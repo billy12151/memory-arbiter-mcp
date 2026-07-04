@@ -249,6 +249,73 @@ class MemoryDB:
         ).fetchall()
         return [row_to_dict(row) for row in rows]
 
+    def audit_summary(self) -> dict[str, Any]:
+        """Pure-Sql aggregate overview per workspace. No semantic judgement.
+
+        Returns memory counts, oldest/newest event_time, open conflicts and
+        source_type distribution for every workspace, plus global totals.
+        """
+        empty = {"workspaces": {}, "total_memories": 0, "total_open_conflicts": 0}
+        if self.conn is None:
+            return empty
+
+        mem_rows = self.conn.execute(
+            """
+            SELECT workspace,
+                   COUNT(*) AS count,
+                   MIN(event_time) AS oldest,
+                   MAX(event_time) AS newest,
+                   source_type
+            FROM memories
+            WHERE status != 'deleted'
+            GROUP BY workspace, source_type
+            """
+        ).fetchall()
+
+        open_conflict_rows = self.conn.execute(
+            "SELECT workspace, COUNT(*) AS open_conflicts FROM ("
+            " SELECT m.workspace AS workspace FROM conflicts c"
+            " JOIN memories m ON m.id IN (c.left_id, c.right_id)"
+            " WHERE c.status = 'open' GROUP BY c.id"
+            ") GROUP BY workspace"
+        ).fetchall()
+        open_conflicts_by_ws = {row["workspace"]: int(row["open_conflicts"]) for row in open_conflict_rows}
+
+        workspaces: dict[str, dict[str, Any]] = {}
+        total_memories = 0
+        for row in mem_rows:
+            ws = row["workspace"]
+            bucket = workspaces.setdefault(
+                ws,
+                {"count": 0, "oldest": None, "newest": None, "open_conflicts": 0, "by_source_type": {}},
+            )
+            count = int(row["count"])
+            bucket["count"] += count
+            total_memories += count
+            oldest, newest = row["oldest"], row["newest"]
+            if oldest is not None and (bucket["oldest"] is None or oldest < bucket["oldest"]):
+                bucket["oldest"] = oldest
+            if newest is not None and (bucket["newest"] is None or newest > bucket["newest"]):
+                bucket["newest"] = newest
+            if row["source_type"] is not None:
+                bucket["by_source_type"][row["source_type"]] = (
+                    bucket["by_source_type"].get(row["source_type"], 0) + count
+                )
+
+        total_open_conflicts = 0
+        for ws, count in open_conflicts_by_ws.items():
+            workspaces.setdefault(
+                ws,
+                {"count": 0, "oldest": None, "newest": None, "open_conflicts": 0, "by_source_type": {}},
+            )["open_conflicts"] = count
+            total_open_conflicts += count
+
+        return {
+            "workspaces": workspaces,
+            "total_memories": total_memories,
+            "total_open_conflicts": total_open_conflicts,
+        }
+
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)

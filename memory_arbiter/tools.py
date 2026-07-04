@@ -109,3 +109,7 @@ class MemoryTools:
                 },
             }
         )
+
+    def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
+        summary = self.db.audit_summary()
+        return self.db.state.response(summary)

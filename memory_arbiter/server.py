@@ -87,6 +87,11 @@ def build_server() -> Any:
         """查看 memory-arbiter 运行状态：数据库路径、降级模式、客户端标识、策略配置。"""
         return tools.memory_status()
 
+    @app.tool()
+    def memory_audit_summary() -> dict[str, Any]:
+        """返回各 workspace 的记忆统计概览：条目数、最旧/最新条目时间、open 冲突数、各 source_type 分布。纯 SQL 聚合，不做语义判断，用于快速判断是否需要深入审查。"""
+        return tools.memory_audit_summary()
+
     return app
 
 

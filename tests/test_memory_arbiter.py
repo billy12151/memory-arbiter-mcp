@@ -154,3 +154,54 @@ def test_compare_manual_review_when_both_protected() -> None:
 
     assert result["manual_review"] is True
     assert result["winner_id"] is None
+
+
+def test_audit_summary_aggregates_per_workspace(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="Confirmed port 5173",
+        subject="dev-port",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    tools.memory_write(
+        content="Agent guessed port 3000",
+        subject="dev-port",
+        source_type="agent_generated",
+        event_time="2026-03-01T00:00:00Z",
+    )
+    tools.memory_write(
+        content="Other workspace memory",
+        subject="other",
+        workspace="repo-b",
+        source_type="document_extracted",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    # Create an open conflict inside repo-a
+    ids = [r["id"] for r in tools.memory_recent(workspace="repo-a", limit=10)["data"]["results"]]
+    tools.memory_arbitrate(ids[0], ids[1], mark_conflict=True)
+
+    summary = tools.memory_audit_summary()
+    data = summary["data"]
+
+    assert summary["ok"] is True
+    assert data["total_memories"] == 3
+    assert data["total_open_conflicts"] == 1
+    repo_a = data["workspaces"]["repo-a"]
+    assert repo_a["count"] == 2
+    assert repo_a["oldest"] == "2026-01-01T00:00:00+00:00"
+    assert repo_a["newest"] == "2026-03-01T00:00:00+00:00"
+    assert repo_a["open_conflicts"] == 1
+    assert repo_a["by_source_type"] == {"user_confirmed": 1, "agent_generated": 1}
+    assert data["workspaces"]["repo-b"]["count"] == 1
+
+
+def test_audit_summary_empty_when_no_memories(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    summary = tools.memory_audit_summary()
+    assert summary["ok"] is True
+    assert summary["data"] == {
+        "workspaces": {},
+        "total_memories": 0,
+        "total_open_conflicts": 0,
+    }
