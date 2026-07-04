@@ -54,8 +54,13 @@ def build_server() -> Any:
 
     @app.tool()
     def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10) -> dict[str, Any]:
-        """按关键词搜索跨工具共享记忆库中的已有记忆。开始新任务前先搜一下，避免重复记录。"""
+        """按关键词搜索跨工具共享记忆库。项目知识、历史决策、偏好、文档摘要类问题应先查记忆，再读源文件。搜索技巧：优先用 2-4 个核心词，不要只用整句；一次搜不到先换同义词/短关键词重试；空 query 或 memory_recent 可列出最近记忆；命中 user_confirmed/高置信记忆时优先采用；仅当记忆缺失、过期或冲突时再回原始文件。"""
         return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit)
+
+    @app.tool()
+    def memory_recent(workspace: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """列出指定 workspace 最近记忆，不按关键词过滤。用于关键词不确定、memory_search 直接命中为空、或需要先浏览库存再决定是否读源文件的场景。"""
+        return tools.memory_recent(workspace=workspace, limit=limit)
 
     @app.tool()
     def memory_compare(left_id: int, right_id: int) -> dict[str, Any]:

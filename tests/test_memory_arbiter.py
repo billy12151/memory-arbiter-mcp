@@ -39,6 +39,52 @@ def test_write_and_search(tmp_path: Path) -> None:
     assert found["data"]["results"][0]["subject"] == "api-token-policy"
 
 
+def test_chinese_search_matches_contiguous_fragment(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="京东科技金融营销系统梳理，覆盖金营、营销链路、活动费用申请和活动配置。",
+        tags=["营销系统", "金营", "系统梳理"],
+        source_type="document_extracted",
+        subject="京东科技金融-营销系统梳理",
+    )
+
+    found = tools.memory_search(query="营销系统", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert found["data"]["count"] >= 1
+    assert found["data"]["results"][0]["subject"] == "京东科技金融-营销系统梳理"
+
+
+def test_search_returns_recent_memories_when_no_direct_match(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="来源：营销系统梳理.xlsx。营销链路包含需求提报、费用申请、设计图提报、活动配置等环节。",
+        tags=["营销系统", "金营", "PRD参考"],
+        source_type="document_extracted",
+        subject="京东科技金融-营销系统梳理",
+        event_time="2026-07-04T09:00:30Z",
+    )
+
+    found = tools.memory_search(query="营销运营全流程 系统", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert found["data"]["count"] == 1
+    assert found["data"]["results"][0]["subject"] == "京东科技金融-营销系统梳理"
+    assert any("No direct memory match" in warning for warning in found["warnings"])
+
+
+def test_memory_recent_lists_recent_workspace_memories(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="Old memory", subject="old", event_time="2026-01-01T00:00:00Z")
+    tools.memory_write(content="New memory", subject="new", event_time="2026-02-01T00:00:00Z")
+    tools.memory_write(content="Other workspace", subject="other", workspace="repo-b", event_time="2026-03-01T00:00:00Z")
+
+    recent = tools.memory_recent(workspace="repo-a", limit=10)
+
+    assert recent["ok"] is True
+    assert [record["subject"] for record in recent["data"]["results"]] == ["new", "old"]
+
+
 def test_arbitration_prefers_event_time(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     old = tools.memory_write(content="Use port 3000", subject="dev-port", event_time="2026-01-01T00:00:00Z")

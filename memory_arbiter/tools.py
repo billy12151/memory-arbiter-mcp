@@ -37,6 +37,11 @@ class MemoryTools:
         results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit)
         return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=warnings)
 
+    def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
+        limit = max(1, min(int(limit), 100))
+        results = self.db.list_memories(workspace=workspace or self.settings.workspace, limit=limit)
+        return self.db.state.response({"results": results, "count": len(results)})
+
     def memory_compare(self, left_id: Optional[int] = None, right_id: Optional[int] = None, left: Optional[dict[str, Any]] = None, right: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         left_record = left or (self.db.get_memory(int(left_id)) if left_id is not None else None)
         right_record = right or (self.db.get_memory(int(right_id)) if right_id is not None else None)

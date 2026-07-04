@@ -50,4 +50,22 @@ def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, t
         ).fetchall()
         if query and not db.state.fts5_available:
             warnings.append("Using LIKE/keyword search because sqlite-vec and FTS5 are unavailable.")
+    if query and not rows:
+        clauses = ["status != 'deleted'"]
+        params = []
+        if workspace:
+            clauses.append("workspace = ?")
+            params.append(workspace)
+        for tag in tags or []:
+            clauses.append("tags LIKE ?")
+            params.append(f"%{tag}%")
+        params.append(limit)
+        rows = db.conn.execute(
+            f"SELECT *, 0 AS score FROM memories WHERE {' AND '.join(clauses)} ORDER BY ingest_time DESC, event_time DESC LIMIT ?",
+            params,
+        ).fetchall()
+        if rows:
+            warnings.append(
+                "No direct memory match. Returning recent memories from this workspace; refine keywords, try memory_recent, or compare candidates before reading source files."
+            )
     return [row_to_dict(row) for row in rows], warnings

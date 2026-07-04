@@ -90,9 +90,7 @@ class MemoryDB:
             self.state.warn("sqlite-vec disabled by configuration. Semantic recall disabled.")
 
         try:
-            self.conn.execute(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, tags, subject, content='memories', content_rowid='id')"
-            )
+            self._ensure_fts()
             self._rebuild_fts()
             self.state.fts5_available = True
             if not self.state.sqlite_vec_available:
@@ -120,6 +118,27 @@ class MemoryDB:
             self.conn.commit()
         except sqlite3.Error:
             self.conn.rollback()
+
+    def _ensure_fts(self) -> None:
+        assert self.conn is not None
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'"
+        ).fetchone()
+        if row:
+            sql = str(row["sql"] or "").lower()
+            if "tokenize='trigram'" in sql or 'tokenize="trigram"' in sql or "tokenize=trigram" in sql:
+                return
+            self.conn.execute("DROP TABLE memories_fts")
+            self.conn.commit()
+        try:
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE memories_fts USING fts5(content, tags, subject, content='memories', content_rowid='id', tokenize='trigram')"
+            )
+        except sqlite3.Error as exc:
+            self.state.warn(f"FTS5 trigram tokenizer unavailable: {exc}. Falling back to default FTS5 tokenizer.")
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, tags, subject, content='memories', content_rowid='id')"
+            )
 
     def insert_memory(self, record: MemoryRecord) -> Tuple[Optional[int], list[str]]:
         warnings: list[str] = []
