@@ -1,13 +1,12 @@
 {
-  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/registry/main/schema/server.schema.json",
-  "name": "memory-arbiter-mcp",
-  "description": "Local MCP memory server with dual timeline conflict arbitration. Share one memory store across all your AI coding tools.",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.billy12151/memory-arbiter-mcp",
+  "description": "Local MCP memory server with dual-timeline conflict arbitration. Share one memory store across all your AI coding tools.",
   "repository": {
     "url": "https://github.com/billy12151/memory-arbiter-mcp",
     "source": "github",
     "id": "billy12151/memory-arbiter-mcp"
   },
-  "version": "0.1.0",
   "homepage": "https://github.com/billy12151/memory-arbiter-mcp",
   "author": {
     "name": "billy12151"
@@ -22,39 +21,32 @@
     "local",
     "sqlite"
   ],
-  "installation": {
-    "type": "pip",
-    "package": "memory-arbiter-mcp",
-    "command": "memory-arbiter-mcp"
-  },
-  "tools": [
+  "version": "0.1.0",
+  "packages": [
     {
-      "name": "memory_write",
-      "description": "Write a structured memory entry with source tracking"
-    },
-    {
-      "name": "memory_search",
-      "description": "Search memories via FTS5 or LIKE fallback"
-    },
-    {
-      "name": "memory_compare",
-      "description": "Compare two memories for conflicts without recording"
-    },
-    {
-      "name": "memory_arbitrate",
-      "description": "Arbitrate a conflict and optionally record the result"
-    },
-    {
-      "name": "memory_confirm",
-      "description": "Promote a memory to user-confirmed and lock it"
-    },
-    {
-      "name": "memory_list_conflicts",
-      "description": "List unresolved conflict records"
-    },
-    {
-      "name": "memory_status",
-      "description": "Show current mode, degradation status, and storage paths"
+      "registryType": "pypi",
+      "identifier": "memory-arbiter-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Client identity (e.g. zcode, codex, cursor, claude-code)",
+          "isRequired": false,
+          "name": "MEMORY_ARBITER_CLIENT"
+        },
+        {
+          "description": "Agent identifier for this client",
+          "isRequired": false,
+          "name": "MEMORY_ARBITER_AGENT_ID"
+        },
+        {
+          "description": "Path to the SQLite database file",
+          "isRequired": false,
+          "name": "MEMORY_ARBITER_DB_PATH"
+        }
+      ]
     }
   ]
 }
