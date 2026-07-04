@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memory-arbiter-mcp"
+version = "0.1.0"
+description = "Local MCP memory arbiter with dual timeline conflict handling."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "OpenClaw Project" }]
+dependencies = [
+  "mcp>=1.2.0",
+  "pydantic>=2.6.0",
+]
+
+[project.optional-dependencies]
+vec = ["sqlite-vec>=0.1.1"]
+test = ["pytest>=8.0.0"]
+
+[project.scripts]
+memory-arbiter-mcp = "memory_arbiter.server:main"
+
+[tool.setuptools.packages.find]
+include = ["memory_arbiter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

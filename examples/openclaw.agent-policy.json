@@ -1,0 +1,10 @@
+{
+  "default_enabled": true,
+  "allow_agents": [
+    "research-agent",
+    "coding-agent"
+  ],
+  "deny_agents": [
+    "private-notes-agent"
+  ]
+}

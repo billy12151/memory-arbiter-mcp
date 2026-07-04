@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "memory-arbiter": {
+      "command": "memory-arbiter-mcp",
+      "env": {
+        "MEMORY_ARBITER_CLIENT": "codex",
+        "MEMORY_ARBITER_AGENT_ID": "codex-default",
+        "MEMORY_ARBITER_WORKSPACE": "${workspaceFolder}",
+        "MEMORY_ARBITER_DB_PATH": "~/.local/share/memory-arbiter/memory.sqlite3"
+      }
+    }
+  }
+}

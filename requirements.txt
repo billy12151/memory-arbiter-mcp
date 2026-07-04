@@ -1,0 +1,6 @@
+mcp>=1.2.0
+pydantic>=2.6.0
+pytest>=8.0.0
+
+# Optional semantic recall enhancement. The server runs without it.
+# sqlite-vec>=0.1.1

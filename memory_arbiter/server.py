@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import sys
+from typing import Any, Optional
+
+from .config import Settings
+from .tools import MemoryTools
+
+
+def build_server() -> Any:
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except Exception as exc:
+        raise RuntimeError(
+            "MCP Python SDK is not installed. Install with `pip install -r requirements.txt` "
+            "or `pip install mcp`, then run `memory-arbiter-mcp` again."
+        ) from exc
+
+    app = FastMCP("memory-arbiter-mcp")
+    tools = MemoryTools(Settings.from_env())
+
+    @app.tool()
+    def memory_write(
+        content: str,
+        agent_id: Optional[str] = None,
+        workspace: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        source_type: str = "unknown",
+        source_ref: Optional[str] = None,
+        event_time: Optional[str] = None,
+        ingest_time: Optional[str] = None,
+        confidence: float = 0.5,
+        protection_level: str = "normal",
+        status: str = "active",
+        subject: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """写入一条结构化记忆到跨工具共享记忆库。必填 content（正文），建议填 subject（标题）、tags（标签）、source_type（来源类型：agent_generated/user_confirmed/document_extracted）。"""
+        return tools.memory_write(
+            content=content,
+            agent_id=agent_id,
+            workspace=workspace,
+            tags=tags or [],
+            source_type=source_type,
+            source_ref=source_ref,
+            event_time=event_time,
+            ingest_time=ingest_time,
+            confidence=confidence,
+            protection_level=protection_level,
+            status=status,
+            subject=subject,
+            metadata=metadata or {},
+        )
+
+    @app.tool()
+    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10) -> dict[str, Any]:
+        """按关键词搜索跨工具共享记忆库中的已有记忆。开始新任务前先搜一下，避免重复记录。"""
+        return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit)
+
+    @app.tool()
+    def memory_compare(left_id: int, right_id: int) -> dict[str, Any]:
+        """比较两条记忆是否冲突，返回可解释的比较理由，不落冲突记录。"""
+        return tools.memory_compare(left_id=left_id, right_id=right_id)
+
+    @app.tool()
+    def memory_arbitrate(left_id: int, right_id: int, mark_conflict: bool = True, apply: bool = False) -> dict[str, Any]:
+        """仲裁两条冲突记忆的胜者与败者。mark_conflict=true 记录冲突，apply=true 自动将非保护败方标记为 superseded。"""
+        return tools.memory_arbitrate(left_id=left_id, right_id=right_id, mark_conflict=mark_conflict, apply=apply)
+
+    @app.tool()
+    def memory_list_conflicts(status: str = "open", limit: int = 50) -> dict[str, Any]:
+        """列出记忆冲突记录，默认只看 open 状态。"""
+        return tools.memory_list_conflicts(status=status, limit=limit)
+
+    @app.tool()
+    def memory_confirm(memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0) -> dict[str, Any]:
+        """将一条记忆标记为用户确认，提升为 user_confirmed + locked 保护级别，禁止自动覆盖。"""
+        return tools.memory_confirm(memory_id=memory_id, source_ref=source_ref, confidence=confidence)
+
+    @app.tool()
+    def memory_status() -> dict[str, Any]:
+        """查看 memory-arbiter 运行状态：数据库路径、降级模式、客户端标识、策略配置。"""
+        return tools.memory_status()
+
+    return app
+
+
+def main() -> None:
+    try:
+        build_server().run()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()
