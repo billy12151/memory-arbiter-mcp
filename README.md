@@ -1,3 +1,5 @@
+mcp-name: io.github.billy12151/memory-arbiter-mcp
+
 # memory-arbiter-mcp
 
 **[中文](#中文) | [English](#english)**
