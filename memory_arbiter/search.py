@@ -5,6 +5,21 @@ from typing import Any, Optional, Tuple
 from .db import MemoryDB, row_to_dict
 
 
+def _sanitize_fts_query(query: str) -> str:
+    """Turn an arbitrary user query into a safe FTS5 MATCH expression.
+
+    FTS5 has its own query grammar where ``. : * " ( ) - + AND OR NOT`` are
+    special. A bare query like ``v0.2.1`` raises ``fts5: syntax error near "."``.
+    We split on whitespace and wrap each token as a double-quoted phrase
+    (with ``"`` escaped as ``""``), joined by ``AND`` so every term must match.
+    """
+    tokens = [tok for tok in query.split() if tok]
+    if not tokens:
+        return ""
+    quoted = ['"' + tok.replace('"', '""') + '"' for tok in tokens]
+    return " AND ".join(quoted)
+
+
 def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10) -> Tuple[list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
     if db.conn is None:
@@ -19,7 +34,7 @@ def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, t
             JOIN memories m ON memories_fts.rowid = m.id
             WHERE memories_fts MATCH ? AND m.status != 'deleted'
         """
-        params: list[Any] = [query]
+        params: list[Any] = [_sanitize_fts_query(query)]
         if workspace:
             sql += " AND m.workspace = ?"
             params.append(workspace)

@@ -205,3 +205,50 @@ def test_audit_summary_empty_when_no_memories(tmp_path: Path) -> None:
         "total_memories": 0,
         "total_open_conflicts": 0,
     }
+
+
+def test_fts5_search_handles_query_with_dots(tmp_path: Path) -> None:
+    """Regression: queries containing '.' (e.g. version numbers, file paths)
+    used to raise ``fts5: syntax error near "."`` and silently fall back to
+    LIKE. FTS5 must now run without warnings."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="Release notes for memory-arbiter v0.2.1, the token optimization release.",
+        subject="v0.2.1 release",
+        source_type="document_extracted",
+    )
+
+    found = tools.memory_search(query="v0.2.1", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert found["data"]["count"] == 1
+    assert found["data"]["results"][0]["subject"] == "v0.2.1 release"
+    assert not any("FTS5 query failed" in w for w in found["warnings"])
+
+
+def test_fts5_search_handles_special_chars_without_warning(tmp_path: Path) -> None:
+    """FTS5 special chars (``: * ( ) -``) in the query must not trigger a
+    syntax-error fallback to LIKE."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="Config lives at config/db.py with key apiKey:path(0)",
+        subject="config-paths",
+        source_type="document_extracted",
+    )
+
+    for query in ("config/db.py", "apiKey:path(0)", "config * (db)"):
+        found = tools.memory_search(query=query, workspace="repo-a")
+        assert found["ok"] is True
+        assert not any("FTS5 query failed" in w for w in found["warnings"]), (
+            f"query {query!r} triggered FTS5 fallback: {found['warnings']}"
+        )
+
+
+def test_sanitize_fts_query_quotes_and_joins_tokens() -> None:
+    from memory_arbiter.search import _sanitize_fts_query
+
+    assert _sanitize_fts_query("") == ""
+    assert _sanitize_fts_query("v0.2.1") == '"v0.2.1"'
+    assert _sanitize_fts_query("v0.2.1 release task") == '"v0.2.1" AND "release" AND "task"'
+    # Embedded double-quotes are escaped as "" per FTS5 phrase syntax
+    assert _sanitize_fts_query('a"b') == '"a""b"'

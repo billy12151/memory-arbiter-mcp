@@ -32,7 +32,16 @@ Most AI clients load their entire memory file (`MEMORY.md` + `memory/*.md`) into
 - ✅ Token-optimization middleware — precise retrieval replaces full-file loading
 - ❌ Not an LLM, does not do semantic reasoning — semantic judgement stays with the AI client
 
-> See [`docs/INTEGRATION.md`](docs/INTEGRATION.md) for three concrete usage patterns (per-turn retrieval, scheduled audit, write-time conflict check) and a real-world cross-tool delegation example.
+#### Real-world example: cross-tool task delegation
+
+The user runs OpenClaw (planning) + ZCode (coding). OpenClaw drafts a task spec; ZCode implements it.
+
+- **Old way**: OpenClaw writes the spec to a file → ZCode reads it. Requires agreed paths, manual sync, version drift. Or the user copy-pastes — information loss + wasted tokens.
+- **Memory Arbiter way**: OpenClaw calls `memory_write` with the spec → the user switches to ZCode → ZCode runs `memory_search("the task")` and gets the full spec with **zero file handoff**.
+
+**Tokens for handing off a 2000-word spec: ~3000 (old) → ~500 (new). Saving ~83%.** This very project ships its own release tasks this way — it dogfoods itself. Full step-by-step in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+
+> See [`docs/INTEGRATION.md`](docs/INTEGRATION.md) for three concrete usage patterns (per-turn retrieval, scheduled audit, write-time conflict check) and the full cross-tool delegation walkthrough.
 
 ### Features
 
@@ -164,7 +173,16 @@ MIT
 - ✅ Token 优化中间件 — 精准检索替代全文加载
 - ❌ 不是 LLM、不做语义推理 — 语义判断交给 AI 客户端
 
-> 三种典型用法（每轮按需检索、定时审查、写入时冲突检测）和一个真实的跨工具委派案例见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
+#### 真实案例：跨工具任务委派
+
+用户同时用 OpenClaw（负责规划）+ ZCode（负责写代码）。OpenClaw 出任务规格，ZCode 执行。
+
+- **传统方式**：OpenClaw 把规格写成文件 → ZCode 读文件，要约定路径、手动同步、版本还容易乱；或者用户口述/复制粘贴，信息损耗又浪费 token。
+- **memory-arbiter 方式**：OpenClaw 调 `memory_write` 写入规格 → 用户切到 ZCode → ZCode 跑 `memory_search("那个任务")` 直接拿到完整规格，**零文件传递**。
+
+**一份 2000 字规格的交接成本：~3000 tokens（传统）→ ~500 tokens（现在），省 83%。** 这个项目自己的发版任务就是这么跑的——用自己的产品喂自己的产品。完整步骤见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
+
+> 三种典型用法（每轮按需检索、定时审查、写入时冲突检测）和完整的跨工具委派步骤见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
 
 ### 核心能力
 
