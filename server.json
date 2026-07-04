@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.billy12151/memory-arbiter-mcp",
-  "description": "Local MCP memory server with dual-timeline conflict arbitration. Share one memory store across all your AI coding tools.",
+  "description": "Shared memory store for AI coding tools with dual-timeline conflict arbitration.",
   "repository": {
     "url": "https://github.com/billy12151/memory-arbiter-mcp",
     "source": "github",
