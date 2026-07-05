@@ -178,6 +178,7 @@ Add to your tool's MCP config (see `examples/` for ready-made templates):
 | `memory_compare` | Compare two memories, returns explanation only |
 | `memory_arbitrate` | Arbitrate conflict, can record result (`apply=true`) |
 | `memory_confirm` | Promote a memory to user-confirmed and locked |
+| `memory_supersede` | Explicitly retire a memory; bypasses user-confirmed/locked protection (`authorized=true` required) |
 | `memory_list_conflicts` | List unresolved conflicts |
 | `memory_audit_summary` | Per-workspace stats overview (counts, oldest/newest, open conflicts, source_type distribution) |
 | `memory_status` | Show current mode, degradation status, storage paths |
@@ -381,6 +382,7 @@ memory-arbiter-mcp
 | `memory_compare` | 比较两条记忆，只返回解释 |
 | `memory_arbitrate` | 仲裁冲突，自动判定胜者（`apply=true` 时落记录） |
 | `memory_confirm` | 用户确认某条记忆，锁定保护 |
+| `memory_supersede` | 显式废弃某条记忆；可突破 user_confirmed/locked 保护（需 `authorized=true`） |
 | `memory_list_conflicts` | 列出未解决的冲突 |
 | `memory_audit_summary` | 各 workspace 记忆统计概览（条目数、最旧/最新、open 冲突数、来源分布） |
 | `memory_status` | 查看运行状态、模式、降级原因 |
