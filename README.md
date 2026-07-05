@@ -154,7 +154,7 @@ Add to your tool's MCP config (see `examples/` for ready-made templates):
 }
 ```
 
-> Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `opendesign`, `zcode`, `codex`, `cursor`, `claude-code`). Point multiple tools at the same `DB_PATH` to enable cross-tool memory sharing.
+> Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `zcode`, `codex`, `cursor`, `claude-code`). Point multiple tools at the same `DB_PATH` to enable cross-tool memory sharing. (GUI tools like OpenDesign inherit the host CLI's config — no separate client name.)
 
 > ⚠️ **New session required**: MCP servers are loaded at session startup. Already-open sessions won't see the new tools. Start a fresh session after configuring.
 
@@ -166,8 +166,9 @@ Add to your tool's MCP config (see `examples/` for ready-made templates):
 | Codex CLI | `~/.codex/` MCP config |
 | Claude Code | `.mcp.json` in project root |
 | Cursor | `~/.cursor/mcp.json` |
-| OpenDesign | OpenDesign MCP settings |
 | OpenClaw | `~/.openclaw/openclaw.json` MCP config |
+
+> **OpenDesign / OpenClaw GUI tools**: these run on top of a host CLI (Codex CLI, Claude Code, etc.) and do **not** have their own MCP config entry. Whatever MCP server the host client has loaded is automatically available — e.g. once Codex CLI configures Memory Arbiter, OpenDesign running on top of Codex can call `memory_search` / `memory_write` natively with no extra setup.
 
 ### MCP Tools
 
@@ -358,7 +359,7 @@ memory-arbiter-mcp
 }
 ```
 
-> 每个工具改一下 `MEMORY_ARBITER_CLIENT` 标识（`openclaw`、`opendesign`、`zcode`、`codex`、`cursor`、`claude-code`）。多个工具指向同一个 `DB_PATH` 即可启用跨工具记忆共享。
+> 每个工具改一下 `MEMORY_ARBITER_CLIENT` 标识（`openclaw`、`zcode`、`codex`、`cursor`、`claude-code`）。多个工具指向同一个 `DB_PATH` 即可启用跨工具记忆共享。（OpenDesign 这类 GUI 工具继承宿主 CLI 的配置，不需要单独的 client 名称。）
 
 > ⚠️ **需要新建会话**：MCP Server 在客户端启动时加载，已经打开的会话不会识别新添加的 Server。配置好后请新建一个会话。
 
@@ -370,8 +371,9 @@ memory-arbiter-mcp
 | Codex CLI | `~/.codex/` 下 MCP 配置 |
 | Claude Code | 项目根目录 `.mcp.json` |
 | Cursor | `~/.cursor/mcp.json` |
-| OpenDesign | OpenDesign MCP 设置 |
 | OpenClaw | `~/.openclaw/openclaw.json` MCP 配置 |
+
+> **OpenDesign / OpenClaw GUI 类工具**：这类工具寄宿在底层 CLI（Codex CLI、Claude Code 等）之上，**没有自己的 MCP 配置入口**。宿主客户端加载了哪个 MCP Server，GUI 工具就天然能用——例如 Codex CLI 配好了 memory-arbiter，跑在 Codex 上的 OpenDesign 就能直接调用 `memory_search` / `memory_write`，无需额外设置。
 
 ### MCP 工具
 

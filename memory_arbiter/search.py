@@ -76,25 +76,33 @@ def _sanitize_fts_query(query: str) -> str:
     return " AND ".join(groups)
 
 
-def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10) -> Tuple[list[dict[str, Any]], list[str]]:
+def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False) -> Tuple[list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
     if db.conn is None:
         return [], ["SQLite unavailable; search cannot read JSONL backup in MVP."]
     limit = max(1, min(int(limit), 100))
     query = (query or "").strip()
+    # Superseded memories are excluded by default: a superseded record is, by
+    # definition, no longer authoritative and only pollutes results (release
+    # chatter, superseded specs, etc.). Audit/history walkthroughs opt back in
+    # via include_superseded=True — and even then the ORDER BY clause below
+    # keeps superseded rows below every active row, so they never drown out
+    # current truth regardless of bm25 score.
+    status_clause = "m.status != 'deleted'" if include_superseded else "(m.status != 'deleted' AND m.status != 'superseded')"
+    like_status_clause = "status != 'deleted'" if include_superseded else "(status != 'deleted' AND status != 'superseded')"
     rows = []
     if db.state.fts5_available and query:
-        sql = """
+        sql = f"""
             SELECT m.*, bm25(memories_fts) AS score
             FROM memories_fts
             JOIN memories m ON memories_fts.rowid = m.id
-            WHERE memories_fts MATCH ? AND m.status != 'deleted'
+            WHERE memories_fts MATCH ? AND {status_clause}
         """
         params: list[Any] = [_sanitize_fts_query(query)]
         if workspace:
             sql += " AND m.workspace = ?"
             params.append(workspace)
-        sql += " ORDER BY score LIMIT ?"
+        sql += " ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
         params.append(limit)
         try:
             rows = db.conn.execute(sql, params).fetchall()
@@ -103,7 +111,7 @@ def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, t
             rows = []
     if not rows:
         like = f"%{query}%"
-        clauses = ["status != 'deleted'"]
+        clauses = [like_status_clause]
         params = []
         if query:
             clauses.append("(content LIKE ? OR subject LIKE ? OR tags LIKE ?)")
@@ -116,13 +124,13 @@ def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, t
             params.append(f"%{tag}%")
         params.append(limit)
         rows = db.conn.execute(
-            f"SELECT *, 0 AS score FROM memories WHERE {' AND '.join(clauses)} ORDER BY event_time DESC, ingest_time DESC LIMIT ?",
+            f"SELECT *, 0 AS score FROM memories WHERE {' AND '.join(clauses)} ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END, event_time DESC, ingest_time DESC LIMIT ?",
             params,
         ).fetchall()
         if query and not db.state.fts5_available:
             warnings.append("Using LIKE/keyword search because sqlite-vec and FTS5 are unavailable.")
     if query and not rows:
-        clauses = ["status != 'deleted'"]
+        clauses = [like_status_clause]
         params = []
         if workspace:
             clauses.append("workspace = ?")
@@ -135,10 +143,13 @@ def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, t
         # A user_confirmed+locked memory is a higher-value hit than an
         # agent_generated+normal one even when the latter is newer — without
         # this, daily agent chatter buries authoritative records.
+        # Superseded (only reachable via include_superseded=True) always sinks
+        # to the bottom so history audits don't bury current truth.
         rows = db.conn.execute(
             f"""SELECT *, 0 AS score FROM memories
                 WHERE {' AND '.join(clauses)}
                 ORDER BY
+                  CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
                   CASE protection_level
                     WHEN 'locked' THEN 0
                     WHEN 'protected' THEN 1

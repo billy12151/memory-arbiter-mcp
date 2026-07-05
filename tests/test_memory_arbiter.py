@@ -419,3 +419,126 @@ def test_sanitize_fts_query_splits_cjk_into_trigram_or_group() -> None:
     assert _sanitize_fts_query("营销 marketing") == '"marketing"'
     # ASCII behavior unchanged when no CJK present.
     assert _sanitize_fts_query("v0.2.1 release") == '"v0.2.1" AND "release"'
+
+
+def test_search_excludes_superseded_by_default(tmp_path: Path) -> None:
+    """v0.2.6: search filters out superseded records unless explicitly opted in.
+
+    A superseded record is, by definition, no longer authoritative. Letting it
+    leak into default results pollutes recall — release chatter, superseded
+    specs, etc. drown out current truth. The default must hide them.
+    """
+    tools = make_tools(tmp_path)
+    active = tools.memory_write(
+        content="release-spec-v2 active authoritative",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    stale = tools.memory_write(
+        content="release-spec-v1 stale superseded",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    active_id, stale_id = active["data"]["id"], stale["data"]["id"]
+    superseded = tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
+    assert superseded["data"]["superseded"] is True
+
+    found = tools.memory_search(query="release-spec", workspace="repo-a")
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert active_id in ids
+    assert stale_id not in ids, "superseded record leaked into default search results"
+
+
+def test_search_includes_superseded_when_requested(tmp_path: Path) -> None:
+    """v0.2.6: include_superseded=True returns both, with superseded ranked below.
+
+    Audit/history walkthroughs need to see the full supersede chain. The flag
+    restores them — but the ORDER BY clause must still sink superseded rows
+    below every active row so history audits don't bury current truth.
+    """
+    tools = make_tools(tmp_path)
+    active = tools.memory_write(
+        content="release-spec-v2 active authoritative",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    stale = tools.memory_write(
+        content="release-spec-v1 stale superseded record",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    active_id, stale_id = active["data"]["id"], stale["data"]["id"]
+    tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
+
+    found = tools.memory_search(query="release-spec", workspace="repo-a", include_superseded=True)
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert active_id in ids, "active record missing under include_superseded=True"
+    assert stale_id in ids, "superseded record not returned under include_superseded=True"
+    # Superseded must rank below active even though both match.
+    assert ids.index(stale_id) > ids.index(active_id), "superseded ranked above active"
+
+
+def test_supersede_rejects_non_active_replacement(tmp_path: Path) -> None:
+    """v0.2.6: supersede chain-breakage guard.
+
+    Starting in v0.2.6, search hides superseded records by default. If a
+    supersede points at a replacement that is itself deleted/superseded, the
+    default would leave the chain pointing at a record search can't see — the
+    user loses both views. Reject early with an explicit error.
+    """
+    tools = make_tools(tmp_path)
+    # Build a chain: A (active) ← supersedes — B (active) ← supersedes — C (active)
+    a = tools.memory_write(content="A active", subject="s", source_type="user_confirmed", event_time="2026-01-01T00:00:00Z")
+    b = tools.memory_write(content="B active", subject="s", source_type="user_confirmed", event_time="2026-02-01T00:00:00Z")
+    c = tools.memory_write(content="C active", subject="s", source_type="user_confirmed", event_time="2026-03-01T00:00:00Z")
+    a_id, b_id, c_id = a["data"]["id"], b["data"]["id"], c["data"]["id"]
+    # B supersedes A — A is now superseded, B still active.
+    tools.memory_supersede(memory_id=a_id, reason="B replaces A", superseded_by=b_id, authorized=True)
+
+    # Now try to supersede C by pointing at A (which is itself superseded) — must be rejected.
+    rejected = tools.memory_supersede(memory_id=c_id, reason="C replaced by A", superseded_by=a_id, authorized=True)
+    assert rejected["ok"] is False
+    assert "not active" in rejected["data"]["error"]
+    # C must remain active (the supersede was blocked before any state change).
+    c_record = tools.db.get_memory(c_id)
+    assert c_record["status"] == "active"
+
+
+def test_superseded_always_ranked_below_active_even_with_higher_score(tmp_path: Path) -> None:
+    """v0.2.6: the soft-demote clause is unconditional, not gated on the filter.
+
+    Even when include_superseded=True lets superseded rows back into the result
+    set, they must rank below active rows regardless of bm25 score. A
+    superseded record that happens to mention the query terms more often than
+    the active record (common: release chatter repeats the codename) must not
+    bubble up. This is the audit-mode safety net.
+    """
+    tools = make_tools(tmp_path)
+    # Active record: short, mentions query term once → lower bm25 signal.
+    active = tools.memory_write(
+        content="release release-spec canonical",
+        subject="release-spec-active",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    # Superseded record: long, repeats query term many times → higher bm25 signal.
+    stale_blob = "release release release release release release-spec release-spec release-spec"
+    stale = tools.memory_write(
+        content=stale_blob,
+        subject="release-spec-stale",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    active_id, stale_id = active["data"]["id"], stale["data"]["id"]
+    tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
+
+    found = tools.memory_search(query="release", workspace="repo-a", include_superseded=True)
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert active_id in ids and stale_id in ids
+    assert ids.index(stale_id) > ids.index(active_id), (
+        "superseded ranked above active despite the demote clause — ORDER BY is broken"
+    )

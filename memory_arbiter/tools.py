@@ -33,8 +33,8 @@ class MemoryTools:
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, **_: Any) -> dict[str, Any]:
-        results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit)
+    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, **_: Any) -> dict[str, Any]:
+        results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded)
         return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=warnings)
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
@@ -122,6 +122,17 @@ class MemoryTools:
             if not replacement:
                 return self.db.state.response(
                     {"error": "superseded_by memory id not found", "superseded": False},
+                    ok=False,
+                )
+            # Guard against supersede-chain breakage: starting in v0.2.6,
+            # memory_search filters out superseded records by default. If the
+            # replacement target is itself deleted/superseded, the new default
+            # would leave the chain pointing at a record that search can't see
+            # — the user would lose both the old and the new view. Reject early
+            # with an explicit error so the caller picks a live replacement.
+            if replacement.get("status") != "active":
+                return self.db.state.response(
+                    {"error": f"superseded_by target is not active (status={replacement.get('status')}); pick a live replacement to avoid a broken chain", "superseded": False},
                     ok=False,
                 )
 
