@@ -33,8 +33,8 @@ class MemoryTools:
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, **_: Any) -> dict[str, Any]:
-        results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded)
+    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, **_: Any) -> dict[str, Any]:
+        results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking)
         return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=warnings)
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:

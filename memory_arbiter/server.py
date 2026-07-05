@@ -53,9 +53,9 @@ def build_server() -> Any:
         )
 
     @app.tool()
-    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False) -> dict[str, Any]:
-        """按关键词搜索跨工具共享记忆库。项目知识、历史决策、偏好、文档摘要类问题应先查记忆，再读源文件。搜索技巧：优先用 2-4 个核心词，不要只用整句；一次搜不到先换同义词/短关键词重试；空 query 或 memory_recent 可列出最近记忆；命中 user_confirmed/高置信记忆时优先采用；仅当记忆缺失、过期或冲突时再回原始文件。默认不返回 superseded（已废弃）记忆；审计/梳理历史决策演化链时传 include_superseded=true，废弃记录会排到 active 之后。"""
-        return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, include_superseded=include_superseded)
+    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False) -> dict[str, Any]:
+        """按关键词搜索跨工具共享记忆库。项目知识、历史决策、偏好、文档摘要类问题应先查记忆，再读源文件。搜索技巧：优先用 2-4 个核心词，不要只用整句；一次搜不到先换同义词/短关键词重试；空 query 或 memory_recent 可列出最近记忆；命中 user_confirmed/高置信记忆时优先采用；仅当记忆缺失、过期或冲突时再回原始文件。默认不返回 superseded（已废弃）记忆；审计/梳理历史决策演化链时传 include_superseded=true，废弃记录会排到 active 之后。debug_ranking=true 返回排序调试字段（_match_reason / _subject_level 等），用于评估排序质量。"""
+        return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, include_superseded=include_superseded, debug_ranking=debug_ranking)
 
     @app.tool()
     def memory_recent(workspace: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
