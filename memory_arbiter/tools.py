@@ -89,6 +89,67 @@ class MemoryTools:
         updated = self.db.get_memory(int(memory_id)) if ok else memory
         return self.db.state.response({"confirmed": ok, "record": updated})
 
+    def memory_supersede(
+        self,
+        memory_id: int,
+        reason: str,
+        superseded_by: Optional[int] = None,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Explicitly supersede a memory, bypassing the user-confirmed/locked
+        protection that blocks ``memory_arbitrate``. Requires ``authorized=True``.
+
+        Side effects: status -> superseded, protection_level -> normal, all open
+        conflicts involving this memory are resolved, and an audit row is appended
+        to the conflicts table (reason prefixed with ``USER-AUTHORIZED SUPERSEDE``).
+        """
+        if not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required to supersede a memory", "superseded": False},
+                ok=False,
+            )
+        memory = self.db.get_memory(int(memory_id))
+        if not memory:
+            return self.db.state.response({"error": "memory id not found", "superseded": False}, ok=False)
+        if memory.get("status") in {"superseded", "deleted"}:
+            return self.db.state.response(
+                {"error": f"memory already {memory.get('status')}", "superseded": False},
+                ok=False,
+            )
+        if superseded_by is not None:
+            replacement = self.db.get_memory(int(superseded_by))
+            if not replacement:
+                return self.db.state.response(
+                    {"error": "superseded_by memory id not found", "superseded": False},
+                    ok=False,
+                )
+
+        self.db.update_memory(
+            int(memory_id),
+            {"status": "superseded", "protection_level": ProtectionLevel.NORMAL.value},
+        )
+        resolved = self.db.resolve_conflicts_for(int(memory_id))
+        audit_reason = f"USER-AUTHORIZED SUPERSEDE: {reason}"
+        conflict_id = self.db.record_conflict(
+            int(memory_id),
+            int(superseded_by) if superseded_by is not None else int(memory_id),
+            memory.get("subject"),
+            audit_reason,
+            int(superseded_by) if superseded_by is not None else None,
+            status="resolved",
+        )
+        updated = self.db.get_memory(int(memory_id))
+        return self.db.state.response(
+            {
+                "superseded": True,
+                "memory_id": int(memory_id),
+                "linked_conflicts_resolved": resolved,
+                "conflict_id": conflict_id,
+                "record": updated,
+            }
+        )
+
     def memory_status(self, **_: Any) -> dict[str, Any]:
         return self.db.state.response(
             {

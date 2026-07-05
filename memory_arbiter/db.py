@@ -227,18 +227,34 @@ class MemoryDB:
         ).fetchall()
         return [row_to_dict(row) for row in rows]
 
-    def record_conflict(self, left_id: int, right_id: int, subject: Optional[str], reason: str, winner_id: Optional[int]) -> Optional[int]:
+    def record_conflict(self, left_id: int, right_id: int, subject: Optional[str], reason: str, winner_id: Optional[int], status: str = "open") -> Optional[int]:
         if self.conn is None or not self.state.sqlite_writable:
             return None
         cur = self.conn.execute(
             """
-            INSERT INTO conflicts(left_id, right_id, subject, reason, winner_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO conflicts(left_id, right_id, subject, status, reason, winner_id, created_at, resolved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (left_id, right_id, subject, reason, winner_id, utc_now_iso()),
+            (left_id, right_id, subject, status, reason, winner_id, utc_now_iso(), utc_now_iso() if status != "open" else None),
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def resolve_conflicts_for(self, memory_id: int) -> int:
+        """Mark all open conflicts involving memory_id as resolved.
+
+        Used when a memory is explicitly superseded: dangling open conflicts
+        that reference it no longer need human review. Returns affected row count.
+        """
+        if self.conn is None or not self.state.sqlite_writable:
+            return 0
+        cur = self.conn.execute(
+            "UPDATE conflicts SET status='resolved', resolved_at=? "
+            "WHERE status='open' AND (left_id=? OR right_id=?)",
+            (utc_now_iso(), memory_id, memory_id),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def list_conflicts(self, status: str = "open", limit: int = 50) -> list[dict[str, Any]]:
         if self.conn is None:

@@ -126,6 +126,89 @@ def test_confirm_promotes_record(tmp_path: Path) -> None:
     assert confirmed["data"]["record"]["protection_level"] == "locked"
 
 
+def test_supersede_requires_authorization(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="Old spec",
+        subject="spec",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+
+    rejected = tools.memory_supersede(memory_id=memory_id, reason="replaced", authorized=False)
+    assert rejected["ok"] is False
+    assert rejected["data"]["superseded"] is False
+    # Memory must remain active+locked when unauthorized
+    still_active = tools.db.get_memory(memory_id)
+    assert still_active["status"] == "active"
+    assert still_active["protection_level"] == "locked"
+
+
+def test_supersede_marks_record_and_resolves_conflicts(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(
+        content="Old release spec",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    new = tools.memory_write(
+        content="New release spec supersedes the old one",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    old_id, new_id = old["data"]["id"], new["data"]["id"]
+
+    # arbitrate hits the user-protected wall and leaves an open conflict
+    blocked = tools.memory_arbitrate(old_id, new_id, mark_conflict=True, apply=True)
+    assert blocked["data"]["comparison"]["manual_review"] is True
+    open_conflicts_before = tools.memory_list_conflicts(status="open")["data"]["count"]
+    assert open_conflicts_before >= 1
+
+    result = tools.memory_supersede(
+        memory_id=old_id,
+        reason="replaced by newer spec",
+        superseded_by=new_id,
+        authorized=True,
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["superseded"] is True
+    assert result["data"]["memory_id"] == old_id
+    assert result["data"]["conflict_id"] is not None
+    assert result["data"]["linked_conflicts_resolved"] >= 1
+
+    updated = tools.db.get_memory(old_id)
+    assert updated["status"] == "superseded"
+    assert updated["protection_level"] == "normal"
+
+    # The open conflict from the blocked arbitrate must now be resolved
+    open_conflicts_after = tools.memory_list_conflicts(status="open")["data"]["count"]
+    assert open_conflicts_after == 0
+    # And an audit row exists for the supersede itself
+    resolved = tools.memory_list_conflicts(status="resolved")["data"]["conflicts"]
+    assert any("USER-AUTHORIZED SUPERSEDE" in c["reason"] for c in resolved)
+
+
+def test_supersede_rejects_already_superseded(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="Stale memory",
+        subject="stale",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+    first = tools.memory_supersede(memory_id=memory_id, reason="stale", authorized=True)
+    assert first["ok"] is True
+
+    second = tools.memory_supersede(memory_id=memory_id, reason="stale again", authorized=True)
+    assert second["ok"] is False
+    assert "already" in second["data"]["error"]
+
+
 def test_degraded_status_mentions_missing_vec(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     status = tools.memory_status()

@@ -83,6 +83,21 @@ def build_server() -> Any:
         return tools.memory_confirm(memory_id=memory_id, source_ref=source_ref, confidence=confidence)
 
     @app.tool()
+    def memory_supersede(
+        memory_id: int,
+        reason: str,
+        superseded_by: Optional[int] = None,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """显式废弃一条记忆，可突破 user_confirmed/locked 保护（memory_arbitrate 被挡时用）。必须 authorized=true 才执行；联动降保护级别并把相关 open 冲突标记为 resolved，审计记录写入 conflicts 表。废弃后不可逆。"""
+        return tools.memory_supersede(
+            memory_id=memory_id,
+            reason=reason,
+            superseded_by=superseded_by,
+            authorized=authorized,
+        )
+
+    @app.tool()
     def memory_status() -> dict[str, Any]:
         """查看 memory-arbiter 运行状态：数据库路径、降级模式、客户端标识、策略配置。"""
         return tools.memory_status()
