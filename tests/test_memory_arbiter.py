@@ -55,6 +55,29 @@ def test_chinese_search_matches_contiguous_fragment(tmp_path: Path) -> None:
     assert found["data"]["results"][0]["subject"] == "京东科技金融-营销系统梳理"
 
 
+def test_chinese_search_overspecified_query_still_matches(tmp_path: Path) -> None:
+    """Regression for the original '营销交付系统' bug: a query whose bigrams
+    are not all present in the document must still hit FTS5 via OR recall on
+    the shared bigrams, instead of falling back to recent memories."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="营销交付需求提报：银行走XBP，自持走邮件，财富走JoySpace。活动配置走权益中台。",
+        tags=["营销交付", "营销链路"],
+        source_type="document_extracted",
+        subject="营销交付-需求提报链路",
+    )
+
+    # "营销交付系统" has bigrams (付系, 系统) absent from the doc; the shared
+    # bigrams (营销, 销交, 交付) must still match via OR.
+    found = tools.memory_search(query="营销交付系统", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert found["data"]["count"] >= 1
+    assert found["data"]["results"][0]["subject"] == "营销交付-需求提报链路"
+    # Must NOT have triggered the recent-memory fallback.
+    assert not any("No direct memory match" in w for w in found["warnings"])
+
+
 def test_search_returns_recent_memories_when_no_direct_match(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     tools.memory_write(
@@ -71,6 +94,40 @@ def test_search_returns_recent_memories_when_no_direct_match(tmp_path: Path) -> 
     assert found["data"]["count"] == 1
     assert found["data"]["results"][0]["subject"] == "京东科技金融-营销系统梳理"
     assert any("No direct memory match" in warning for warning in found["warnings"])
+
+
+def test_recent_fallback_ranks_by_trust_then_recency(tmp_path: Path) -> None:
+    """Regression: when a query misses FTS5 and falls back to recent memories,
+    a user_confirmed+locked record must outrank a newer agent_generated+normal
+    one. Previously pure ``ingest_time DESC`` ordering let daily agent chatter
+    bury authoritative records."""
+    tools = make_tools(tmp_path)
+    # Newer but low-trust: agent chatter from today.
+    tools.memory_write(
+        content="memory-arbiter v0.2.4 release notes supersede tooling spec",
+        subject="release-chatter",
+        source_type="agent_generated",
+        event_time="2026-07-05T00:00:00Z",
+    )
+    # Older but authoritative: the actual system overview the user confirmed.
+    tools.memory_write(
+        content="营销系统梳理：金营平台、权益中台、活动配置全链路系统清单",
+        subject="营销系统-权威",
+        source_type="user_confirmed",
+        confidence=1.0,
+        event_time="2026-07-04T00:00:00Z",
+    )
+
+    found = tools.memory_search(query="完全不存在的查询词 xyz123", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert any("No direct memory match" in w for w in found["warnings"])
+    results = found["data"]["results"]
+    assert len(results) == 2
+    # Authoritative record must rank first despite being older.
+    assert results[0]["subject"] == "营销系统-权威"
+    assert results[0]["protection_level"] == "locked"
+    assert results[1]["subject"] == "release-chatter"
 
 
 def test_memory_recent_lists_recent_workspace_memories(tmp_path: Path) -> None:
@@ -335,3 +392,30 @@ def test_sanitize_fts_query_quotes_and_joins_tokens() -> None:
     assert _sanitize_fts_query("v0.2.1 release task") == '"v0.2.1" AND "release" AND "task"'
     # Embedded double-quotes are escaped as "" per FTS5 phrase syntax
     assert _sanitize_fts_query('a"b') == '"a""b"'
+
+
+def test_sanitize_fts_query_splits_cjk_into_trigram_or_group() -> None:
+    """Regression: a CJK token used to be wrapped as a single strict phrase,
+    so ``营销交付系统`` missed documents that contained ``营销交付需求提报``
+    (one trigram absent). It must now expand to an OR of overlapping trigrams.
+
+    The FTS5 table uses ``tokenize='trigram'``, which only matches queries
+    that produce 3-char tokens — so 2-char phrases never hit, and a strict
+    CJK phrase silently misses when overspecified. Bare trigrams joined by
+    OR restore recall without any new tokenizer dependency.
+    """
+    from memory_arbiter.search import _sanitize_fts_query
+
+    # Pure CJK: overlapping trigrams (unquoted) joined by OR.
+    assert _sanitize_fts_query("营销交付") == "(营销交 OR 销交付)"
+    assert _sanitize_fts_query("营销交付系统") == (
+        "(营销交 OR 销交付 OR 交付系 OR 付系统)"
+    )
+    # Single/double CJK chars cannot form a trigram → dropped (LIKE fallback
+    # handles them via the empty-FTS-result path).
+    assert _sanitize_fts_query("营") == ""
+    assert _sanitize_fts_query("营销") == ""
+    # Mixed CJK + ASCII: short CJK token dropped, ASCII token preserved.
+    assert _sanitize_fts_query("营销 marketing") == '"marketing"'
+    # ASCII behavior unchanged when no CJK present.
+    assert _sanitize_fts_query("v0.2.1 release") == '"v0.2.1" AND "release"'
