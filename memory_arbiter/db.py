@@ -84,6 +84,7 @@ class MemoryDB:
                 sqlite_vec.load(self.conn)
                 self.state.sqlite_vec_available = True
                 self.state.mode = "sqlite_vec"
+                self._ensure_vec_table()
             except Exception as exc:  # pragma: no cover - depends on local optional package
                 self.state.warn(f"sqlite-vec unavailable: {exc}. Semantic recall disabled; falling back to FTS5 or keyword search.")
         else:
@@ -139,6 +140,69 @@ class MemoryDB:
             self.conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, tags, subject, content='memories', content_rowid='id')"
             )
+
+    def _ensure_vec_table(self) -> None:
+        """Create the vec0 table for optional semantic recall.
+
+        Dimension is read from settings (env MEMORY_ARBITER_VEC_DIM, default 768).
+        Users are responsible for backfilling embeddings; the table starts empty.
+        If the dimension changes, the user must drop + recreate the table.
+        """
+        assert self.conn is not None
+        dim = int(getattr(self.settings, "vec_dim", 768) or 768)
+        try:
+            self.conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[{dim}])"
+            )
+            self.conn.commit()
+        except sqlite3.Error as exc:
+            self.state.warn(f"vec0 table creation failed (dim={dim}): {exc}. Semantic recall disabled.")
+            self.state.sqlite_vec_available = False
+
+    def store_embedding(self, memory_id: int, embedding: list[float]) -> Tuple[bool, list[str]]:
+        """Store or replace an embedding for a memory. Returns (ok, warnings)."""
+        warnings: list[str] = []
+        if self.conn is None or not self.state.sqlite_writable:
+            return False, ["SQLite write unavailable; embedding not stored."]
+        if not self.state.sqlite_vec_available:
+            return False, ["sqlite-vec unavailable; embedding not stored."]
+        try:
+            # vec0 has no UPSERT; delete then insert to replace.
+            self.conn.execute("DELETE FROM memories_vec WHERE id = ?", (memory_id,))
+            self.conn.execute(
+                "INSERT INTO memories_vec(id, embedding) VALUES (?, ?)",
+                (memory_id, json.dumps(embedding)),
+            )
+            self.conn.commit()
+            return True, []
+        except sqlite3.Error as exc:
+            self.conn.rollback()
+            warnings.append(f"store_embedding failed: {exc}")
+            return False, warnings
+
+    def vec_knn(self, query_embedding: list[float], k: int = 10) -> list[dict[str, Any]]:
+        """Return up to k nearest neighbors by cosine distance. Empty if vec unavailable."""
+        if self.conn is None or not self.state.sqlite_vec_available:
+            return []
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT v.id AS id, v.distance AS distance, m.workspace AS workspace,
+                       m.agent_id AS agent_id, m.status AS status, m.subject AS subject,
+                       m.tags AS tags, m.content AS content, m.source_type AS source_type,
+                       m.confidence AS confidence, m.protection_level AS protection_level,
+                       m.event_time AS event_time, m.ingest_time AS ingest_time,
+                       m.metadata AS metadata
+                FROM memories_vec v
+                JOIN memories m ON m.id = v.id
+                WHERE v.embedding MATCH ? AND k = ?
+                ORDER BY v.distance
+                """,
+                (json.dumps(query_embedding), k),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
 
     def insert_memory(self, record: MemoryRecord) -> Tuple[Optional[int], list[str]]:
         warnings: list[str] = []

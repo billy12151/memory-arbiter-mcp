@@ -35,7 +35,10 @@ class Settings:
     client: str = "codex"
     agent_id: str = "default"
     workspace: str = "default"
-    enable_sqlite_vec: bool = True
+    enable_sqlite_vec: bool = False
+    vec_dim: int = 768
+    recall_pool_cap: int = 50
+    content_like_cap: int = 30
     policy: AgentPolicy = field(default_factory=AgentPolicy)
 
     @classmethod
@@ -49,7 +52,10 @@ class Settings:
             client=os.getenv("MEMORY_ARBITER_CLIENT", "codex"),
             agent_id=os.getenv("MEMORY_ARBITER_AGENT_ID", "default"),
             workspace=os.getenv("MEMORY_ARBITER_WORKSPACE", "default"),
-            enable_sqlite_vec=os.getenv("MEMORY_ARBITER_ENABLE_SQLITE_VEC", "true").lower() not in {"0", "false", "no"},
+            enable_sqlite_vec=os.getenv("MEMORY_ARBITER_ENABLE_SQLITE_VEC", "false").lower() in {"1", "true", "yes"},
+            vec_dim=int(os.getenv("MEMORY_ARBITER_VEC_DIM", "768")),
+            recall_pool_cap=int(os.getenv("MEMORY_ARBITER_RECALL_POOL_CAP", "50")),
+            content_like_cap=int(os.getenv("MEMORY_ARBITER_CONTENT_LIKE_CAP", "30")),
         )
         settings.policy = load_policy(settings.policy_path)
         return settings

@@ -33,9 +33,28 @@ class MemoryTools:
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, **_: Any) -> dict[str, Any]:
-        results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking)
+    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, **_: Any) -> dict[str, Any]:
+        results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
         return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=warnings)
+
+    def memory_store_embedding(self, memory_id: int, embedding: list[float], **_: Any) -> dict[str, Any]:
+        """Store or replace an embedding for a memory (v0.3.1 semantic recall).
+
+        The caller is responsible for generating the embedding with any model
+        of matching dimension. memory-arbiter does not bundle an embedding
+        model by design (local-first, zero cloud, no heavy deps). See
+        docs/semantic_example.py for a backfill script using sentence-transformers.
+        """
+        try:
+            memory_id_int = int(memory_id)
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
+        if not isinstance(embedding, list) or not embedding:
+            return self.db.state.response({"error": "embedding must be a non-empty list of floats"}, ok=False)
+        if not self.db.get_memory(memory_id_int):
+            return self.db.state.response({"error": f"memory id {memory_id_int} not found"}, ok=False)
+        ok, store_warnings = self.db.store_embedding(memory_id_int, embedding)
+        return self.db.state.response({"stored": ok, "memory_id": memory_id_int, "dimensions": len(embedding)}, ok=ok, extra_warnings=store_warnings)
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         limit = max(1, min(int(limit), 100))

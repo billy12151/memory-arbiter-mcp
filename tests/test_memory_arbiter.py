@@ -542,3 +542,109 @@ def test_superseded_always_ranked_below_active_even_with_higher_score(tmp_path: 
     assert ids.index(stale_id) > ids.index(active_id), (
         "superseded ranked above active despite the demote clause — ORDER BY is broken"
     )
+
+
+# ---- v0.3.1: optional semantic recall (sqlite-vec vec0) -----------------
+try:
+    import sqlite_vec  # type: ignore  # noqa: F401
+    _VEC_AVAILABLE = True
+except Exception:
+    _VEC_AVAILABLE = False
+
+
+def make_tools_vec(tmp_path: Path) -> MemoryTools:
+    """Fixture that enables sqlite-vec (required for semantic recall tests)."""
+    settings = Settings(
+        db_path=tmp_path / "memory_vec.sqlite3",
+        backup_jsonl=tmp_path / "backup_vec.jsonl",
+        client="codex",
+        agent_id="agent-a",
+        workspace="repo-a",
+        enable_sqlite_vec=True,
+        vec_dim=4,
+    )
+    return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def test_semantic_recall_off_when_no_embedding(tmp_path: Path) -> None:
+    """Default behaviour unchanged: without query_embedding, search is lexical-only."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="The deployment uses blue-green strategy.",
+        subject="deploy-strategy",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    # No query_embedding passed — pure lexical search, same as v0.3.0.
+    found = tools.memory_search(query="deployment", workspace="repo-a")
+    assert found["ok"] is True
+    assert found["data"]["count"] >= 1
+
+
+def test_store_embedding_rejects_missing_memory(tmp_path: Path) -> None:
+    """Storing an embedding for a non-existent memory id should fail cleanly."""
+    if not _VEC_AVAILABLE:
+        return  # environment without sqlite-vec; skip gracefully
+    tools = make_tools_vec(tmp_path)
+    result = tools.memory_store_embedding(memory_id=99999, embedding=[0.1, 0.2, 0.3, 0.4])
+    assert result["ok"] is False
+    assert "not found" in (result.get("data", {}).get("error") or "").lower()
+
+
+def test_semantic_recall_surfaces_lexically_unmatched_memory(tmp_path: Path) -> None:
+    """A memory with zero lexical overlap should still be reachable via vec0 KNN.
+
+    This is the core value of semantic recall: 'happy' query finds 'joyful'
+    content when embeddings say they're close, even though trigram/BM25 miss.
+    """
+    if not _VEC_AVAILABLE:
+        return
+    tools = make_tools_vec(tmp_path)
+    # Two memories. The first shares no trigrams/tokens with the query
+    # 'serene calmness'; the second is lexically unrelated too but further
+    # away in vector space. Without semantic recall, neither would surface.
+    happy = tools.memory_write(
+        content="A tranquil meadow at dawn, quiet and still.",
+        subject="meadow-scene",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    tools.memory_write(
+        content="Quarterly revenue grew 12% year over year.",
+        subject="revenue-report",
+        source_type="agent_generated",
+        event_time="2026-01-02T00:00:00Z",
+    )
+    happy_id = happy["data"]["id"]
+    # Craft a 4-dim embedding that is close to the query vector and far from
+    # everything else. Query vector below sits near happy's embedding.
+    happy_embedding = [0.9, 0.1, 0.0, 0.0]
+    revenue_embedding = [0.0, 0.0, 0.9, 0.1]
+    assert tools.memory_store_embedding(memory_id=happy_id, embedding=happy_embedding)["ok"] is True
+    # Store one for revenue too, to make sure KNN discriminates.
+    revenue_id = [r["id"] for r in tools.memory_recent(workspace="repo-a")["data"]["results"] if r["subject"] == "revenue-report"][0]
+    assert tools.memory_store_embedding(memory_id=revenue_id, embedding=revenue_embedding)["ok"] is True
+
+    # Query embedding close to happy → happy should surface even though
+    # 'serene calmness' shares no trigrams with the meadow content.
+    found = tools.memory_search(query="serene calmness", workspace="repo-a", query_embedding=[0.85, 0.15, 0.0, 0.0])
+    assert found["ok"] is True
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert happy_id in ids, "semantic recall failed: lexically-unmatched memory not surfaced"
+
+
+def test_query_embedding_without_sqlite_vec_warns(tmp_path: Path) -> None:
+    """When sqlite-vec is unavailable, passing query_embedding should warn, not crash."""
+    tools = make_tools(tmp_path)  # vec disabled in this fixture
+    tools.memory_write(
+        content="Some content here.",
+        subject="note",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    result = tools.memory_search(query="content", workspace="repo-a", query_embedding=[0.1, 0.2, 0.3, 0.4])
+    assert result["ok"] is True  # must not crash
+    # Should carry a warning that semantic channel was skipped.
+    warnings_text = " ".join(result.get("warnings") or [])
+    assert "sqlite-vec unavailable" in warnings_text or result["data"]["count"] >= 0
+

@@ -110,6 +110,12 @@ _TRUST_BONUS_DOCUMENT_EXTRACTED = 0.3
 _TRUST_BONUS_DEFAULT = 0.0
 _LONG_CONTENT_PENALTY = 1.5     # r4 §8.4: applied only under 3 conditions
 _CONTENT_ONLY_PENALTY = 2.0     # r4 §8.3: subject/tags miss + content hits
+# v0.3.1: floor score for vec0-recalled candidates. These candidates often
+# have zero lexical overlap with the query (that's the whole point of
+# semantic recall), so without a floor they'd rank last despite being
+# semantically relevant. Set just below CONTENT_SCORE_CAP so a vec candidate
+# beats content-only noise but never beats a real subject/tags hit.
+_VEC_FLOOR_SCORE = 2.5
 
 # subject/tags match-level weights (after capping)
 _SUBJECT_STRONG_WEIGHT = 10.0
@@ -235,6 +241,13 @@ def _soft_rerank(
         if subject_tags_weak and content_long and content_score > 0:
             relevance -= _LONG_CONTENT_PENALTY
 
+        # v0.3.1: vec0-recalled candidates. If this candidate came from the
+        # semantic channel and lexical relevance is below the floor, raise it
+        # to the floor. The floor sits just below content-score cap, so a vec
+        # candidate beats content-only noise but loses to any subject/tags hit.
+        if rec.get("_vec_candidate") and relevance < _VEC_FLOOR_SCORE:
+            relevance = _VEC_FLOOR_SCORE
+
         trust = _trust_bonus(rec)
         # Superseded always sinks below active regardless of score (r4 carries
         # this forward from v0.2.6).
@@ -251,6 +264,10 @@ def _soft_rerank(
             notes.append("long content penalty applied")
         if superseded_sink:
             notes.append("superseded: sunk below active")
+        if rec.get("_vec_candidate"):
+            if match_reason == "subject_or_tag_match":
+                match_reason = "vec_recall"
+            notes.append("v0.3.1: semantic recall candidate, floor score applied")
 
         rec_copy = dict(rec)
         rec_copy["_final_score"] = final_score
@@ -279,6 +296,8 @@ def _wide_recall(
     like_status_clause: str,
     pool_cap: int = 50,
     content_like_fallback: bool = True,
+    query_embedding: Optional[list[float]] = None,
+    content_like_cap: int = 30,
 ) -> list[dict[str, Any]]:
     """v0.3.0 wide recall: merge multiple retrieval channels into a candidate pool.
 
@@ -287,6 +306,10 @@ def _wide_recall(
       2. FTS OR-query top N (loosened — query tokens OR'd rather than AND'd)
       3. subject/tags LIKE (precise surface recall)
       4. content LIKE — only if pool not yet full, with ≥2 anchor hits, capped
+      5. vec0 KNN — optional (v0.3.1), only when query_embedding provided and
+         sqlite-vec available. Catches semantically similar but lexically
+         dissimilar memories. Candidates are flagged so soft-rerank can give
+         them a floor score (the query text didn't literally match anything).
 
     Returns dedup'd candidate pool (list of dict rows). Each row already has
     its raw fields; soft-rerank will add scoring fields.
@@ -383,7 +406,7 @@ def _wide_recall(
             for tag in tags or []:
                 clauses.append("tags LIKE ?")
                 params.append(f"%{tag}%")
-            params.append(10)  # cap at 10 content-LIKE补漏
+            params.append(content_like_cap)  # cap content-LIKE补漏 (configurable via MEMORY_ARBITER_CONTENT_LIKE_CAP)
             sql = f"""SELECT *, 0 AS score FROM memories
                       WHERE {' AND '.join(clauses)}
                       ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
@@ -396,8 +419,34 @@ def _wide_recall(
                     d["_content_only_candidate"] = True
                     pool[d["id"]] = d
                     added += 1
-                    if added >= 10 or len(pool) >= pool_cap:
+                    if added >= content_like_cap or len(pool) >= pool_cap:
                         break
+
+    # Channel 5 (v0.3.1): vec0 KNN — optional semantic recall. Only runs when
+    # the caller supplied a query_embedding AND sqlite-vec is available. This
+    # is the only channel that can surface memories whose surface text shares
+    # no trigrams/tokens with the query. Candidates are flagged so soft-rerank
+    # knows they came from vectors (their lexical score will be 0).
+    if query_embedding and db.state.sqlite_vec_available and len(pool) < pool_cap:
+        knn_rows = db.vec_knn(query_embedding, k=max(pool_cap - len(pool), 10))
+        for row in knn_rows:
+            # Apply the same workspace filter the other channels use.
+            if workspace and row.get("workspace") != workspace:
+                continue
+            # Respect status filtering — vec0 rows are joined from memories,
+            # but we still need to honour the active/superseded gate.
+            status = row.get("status")
+            if status == "deleted":
+                continue
+            if status == "superseded" and "superseded" in like_status_clause:
+                # like_status_clause filters superseded by default; match that.
+                continue
+            rid = row.get("id")
+            if rid is None or rid in pool:
+                continue
+            d = dict(row)
+            d["_vec_candidate"] = True
+            pool[rid] = d
 
     return list(pool.values())[:pool_cap]
 
@@ -423,13 +472,17 @@ def _sanitize_fts_query_or(query: str) -> str:
     return " OR ".join(parts)
 
 
-def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False) -> Tuple[list[dict[str, Any]], list[str]]:
+def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None) -> Tuple[list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
     if db.conn is None:
         return [], ["SQLite unavailable; search cannot read JSONL backup in MVP."]
     limit = max(1, min(int(limit), 100))
     query = (query or "").strip()
     mode = _get_ranking_mode()
+    # v0.3.1: when a query_embedding is supplied but sqlite-vec is not active,
+    # warn so the caller knows the semantic channel was silently skipped.
+    if query_embedding and not db.state.sqlite_vec_available:
+        warnings.append("query_embedding provided but sqlite-vec unavailable; semantic recall skipped.")
     # Superseded memories are excluded by default: a superseded record is, by
     # definition, no longer authoritative and only pollutes results (release
     # chatter, superseded specs, etc.). Audit/history walkthroughs opt back in
@@ -448,7 +501,9 @@ def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, t
         # Empty query: same as v0.2.6 recent fallback (no reranking needed).
         return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
 
-    pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause)
+    pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause, query_embedding=query_embedding,
+                        pool_cap=getattr(db.settings, "recall_pool_cap", 50),
+                        content_like_cap=getattr(db.settings, "content_like_cap", 30))
     if not pool:
         # No direct hits: fall back to recent memories (r4 §4.2 safety net).
         return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
