@@ -1,6 +1,6 @@
 """Three-way A/B test: bm25 (v0.2.6) vs hybrid (v0.3.0) vs hybrid+semantic (v0.3.1).
 
-Reuses the 15 golden queries + 18 pairwise constraints from tests/test_v0.3.0_ab.py
+Reuses the 15 golden queries + 18 pairwise constraints from docs/v0_3_0_ab.py
 so all three modes are scored against the SAME criteria. Adds a third mode that
 supplies query_embedding from the local GGUF embedder.
 
@@ -16,20 +16,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "docs"))
-sys.path.insert(0, str(REPO / "tests"))
 
 from memory_arbiter.config import Settings  # noqa: E402
 from memory_arbiter.db import MemoryDB  # noqa: E402
 from memory_arbiter.search import search_memories  # noqa: E402
 from semantic_example import load_gguf_embedder  # noqa: E402
 
-# The v0.3.0 A/B script lives at tests/test_v0.3.0_ab.py — its dotted name
-# can't be imported normally, so load it by path and reuse its golden-query
-# set + lexical eval function. This keeps the three modes scored against
-# the SAME 15 queries + 18 pairwise constraints.
+# The v0.3.0 A/B script is a standalone evaluation script, so load it by path
+# and reuse its golden-query set + lexical eval function. This keeps the three
+# modes scored against the SAME 15 queries + 18 pairwise constraints.
 import importlib.util  # noqa: E402
 _spec = importlib.util.spec_from_file_location(
-    "v030_ab", REPO / "tests" / "test_v0.3.0_ab.py")
+    "v030_ab", REPO / "docs" / "v0_3_0_ab.py")
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 GOLDEN_QUERIES = _mod.GOLDEN_QUERIES

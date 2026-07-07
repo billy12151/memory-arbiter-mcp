@@ -5,7 +5,7 @@ RANKING_MODE=bm25 and RANKING_MODE=hybrid, and prints a side-by-side comparison
 plus Top-1 / Top-3 / pairwise pass-rate statistics.
 
 This is NOT a pytest test — it's a standalone evaluation script. Run with:
-    python tests/test_v0.3.0_ab.py
+    python docs/v0_3_0_ab.py
 """
 
 from __future__ import annotations

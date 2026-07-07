@@ -204,3 +204,143 @@ class MemoryTools:
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
         summary = self.db.audit_summary()
         return self.db.state.response(summary)
+
+    def memory_edit(
+        self,
+        memory_id: int,
+        new_content: Optional[str] = None,
+        old_text: Optional[str] = None,
+        new_text: Optional[str] = None,
+        new_subject: Optional[str] = None,
+        new_tags: Optional[list[str]] = None,
+        reason: str = "",
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """In-place edit a memory's content, archiving the prior version to
+        ``memory_history`` (version chain) and syncing the FTS index.
+
+        Two edit modes:
+          * full replace: pass ``new_content`` (old_text/new_text must be empty)
+          * partial replace: pass ``old_text`` + ``new_text`` for an exact
+            substring substitution (new_content must be empty)
+
+        Authorization (layered): normal records edit freely; ``locked`` /
+        ``user_confirmed`` records require ``authorized=True`` (mirrors
+        ``memory_supersede``). Records already superseded/deleted are rejected.
+        """
+        memory = self.db.get_memory(int(memory_id))
+        if not memory:
+            return self.db.state.response({"error": "memory id not found", "edited": False}, ok=False)
+        if memory.get("status") in {"superseded", "deleted"}:
+            return self.db.state.response(
+                {"error": f"memory already {memory.get('status')}", "edited": False},
+                ok=False,
+            )
+        is_protected = (
+            memory.get("protection_level") == ProtectionLevel.LOCKED.value
+            or memory.get("source_type") == SourceType.USER_CONFIRMED.value
+        )
+        if is_protected and not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required to edit a locked/user_confirmed memory", "edited": False},
+                ok=False,
+            )
+        # Resolve the resulting content from the two edit modes.
+        current_content = memory.get("content") or ""
+        if new_content is not None and (old_text or new_text):
+            return self.db.state.response(
+                {"error": "pass either new_content (full replace) or old_text+new_text (partial), not both", "edited": False},
+                ok=False,
+            )
+        if new_content is not None:
+            resolved_content = new_content
+        elif old_text is not None and new_text is not None:
+            if old_text not in current_content:
+                return self.db.state.response(
+                    {"error": "old_text not found in current content", "edited": False},
+                    ok=False,
+                )
+            resolved_content = current_content.replace(old_text, new_text, 1)
+        else:
+            return self.db.state.response(
+                {"error": "provide new_content for full replace, or old_text+new_text for partial replace", "edited": False},
+                ok=False,
+            )
+        history_id = self.db.edit_memory(
+            int(memory_id),
+            resolved_content,
+            new_subject=new_subject,
+            new_tags=new_tags,
+            reason=reason or None,
+        )
+        if history_id is None:
+            return self.db.state.response({"error": "edit failed (db not writable)", "edited": False}, ok=False)
+        updated = self.db.get_memory(int(memory_id))
+        return self.db.state.response(
+            {
+                "edited": True,
+                "memory_id": int(memory_id),
+                "new_version": int(updated.get("version") or 1) if updated else None,
+                "history_id": history_id,
+                "record": updated,
+            }
+        )
+
+    def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:
+        """View the version-chain (historical snapshots) of a memory, newest
+        version first. Read-only; does not modify any table.
+        """
+        memory = self.db.get_memory(int(memory_id))
+        if not memory:
+            return self.db.state.response({"error": "memory id not found"}, ok=False)
+        history = self.db.list_history(int(memory_id))
+        return self.db.state.response(
+            {
+                "memory_id": int(memory_id),
+                "current_version": int(memory.get("version") or 1),
+                "history": history,
+                "count": len(history),
+            }
+        )
+
+    def memory_cleanup_history(
+        self,
+        memory_id: Optional[int] = None,
+        older_than_days: Optional[int] = None,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Delete historical snapshots from ``memory_history``.
+
+        Scope:
+          * ``memory_id`` set: clean only that memory's history
+          * ``older_than_days`` set: clean only snapshots older than N days
+          * both set: both filters apply
+          * neither set (full cleanup): **requires ``authorized=True``** as an
+            explicit confirmation gate
+
+        SAFETY: this tool only ever deletes from memory_history. The memories
+        table (active records) is never touched, regardless of arguments.
+        """
+        full_cleanup = memory_id is None and older_than_days is None
+        if older_than_days is not None and int(older_than_days) < 0:
+            return self.db.state.response(
+                {"error": "older_than_days must be >= 0", "cleaned": 0},
+                ok=False,
+            )
+        if full_cleanup and not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required for full history cleanup (no memory_id / older_than_days filter)", "cleaned": 0},
+                ok=False,
+            )
+        cleaned = self.db.cleanup_history(memory_id=memory_id, older_than_days=older_than_days)
+        scope = "full" if full_cleanup else ("memory" if memory_id is not None else "by_age")
+        return self.db.state.response(
+            {
+                "cleaned": cleaned,
+                "scope": scope,
+                "memory_id": memory_id,
+                "older_than_days": older_than_days,
+            }
+        )

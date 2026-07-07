@@ -70,9 +70,34 @@ class MemoryDB:
             CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(workspace, agent_id, status);
             CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(workspace, subject);
             CREATE INDEX IF NOT EXISTS idx_memories_event ON memories(event_time, ingest_time);
+            CREATE TABLE IF NOT EXISTS memory_history (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              memory_id INTEGER NOT NULL,
+              content_snapshot TEXT NOT NULL,
+              subject_snapshot TEXT,
+              tags_snapshot TEXT,
+              version INTEGER NOT NULL,
+              changed_at TEXT NOT NULL,
+              reason TEXT,
+              FOREIGN KEY(memory_id) REFERENCES memories(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, changed_at);
             """
         )
+        self._migrate_add_version_column()
         self.conn.commit()
+
+    def _migrate_add_version_column(self) -> None:
+        """Idempotently add the `version` column to the memories table.
+
+        CREATE TABLE IF NOT EXISTS only affects fresh DBs; existing on-disk
+        databases need an ALTER TABLE to pick up the column. Probed via
+        PRAGMA table_info so it's safe to run repeatedly.
+        """
+        assert self.conn is not None
+        cols = {str(row["name"]) for row in self.conn.execute("PRAGMA table_info(memories)")}
+        if "version" not in cols:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
 
     def _probe_features(self) -> None:
         assert self.conn is not None
@@ -328,6 +353,106 @@ class MemoryDB:
             (status, limit),
         ).fetchall()
         return [row_to_dict(row) for row in rows]
+
+    def edit_memory(
+        self,
+        memory_id: int,
+        new_content: str,
+        new_subject: Optional[str] = None,
+        new_tags: Optional[list[str]] = None,
+        reason: Optional[str] = None,
+    ) -> Optional[int]:
+        """In-place edit a memory's content, archiving the prior version to memory_history.
+
+        Stores a snapshot of the old content/subject/tags at the old version,
+        bumps memories.version, and rewrites the FTS row so search sees the new
+        text immediately (update_memory does not sync FTS for content edits).
+        Returns the history row id, or None if the DB is unwritable.
+        """
+        if self.conn is None or not self.state.sqlite_writable:
+            return None
+        current = self.get_memory(memory_id)
+        if not current:
+            return None
+        old_content = current["content"]
+        old_subject = current.get("subject")
+        old_tags = current.get("tags") or []
+        old_version = int(current.get("version") or 1)
+        tags_json = json.dumps(new_tags, ensure_ascii=False) if new_tags is not None else json.dumps(old_tags, ensure_ascii=False)
+        subject_value = new_subject if new_subject is not None else old_subject
+        try:
+            history_cur = self.conn.execute(
+                """
+                INSERT INTO memory_history
+                (memory_id, content_snapshot, subject_snapshot, tags_snapshot, version, changed_at, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory_id,
+                    old_content,
+                    old_subject,
+                    json.dumps(old_tags, ensure_ascii=False),
+                    old_version,
+                    utc_now_iso(),
+                    reason,
+                ),
+            )
+            history_id = int(history_cur.lastrowid)
+            self.conn.execute(
+                "UPDATE memories SET content=?, subject=?, tags=?, version=? WHERE id=?",
+                (new_content, subject_value, tags_json, old_version + 1, memory_id),
+            )
+            if self.state.fts5_available:
+                # External-content FTS5: remove the old row via the special 'delete'
+                # command (requires the row's pre-edit values), then re-insert fresh.
+                self.conn.execute(
+                    "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) VALUES('delete', ?, ?, ?, ?)",
+                    (memory_id, old_content, " ".join(old_tags), old_subject or ""),
+                )
+                self.conn.execute(
+                    "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
+                    (memory_id, new_content, " ".join(new_tags) if new_tags is not None else " ".join(old_tags), subject_value or ""),
+                )
+            self.conn.commit()
+            return history_id
+        except sqlite3.Error:
+            self.conn.rollback()
+            return None
+
+    def list_history(self, memory_id: int) -> list[dict[str, Any]]:
+        """Return version snapshots for a memory, newest version first."""
+        if self.conn is None:
+            return []
+        rows = self.conn.execute(
+            "SELECT * FROM memory_history WHERE memory_id=? ORDER BY version DESC, id DESC",
+            (memory_id,),
+        ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def cleanup_history(self, memory_id: Optional[int] = None, older_than_days: Optional[int] = None) -> int:
+        """Delete historical snapshots from memory_history.
+
+        SAFETY RED LINE: this method only ever issues DELETE against
+        memory_history. It must never touch the memories table, regardless of
+        arguments. Full cleanup (no args) wipes the entire history table.
+        """
+        if self.conn is None or not self.state.sqlite_writable:
+            return 0
+        clauses: list[str] = []
+        params: list[Any] = []
+        if memory_id is not None:
+            clauses.append("memory_id = ?")
+            params.append(memory_id)
+        if older_than_days is not None:
+            from datetime import datetime, timedelta, timezone
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=int(older_than_days))).replace(microsecond=0).isoformat()
+            clauses.append("changed_at < ?")
+            params.append(cutoff)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cur = self.conn.execute(f"DELETE FROM memory_history {where}", params)
+        self.conn.commit()
+        return cur.rowcount
 
     def audit_summary(self) -> dict[str, Any]:
         """Pure-Sql aggregate overview per workspace. No semantic judgement.

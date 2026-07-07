@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
+import sys
+import types
 from pathlib import Path
 
 from memory_arbiter.arbitration import compare_memories
@@ -648,3 +651,315 @@ def test_query_embedding_without_sqlite_vec_warns(tmp_path: Path) -> None:
     warnings_text = " ".join(result.get("warnings") or [])
     assert "sqlite-vec unavailable" in warnings_text or result["data"]["count"] >= 0
 
+
+# --------------------------------------------------------------------------- #
+# v0.4.0 — version chain (memory_edit / memory_history / memory_cleanup_history)
+# --------------------------------------------------------------------------- #
+
+
+def test_edit_full_replacement_stores_history_and_updates_fts(tmp_path: Path) -> None:
+    """Full content replace: version bumps, old content archived, FTS re-synced."""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="version one content here",
+        subject="s1",
+        tags=["t"],
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+
+    result = tools.memory_edit(memory_id=memory_id, new_content="version two content here", reason="refresh")
+    assert result["ok"] is True
+    assert result["data"]["edited"] is True
+    assert result["data"]["new_version"] == 2
+    assert result["data"]["history_id"] is not None
+
+    updated = tools.db.get_memory(memory_id)
+    assert updated["content"] == "version two content here"
+    assert updated["version"] == 2
+
+    # History archived the old snapshot at the old version
+    history = tools.memory_history(memory_id=memory_id)["data"]["history"]
+    assert len(history) == 1
+    assert history[0]["content_snapshot"] == "version one content here"
+    assert history[0]["version"] == 1
+    assert history[0]["reason"] == "refresh"
+
+    # FTS must reflect the new content, not the old. Query the FTS index
+    # directly — memory_search falls back to "recent" when a token matches
+    # nothing, which would mask a stale-FTS bug. Use a token unique to the old
+    # body (kangaroo) vs unique to the new body (platypus).
+    written2 = tools.memory_write(
+        content="alpha kangaroo draft",
+        subject="s2",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    mid2 = written2["data"]["id"]
+    tools.memory_edit(memory_id=mid2, new_content="alpha platypus final", reason="swap")
+
+    fts_new = [r["rowid"] for r in tools.db.conn.execute(
+        "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'platypus'"
+    ).fetchall()]
+    fts_old = [r["rowid"] for r in tools.db.conn.execute(
+        "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'kangaroo'"
+    ).fetchall()]
+    assert mid2 in fts_new, f"new token not in FTS: {fts_new}"
+    assert mid2 not in fts_old, f"old token still in FTS (stale index): {fts_old}"
+    # And the live memories row carries the new text (sanity)
+    assert tools.db.get_memory(mid2)["content"] == "alpha platypus final"
+
+
+def test_existing_database_is_migrated_to_version_chain_schema(tmp_path: Path) -> None:
+    """Opening a pre-v0.4.0 DB adds version + memory_history idempotently."""
+    db_path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE memories (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          content TEXT NOT NULL,
+          agent_id TEXT NOT NULL,
+          workspace TEXT NOT NULL,
+          tags TEXT NOT NULL DEFAULT '[]',
+          source_type TEXT NOT NULL,
+          source_ref TEXT,
+          event_time TEXT NOT NULL,
+          ingest_time TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0.5,
+          protection_level TEXT NOT NULL DEFAULT 'normal',
+          status TEXT NOT NULL DEFAULT 'active',
+          subject TEXT,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO memories
+        (content, agent_id, workspace, tags, source_type, event_time, ingest_time, subject, metadata, created_at)
+        VALUES ('legacy content', 'agent-a', 'repo-a', '["legacy"]', 'agent_generated',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'legacy', '{}',
+                '2026-01-01T00:00:00Z');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    settings = Settings(
+        db_path=db_path,
+        backup_jsonl=tmp_path / "backup.jsonl",
+        client="codex",
+        agent_id="agent-a",
+        workspace="repo-a",
+        enable_sqlite_vec=False,
+    )
+    db = MemoryDB(settings)
+    cols = {row["name"] for row in db.conn.execute("PRAGMA table_info(memories)").fetchall()}
+    history_table = db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_history'"
+    ).fetchone()
+    record = db.get_memory(1)
+
+    assert "version" in cols
+    assert history_table is not None
+    assert record["content"] == "legacy content"
+    assert record["version"] == 1
+
+    # Idempotency: reopening the same DB should not fail or alter the row.
+    db2 = MemoryDB(settings)
+    assert db2.get_memory(1)["version"] == 1
+
+
+def test_edit_partial_replacement(tmp_path: Path) -> None:
+    """old_text+new_text does an exact substring substitution, not full replace."""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="the api returns status 200 on success",
+        subject="s",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+
+    result = tools.memory_edit(memory_id=memory_id, old_text="200", new_text="404", reason="typo")
+    assert result["ok"] is True
+    assert result["data"]["record"]["content"] == "the api returns status 404 on success"
+    assert result["data"]["new_version"] == 2
+
+    # old_text not present -> explicit error, no mutation
+    bad = tools.memory_edit(memory_id=memory_id, old_text="nonexistent", new_text="x")
+    assert bad["ok"] is False
+    assert "old_text not found" in bad["data"]["error"]
+    # version unchanged after the failed edit
+    assert tools.db.get_memory(memory_id)["version"] == 2
+
+
+def test_edit_requires_authorization_for_locked(tmp_path: Path) -> None:
+    """user_confirmed/locked records require authorized=True to edit."""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="confirmed fact",
+        subject="s",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+
+    rejected = tools.memory_edit(memory_id=memory_id, new_content="tampered", reason="try", authorized=False)
+    assert rejected["ok"] is False
+    assert rejected["data"]["edited"] is False
+    assert "authorized" in rejected["data"]["error"]
+    # content untouched
+    assert tools.db.get_memory(memory_id)["content"] == "confirmed fact"
+
+    allowed = tools.memory_edit(memory_id=memory_id, new_content="corrected fact", reason="auth", authorized=True)
+    assert allowed["ok"] is True
+    assert allowed["data"]["edited"] is True
+    assert tools.db.get_memory(memory_id)["content"] == "corrected fact"
+
+
+def test_edit_normal_memory_no_auth_needed(tmp_path: Path) -> None:
+    """agent_generated/normal records can be edited without authorized flag."""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="draft note",
+        subject="s",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+    assert tools.db.get_memory(memory_id)["protection_level"] == "normal"
+
+    result = tools.memory_edit(memory_id=memory_id, new_content="revised note", reason="cleanup")
+    assert result["ok"] is True
+    assert result["data"]["edited"] is True
+
+
+def test_edit_rejects_superseded(tmp_path: Path) -> None:
+    """Editing a superseded record is refused (idempotency / terminal-state gate)."""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="doomed",
+        subject="s",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+    tools.memory_supersede(memory_id=memory_id, reason="retired", authorized=True)
+
+    rejected = tools.memory_edit(memory_id=memory_id, new_content="revived", reason="try", authorized=True)
+    assert rejected["ok"] is False
+    assert "already" in rejected["data"]["error"]
+    assert rejected["data"]["edited"] is False
+
+
+def test_history_returns_version_chain(tmp_path: Path) -> None:
+    """Two edits produce two history rows; history is newest-version-first."""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="rev one",
+        subject="s",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+    tools.memory_edit(memory_id=memory_id, new_content="rev two", reason="second")
+    tools.memory_edit(memory_id=memory_id, new_content="rev three", reason="third")
+
+    result = tools.memory_history(memory_id=memory_id)
+    assert result["ok"] is True
+    assert result["data"]["current_version"] == 3
+    assert result["data"]["count"] == 2
+    versions = [h["version"] for h in result["data"]["history"]]
+    assert versions == [2, 1]  # newest version snapshot first
+    assert result["data"]["history"][0]["content_snapshot"] == "rev two"
+
+
+def test_cleanup_history_full_requires_authorization(tmp_path: Path) -> None:
+    """Full history cleanup needs authorized=True; per-memory cleanup does not.
+    And under no arguments must the memories table lose zero rows."""
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="a one", subject="a", source_type="agent_generated", event_time="2026-01-01T00:00:00Z")
+    b = tools.memory_write(content="b one", subject="b", source_type="agent_generated", event_time="2026-01-01T00:00:00Z")
+    a_id, b_id = a["data"]["id"], b["data"]["id"]
+    tools.memory_edit(memory_id=a_id, new_content="a two", reason="e")
+    tools.memory_edit(memory_id=b_id, new_content="b two", reason="e")
+    # 2 history rows now
+
+    # Full cleanup without auth -> rejected, nothing removed
+    rejected = tools.memory_cleanup_history()
+    assert rejected["ok"] is False
+    assert rejected["data"]["cleaned"] == 0
+    assert "authorized" in rejected["data"]["error"]
+    assert tools.memory_history(memory_id=a_id)["data"]["count"] == 1  # history intact
+
+    # Per-memory cleanup needs no auth
+    single = tools.memory_cleanup_history(memory_id=a_id)
+    assert single["ok"] is True
+    assert single["data"]["cleaned"] == 1
+    assert tools.memory_history(memory_id=a_id)["data"]["count"] == 0
+    assert tools.memory_history(memory_id=b_id)["data"]["count"] == 1  # b untouched
+
+    negative_age = tools.memory_cleanup_history(older_than_days=-1)
+    assert negative_age["ok"] is False
+    assert negative_age["data"]["cleaned"] == 0
+    assert tools.memory_history(memory_id=b_id)["data"]["count"] == 1
+
+    # Full cleanup WITH auth clears the rest
+    full = tools.memory_cleanup_history(authorized=True)
+    assert full["ok"] is True
+    assert full["data"]["cleaned"] == 1  # b's remaining row
+
+    # SAFETY RED LINE: memories table must be fully intact despite "full cleanup"
+    assert tools.db.get_memory(a_id)["content"] == "a two"
+    assert tools.db.get_memory(b_id)["content"] == "b two"
+
+
+def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path, monkeypatch) -> None:
+    """Regression: the MCP wrapper must pass new_tags=None through.
+
+    Passing [] erases existing tags on a content-only edit, even though the
+    MemoryTools layer correctly preserves tags when new_tags is omitted.
+    """
+
+    class FakeFastMCP:
+        def __init__(self, _name: str) -> None:
+            self.tools = {}
+
+        def tool(self):
+            def decorator(func):
+                self.tools[func.__name__] = func
+                return func
+
+            return decorator
+
+    fake_fastmcp = types.ModuleType("mcp.server.fastmcp")
+    fake_fastmcp.FastMCP = FakeFastMCP
+    fake_server = types.ModuleType("mcp.server")
+    fake_mcp = types.ModuleType("mcp")
+    fake_server.fastmcp = fake_fastmcp
+    fake_mcp.server = fake_server
+    monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
+    monkeypatch.setitem(sys.modules, "mcp.server", fake_server)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fake_fastmcp)
+    monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
+    monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
+    monkeypatch.setenv("MEMORY_ARBITER_WORKSPACE", "repo-a")
+    monkeypatch.setenv("MEMORY_ARBITER_AGENT_ID", "agent-a")
+
+    from memory_arbiter.server import build_server
+
+    app = build_server()
+    written = app.tools["memory_write"](
+        content="draft content",
+        subject="server-wrapper",
+        tags=["keep-me"],
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+
+    edited = app.tools["memory_edit"](memory_id=memory_id, new_content="edited content")
+
+    assert edited["ok"] is True
+    assert edited["data"]["record"]["content"] == "edited content"
+    assert edited["data"]["record"]["tags"] == ["keep-me"]

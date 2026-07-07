@@ -112,6 +112,47 @@ def build_server() -> Any:
         """返回各 workspace 的记忆统计概览：条目数、最旧/最新条目时间、open 冲突数、各 source_type 分布。纯 SQL 聚合，不做语义判断，用于快速判断是否需要深入审查。"""
         return tools.memory_audit_summary()
 
+    @app.tool()
+    def memory_edit(
+        memory_id: int,
+        new_content: Optional[str] = None,
+        old_text: Optional[str] = None,
+        new_text: Optional[str] = None,
+        new_subject: Optional[str] = None,
+        new_tags: Optional[list[str]] = None,
+        reason: str = "",
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """原地编辑记忆正文，旧版本自动存入 memory_history 版本链并同步 FTS。两种模式：传 new_content 整体替换，或传 old_text+new_text 做精确局部替换。normal 记忆直接可编辑；locked/user_confirmed 记忆必须 authorized=true（与 memory_supersede 一致）。部分否定的正确做法——只改要改的，没否定的信息不会像 supersede 那样整条沉掉。"""
+        return tools.memory_edit(
+            memory_id=memory_id,
+            new_content=new_content,
+            old_text=old_text,
+            new_text=new_text,
+            new_subject=new_subject,
+            new_tags=new_tags,
+            reason=reason,
+            authorized=authorized,
+        )
+
+    @app.tool()
+    def memory_history(memory_id: int) -> dict[str, Any]:
+        """查看一条记忆的版本演化轨迹（memory_history 表的历史快照，按版本号倒序）。只读，不动任何表。配合 memory_edit 使用：每次编辑前的旧正文都存在这里，必要时可人工恢复。"""
+        return tools.memory_history(memory_id=memory_id)
+
+    @app.tool()
+    def memory_cleanup_history(
+        memory_id: Optional[int] = None,
+        older_than_days: Optional[int] = None,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """清理 memory_history 表的历史快照（不碰 memories 活跃记录）。三种粒度：传 memory_id 只清指定记忆的历史；传 older_than_days 只清 N 天前的快照；两者都不传=全量瘦身，必须 authorized=true 作为确认门。绝对安全：无论传什么参数，只 DELETE FROM memory_history，memories 表一条都不动。"""
+        return tools.memory_cleanup_history(
+            memory_id=memory_id,
+            older_than_days=older_than_days,
+            authorized=authorized,
+        )
+
     return app
 
 
