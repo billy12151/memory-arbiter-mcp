@@ -1,0 +1,28 @@
+{
+  "_readme": [
+    "Copy this file to ~/.config/memory-arbiter/config.json, then edit paths.",
+    "Why ~/.config/memory-arbiter/ instead of MCP client env or an install directory:",
+    "  - MCP client env lives in each client config, so every client repeats the same vector settings.",
+    "  - Client config and package directories may be rewritten during reinstall or migration.",
+    "  - ~/.config/memory-arbiter/ is user-owned XDG config; pip/client installers do not overwrite it.",
+    "Discovery order: MEMORY_ARBITER_CONFIG env > ~/.config/memory-arbiter/config.json > env/defaults.",
+    "First auto-embedding call loads the GGUF model lazily. A 300MB model may add visible startup latency once; later calls reuse the loaded model."
+  ],
+  "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
+  "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
+  "client": "codex",
+  "agent_id": "default",
+  "workspace": "default",
+  "vec": {
+    "enabled": true,
+    "dim": 768
+  },
+  "embedding": {
+    "provider": "gguf",
+    "model_path": "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
+    "auto_query": true,
+    "auto_write": true
+  },
+  "recall_pool_cap": 50,
+  "content_like_cap": 30
+}

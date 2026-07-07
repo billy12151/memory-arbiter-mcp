@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import types
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from memory_arbiter.arbitration import compare_memories
-from memory_arbiter.config import Settings
+from memory_arbiter.config import Settings, parse_bool
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
@@ -24,6 +25,28 @@ def make_tools(tmp_path: Path) -> MemoryTools:
         enable_sqlite_vec=False,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def clear_config_env(monkeypatch) -> None:
+    for key in (
+        "MEMORY_ARBITER_CONFIG",
+        "MEMORY_ARBITER_DB_PATH",
+        "MEMORY_ARBITER_BACKUP_JSONL",
+        "MEMORY_ARBITER_POLICY",
+        "MEMORY_ARBITER_CLIENT",
+        "MEMORY_ARBITER_AGENT_ID",
+        "MEMORY_ARBITER_WORKSPACE",
+        "MEMORY_ARBITER_ENABLE_SQLITE_VEC",
+        "MEMORY_ARBITER_VEC_DIM",
+        "MEMORY_ARBITER_RECALL_POOL_CAP",
+        "MEMORY_ARBITER_CONTENT_LIKE_CAP",
+        "MEMORY_ARBITER_EMBEDDING_PROVIDER",
+        "MEMORY_ARBITER_EMBEDDING_MODEL_PATH",
+        "MEMORY_ARBITER_EMBEDDING_AUTO_QUERY",
+        "MEMORY_ARBITER_EMBEDDING_AUTO_WRITE",
+        "MEMORY_ARBITER_GGUF",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 def test_write_and_search(tmp_path: Path) -> None:
@@ -986,6 +1009,354 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     assert edited["ok"] is True
     assert edited["data"]["record"]["content"] == "edited content"
     assert edited["data"]["record"]["tags"] == ["keep-me"]
+
+
+# --------------------------------------------------------------------------- #
+# v0.5.0 — config file + automatic embedding
+# --------------------------------------------------------------------------- #
+
+
+def test_config_file_overrides_env(tmp_path: Path, monkeypatch) -> None:
+    clear_config_env(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    cfg_db = tmp_path / "from-config.sqlite3"
+    env_db = tmp_path / "from-env.sqlite3"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "db_path": str(cfg_db),
+                "backup_jsonl": str(tmp_path / "from-config.jsonl"),
+                "client": "from-config",
+                "vec": {"enabled": True, "dim": 512},
+                "embedding": {
+                    "provider": "gguf",
+                    "model_path": str(tmp_path / "model.gguf"),
+                    "auto_query": False,
+                    "auto_write": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+    monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(env_db))
+    monkeypatch.setenv("MEMORY_ARBITER_VEC_DIM", "999")
+
+    settings = Settings.from_env()
+
+    assert settings.db_path == cfg_db
+    assert settings.client == "from-config"
+    assert settings.enable_sqlite_vec is True
+    assert settings.vec_dim == 512
+    assert settings.embedding_provider == "gguf"
+    assert settings.embedding_model_path == tmp_path / "model.gguf"
+    assert settings.embedding_auto_query is False
+
+
+def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch) -> None:
+    clear_config_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "env.sqlite3"))
+    monkeypatch.setenv("MEMORY_ARBITER_ENABLE_SQLITE_VEC", "true")
+    monkeypatch.setenv("MEMORY_ARBITER_VEC_DIM", "1024")
+    monkeypatch.setenv("MEMORY_ARBITER_GGUF", str(tmp_path / "legacy.gguf"))
+
+    settings = Settings.from_env()
+
+    assert settings.db_path == tmp_path / "env.sqlite3"
+    assert settings.enable_sqlite_vec is True
+    assert settings.vec_dim == 1024
+    assert settings.embedding_provider == "gguf"
+    assert settings.embedding_model_path == tmp_path / "legacy.gguf"
+
+
+def test_config_file_parse_error_graceful(tmp_path: Path, monkeypatch) -> None:
+    clear_config_env(monkeypatch)
+    bad_cfg = tmp_path / "bad.json"
+    bad_cfg.write_text("{ not json", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(bad_cfg))
+    monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "env.sqlite3"))
+
+    settings = Settings.from_env()
+
+    assert settings.db_path == tmp_path / "env.sqlite3"
+    assert any("JSON parse failed" in warning for warning in settings.config_warnings)
+
+
+def test_config_env_path_not_exist_fallback_xdg(tmp_path: Path, monkeypatch) -> None:
+    clear_config_env(monkeypatch)
+    home = tmp_path / "home"
+    xdg_cfg = home / ".config" / "memory-arbiter" / "config.json"
+    xdg_cfg.parent.mkdir(parents=True)
+    xdg_cfg.write_text(json.dumps({"db_path": str(tmp_path / "xdg.sqlite3")}), encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(tmp_path / "missing.json"))
+
+    settings = Settings.from_env()
+
+    assert settings.db_path == tmp_path / "xdg.sqlite3"
+    assert any("does not exist" in warning for warning in settings.config_warnings)
+
+
+def test_bad_field_value_degrades_with_warning(tmp_path: Path, monkeypatch) -> None:
+    clear_config_env(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps({"vec": {"enabled": "maybe", "dim": "abc"}, "embedding": {"auto_write": "??"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+
+    settings = Settings.from_env()
+
+    assert settings.enable_sqlite_vec is False
+    assert settings.vec_dim == 768
+    assert settings.embedding_auto_write is True
+    assert any("vec.enabled" in warning for warning in settings.config_warnings)
+    assert any("vec.dim" in warning for warning in settings.config_warnings)
+    assert any("embedding.auto_write" in warning for warning in settings.config_warnings)
+
+
+def test_parse_bool_false_string_is_false() -> None:
+    assert parse_bool("false", default=True) is False
+    assert parse_bool("0", default=True) is False
+    assert parse_bool("no", default=True) is False
+
+
+def test_embedding_model_path_without_provider_defaults_to_gguf(tmp_path: Path, monkeypatch) -> None:
+    clear_config_env(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps({"embedding": {"model_path": str(tmp_path / "model.gguf")}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+
+    settings = Settings.from_env()
+
+    assert settings.embedding_provider == "gguf"
+    assert settings.embedding_model_path == tmp_path / "model.gguf"
+
+
+def test_no_embedding_no_false_warning(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+
+    written = tools.memory_write(content="plain lexical memory", subject="lexical")
+    found = tools.memory_search(query="lexical")
+
+    assert "embedding_stored" not in written["data"]
+    assert not any("embedding configured" in warning for warning in found["warnings"])
+    assert not any("auto-embedding" in warning for warning in found["warnings"])
+
+
+def test_auto_embedding_injects_query_embedding(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        workspace="repo-a",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    tools._ensure_embedder = lambda: (lambda text: [0.1, 0.2, 0.3], [])  # type: ignore[method-assign]
+    captured = {}
+
+    def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None):
+        captured["query_embedding"] = query_embedding
+        return [], []
+
+    monkeypatch.setattr("memory_arbiter.tools.search_memories", fake_search_memories)
+
+    result = tools.memory_search(query="semantic query")
+
+    assert result["ok"] is True
+    assert captured["query_embedding"] == [0.1, 0.2, 0.3]
+
+
+def test_explicit_embedding_overrides_auto(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        workspace="repo-a",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+
+    def fail_ensure():
+        raise AssertionError("auto embedder should not be loaded when query_embedding is explicit")
+
+    tools._ensure_embedder = fail_ensure  # type: ignore[method-assign]
+    captured = {}
+
+    def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None):
+        captured["query_embedding"] = query_embedding
+        return [], []
+
+    monkeypatch.setattr("memory_arbiter.tools.search_memories", fake_search_memories)
+
+    tools.memory_search(query="semantic query", query_embedding=[9.0])
+
+    assert captured["query_embedding"] == [9.0]
+
+
+def test_vec_disabled_does_not_load_embedder(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=False,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+
+    embedder, warnings = tools._ensure_embedder()
+
+    assert embedder is None
+    assert any("vec.enabled=false" in warning for warning in warnings)
+
+
+def test_vec_disabled_warning_appears_in_same_write_response(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=False,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+
+    result = tools.memory_write(content="semantic body", subject="semantic subject")
+
+    assert result["ok"] is True
+    assert result["data"]["embedding_stored"] is False
+    assert any("embedding configured but vec.enabled=false" in warning for warning in result["warnings"])
+
+
+def test_memory_write_auto_stores_embedding(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        workspace="repo-a",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    tools._ensure_embedder = lambda: (lambda text: [1.0, 2.0], [])  # type: ignore[method-assign]
+    stored = {}
+
+    def fake_store(memory_id: int, embedding: list[float]):
+        stored["memory_id"] = memory_id
+        stored["embedding"] = embedding
+        return True, []
+
+    tools.db.store_embedding = fake_store  # type: ignore[method-assign]
+
+    result = tools.memory_write(content="semantic body", subject="semantic subject")
+
+    assert result["data"]["embedding_stored"] is True
+    assert stored["memory_id"] == result["data"]["id"]
+    assert stored["embedding"] == [1.0, 2.0]
+
+
+def test_store_embedding_failure_visible(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    tools._ensure_embedder = lambda: (lambda text: [1.0, 2.0], [])  # type: ignore[method-assign]
+    tools.db.store_embedding = lambda memory_id, embedding: (False, ["boom"])  # type: ignore[method-assign]
+
+    result = tools.memory_write(content="semantic body", subject="semantic subject")
+
+    assert result["ok"] is True
+    assert result["data"]["embedding_stored"] is False
+    assert "boom" in result["warnings"]
+
+
+def test_memory_edit_reembeds(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    written = tools.memory_write(content="old body", subject="old subject")
+    tools._ensure_embedder = lambda: (lambda text: [3.0, 4.0], [])  # type: ignore[method-assign]
+    stored = {}
+
+    def fake_store(memory_id: int, embedding: list[float]):
+        stored["memory_id"] = memory_id
+        stored["embedding"] = embedding
+        return True, []
+
+    tools.db.store_embedding = fake_store  # type: ignore[method-assign]
+
+    edited = tools.memory_edit(memory_id=written["data"]["id"], new_content="new body")
+
+    assert edited["ok"] is True
+    assert edited["data"]["embedding_stored"] is True
+    assert stored["memory_id"] == written["data"]["id"]
+    assert stored["embedding"] == [3.0, 4.0]
+
+
+def test_memory_edit_reembed_failure_deletes_stale(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    written = tools.memory_write(content="old body", subject="old subject")
+
+    def bad_encode(text: str) -> list[float]:
+        raise RuntimeError("encode failed")
+
+    deleted = {}
+    tools._ensure_embedder = lambda: (bad_encode, [])  # type: ignore[method-assign]
+    tools.db.delete_embedding = lambda memory_id: (deleted.setdefault("memory_id", memory_id) is not None, [])  # type: ignore[method-assign]
+
+    edited = tools.memory_edit(memory_id=written["data"]["id"], new_content="new body")
+
+    assert edited["ok"] is True
+    assert edited["data"]["embedding_stored"] is False
+    assert deleted["memory_id"] == written["data"]["id"]
+    assert any("deleted stale embedding" in warning for warning in edited["warnings"])
+
+
+def test_memory_edit_store_failure_deletes_stale(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    written = tools.memory_write(content="old body", subject="old subject")
+    deleted = {}
+    tools._ensure_embedder = lambda: (lambda text: [5.0, 6.0], [])  # type: ignore[method-assign]
+    tools.db.store_embedding = lambda memory_id, embedding: (False, ["store failed"])  # type: ignore[method-assign]
+    tools.db.delete_embedding = lambda memory_id: (deleted.setdefault("memory_id", memory_id) is not None, [])  # type: ignore[method-assign]
+
+    edited = tools.memory_edit(memory_id=written["data"]["id"], new_content="new body")
+
+    assert edited["ok"] is True
+    assert edited["data"]["embedding_stored"] is False
+    assert deleted["memory_id"] == written["data"]["id"]
+    assert "store failed" in edited["warnings"]
+    assert any("deleted stale embedding" in warning for warning in edited["warnings"])
 
 
 # --------------------------------------------------------------------------- #

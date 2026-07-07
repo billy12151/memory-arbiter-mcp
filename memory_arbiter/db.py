@@ -242,6 +242,20 @@ class MemoryDB:
             warnings.append(f"store_embedding failed: {exc}")
             return False, warnings
 
+    def delete_embedding(self, memory_id: int) -> Tuple[bool, list[str]]:
+        """Delete a memory embedding if present. Returns (ok, warnings)."""
+        if self.conn is None or not self.state.sqlite_writable:
+            return False, ["SQLite write unavailable; embedding not deleted."]
+        if not self.state.sqlite_vec_available:
+            return False, ["sqlite-vec unavailable; embedding not deleted."]
+        try:
+            self.conn.execute("DELETE FROM memories_vec WHERE id = ?", (memory_id,))
+            self.conn.commit()
+            return True, []
+        except sqlite3.Error as exc:
+            self.conn.rollback()
+            return False, [f"delete_embedding failed: {exc}"]
+
     def vec_knn(self, query_embedding: list[float], k: int = 10) -> list[dict[str, Any]]:
         """Return up to k nearest neighbors by cosine distance. Empty if vec unavailable."""
         if self.conn is None or not self.state.sqlite_vec_available:

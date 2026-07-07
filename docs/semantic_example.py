@@ -1,9 +1,10 @@
-"""Optional semantic recall backfill — v0.3.1 example (GGUF model).
+"""Optional semantic recall backfill — GGUF model example.
 
 memory-arbiter does NOT bundle an embedding model. This script shows how to
 generate embeddings with a local GGUF model (loaded via llama-cpp-python) and
-backfill them into the shared SQLite so that `memory_search(query_embedding=...)`
-can do semantic recall.
+backfill them into the shared SQLite. In v0.5.0+, configured servers can also
+auto-embed new writes and plain-text queries; this script remains useful for
+existing memories and model changes.
 
 This is model-agnostic in principle — swap the model_path / embed call for any
 other backend (sentence-transformers, OpenAI API, Ollama, etc.) and the rest
@@ -20,17 +21,17 @@ Install:
     # Then point MODEL_PATH at any GGUF embedding model you already have.
 
 Usage:
-    # Set the model path (or rely on the default below).
-    export MEMORY_ARBITER_GGUF=/path/to/embedding-model.gguf
+    # Recommended: put the model path in ~/.config/memory-arbiter/config.json.
+    # Legacy fallback: export MEMORY_ARBITER_GGUF=/path/to/embedding-model.gguf
     # Make sure MEMORY_ARBITER_VEC_DIM matches the model's output dim.
     python docs/semantic_example.py            # backfill all active memories
     python docs/semantic_example.py --query "金营平台营销"   # try a semantic search
     python docs/semantic_example.py --query "金营平台营销" --compare  # with/without vec
 
-Why a separate script instead of auto-embedding on every write?
-  - Keeps the core package dependency-free and lightweight.
-  - You choose the model, the runtime (GGUF/ONNX/API), the cost.
-  - Re-running this script refreshes embeddings after schema/model changes.
+Why keep this script if auto-embedding exists?
+  - Backfills old memories that predate auto-embedding.
+  - Refreshes embeddings after vec.dim/model changes.
+  - Lets you test lexical vs semantic recall explicitly.
 """
 from __future__ import annotations
 
@@ -49,7 +50,7 @@ from memory_arbiter.tools import MemoryTools  # noqa: E402
 
 # Default model path: reuses the OpenClaw-installed embeddinggemma GGUF if
 # present, so you don't need to download anything new. Override with
-# MEMORY_ARBITER_GGUF env var or --model flag.
+# ~/.config/memory-arbiter/config.json, MEMORY_ARBITER_GGUF, or --model.
 DEFAULT_GGUF = os.path.expanduser(
     "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf"
 )
@@ -113,10 +114,12 @@ def semantic_search(tools: MemoryTools, encode_fn, query: str, limit: int = 5):
 
 
 def main() -> None:
+    settings = Settings.from_env()
+    default_model = str(settings.embedding_model_path or DEFAULT_GGUF)
     parser = argparse.ArgumentParser(description="memory-arbiter semantic backfill / search (GGUF)")
     parser.add_argument("--query", default=None, help="if set, run a semantic search instead of backfill")
     parser.add_argument("--compare", action="store_true", help="with --query: print lexical-only vs semantic results side by side")
-    parser.add_argument("--model", default=os.getenv("MEMORY_ARBITER_GGUF", DEFAULT_GGUF), help="path to GGUF embedding model")
+    parser.add_argument("--model", default=os.getenv("MEMORY_ARBITER_GGUF", default_model), help="path to GGUF embedding model")
     parser.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
 
@@ -124,7 +127,6 @@ def main() -> None:
     encode_fn, model_dim = load_gguf_embedder(args.model)
     print(f"Model output dim: {model_dim}", file=sys.stderr)
 
-    settings = Settings.from_env()
     if settings.vec_dim != model_dim:
         print(
             f"WARNING: MEMORY_ARBITER_VEC_DIM={settings.vec_dim} but model outputs "
@@ -152,7 +154,7 @@ def main() -> None:
     else:
         count, elapsed = backfill(tools, encode_fn)
         print(f"Backfilled {count} memories with embeddings (dim={model_dim}) in {elapsed:.1f}s.")
-        print("Now call memory_search with query_embedding=... to enable semantic recall.")
+        print("Configured servers can now use semantic recall automatically; explicit query_embedding still works.")
 
 
 if __name__ == "__main__":

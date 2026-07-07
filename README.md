@@ -198,36 +198,30 @@ Add to your tool's MCP config (see `examples/` for ready-made templates):
 | `memory_supersede` | Explicitly retire a memory; bypasses user-confirmed/locked protection (`authorized=true` required) |
 | `memory_list_conflicts` | List unresolved conflicts |
 | `memory_audit_summary` | Per-workspace stats overview (counts, oldest/newest, open conflicts, source_type distribution) |
-| `memory_store_embedding` | (v0.3.1, optional) Store an embedding for a memory — enables semantic recall via `memory_search(query_embedding=...)`. Model-agnostic: you generate the vector, memory-arbiter stores and queries it. |
+| `memory_store_embedding` | (optional) Store or replace an embedding manually. v0.5.0 can also auto-embed writes/searches when configured. |
 | `memory_edit` | (v0.4.0) In-place edit a memory's content (full or partial `old_text`→`new_text`), archiving the prior version to a history table and re-syncing FTS. `locked`/`user_confirmed` records need `authorized=true`. The right tool for *partial* corrections — `supersede` retires the whole record, which also sinks the parts you didn't mean to negate. |
 | `memory_history` | (v0.4.0) View the version chain (historical snapshots) of a memory, newest version first. Read-only. |
 | `memory_cleanup_history` | (v0.4.0) Delete historical snapshots from `memory_history` (never touches active records). Per-memory / by-age / full; full cleanup requires `authorized=true`. |
 | `memory_status` | Show current mode, degradation status, storage paths |
 
-### Optional: Semantic Recall (v0.3.1)
+### Optional: Semantic Recall (v0.5.0)
 
 By default, memory-arbiter uses **lexical recall** (FTS5 trigram + BM25 + soft-rerank) — no embedding model, no heavy dependencies, fully local. This is enough for most cases.
 
-For queries where wording differs but meaning is the same ("happy" vs "joyful", "金营平台" vs "金融带货"), you can opt into **semantic recall**. memory-arbiter does **not** bundle an embedding model — you bring your own, so the default install stays lightweight and you keep full control over the model, language, and cost.
+For queries where wording differs but meaning is the same ("happy" vs "joyful", "金营平台" vs "金融带货"), you can opt into **semantic recall**. memory-arbiter does **not** bundle an embedding model — you bring your own, so the default install stays lightweight and you keep full control over the model, language, and cost. When configured, normal `memory_write` and `memory_search(query="...")` calls auto-embed; callers do not need to pass `query_embedding` manually.
 
 **Setup (4 steps):**
 
-1. Install sqlite-vec and enable it (off by default — it's an optional dependency):
+1. Install sqlite-vec and the GGUF runtime:
    ```bash
    pip install memory-arbiter-mcp[vec]
-   export MEMORY_ARBITER_ENABLE_SQLITE_VEC=true
+   pip install llama-cpp-python
    ```
-2. Choose an embedding model and install its runtime. memory-arbiter does **not** bundle or call any model — your backfill script does. Three supported paths:
+2. Choose an embedding model. For automatic embedding in v0.5.0, the built-in runtime supports local GGUF models:
    - **GGUF (local, recommended)** — works with any GGUF embedding model via `llama-cpp-python`. Reuses models you may already have (e.g. from OpenClaw/llama.cpp). Point the script at the file:
-     ```bash
-     pip install llama-cpp-python
-     export MEMORY_ARBITER_GGUF=/path/to/embedding-model.gguf   # e.g. embeddinggemma-300m-qat-Q8_0.gguf
-     ```
+     `embeddinggemma-300m-qat-Q8_0.gguf` is a good 768-dim default.
    - **sentence-transformers (local)** — HuggingFace PyTorch models (`bge-small-zh`, `bge-base-en`, etc.):
-     ```bash
-     pip install sentence-transformers
-     # pass --model BAAI/bge-small-zh-v1.5 to the example script
-     ```
+     use your own backfill/query script and pass vectors to `memory_store_embedding` / `memory_search(query_embedding=...)`.
    - **Remote API (OpenAI / Zhipu / Tongyi)** — call the API in your own backfill script, pass vectors to `memory_store_embedding`. memory-arbiter only needs `pip install memory-arbiter-mcp[vec]`; no model runtime on this side.
 
    **Embedding Model Quick Reference** (pick one, then match `MEMORY_ARBITER_VEC_DIM` to its dimension):
@@ -238,22 +232,24 @@ For queries where wording differs but meaning is the same ("happy" vs "joyful", 
    | sentence-transformers | `BAAI/bge-small-zh-v1.5` (CN) / `bge-base-en-v1.5` (EN) | 512 / 768 | [HuggingFace](https://huggingface.co/BAAI) | Best quality-to-size ratio; needs PyTorch |
    | Remote API | `text-embedding-3-small` (OpenAI) / `embedding-3` (Zhipu) | 1536 / 1024 | Provider dashboard | No local compute; per-call cost |
 
-   **End-to-end flow:** pick model → install runtime (`llama-cpp-python` / `sentence-transformers` / your API SDK) → set `MEMORY_ARBITER_VEC_DIM` to the model's dim → run `docs/semantic_example.py` to backfill → pass `query_embedding` to `memory_search` at query time. The backfill script reads `MEMORY_ARBITER_GGUF` or takes a `--model` flag.
-3. Set the vector dimension to match your model, then restart the MCP server (it creates the `memories_vec` table on startup):
+   **End-to-end flow for auto-embedding:** pick GGUF model → put vec/model settings in `~/.config/memory-arbiter/config.json` → restart the MCP server → run `docs/semantic_example.py` once to backfill old memories. New writes and plain-text searches auto-embed after that.
+3. Copy the config template and edit paths:
    ```bash
-   export MEMORY_ARBITER_VEC_DIM=512   # MUST match the model: bge-small-zh=512, embeddinggemma-300m/bge-base=768, OpenAI text-embedding-3-small=1536
+   mkdir -p ~/.config/memory-arbiter
+   cp examples/memory-arbiter.config.example.json ~/.config/memory-arbiter/config.json
    ```
-4. Backfill embeddings into existing memories, then query with a vector:
+   Keep vector/model settings here instead of each MCP client's env block. `~/.config/memory-arbiter/` is user-owned XDG config, so pip installs and client reinstallers do not overwrite it. The first auto-embedding call lazily loads the model and may be noticeably slower; later calls reuse it.
+4. Backfill embeddings into existing memories, then search normally:
    ```bash
-   python docs/semantic_example.py                 # backfill all memories (uses MEMORY_ARBITER_GGUF or --model)
+   python docs/semantic_example.py                 # backfill all active memories
    python docs/semantic_example.py --query "金营平台营销"   # try a semantic search
    ```
 
-After backfill, call `memory_search` with an optional `query_embedding` (same model, same dim) — the semantic channel joins the existing wide-recall pool. Pass nothing and behaviour is identical to v0.3.0.
+After configuration, normal `memory_search(query="...")` can generate the query vector automatically. Explicit `query_embedding` still works and takes precedence.
 
 **How it ranks:** semantic candidates get a *floor score* just below content matches — they beat content-only noise but never outrank a real subject/tags hit. The arbitration and trust layer is untouched.
 
-**Measured impact (small sample, not a formal benchmark):** on the same 15 golden queries + 18 pairwise constraints used to validate v0.3.0, enabling semantic recall improved Top-3 hit rate and pairwise ordering. The biggest win was pairwise pass rate reaching 100% — every "should-rank-above" constraint held. Latency overhead was ~8ms per query on the memory-arbiter side (embedding generation cost is borne by the caller).
+**Measured impact (small sample, not a formal benchmark):** on the same 15 golden queries + 18 pairwise constraints used to validate v0.3.0, enabling semantic recall improved Top-3 hit rate and pairwise ordering. The biggest win was pairwise pass rate reaching 100% — every "should-rank-above" constraint held. SQLite-side latency overhead was ~8ms per query; local embedding generation depends on your model/runtime.
 
 | Metric | bm25 (v0.2.6) | hybrid (v0.3.0) | hybrid + semantic (v0.3.1) |
 |---|---|---|---|
@@ -263,7 +259,7 @@ After backfill, call `memory_search` with an optional `query_embedding` (same mo
 
 ### Configuration
 
-All configuration is via environment variables. The defaults work for small libraries; the full table with explanations is in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbiter/config.json`, then environment variables/defaults. Put durable vector/model settings in the config file so they survive MCP client reinstall/migration. Environment variables remain useful for simple client identity and CI overrides. The full table with explanations is in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 
 | Variable | Default | What to tune |
 |---|---|---|
@@ -495,36 +491,30 @@ memory-arbiter-mcp
 | `memory_supersede` | 显式废弃某条记忆；可突破 user_confirmed/locked 保护（需 `authorized=true`） |
 | `memory_list_conflicts` | 列出未解决的冲突 |
 | `memory_audit_summary` | 各 workspace 记忆统计概览（条目数、最旧/最新、open 冲突数、来源分布） |
-| `memory_store_embedding` | （v0.3.1，可选）为某条记忆存入语义向量——之后 `memory_search(query_embedding=...)` 即可走语义召回。不绑定模型：你自己生成向量，memory-arbiter 只负责存储和查询。 |
+| `memory_store_embedding` | （可选）手动存入或替换某条记忆的语义向量。v0.5.0 配置后也可自动为写入/查询生成向量。 |
 | `memory_edit` | （v0.4.0）原地编辑记忆正文（整体替换 `new_content` 或局部替换 `old_text`→`new_text`），旧版本自动存入历史表并同步 FTS。`locked`/`user_confirmed` 记忆需 `authorized=true`。**部分否定的正确做法**——`supersede` 会整条沉掉（连同你没否定那部分），`edit` 只改你要改的。 |
 | `memory_history` | （v0.4.0）查看一条记忆的版本演化轨迹（历史快照，按版本号倒序）。只读。 |
 | `memory_cleanup_history` | （v0.4.0）清理历史表快照（**绝不碰活跃记录**）。支持单条 / 按时间 / 全量；全量清理需 `authorized=true`。 |
 | `memory_status` | 查看运行状态、模式、降级原因 |
 
-### 可选：语义检索（v0.3.1）
+### 可选：语义检索（v0.5.0）
 
 默认情况下，memory-arbiter 用的是**字面检索**（FTS5 trigram + BM25 + 软重排）——不依赖 embedding 模型、不引入重依赖、完全本地。绝大多数场景这就够了。
 
-对于"措辞不同但语义相同"的查询（比如搜"快乐"想命中"开心"、搜"金融带货"想命中"金营平台"），你可以**可选开启语义检索**。memory-arbiter **不内置** embedding 模型——你自己带模型，这样默认安装保持轻量，模型选择、语言、成本完全由你掌控。
+对于"措辞不同但语义相同"的查询（比如搜"快乐"想命中"开心"、搜"金融带货"想命中"金营平台"），你可以**可选开启语义检索**。memory-arbiter **不内置** embedding 模型——你自己带模型，这样默认安装保持轻量，模型选择、语言、成本完全由你掌控。配置完成后，普通 `memory_write` 和 `memory_search(query="...")` 会自动向量化，调用方不用手动传 `query_embedding`。
 
 **四步开启：**
 
-1. 装 sqlite-vec 并显式启用（默认关闭，它是个可选依赖）：
+1. 安装 sqlite-vec 和 GGUF 运行时：
    ```bash
    pip install memory-arbiter-mcp[vec]
-   export MEMORY_ARBITER_ENABLE_SQLITE_VEC=true
+   pip install llama-cpp-python
    ```
-2. 选一个 embedding 模型，装它的运行时。memory-arbiter **不内置也不调用**任何模型——是你的灌向量脚本在调。三种方式：
+2. 选一个 embedding 模型。v0.5.0 的自动向量化内置支持本地 GGUF：
    - **GGUF（本地，推荐）**——通过 `llama-cpp-python` 跑任意 GGUF embedding 模型。能复用你已有的模型（比如 OpenClaw/llama.cpp 用的）。把脚本指到模型文件：
-     ```bash
-     pip install llama-cpp-python
-     export MEMORY_ARBITER_GGUF=/path/to/embedding-model.gguf   # 如 embeddinggemma-300m-qat-Q8_0.gguf
-     ```
+     `embeddinggemma-300m-qat-Q8_0.gguf` 是一个 768 维的默认选择。
    - **sentence-transformers（本地）**——HuggingFace PyTorch 模型（`bge-small-zh`、`bge-base-en` 等）：
-     ```bash
-     pip install sentence-transformers
-     # 给示例脚本传 --model BAAI/bge-small-zh-v1.5
-     ```
+     用你自己的 backfill/query 脚本，把向量传给 `memory_store_embedding` / `memory_search(query_embedding=...)`。
    - **远程 API（OpenAI / 智谱 / 通义）**——在你自己的灌向量脚本里调 API，把向量传给 `memory_store_embedding`。memory-arbiter 这侧只需 `pip install memory-arbiter-mcp[vec]`，不跑任何模型。
 
    **向量模型速查表**（任选一个，然后把 `MEMORY_ARBITER_VEC_DIM` 设成它的维度）：
@@ -535,22 +525,24 @@ memory-arbiter-mcp
    | sentence-transformers | `BAAI/bge-small-zh-v1.5`（中）/ `bge-base-en-v1.5`（英） | 512 / 768 | [HuggingFace](https://huggingface.co/BAAI) | 性价比最高；需要 PyTorch |
    | 远程 API | `text-embedding-3-small`（OpenAI）/ `embedding-3`（智谱） | 1536 / 1024 | 各平台控制台 | 不想本地算力；按调用计费 |
 
-   **完整流程一句话**：选模型 → 装运行时（`llama-cpp-python` / `sentence-transformers` / 你的 API SDK）→ 把 `MEMORY_ARBITER_VEC_DIM` 设成模型维度 → 跑 `docs/semantic_example.py` 灌向量 → 查询时给 `memory_search` 传 `query_embedding`。灌向量脚本读 `MEMORY_ARBITER_GGUF` 环境变量或接 `--model` 参数。
-3. 把向量维度设成你的模型输出维度，重启 MCP server（它会在启动时创建 `memories_vec` 表）：
+   **自动向量化完整流程一句话**：选 GGUF 模型 → 把 vec/model 配置写到 `~/.config/memory-arbiter/config.json` → 重启 MCP server → 跑一次 `docs/semantic_example.py` 给旧记忆补向量。之后新写入和普通文本查询会自动向量化。
+3. 复制配置模板并修改路径：
    ```bash
-   export MEMORY_ARBITER_VEC_DIM=512   # 必须和模型一致：bge-small-zh=512、embeddinggemma-300m/bge-base=768、OpenAI text-embedding-3-small=1536
+   mkdir -p ~/.config/memory-arbiter
+   cp examples/memory-arbiter.config.example.json ~/.config/memory-arbiter/config.json
    ```
-4. 把现有记忆批量灌入向量，然后用向量查询：
+   向量和模型配置建议放这里，不放每个 MCP 客户端的 env 段。`~/.config/memory-arbiter/` 是用户自己的 XDG 配置目录，pip 安装和客户端重装不会覆盖。第一次自动向量化会懒加载模型，可能明显慢一次；后续复用已加载模型。
+4. 给现有记忆补向量，然后正常搜索：
    ```bash
-   python docs/semantic_example.py                 # 给所有记忆灌向量（用 MEMORY_ARBITER_GGUF 或 --model）
+   python docs/semantic_example.py                 # 给所有活跃记忆补向量
    python docs/semantic_example.py --query "金营平台营销"   # 试一次语义检索
    ```
 
-灌完后，调 `memory_search` 时多传一个 `query_embedding`（同模型、同维度）即可——语义召回会并入现有的宽召回候选池。不传则行为和 v0.3.0 完全一致。
+配置完成后，普通 `memory_search(query="...")` 可以自动生成查询向量。显式 `query_embedding` 仍然支持，并且优先级更高。
 
 **排序规则**：语义召回的候选会给一个*保底分*（略低于正文命中分）——它能压过"正文顺带提及"的噪音，但永远不会盖过真正的标题/标签命中。仲裁和可信度分层逻辑完全不动。
 
-**实测效果（小样本，非正式 benchmark）**：在 v0.3.0 验证用的同一套 15 条黄金查询 + 18 条 pairwise 约束上，开启语义检索后 Top-3 命中率和排序质量进一步提升。最大的亮点是 pairwise 通过率冲到 100%——所有"该排前面的都排在前面了"。memory-arbiter 侧的查询延迟只多了约 8ms（生成 query 向量的耗时算在调用方）。
+**实测效果（小样本，非正式 benchmark）**：在 v0.3.0 验证用的同一套 15 条黄金查询 + 18 条 pairwise 约束上，开启语义检索后 Top-3 命中率和排序质量进一步提升。最大的亮点是 pairwise 通过率冲到 100%——所有"该排前面的都排在前面了"。SQLite 侧查询延迟约多 8ms；本地 embedding 生成耗时取决于模型和运行时。
 
 | 指标 | bm25 (v0.2.6) | hybrid (v0.3.0) | hybrid + 语义 (v0.3.1) |
 |---|---|---|---|
@@ -560,7 +552,7 @@ memory-arbiter-mcp
 
 ### 配置
 
-所有配置都通过环境变量完成，默认值对小记忆库够用。完整说明见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
+配置读取顺序：`MEMORY_ARBITER_CONFIG` 指定文件 → `~/.config/memory-arbiter/config.json` → 环境变量/default。耐久的向量和模型配置建议放配置文件，避免 MCP 客户端重装/迁移时丢失；环境变量仍适合简单 client 标识和 CI 覆盖。完整说明见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
 
 | 变量 | 默认值 | 什么时候调 |
 |---|---|---|

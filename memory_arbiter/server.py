@@ -35,7 +35,7 @@ def build_server() -> Any:
         subject: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """写入一条结构化记忆到跨工具共享记忆库。必填 content（正文），建议填 subject（标题）、tags（标签）、source_type（来源类型：agent_generated/user_confirmed/document_extracted）。"""
+        """写入一条结构化记忆到跨工具共享记忆库。必填 content，建议填 subject/tags/source_type。v0.5.0：如果配置了 GGUF embedding + sqlite-vec，写入成功后会自动存向量；响应里仅在尝试过向量化时返回 embedding_stored。"""
         return tools.memory_write(
             content=content,
             agent_id=agent_id,
@@ -54,12 +54,12 @@ def build_server() -> Any:
 
     @app.tool()
     def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None) -> dict[str, Any]:
-        """按关键词搜索跨工具共享记忆库。项目知识、历史决策、偏好、文档摘要类问题应先查记忆，再读源文件。搜索技巧：优先用 2-4 个核心词，不要只用整句；一次搜不到先换同义词/短关键词重试；空 query 或 memory_recent 可列出最近记忆；命中 user_confirmed/高置信记忆时优先采用；仅当记忆缺失、过期或冲突时再回原始文件。默认不返回 superseded（已废弃）记忆；审计/梳理历史决策演化链时传 include_superseded=true，废弃记录会排到 active 之后。debug_ranking=true 返回排序调试字段（_match_reason / _subject_level 等），用于评估排序质量。v0.3.1：传 query_embedding（与已灌入 memory_store_embedding 的向量同维度）会在宽召回阶段加一路 vec0 语义近邻，召回字面不重合但语义相近的记忆；不传则只走字面召回（默认行为）。"""
+        """搜索跨工具共享记忆库。项目知识、历史决策、偏好、文档摘要类问题应先查记忆，再读源文件。优先用 2-4 个核心词；一次搜不到先换同义词/短关键词重试；空 query 或 memory_recent 可列最近记忆。默认不返回 superseded；审计历史链路时传 include_superseded=true。debug_ranking=true 返回排序调试字段。v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会自动对 query 向量化；显式 query_embedding 仍优先。"""
         return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
 
     @app.tool()
     def memory_store_embedding(memory_id: int, embedding: list[float]) -> dict[str, Any]:
-        """为指定记忆存入或替换语义向量（v0.3.1 可选语义检索）。memory-arbiter 不内置 embedding 模型——调用方需用任意同维度模型（默认 768 维，可用环境变量 MEMORY_ARBITER_VEC_DIM 配置）自行生成向量后传入。典型用法：跑 docs/semantic_example.py 之类的脚本，把记忆正文批量灌向量。灌完后，memory_search 传 query_embedding 即可走语义召回。"""
+        """为指定记忆手动存入或替换语义向量。v0.5.0 配置 GGUF embedding 后，新写入/普通查询可自动向量化；这个工具仍适合 backfill、非 GGUF 模型、远程 API 或自定义向量流程。向量维度必须匹配 vec.dim。"""
         return tools.memory_store_embedding(memory_id=memory_id, embedding=embedding)
 
     @app.tool()
@@ -104,7 +104,7 @@ def build_server() -> Any:
 
     @app.tool()
     def memory_status() -> dict[str, Any]:
-        """查看 memory-arbiter 运行状态：数据库路径、降级模式、客户端标识、策略配置。"""
+        """查看 memory-arbiter 运行状态：数据库路径、降级模式、客户端标识、策略配置、配置解析 warning、自动 embedding 是否已配置。"""
         return tools.memory_status()
 
     @app.tool()
@@ -123,7 +123,7 @@ def build_server() -> Any:
         reason: str = "",
         authorized: bool = False,
     ) -> dict[str, Any]:
-        """原地编辑记忆正文，旧版本自动存入 memory_history 版本链并同步 FTS。两种模式：传 new_content 整体替换，或传 old_text+new_text 做精确局部替换。normal 记忆直接可编辑；locked/user_confirmed 记忆必须 authorized=true（与 memory_supersede 一致）。部分否定的正确做法——只改要改的，没否定的信息不会像 supersede 那样整条沉掉。"""
+        """原地编辑记忆正文，旧版本自动存入 memory_history 版本链并同步 FTS。两种模式：传 new_content 整体替换，或 old_text+new_text 精确局部替换。normal 记忆可直接编辑；locked/user_confirmed 需 authorized=true。v0.5.0：若配置自动 embedding，编辑成功后会重算向量；重算/写入失败会删除旧向量，避免语义召回仍按旧内容命中。"""
         return tools.memory_edit(
             memory_id=memory_id,
             new_content=new_content,

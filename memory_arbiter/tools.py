@@ -5,6 +5,7 @@ from typing import Any, Optional, Tuple
 from .arbitration import compare_memories
 from .config import Settings
 from .db import MemoryDB
+from .embedder import EncodeFn
 from .models import MemoryRecord, ProtectionLevel, SourceType
 from .search import search_memories
 
@@ -13,6 +14,9 @@ class MemoryTools:
     def __init__(self, settings: Optional[Settings] = None, db: Optional[MemoryDB] = None):
         self.settings = settings or Settings.from_env()
         self.db = db or MemoryDB(self.settings)
+        self._embedder: Optional[EncodeFn] = None
+        self._embedder_loaded = False
+        self._embedder_warnings: list[str] = list(self.settings.config_warnings)
 
     def _allowed(self, agent_id: Optional[str] = None, client: Optional[str] = None) -> Tuple[bool, list[str]]:
         actual_agent = agent_id or self.settings.agent_id
@@ -20,6 +24,32 @@ class MemoryTools:
         if self.settings.policy.enabled_for(actual_client, actual_agent):
             return True, []
         return False, [f"Memory arbiter disabled by policy for client={actual_client}, agent_id={actual_agent}."]
+
+    def _embedding_configured(self) -> bool:
+        return self.settings.embedding_provider == "gguf" and self.settings.embedding_model_path is not None
+
+    def _ensure_embedder(self) -> Tuple[Optional[EncodeFn], list[str]]:
+        if self._embedder_loaded:
+            return self._embedder, []
+        self._embedder_loaded = True
+        if not self._embedding_configured():
+            return None, []
+        if not self.settings.enable_sqlite_vec:
+            warning = "embedding configured but vec.enabled=false; auto-embedding disabled. Set vec.enabled=true to enable."
+            self._embedder_warnings.append(warning)
+            return None, [warning]
+        from .embedder import build_embedder
+
+        assert self.settings.embedding_model_path is not None
+        self._embedder, warnings = build_embedder(str(self.settings.embedding_model_path), self.settings.vec_dim)
+        self._embedder_warnings.extend(warnings)
+        return self._embedder, warnings
+
+    @staticmethod
+    def _embedding_text(record: dict[str, Any]) -> str:
+        subject = record.get("subject") or ""
+        content = record.get("content") or ""
+        return f"{subject}\n{content}".strip()
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         allowed, warnings = self._allowed(payload.get("agent_id"), payload.get("client"))
@@ -29,13 +59,34 @@ class MemoryTools:
             record = MemoryRecord.from_input(payload, self.settings.defaults())
             memory_id, write_warnings = self.db.insert_memory(record)
             data = {"id": memory_id, "backup_only": memory_id is None, "record": {**record.__dict__, "id": memory_id}}
-            return self.db.state.response(data, extra_warnings=warnings + write_warnings)
+            embedding_warnings: list[str] = []
+            if memory_id is not None and self.settings.embedding_auto_write and self._embedding_configured():
+                data["embedding_stored"] = False
+                embedder, ensure_warnings = self._ensure_embedder()
+                embedding_warnings.extend(ensure_warnings)
+                if embedder is not None:
+                    try:
+                        embedding = embedder(self._embedding_text(data["record"]))
+                        data["embedding_stored"], store_warnings = self.db.store_embedding(memory_id, embedding)
+                        embedding_warnings.extend(store_warnings)
+                    except Exception as exc:
+                        embedding_warnings.append(f"auto-embedding write failed: {exc}")
+            return self.db.state.response(data, extra_warnings=warnings + write_warnings + embedding_warnings)
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
 
     def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, **_: Any) -> dict[str, Any]:
+        extra_warnings = list(self._embedder_warnings)
+        if query_embedding is None and query and self.settings.embedding_auto_query:
+            embedder, ensure_warnings = self._ensure_embedder()
+            extra_warnings.extend(ensure_warnings)
+            if embedder is not None:
+                try:
+                    query_embedding = embedder(query)
+                except Exception as exc:
+                    extra_warnings.append(f"auto-embedding query failed: {exc}")
         results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
-        return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=warnings)
+        return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=extra_warnings + warnings)
 
     def memory_store_embedding(self, memory_id: int, embedding: list[float], **_: Any) -> dict[str, Any]:
         """Store or replace an embedding for a memory (v0.3.1 semantic recall).
@@ -192,13 +243,18 @@ class MemoryTools:
                 "client": self.settings.client,
                 "agent_id": self.settings.agent_id,
                 "workspace": self.settings.workspace,
+                "config_warnings": self.settings.config_warnings,
+                "embedding_configured": self._embedding_configured(),
+                "embedding_auto_query": self.settings.embedding_auto_query,
+                "embedding_auto_write": self.settings.embedding_auto_write,
                 "policy": {
                     "client_defaults": self.settings.policy.client_defaults,
                     "default_enabled": self.settings.policy.default_enabled,
                     "allow_agents": self.settings.policy.allow_agents,
                     "deny_agents": self.settings.policy.deny_agents,
                 },
-            }
+            },
+            extra_warnings=self.settings.config_warnings,
         )
 
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
@@ -277,14 +333,41 @@ class MemoryTools:
         if history_id is None:
             return self.db.state.response({"error": "edit failed (db not writable)", "edited": False}, ok=False)
         updated = self.db.get_memory(int(memory_id))
+        embedding_warnings: list[str] = []
+        embedding_stored: Optional[bool] = None
+        if self.settings.embedding_auto_write and self._embedding_configured():
+            embedding_stored = False
+            embedder, ensure_warnings = self._ensure_embedder()
+            embedding_warnings.extend(ensure_warnings)
+            if embedder is None:
+                _deleted, delete_warnings = self.db.delete_embedding(int(memory_id))
+                embedding_warnings.extend(delete_warnings)
+                embedding_warnings.append("re-embedding on edit skipped because embedder unavailable; deleted stale embedding to avoid dirty recall.")
+            elif updated is not None:
+                try:
+                    embedding = embedder(self._embedding_text(updated))
+                    embedding_stored, store_warnings = self.db.store_embedding(int(memory_id), embedding)
+                    embedding_warnings.extend(store_warnings)
+                    if not embedding_stored:
+                        _deleted, delete_warnings = self.db.delete_embedding(int(memory_id))
+                        embedding_warnings.extend(delete_warnings)
+                        embedding_warnings.append("re-embedding on edit failed; deleted stale embedding to avoid dirty recall.")
+                except Exception as exc:
+                    _deleted, delete_warnings = self.db.delete_embedding(int(memory_id))
+                    embedding_warnings.extend(delete_warnings)
+                    embedding_warnings.append(f"re-embedding on edit failed: {exc}; deleted stale embedding to avoid dirty recall.")
+        data = {
+            "edited": True,
+            "memory_id": int(memory_id),
+            "new_version": int(updated.get("version") or 1) if updated else None,
+            "history_id": history_id,
+            "record": updated,
+        }
+        if embedding_stored is not None:
+            data["embedding_stored"] = embedding_stored
         return self.db.state.response(
-            {
-                "edited": True,
-                "memory_id": int(memory_id),
-                "new_version": int(updated.get("version") or 1) if updated else None,
-                "history_id": history_id,
-                "record": updated,
-            }
+            data,
+            extra_warnings=embedding_warnings,
         )
 
     def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:
