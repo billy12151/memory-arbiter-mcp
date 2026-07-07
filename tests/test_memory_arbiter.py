@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from memory_arbiter.arbitration import compare_memories
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
@@ -275,7 +277,28 @@ def test_degraded_status_mentions_missing_vec(tmp_path: Path) -> None:
 
     assert status["ok"] is True
     assert status["degraded"] is True
-    assert any("sqlite-vec disabled" in warning for warning in status["warnings"])
+    # Wording varies by whether the package is installed; pin only the
+    # invariant — vec is off and the warning says so.
+    assert any("disabled" in warning and "sqlite-vec" in warning for warning in status["warnings"])
+
+
+def test_vec_disabled_but_installed_warns_with_enable_hint(tmp_path: Path) -> None:
+    """When the package is loadable but the env switch is off, the warning
+    should point at the exact env var to flip — not just say "disabled".
+
+    This is the diagnostic gap that made the last reinstall-overwrite incident
+    hard to spot: the user saw a generic "disabled by configuration" and had
+    no way to tell the package was actually fine, only the switch was missing.
+    Skipped on machines where sqlite-vec isn't installed (the hint would be
+    misleading there — the install line covers that path instead).
+    """
+    pytest.importorskip("sqlite_vec")
+    tools = make_tools(tmp_path)  # enable_sqlite_vec=False in this fixture
+    status = tools.memory_status()
+
+    assert status["data"]["sqlite_vec_available"] is False
+    joined = " ".join(status["warnings"])
+    assert "MEMORY_ARBITER_ENABLE_SQLITE_VEC=true" in joined
 
 
 def test_compare_manual_review_when_both_protected() -> None:

@@ -113,7 +113,23 @@ class MemoryDB:
             except Exception as exc:  # pragma: no cover - depends on local optional package
                 self.state.warn(f"sqlite-vec unavailable: {exc}. Semantic recall disabled; falling back to FTS5 or keyword search.")
         else:
-            self.state.warn("sqlite-vec disabled by configuration. Semantic recall disabled.")
+            # Disabled by config (MEMORY_ARBITER_ENABLE_SQLITE_VEC unset/false).
+            # Probe whether the package is at least loadable so the warning can
+            # tell the user exactly what's missing — a silent "disabled" leaves
+            # them guessing whether to install the package or set the env var
+            # (this is what made the last reinstall-overwrite incident hard to
+            # diagnose).
+            probe = self._probe_sqlite_vec_loadable()
+            if probe is True:
+                self.state.warn(
+                    "sqlite-vec is installed and loadable but disabled by configuration. "
+                    "Set MEMORY_ARBITER_ENABLE_SQLITE_VEC=true to enable semantic recall."
+                )
+            else:
+                self.state.warn(
+                    "sqlite-vec disabled by configuration. Semantic recall disabled. "
+                    "Install with `pip install '.[vec]'` and set MEMORY_ARBITER_ENABLE_SQLITE_VEC=true to enable."
+                )
 
         try:
             self._ensure_fts()
@@ -136,6 +152,27 @@ class MemoryDB:
             self.state.mode = "jsonl_backup"
             self.state.jsonl_backup_active = True
             self.state.warn(f"SQLite opened read-only or write probe failed: {exc}. Writes will use JSONL backup when possible.")
+
+    def _probe_sqlite_vec_loadable(self) -> Optional[bool]:
+        """Best-effort probe: can we import + load sqlite-vec right now?
+
+        Returns True if the package imports and loads into a throwaway
+        connection, False if it's clearly not installed, None on any other
+        failure (load error, incompatible build). Strictly read-only and
+        never raises — this is diagnostic-only, used to word a warning.
+        """
+        try:
+            import sqlite_vec  # type: ignore
+
+            probe_conn = sqlite3.connect(":memory:")
+            probe_conn.enable_load_extension(True)
+            sqlite_vec.load(probe_conn)
+            probe_conn.close()
+            return True
+        except ImportError:
+            return False
+        except Exception:
+            return None
 
     def _rebuild_fts(self) -> None:
         assert self.conn is not None
