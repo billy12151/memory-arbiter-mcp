@@ -963,3 +963,153 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     assert edited["ok"] is True
     assert edited["data"]["record"]["content"] == "edited content"
     assert edited["data"]["record"]["tags"] == ["keep-me"]
+
+
+# --------------------------------------------------------------------------- #
+# v0.4.1 — recency-aware ranking (tie-breaker fix + recency bonus)
+# --------------------------------------------------------------------------- #
+
+
+def test_tied_scores_rank_newest_first(tmp_path: Path) -> None:
+    """Regression: when several records tie on relevance score, the newest must
+    rank first.
+
+    Reproduces the exact dogfooding failure that buried v0.4.0's release notes
+    (id=108) under v0.2.x's (id=27..52) when querying "发版完成" — all release
+    summaries cap out at the same subject/tags score, so the previous two-sort
+    implementation (ascending ingest_time, then stable score-desc) left them in
+    oldest-first SQLite rowid order.
+    """
+    tools = make_tools(tmp_path)
+    # Three release summaries, identical structure → identical surface scores.
+    # Ingested a day apart so ingest_time is a meaningful tiebreaker.
+    tools.memory_write(
+        content="release v1 summary notes",
+        subject="release-notes",
+        tags=["release"],
+        source_type="agent_generated",
+        ingest_time="2026-07-01T00:00:00+00:00",
+        event_time="2026-07-01T00:00:00Z",
+    )
+    tools.memory_write(
+        content="release v2 summary notes",
+        subject="release-notes",
+        tags=["release"],
+        source_type="agent_generated",
+        ingest_time="2026-07-02T00:00:00+00:00",
+        event_time="2026-07-02T00:00:00Z",
+    )
+    tools.memory_write(
+        content="release v3 summary notes",
+        subject="release-notes",
+        tags=["release"],
+        source_type="agent_generated",
+        ingest_time="2026-07-03T00:00:00+00:00",
+        event_time="2026-07-03T00:00:00Z",
+    )
+
+    found = tools.memory_search(query="release", workspace="repo-a", limit=10)
+    assert found["ok"] is True
+    subjects = [r["content"] for r in found["data"]["results"]]
+    # Newest first. This is the v0.4.0 id=108 case: the latest release must
+    # not be buried under older ones that merely share its surface score.
+    assert subjects[0] == "release v3 summary notes", f"newest not first: {subjects}"
+    assert subjects == [
+        "release v3 summary notes",
+        "release v2 summary notes",
+        "release v1 summary notes",
+    ], f"expected newest→oldest order, got {subjects}"
+
+
+def test_recency_bonus_does_not_override_relevance(tmp_path: Path) -> None:
+    """A newer content-only match must NOT outrank an older subject match.
+
+    This is the safety boundary on the recency bonus: max 0.30, while the
+    cheapest subject-medium weight is 6.0. A record that only matches content
+    (and takes the content-only penalty) should sit below a subject match even
+    if the subject match is old enough to receive zero recency bonus.
+    """
+    tools = make_tools(tmp_path)
+    # Old but authoritative: strong subject hit, zero recency bonus (>90d).
+    tools.memory_write(
+        content="canonical api token policy",
+        subject="token-policy",
+        tags=["policy"],
+        source_type="document_extracted",
+        ingest_time="2025-01-01T00:00:00+00:00",
+        event_time="2025-01-01T00:00:00Z",
+    )
+    # New but only matches content: "token" appears in body, not subject.
+    tools.memory_write(
+        content="changelog mentions token refresh by the way",
+        subject="unrelated-changelog",
+        tags=["release"],
+        source_type="agent_generated",
+        ingest_time="2026-07-07T00:00:00+00:00",
+        event_time="2026-07-07T00:00:00Z",
+    )
+
+    found = tools.memory_search(query="token", workspace="repo-a", limit=10)
+    assert found["ok"] is True
+    subjects = [r["subject"] for r in found["data"]["results"]]
+    assert subjects[0] == "token-policy", (
+        f"recency overrode relevance: {subjects} — content-only match outranked subject match"
+    )
+
+
+def test_recency_bonus_tiers_parsed_correctly() -> None:
+    """Unit test for _recency_bonus tiers and graceful degradation."""
+    from memory_arbiter.search import _recency_bonus
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime(2026, 7, 7, tzinfo=timezone.utc)
+
+    fresh = {"ingest_time": (now - timedelta(days=2)).isoformat()}
+    assert _recency_bonus(fresh, now=now) == 0.30
+
+    month_old = {"ingest_time": (now - timedelta(days=20)).isoformat()}
+    assert _recency_bonus(month_old, now=now) == 0.15
+
+    quarter_old = {"ingest_time": (now - timedelta(days=60)).isoformat()}
+    assert _recency_bonus(quarter_old, now=now) == 0.05
+
+    ancient = {"ingest_time": (now - timedelta(days=365)).isoformat()}
+    assert _recency_bonus(ancient, now=now) == 0.0
+
+    # Future-dated / unparseable / missing: 0 bonus, no exception.
+    assert _recency_bonus({"ingest_time": (now + timedelta(days=1)).isoformat()}, now=now) == 0.0
+    assert _recency_bonus({"ingest_time": "not-a-date"}, now=now) == 0.0
+    assert _recency_bonus({}, now=now) == 0.0
+
+
+def test_tied_scores_sort_by_parsed_utc_ingest_time() -> None:
+    """Tie-breaker must compare actual instants, not raw timestamp strings."""
+    from memory_arbiter.search import _soft_rerank
+
+    ranked = _soft_rerank(
+        "release",
+        [
+            {
+                "id": 1,
+                "content": "looks newer by string",
+                "subject": "release-notes",
+                "tags": '["release"]',
+                "source_type": "agent_generated",
+                # 2026-07-06 16:30 UTC
+                "ingest_time": "2026-07-07T00:30:00+08:00",
+                "status": "active",
+            },
+            {
+                "id": 2,
+                "content": "actually newer in utc",
+                "subject": "release-notes",
+                "tags": '["release"]',
+                "source_type": "agent_generated",
+                # 2026-07-06 18:00 UTC
+                "ingest_time": "2026-07-06T18:00:00+00:00",
+                "status": "active",
+            },
+        ],
+    )
+
+    assert [record["id"] for record in ranked] == [2, 1]

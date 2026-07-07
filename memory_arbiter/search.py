@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
 
 from .anchors import (
@@ -125,6 +126,22 @@ _TAGS_STRONG_WEIGHT = 7.0
 _TAGS_MEDIUM_WEIGHT = 4.0
 _TAGS_WEAK_WEIGHT = 1.5
 
+# v0.4.1: recency bonus tiers. Capped low so recency only breaks ties between
+# equally-relevant records — it must never override a subject/tags hit. The
+# smallest subject-medium weight is 6.0, so a 0.30 max bonus is ~5% of that:
+# enough to lift "release v0.4.0" above "release v0.2.1" when both cap out at
+# the same surface score (the exact failure that buried id=108 under id=27),
+# but never enough to promote a content-only match over a subject match.
+_RECENCY_BONUS_7D = 0.30
+_RECENCY_BONUS_30D = 0.15
+_RECENCY_BONUS_90D = 0.05
+_RECENCY_BONUS_DEFAULT = 0.0
+_RECENCY_THRESHOLDS = (
+    (7 * 86400, _RECENCY_BONUS_7D),
+    (30 * 86400, _RECENCY_BONUS_30D),
+    (90 * 86400, _RECENCY_BONUS_90D),
+)
+
 
 def _trust_bonus(record: dict[str, Any]) -> float:
     """Small, capped trust bonus — never enough to override relevance."""
@@ -135,6 +152,53 @@ def _trust_bonus(record: dict[str, Any]) -> float:
     if source == "document_extracted":
         return _TRUST_BONUS_DOCUMENT_EXTRACTED
     return _TRUST_BONUS_DEFAULT
+
+
+def _parse_ingest_time(record: dict[str, Any]) -> Optional[datetime]:
+    """Parse ingest_time as a timezone-aware UTC datetime, if possible."""
+    raw = record.get("ingest_time") or ""
+    if not raw:
+        return None
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        ts = datetime.fromisoformat(normalized)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _ingest_sort_key(record: dict[str, Any]) -> float:
+    """Chronological sort key for ingest_time; invalid timestamps sort last."""
+    ts = _parse_ingest_time(record)
+    if ts is None:
+        return float("-inf")
+    return ts.timestamp()
+
+
+def _recency_bonus(record: dict[str, Any], now: Optional[datetime] = None) -> float:
+    """Tiered recency bonus based on ingest_time, never enough to override relevance.
+
+    Uses ingest_time (when the memory entered the store) rather than event_time
+    (when the underlying fact happened). "Find the latest release notes" cares
+    about when the record was logged, not when the release shipped.
+
+    Degrades gracefully: unparseable or future timestamps return 0 bonus
+    rather than raising — a bad timestamp must never break search.
+    """
+    ts = _parse_ingest_time(record)
+    if ts is None:
+        return _RECENCY_BONUS_DEFAULT
+    reference = now or datetime.now(timezone.utc)
+    age_seconds = (reference - ts).total_seconds()
+    if age_seconds < 0:
+        # Clock skew or future-dated record; don't penalize, don't reward.
+        return _RECENCY_BONUS_DEFAULT
+    for threshold, bonus in _RECENCY_THRESHOLDS:
+        if age_seconds <= threshold:
+            return bonus
+    return _RECENCY_BONUS_DEFAULT
 
 
 def _score_surface(
@@ -249,10 +313,11 @@ def _soft_rerank(
             relevance = _VEC_FLOOR_SCORE
 
         trust = _trust_bonus(rec)
+        recency = _recency_bonus(rec)
         # Superseded always sinks below active regardless of score (r4 carries
         # this forward from v0.2.6).
         superseded_sink = 1 if rec.get("status") == "superseded" else 0
-        final_score = relevance + trust - (superseded_sink * 1000.0)
+        final_score = relevance + trust + recency - (superseded_sink * 1000.0)
 
         # Build debug info (only returned when debug_ranking=True).
         notes: list[str] = []
@@ -278,12 +343,18 @@ def _soft_rerank(
         rec_copy["_subject_score"] = subject_score
         rec_copy["_tag_score"] = tag_score
         rec_copy["_content_score"] = content_score
+        rec_copy["_recency_bonus"] = recency
+        rec_copy["_trust_bonus"] = trust
         scored.append((final_score, rec_copy))
 
-    # Sort by final_score desc; tiebreak by ingest_time desc for stability.
-    scored.sort(key=lambda x: (-x[0], x[1].get("ingest_time", "")), reverse=False)
-    # Re-flip the sort: we want highest score first, so use reverse on score.
-    scored.sort(key=lambda x: -x[0])
+    # Sort by final_score desc; tiebreak by ingest_time desc (newest first).
+    # The previous implementation ran two sorts — first ascending on
+    # ingest_time then stable descending on score — which left ties ordered
+    # oldest-first (SQLite rowid order). For "find the latest X" queries
+    # this buried the newest record, e.g. querying release notes returned
+    # v0.2.x ahead of v0.4.0 because every release-summary record hit the
+    # same subject/tags cap. One sort, score-desc then time-desc, fixes it.
+    scored.sort(key=lambda x: (x[0], _ingest_sort_key(x[1])), reverse=True)
     return [r for _, r in scored]
 
 
