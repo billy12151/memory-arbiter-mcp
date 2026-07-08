@@ -163,14 +163,14 @@ Add to your tool's MCP config (see `examples/` for ready-made templates):
       "env": {
         "MEMORY_ARBITER_CLIENT": "zcode",
         "MEMORY_ARBITER_AGENT_ID": "zcode-default",
-        "MEMORY_ARBITER_DB_PATH": "~/.local/share/memory-arbiter/memory.sqlite3"
+        "MEMORY_ARBITER_WORKSPACE": "${workspaceFolder}"
       }
     }
   }
 }
 ```
 
-> Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `zcode`, `codex`, `cursor`, `claude-code`). Point multiple tools at the same `DB_PATH` to enable cross-tool memory sharing. (GUI tools like OpenDesign inherit the host CLI's config — no separate client name.)
+> Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `zcode`, `codex`, `cursor`, `claude-code`). Put shared paths/vector/model settings in `~/.config/memory-arbiter/config.json`; keep per-client identity in the MCP env block. If you are not using a config file, put `MEMORY_ARBITER_DB_PATH` in each client's env and point them at the same SQLite file. (GUI tools like OpenDesign inherit the host CLI's config — no separate client name.)
 
 > ⚠️ **New session required**: MCP servers are loaded at session startup. Already-open sessions won't see the new tools. Start a fresh session after configuring.
 
@@ -236,14 +236,20 @@ For queries where wording differs but meaning is the same ("happy" vs "joyful", 
 3. Copy the config template and edit paths:
    ```bash
    mkdir -p ~/.config/memory-arbiter
+   # Source checkout:
    cp examples/memory-arbiter.config.example.json ~/.config/memory-arbiter/config.json
+   # Or pip-installed users:
+   curl -L https://raw.githubusercontent.com/billy12151/memory-arbiter-mcp/main/examples/memory-arbiter.config.example.json \
+     -o ~/.config/memory-arbiter/config.json
    ```
-   Keep vector/model settings here instead of each MCP client's env block. `~/.config/memory-arbiter/` is user-owned XDG config, so pip installs and client reinstallers do not overwrite it. The first auto-embedding call lazily loads the model and may be noticeably slower; later calls reuse it.
+   Keep shared paths/vector/model settings here instead of each MCP client's env block. Keep `MEMORY_ARBITER_CLIENT`, `MEMORY_ARBITER_AGENT_ID`, and `MEMORY_ARBITER_WORKSPACE` in each client's env so tools keep separate identities. `~/.config/memory-arbiter/` is user-owned XDG config, so pip installs and client reinstallers do not overwrite it. The first auto-embedding call lazily loads the model and may be noticeably slower; later calls reuse it.
 4. Backfill embeddings into existing memories, then search normally:
    ```bash
+   # From a source checkout:
    python docs/semantic_example.py                 # backfill all active memories
    python docs/semantic_example.py --query "金营平台营销"   # try a semantic search
    ```
+   The backfill helper currently ships as a source-tree script. If you installed only from pip, clone the repo or use `memory_store_embedding` from your own script for existing memories. New writes/edits are auto-embedded once the server is configured.
 
 After configuration, normal `memory_search(query="...")` can generate the query vector automatically. Explicit `query_embedding` still works and takes precedence.
 
@@ -259,18 +265,34 @@ After configuration, normal `memory_search(query="...")` can generate the query 
 
 ### Configuration
 
-Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbiter/config.json`, then environment variables/defaults. Put durable vector/model settings in the config file so they survive MCP client reinstall/migration. Environment variables remain useful for simple client identity and CI overrides. The full table with explanations is in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbiter/config.json`, then environment variables/defaults. **Durable vector/model settings belong in the config file** so they survive MCP client reinstall/migration; each row below shows the JSON path and its env fallback (config file wins when both are set). Environment variables are still useful for simple client identity and CI overrides. Full explanations in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+
+**Config file fields** (`~/.config/memory-arbiter/config.json`) — paths, vector, and embedding settings:
+
+| JSON path | Env fallback | Default | What to tune |
+|---|---|---|---|
+| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | Shared path for cross-tool memory. |
+| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | Append-only JSONL backup, used only when SQLite is read-only. |
+| `policy_path` | `MEMORY_ARBITER_POLICY` | _(none)_ | Path to a JSON policy file (per-client enable/disable, agent allow/deny). |
+| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | Set `true` to enable semantic recall (requires `pip install memory-arbiter-mcp[vec]`). |
+| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | Must match your embedding model. Changing it requires dropping and recreating `memories_vec`. |
+| `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | **Raise to 100–200 when your store exceeds ~100 entries** — first knob to turn if matches go missing. |
+| `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | Raise if many same-topic memories exist. |
+| `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | inferred as `gguf` only when `embedding.model_path` is set | Only `gguf` is supported in v0.5.0. Without a model path, auto-embedding stays off. |
+| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` (or legacy `MEMORY_ARBITER_GGUF`) | _(none)_ | Path to the GGUF embedding model. |
+| `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | Auto-encode plain-text queries for semantic recall. |
+| `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | Auto-embed new writes/edits so they enter semantic recall immediately. |
+
+**Environment variables** — keep per-client identity in each MCP client's env block. Some fields also have config-file equivalents, but config wins; use env here when the value must differ by client/session.
 
 | Variable | Default | What to tune |
 |---|---|---|
-| `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | Shared path for cross-tool memory. |
 | `MEMORY_ARBITER_CLIENT` | `codex` | Per-tool identity (`codex`, `claude-code`, `cursor`, `zcode`, ...). |
+| `MEMORY_ARBITER_AGENT_ID` | `default` | Agent identity within a client. |
 | `MEMORY_ARBITER_WORKSPACE` | `default` | Isolation key. |
-| `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | Set `true` to enable semantic recall (requires `pip install memory-arbiter-mcp[vec]`). Off by default — pure lexical recall works without it. |
-| `MEMORY_ARBITER_VEC_DIM` | `768` | Must match your embedding model. |
-| `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | **Raise to 100–200 when your store exceeds ~100 entries** — first knob to turn if matches go missing. |
-| `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | Raise if many same-topic memories exist. |
-| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid` (default) or `bm25` (legacy). |
+| `MEMORY_ARBITER_CONFIG` | _(none)_ | Optional path to an alternate JSON config file. If set, memory-arbiter reads that file instead of the default `~/.config/memory-arbiter/config.json`; file values still override other env fallbacks. |
+| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid` (default) or `bm25` (legacy). No config-file equivalent. |
+| `MEMORY_ARBITER_GGUF` | _(none)_ | Legacy GGUF path fallback; prefer `embedding.model_path` in the config file. |
 
 ### Data Migration
 
@@ -456,14 +478,14 @@ memory-arbiter-mcp
       "env": {
         "MEMORY_ARBITER_CLIENT": "zcode",
         "MEMORY_ARBITER_AGENT_ID": "zcode-default",
-        "MEMORY_ARBITER_DB_PATH": "~/.local/share/memory-arbiter/memory.sqlite3"
+        "MEMORY_ARBITER_WORKSPACE": "${workspaceFolder}"
       }
     }
   }
 }
 ```
 
-> 每个工具改一下 `MEMORY_ARBITER_CLIENT` 标识（`openclaw`、`zcode`、`codex`、`cursor`、`claude-code`）。多个工具指向同一个 `DB_PATH` 即可启用跨工具记忆共享。（OpenDesign 这类 GUI 工具继承宿主 CLI 的配置，不需要单独的 client 名称。）
+> 每个工具改一下 `MEMORY_ARBITER_CLIENT` 标识（`openclaw`、`zcode`、`codex`、`cursor`、`claude-code`）。共享路径、向量、模型配置放 `~/.config/memory-arbiter/config.json`；每客户端身份放 MCP env 段。如果不用配置文件，再把 `MEMORY_ARBITER_DB_PATH` 放到每个客户端 env，并指向同一个 SQLite 文件。（OpenDesign 这类 GUI 工具继承宿主 CLI 的配置，不需要单独的 client 名称。）
 
 > ⚠️ **需要新建会话**：MCP Server 在客户端启动时加载，已经打开的会话不会识别新添加的 Server。配置好后请新建一个会话。
 
@@ -529,14 +551,20 @@ memory-arbiter-mcp
 3. 复制配置模板并修改路径：
    ```bash
    mkdir -p ~/.config/memory-arbiter
+   # 源码 checkout：
    cp examples/memory-arbiter.config.example.json ~/.config/memory-arbiter/config.json
+   # 或 pip 安装用户：
+   curl -L https://raw.githubusercontent.com/billy12151/memory-arbiter-mcp/main/examples/memory-arbiter.config.example.json \
+     -o ~/.config/memory-arbiter/config.json
    ```
-   向量和模型配置建议放这里，不放每个 MCP 客户端的 env 段。`~/.config/memory-arbiter/` 是用户自己的 XDG 配置目录，pip 安装和客户端重装不会覆盖。第一次自动向量化会懒加载模型，可能明显慢一次；后续复用已加载模型。
+   共享路径、向量、模型配置建议放这里，不放每个 MCP 客户端的 env 段。`MEMORY_ARBITER_CLIENT`、`MEMORY_ARBITER_AGENT_ID`、`MEMORY_ARBITER_WORKSPACE` 仍放各客户端 env，避免所有工具被全局 config 覆盖成同一个身份。`~/.config/memory-arbiter/` 是用户自己的 XDG 配置目录，pip 安装和客户端重装不会覆盖。第一次自动向量化会懒加载模型，可能明显慢一次；后续复用已加载模型。
 4. 给现有记忆补向量，然后正常搜索：
    ```bash
+   # 从源码 checkout 运行：
    python docs/semantic_example.py                 # 给所有活跃记忆补向量
    python docs/semantic_example.py --query "金营平台营销"   # 试一次语义检索
    ```
+   backfill 辅助脚本目前是源码树脚本。只通过 pip 安装的用户，可以 clone 仓库后运行脚本，或用自己的脚本调用 `memory_store_embedding` 给旧记忆补向量。服务配置好后，新写入/编辑会自动写向量。
 
 配置完成后，普通 `memory_search(query="...")` 可以自动生成查询向量。显式 `query_embedding` 仍然支持，并且优先级更高。
 
@@ -552,18 +580,34 @@ memory-arbiter-mcp
 
 ### 配置
 
-配置读取顺序：`MEMORY_ARBITER_CONFIG` 指定文件 → `~/.config/memory-arbiter/config.json` → 环境变量/default。耐久的向量和模型配置建议放配置文件，避免 MCP 客户端重装/迁移时丢失；环境变量仍适合简单 client 标识和 CI 覆盖。完整说明见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
+配置读取顺序：`MEMORY_ARBITER_CONFIG` 指定文件 → `~/.config/memory-arbiter/config.json` → 环境变量/default。**耐久的向量和模型配置建议放配置文件**，避免 MCP 客户端重装/迁移时丢失；下面每行同时给出 JSON 路径和对应的 env 兜底（两者都设时配置文件优先）。环境变量仍适合简单 client 标识和 CI 覆盖。完整说明见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
+
+**配置文件字段**（`~/.config/memory-arbiter/config.json`）——路径、向量、embedding 设置：
+
+| JSON 路径 | env 兜底 | 默认值 | 什么时候调 |
+|---|---|---|---|
+| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | 跨工具共享记忆时设成同一路径。 |
+| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | 追加式 JSONL 备份，仅在 SQLite 只读时启用。 |
+| `policy_path` | `MEMORY_ARBITER_POLICY` | _(无)_ | 策略 JSON 文件路径，可按客户端开关、按 agent 允许/拒绝。 |
+| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | 设 `true` 开启语义检索（需 `pip install memory-arbiter-mcp[vec]`）。 |
+| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | 必须和你的 embedding 模型一致。改维度要重建 `memories_vec` 表。 |
+| `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | **记忆超过约 100 条时调到 100–200**——发现结果里漏了相关记忆，第一个就调它。 |
+| `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | 同主题记忆多时调大。 |
+| `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | 仅在设置 `embedding.model_path` 时推断为 `gguf` | v0.5.0 只支持 `gguf`。没有模型路径时，自动向量化保持关闭。 |
+| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH`（或 legacy `MEMORY_ARBITER_GGUF`） | _(无)_ | GGUF embedding 模型路径。 |
+| `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | 自动 encode 纯文本查询触发语义检索。 |
+| `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | 新写入/编辑自动灌向量，立即进语义召回。 |
+
+**环境变量**——每客户端身份建议放在各自 MCP env 段。部分字段也有配置文件对应项，但 config 优先；当某个值必须按客户端/会话变化时再放 env。
 
 | 变量 | 默认值 | 什么时候调 |
 |---|---|---|
-| `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | 跨工具共享记忆时设成同一路径。 |
 | `MEMORY_ARBITER_CLIENT` | `codex` | 每个工具一个标识（`codex`、`claude-code`、`cursor`、`zcode`…）。 |
+| `MEMORY_ARBITER_AGENT_ID` | `default` | 客户端内的 agent 身份。 |
 | `MEMORY_ARBITER_WORKSPACE` | `default` | 工作区隔离键。 |
-| `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | 设 `true` 开启语义检索（需 `pip install memory-arbiter-mcp[vec]`）。默认关闭——纯字面检索不需要它。 |
-| `MEMORY_ARBITER_VEC_DIM` | `768` | 必须和你的 embedding 模型一致。 |
-| `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | **记忆超过约 100 条时调到 100–200**——发现结果里漏了相关记忆，第一个就调它。 |
-| `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | 同主题记忆多时调大。 |
-| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid`（默认）或 `bm25`（legacy）。 |
+| `MEMORY_ARBITER_CONFIG` | _(无)_ | 可选：指定另一个 JSON 配置文件路径。设置后读取该文件，而不是默认的 `~/.config/memory-arbiter/config.json`；配置文件里的字段仍然优先于其他 env 兜底值。 |
+| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid`（默认）或 `bm25`（legacy）。无配置文件对应。 |
+| `MEMORY_ARBITER_GGUF` | _(无)_ | 旧版 GGUF 路径兜底；建议改用配置文件里的 `embedding.model_path`。 |
 
 ### 数据迁移
 

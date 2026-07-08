@@ -5,8 +5,7 @@
       "env": {
         "MEMORY_ARBITER_CLIENT": "zcode",
         "MEMORY_ARBITER_AGENT_ID": "zcode-default",
-        "MEMORY_ARBITER_WORKSPACE": "${workspaceFolder}",
-        "MEMORY_ARBITER_DB_PATH": "~/.local/share/memory-arbiter/memory.sqlite3"
+        "MEMORY_ARBITER_WORKSPACE": "${workspaceFolder}"
       }
     }
   }

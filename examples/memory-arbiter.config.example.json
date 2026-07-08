@@ -5,14 +5,13 @@
     "  - MCP client env lives in each client config, so every client repeats the same vector settings.",
     "  - Client config and package directories may be rewritten during reinstall or migration.",
     "  - ~/.config/memory-arbiter/ is user-owned XDG config; pip/client installers do not overwrite it.",
+    "Keep per-client identity (MEMORY_ARBITER_CLIENT / AGENT_ID / WORKSPACE) in each MCP client's env block.",
+    "Do not put client/agent_id/workspace here unless you intentionally want one global default for every client.",
     "Discovery order: MEMORY_ARBITER_CONFIG env > ~/.config/memory-arbiter/config.json > env/defaults.",
     "First auto-embedding call loads the GGUF model lazily. A 300MB model may add visible startup latency once; later calls reuse the loaded model."
   ],
   "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
   "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
-  "client": "codex",
-  "agent_id": "default",
-  "workspace": "default",
   "vec": {
     "enabled": true,
     "dim": 768

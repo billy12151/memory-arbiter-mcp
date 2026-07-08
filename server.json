@@ -21,18 +21,18 @@
     "local",
     "sqlite"
   ],
-  "version": "0.5.0",
+  "version": "0.5.1",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "memory-arbiter-mcp",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "description": "Optional JSON config path. Defaults to ~/.config/memory-arbiter/config.json when present",
+          "description": "Optional alternate JSON config path. File values override other env fallbacks.",
           "isRequired": false,
           "name": "MEMORY_ARBITER_CONFIG"
         },
