@@ -204,6 +204,12 @@ Add to your tool's MCP config (see `examples/` for ready-made templates):
 | `memory_cleanup_history` | (v0.4.0) Delete historical snapshots from `memory_history` (never touches active records). Per-memory / by-age / full; full cleanup requires `authorized=true`. |
 | `memory_status` | Show current mode, degradation status, storage paths |
 
+### Information storage rules (feed this to your agent)
+
+If your client also keeps local markdown (ZCode's `MEMORY.md`, Codex's `AGENTS.md`, etc.), paste this rule into your agent's instructions so it knows what to write where:
+
+> Local md files store only self-use info (rules, tool experience, config notes, agent persona). Anything that might be reused by another agent or platform — not just project info: requirements, research, decisions, progress, user preferences, knowledge conclusions — goes into `memory-arbiter`. Every write must fill `subject`, `tags`, `source_type` (one of `requirement` / `decision` / `doc_summary` / `research` / `progress`), `event_time` (ISO 8601), `workspace` (project name), `source_ref`. Search via `memory_search` first; read source files only for detail. When you find a contradiction, don't overwrite — use `memory_supersede` or `memory_arbitrate`. When a to-do entry is done, write the status back to the original record (update status/subject to done); don't just mention "done" in a new memory, or the old entry stays in to-do state and misleads future searches.
+
 ### Optional: Semantic Recall (v0.5.0)
 
 By default, memory-arbiter uses **lexical recall** (FTS5 trigram + BM25 + soft-rerank) — no embedding model, no heavy dependencies, fully local. This is enough for most cases.
@@ -518,6 +524,12 @@ memory-arbiter-mcp
 | `memory_history` | （v0.4.0）查看一条记忆的版本演化轨迹（历史快照，按版本号倒序）。只读。 |
 | `memory_cleanup_history` | （v0.4.0）清理历史表快照（**绝不碰活跃记录**）。支持单条 / 按时间 / 全量；全量清理需 `authorized=true`。 |
 | `memory_status` | 查看运行状态、模式、降级原因 |
+
+### 信息存储规则（喂给你的 Agent）
+
+如果你的客户端同时维护本地 markdown（ZCode 的 `MEMORY.md`、Codex 的 `AGENTS.md` 等），把下面这条规则贴进你 agent 的系统指令，让它知道什么该写到哪里：
+
+> 本地 md 只存自用信息（规则/经验/配置/角色）。凡是有可能被其他 agent 或平台复用的信息（不只是项目信息——需求、调研、决策、进展、用户偏好、知识结论等），一律写入 `memory-arbiter`，必填 `subject`、`tags`、`source_type`（限 requirement/decision/doc_summary/research/progress）、`event_time`（ISO 8601）、`workspace`（项目名）、`source_ref`。查找先 `memory_search`，细节读源文件。发现矛盾不覆盖，用 `memory_supersede` 或 `memory_arbitrate` 处理。待办处理完成后回写原条目（更新 status/subject 标注已完成），不要只在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
 
 ### 可选：语义检索（v0.5.0）
 
