@@ -61,6 +61,9 @@ def build_server() -> Any:
     def memory_get(memory_id: int) -> dict[str, Any]:
         """通过 ID 直接获取一条记忆的完整信息。用于已知 memory_id 时（如从冲突列表、审计结果、搜索结果中获取）快速获取单条记忆详情，无需再走搜索流程。只读，不修改任何数据。"""
         return tools.memory_get(memory_id=memory_id)
+
+    @app.tool()
+    def memory_store_embedding(memory_id: int, embedding: list[float]) -> dict[str, Any]:
         """为指定记忆手动存入或替换语义向量。v0.5.0 配置 GGUF embedding 后，新写入/普通查询可自动向量化；这个工具仍适合 backfill、非 GGUF 模型、远程 API 或自定义向量流程。向量维度必须匹配 vec.dim。"""
         return tools.memory_store_embedding(memory_id=memory_id, embedding=embedding)
 
