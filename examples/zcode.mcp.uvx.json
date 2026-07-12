@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "memory-arbiter": {
+      "command": "uvx",
+      "args": ["--from", "memory-arbiter-mcp", "memory-arbiter"],
+      "env": {
+        "MEMORY_ARBITER_CLIENT": "zcode",
+        "MEMORY_ARBITER_AGENT_ID": "zcode-default",
+        "MEMORY_ARBITER_WORKSPACE": "${workspaceFolder}"
+      }
+    }
+  }
+}
