@@ -88,6 +88,17 @@ class MemoryTools:
         results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
         return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=extra_warnings + warnings)
 
+    def memory_get(self, memory_id: int, **_: Any) -> dict[str, Any]:
+        """通过 ID 直接获取一条记忆的完整信息。只读，不修改任何数据。"""
+        try:
+            memory_id_int = int(memory_id)
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
+        memory = self.db.get_memory(memory_id_int)
+        if not memory:
+            return self.db.state.response({"error": f"memory id {memory_id_int} not found"}, ok=False)
+        return self.db.state.response({"memory": memory})
+
     def memory_store_embedding(self, memory_id: int, embedding: list[float], **_: Any) -> dict[str, Any]:
         """Store or replace an embedding for a memory (v0.3.1 semantic recall).
 

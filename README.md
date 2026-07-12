@@ -151,15 +151,43 @@ pip install '.[vec]'
 memory-arbiter-mcp
 ```
 
+#### Zero-install via `uvx` (recommended for non-Python users)
+
+If you just want to run the server without managing a Python env — install [`uv`](https://docs.astral.sh/uv/) once, then:
+
+```bash
+uvx --from memory-arbiter-mcp memory-arbiter
+```
+
+This pulls the published package and launches the `memory-arbiter` entry point. No venv, no `pip install`. The entry points `memory-arbiter` and `memory-arbiter-mcp` are equivalent — use the shorter one. Note: `uvx` only shortens the **install** step; embedding model and `sqlite-vec` still need separate setup (see [Semantic Recall](#semantic-recall-optional)).
+
 ### Connect Your Tool
 
-Add to your tool's MCP config (see `examples/` for ready-made templates):
+Add to your tool's MCP config (see `examples/` for ready-made templates). With a local venv:
 
 ```json
 {
   "mcpServers": {
     "memory-arbiter": {
       "command": "/path/to/memory-arbiter-mcp/.venv/bin/memory-arbiter-mcp",
+      "env": {
+        "MEMORY_ARBITER_CLIENT": "zcode",
+        "MEMORY_ARBITER_AGENT_ID": "zcode-default",
+        "MEMORY_ARBITER_WORKSPACE": "${workspaceFolder}"
+      }
+    }
+  }
+}
+```
+
+Or, zero-install via `uvx` (no local clone needed):
+
+```json
+{
+  "mcpServers": {
+    "memory-arbiter": {
+      "command": "uvx",
+      "args": ["--from", "memory-arbiter-mcp", "memory-arbiter"],
       "env": {
         "MEMORY_ARBITER_CLIENT": "zcode",
         "MEMORY_ARBITER_AGENT_ID": "zcode-default",
@@ -189,9 +217,10 @@ Add to your tool's MCP config (see `examples/` for ready-made templates):
 ### MCP Tools
 
 | Tool | Description |
-|---|---|
+|---|---|---|
 | `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks) |
 | `memory_search` | Search memories (FTS5 → LIKE fallback) |
+| `memory_get` | Get a single memory by ID. Use when you already know the `memory_id` (e.g. from conflict lists, audit results, or previous search results) to quickly fetch full details without re-running a search. Read-only. |
 | `memory_compare` | Compare two memories, returns explanation only |
 | `memory_arbitrate` | Arbitrate conflict, can record result (`apply=true`) |
 | `memory_confirm` | Promote a memory to user-confirmed and locked |
@@ -472,9 +501,19 @@ pip install '.[vec]'
 memory-arbiter-mcp
 ```
 
+#### 用 `uvx` 零安装启动（推荐非 Python 用户）
+
+只想跑起来、不想管 Python 环境——装一次 [`uv`](https://docs.astral.sh/uv/)，然后：
+
+```bash
+uvx --from memory-arbiter-mcp memory-arbiter
+```
+
+这会拉取已发布的包并启动 `memory-arbiter` 入口。无需 venv、无需 `pip install`。`memory-arbiter` 和 `memory-arbiter-mcp` 两个入口等价，用短的那个即可。注意：`uvx` 只省掉**安装**这一步，embedding 模型和 `sqlite-vec` 仍需单独配置（见 [语义召回](#语义召回可选)）。
+
 ### 接入工具
 
-在你的工具的 MCP 配置中加入（完整示例见 `examples/` 目录）：
+在你的工具的 MCP 配置中加入（完整示例见 `examples/` 目录）。用本地 venv：
 
 ```json
 {
@@ -488,6 +527,26 @@ memory-arbiter-mcp
       }
     }
   }
+}
+```
+
+或用 `uvx` 零安装（无需本地 clone）：
+
+```json
+{
+  "mcpServers": {
+    "memory-arbiter": {
+      "command": "uvx",
+      "args": ["--from", "memory-arbiter-mcp", "memory-arbiter"],
+      "env": {
+        "MEMORY_ARBITER_CLIENT": "zcode",
+        "MEMORY_ARBITER_AGENT_ID": "zcode-default",
+        "MEMORY_ARBITER_WORKSPACE": "${workspaceFolder}"
+      }
+    }
+  }
+}
+```
 }
 ```
 
@@ -510,9 +569,10 @@ memory-arbiter-mcp
 ### MCP 工具
 
 | 工具 | 说明 |
-|---|---|
+|---|---|---|
 | `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定） |
 | `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级） |
+| `memory_get` | 通过 ID 直接获取单条记忆的完整信息。当已知 `memory_id`（如从冲突列表、审计结果、搜索结果中获取）时，直接用此工具获取记忆详情，无需重新搜索。只读。 |
 | `memory_compare` | 比较两条记忆，只返回解释 |
 | `memory_arbitrate` | 仲裁冲突，自动判定胜者（`apply=true` 时落记录） |
 | `memory_confirm` | 用户确认某条记忆，锁定保护 |

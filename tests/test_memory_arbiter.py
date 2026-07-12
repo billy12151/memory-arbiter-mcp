@@ -1507,3 +1507,51 @@ def test_tied_scores_sort_by_parsed_utc_ingest_time() -> None:
     )
 
     assert [record["id"] for record in ranked] == [2, 1]
+
+
+# --------------------------------------------------------------------------- #
+# v0.5.1 — memory_get (direct ID lookup)
+# --------------------------------------------------------------------------- #
+
+
+def test_get_memory_by_id(tmp_path: Path) -> None:
+    """通过 ID 直接获取一条记忆的完整信息，包含所有字段。"""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="Project API token policy lives in README security section.",
+        subject="api-token-policy",
+        tags=["policy", "security"],
+        source_type="document_extracted",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+
+    result = tools.memory_get(memory_id=memory_id)
+
+    assert result["ok"] is True
+    memory = result["data"]["memory"]
+    assert memory["id"] == memory_id
+    assert memory["subject"] == "api-token-policy"
+    assert memory["content"] == "Project API token policy lives in README security section."
+    assert memory["source_type"] == "document_extracted"
+    assert "policy" in memory["tags"]
+
+
+def test_get_memory_not_found(tmp_path: Path) -> None:
+    """传入不存在的 memory_id 应返回错误。"""
+    tools = make_tools(tmp_path)
+
+    result = tools.memory_get(memory_id=99999)
+
+    assert result["ok"] is False
+    assert "not found" in result["data"]["error"]
+
+
+def test_get_memory_invalid_id_type(tmp_path: Path) -> None:
+    """传入非整数类型的 memory_id 应返回错误。"""
+    tools = make_tools(tmp_path)
+
+    result = tools.memory_get(memory_id="not-a-number")
+
+    assert result["ok"] is False
+    assert "must be an integer" in result["data"]["error"]
