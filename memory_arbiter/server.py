@@ -169,10 +169,8 @@ def build_server() -> Any:
         decision_split_status: Optional[str] = None,
         decision_split_revision: Optional[int] = None,
         sections: Optional[list[dict]] = None,
-        prepare_batch_index: int = 0,
-        llm_batch_chars: int = 12000,
     ) -> dict[str, Any]:
-        """长文分段工具（v0.6.0，分段唯一入口）。两阶段：首次调用返回原文+schema供外部 LLM 生成段落信息；二次提交验证 offset 并原子发布段落+向量。split_decision: None=首次/取批, "split"=发布, "decline"=拒绝, "rebuild"=重建。"""
+        """长文分段工具（v0.6.0，分段唯一入口）。两阶段：首次调用返回原文+schema供外部 LLM 生成段落信息；二次提交验证 offset 并原子发布段落+向量。split_decision: None=首次, "split"=发布, "decline"=拒绝, "rebuild"=重建。v0.6.0 为单批：原文一次性返回；超长文档请调用方在 memory_write 前自行分块。"""
         return tools.memory_split(
             memory_id=memory_id,
             split_decision=split_decision,
@@ -181,8 +179,6 @@ def build_server() -> Any:
             decision_split_status=decision_split_status,
             decision_split_revision=decision_split_revision,
             sections=sections,
-            prepare_batch_index=prepare_batch_index,
-            llm_batch_chars=llm_batch_chars,
         )
 
     @app.tool()

@@ -33,6 +33,7 @@ class ManagedEmbedder:
     n_ctx: int
     reserved_tokens: int = 64
     warnings: list[str] = field(default_factory=list)
+    last_encode_error: Optional[str] = None
 
     def embed_text(
         self,
@@ -46,7 +47,13 @@ class ManagedEmbedder:
         if total exceeds the model context budget.  All memory/query/section
         embedding must go through this method.
         """
-        full_text = prefix + body
+        # Join prefix and body with a newline boundary so tokenizers don't merge
+        # the trailing token of the prefix with the leading token of the body
+        # (e.g. subject "cat" + content "dog" must not become "catdog").  An
+        # empty prefix yields a leading newline only when the body is non-empty,
+        # which models handle identically to the bare body.
+        sep = "\n" if prefix and body else ""
+        full_text = prefix + sep + body
         original_tokens = len(self.tokenize(full_text))
 
         body_candidate = body
@@ -54,7 +61,7 @@ class ManagedEmbedder:
             body_candidate = body_candidate[:max_body_chars]
 
         token_budget = self.n_ctx - self.reserved_tokens
-        candidate_tokens = len(self.tokenize(prefix + body_candidate))
+        candidate_tokens = len(self.tokenize(prefix + sep + body_candidate))
 
         used_tokens = candidate_tokens
         if candidate_tokens > token_budget:
@@ -62,7 +69,7 @@ class ManagedEmbedder:
             best = ""
             while lo <= hi:
                 mid = (lo + hi) // 2
-                t = len(self.tokenize(prefix + body_candidate[:mid]))
+                t = len(self.tokenize(prefix + sep + body_candidate[:mid]))
                 if t <= token_budget:
                     best = body_candidate[:mid]
                     used_tokens = t
@@ -73,15 +80,23 @@ class ManagedEmbedder:
             if not best:
                 used_tokens = len(self.tokenize(prefix))
 
-        final_text = prefix + body_candidate
+        final_text = prefix + sep + body_candidate
         truncated = original_tokens > used_tokens or len(body_candidate) < len(body)
 
         try:
             embedding = self.encode_raw(final_text)
-        except Exception:
-            embedding = self.encode_raw(prefix)
-            used_tokens = len(self.tokenize(prefix))
-            truncated = True
+        except Exception as exc:
+            # The model-level failure will likely recur on the bare prefix too.
+            # embed_text is a Never-raises surface: record the error and return a
+            # sentinel result so the caller can surface a warning instead of
+            # propagating an exception up the MCP tool call.
+            self.last_encode_error = str(exc)
+            return EmbedResult(
+                embedding=[],
+                truncated=True,
+                original_tokens=original_tokens,
+                used_tokens=len(self.tokenize(prefix)),
+            )
 
         return EmbedResult(
             embedding=embedding,
@@ -123,6 +138,7 @@ def build_embedder(
     expected_dim: int,
     n_ctx: int = 2048,
     reserved_tokens: int = 64,
+    max_section_chars: int = 3600,
 ) -> Tuple[Optional[ManagedEmbedder], list[str]]:
     """Build a managed GGUF embedder with token-safe helpers.
 
@@ -156,10 +172,14 @@ def build_embedder(
             return None, warnings
 
         model_digest = compute_model_digest(model_path)
+        # All output-affecting config must be captured here so that changing any
+        # of them yields a different embedding_space_id and forces a rebuild.
+        # These values must come from the caller's real Settings, NOT literals,
+        # otherwise the space-id invariant silently breaks (design doc §1.1b).
         effective_config = {
             "n_ctx": n_ctx,
             "reserved_tokens": reserved_tokens,
-            "max_section_chars_default": 3600,
+            "max_section_chars": max_section_chars,
         }
         space_id = compute_embedding_space_id(
             model_digest, expected_dim, EMBEDDING_PIPELINE_VERSION, effective_config

@@ -47,6 +47,9 @@ class Settings:
     embedding_model_path: Optional[Path] = None
     embedding_auto_query: bool = True
     embedding_auto_write: bool = True
+    # ── Embedding pipeline params (v0.6.0: part of embedding_space_id) ──
+    embedding_n_ctx: int = 2048
+    embedding_reserved_tokens: int = 64
     # ── Section split (v0.6.0, advanced feature, all default off) ──
     split_enabled: bool = False
     split_threshold: int = 4000
@@ -150,23 +153,36 @@ class Settings:
             embedding_auto_write=pick_bool_field(
                 emb_cfg.get("auto_write"), "MEMORY_ARBITER_EMBEDDING_AUTO_WRITE", "true", name="embedding.auto_write", default_bool=True
             ),
+            embedding_n_ctx=clamp_int(
+                pick_int_field(emb_cfg.get("n_ctx"), "MEMORY_ARBITER_EMBEDDING_N_CTX", 2048, name="embedding.n_ctx"),
+                128, 131072, name="embedding.n_ctx", warnings=config_warnings,
+            ),
+            embedding_reserved_tokens=clamp_int(
+                pick_int_field(emb_cfg.get("reserved_tokens"), "MEMORY_ARBITER_EMBEDDING_RESERVED_TOKENS", 64, name="embedding.reserved_tokens"),
+                0, 4096, name="embedding.reserved_tokens", warnings=config_warnings,
+            ),
             split_enabled=pick_bool_field(
                 split_cfg.get("enabled"), "MEMORY_ARBITER_SPLIT_ENABLED", "false", name="split.enabled", default_bool=False
             ),
-            split_threshold=pick_int_field(
-                split_cfg.get("threshold"), "MEMORY_ARBITER_SPLIT_THRESHOLD", 4000, name="split.threshold"
+            split_threshold=clamp_int(
+                pick_int_field(split_cfg.get("threshold"), "MEMORY_ARBITER_SPLIT_THRESHOLD", 4000, name="split.threshold"),
+                100, 1_000_000, name="split.threshold", warnings=config_warnings,
             ),
-            section_vec_distance_threshold=pick_float_field(
-                split_cfg.get("section_vec_distance_threshold"), "MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD", 0.7, name="split.section_vec_distance_threshold"
+            section_vec_distance_threshold=clamp_float(
+                pick_float_field(split_cfg.get("section_vec_distance_threshold"), "MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD", 0.7, name="split.section_vec_distance_threshold"),
+                0.0, 2.0, name="split.section_vec_distance_threshold", warnings=config_warnings,
             ),
-            section_fulltext_threshold=pick_float_field(
-                split_cfg.get("section_fulltext_threshold"), "MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD", 0.8, name="split.section_fulltext_threshold"
+            section_fulltext_threshold=clamp_float(
+                pick_float_field(split_cfg.get("section_fulltext_threshold"), "MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD", 0.8, name="split.section_fulltext_threshold"),
+                0.0, 1.0, name="split.section_fulltext_threshold", warnings=config_warnings,
             ),
-            max_sections=pick_int_field(
-                split_cfg.get("max_sections"), "MEMORY_ARBITER_MAX_SECTIONS", 50, name="split.max_sections"
+            max_sections=clamp_int(
+                pick_int_field(split_cfg.get("max_sections"), "MEMORY_ARBITER_MAX_SECTIONS", 50, name="split.max_sections"),
+                2, 500, name="split.max_sections", warnings=config_warnings,
             ),
-            max_section_chars=pick_int_field(
-                split_cfg.get("max_section_chars"), "MEMORY_ARBITER_MAX_SECTION_CHARS", 3600, name="split.max_section_chars"
+            max_section_chars=clamp_int(
+                pick_int_field(split_cfg.get("max_section_chars"), "MEMORY_ARBITER_MAX_SECTION_CHARS", 3600, name="split.max_section_chars"),
+                100, 1_000_000, name="split.max_section_chars", warnings=config_warnings,
             ),
         )
         settings.config_warnings = config_warnings
@@ -236,6 +252,32 @@ def parse_float(val: Any, default: float, name: str = "", warnings: Optional[lis
         if warnings is not None and val is not None:
             warnings.append(f"{name}={val!r} invalid; using default {default}")
         return default
+
+
+def clamp_int(val: int, lo: int, hi: int, name: str = "", warnings: Optional[list[str]] = None) -> int:
+    """Clamp an int to [lo, hi], emitting a warning when out of range."""
+    if val < lo:
+        if warnings is not None:
+            warnings.append(f"{name}={val} below minimum {lo}; clamped to {lo}")
+        return lo
+    if val > hi:
+        if warnings is not None:
+            warnings.append(f"{name}={val} above maximum {hi}; clamped to {hi}")
+        return hi
+    return val
+
+
+def clamp_float(val: float, lo: float, hi: float, name: str = "", warnings: Optional[list[str]] = None) -> float:
+    """Clamp a float to [lo, hi], emitting a warning when out of range."""
+    if val < lo:
+        if warnings is not None:
+            warnings.append(f"{name}={val} below minimum {lo}; clamped to {lo}")
+        return lo
+    if val > hi:
+        if warnings is not None:
+            warnings.append(f"{name}={val} above maximum {hi}; clamped to {hi}")
+        return hi
+    return val
 
 
 def _find_config_file(warnings: list[str]) -> Optional[Path]:

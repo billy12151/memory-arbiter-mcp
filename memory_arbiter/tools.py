@@ -61,7 +61,11 @@ class MemoryTools:
 
         assert self.settings.embedding_model_path is not None
         self._embedder, warnings = build_embedder(
-            str(self.settings.embedding_model_path), self.settings.vec_dim
+            str(self.settings.embedding_model_path),
+            self.settings.vec_dim,
+            n_ctx=getattr(self.settings, "embedding_n_ctx", 2048),
+            reserved_tokens=getattr(self.settings, "embedding_reserved_tokens", 64),
+            max_section_chars=getattr(self.settings, "max_section_chars", 3600),
         )
         self._embedder_warnings.extend(warnings)
         return self._embedder, warnings
@@ -527,6 +531,19 @@ class MemoryTools:
             and query_embedding is not None
             and self.db.state.sqlite_vec_available
         )
+        # Real reason the vec gate is closed, for accurate per-result warnings.
+        if not query_embedding:
+            vec_disabled_reason = "no_query_embedding"
+        elif vec_state.get("state") in {"mismatch", "failed"}:
+            vec_disabled_reason = (
+                "embedding_space_mismatch"
+                if vec_state.get("state") == "mismatch"
+                else "embedding_migration_failed"
+            )
+        elif vec_state.get("state") != "ready":
+            vec_disabled_reason = "gate_closed_state_not_ready"
+        else:
+            vec_disabled_reason = "vec_extension_unavailable"
         threshold = getattr(self.settings, "section_vec_distance_threshold", 0.7)
         fulltext_threshold = getattr(self.settings, "section_fulltext_threshold", 0.8)
 
@@ -564,26 +581,38 @@ class MemoryTools:
             sections = sections_map.get(mid, [])
             total_sections = len(sections)
 
-            # Invariant guards
+            # Invariant guards — these fire regardless of the vec gate, so a
+            # corrupted section state is always detectable.  On every degrade
+            # path we explicitly mark content_omitted=False and
+            # section_enhancement_applied=False so the "return full text"
+            # invariant does NOT rely on upstream content being untouched
+            # (a fragile implicit contract).
             if total_sections == 0:
                 result.setdefault("warnings", []).append("split_invariant_broken_empty_sections")
+                result["content_omitted"] = False
+                result["section_enhancement_applied"] = False
                 continue
             if total_sections == 1:
                 result.setdefault("warnings", []).append("split_invariant_broken_too_few_sections")
+                result["content_omitted"] = False
+                result["section_enhancement_applied"] = False
                 continue
 
-            # Vec gate closed → return full text
-            if not vec_gate_open:
-                result.setdefault("warnings", []).append(
-                    f"vec_disabled={'gate_closed' if query_embedding else 'no_query_embedding'}"
-                )
-                continue
-
-            # Check section vec completeness
+            # Check section vec completeness BEFORE the gate check, so a missing
+            # section vector is reported even when the vec gate is closed.
             section_ids = {s["id"] for s in sections}
             vec_ids = section_vec_ids_map.get(mid, set())
             if section_ids - vec_ids:
                 result.setdefault("warnings", []).append("split_invariant_broken_missing_section_vec")
+                result["content_omitted"] = False
+                result["section_enhancement_applied"] = False
+                continue
+
+            # Vec gate closed → return full text (explicit degrade).
+            if not vec_gate_open:
+                result.setdefault("warnings", []).append(f"vec_disabled={vec_disabled_reason}")
+                result["content_omitted"] = False
+                result["section_enhancement_applied"] = False
                 continue
 
             # Section Vec matching
@@ -595,18 +624,24 @@ class MemoryTools:
             matched_ids = {h["section_id"] for h in vec_hits}
             matched_count = len(matched_ids)
 
+            def _catalog_entry(s: dict) -> dict:
+                """Unified catalog schema (same shape in zero-match and partial branches)."""
+                return {
+                    "section_id": s["id"],
+                    "title": s.get("title"),
+                    "title_path": s.get("title_path"),
+                    "summary": s.get("summary"),
+                    "embedding_truncated": bool(s.get("embedding_truncated")),
+                    "embedding_original_tokens": s.get("embedding_original_tokens", 0),
+                    "embedding_used_tokens": s.get("embedding_used_tokens", 0),
+                }
+
             if matched_count == 0:
                 # True zero match
                 result["content"] = None
                 result["content_omitted"] = True
                 result["section_enhancement_applied"] = True
-                result["section_catalog"] = [
-                    {"section_id": s["id"], "title": s.get("title"), "title_path": s.get("title_path"),
-                     "summary": s.get("summary"), "embedding_truncated": bool(s.get("embedding_truncated")),
-                     "embedding_original_tokens": s.get("embedding_original_tokens", 0),
-                     "embedding_used_tokens": s.get("embedding_used_tokens", 0)}
-                    for s in sections
-                ]
+                result["section_catalog"] = [_catalog_entry(s) for s in sections]
                 result["hint"] = f"已拆分为 {total_sections} 段，可用 get_sections 获取"
             elif matched_count / total_sections >= fulltext_threshold:
                 # Most sections matched → return full text
@@ -630,9 +665,7 @@ class MemoryTools:
                     for h in vec_hits
                 ]
                 result["section_catalog"] = [
-                    {"section_id": s["id"], "title": s.get("title"), "title_path": s.get("title_path"),
-                     "summary": s.get("summary")}
-                    for s in sections if s["id"] not in matched_ids
+                    _catalog_entry(s) for s in sections if s["id"] not in matched_ids
                 ]
                 result["hint"] = "已返回命中段落元数据，用 get_sections 获取段落原文"
 
@@ -655,11 +688,13 @@ class MemoryTools:
         self,
         content: str,
         sections_data: list[dict[str, Any]],
-        batch_start: int = 0,
     ) -> Optional[list[dict[str, Any]]]:
         """Compute global offsets from LLM-provided anchors.
 
-        Returns list of {start_offset, end_offset, ...section_data} or None on failure.
+        Returns list of {start_offset, end_offset, ...section_data} or None on
+        failure.  v0.6.0 is single-batch: every anchor is located in the full
+        content and its offset is already global.  The caller must not supply
+        start_offset/end_offset — only anchors.
         """
         result: list[dict[str, Any]] = []
         for i, sec in enumerate(sections_data):
@@ -670,16 +705,9 @@ class MemoryTools:
                 occ = sec.get("occurrence_index", 0)
                 if not anchor:
                     return None
-                local_start = self._find_nth_occurrence(
-                    content[batch_start:batch_start + len(content)], anchor, occ
-                )
-                # Actually search in the full content from batch_start
-                # Simplified: search in the remaining content from batch_start
-                search_text = content
-                local_start = self._find_nth_occurrence(search_text, anchor, occ)
+                local_start = self._find_nth_occurrence(content, anchor, occ)
                 if local_start == -1:
                     return None
-                local_start = local_start  # already global if batch_start=0
             result.append({**sec, "start_offset": local_start})
 
         # Derive end_offsets
@@ -778,11 +806,15 @@ class MemoryTools:
         decision_split_status: Optional[str] = None,
         decision_split_revision: Optional[int] = None,
         sections: Optional[list[dict]] = None,
-        prepare_batch_index: int = 0,
-        llm_batch_chars: int = 12000,
         **_: Any,
     ) -> dict[str, Any]:
-        """Section split: prepare (return content for LLM) or publish (validate + atomically write)."""
+        """Section split: prepare (return content for LLM) or publish (validate + atomically write).
+
+        v0.6.0 is single-batch: prepare returns the full content in one go.  For
+        ultra-long documents that exceed an external LLM's context, the caller
+        should pre-chunk before ``memory_write`` (split across multiple
+        memories) rather than relying on a server-side batch protocol.
+        """
         mid = int(memory_id)
         memory = self.db.get_memory(mid)
         if not memory:
@@ -817,7 +849,8 @@ class MemoryTools:
             headings = self._detect_markdown_headings(content)
             parser_detected = len(headings) >= 2
 
-            # Simple single-batch prepare (multi-batch can be added later)
+            # Single-batch prepare: returns the full content for one LLM pass.
+            # For ultra-long docs the caller should pre-chunk before memory_write.
             return self.db.state.response({
                 "requires_user_confirmation": True,
                 "content": content,
@@ -827,10 +860,8 @@ class MemoryTools:
                 "split_revision": split_revision,
                 "char_count": len(content),
                 "parser_detected": parser_detected,
-                "llm_batch_chars": llm_batch_chars,
-                "batch_count": 1,
                 "split_prompt": (
-                    f"该记忆 {len(content)} 字符。分段需 1 个 LLM 批次。"
+                    f"该记忆 {len(content)} 字符。分段为单批：原文一次性返回。"
                     "原文已完整保存，分段仅影响检索精度。是否分段？"
                 ),
                 "split_schema": {

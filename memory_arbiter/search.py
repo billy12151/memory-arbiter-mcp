@@ -462,7 +462,7 @@ def _wide_recall(
             if d["id"] not in pool:
                 pool[d["id"]] = d
 
-    # Channel 4: content LIKE — limited补漏. Requires ≥2 query anchors hit
+    # Channel 4: content LIKE — a limited gap-filler. Requires ≥2 query anchors hit
     # (r4 §6.1) and is capped at 5-10 to avoid noise explosion.
     if content_like_fallback and len(pool) < pool_cap:
         # Only run if query has at least 2 anchors — otherwise the ≥2-anchor
@@ -478,7 +478,7 @@ def _wide_recall(
             for tag in tags or []:
                 clauses.append("tags LIKE ?")
                 params.append(f"%{tag}%")
-            params.append(content_like_cap)  # cap content-LIKE补漏 (configurable via MEMORY_ARBITER_CONTENT_LIKE_CAP)
+            params.append(content_like_cap)  # cap content-LIKE gap-fill (configurable via MEMORY_ARBITER_CONTENT_LIKE_CAP)
             sql = f"""SELECT *, 0 AS score FROM memories
                       WHERE {' AND '.join(clauses)}
                       ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,

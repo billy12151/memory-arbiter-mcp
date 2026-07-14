@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import sys
 import types
@@ -25,7 +26,10 @@ class _MockManagedEmbedder:
         self.embedding_space_id = "mock_space_id"
 
     def embed_text(self, prefix="", body="", max_body_chars=None):
-        text = (prefix + body).strip()
+        # Mirror the production separator so the prefix's trailing token and the
+        # body's leading token are not merged (e.g. "alpha"+"alpha x" → "alphaalpha").
+        sep = "\n" if prefix and body else ""
+        text = (prefix + sep + body).strip()
         emb = self._encode(text)
         return EmbedResult(embedding=emb, truncated=False, original_tokens=0, used_tokens=0)
 
@@ -1734,3 +1738,238 @@ def test_split_failure_merges_error_into_existing_metadata(tmp_path: Path) -> No
     assert current["metadata"]["keep"] == "yes"
     assert current["metadata"]["nested"] == {"value": 1}
     assert current["metadata"]["_split"]["last_split_error"]["stage"] == "validation"
+
+
+# ────────────────────────────────────────────────────────────────────
+# v0.6.0 review fixes: split success path, _attach_sections branches,
+# edit clears sections, vec_space_changed CAS, single-batch regression.
+# ────────────────────────────────────────────────────────────────────
+
+
+def _keyword_embedding(text: str) -> list[float]:
+    """Deterministic 2D embedding keyed off the first token in text.
+
+    Maps the first run of word-ish chars to one of a fixed set of orthogonal /
+    diametrically-opposed unit vectors so cosine distances are predictable:
+    two distinct known tokens are always > 0.7 apart, while identical tokens
+    are at distance 0.  Unknown tokens map to a sentinel direction.
+    """
+    # Ordered fixed directions around the unit circle (90° apart → cosine dist 1.0
+    # between neighbours, 2.0 between opposites).  The key's hash picks one index.
+    m = re.search(r"[A-Za-z0-9\u4e00-\u9fff]+", text or "")
+    key = m.group(0) if m else "x"
+    table = {
+        "alpha": (1.0, 0.0),
+        "beta": (0.0, 1.0),
+        "gamma": (-1.0, 0.0),
+        "delta": (0.0, -1.0),
+    }
+    return [table[key][0], table[key][1]] if key in table else [-0.7071, -0.7071]
+
+
+def _keyword_embedder(space_id: str = "mock_space_id"):
+    """A ManagedEmbedder-like mock whose embedding is keyed off text content."""
+    return _MockManagedEmbedder(lambda text: _keyword_embedding(text))
+
+
+def _set_vec_ready(tools: MemoryTools, space_id: str = "mock_space_id") -> None:
+    with tools.db.write_transaction() as conn:
+        MemoryDB._set_meta(conn, "state", "ready")
+        MemoryDB._set_meta(conn, "active_space_id", space_id)
+
+
+def _publish_two_sections(tools: MemoryTools, memory_id: int, content: str,
+                          first_anchor_token: str, second_anchor_token: str) -> dict:
+    """Helper: publish a 2-section split whose anchors genuinely exist in content."""
+    mem = tools.db.get_memory(memory_id)
+    return tools.memory_split(
+        memory_id=memory_id,
+        split_decision="split",
+        decision_content_hash=hashlib.sha256(mem["content"].encode("utf-8")).hexdigest(),
+        decision_memory_version=mem["version"],
+        decision_split_status=mem["split_status"],
+        decision_split_revision=mem["split_revision"],
+        sections=[
+            {"title": first_anchor_token},
+            {"title": second_anchor_token, "anchor_text": second_anchor_token, "occurrence_index": 0},
+        ],
+    )
+
+
+def test_split_publish_success_then_search_returns_matched_sections(tmp_path: Path) -> None:
+    """Happy path: valid anchors → offsets resolve → publish → search returns matched_sections."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    # Content: two distinct anchors so each section embeds to a different vector.
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    memory_id = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    _set_vec_ready(tools)
+
+    published = _publish_two_sections(tools, memory_id, content, "alpha", "beta")
+    assert published["ok"] is True, published
+    assert published["data"]["split_active"] is True
+    assert published["data"]["section_count"] == 2
+
+    mem = tools.db.get_memory(memory_id)
+    assert mem["split_status"] == "active"
+    # Sections + section vecs written
+    sections = tools.db.get_sections_by_memory(memory_id)
+    assert len(sections) == 2
+    with tools.db.connection() as conn:
+        vec_ids = MemoryDB._get_section_vec_ids(conn, memory_id)
+    assert len(vec_ids) == 2
+
+    # Search with a query whose embedding matches one section's keyword.
+    result = tools.memory_search(query="beta", query_embedding=_keyword_embedding("beta"))
+    assert result["ok"] is True
+    hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
+    # 1/2 matched → partial branch → content omitted, matched_sections present
+    assert hit["content_omitted"] is True
+    assert hit["section_enhancement_applied"] is True
+    assert hit.get("matched_sections")
+    assert hit["matched_sections"][0]["title"] == "beta"
+
+
+def test_split_publish_success_zero_hit_returns_catalog(tmp_path: Path) -> None:
+    """Zero section matches → content_omitted=True + full section_catalog."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    memory_id = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    _set_vec_ready(tools)
+    published = _publish_two_sections(tools, memory_id, content, "alpha", "beta")
+    assert published["ok"] is True
+
+    # Query with a token that maps to neither section's vector.
+    result = tools.memory_search(query="zzz", query_embedding=_keyword_embedding("zzz"))
+    hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
+    assert hit["content_omitted"] is True
+    assert hit["section_enhancement_applied"] is True
+    assert hit.get("section_catalog")
+    assert len(hit["section_catalog"]) == 2
+    # Unified catalog schema: embedding diagnostic fields present.
+    assert "embedding_truncated" in hit["section_catalog"][0]
+    assert "embedding_original_tokens" in hit["section_catalog"][0]
+
+
+def test_split_publish_success_fulltext_fallback(tmp_path: Path) -> None:
+    """When the matched fraction ≥ section_fulltext_threshold → return full text."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    # Lower fulltext threshold to 0.0 so any match counts as "most matched".
+    tools.settings.section_fulltext_threshold = 0.0
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    memory_id = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    _set_vec_ready(tools)
+    published = _publish_two_sections(tools, memory_id, content, "alpha", "beta")
+    assert published["ok"] is True
+
+    result = tools.memory_search(query="alpha", query_embedding=_keyword_embedding("alpha"))
+    hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
+    assert hit["content_omitted"] is False
+    assert hit["section_enhancement_applied"] is True
+    assert hit.get("matched_sections")  # reference list still present
+    assert hit.get("content")  # full text returned
+
+
+def test_edit_clears_sections_and_bumps_revision(tmp_path: Path) -> None:
+    """After a successful publish, editing content clears sections + bumps split_revision."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    memory_id = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    _set_vec_ready(tools)
+    published = _publish_two_sections(tools, memory_id, content, "alpha", "beta")
+    assert published["ok"] is True
+    assert tools.db.get_memory(memory_id)["split_revision"] == 1
+
+    edited = tools.memory_edit(memory_id=memory_id, new_content=content + "\n appended")
+    assert edited["ok"] is True
+
+    after = tools.db.get_memory(memory_id)
+    assert after["split_status"] is None
+    assert after["split_revision"] == 2
+    assert tools.db.get_sections_by_memory(memory_id) == []
+    with tools.db.connection() as conn:
+        assert MemoryDB._get_section_vec_ids(conn, memory_id) == set()
+
+
+def test_attach_sections_invariant_missing_section_vec(tmp_path: Path) -> None:
+    """Manually deleting a section vec → invariant reported + full text returned."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    memory_id = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    _set_vec_ready(tools)
+    published = _publish_two_sections(tools, memory_id, content, "alpha", "beta")
+    assert published["ok"] is True
+
+    # Sabotage: delete one section vector.
+    sections = tools.db.get_sections_by_memory(memory_id)
+    victim = sections[0]["id"]
+    with tools.db.connection() as conn:
+        conn.execute("DELETE FROM memory_sections_vec WHERE id = ?", (victim,))
+        conn.commit()
+
+    result = tools.memory_search(query="alpha", query_embedding=_keyword_embedding("alpha"))
+    hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
+    assert "split_invariant_broken_missing_section_vec" in hit.get("warnings", [])
+    assert hit["content_omitted"] is False
+    assert hit["section_enhancement_applied"] is False
+
+
+def test_split_publish_rejects_when_vec_space_changed(tmp_path: Path) -> None:
+    """active_space_id != embedder.embedding_space_id at publish → vec_space_changed, no write."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    memory_id = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    # ready but active_space_id is a DIFFERENT space than the embedder.
+    _set_vec_ready(tools, space_id="some_other_space")
+
+    mem = tools.db.get_memory(memory_id)
+    rejected = tools.memory_split(
+        memory_id=memory_id,
+        split_decision="split",
+        decision_content_hash=hashlib.sha256(mem["content"].encode("utf-8")).hexdigest(),
+        decision_memory_version=mem["version"],
+        decision_split_status=mem["split_status"],
+        decision_split_revision=mem["split_revision"],
+        sections=[
+            {"title": "alpha"},
+            {"title": "beta", "anchor_text": "beta", "occurrence_index": 0},
+        ],
+    )
+    assert rejected["ok"] is False
+    assert rejected["data"]["error"] == "vec_space_changed"
+    # Nothing written.
+    assert tools.db.get_sections_by_memory(memory_id) == []
+    assert tools.db.get_memory(memory_id)["split_status"] is None
+
+
+def test_split_single_batch_ignores_legacy_batch_params(tmp_path: Path) -> None:
+    """Regression: the dropped prepare_batch_index/llm_batch_chars kwargs are absorbed by **_, not errors."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    content = "alpha " + ("x" * 60)
+    memory_id = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    _set_vec_ready(tools)
+
+    # Prepare call passing the now-removed params — must not raise.
+    prepared = tools.memory_split(
+        memory_id=memory_id,
+        prepare_batch_index=0,  # legacy, now ignored via **_
+        llm_batch_chars=9999,   # legacy, now ignored via **_
+    )
+    assert prepared["ok"] is True
+    assert "content" in prepared["data"]
+    # New single-batch response has no batch_count / llm_batch_chars fields.
+    assert "batch_count" not in prepared["data"]
+    assert "llm_batch_chars" not in prepared["data"]

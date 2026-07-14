@@ -21,12 +21,12 @@
     "local",
     "sqlite"
   ],
-  "version": "0.5.4",
+  "version": "0.6.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "memory-arbiter-mcp",
-      "version": "0.5.4",
+      "version": "0.6.0",
       "transport": {
         "type": "stdio"
       },

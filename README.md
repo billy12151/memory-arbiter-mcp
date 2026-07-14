@@ -232,7 +232,7 @@ Or, zero-install via `uvx` (no local clone needed):
 | `memory_history` | (v0.4.0) View the version chain (historical snapshots) of a memory, newest version first. Read-only. |
 | `memory_cleanup_history` | (v0.4.0) Delete historical snapshots from `memory_history` (never touches active records). Per-memory / by-age / full; full cleanup requires `authorized=true`. |
 | `memory_status` | Show current mode, degradation status, storage paths |
-| `memory_split` | (v0.6.0) Split a long memory into sections for paragraph-level retrieval. Two-phase: prepare returns content batches for an external LLM; publish validates and atomically publishes sections + vectors. Requires sqlite-vec + GGUF embedding + `split.enabled`. |
+| `memory_split` | (v0.6.0) Split a long memory into sections for paragraph-level retrieval. Two-phase: prepare returns the full content in a single batch for an external LLM; publish validates offsets and atomically publishes sections + vectors. Requires sqlite-vec + GGUF embedding + `split.enabled`. v0.6.0 is single-batch — for ultra-long documents, pre-chunk before `memory_write` or split across multiple memories. |
 | `get_sections` | (v0.6.0) Get full text + metadata of specific sections by ID. Use after `memory_search` returns `matched_sections` to fetch only the relevant paragraphs. |
 | `memory_split_status` | (v0.6.0) Check a memory's section-split status, section catalog, and global vector index state. |
 | `memory_rebuild_embeddings` | (v0.6.0) Batch-rebuild all embeddings after switching embedding models. Processes memory-level + section-level vectors. No LLM needed. | (feed this to your agent)
@@ -318,8 +318,8 @@ memory_write(long_doc)
   → split_hint is just a suggestion — content is already saved, no data loss
 
 memory_split(memory_id)                    ← prepare, no DB writes
-  → returns content in safe batches (llm_batch_chars) + section schema
-  → Agent sends each batch to external LLM → gets back title/summary/anchor
+  → returns the full content in a single batch + section schema
+  → Agent sends content to an external LLM → gets back title/summary/anchor
 
 memory_split(memory_id, split_decision="split", sections=[...])
   → arbiter validates offsets deterministically (never trusts LLM offsets)
@@ -335,6 +335,8 @@ memory_search("query")
 get_sections(memory_id, [section_id, ...])  ← fetch specific paragraphs
 memory_get(memory_id)                       ← fetch full text if needed
 ```
+
+> **Single-batch limitation (v0.6.0):** `memory_split(prepare)` returns the entire document content in one pass. If a document exceeds the external LLM's context window, pre-chunk it before `memory_write` (store each chunk as its own memory) rather than relying on a server-side batch protocol. Multi-batch support is planned for a later release.
 
 **Vec gate closed** (model migration, space mismatch, query embedding failure): `memory_search` returns the full text with `section_enhancement_applied=false` — search capability never degrades, section enhancement is purely additive.
 
@@ -669,7 +671,7 @@ uvx --from memory-arbiter-mcp memory-arbiter
 | `memory_history` | （v0.4.0）查看一条记忆的版本演化轨迹（历史快照，按版本号倒序）。只读。 |
 | `memory_cleanup_history` | （v0.4.0）清理历史表快照（**绝不碰活跃记录**）。支持单条 / 按时间 / 全量；全量清理需 `authorized=true`。 |
 | `memory_status` | 查看运行状态、模式、降级原因 |
-| `memory_split` | （v0.6.0）将长记忆分段，实现段落级检索。两阶段：prepare 返回内容批次供外部 LLM 生成段落信息；publish 验证偏移量并原子发布段落 + 向量。需 sqlite-vec + GGUF embedding + `split.enabled`。 |
+| `memory_split` | （v0.6.0）将长记忆分段，实现段落级检索。两阶段：prepare 单批返回全文供外部 LLM 生成段落信息；publish 验证偏移量并原子发布段落 + 向量。需 sqlite-vec + GGUF embedding + `split.enabled`。v0.6.0 为单批——超长文档请在 memory_write 前自行分块或拆成多条记忆。 |
 | `get_sections` | （v0.6.0）按 section ID 获取段落完整原文 + 元数据。`memory_search` 返回 `matched_sections` 后，用此工具取相关段落原文，不必拉取整篇文档。 |
 | `memory_split_status` | （v0.6.0）查看某条记忆的分段状态、段落目录、全局向量索引状态。 |
 | `memory_rebuild_embeddings` | （v0.6.0）切换 embedding 模型后批量重建所有向量（memory 级 + section 级）。不需要 LLM，只重算向量。 |
@@ -757,8 +759,8 @@ memory_write(长文档)
   → split_hint 只是建议——原文已保存，不丢数据
 
 memory_split(memory_id)                    ← prepare，不写库
-  → 按安全批次（llm_batch_chars）返回正文 + section schema
-  → Agent 把每批发给外部 LLM → 拿回 title/summary/anchor
+  → 单批返回全文 + section schema
+  → Agent 把全文发给外部 LLM → 拿回 title/summary/anchor
 
 memory_split(memory_id, split_decision="split", sections=[...])
   → arbiter 确定性验证偏移量（绝不信任 LLM 的 offset）
