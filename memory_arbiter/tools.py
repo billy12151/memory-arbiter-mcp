@@ -525,6 +525,19 @@ class MemoryTools:
     #  v0.6.0: Section split tools
     # ==================================================================
 
+    @staticmethod
+    def _catalog_entry(s: dict) -> dict:
+        """Unified section-catalog schema (same shape in zero-match and partial branches)."""
+        return {
+            "section_id": s["id"],
+            "title": s.get("title"),
+            "title_path": s.get("title_path"),
+            "summary": s.get("summary"),
+            "embedding_truncated": bool(s.get("embedding_truncated")),
+            "embedding_original_tokens": s.get("embedding_original_tokens", 0),
+            "embedding_used_tokens": s.get("embedding_used_tokens", 0),
+        }
+
     def _attach_sections(
         self,
         results: list[dict[str, Any]],
@@ -637,24 +650,12 @@ class MemoryTools:
             matched_ids = {h["section_id"] for h in vec_hits}
             matched_count = len(matched_ids)
 
-            def _catalog_entry(s: dict) -> dict:
-                """Unified catalog schema (same shape in zero-match and partial branches)."""
-                return {
-                    "section_id": s["id"],
-                    "title": s.get("title"),
-                    "title_path": s.get("title_path"),
-                    "summary": s.get("summary"),
-                    "embedding_truncated": bool(s.get("embedding_truncated")),
-                    "embedding_original_tokens": s.get("embedding_original_tokens", 0),
-                    "embedding_used_tokens": s.get("embedding_used_tokens", 0),
-                }
-
             if matched_count == 0:
                 # True zero match
                 result["content"] = None
                 result["content_omitted"] = True
                 result["section_enhancement_applied"] = True
-                result["section_catalog"] = [_catalog_entry(s) for s in sections]
+                result["section_catalog"] = [self._catalog_entry(s) for s in sections]
                 result["hint"] = f"已拆分为 {total_sections} 段，可用 get_sections 获取"
             elif matched_count / total_sections >= fulltext_threshold:
                 # Most sections matched → return full text
@@ -678,7 +679,7 @@ class MemoryTools:
                     for h in vec_hits
                 ]
                 result["section_catalog"] = [
-                    _catalog_entry(s) for s in sections if s["id"] not in matched_ids
+                    self._catalog_entry(s) for s in sections if s["id"] not in matched_ids
                 ]
                 result["hint"] = "已返回命中段落元数据，用 get_sections 获取段落原文"
 
