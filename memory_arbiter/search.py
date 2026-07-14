@@ -500,7 +500,13 @@ def _wide_recall(
     # is the only channel that can surface memories whose surface text shares
     # no trigrams/tokens with the query. Candidates are flagged so soft-rerank
     # knows they came from vectors (their lexical score will be 0).
-    if query_embedding and db.state.sqlite_vec_available and len(pool) < pool_cap:
+    vec_state = db.get_vec_index_state().get("state")
+    if (
+        query_embedding
+        and db.state.sqlite_vec_available
+        and vec_state in {"ready", "unmanaged"}
+        and len(pool) < pool_cap
+    ):
         knn_rows = db.vec_knn(query_embedding, k=max(pool_cap - len(pool), 10))
         for row in knn_rows:
             # Apply the same workspace filter the other channels use.

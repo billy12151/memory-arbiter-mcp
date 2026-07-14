@@ -123,7 +123,17 @@ class MemoryTools:
 
     def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, **_: Any) -> dict[str, Any]:
         extra_warnings = list(self._embedder_warnings)
-        if query_embedding is None and query and self.settings.embedding_auto_query:
+        vec_state = self.db.get_vec_index_state()
+        vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
+        if vec_disabled and (query_embedding is not None or (query and self.settings.embedding_auto_query)):
+            disabled_reason = (
+                "embedding_space_mismatch"
+                if vec_state.get("state") == "mismatch"
+                else "embedding_migration_failed"
+            )
+            extra_warnings.append(f"vec_disabled={disabled_reason}")
+            query_embedding = None
+        elif query_embedding is None and query and self.settings.embedding_auto_query:
             embedder, ensure_warnings = self._ensure_embedder()
             extra_warnings.extend(ensure_warnings)
             if embedder is not None:
@@ -726,6 +736,39 @@ class MemoryTools:
             pos += len(line)
         return headings
 
+    @staticmethod
+    def _split_snapshot_error(
+        memory: dict[str, Any],
+        decision_content_hash: Optional[str],
+        decision_memory_version: Optional[int],
+        decision_split_status: Optional[str],
+        decision_split_revision: Optional[int],
+        allowed_split_statuses: tuple[Optional[str], ...],
+    ) -> Optional[str]:
+        """Validate a caller's prepare snapshot against the current row."""
+        if (
+            not decision_content_hash
+            or decision_memory_version is None
+            or decision_split_revision is None
+        ):
+            return "decision snapshot fields are required"
+        current_hash = hashlib.sha256(
+            str(memory.get("content") or "").encode("utf-8")
+        ).hexdigest()
+        if (
+            memory.get("status") != "active"
+            or current_hash != decision_content_hash
+            or int(memory.get("version") or 1) != int(decision_memory_version)
+        ):
+            return "memory_changed"
+        if (
+            memory.get("split_status") != decision_split_status
+            or int(memory.get("split_revision") or 0) != int(decision_split_revision)
+            or decision_split_status not in allowed_split_statuses
+        ):
+            return "split_revision_conflict"
+        return None
+
     def memory_split(
         self,
         memory_id: int,
@@ -803,23 +846,59 @@ class MemoryTools:
 
         # ---- DECLINE ----
         if split_decision == "decline":
-            if decision_content_hash != content_hash:
-                return self.db.state.response({"error": "content_hash mismatch"}, ok=False)
+            snapshot_error = self._split_snapshot_error(
+                memory,
+                decision_content_hash,
+                decision_memory_version,
+                decision_split_status,
+                decision_split_revision,
+                (None, "failed", "declined"),
+            )
+            if snapshot_error:
+                return self.db.state.response({"error": snapshot_error}, ok=False)
             with self.db.write_transaction() as conn:
                 cur = conn.execute(
-                    "SELECT split_status, split_revision FROM memories WHERE id = ?", (mid,)
+                    "SELECT status, content, version, split_status, split_revision "
+                    "FROM memories WHERE id = ?", (mid,)
                 ).fetchone()
-                if cur["split_status"] != split_status or cur["split_revision"] != split_revision:
-                    return self.db.state.response({"error": "split_revision_conflict"}, ok=False)
-                conn.execute(
-                    "UPDATE memories SET split_status = 'declined', "
-                    "split_revision = split_revision + 1 WHERE id = ?",
-                    (mid,),
+                current = dict(cur) if cur is not None else {}
+                snapshot_error = self._split_snapshot_error(
+                    current,
+                    decision_content_hash,
+                    decision_memory_version,
+                    decision_split_status,
+                    decision_split_revision,
+                    (None, "failed", "declined"),
                 )
+                if snapshot_error:
+                    return self.db.state.response({"error": snapshot_error}, ok=False)
+                updated = conn.execute(
+                    "UPDATE memories SET split_status = 'declined', "
+                    "split_revision = split_revision + 1 "
+                    "WHERE id = ? AND split_revision = ?",
+                    (mid, int(decision_split_revision)),
+                )
+                if updated.rowcount != 1:
+                    return self.db.state.response({"error": "split_revision_conflict"}, ok=False)
             return self.db.state.response({"declined": True, "memory_id": mid})
 
         # ---- PUBLISH (split or rebuild) ----
         if split_decision in ("split", "rebuild"):
+            allowed_statuses: tuple[Optional[str], ...] = (
+                ("active",)
+                if split_decision == "rebuild"
+                else (None, "failed", "declined")
+            )
+            snapshot_error = self._split_snapshot_error(
+                memory,
+                decision_content_hash,
+                decision_memory_version,
+                decision_split_status,
+                decision_split_revision,
+                allowed_statuses,
+            )
+            if snapshot_error:
+                return self.db.state.response({"error": snapshot_error}, ok=False)
             if not sections:
                 return self.db.state.response({"error": "sections required for publish"}, ok=False)
 
@@ -841,9 +920,12 @@ class MemoryTools:
             # Compute offsets
             offset_result = self._compute_offsets(content, sections)
             if offset_result is None:
-                # Mark as failed
-                self._mark_split_failed(mid, content_hash, memory_version, split_revision,
-                                        split_status, "validation", "offset computation failed")
+                if split_decision == "split":
+                    self._mark_split_failed(
+                        mid, str(decision_content_hash), int(decision_memory_version),
+                        int(decision_split_revision), decision_split_status,
+                        "validation", "offset computation failed",
+                    )
                 return self.db.state.response({"error": "offset validation failed"}, ok=False)
 
             # Generate section embeddings
@@ -860,12 +942,15 @@ class MemoryTools:
                     er = embedder.embed_text(prefix=title_path, body=body, max_body_chars=max_section_chars)
                     section_embeddings.append((i, er.embedding, int(er.truncated), er.original_tokens, er.used_tokens, True))
                 except Exception as exc:
-                    self._mark_split_failed(mid, content_hash, memory_version, split_revision,
-                                            split_status, "embedding", f"section {i}: {exc}")
+                    if split_decision == "split":
+                        self._mark_split_failed(
+                            mid, str(decision_content_hash), int(decision_memory_version),
+                            int(decision_split_revision), decision_split_status,
+                            "embedding", f"section {i}: {exc}",
+                        )
                     return self.db.state.response({"error": f"section embedding failed at {i}: {exc}"}, ok=False)
 
             # Atomic publish
-            expected_status = "active" if split_decision == "rebuild" else split_status
             try:
                 with self.db.write_transaction() as conn:
                     # CAS
@@ -875,18 +960,22 @@ class MemoryTools:
                     ).fetchone()
                     if cur is None:
                         raise ValueError("memory disappeared")
-                    if hashlib.sha256(str(cur["content"]).encode()).hexdigest() != content_hash:
+                    if cur["status"] != "active":
                         raise ValueError("memory_changed")
-                    if int(cur["version"]) != memory_version:
+                    if hashlib.sha256(str(cur["content"]).encode("utf-8")).hexdigest() != decision_content_hash:
                         raise ValueError("memory_changed")
-                    if str(cur["split_status"]) != str(expected_status):
+                    if int(cur["version"]) != int(decision_memory_version):
+                        raise ValueError("memory_changed")
+                    if cur["split_status"] != decision_split_status:
                         raise ValueError("split_revision_conflict")
-                    if int(cur["split_revision"]) != split_revision:
+                    if int(cur["split_revision"]) != int(decision_split_revision):
                         raise ValueError("split_revision_conflict")
 
                     # Vec space check
+                    if MemoryDB._get_meta(conn, "state") != "ready":
+                        raise ValueError("vec_space_changed")
                     active_space = MemoryDB._get_meta(conn, "active_space_id")
-                    if active_space and active_space != embedder.embedding_space_id:
+                    if active_space != embedder.embedding_space_id:
                         raise ValueError("vec_space_changed")
 
                     # Delete old sections
@@ -912,11 +1001,14 @@ class MemoryTools:
                         MemoryDB._store_section_vec(conn, section_id, em[1])
 
                     # Update status
-                    conn.execute(
+                    updated = conn.execute(
                         "UPDATE memories SET split_status = 'active', "
-                        "split_revision = split_revision + 1 WHERE id = ?",
-                        (mid,),
+                        "split_revision = split_revision + 1 "
+                        "WHERE id = ? AND split_revision = ?",
+                        (mid, int(decision_split_revision)),
                     )
+                    if updated.rowcount != 1:
+                        raise ValueError("split_revision_conflict")
             except ValueError as e:
                 return self.db.state.response({"error": str(e)}, ok=False)
 
@@ -936,20 +1028,27 @@ class MemoryTools:
         try:
             with self.db.write_transaction() as conn:
                 cur = conn.execute(
-                    "SELECT content, version, split_status, split_revision FROM memories WHERE id = ?",
+                    "SELECT status, content, version, split_status, split_revision, metadata "
+                    "FROM memories WHERE id = ?",
                     (mid,),
                 ).fetchone()
                 if cur is None:
                     return
-                if hashlib.sha256(str(cur["content"]).encode()).hexdigest() != content_hash:
+                if cur["status"] != "active":
+                    return
+                if hashlib.sha256(str(cur["content"]).encode("utf-8")).hexdigest() != content_hash:
                     return
                 if int(cur["version"]) != version or int(cur["split_revision"]) != revision:
                     return
                 if str(cur["split_status"]) != str(expected_status):
                     return
                 # Merge metadata
-                row = cur
-                meta = json.loads(row["metadata"] or "{}") if "metadata" in row.keys() else {}
+                try:
+                    meta = json.loads(cur["metadata"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
                 split_meta = meta.get("_split", {})
                 split_meta["last_split_error"] = {"stage": stage, "message": message}
                 meta["_split"] = split_meta
@@ -1041,15 +1140,25 @@ class MemoryTools:
             return self.db.state.response({"error": "embedder unavailable"}, ok=False)
 
         # Determine target memories
-        if state in ("mismatch", "failed"):
-            # Migration mode: all memories with vectors
+        migration_mode = state in ("mismatch", "failed")
+        migration_cursor = vec_state.get("migration_cursor")
+        cursor_value = int(migration_cursor) if migration_cursor is not None else -1
+        if migration_mode:
+            if vec_state.get("target_space_id") != embedder.embedding_space_id:
+                return self.db.state.response({
+                    "error": "current embedder does not match migration target",
+                    "target_space_id": vec_state.get("target_space_id"),
+                    "current_space_id": embedder.embedding_space_id,
+                }, ok=False)
+            # Migration mode: continue after the persisted contiguous cursor.
             with self.db.connection() as conn:
                 rows = conn.execute(
                     "SELECT DISTINCT m.id AS id FROM memories m "
                     "LEFT JOIN memories_vec v ON v.id = m.id "
                     "LEFT JOIN memory_sections s ON s.memory_id = m.id "
-                    "WHERE v.id IS NOT NULL OR s.id IS NOT NULL "
-                    "ORDER BY m.id"
+                    "WHERE (v.id IS NOT NULL OR s.id IS NOT NULL) AND m.id > ? "
+                    "ORDER BY m.id",
+                    (cursor_value,),
                 ).fetchall()
                 target_ids = [int(r["id"]) for r in rows]
         elif state == "ready":
@@ -1078,10 +1187,12 @@ class MemoryTools:
         # Execute rebuild
         succeeded = 0
         failed = 0
+        processed = 0
         errors: list[dict] = []
         max_section_chars = getattr(self.settings, "max_section_chars", 3600)
 
         for mid in target_ids:
+            processed += 1
             try:
                 with self.db.connection() as conn:
                     mem = MemoryDB._fetch_memory(conn, mid)
@@ -1090,6 +1201,8 @@ class MemoryTools:
                         with self.db.write_transaction() as wconn:
                             MemoryDB._delete_sections_for_memory(wconn, mid)
                             wconn.execute("DELETE FROM memories_vec WHERE id = ?", (mid,))
+                            if migration_mode:
+                                MemoryDB._set_meta(wconn, "migration_cursor", str(mid))
                         succeeded += 1
                         continue
 
@@ -1128,25 +1241,51 @@ class MemoryTools:
                                 "WHERE id = ?",
                                 (int(ser.truncated), ser.original_tokens, ser.used_tokens, sid),
                             )
+                        if migration_mode:
+                            MemoryDB._set_meta(wconn, "migration_cursor", str(mid))
                     succeeded += 1
             except Exception as exc:
                 failed += 1
                 errors.append({"memory_id": mid, "error": str(exc)})
+                if migration_mode:
+                    try:
+                        with self.db.write_transaction() as conn:
+                            MemoryDB._set_meta(conn, "state", "failed")
+                            MemoryDB._set_meta(conn, "last_error", f"memory_id={mid}: {exc}")
+                    except Exception:
+                        pass
+                    break  # preserve a contiguous cursor for the next resume
 
-        # Update vec state if migration complete
-        if state in ("mismatch", "failed") and not errors and not target_ids:
+        # Update vec state only after checking for targets beyond the cursor
+        # produced by this batch.  Re-querying without a cursor would select
+        # the vectors just rebuilt and make migration impossible to finish.
+        if migration_mode and not errors:
             try:
                 with self.db.write_transaction() as conn:
-                    MemoryDB._set_meta(conn, "state", "ready")
-                    MemoryDB._set_meta(conn, "active_space_id", embedder.embedding_space_id)
-                    MemoryDB._delete_meta(conn, "target_space_id")
-                    MemoryDB._delete_meta(conn, "migration_cursor")
-                    MemoryDB._delete_meta(conn, "last_error")
+                    current_cursor_raw = MemoryDB._get_meta(conn, "migration_cursor")
+                    current_cursor = int(current_cursor_raw) if current_cursor_raw is not None else -1
+                    remaining = conn.execute(
+                        "SELECT 1 FROM memories m "
+                        "LEFT JOIN memories_vec v ON v.id = m.id "
+                        "LEFT JOIN memory_sections s ON s.memory_id = m.id "
+                        "WHERE (v.id IS NOT NULL OR s.id IS NOT NULL) AND m.id > ? "
+                        "LIMIT 1",
+                        (current_cursor,),
+                    ).fetchone()
+                    if remaining is None:
+                        MemoryDB._set_meta(conn, "state", "ready")
+                        MemoryDB._set_meta(conn, "active_space_id", embedder.embedding_space_id)
+                        for key in (
+                            "target_space_id", "migration_cursor", "migration_epoch",
+                            "migration_lease_owner", "migration_lease_expires_at",
+                            "last_error",
+                        ):
+                            MemoryDB._delete_meta(conn, key)
             except Exception:
                 pass
 
         return self.db.state.response({
-            "processed": len(target_ids),
+            "processed": processed,
             "succeeded": succeeded,
             "failed": failed,
             "errors": errors,

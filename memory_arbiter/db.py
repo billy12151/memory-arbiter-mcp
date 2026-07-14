@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
@@ -795,13 +796,32 @@ class MemoryDB:
         if not self._db_available:
             return
         with self.write_transaction() as conn:
-            existing = {r["key"] for r in conn.execute("SELECT key FROM _vec_index_meta").fetchall()}
-            if "state" in existing:
-                return  # already initialized
-
             if not has_managed_embedder or embedding_space_id is None:
                 self._set_meta(conn, "state", "unmanaged")
                 return
+
+            rows = conn.execute("SELECT key, value FROM _vec_index_meta").fetchall()
+            meta = {str(r["key"]): str(r["value"]) for r in rows}
+            state = meta.get("state")
+            active_space_id = meta.get("active_space_id")
+            target_space_id = meta.get("target_space_id")
+
+            # Reconcile the persisted state with the embedder loaded by this
+            # process.  Returning merely because ``state`` exists would leave
+            # a database marked ready after the model (and vector space) has
+            # changed.
+            if active_space_id == embedding_space_id:
+                self._set_meta(conn, "state", "ready")
+                for key in (
+                    "target_space_id", "migration_cursor", "migration_epoch",
+                    "migration_lease_owner", "migration_lease_expires_at",
+                    "last_error",
+                ):
+                    self._delete_meta(conn, key)
+                return
+
+            if state in {"mismatch", "failed"} and target_space_id == embedding_space_id:
+                return  # resume the existing migration and preserve its cursor
 
             # Check if vec tables have data
             mem_vec_count = conn.execute("SELECT COUNT(*) AS c FROM memories_vec").fetchone()["c"]
@@ -811,14 +831,22 @@ class MemoryDB:
             except sqlite3.Error:
                 pass
 
-            if mem_vec_count == 0 and sec_vec_count == 0:
+            if not active_space_id and mem_vec_count == 0 and sec_vec_count == 0:
                 # Fresh install — trust current embedder
                 self._set_meta(conn, "state", "ready")
                 self._set_meta(conn, "active_space_id", embedding_space_id)
+                self._delete_meta(conn, "target_space_id")
             else:
-                # Existing vectors of unknown origin — require rebuild
+                # Existing/previous vectors belong to an unknown or different
+                # space.  Start a fresh migration towards the current model.
                 self._set_meta(conn, "state", "mismatch")
                 self._set_meta(conn, "target_space_id", embedding_space_id)
+                self._set_meta(conn, "migration_epoch", uuid.uuid4().hex)
+                for key in (
+                    "migration_cursor", "migration_lease_owner",
+                    "migration_lease_expires_at", "last_error",
+                ):
+                    self._delete_meta(conn, key)
 
     # ---- Section CRUD ----
 

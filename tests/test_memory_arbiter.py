@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -37,6 +38,22 @@ def make_tools(tmp_path: Path) -> MemoryTools:
         agent_id="agent-a",
         workspace="repo-a",
         enable_sqlite_vec=False,
+    )
+    return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def make_vec_tools(tmp_path: Path) -> MemoryTools:
+    pytest.importorskip("sqlite_vec")
+    settings = Settings(
+        db_path=tmp_path / "memory-vec.sqlite3",
+        backup_jsonl=tmp_path / "backup-vec.jsonl",
+        client="codex",
+        agent_id="agent-a",
+        workspace="repo-a",
+        enable_sqlite_vec=True,
+        vec_dim=2,
+        split_enabled=True,
+        split_threshold=1,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
@@ -1571,3 +1588,149 @@ def test_get_memory_invalid_id_type(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert "must be an integer" in result["data"]["error"]
+
+
+# --------------------------------------------------------------------------- #
+# v0.6.0 — section split / vector-space regression coverage
+# --------------------------------------------------------------------------- #
+
+
+def test_vec_state_detects_model_change_and_preserves_resume_cursor(tmp_path: Path) -> None:
+    tools = make_vec_tools(tmp_path)
+    with tools.db.write_transaction() as conn:
+        MemoryDB._set_meta(conn, "state", "ready")
+        MemoryDB._set_meta(conn, "active_space_id", "space-a")
+
+    tools.db.init_vec_index_state("space-b", True)
+    changed = tools.db.get_vec_index_state()
+    assert changed["state"] == "mismatch"
+    assert changed["active_space_id"] == "space-a"
+    assert changed["target_space_id"] == "space-b"
+    assert changed["migration_epoch"]
+
+    with tools.db.write_transaction() as conn:
+        MemoryDB._set_meta(conn, "migration_cursor", "7")
+    tools.db.init_vec_index_state("space-b", True)
+    resumed = tools.db.get_vec_index_state()
+    assert resumed["state"] == "mismatch"
+    assert resumed["migration_cursor"] == 7
+
+
+def test_memory_search_disables_vec_during_space_mismatch(tmp_path: Path) -> None:
+    tools = make_vec_tools(tmp_path)
+    called = False
+
+    def unexpected_vec_knn(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    tools.db.vec_knn = unexpected_vec_knn  # type: ignore[method-assign]
+    with tools.db.write_transaction() as conn:
+        MemoryDB._set_meta(conn, "state", "mismatch")
+        MemoryDB._set_meta(conn, "active_space_id", "space-a")
+        MemoryDB._set_meta(conn, "target_space_id", "space-b")
+
+    result = tools.memory_search(
+        query="no lexical match expected",
+        query_embedding=[1.0, 0.0],
+    )
+
+    assert called is False
+    assert "vec_disabled=embedding_space_mismatch" in result["warnings"]
+
+
+def test_rebuild_embeddings_advances_cursor_and_finishes_migration(tmp_path: Path) -> None:
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _MockManagedEmbedder(lambda _text: [1.0, 0.0])
+    tools._embedder_loaded = True
+    memory_id = tools.memory_write(content="semantic body", subject="subject")["data"]["id"]
+    stored, warnings = tools.db.store_embedding(memory_id, [0.0, 1.0])
+    assert stored is True, warnings
+    with tools.db.write_transaction() as conn:
+        MemoryDB._set_meta(conn, "state", "mismatch")
+        MemoryDB._set_meta(conn, "active_space_id", "space-a")
+        MemoryDB._set_meta(conn, "target_space_id", "mock_space_id")
+
+    result = tools.memory_rebuild_embeddings(dry_run=False, batch_size=50)
+
+    assert result["ok"] is True
+    assert result["data"]["processed"] == 1
+    assert result["data"]["succeeded"] == 1
+    assert result["data"]["global_state"] == "ready"
+    state = tools.db.get_vec_index_state()
+    assert state["active_space_id"] == "mock_space_id"
+    assert state["target_space_id"] is None
+    assert state["migration_cursor"] is None
+
+
+def test_split_rejects_stale_snapshot_without_overwriting_decline(tmp_path: Path) -> None:
+    tools = make_vec_tools(tmp_path)
+    written = tools.memory_write(
+        content="first section\nsecond section",
+        subject="split target",
+        metadata={"keep": "yes"},
+    )
+    memory_id = written["data"]["id"]
+    with tools.db.write_transaction() as conn:
+        MemoryDB._set_meta(conn, "state", "ready")
+        MemoryDB._set_meta(conn, "active_space_id", "mock_space_id")
+    memory = tools.db.get_memory(memory_id)
+    snapshot = {
+        "decision_content_hash": hashlib.sha256(memory["content"].encode("utf-8")).hexdigest(),
+        "decision_memory_version": memory["version"],
+        "decision_split_status": memory["split_status"],
+        "decision_split_revision": memory["split_revision"],
+    }
+    declined = tools.memory_split(memory_id=memory_id, split_decision="decline", **snapshot)
+    assert declined["ok"] is True
+
+    stale = tools.memory_split(
+        memory_id=memory_id,
+        split_decision="split",
+        sections=[
+            {"title": "first"},
+            {"title": "second", "anchor_text": "missing anchor", "occurrence_index": 0},
+        ],
+        **snapshot,
+    )
+
+    assert stale["ok"] is False
+    assert stale["data"]["error"] == "split_revision_conflict"
+    current = tools.db.get_memory(memory_id)
+    assert current["split_status"] == "declined"
+    assert current["split_revision"] == 1
+    assert current["metadata"] == {"keep": "yes"}
+
+
+def test_split_failure_merges_error_into_existing_metadata(tmp_path: Path) -> None:
+    tools = make_vec_tools(tmp_path)
+    written = tools.memory_write(
+        content="first section\nsecond section",
+        metadata={"keep": "yes", "nested": {"value": 1}},
+    )
+    memory_id = written["data"]["id"]
+    with tools.db.write_transaction() as conn:
+        MemoryDB._set_meta(conn, "state", "ready")
+        MemoryDB._set_meta(conn, "active_space_id", "mock_space_id")
+    memory = tools.db.get_memory(memory_id)
+
+    failed = tools.memory_split(
+        memory_id=memory_id,
+        split_decision="split",
+        decision_content_hash=hashlib.sha256(memory["content"].encode("utf-8")).hexdigest(),
+        decision_memory_version=memory["version"],
+        decision_split_status=memory["split_status"],
+        decision_split_revision=memory["split_revision"],
+        sections=[
+            {"title": "first"},
+            {"title": "second", "anchor_text": "missing anchor", "occurrence_index": 0},
+        ],
+    )
+
+    assert failed["ok"] is False
+    current = tools.db.get_memory(memory_id)
+    assert current["split_status"] == "failed"
+    assert current["metadata"]["keep"] == "yes"
+    assert current["metadata"]["nested"] == {"value": 1}
+    assert current["metadata"]["_split"]["last_split_error"]["stage"] == "validation"
