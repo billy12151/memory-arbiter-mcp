@@ -95,6 +95,10 @@ class MemoryTools:
                             prefix=record.subject or "",
                             body=record.content,
                         )
+                        if not er.embedding:
+                            raise RuntimeError(
+                                f"encode returned empty embedding: {getattr(embedder, 'last_encode_error', None) or 'unknown'}"
+                            )
                         data["embedding_stored"], store_warnings = self.db.store_embedding(memory_id, er.embedding)
                         embedding_warnings.extend(store_warnings)
                         if er.truncated:
@@ -143,7 +147,12 @@ class MemoryTools:
             if embedder is not None:
                 try:
                     er = embedder.embed_text(prefix="", body=query)
-                    query_embedding = er.embedding
+                    if er.embedding:
+                        query_embedding = er.embedding
+                    else:
+                        extra_warnings.append(
+                            f"auto-embedding query failed: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
+                        )
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
         results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
@@ -426,6 +435,10 @@ class MemoryTools:
                         prefix=updated.get("subject") or "",
                         body=updated.get("content") or "",
                     )
+                    if not embedding_result.embedding:
+                        raise RuntimeError(
+                            f"encode returned empty embedding: {getattr(embedder, 'last_encode_error', None) or 'unknown'}"
+                        )
                     embedding_stored, store_warnings = self.db.store_embedding(int(memory_id), embedding_result.embedding)
                     embedding_warnings.extend(store_warnings)
                     if not embedding_stored:
@@ -971,6 +984,10 @@ class MemoryTools:
                 body = content[sec["start_offset"]:sec["end_offset"]]
                 try:
                     er = embedder.embed_text(prefix=title_path, body=body, max_body_chars=max_section_chars)
+                    if not er.embedding:
+                        raise RuntimeError(
+                            f"section {i}: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
+                        )
                     section_embeddings.append((i, er.embedding, int(er.truncated), er.original_tokens, er.used_tokens, True))
                 except Exception as exc:
                     if split_decision == "split":
@@ -1242,6 +1259,10 @@ class MemoryTools:
                         prefix=mem.get("subject") or "",
                         body=mem.get("content") or "",
                     )
+                    if not er.embedding:
+                        raise RuntimeError(
+                            f"memory {mid}: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
+                        )
 
                     # Section embeddings
                     sections = MemoryDB._get_sections(conn, mid)
@@ -1251,6 +1272,10 @@ class MemoryTools:
                         title_path = sec.get("title_path") or sec.get("title") or ""
                         body = content[sec["start_offset"]:sec["end_offset"]]
                         sec_er = embedder.embed_text(prefix=title_path, body=body, max_body_chars=max_section_chars)
+                        if not sec_er.embedding:
+                            raise RuntimeError(
+                                f"section {sec['id']}: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
+                            )
                         sec_embeddings.append((sec["id"], sec_er))
 
                     # Write

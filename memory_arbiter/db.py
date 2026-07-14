@@ -383,6 +383,8 @@ class MemoryDB:
             return False, ["SQLite write unavailable; embedding not stored."]
         if not self.state.sqlite_vec_available:
             return False, ["sqlite-vec unavailable; embedding not stored."]
+        if not embedding:
+            return False, ["embedding is empty (encode failed); not stored."]
         try:
             with self.connection() as conn:
                 conn.execute("DELETE FROM memories_vec WHERE id = ?", (memory_id,))
@@ -890,6 +892,8 @@ class MemoryDB:
         section_id: int,
         embedding: list[float],
     ) -> None:
+        if not embedding:
+            raise ValueError("section embedding is empty (encode failed)")
         conn.execute(
             "DELETE FROM memory_sections_vec WHERE id = ?", (section_id,)
         )

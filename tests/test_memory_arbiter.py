@@ -19,18 +19,28 @@ from memory_arbiter.tools import MemoryTools
 
 
 class _MockManagedEmbedder:
-    """Minimal mock for ManagedEmbedder — wraps a plain encode function."""
+    """Minimal mock for ManagedEmbedder — wraps a plain encode function.
+
+    Mirrors the production Never-raises contract: if _encode raises, the
+    exception is caught, last_encode_error is set, and an empty EmbedResult
+    is returned so callers must check er.embedding.
+    """
 
     def __init__(self, encode_fn):
         self._encode = encode_fn
         self.embedding_space_id = "mock_space_id"
+        self.last_encode_error = None
 
     def embed_text(self, prefix="", body="", max_body_chars=None):
         # Mirror the production separator so the prefix's trailing token and the
         # body's leading token are not merged (e.g. "alpha"+"alpha x" → "alphaalpha").
         sep = "\n" if prefix and body else ""
         text = (prefix + sep + body).strip()
-        emb = self._encode(text)
+        try:
+            emb = self._encode(text)
+        except Exception as exc:
+            self.last_encode_error = str(exc)
+            return EmbedResult(embedding=[], truncated=True, original_tokens=0, used_tokens=0)
         return EmbedResult(embedding=emb, truncated=False, original_tokens=0, used_tokens=0)
 
 
@@ -1973,3 +1983,82 @@ def test_split_single_batch_ignores_legacy_batch_params(tmp_path: Path) -> None:
     # New single-batch response has no batch_count / llm_batch_chars fields.
     assert "batch_count" not in prepared["data"]
     assert "llm_batch_chars" not in prepared["data"]
+
+
+def test_empty_embedding_not_stored_on_write_and_search(tmp_path: Path) -> None:
+    """Never-raises contract: when embed_text returns an empty embedding (encode
+    failure), memory_write must not store it and memory_search must not open the
+    vec gate.  Does not require sqlite-vec.
+    """
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "model.gguf",
+        embedding_auto_write=True,
+        embedding_auto_query=True,
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+
+    def bad_encode(_text: str) -> list[float]:
+        raise RuntimeError("model crashed")
+
+    failing = _MockManagedEmbedder(bad_encode)
+    tools._ensure_embedder = lambda: (failing, [])  # type: ignore[method-assign]
+
+    # ---- memory_write: empty embedding must not be stored ----
+    written = tools.memory_write(content="body text", subject="subject")
+    assert written["ok"] is True
+    assert written["data"].get("embedding_stored") is not True
+    assert any("auto-embedding write failed" in w for w in written["warnings"])
+
+    # ---- memory_search: empty query embedding must not be used ----
+    result = tools.memory_search(query="anything", query_embedding=None)
+    assert result["ok"] is True
+    assert any("auto-embedding query failed" in w for w in result["warnings"])
+
+
+def test_empty_embedding_rejects_split_publish(tmp_path: Path) -> None:
+    """Never-raises contract: when section embed_text returns empty, the split
+    publish must be rejected and no sections/vecs written.
+    """
+    pytest.importorskip("sqlite_vec")
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    memory_id = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    _set_vec_ready(tools)
+
+    # Prepare with a working embedder (no embedding needed for prepare).
+    mem = tools.db.get_memory(memory_id)
+    prepared = tools.memory_split(memory_id=memory_id)
+    assert prepared["ok"] is True
+
+    # Switch to a failing embedder for the publish step.
+    def bad_encode(_text: str) -> list[float]:
+        raise RuntimeError("model crashed")
+
+    failing = _MockManagedEmbedder(bad_encode)
+    tools._ensure_embedder = lambda: (failing, [])  # type: ignore[method-assign]
+
+    rejected = tools.memory_split(
+        memory_id=memory_id,
+        split_decision="split",
+        decision_content_hash=hashlib.sha256(mem["content"].encode("utf-8")).hexdigest(),
+        decision_memory_version=mem["version"],
+        decision_split_status=mem["split_status"],
+        decision_split_revision=mem["split_revision"],
+        sections=[
+            {"title": "alpha"},
+            {"title": "beta", "anchor_text": "beta", "occurrence_index": 0},
+        ],
+    )
+    assert rejected["ok"] is False
+    assert "section embedding failed" in rejected["data"]["error"]
+    # No sections or section vecs written.
+    assert tools.db.get_sections_by_memory(memory_id) == []
+    with tools.db.connection() as conn:
+        vec_ids = MemoryDB._get_section_vec_ids(conn, memory_id)
+    assert len(vec_ids) == 0
