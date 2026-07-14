@@ -158,6 +158,59 @@ def build_server() -> Any:
             authorized=authorized,
         )
 
+    # ── v0.6.0: Section split tools ──
+
+    @app.tool()
+    def memory_split(
+        memory_id: int,
+        split_decision: Optional[str] = None,
+        decision_content_hash: Optional[str] = None,
+        decision_memory_version: Optional[int] = None,
+        decision_split_status: Optional[str] = None,
+        decision_split_revision: Optional[int] = None,
+        sections: Optional[list[dict]] = None,
+        prepare_batch_index: int = 0,
+        llm_batch_chars: int = 12000,
+    ) -> dict[str, Any]:
+        """长文分段工具（v0.6.0，分段唯一入口）。两阶段：首次调用返回原文+schema供外部 LLM 生成段落信息；二次提交验证 offset 并原子发布段落+向量。split_decision: None=首次/取批, "split"=发布, "decline"=拒绝, "rebuild"=重建。"""
+        return tools.memory_split(
+            memory_id=memory_id,
+            split_decision=split_decision,
+            decision_content_hash=decision_content_hash,
+            decision_memory_version=decision_memory_version,
+            decision_split_status=decision_split_status,
+            decision_split_revision=decision_split_revision,
+            sections=sections,
+            prepare_batch_index=prepare_batch_index,
+            llm_batch_chars=llm_batch_chars,
+        )
+
+    @app.tool()
+    def get_sections(
+        memory_id: int,
+        section_ids: Optional[list[int]] = None,
+    ) -> dict[str, Any]:
+        """获取指定 section 的完整原文片段（content[start_offset:end_offset]）+ 元数据。section_ids 为空时返回该 memory 的全部 sections。"""
+        return tools.get_sections(memory_id=memory_id, section_ids=section_ids)
+
+    @app.tool()
+    def memory_split_status(memory_id: int) -> dict[str, Any]:
+        """查看某条记忆的分段状态、section 目录、content hash 和全局向量索引状态。"""
+        return tools.memory_split_status(memory_id=memory_id)
+
+    @app.tool()
+    def memory_rebuild_embeddings(
+        memory_ids: Optional[list[int]] = None,
+        dry_run: bool = True,
+        batch_size: Optional[int] = 50,
+    ) -> dict[str, Any]:
+        """批量重建向量（v0.6.0）。用于 embedding 模型切换后的向量层迁移，或 ready 状态下的局部修复。不需要 LLM 调用——只重算向量。dry_run=True 只返回清单不执行。"""
+        return tools.memory_rebuild_embeddings(
+            memory_ids=memory_ids,
+            dry_run=dry_run,
+            batch_size=batch_size,
+        )
+
     return app
 
 

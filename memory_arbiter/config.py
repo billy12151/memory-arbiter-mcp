@@ -47,6 +47,13 @@ class Settings:
     embedding_model_path: Optional[Path] = None
     embedding_auto_query: bool = True
     embedding_auto_write: bool = True
+    # ── Section split (v0.6.0, advanced feature, all default off) ──
+    split_enabled: bool = False
+    split_threshold: int = 4000
+    section_vec_distance_threshold: float = 0.7
+    section_fulltext_threshold: float = 0.8
+    max_sections: int = 50
+    max_section_chars: int = 3600
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -65,6 +72,11 @@ class Settings:
             config_warnings.append(f"embedding={emb_cfg!r} invalid; using env/defaults")
             emb_cfg = {}
         emb_cfg = {str(k): v for k, v in emb_cfg.items() if not str(k).startswith("_")}
+        split_cfg = cfg.get("split") or {}
+        if not isinstance(split_cfg, dict):
+            config_warnings.append(f"split={split_cfg!r} invalid; using env/defaults")
+            split_cfg = {}
+        split_cfg = {str(k): v for k, v in split_cfg.items() if not str(k).startswith("_")}
 
         def pick_str(cfg_key: str, env_key: str, default: str) -> str:
             try:
@@ -103,6 +115,14 @@ class Settings:
             env_val = os.getenv(env_key, default_str)
             return parse_bool_warn(env_val, default_bool, name=name, warnings=config_warnings)
 
+        def pick_float_field(cfg_val: Any, env_key: str, default: float, name: str) -> float:
+            if cfg_val is not None:
+                return parse_float(cfg_val, default, name=name, warnings=config_warnings)
+            env_val = os.getenv(env_key)
+            if env_val is not None:
+                return parse_float(env_val, default, name=name, warnings=config_warnings)
+            return default
+
         embedding_model_raw = emb_cfg.get("model_path") or os.getenv("MEMORY_ARBITER_EMBEDDING_MODEL_PATH") or os.getenv("MEMORY_ARBITER_GGUF")
         embedding_provider_raw = emb_cfg.get("provider") or os.getenv("MEMORY_ARBITER_EMBEDDING_PROVIDER") or ("gguf" if embedding_model_raw else None)
         embedding_provider = str(embedding_provider_raw).lower() if embedding_provider_raw else None
@@ -129,6 +149,24 @@ class Settings:
             ),
             embedding_auto_write=pick_bool_field(
                 emb_cfg.get("auto_write"), "MEMORY_ARBITER_EMBEDDING_AUTO_WRITE", "true", name="embedding.auto_write", default_bool=True
+            ),
+            split_enabled=pick_bool_field(
+                split_cfg.get("enabled"), "MEMORY_ARBITER_SPLIT_ENABLED", "false", name="split.enabled", default_bool=False
+            ),
+            split_threshold=pick_int_field(
+                split_cfg.get("threshold"), "MEMORY_ARBITER_SPLIT_THRESHOLD", 4000, name="split.threshold"
+            ),
+            section_vec_distance_threshold=pick_float_field(
+                split_cfg.get("section_vec_distance_threshold"), "MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD", 0.7, name="split.section_vec_distance_threshold"
+            ),
+            section_fulltext_threshold=pick_float_field(
+                split_cfg.get("section_fulltext_threshold"), "MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD", 0.8, name="split.section_fulltext_threshold"
+            ),
+            max_sections=pick_int_field(
+                split_cfg.get("max_sections"), "MEMORY_ARBITER_MAX_SECTIONS", 50, name="split.max_sections"
+            ),
+            max_section_chars=pick_int_field(
+                split_cfg.get("max_section_chars"), "MEMORY_ARBITER_MAX_SECTION_CHARS", 3600, name="split.max_section_chars"
             ),
         )
         settings.config_warnings = config_warnings
@@ -185,6 +223,15 @@ def parse_bool_warn(val: Any, default: bool, name: str = "", warnings: Optional[
 def parse_int(val: Any, default: int, name: str = "", warnings: Optional[list[str]] = None) -> int:
     try:
         return int(val)
+    except (TypeError, ValueError):
+        if warnings is not None and val is not None:
+            warnings.append(f"{name}={val!r} invalid; using default {default}")
+        return default
+
+
+def parse_float(val: Any, default: float, name: str = "", warnings: Optional[list[str]] = None) -> float:
+    try:
+        return float(val)
     except (TypeError, ValueError):
         if warnings is not None and val is not None:
             warnings.append(f"{name}={val!r} invalid; using default {default}")

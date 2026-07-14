@@ -131,15 +131,15 @@ This isn't about *having* data (a static asset). It's about **factual command** 
 
 ### Quick Start
 
-**Requirements**: Python 3.11+
+**Requirements**: Python 3.11+ (3.11, 3.12, or 3.13 — any of them works).
 
 ```bash
 # Clone
 git clone https://github.com/billy12151/memory-arbiter-mcp.git
 cd memory-arbiter-mcp
 
-# Setup
-python3.11 -m venv .venv
+# Setup — use whichever python3.1x you have (>=3.11). No python3.11? Use python3.12 / python3.13.
+python3.11 -m venv .venv        # or: python3.12 / python3.13
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
@@ -232,8 +232,10 @@ Or, zero-install via `uvx` (no local clone needed):
 | `memory_history` | (v0.4.0) View the version chain (historical snapshots) of a memory, newest version first. Read-only. |
 | `memory_cleanup_history` | (v0.4.0) Delete historical snapshots from `memory_history` (never touches active records). Per-memory / by-age / full; full cleanup requires `authorized=true`. |
 | `memory_status` | Show current mode, degradation status, storage paths |
-
-### Information storage rules (feed this to your agent)
+| `memory_split` | (v0.6.0) Split a long memory into sections for paragraph-level retrieval. Two-phase: prepare returns content batches for an external LLM; publish validates and atomically publishes sections + vectors. Requires sqlite-vec + GGUF embedding + `split.enabled`. |
+| `get_sections` | (v0.6.0) Get full text + metadata of specific sections by ID. Use after `memory_search` returns `matched_sections` to fetch only the relevant paragraphs. |
+| `memory_split_status` | (v0.6.0) Check a memory's section-split status, section catalog, and global vector index state. |
+| `memory_rebuild_embeddings` | (v0.6.0) Batch-rebuild all embeddings after switching embedding models. Processes memory-level + section-level vectors. No LLM needed. | (feed this to your agent)
 
 If your client also keeps local markdown (ZCode's `MEMORY.md`, Codex's `AGENTS.md`, etc.), paste this rule into your agent's instructions so it knows what to write where:
 
@@ -298,6 +300,85 @@ After configuration, normal `memory_search(query="...")` can generate the query 
 | Top-3 hit rate | 60.0% | 66.7% | **73.3%** |
 | Pairwise pass rate | 77.8% | 88.9% | **100.0%** |
 
+### Optional: Long-Document Section Split (v0.6.0)
+
+When a memory exceeds `split.threshold` (default 4000 chars), `memory_search` returns the entire content — potentially tens of thousands of tokens. Section split solves this by dividing long documents into semantic sections with per-section vectors, so `memory_search` returns only the relevant section metadata (`matched_sections`) instead of the full text. Full design spec: [`docs/section-split-design.md`](docs/section-split-design.md).
+
+**Prerequisites (all required):**
+1. Semantic recall configured — sqlite-vec + GGUF embedding (see above)
+2. `split.enabled = true` in `config.json`
+3. `_vec_index_meta.state == ready` (verify with `memory_status`)
+4. An external LLM to generate section titles, summaries, and boundary anchors
+
+**How it works:**
+
+```
+memory_write(long_doc)
+  → saves content normally; response includes split_hint if > threshold
+  → split_hint is just a suggestion — content is already saved, no data loss
+
+memory_split(memory_id)                    ← prepare, no DB writes
+  → returns content in safe batches (llm_batch_chars) + section schema
+  → Agent sends each batch to external LLM → gets back title/summary/anchor
+
+memory_split(memory_id, split_decision="split", sections=[...])
+  → arbiter validates offsets deterministically (never trusts LLM offsets)
+  → generates per-section embeddings (hard prerequisite — all must succeed)
+  → atomically publishes sections + vectors, sets split_status=active
+
+memory_search("query")
+  → recall works the same (5 channels, no new recall path)
+  → for active-split memories: section Vec matching finds relevant paragraphs
+  → returns matched_sections (title+summary only) + section_catalog
+  → content=null, content_omitted=true → saves tokens
+
+get_sections(memory_id, [section_id, ...])  ← fetch specific paragraphs
+memory_get(memory_id)                       ← fetch full text if needed
+```
+
+**Vec gate closed** (model migration, space mismatch, query embedding failure): `memory_search` returns the full text with `section_enhancement_applied=false` — search capability never degrades, section enhancement is purely additive.
+
+**Configuration** (`config.json` `split` section):
+
+| JSON path | Env fallback | Default | Description |
+|---|---|---|---|
+| `split.enabled` | `MEMORY_ARBITER_SPLIT_ENABLED` | `false` | Master switch. All prerequisites must also be met. |
+| `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | Min char count to trigger split hint. |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.7` | Cosine distance cutoff for section matching. ⚠️ **Calibrate before production.** |
+| `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | When ≥80% of sections match, return full text. |
+| `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory. Min is 2 (fewer = pointless). |
+| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding body (truncation tracked). |
+
+**Example `config.json` with split enabled:**
+
+```json
+{
+  "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
+  "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
+  "vec": { "enabled": true, "dim": 768 },
+  "embedding": {
+    "provider": "gguf",
+    "model_path": "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
+    "auto_query": true,
+    "auto_write": true
+  },
+  "split": {
+    "enabled": true,
+    "threshold": 4000,
+    "section_vec_distance_threshold": 0.7,
+    "section_fulltext_threshold": 0.8,
+    "max_sections": 50,
+    "max_section_chars": 3600
+  }
+}
+```
+
+**Important notes:**
+- `section_vec_distance_threshold` (0.7) is a development placeholder. Before production use, calibrate with real query-section pairs (see design doc §5). If the threshold is wrong, section split provides no value.
+- `memory_edit` on content clears all sections and resets `split_status` to NULL. Re-split with `memory_split` if needed.
+- After switching embedding models, run `memory_rebuild_embeddings(dry_run=True)` to preview impact, then `memory_rebuild_embeddings(dry_run=False, batch_size=50)` to rebuild all vectors.
+- Default is **off**. If your memories are mostly short notes, code snippets, or conversation summaries, don't enable this — the overhead (LLM calls + embedding generation) isn't worth it.
+
 ### Configuration
 
 Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbiter/config.json`, then environment variables/defaults. **Durable vector/model settings belong in the config file** so they survive MCP client reinstall/migration; each row below shows the JSON path and its env fallback (config file wins when both are set). Environment variables are still useful for simple client identity and CI overrides. Full explanations in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
@@ -317,6 +398,12 @@ Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbi
 | `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` (or legacy `MEMORY_ARBITER_GGUF`) | _(none)_ | Path to the GGUF embedding model. |
 | `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | Auto-encode plain-text queries for semantic recall. |
 | `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | Auto-embed new writes/edits so they enter semantic recall immediately. |
+| `split.enabled` | `MEMORY_ARBITER_SPLIT_ENABLED` | `false` | Enable long-document section split (v0.6.0). Requires vec + embedding configured. See [Section Split](#optional-long-document-section-split-v060). |
+| `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | Min char count to trigger section split. |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.7` | Section Vec cosine distance cutoff. ⚠️ Calibrate before production. |
+| `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | Return full text when ≥X% of sections match. |
+| `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory (min 2). |
+| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding input. |
 
 **Environment variables** — keep per-client identity in each MCP client's env block. Some fields also have config-file equivalents, but config wins; use env here when the value must differ by client/session.
 
@@ -481,15 +568,15 @@ AI 模型的能力正在同步收敛。GPT-4o、Claude 3.5、Gemini 1.5、Llama 
 
 ### 快速开始
 
-**要求**：Python 3.11+
+**要求**：Python 3.11+（3.11、3.12、3.13 均可）。
 
 ```bash
 # 克隆
 git clone https://github.com/billy12151/memory-arbiter-mcp.git
 cd memory-arbiter-mcp
 
-# 安装
-python3.11 -m venv .venv
+# 安装 —— 用你机器上任意一个 3.11 及以上的 python 即可；没有 3.11 就用 3.12 / 3.13
+python3.11 -m venv .venv        # 也可：python3.12 / python3.13
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
@@ -547,8 +634,6 @@ uvx --from memory-arbiter-mcp memory-arbiter
   }
 }
 ```
-}
-```
 
 > 每个工具改一下 `MEMORY_ARBITER_CLIENT` 标识（`openclaw`、`zcode`、`codex`、`cursor`、`claude-code`）。共享路径、向量、模型配置放 `~/.config/memory-arbiter/config.json`；每客户端身份放 MCP env 段。如果不用配置文件，再把 `MEMORY_ARBITER_DB_PATH` 放到每个客户端 env，并指向同一个 SQLite 文件。（OpenDesign 这类 GUI 工具继承宿主 CLI 的配置，不需要单独的 client 名称。）
 
@@ -584,6 +669,10 @@ uvx --from memory-arbiter-mcp memory-arbiter
 | `memory_history` | （v0.4.0）查看一条记忆的版本演化轨迹（历史快照，按版本号倒序）。只读。 |
 | `memory_cleanup_history` | （v0.4.0）清理历史表快照（**绝不碰活跃记录**）。支持单条 / 按时间 / 全量；全量清理需 `authorized=true`。 |
 | `memory_status` | 查看运行状态、模式、降级原因 |
+| `memory_split` | （v0.6.0）将长记忆分段，实现段落级检索。两阶段：prepare 返回内容批次供外部 LLM 生成段落信息；publish 验证偏移量并原子发布段落 + 向量。需 sqlite-vec + GGUF embedding + `split.enabled`。 |
+| `get_sections` | （v0.6.0）按 section ID 获取段落完整原文 + 元数据。`memory_search` 返回 `matched_sections` 后，用此工具取相关段落原文，不必拉取整篇文档。 |
+| `memory_split_status` | （v0.6.0）查看某条记忆的分段状态、段落目录、全局向量索引状态。 |
+| `memory_rebuild_embeddings` | （v0.6.0）切换 embedding 模型后批量重建所有向量（memory 级 + section 级）。不需要 LLM，只重算向量。 |
 
 ### 信息存储规则（喂给你的 Agent）
 
@@ -650,6 +739,85 @@ uvx --from memory-arbiter-mcp memory-arbiter
 | Top-3 命中率 | 60.0% | 66.7% | **73.3%** |
 | Pairwise 通过率 | 77.8% | 88.9% | **100.0%** |
 
+### 可选：长文分段检索（v0.6.0）
+
+当一条记忆超过 `split.threshold`（默认 4000 字符）时，`memory_search` 会返回完整原文——可能几万个 token。分段功能把长文档按语义切成多个 section，每个 section 独立向量化，`memory_search` 只返回最相关段落的元数据（`matched_sections`），不再返回全文。完整设计见 [`docs/section-split-design.md`](docs/section-split-design.md)。
+
+**前置条件（全部满足才能生效）：**
+1. 已配置语义检索——sqlite-vec + GGUF embedding（见上方）
+2. `config.json` 中 `split.enabled = true`
+3. `_vec_index_meta.state == ready`（用 `memory_status` 确认）
+4. 有外部 LLM 可用于生成段落标题、摘要和边界锚点
+
+**工作流程：**
+
+```
+memory_write(长文档)
+  → 正常入库；超过阈值时返回里带 split_hint 建议分段
+  → split_hint 只是建议——原文已保存，不丢数据
+
+memory_split(memory_id)                    ← prepare，不写库
+  → 按安全批次（llm_batch_chars）返回正文 + section schema
+  → Agent 把每批发给外部 LLM → 拿回 title/summary/anchor
+
+memory_split(memory_id, split_decision="split", sections=[...])
+  → arbiter 确定性验证偏移量（绝不信任 LLM 的 offset）
+  → 生成每段向量（硬前提——必须全部成功）
+  → 原子发布段落 + 向量，split_status 切 active
+
+memory_search("查询")
+  → 召回路径不变（5 通道，不新增召回通道）
+  → 对 active 分段记忆：section Vec 匹配找出相关段落
+  → 返回 matched_sections（只有 title+summary）+ section_catalog
+  → content=null, content_omitted=true → 省 token
+
+get_sections(memory_id, [section_id, ...])  ← 取特定段落原文
+memory_get(memory_id)                       ← 取全文（需要时）
+```
+
+**Vec 门禁关闭时**（模型迁移、空间不匹配、query embedding 失败）：`memory_search` 直接返回全文，`section_enhancement_applied=false`——检索能力不会退化，分段增强纯粹是加法。
+
+**配置项**（`config.json` 的 `split` 段）：
+
+| JSON 路径 | env 兜底 | 默认值 | 说明 |
+|---|---|---|---|
+| `split.enabled` | `MEMORY_ARBITER_SPLIT_ENABLED` | `false` | 总开关。所有前置条件也必须满足。 |
+| `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | 触发分段提示的最小字符数。 |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.7` | section Vec 余弦距离上限。⚠️ **上线前必须用真实数据校准。** |
+| `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比 ≥80% 时返回全文。 |
+| `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大段数（最小 2）。 |
+| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入的字符上限（超出部分截断，有诊断标记）。 |
+
+**完整配置示例（含分段）：**
+
+```json
+{
+  "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
+  "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
+  "vec": { "enabled": true, "dim": 768 },
+  "embedding": {
+    "provider": "gguf",
+    "model_path": "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
+    "auto_query": true,
+    "auto_write": true
+  },
+  "split": {
+    "enabled": true,
+    "threshold": 4000,
+    "section_vec_distance_threshold": 0.7,
+    "section_fulltext_threshold": 0.8,
+    "max_sections": 50,
+    "max_section_chars": 3600
+  }
+}
+```
+
+**注意事项：**
+- `section_vec_distance_threshold`（0.7）是开发期临时值。上线前必须用真实 query-section 对校准（见设计文档 §5）。阈值不对，分段等于白做。
+- `memory_edit` 改 content 后会清空所有 section 并重置 `split_status` 为 NULL。需要时用 `memory_split` 重新分段。
+- 切换 embedding 模型后，先跑 `memory_rebuild_embeddings(dry_run=True)` 看影响范围，再 `memory_rebuild_embeddings(dry_run=False, batch_size=50)` 批量重建向量。
+- 默认**关闭**。如果你的记忆大部分是短笔记、代码片段、对话摘要，不要开启——LLM 调用 + 向量生成的开销不值得。
+
 ### 配置
 
 配置读取顺序：`MEMORY_ARBITER_CONFIG` 指定文件 → `~/.config/memory-arbiter/config.json` → 环境变量/default。**耐久的向量和模型配置建议放配置文件**，避免 MCP 客户端重装/迁移时丢失；下面每行同时给出 JSON 路径和对应的 env 兜底（两者都设时配置文件优先）。环境变量仍适合简单 client 标识和 CI 覆盖。完整说明见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
@@ -669,6 +837,12 @@ uvx --from memory-arbiter-mcp memory-arbiter
 | `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH`（或 legacy `MEMORY_ARBITER_GGUF`） | _(无)_ | GGUF embedding 模型路径。 |
 | `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | 自动 encode 纯文本查询触发语义检索。 |
 | `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | 新写入/编辑自动灌向量，立即进语义召回。 |
+| `split.enabled` | `MEMORY_ARBITER_SPLIT_ENABLED` | `false` | 开启长文分段检索（v0.6.0）。需 vec + embedding 已配置。详见 [长文分段](#可选长文分段检索v060)。 |
+| `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | 触发分段的最小字符数。 |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.7` | section Vec 余弦距离上限。⚠️ 上线前校准。 |
+| `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比达到此值时返回全文。 |
+| `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大段数（最小 2）。 |
+| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入字符上限。 |
 
 **环境变量**——每客户端身份建议放在各自 MCP env 段。部分字段也有配置文件对应项，但 config 优先；当某个值必须按客户端/会话变化时再放 env。
 

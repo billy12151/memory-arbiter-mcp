@@ -385,9 +385,10 @@ def _wide_recall(
     Returns dedup'd candidate pool (list of dict rows). Each row already has
     its raw fields; soft-rerank will add scoring fields.
     """
-    if db.conn is None or not query:
+    if not db.db_available or not query:
         return []
     pool: dict[int, dict[str, Any]] = {}
+    conn = db._new_connection()
 
     # Channel 1+2: FTS main + OR. _sanitize_fts_query already OR-joins CJK
     # trigrams; for the OR channel we additionally try a loosened query that
@@ -410,7 +411,7 @@ def _wide_recall(
             sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
             params.append(per_channel_cap)
             try:
-                for row in db.conn.execute(sql, params).fetchall():
+                for row in conn.execute(sql, params).fetchall():
                     d = row_to_dict(row)
                     pool[d["id"]] = d
             except Exception:
@@ -433,7 +434,7 @@ def _wide_recall(
                 sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
                 params.append(per_channel_cap)
                 try:
-                    for row in db.conn.execute(sql, params).fetchall():
+                    for row in conn.execute(sql, params).fetchall():
                         d = row_to_dict(row)
                         if d["id"] not in pool:
                             pool[d["id"]] = d
@@ -456,7 +457,7 @@ def _wide_recall(
                   WHERE {' AND '.join(clauses)}
                   ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
                            ingest_time DESC LIMIT ?"""
-        for row in db.conn.execute(sql, params).fetchall():
+        for row in conn.execute(sql, params).fetchall():
             d = row_to_dict(row)
             if d["id"] not in pool:
                 pool[d["id"]] = d
@@ -483,7 +484,7 @@ def _wide_recall(
                       ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
                                ingest_time DESC LIMIT ?"""
             added = 0
-            for row in db.conn.execute(sql, params).fetchall():
+            for row in conn.execute(sql, params).fetchall():
                 d = row_to_dict(row)
                 if d["id"] not in pool:
                     # Mark as content_only candidate for soft-rerank awareness.
@@ -492,6 +493,7 @@ def _wide_recall(
                     added += 1
                     if added >= content_like_cap or len(pool) >= pool_cap:
                         break
+    conn.close()
 
     # Channel 5 (v0.3.1): vec0 KNN — optional semantic recall. Only runs when
     # the caller supplied a query_embedding AND sqlite-vec is available. This
@@ -545,7 +547,7 @@ def _sanitize_fts_query_or(query: str) -> str:
 
 def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None) -> Tuple[list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
-    if db.conn is None:
+    if not db.db_available:
         return [], ["SQLite unavailable; search cannot read JSONL backup in MVP."]
     limit = max(1, min(int(limit), 100))
     query = (query or "").strip()
@@ -605,6 +607,7 @@ def _search_bm25(
 ) -> Tuple[list[dict[str, Any]], list[str]]:
     """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback."""
     rows = []
+    conn = db._new_connection()
     if db.state.fts5_available and query:
         sql = f"""
             SELECT m.*, bm25(memories_fts) AS score
@@ -619,7 +622,7 @@ def _search_bm25(
         sql += " ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
         params.append(limit)
         try:
-            rows = db.conn.execute(sql, params).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         except Exception as exc:
             warnings.append(f"FTS5 query failed: {exc}. Falling back to LIKE search.")
             rows = []
@@ -637,12 +640,13 @@ def _search_bm25(
             clauses.append("tags LIKE ?")
             params.append(f"%{tag}%")
         params.append(limit)
-        rows = db.conn.execute(
+        rows = conn.execute(
             f"SELECT *, 0 AS score FROM memories WHERE {' AND '.join(clauses)} ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END, event_time DESC, ingest_time DESC LIMIT ?",
             params,
         ).fetchall()
         if query and not db.state.fts5_available:
             warnings.append("Using LIKE/keyword search because sqlite-vec and FTS5 are unavailable.")
+    conn.close()
     if query and not rows:
         return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
     out = [row_to_dict(row) for row in rows]
@@ -670,27 +674,31 @@ def _recent_fallback(
         clauses.append("tags LIKE ?")
         params.append(f"%{tag}%")
     params.append(limit)
-    rows = db.conn.execute(
-        f"""SELECT *, 0 AS score FROM memories
-            WHERE {' AND '.join(clauses)}
-            ORDER BY
-              CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
-              CASE protection_level
-                WHEN 'locked' THEN 0
-                WHEN 'protected' THEN 1
-                ELSE 2
-              END,
-              CASE source_type
-                WHEN 'user_confirmed' THEN 0
-                WHEN 'document_extracted' THEN 1
-                ELSE 2
-              END,
-              confidence DESC,
-              ingest_time DESC,
-              event_time DESC
-            LIMIT ?""",
-        params,
-    ).fetchall()
+    conn = db._new_connection()
+    try:
+        rows = conn.execute(
+            f"""SELECT *, 0 AS score FROM memories
+                WHERE {' AND '.join(clauses)}
+                ORDER BY
+                  CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
+                  CASE protection_level
+                    WHEN 'locked' THEN 0
+                    WHEN 'protected' THEN 1
+                    ELSE 2
+                  END,
+                  CASE source_type
+                    WHEN 'user_confirmed' THEN 0
+                    WHEN 'document_extracted' THEN 1
+                    ELSE 2
+                  END,
+                  confidence DESC,
+                  ingest_time DESC,
+                  event_time DESC
+                LIMIT ?""",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
     if rows:
         warnings.append(
             "No direct memory match. Returning recent memories from this workspace; refine keywords, try memory_recent, or compare candidates before reading source files."

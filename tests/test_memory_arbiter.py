@@ -11,8 +11,22 @@ import pytest
 from memory_arbiter.arbitration import compare_memories
 from memory_arbiter.config import Settings, parse_bool
 from memory_arbiter.db import MemoryDB
+from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
+
+
+class _MockManagedEmbedder:
+    """Minimal mock for ManagedEmbedder — wraps a plain encode function."""
+
+    def __init__(self, encode_fn):
+        self._encode = encode_fn
+        self.embedding_space_id = "mock_space_id"
+
+    def embed_text(self, prefix="", body="", max_body_chars=None):
+        text = (prefix + body).strip()
+        emb = self._encode(text)
+        return EmbedResult(embedding=emb, truncated=False, original_tokens=0, used_tokens=0)
 
 
 def make_tools(tmp_path: Path) -> MemoryTools:
@@ -745,12 +759,13 @@ def test_edit_full_replacement_stores_history_and_updates_fts(tmp_path: Path) ->
     mid2 = written2["data"]["id"]
     tools.memory_edit(memory_id=mid2, new_content="alpha platypus final", reason="swap")
 
-    fts_new = [r["rowid"] for r in tools.db.conn.execute(
-        "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'platypus'"
-    ).fetchall()]
-    fts_old = [r["rowid"] for r in tools.db.conn.execute(
-        "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'kangaroo'"
-    ).fetchall()]
+    with tools.db.connection() as fts_conn:
+        fts_new = [r["rowid"] for r in fts_conn.execute(
+            "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'platypus'"
+        ).fetchall()]
+        fts_old = [r["rowid"] for r in fts_conn.execute(
+            "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'kangaroo'"
+        ).fetchall()]
     assert mid2 in fts_new, f"new token not in FTS: {fts_new}"
     assert mid2 not in fts_old, f"old token still in FTS (stale index): {fts_old}"
     # And the live memories row carries the new text (sanity)
@@ -799,10 +814,11 @@ def test_existing_database_is_migrated_to_version_chain_schema(tmp_path: Path) -
         enable_sqlite_vec=False,
     )
     db = MemoryDB(settings)
-    cols = {row["name"] for row in db.conn.execute("PRAGMA table_info(memories)").fetchall()}
-    history_table = db.conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_history'"
-    ).fetchone()
+    with db.connection() as schema_conn:
+        cols = {row["name"] for row in schema_conn.execute("PRAGMA table_info(memories)").fetchall()}
+        history_table = schema_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_history'"
+        ).fetchone()
     record = db.get_memory(1)
 
     assert "version" in cols
@@ -1159,7 +1175,7 @@ def test_auto_embedding_injects_query_embedding(tmp_path: Path, monkeypatch) -> 
         embedding_model_path=tmp_path / "model.gguf",
     )
     tools = MemoryTools(settings=settings, db=MemoryDB(settings))
-    tools._ensure_embedder = lambda: (lambda text: [0.1, 0.2, 0.3], [])  # type: ignore[method-assign]
+    tools._ensure_embedder = lambda: (_MockManagedEmbedder(lambda text: [0.1, 0.2, 0.3]), [])  # type: ignore[method-assign]
     captured = {}
 
     def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None):
@@ -1245,7 +1261,7 @@ def test_memory_write_auto_stores_embedding(tmp_path: Path) -> None:
         embedding_model_path=tmp_path / "model.gguf",
     )
     tools = MemoryTools(settings=settings, db=MemoryDB(settings))
-    tools._ensure_embedder = lambda: (lambda text: [1.0, 2.0], [])  # type: ignore[method-assign]
+    tools._ensure_embedder = lambda: (_MockManagedEmbedder(lambda text: [1.0, 2.0]), [])  # type: ignore[method-assign]
     stored = {}
 
     def fake_store(memory_id: int, embedding: list[float]):
@@ -1271,7 +1287,7 @@ def test_store_embedding_failure_visible(tmp_path: Path) -> None:
         embedding_model_path=tmp_path / "model.gguf",
     )
     tools = MemoryTools(settings=settings, db=MemoryDB(settings))
-    tools._ensure_embedder = lambda: (lambda text: [1.0, 2.0], [])  # type: ignore[method-assign]
+    tools._ensure_embedder = lambda: (_MockManagedEmbedder(lambda text: [1.0, 2.0]), [])  # type: ignore[method-assign]
     tools.db.store_embedding = lambda memory_id, embedding: (False, ["boom"])  # type: ignore[method-assign]
 
     result = tools.memory_write(content="semantic body", subject="semantic subject")
@@ -1291,7 +1307,7 @@ def test_memory_edit_reembeds(tmp_path: Path) -> None:
     )
     tools = MemoryTools(settings=settings, db=MemoryDB(settings))
     written = tools.memory_write(content="old body", subject="old subject")
-    tools._ensure_embedder = lambda: (lambda text: [3.0, 4.0], [])  # type: ignore[method-assign]
+    tools._ensure_embedder = lambda: (_MockManagedEmbedder(lambda text: [3.0, 4.0]), [])  # type: ignore[method-assign]
     stored = {}
 
     def fake_store(memory_id: int, embedding: list[float]):
@@ -1324,7 +1340,7 @@ def test_memory_edit_reembed_failure_deletes_stale(tmp_path: Path) -> None:
         raise RuntimeError("encode failed")
 
     deleted = {}
-    tools._ensure_embedder = lambda: (bad_encode, [])  # type: ignore[method-assign]
+    tools._ensure_embedder = lambda: (_MockManagedEmbedder(bad_encode), [])  # type: ignore[method-assign]
     tools.db.delete_embedding = lambda memory_id: (deleted.setdefault("memory_id", memory_id) is not None, [])  # type: ignore[method-assign]
 
     edited = tools.memory_edit(memory_id=written["data"]["id"], new_content="new body")
@@ -1346,7 +1362,7 @@ def test_memory_edit_store_failure_deletes_stale(tmp_path: Path) -> None:
     tools = MemoryTools(settings=settings, db=MemoryDB(settings))
     written = tools.memory_write(content="old body", subject="old subject")
     deleted = {}
-    tools._ensure_embedder = lambda: (lambda text: [5.0, 6.0], [])  # type: ignore[method-assign]
+    tools._ensure_embedder = lambda: (_MockManagedEmbedder(lambda text: [5.0, 6.0]), [])  # type: ignore[method-assign]
     tools.db.store_embedding = lambda memory_id, embedding: (False, ["store failed"])  # type: ignore[method-assign]
     tools.db.delete_embedding = lambda memory_id: (deleted.setdefault("memory_id", memory_id) is not None, [])  # type: ignore[method-assign]
 
