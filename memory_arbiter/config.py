@@ -53,7 +53,7 @@ class Settings:
     # ── Section split (v0.6.0, advanced feature, all default off) ──
     split_enabled: bool = False
     split_threshold: int = 4000
-    section_vec_distance_threshold: float = 0.7
+    section_vec_distance_threshold: float = 0.42
     section_fulltext_threshold: float = 0.8
     max_sections: int = 50
     max_section_chars: int = 3600
@@ -169,7 +169,7 @@ class Settings:
                 100, 1_000_000, name="split.threshold", warnings=config_warnings,
             ),
             section_vec_distance_threshold=clamp_float(
-                pick_float_field(split_cfg.get("section_vec_distance_threshold"), "MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD", 0.7, name="split.section_vec_distance_threshold"),
+                pick_float_field(split_cfg.get("section_vec_distance_threshold"), "MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD", 0.42, name="split.section_vec_distance_threshold"),
                 0.0, 2.0, name="split.section_vec_distance_threshold", warnings=config_warnings,
             ),
             section_fulltext_threshold=clamp_float(

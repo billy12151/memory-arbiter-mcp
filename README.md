@@ -346,7 +346,7 @@ memory_get(memory_id)                       ← fetch full text if needed
 |---|---|---|---|
 | `split.enabled` | `MEMORY_ARBITER_SPLIT_ENABLED` | `false` | Master switch. All prerequisites must also be met. |
 | `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | Min char count to trigger split hint. |
-| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.7` | Cosine distance cutoff for section matching. ⚠️ **Calibrate before production.** |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | Cosine distance cutoff for section matching (lower = stricter). Calibrated on embeddinggemma-300m: at 0.42, ≥90% of relevant queries hit while ≥90% of irrelevant sections are filtered. **Re-calibrate if you switch embedding models** (run `scripts/calibrate_section_threshold.py`). |
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | When ≥80% of sections match, return full text. |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory. Min is 2 (fewer = pointless). |
 | `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding body (truncation tracked). |
@@ -367,7 +367,7 @@ memory_get(memory_id)                       ← fetch full text if needed
   "split": {
     "enabled": true,
     "threshold": 4000,
-    "section_vec_distance_threshold": 0.7,
+    "section_vec_distance_threshold": 0.42,
     "section_fulltext_threshold": 0.8,
     "max_sections": 50,
     "max_section_chars": 3600
@@ -376,7 +376,7 @@ memory_get(memory_id)                       ← fetch full text if needed
 ```
 
 **Important notes:**
-- `section_vec_distance_threshold` (0.7) is a development placeholder. Before production use, calibrate with real query-section pairs (see design doc §5). If the threshold is wrong, section split provides no value.
+- `section_vec_distance_threshold` (0.42) is calibrated on embeddinggemma-300m (Q8). At this value, ≥90% of relevant queries hit their target section while ≥90% of irrelevant sections are filtered. **If you switch embedding models, re-calibrate** — run `scripts/calibrate_section_threshold.py` with your model and corpus. If the threshold is wrong (too loose), section split provides no filtering; too tight and real matches are missed.
 - `memory_edit` on content clears all sections and resets `split_status` to NULL. Re-split with `memory_split` if needed.
 - After switching embedding models, run `memory_rebuild_embeddings(dry_run=True)` to preview impact, then `memory_rebuild_embeddings(dry_run=False, batch_size=50)` to rebuild all vectors.
 - Default is **off**. If your memories are mostly short notes, code snippets, or conversation summaries, don't enable this — the overhead (LLM calls + embedding generation) isn't worth it.
@@ -402,7 +402,7 @@ Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbi
 | `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | Auto-embed new writes/edits so they enter semantic recall immediately. |
 | `split.enabled` | `MEMORY_ARBITER_SPLIT_ENABLED` | `false` | Enable long-document section split (v0.6.0). Requires vec + embedding configured. See [Section Split](#optional-long-document-section-split-v060). |
 | `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | Min char count to trigger section split. |
-| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.7` | Section Vec cosine distance cutoff. ⚠️ Calibrate before production. |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | Section Vec cosine distance cutoff. Calibrated on embeddinggemma-300m; re-calibrate if you switch models. |
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | Return full text when ≥X% of sections match. |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory (min 2). |
 | `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding input. |
@@ -785,7 +785,7 @@ memory_get(memory_id)                       ← 取全文（需要时）
 |---|---|---|---|
 | `split.enabled` | `MEMORY_ARBITER_SPLIT_ENABLED` | `false` | 总开关。所有前置条件也必须满足。 |
 | `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | 触发分段提示的最小字符数。 |
-| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.7` | section Vec 余弦距离上限。⚠️ **上线前必须用真实数据校准。** |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | section Vec 余弦距离上限（越小越严）。基于 embeddinggemma-300m 校准：0.42 时 ≥90% 相关查询命中、≥90% 无关段落被过滤。**换模型后需重新校准**（跑 `scripts/calibrate_section_threshold.py`）。 |
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比 ≥80% 时返回全文。 |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大段数（最小 2）。 |
 | `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入的字符上限（超出部分截断，有诊断标记）。 |
@@ -806,7 +806,7 @@ memory_get(memory_id)                       ← 取全文（需要时）
   "split": {
     "enabled": true,
     "threshold": 4000,
-    "section_vec_distance_threshold": 0.7,
+    "section_vec_distance_threshold": 0.42,
     "section_fulltext_threshold": 0.8,
     "max_sections": 50,
     "max_section_chars": 3600
@@ -815,7 +815,7 @@ memory_get(memory_id)                       ← 取全文（需要时）
 ```
 
 **注意事项：**
-- `section_vec_distance_threshold`（0.7）是开发期临时值。上线前必须用真实 query-section 对校准（见设计文档 §5）。阈值不对，分段等于白做。
+- `section_vec_distance_threshold`（0.42）基于 embeddinggemma-300m（Q8）校准：在该值下 ≥90% 相关查询命中目标段、≥90% 无关段落被过滤。**换 embedding 模型后必须重新校准**——跑 `scripts/calibrate_section_threshold.py`，用你的模型和语料。阈值太松（如原 0.7）分段等于没过滤；太紧则漏掉真实命中。
 - `memory_edit` 改 content 后会清空所有 section 并重置 `split_status` 为 NULL。需要时用 `memory_split` 重新分段。
 - 切换 embedding 模型后，先跑 `memory_rebuild_embeddings(dry_run=True)` 看影响范围，再 `memory_rebuild_embeddings(dry_run=False, batch_size=50)` 批量重建向量。
 - 默认**关闭**。如果你的记忆大部分是短笔记、代码片段、对话摘要，不要开启——LLM 调用 + 向量生成的开销不值得。
@@ -841,7 +841,7 @@ memory_get(memory_id)                       ← 取全文（需要时）
 | `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | 新写入/编辑自动灌向量，立即进语义召回。 |
 | `split.enabled` | `MEMORY_ARBITER_SPLIT_ENABLED` | `false` | 开启长文分段检索（v0.6.0）。需 vec + embedding 已配置。详见 [长文分段](#可选长文分段检索v060)。 |
 | `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | 触发分段的最小字符数。 |
-| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.7` | section Vec 余弦距离上限。⚠️ 上线前校准。 |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | section Vec 余弦距离上限。基于 embeddinggemma-300m 校准，换模型需重校准。 |
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比达到此值时返回全文。 |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大段数（最小 2）。 |
 | `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入字符上限。 |

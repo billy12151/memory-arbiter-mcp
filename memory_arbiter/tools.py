@@ -570,7 +570,7 @@ class MemoryTools:
             vec_disabled_reason = "gate_closed_state_not_ready"
         else:
             vec_disabled_reason = "vec_extension_unavailable"
-        threshold = getattr(self.settings, "section_vec_distance_threshold", 0.7)
+        threshold = getattr(self.settings, "section_vec_distance_threshold", 0.42)
         fulltext_threshold = getattr(self.settings, "section_fulltext_threshold", 0.8)
 
         active_ids = [
