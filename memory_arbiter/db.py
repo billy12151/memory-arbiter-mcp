@@ -423,9 +423,51 @@ class MemoryDB:
                            m.tags AS tags, m.content AS content, m.source_type AS source_type,
                            m.confidence AS confidence, m.protection_level AS protection_level,
                            m.event_time AS event_time, m.ingest_time AS ingest_time,
-                           m.metadata AS metadata
+                           m.metadata AS metadata, m.split_status AS split_status
                     FROM memories_vec v
                     JOIN memories m ON m.id = v.id
+                    WHERE v.embedding MATCH ? AND k = ?
+                    ORDER BY v.distance
+                    """,
+                    (json.dumps(query_embedding), k),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
+
+    def section_vec_knn(
+        self, query_embedding: list[float], k: int = 10
+    ) -> list[dict[str, Any]]:
+        """v0.6.1 Channel 6: section-level vec KNN recall.
+
+        Returns the k nearest *sections* (not memories), joined to their
+        parent memory's metadata. Unlike ``vec_knn`` this does NOT select
+        ``m.content`` — Channel 6 candidates score via the vec floor and get
+        their content re-fetched by ``_attach_sections`` from
+        ``current_mem_map``, so pulling k full texts here would be wasted I/O
+        (k ≈ need×3, most rows dedup to the same handful of memories).
+        Workspace/status/split_status filtering is done Python-side in
+        ``_wide_recall`` (mirroring Channel 5) so like_status_clause semantics
+        stay aligned.
+        """
+        if not self._db_available or not self.state.sqlite_vec_available:
+            return []
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT s.memory_id AS memory_id, s.id AS section_id,
+                           v.distance AS distance,
+                           s.title AS section_title, s.title_path AS section_title_path,
+                           m.workspace AS workspace, m.status AS status,
+                           m.subject AS subject, m.tags AS tags,
+                           m.source_type AS source_type, m.confidence AS confidence,
+                           m.protection_level AS protection_level,
+                           m.event_time AS event_time, m.ingest_time AS ingest_time,
+                           m.metadata AS metadata, m.split_status AS split_status
+                    FROM memory_sections_vec v
+                    JOIN memory_sections s ON s.id = v.id
+                    JOIN memories m ON m.id = s.memory_id
                     WHERE v.embedding MATCH ? AND k = ?
                     ORDER BY v.distance
                     """,

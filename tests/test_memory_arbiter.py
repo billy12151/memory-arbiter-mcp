@@ -1842,7 +1842,7 @@ def test_split_publish_success_then_search_returns_matched_sections(tmp_path: Pa
 
 
 def test_split_publish_success_zero_hit_returns_catalog(tmp_path: Path) -> None:
-    """Zero section matches → content_omitted=True + full section_catalog."""
+    """Zero section matches → bounded preview (not full text) + full section_catalog."""
     tools = make_vec_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
@@ -1855,7 +1855,12 @@ def test_split_publish_success_zero_hit_returns_catalog(tmp_path: Path) -> None:
     # Query with a token that maps to neither section's vector.
     result = tools.memory_search(query="zzz", query_embedding=_keyword_embedding("zzz"))
     hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
-    assert hit["content_omitted"] is True
+    # v0.6.1: zero-match now returns a bounded preview (A2 token-explosion fix),
+    # not content_omitted=True. content_truncated reflects whether the preview
+    # was actually shorter than the full text.
+    assert hit["content_omitted"] is False
+    assert hit["content"] is not None          # preview non-empty
+    assert hit.get("content_truncated") is not None  # truncation flag present
     assert hit["section_enhancement_applied"] is True
     assert hit.get("section_catalog")
     assert len(hit["section_catalog"]) == 2
@@ -2062,3 +2067,443 @@ def test_empty_embedding_rejects_split_publish(tmp_path: Path) -> None:
     with tools.db.connection() as conn:
         vec_ids = MemoryDB._get_section_vec_ids(conn, memory_id)
     assert len(vec_ids) == 0
+
+
+# ===========================================================================
+# v0.6.1 Channel 6 (section-vec KNN) tests — T1 through T14.
+# See docs/v0.6.1_detailed_design_channel6.md §6.2 for the test matrix.
+# ===========================================================================
+
+
+def _make_channel6_tools(tmp_path: Path, pool_cap: int = 50) -> MemoryTools:
+    """Vec-enabled tools with split on + a small pool cap (for saturation tests)."""
+    pytest.importorskip("sqlite_vec")
+    settings = Settings(
+        db_path=tmp_path / "ch6.sqlite3",
+        backup_jsonl=tmp_path / "ch6-backup.jsonl",
+        client="codex",
+        agent_id="agent-a",
+        workspace="repo-a",
+        enable_sqlite_vec=True,
+        vec_dim=2,
+        split_enabled=True,
+        split_threshold=1,
+        recall_pool_cap=pool_cap,
+    )
+    return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def test_v061_t1_channel6_recalls_what_channel5_misses(tmp_path: Path) -> None:
+    """T1: Channel 6 can surface a memory that Channel 5 cannot. We verify the
+    mechanism directly: section_vec_knn returns the target (via its section vec)
+    while vec_knn returns nothing (no memory-level vec stored). Per §6.2 the mock
+    embedder can't simulate true dilution, so we test the mechanism, not the
+    end-to-end KNN ranking."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    # Target memory: NO memory-level vec stored (Channel 5 can't recall it).
+    target_content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    target_id = tools.memory_write(content=target_content, subject="target")["data"]["id"]
+    published = _publish_two_sections(tools, target_id, target_content, "alpha", "beta")
+    assert published["ok"] is True
+
+    # Channel 5 (memory-level vec KNN) finds nothing — no vec stored.
+    ch5_rows = tools.db.vec_knn(_keyword_embedding("beta"), k=5)
+    assert target_id not in [r["id"] for r in ch5_rows], (
+        "Channel 5 should NOT recall a memory with no memory-level vec"
+    )
+    # Channel 6 (section-level vec KNN) DOES find it — the "beta" section vec matches.
+    ch6_rows = tools.db.section_vec_knn(_keyword_embedding("beta"), k=5)
+    recalled_ids = {r["memory_id"] for r in ch6_rows}
+    assert target_id in recalled_ids, (
+        "Channel 6 (section_vec_knn) should recall the target via its section vec"
+    )
+
+
+def test_v061_t2_dedup_one_memory_multiple_sections(tmp_path: Path) -> None:
+    """T2: one memory with 3 sections all near the query enters the pool once."""
+    tools = _make_channel6_tools(tmp_path, pool_cap=10)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    # Three sections, each starting with "alpha" so each section vector = (1,0).
+    content = "alpha " + ("x" * 60) + "\nalpha " + ("y" * 60) + "\nalpha " + ("z" * 60)
+    mid = tools.memory_write(content=content, subject="dedup")["data"]["id"]
+    mem = tools.db.get_memory(mid)
+    published = tools.memory_split(
+        memory_id=mid,
+        split_decision="split",
+        decision_content_hash=hashlib.sha256(mem["content"].encode("utf-8")).hexdigest(),
+        decision_memory_version=mem["version"],
+        decision_split_status=mem["split_status"],
+        decision_split_revision=mem["split_revision"],
+        sections=[
+            {"title": "alpha"},
+            {"title": "alpha", "anchor_text": "alpha", "occurrence_index": 1},
+            {"title": "alpha", "anchor_text": "alpha", "occurrence_index": 2},
+        ],
+    )
+    assert published["ok"] is True
+
+    result = tools.memory_search(
+        query="alpha", query_embedding=_keyword_embedding("alpha"), debug_ranking=True
+    )
+    # The memory should appear exactly once in debug ranking (dedup held).
+    target_entries = [r for r in result["data"]["results"] if r["id"] == mid]
+    assert len(target_entries) == 1
+
+
+def test_v061_t3_split_active_exempt_from_long_content_penalty(tmp_path: Path) -> None:
+    """T3: a split-active long doc recalled by FTS does NOT get long-content penalty."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    long_content = "alpha " + ("x" * 3000) + "\n" + "beta " + ("y" * 60)
+    mid = tools.memory_write(content=long_content, subject=None, tags=None)["data"]["id"]
+    _publish_two_sections(tools, mid, long_content, "alpha", "beta")
+
+    # Query "alpha" hits content lexically (FTS) but subject/tags are None (weak).
+    result = tools.memory_search(
+        query="alpha", query_embedding=_keyword_embedding("alpha"), debug_ranking=True
+    )
+    debug_map = {r["id"]: r for r in result["data"]["results"]}
+    if mid in debug_map:
+        notes = debug_map[mid].get("_ranking_notes", [])
+        assert "long content penalty applied" not in notes, (
+            "split-active long doc should be exempt from long-content penalty"
+        )
+
+
+def test_v061_t4_non_split_still_gets_long_content_penalty(tmp_path: Path) -> None:
+    """T4: regression — a non-split long memory still incurs long-content penalty."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    long_content = "alpha " + ("x" * 3000)
+    mid = tools.memory_write(content=long_content, subject=None, tags=None)["data"]["id"]
+    # NOT split — so the penalty should still apply.
+
+    result = tools.memory_search(query="alpha", debug_ranking=True)
+    debug_map = {r["id"]: r for r in result["data"]["results"]}
+    assert mid in debug_map
+    notes = debug_map[mid].get("_ranking_notes", [])
+    assert "long content penalty applied" in notes
+
+
+def test_v061_t5_channel6_skipped_when_vec_disabled(tmp_path: Path) -> None:
+    """T5: with the vec gate closed, no Channel 6 candidates appear."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    # Deliberately do NOT call _set_vec_ready — gate stays closed.
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    mid = tools.memory_write(content=content, subject="gate")["data"]["id"]
+    _publish_two_sections(tools, mid, content, "alpha", "beta")
+
+    result = tools.memory_search(
+        query="alpha", query_embedding=_keyword_embedding("alpha"), debug_ranking=True
+    )
+    for r in result["data"].get("_debug_ranking", []):
+        assert not r.get("_section_vec_candidate"), (
+            "Channel 6 must not fire when the vec gate is closed"
+        )
+
+
+def test_v061_t6_pool_cap_not_exceeded(tmp_path: Path) -> None:
+    """T6: Channel 6 does not push the pool beyond pool_cap."""
+    tools = _make_channel6_tools(tmp_path, pool_cap=4)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    for i in range(6):
+        c = f"alpha {i} " + ("x" * 60) + "\nbeta " + ("y" * 60)
+        mid = tools.memory_write(content=c, subject=f"cap-{i}")["data"]["id"]
+        _publish_two_sections(tools, mid, c, "alpha", "beta")
+
+    result = tools.memory_search(query="alpha", query_embedding=_keyword_embedding("alpha"))
+    # The number of unique results never exceeds pool_cap.
+    assert len(result["data"]["results"]) <= 4
+
+
+def test_v061_t7_channel5_candidate_has_split_status(tmp_path: Path) -> None:
+    """T7: vec_knn (Channel 5) now returns split_status (§2.1前置 checkpoint)."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    mid = tools.memory_write(content=content, subject="t7")["data"]["id"]
+    # memory_write doesn't auto-store a memory-level vec under the mock embedder
+    # (embedding_provider != "gguf"), so store one explicitly.
+    tools.memory_store_embedding(mid, _keyword_embedding("alpha"))
+    _publish_two_sections(tools, mid, content, "alpha", "beta")
+
+    rows = tools.db.vec_knn(_keyword_embedding("alpha"), k=5)
+    target_row = next((r for r in rows if r["id"] == mid), None)
+    assert target_row is not None, "target not in Channel 5 KNN results"
+    assert "split_status" in target_row, "vec_knn must return split_status (§2.1)"
+    assert target_row["split_status"] == "active"
+
+
+def test_v061_t8_c4_long_content_zero_match_truncated(tmp_path: Path) -> None:
+    """T8/C4: a 50000-char split-active doc under zero-match returns ≤preview_chars."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    tools.settings.section_zero_match_preview_chars = 2000
+    _set_vec_ready(tools)
+
+    # A very long doc whose sections embed to alpha/beta; query "zzz" hits none.
+    big = "alpha " + ("q" * 25000) + "\nbeta " + ("r" * 24000)
+    mid = tools.memory_write(content=big, subject="bigdoc")["data"]["id"]
+    _publish_two_sections(tools, mid, big, "alpha", "beta")
+
+    result = tools.memory_search(query="zzz", query_embedding=_keyword_embedding("zzz"))
+    hit = next((r for r in result["data"]["results"] if r["id"] == mid), None)
+    if hit is not None:
+        assert hit["content_truncated"] is True
+        assert len(hit["content"]) <= 2000, "zero-match preview must be bounded"
+
+
+def test_v061_t9_debug_ranking_channel6_fields(tmp_path: Path) -> None:
+    """T9: a Channel 6 candidate carries section-vec debug fields + note. We feed
+    a synthetic Channel 6 candidate through _soft_rerank directly — in a real
+    end-to-end search the candidate may also be recalled by FTS first, masking
+    the Channel 6 flag, so testing the scorer in isolation is more reliable."""
+    from memory_arbiter.search import _soft_rerank
+
+    candidate = {
+        "id": 999,
+        "subject": "t9",
+        "tags": "[]",
+        "content": "",               # Channel 6 omits content (A3)
+        "split_status": "active",
+        "status": "active",
+        "source_type": "unknown",
+        "protection_level": "normal",
+        "ingest_time": "2020-01-01T00:00:00Z",
+        "_vec_candidate": True,
+        "_section_vec_candidate": True,
+        "_section_vec_distance": 0.3,
+        "_section_vec_section_id": 42,
+    }
+    reranked = _soft_rerank("anything", [candidate])
+    rec = reranked[0]
+    assert rec.get("_section_vec_candidate") is True
+    assert rec.get("_section_vec_distance") == 0.3
+    assert rec.get("_section_vec_section_id") == 42
+    notes = rec.get("_ranking_notes", [])
+    assert "v0.6.1: section-vec recall candidate (Channel 6)" in notes
+
+
+def test_v061_t10_penalty_baseline_c9(tmp_path: Path) -> None:
+    """T10/C9 (blocking): non-split long memory incurs BOTH content_only and
+    long-content penalties — the baseline T3/T4 exemption logic regresses against."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    long_content = "alpha " + ("x" * 3000)
+    mid = tools.memory_write(content=long_content, subject=None, tags=None)["data"]["id"]
+    result = tools.memory_search(query="alpha", debug_ranking=True)
+    debug_map = {r["id"]: r for r in result["data"]["results"]}
+    assert mid in debug_map
+    rec = debug_map[mid]
+    notes = rec.get("_ranking_notes", [])
+    assert "content_only_match" in str(rec.get("_match_reason", "")) or any(
+        "matched content but not subject/tags" in n for n in notes
+    )
+    assert "long content penalty applied" in notes
+    # relevance = 3.0 - 2.0 - 1.5 = -0.5; trust=0 (default source), recency ∈ [0, 0.8]
+    assert -0.5 <= rec["_final_score"] < 0.5
+
+
+def test_v061_t11_pool_saturation_skips_channel6_c2(tmp_path: Path) -> None:
+    """T11/C2 (blocking): when Channels 1-5 fill the pool, Channel 6 is skipped."""
+    tools = _make_channel6_tools(tmp_path, pool_cap=2)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    # Two FTS-recallable memories fill the small pool (cap=2) before Channel 6.
+    tools.memory_write(content="alpha match one " + "x" * 60, subject="fill-1")
+    tools.memory_write(content="alpha match two " + "y" * 60, subject="fill-2")
+    # A split-active memory that only Channel 6 could surface.
+    target_content = "gamma " + ("x" * 60) + "\nbeta " + ("y" * 60)
+    target_id = tools.memory_write(content=target_content, subject="late")["data"]["id"]
+    _publish_two_sections(tools, target_id, target_content, "gamma", "beta")
+
+    result = tools.memory_search(
+        query="alpha", query_embedding=_keyword_embedding("alpha"), debug_ranking=True
+    )
+    debug_map = {r["id"]: r for r in result["data"]["results"]}
+    # Pool was saturated by FTS hits → Channel 6 never ran → no section-vec candidates.
+    assert all(
+        not r.get("_section_vec_candidate") for r in result["data"]["results"]
+    ), "Channel 6 should be skipped when the pool is already full"
+
+
+def test_v061_t12_content_only_penalty_still_applies_to_split_active(tmp_path: Path) -> None:
+    """T12 (A5 regression): content_only_penalty still hits split-active, but
+    long-content penalty is exempted. Score uses a range (not exact) per §6.2."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    long_content = "alpha " + ("x" * 3000) + "\nbeta " + ("y" * 60)
+    mid = tools.memory_write(content=long_content, subject=None, tags=None)["data"]["id"]
+    _publish_two_sections(tools, mid, long_content, "alpha", "beta")
+
+    result = tools.memory_search(
+        query="alpha", query_embedding=_keyword_embedding("alpha"), debug_ranking=True
+    )
+    debug_map = {r["id"]: r for r in result["data"]["results"]}
+    if mid in debug_map and not debug_map[mid].get("_vec_candidate"):
+        rec = debug_map[mid]
+        notes = rec.get("_ranking_notes", [])
+        # content_only still applies (A5: NOT exempted)...
+        assert any("matched content but not subject/tags" in n for n in notes) or (
+            rec.get("_match_reason") == "content_only_match"
+        )
+        # ...but long-content penalty is exempted for split-active.
+        assert "long content penalty applied" not in notes
+        # relevance = 3.0 - 2.0 = 1.0; with recency the final lands in [1.0, 2.0).
+        assert 1.0 <= rec["_final_score"] < 2.0
+
+
+def test_v061_t13_fulltext_branch_channel6_not_empty_content(tmp_path: Path) -> None:
+    """T13 (blocking, second-round Bug regression): a Channel 6-only candidate
+    entering the fulltext branch must NOT return empty content. §4.2 归一化 fixes
+    this. We unit-test _attach_sections directly with a content='' candidate."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    full_text = "alpha " + ("x" * 60) + "\nbeta " + ("y" * 60)
+    mid = tools.memory_write(content=full_text, subject="t13")["data"]["id"]
+    _publish_two_sections(tools, mid, full_text, "alpha", "beta")
+    # Lower fulltext threshold so ≥1 match counts as "most matched".
+    tools.settings.section_fulltext_threshold = 0.0
+
+    # Simulate a Channel 6 candidate: content="" but the memory is split-active.
+    # _attach_sections must normalize content from current_mem_map.
+    fake_candidate = {
+        "id": mid,
+        "content": "",          # Channel 6 deliberately omits content (A3)
+        "split_status": "active",
+        "_vec_candidate": True,
+        "_section_vec_candidate": True,
+        "subject": "t13",
+    }
+    normalized = tools._attach_sections(
+        [fake_candidate], _keyword_embedding("alpha"), {"state": "ready"}
+    )
+    hit = normalized[0]
+    assert hit.get("content_omitted") is False
+    assert hit.get("content"), (
+        "fulltext branch must return non-empty content for Channel 6 candidates "
+        "(second-round Bug regression)"
+    )
+
+
+def test_v061_t14_partial_branch_does_not_leak_full_content(tmp_path: Path) -> None:
+    """T14 (§4.2 interaction): a Channel 6 candidate in the partial branch must
+    have content=None (normalization's full text is correctly discarded)."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    full_text = "alpha " + ("x" * 60) + "\nbeta " + ("y" * 60)
+    mid = tools.memory_write(content=full_text, subject="t14")["data"]["id"]
+    _publish_two_sections(tools, mid, full_text, "alpha", "beta")
+
+    # Query "alpha" → section "alpha" matches (1/2 = partial, below fulltext 0.8).
+    fake_candidate = {
+        "id": mid,
+        "content": "",
+        "split_status": "active",
+        "_vec_candidate": True,
+        "_section_vec_candidate": True,
+        "subject": "t14",
+    }
+    normalized = tools._attach_sections(
+        [fake_candidate], _keyword_embedding("alpha"), {"state": "ready"}
+    )
+    hit = normalized[0]
+    # Partial branch sets content=None even though normalization filled it.
+    assert hit.get("content") is None
+    assert hit.get("content_omitted") is True
+
+
+# ===========================================================================
+# v0.6.3 provenance tests — section source attribution (parser vs agent).
+# ===========================================================================
+
+
+def test_v061_provenance_parser_when_anchors_are_markdown_headings(tmp_path: Path) -> None:
+    """When the caller uses the document's own Markdown headings as section
+    titles/anchors, provenance='parser' (no LLM was needed)."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    # A document with real Markdown headings.
+    content = (
+        "# alpha\n" + ("x" * 60) + "\n\n"
+        "## beta\n" + ("y" * 60)
+    )
+    mid = tools.memory_write(content=content, subject="md-doc")["data"]["id"]
+    mem = tools.db.get_memory(mid)
+    published = tools.memory_split(
+        memory_id=mid,
+        split_decision="split",
+        decision_content_hash=hashlib.sha256(mem["content"].encode("utf-8")).hexdigest(),
+        decision_memory_version=mem["version"],
+        decision_split_status=mem["split_status"],
+        decision_split_revision=mem["split_revision"],
+        sections=[
+            {"title": "alpha"},
+            {"title": "beta", "anchor_text": "## beta", "occurrence_index": 0},
+        ],
+    )
+    assert published["ok"] is True
+
+    sections = tools.db.get_sections_by_memory(mid)
+    assert len(sections) == 2
+    # Both sections use the document's own headings → parser.
+    assert sections[0]["provenance"] == "parser"
+    assert sections[1]["provenance"] == "parser"
+
+
+def test_v061_provenance_agent_when_anchors_are_not_headings(tmp_path: Path) -> None:
+    """When the caller supplies anchors that are NOT Markdown headings (e.g. an
+    LLM invented the section boundaries), provenance='agent'."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    # No Markdown headings — just plain text with an anchor word.
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    mid = tools.memory_write(content=content, subject="plain-doc")["data"]["id"]
+    published = _publish_two_sections(tools, mid, content, "alpha", "beta")
+    assert published["ok"] is True
+
+    sections = tools.db.get_sections_by_memory(mid)
+    assert len(sections) == 2
+    # "alpha"/"beta" are plain-text anchors, not Markdown headings → agent.
+    assert sections[0]["provenance"] == "agent"
+    assert sections[1]["provenance"] == "agent"

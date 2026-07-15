@@ -118,6 +118,11 @@ _CONTENT_ONLY_PENALTY = 2.0     # r4 §8.3: subject/tags miss + content hits
 # beats content-only noise but never beats a real subject/tags hit.
 _VEC_FLOOR_SCORE = 2.5
 
+# v0.6.1: Channel 6 section-vec KNN multiplier. One memory's multiple
+# sections can occupy KNN slots; over-fetch by this factor so dedup still
+# leaves enough unique memories to fill the pool gap.
+_SECTION_KNN_K_MULTIPLIER = 3
+
 # subject/tags match-level weights (after capping)
 _SUBJECT_STRONG_WEIGHT = 10.0
 _SUBJECT_MEDIUM_WEIGHT = 6.0
@@ -300,9 +305,12 @@ def _soft_rerank(
         # 1. subject/tags no strong or medium hit
         # 2. hits mainly from content
         # 3. content is long
+        # v0.6.1: exempt split-active memories — their length is structural
+        # (a long doc legitimately split into sections), not "附带提及" noise.
         subject_tags_weak = subject_level in ("none", "weak") and tag_level in ("none", "weak")
         content_long = len(content) > 2000
-        if subject_tags_weak and content_long and content_score > 0:
+        is_split_active = rec.get("split_status") == "active"
+        if subject_tags_weak and content_long and content_score > 0 and not is_split_active:
             relevance -= _LONG_CONTENT_PENALTY
 
         # v0.3.1: vec0-recalled candidates. If this candidate came from the
@@ -325,7 +333,7 @@ def _soft_rerank(
         if subject_tags_miss and content_score > 0:
             match_reason = "content_only_match"
             notes.append("query terms matched content but not subject/tags")
-        if subject_tags_weak and content_long and content_score > 0:
+        if subject_tags_weak and content_long and content_score > 0 and not is_split_active:
             notes.append("long content penalty applied")
         if superseded_sink:
             notes.append("superseded: sunk below active")
@@ -333,6 +341,11 @@ def _soft_rerank(
             if match_reason == "subject_or_tag_match":
                 match_reason = "vec_recall"
             notes.append("v0.3.1: semantic recall candidate, floor score applied")
+        # v0.6.1: distinguish section-vec (Channel 6) from memory-vec (Channel 5)
+        # in debug output. Both set _vec_candidate for the floor; this note
+        # disambiguates the recall source.
+        if rec.get("_section_vec_candidate"):
+            notes.append("v0.6.1: section-vec recall candidate (Channel 6)")
 
         rec_copy = dict(rec)
         rec_copy["_final_score"] = final_score
@@ -525,6 +538,61 @@ def _wide_recall(
                 continue
             d = dict(row)
             d["_vec_candidate"] = True
+            pool[rid] = d
+
+    # Channel 6 (v0.6.1): section-vec KNN — recall memories via their section
+    # vectors. Catches the "query semantically matches a late chapter that the
+    # memory-level embedding (truncated to ~3600 chars) never saw" case. Same
+    # gate as Channel 5; pure gap-filler so existing channels are untouched.
+    if (
+        query_embedding
+        and db.state.sqlite_vec_available
+        and vec_state in {"ready", "unmanaged"}
+        and len(pool) < pool_cap
+    ):
+        need = max(pool_cap - len(pool), 10)
+        k = need * _SECTION_KNN_K_MULTIPLIER
+        sec_rows = db.section_vec_knn(query_embedding, k=k)
+        for row in sec_rows:
+            # Post-filter: workspace + status (mirror Channel 5's logic).
+            if workspace and row.get("workspace") != workspace:
+                continue
+            status = row.get("status")
+            if status == "deleted":
+                continue
+            if status == "superseded" and "superseded" in like_status_clause:
+                continue
+            # Only split-active memories have meaningful section vectors.
+            if row.get("split_status") != "active":
+                continue
+            rid = row.get("memory_id")
+            if rid is None or rid in pool:
+                # Already in pool (recalled by an earlier channel). Do NOT
+                # re-add; section-level enhancement is _attach_sections' job.
+                continue
+            d = {
+                "id": rid,
+                "workspace": row.get("workspace"),
+                "status": row.get("status"),
+                "subject": row.get("subject"),
+                "tags": row.get("tags"),
+                # NOTE: content deliberately omitted (A3). Channel 6 candidates
+                # score via vec floor (content_score=0); _attach_sections
+                # re-fetches content from current_mem_map for split-active rows.
+                "content": "",
+                "source_type": row.get("source_type"),
+                "confidence": row.get("confidence"),
+                "protection_level": row.get("protection_level"),
+                "event_time": row.get("event_time"),
+                "ingest_time": row.get("ingest_time"),
+                "metadata": row.get("metadata"),
+                "split_status": row.get("split_status"),
+                # Flags for _soft_rerank + debug_ranking.
+                "_vec_candidate": True,            # reuse vec floor logic
+                "_section_vec_candidate": True,    # debug identity
+                "_section_vec_distance": row.get("distance"),
+                "_section_vec_section_id": row.get("section_id"),
+            }
             pool[rid] = d
 
     return list(pool.values())[:pool_cap]

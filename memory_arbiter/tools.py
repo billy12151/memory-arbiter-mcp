@@ -604,6 +604,19 @@ class MemoryTools:
             if mid not in current_mem_map:
                 continue
 
+            # v0.6.1: content 归一化（修第二轮评审 Bug）。
+            # Channel 6 候选 content=""（A3 不拉全文），但 current_mem_map[mid]
+            # 已通过 _fetch_memory 重读全文（tools.py:590）。在三分支之前统一
+            # 补 content，覆盖 invariant guard / vec gate closed / fulltext 三
+            # 个"不碰 content"的分支——否则它们对 Channel 6 候选返回空串。
+            # current_mem_map 只含 split-active，Channel 6 post-filter 也只留
+            # split-active（§3.2），故 Channel 6 候选必在此 map 中。
+            real_content = current_mem_map[mid].get("content")
+            if real_content and not result.get("content"):
+                result["content"] = real_content
+            # content_truncated 跨分支初始化：仅 zero-match 分支可能覆写为 True。
+            result.setdefault("content_truncated", False)
+
             sections = sections_map.get(mid, [])
             total_sections = len(sections)
 
@@ -651,12 +664,21 @@ class MemoryTools:
             matched_count = len(matched_ids)
 
             if matched_count == 0:
-                # True zero match
-                result["content"] = None
-                result["content_omitted"] = True
+                # True zero match. §4.2 归一化已在循环顶部把 content 补全为
+                # 真实全文；这里截断为预览而非返回全文——zero-match 是零 section
+                # 置信度，一篇 50000 字文档走 zero-match 返回全文会 token 爆炸，
+                # 且 Channel 6 的无 threshold KNN 使此路径高频（A2）。
+                full_content = result.get("content") or ""
+                preview_chars = getattr(self.settings, "section_zero_match_preview_chars", 2000)
+                result["content"] = full_content[:preview_chars]
+                result["content_truncated"] = len(full_content) > preview_chars
+                result["content_omitted"] = False
                 result["section_enhancement_applied"] = True
                 result["section_catalog"] = [self._catalog_entry(s) for s in sections]
-                result["hint"] = f"已拆分为 {total_sections} 段，可用 get_sections 获取"
+                result["hint"] = (
+                    f"已拆分为 {total_sections} 段，零段落命中阈值，已返回前 {preview_chars} 字预览；"
+                    f"可用 get_sections 获取特定段落"
+                )
             elif matched_count / total_sections >= fulltext_threshold:
                 # Most sections matched → return full text
                 result["content_omitted"] = False
@@ -754,7 +776,9 @@ class MemoryTools:
     def _detect_markdown_headings(content: str) -> list[tuple[int, str]]:
         """Detect ATX headings outside fenced code blocks.
 
-        Returns list of (char_offset, heading_text).
+        Returns list of (char_offset, heading_text) where heading_text is the
+        heading text with the ``#`` prefix stripped (e.g. ``"标题"`` not
+        ``"## 标题"``). Consumers compare against section titles/anchors.
         """
         in_fence = False
         fence_marker = None
@@ -774,7 +798,7 @@ class MemoryTools:
             elif not in_fence:
                 m = re.match(r"^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$", line.rstrip())
                 if m:
-                    headings.append((pos, line.rstrip()))
+                    headings.append((pos, m.group(2).strip()))
             pos += len(line)
         return headings
 
@@ -1030,9 +1054,25 @@ class MemoryTools:
                     # Delete old sections
                     MemoryDB._delete_sections_for_memory(conn, mid)
 
+                    # v0.6.3: determine each section's provenance. content is
+                    # CAS-verified unchanged, so re-running the heading detector
+                    # gives the same result as prepare. If a section's title /
+                    # anchor is one of the document's own Markdown headings, the
+                    # caller used the parser output directly (no LLM); otherwise
+                    # the caller (or an LLM) supplied the title/anchor.
+                    heading_texts = {
+                        h[1] for h in self._detect_markdown_headings(content)
+                    }
+
                     # Insert new sections + vecs
                     for i, sec in enumerate(offset_result):
                         em = section_embeddings[i]
+                        # First section has no anchor (starts at 0); judge by
+                        # title. Later sections judge by anchor_text. Strip a
+                        # leading "#"-prefix so "## beta" matches heading "beta".
+                        label = sec.get("anchor_text") or sec.get("title") or ""
+                        label = re.sub(r"^#{1,6}\s+", "", label).strip()
+                        provenance = "parser" if label in heading_texts else "agent"
                         section_id = MemoryDB._insert_section(
                             conn, mid, i,
                             title=sec.get("title"),
@@ -1042,7 +1082,7 @@ class MemoryTools:
                             occurrence_index=sec.get("occurrence_index", 0),
                             start_offset=sec["start_offset"],
                             end_offset=sec["end_offset"],
-                            provenance="llm",
+                            provenance=provenance,
                             embedding_truncated=em[2],
                             embedding_original_tokens=em[3],
                             embedding_used_tokens=em[4],
