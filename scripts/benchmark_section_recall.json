@@ -1,0 +1,207 @@
+{
+  "config": {
+    "model": "/Users/zhangzhiwei17/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
+    "max_section_chars": 3600,
+    "n_queries": 17
+  },
+  "accuracy": {
+    "memory_vec_recall": 0.7058823529411765,
+    "section_vec_top1": 0.9411764705882353,
+    "section_vec_top3": 1.0,
+    "queries_beyond_truncation": 10
+  },
+  "token_cost": {
+    "full_text_chars": 124980,
+    "split_chars": 44675,
+    "reduction": 0.6425428068490959
+  },
+  "rows": [
+    {
+      "mid": 141,
+      "q": "section split 强一致发布策略，embedding 失败时怎么处理",
+      "expect": "补充5（P0）：强一致发布策略+embedding不可用",
+      "expect_offset": 4733,
+      "mem_rank": 7,
+      "mem_dist": 19.172,
+      "sec_rank": 0,
+      "sec_dist": 0.281,
+      "sec_match_n": 9
+    },
+    {
+      "mid": 141,
+      "q": "首次写入长记忆时用户确认后怎么一次性写入，两阶段协议字段",
+      "expect": "补充6（P0）：首次写入确认后一次性写入",
+      "expect_offset": 7859,
+      "mem_rank": null,
+      "mem_dist": null,
+      "sec_rank": 0,
+      "sec_dist": 0.34,
+      "sec_match_n": 9
+    },
+    {
+      "mid": 141,
+      "q": "section 命中后 memory_search 返回结构，matched_sec",
+      "expect": "补充7（P1）：section命中返回结构",
+      "expect_offset": 11199,
+      "mem_rank": 4,
+      "mem_dist": 19.1,
+      "sec_rank": 0,
+      "sec_dist": 0.239,
+      "sec_match_n": 9
+    },
+    {
+      "mid": 70,
+      "q": "渐进式优雅降级机制，sqlite-vec 到 LIKE 到 JSONL 多级回退",
+      "expect": "P-08 渐进式优雅降级机制",
+      "expect_offset": 7332,
+      "mem_rank": null,
+      "mem_dist": null,
+      "sec_rank": 0,
+      "sec_dist": 0.287,
+      "sec_match_n": 10
+    },
+    {
+      "mid": 70,
+      "q": "专利组合策略，核心专利群和防御性专利怎么划分",
+      "expect": "专利组合策略建议",
+      "expect_offset": 7946,
+      "mem_rank": 2,
+      "mem_dist": 18.341,
+      "sec_rank": 0,
+      "sec_dist": 0.3,
+      "sec_match_n": 10
+    },
+    {
+      "mid": 164,
+      "q": "第二轮 review 修复发版阻塞，版本号 0.5.4 到 0.6.0 和 spac",
+      "expect": "第二轮review-fix详情",
+      "expect_offset": 3345,
+      "mem_rank": 0,
+      "mem_dist": 13.959,
+      "sec_rank": 0,
+      "sec_dist": 0.311,
+      "sec_match_n": 6
+    },
+    {
+      "mid": 164,
+      "q": "v0.6.0 原始实现记录，PR1 到 PR8 连接工厂和 embedder 重写",
+      "expect": "原始实现记录",
+      "expect_offset": 6379,
+      "mem_rank": 0,
+      "mem_dist": 15.867,
+      "sec_rank": 2,
+      "sec_dist": 0.408,
+      "sec_match_n": 6
+    },
+    {
+      "mid": 63,
+      "q": "外观设计专利交底书，简要说明和六视图要求",
+      "expect": "外观设计专利标准结构",
+      "expect_offset": 2529,
+      "mem_rank": 0,
+      "mem_dist": 17.902,
+      "sec_rank": 0,
+      "sec_dist": 0.253,
+      "sec_match_n": 6
+    },
+    {
+      "mid": 63,
+      "q": "专利撰写流程，自我审查清单和 docx 输出格式要求",
+      "expect": "撰写流程建议与质量标准",
+      "expect_offset": 3371,
+      "mem_rank": 1,
+      "mem_dist": 17.362,
+      "sec_rank": 0,
+      "sec_dist": 0.258,
+      "sec_match_n": 6
+    },
+    {
+      "mid": 181,
+      "q": "第三轮评审逐行追踪 content 归一化，设计可进入实施",
+      "expect": "第三轮评审：终审通过",
+      "expect_offset": 2465,
+      "mem_rank": 14,
+      "mem_dist": 17.682,
+      "sec_rank": 0,
+      "sec_dist": 0.279,
+      "sec_match_n": 6
+    },
+    {
+      "mid": 181,
+      "q": "provenance 动态判定，parser 还是 agent，剥 # 前缀的坑",
+      "expect": "provenance动态判定与最终修复",
+      "expect_offset": 4584,
+      "mem_rank": null,
+      "mem_dist": null,
+      "sec_rank": 0,
+      "sec_dist": 0.345,
+      "sec_match_n": 6
+    },
+    {
+      "mid": 88,
+      "q": "菁管+ 线上审批流，菁卡运管平台审批流线上化",
+      "expect": "seq27-38：菁管+/金采2.0/预审/风险提示",
+      "expect_offset": 2948,
+      "mem_rank": 10,
+      "mem_dist": 15.534,
+      "sec_rank": 0,
+      "sec_dist": 0.386,
+      "sec_match_n": 5
+    },
+    {
+      "mid": 88,
+      "q": "二期需求待沟通，业务负责人字段和数字人民币奖品线上变更",
+      "expect": "seq39-52：二期需求（待沟通）",
+      "expect_offset": 4024,
+      "mem_rank": 0,
+      "mem_dist": 17.928,
+      "sec_rank": 0,
+      "sec_dist": 0.389,
+      "sec_match_n": 5
+    },
+    {
+      "mid": 79,
+      "q": "VOP 接口数量统计，哪个模块接口最多，订单模块多少页",
+      "expect": "接口数量统计（92个接口）",
+      "expect_offset": 4287,
+      "mem_rank": 0,
+      "mem_dist": 16.454,
+      "sec_rank": 0,
+      "sec_dist": 0.277,
+      "sec_match_n": 5
+    },
+    {
+      "mid": 79,
+      "q": "金营平台对接 VOP 必接接口，核心下单链路和首期优先接入",
+      "expect": "与金营平台/金融带货的关联与接入建议",
+      "expect_offset": 4714,
+      "mem_rank": null,
+      "mem_dist": null,
+      "sec_rank": 0,
+      "sec_dist": 0.231,
+      "sec_match_n": 5
+    },
+    {
+      "mid": 106,
+      "q": "FTS 同步修复，contentless FTS5 不支持 DELETE 用特殊命令",
+      "expect": "FTS同步修复（关键工程决策）",
+      "expect_offset": 1901,
+      "mem_rank": null,
+      "mem_dist": null,
+      "sec_rank": 0,
+      "sec_dist": 0.238,
+      "sec_match_n": 6
+    },
+    {
+      "mid": 106,
+      "q": "真实库迁移 dogfooding 验证，拷贝 100 条生产库测试",
+      "expect": "测试与真实库dogfooding验证",
+      "expect_offset": 2408,
+      "mem_rank": 2,
+      "mem_dist": 17.955,
+      "sec_rank": 0,
+      "sec_dist": 0.319,
+      "sec_match_n": 6
+    }
+  ]
+}
