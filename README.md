@@ -147,7 +147,28 @@ Or, zero-install via `uvx` (no local clone needed):
 
 > ⚠️ **New session required**: MCP servers are loaded at session startup. Already-open sessions won't see the new tools. Start a fresh session after configuring.
 
-> **What to write where** — if your client also keeps local markdown (ZCode's `MEMORY.md`, Codex's `AGENTS.md`, etc.), paste this rule into your agent's instructions: local md files store only self-use info (rules, tool experience, config notes, agent persona). Anything that might be reused by another agent or platform — requirements, research, decisions, progress, user preferences, knowledge conclusions — goes into `memory-arbiter`. Every write must fill `subject`, `tags`, `source_type`, `event_time`, `workspace`, `source_ref`. Search via `memory_search` first; read source files only for detail. When you find a contradiction, don't overwrite — use `memory_supersede` or `memory_arbitrate`.
+#### 📋 Agent instruction: what to write where
+
+If your client also keeps local markdown (ZCode's `MEMORY.md`, Codex's `AGENTS.md`, etc.), **paste this rule into your agent's system prompt** so it knows what to write where:
+
+```
+Local md files store only self-use info (rules, tool experience, config notes,
+agent persona). Anything that might be reused by another agent or platform —
+not just project info: requirements, research, decisions, progress, user
+preferences, knowledge conclusions — goes into memory-arbiter.
+
+Every write must fill: subject, tags, source_type (one of: requirement /
+decision / doc_summary / research / progress), event_time (ISO 8601),
+workspace (project name), source_ref.
+
+Search via memory_search first; read source files only for detail. When you
+find a contradiction, don't overwrite — if you know which is correct, use
+memory_supersede (retire the wrong one); if unsure, use memory_arbitrate
+(the system decides by timeline + trust level). When a to-do entry is done,
+write the status back to the original record (update status/subject to done);
+don't just mention "done" in a new memory, or the old entry stays in to-do
+state and misleads future searches.
+```
 
 ### Client Config Locations
 
@@ -593,7 +614,24 @@ uvx --from memory-arbiter-mcp memory-arbiter
 
 > ⚠️ **需要新建会话**：MCP Server 在客户端启动时加载，已经打开的会话不会识别新添加的 Server。配置好后请新建一个会话。
 
-> **什么写哪里** —— 如果你的客户端同时维护本地 markdown（ZCode 的 `MEMORY.md`、Codex 的 `AGENTS.md` 等），把这条规则贴进 agent 的系统指令：本地 md 只存自用信息（规则/经验/配置/角色）。凡是有可能被其他 agent 或平台复用的信息——需求、调研、决策、进展、用户偏好、知识结论——一律写入 `memory-arbiter`，必填 `subject`、`tags`、`source_type`、`event_time`、`workspace`、`source_ref`。查找先 `memory_search`，细节读源文件。发现矛盾不覆盖，用 `memory_supersede` 或 `memory_arbitrate` 处理。
+#### 📋 Agent 指令：什么该写到哪里
+
+如果你的客户端同时维护本地 markdown（ZCode 的 `MEMORY.md`、Codex 的 `AGENTS.md` 等），**把下面这段贴进你 agent 的系统指令**，让它知道什么该写到哪里：
+
+```
+本地 md 只存自用信息（规则/经验/配置/角色）。凡是有可能被其他 agent
+或平台复用的信息（不只是项目信息——需求、调研、决策、进展、用户偏好、
+知识结论等），一律写入 memory-arbiter。
+
+每次写入必填：subject、tags、source_type（限 requirement / decision /
+doc_summary / research / progress）、event_time（ISO 8601）、workspace
+（项目名）、source_ref。
+
+查找先 memory_search，细节读源文件。发现矛盾不覆盖：明确知道哪条对时
+用 memory_supersede（废弃错的），不确定时用 memory_arbitrate（系统按
+时间线和可信度仲裁）。待办处理完成后回写原条目（更新 status/subject
+标注已完成），不要只在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
+```
 
 ### 客户端配置位置
 
