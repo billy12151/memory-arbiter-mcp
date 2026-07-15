@@ -155,7 +155,7 @@ class MemoryTools:
                         )
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
-        results, warnings = search_memories(self.db, query, workspace or self.settings.workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
+        results, warnings = search_memories(self.db, query, workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
         # v0.6.0: attach section enhancement to active-split results
         results = self._attach_sections(results, query_embedding, extra_warnings)
         return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=extra_warnings + warnings)
@@ -192,7 +192,7 @@ class MemoryTools:
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         limit = max(1, min(int(limit), 100))
-        results = self.db.list_memories(workspace=workspace or self.settings.workspace, limit=limit)
+        results = self.db.list_memories(workspace=workspace, limit=limit)
         return self.db.state.response({"results": results, "count": len(results)})
 
     def memory_compare(self, left_id: Optional[int] = None, right_id: Optional[int] = None, left: Optional[dict[str, Any]] = None, right: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
