@@ -57,6 +57,10 @@ class Settings:
     section_fulltext_threshold: float = 0.8
     max_sections: int = 50
     max_section_chars: int = 3600
+    # v0.6.3: zero-match preview length (Channel 6 makes zero-match frequent;
+    # returning full text risks token explosion on long docs). Default matches
+    # max_section_chars order of magnitude.
+    section_zero_match_preview_chars: int = 2000
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -183,6 +187,10 @@ class Settings:
             max_section_chars=clamp_int(
                 pick_int_field(split_cfg.get("max_section_chars"), "MEMORY_ARBITER_MAX_SECTION_CHARS", 3600, name="split.max_section_chars"),
                 100, 1_000_000, name="split.max_section_chars", warnings=config_warnings,
+            ),
+            section_zero_match_preview_chars=clamp_int(
+                pick_int_field(split_cfg.get("section_zero_match_preview_chars"), "MEMORY_ARBITER_SECTION_ZERO_MATCH_PREVIEW_CHARS", 2000, name="split.section_zero_match_preview_chars"),
+                100, 10000, name="split.section_zero_match_preview_chars", warnings=config_warnings,
             ),
         )
         settings.config_warnings = config_warnings

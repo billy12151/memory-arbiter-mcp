@@ -338,6 +338,12 @@ memory_get(memory_id)                       ← fetch full text if needed
 
 **Vec gate closed** (model migration, space mismatch, query embedding failure): `memory_search` returns the full text with `section_enhancement_applied=false` — search capability never degrades, section enhancement is purely additive.
 
+**What's new in v0.6.3** (all are pure additive changes, no schema migration, no breaking change):
+
+- **Channel 6 — section-vec KNN recall.** A new recall channel catches the case where a query semantically matches a *late chapter* of a long document that the memory-level embedding (truncated to ~3600 chars) never saw. It runs the KNN over **section** vectors instead of the single memory vector. Only fires when sqlite-vec is available and the pool isn't already full; existing channels are untouched. Pure gap-filler — if Channels 1-5 already recall a memory, Channel 6 does nothing.
+- **Zero-match now returns a bounded preview, not full text.** Previously, when zero sections matched a split-active memory, `memory_search` returned the entire content (`content_omitted=true`). Now it returns a truncated preview (default 2000 chars, configurable via `split.section_zero_match_preview_chars`) plus the section catalog. This prevents token explosion on 50k-char documents. The `content_truncated` flag tells the caller whether the preview was actually shortened. The `content_omitted` field changes from `true` to `false` in this case (there *is* content, just a preview).
+- **Long-content penalty exempts split-active memories.** A long, legitimately-sectioned document no longer gets its score penalized purely for being long. Non-split long memories are penalized exactly as before.
+
 **Configuration** (`config.json` `split` section):
 
 | JSON path | Env fallback | Default | Description |
@@ -348,6 +354,7 @@ memory_get(memory_id)                       ← fetch full text if needed
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | When ≥80% of sections match, return full text. |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory. Min is 2 (fewer = pointless). |
 | `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding body (truncation tracked). |
+| `split.section_zero_match_preview_chars` | `MEMORY_ARBITER_SECTION_ZERO_MATCH_PREVIEW_CHARS` | `2000` | (v0.6.3) When zero sections match, return a bounded preview of this length instead of the full text. Prevents token explosion on long docs. Clamped to [100, 10000]. |
 
 **Example `config.json` with split enabled:**
 
@@ -368,7 +375,8 @@ memory_get(memory_id)                       ← fetch full text if needed
     "section_vec_distance_threshold": 0.42,
     "section_fulltext_threshold": 0.8,
     "max_sections": 50,
-    "max_section_chars": 3600
+    "max_section_chars": 3600,
+    "section_zero_match_preview_chars": 2000
   }
 }
 ```
@@ -377,7 +385,7 @@ memory_get(memory_id)                       ← fetch full text if needed
 - `section_vec_distance_threshold` (0.42) is calibrated on embeddinggemma-300m (Q8). At this value, ≥90% of relevant queries hit their target section while ≥90% of irrelevant sections are filtered. **If you switch embedding models, re-calibrate** — run `scripts/calibrate_section_threshold.py` with your model and corpus. If the threshold is wrong (too loose), section split provides no filtering; too tight and real matches are missed.
 - `memory_edit` on content clears all sections and resets `split_status` to NULL. Re-split with `memory_split` if needed.
 - After switching embedding models, run `memory_rebuild_embeddings(dry_run=True)` to preview impact, then `memory_rebuild_embeddings(dry_run=False, batch_size=50)` to rebuild all vectors.
-- Default is **off**. If your memories are mostly short notes, code snippets, or conversation summaries, don't enable this — the overhead (LLM calls + embedding generation) isn't worth it.
+- Default is **off**. If your memories are mostly short notes, code snippets, or conversation summaries, don't enable this — they're already retrieved fine by keyword and splitting adds no value. For long structured documents the cost is low: `memory_split` prepare auto-detects Markdown headings (regex, no LLM) and returns `parser_detected=true`; if the document has ≥2 headings the caller can build sections from the parser output directly and skip the LLM entirely. Section boundaries are then located by plain string search and section vectors by the local GGUF embedder (no LLM). An LLM is only needed when the document has no detectable headings (the agent must invent section titles/anchors) — which is the minority case for well-structured docs.
 
 ### Configuration
 
@@ -404,6 +412,7 @@ Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbi
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | Return full text when ≥X% of sections match. |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory (min 2). |
 | `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding input. |
+| `split.section_zero_match_preview_chars` | `MEMORY_ARBITER_SECTION_ZERO_MATCH_PREVIEW_CHARS` | `2000` | (v0.6.3) Zero-match preview length cap. Prevents token explosion on long docs. Clamped [100, 10000]. |
 
 **Environment variables** — keep per-client identity in each MCP client's env block. Some fields also have config-file equivalents, but config wins; use env here when the value must differ by client/session.
 
@@ -775,6 +784,12 @@ memory_get(memory_id)                       ← 取全文（需要时）
 
 **Vec 门禁关闭时**（模型迁移、空间不匹配、query embedding 失败）：`memory_search` 直接返回全文，`section_enhancement_applied=false`——检索能力不会退化，分段增强纯粹是加法。
 
+**v0.6.3 新增**（全部为纯增量改动，无 schema 迁移，无破坏性变更）：
+
+- **Channel 6 —— 段落向量 KNN 召回**。新增一个召回通道，专门解决"查询语义上匹配长文档靠后的某一章，但 memory 级向量（被截断到 ~3600 字）根本没见过那一章"的稀释问题。它在**段落**向量上跑 KNN，而非单一的 memory 向量。仅在 sqlite-vec 可用且 pool 未满时触发；不改动现有 5 个通道。纯补漏——如果 Channel 1-5 已经召回了某条 memory，Channel 6 什么都不做。
+- **zero-match 改为返回截断预览，不再返回全文**。之前当一个 split-active memory 的所有段落都未命中时，`memory_search` 返回全文（`content_omitted=true`）。现在改为返回截断预览（默认 2000 字，可通过 `split.section_zero_match_preview_chars` 配置）+ section catalog，避免 5 万字文档走 zero-match 时 token 爆炸。`content_truncated` 标志告诉调用方预览是否被缩短。此场景下 `content_omitted` 从 `true` 变为 `false`（因为有内容了，只是预览）。
+- **长内容 penalty 豁免 split-active memory**。一篇合理分段的长文档不再仅因"长"而被扣分。未分段的长记忆照常扣分，行为不变。
+
 **配置项**（`config.json` 的 `split` 段）：
 
 | JSON 路径 | env 兜底 | 默认值 | 说明 |
@@ -785,6 +800,7 @@ memory_get(memory_id)                       ← 取全文（需要时）
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比 ≥80% 时返回全文。 |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大段数（最小 2）。 |
 | `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入的字符上限（超出部分截断，有诊断标记）。 |
+| `split.section_zero_match_preview_chars` | `MEMORY_ARBITER_SECTION_ZERO_MATCH_PREVIEW_CHARS` | `2000` | （v0.6.3）零段落命中时返回的预览长度上限（而非返回全文）。避免长文档走 zero-match 时 token 爆炸。clamp 到 [100, 10000]。 |
 
 **完整配置示例（含分段）：**
 
@@ -805,7 +821,8 @@ memory_get(memory_id)                       ← 取全文（需要时）
     "section_vec_distance_threshold": 0.42,
     "section_fulltext_threshold": 0.8,
     "max_sections": 50,
-    "max_section_chars": 3600
+    "max_section_chars": 3600,
+    "section_zero_match_preview_chars": 2000
   }
 }
 ```
@@ -814,7 +831,7 @@ memory_get(memory_id)                       ← 取全文（需要时）
 - `section_vec_distance_threshold`（0.42）基于 embeddinggemma-300m（Q8）校准：在该值下 ≥90% 相关查询命中目标段、≥90% 无关段落被过滤。**换 embedding 模型后必须重新校准**——跑 `scripts/calibrate_section_threshold.py`，用你的模型和语料。阈值太松（如原 0.7）分段等于没过滤；太紧则漏掉真实命中。
 - `memory_edit` 改 content 后会清空所有 section 并重置 `split_status` 为 NULL。需要时用 `memory_split` 重新分段。
 - 切换 embedding 模型后，先跑 `memory_rebuild_embeddings(dry_run=True)` 看影响范围，再 `memory_rebuild_embeddings(dry_run=False, batch_size=50)` 批量重建向量。
-- 默认**关闭**。如果你的记忆大部分是短笔记、代码片段、对话摘要，不要开启——LLM 调用 + 向量生成的开销不值得。
+- 默认**关闭**。如果你的记忆大部分是短笔记、代码片段、对话摘要，不需要开启——它们靠关键词就能检索到，分段没有收益。对于长文档，成本其实很低：`memory_split` 的 prepare 阶段会自动检测 Markdown 标题（纯 regex，不涉及 LLM）并返回 `parser_detected=true`；如果文档有 ≥2 个标题，调用方可以直接用 parser 结果构建 section、完全跳过 LLM。之后段落边界靠纯字符串查找定位、段落向量由本地 GGUF embedder 生成（不涉及 LLM）。只有当文档没有可检测的标题时（需要 agent 自己生成段落标题/anchor）才依赖 LLM——对结构良好的文档这是少数情况。
 
 ### 配置
 
@@ -841,6 +858,7 @@ memory_get(memory_id)                       ← 取全文（需要时）
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比达到此值时返回全文。 |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大段数（最小 2）。 |
 | `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入字符上限。 |
+| `split.section_zero_match_preview_chars` | `MEMORY_ARBITER_SECTION_ZERO_MATCH_PREVIEW_CHARS` | `2000` | （v0.6.3）零段落命中时的预览长度上限。避免长文档 token 爆炸。clamp [100, 10000]。 |
 
 **环境变量**——每客户端身份建议放在各自 MCP env 段。部分字段也有配置文件对应项，但 config 优先；当某个值必须按客户端/会话变化时再放 env。
 
