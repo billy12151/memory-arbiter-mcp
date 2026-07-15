@@ -1,0 +1,113 @@
+# Changelog
+
+All notable changes to memory-arbiter-mcp are documented here.
+Versions follow semantic versioning.
+
+## [0.6.3] — 2026-07-15
+
+### Added
+- **Channel 6 — section-vec KNN recall.** New recall channel that catches
+  long-document dilution: a query semantically matches a late chapter the
+  memory-level embedding (truncated to ~3600 chars) never saw. Runs KNN over
+  section vectors instead of the single memory vector. Pure gap-filler —
+  existing channels are untouched.
+- **`section_zero_match_preview_chars` config.** Bounds the zero-match preview
+  length (default 2000, clamped [100, 10000]) to prevent token explosion.
+- **Section provenance attribution.** Each published section is tagged
+  `provenance="parser"` (anchor matches a document heading) or `"agent"`
+  (anchor supplied by the caller/LLM). `memory_split` prepare auto-detects
+  Markdown headings; callers with structured docs can skip the LLM entirely.
+
+### Changed
+- **Zero-match returns a bounded preview, not full text.** When zero sections
+  match, `memory_search` returns a truncated preview + section catalog instead
+  of the full content. `content_omitted` changes `true→false`; new
+  `content_truncated` flag indicates whether the preview was shortened.
+- **Long-content penalty exempts split-active memories.** A legitimately
+  sectioned long document is no longer penalized for length. Non-split long
+  memories are penalized as before.
+- **Content normalization in `_attach_sections`.** Channel 6 candidates
+  (content="") now get their content filled from `current_mem_map` at the top
+  of the result loop, fixing empty-content returns in fulltext/invariant/
+  gate-closed branches.
+- `vec_knn` (Channel 5) now returns `split_status`, a prerequisite for the
+  penalty exemption.
+
+## [0.6.2] — 2026-07-15
+
+### Changed
+- **Workspace no longer used as a search filter.** `memory_search` and
+  `memory_recent` no longer fall back to `settings.workspace` when the caller
+  does not explicitly pass a workspace. All memories are searchable regardless
+  of their workspace field. The field is kept on records for future use.
+
+## [0.6.0] — 2026-07-06
+
+### Added
+- **Long-document section split.** Memories exceeding `split.threshold`
+  (default 4000 chars) can be split into semantic sections with per-section
+  vectors. `memory_search` returns only matched section metadata instead of
+  the full text. Two-phase: `memory_split` prepare returns content for the
+  caller; publish validates offsets and atomically writes sections + vectors.
+- New tools: `memory_split`, `get_sections`, `memory_split_status`,
+  `memory_rebuild_embeddings`.
+- Config: `split.enabled`, `split.threshold`, `section_vec_distance_threshold`
+  (calibrated 0.42 on embeddinggemma-300m), `section_fulltext_threshold`,
+  `max_sections`, `max_section_chars`.
+
+### Fixed
+- Guard against empty embeddings from the never-raises embedder contract.
+- Section split state handling hardened; version sync, space-id invariant,
+  single-batch protocol.
+
+## [0.5.0] — 2026-06-29
+
+### Added
+- **Auto embedding via GGUF.** `embedding.provider = "gguf"` with a local model
+  path enables automatic query encoding and write-time embedding — no external
+  API calls. sqlite-vec stores vectors locally.
+- Config: `embedding.provider`, `embedding.model_path`, `embedding.auto_query`,
+  `embedding.auto_write`, vec dim.
+
+## [0.4.0] — 2026-06-21
+
+### Added
+- **In-place version chain.** `memory_edit` rewrites content in place; old
+  versions are preserved in `memory_history`. `memory_history` traces the full
+  edit timeline; `memory_cleanup_history` trims old snapshots.
+- README configuration guide with config-file / env-var tables.
+
+## [0.3.1] — 2026-06-15
+
+### Added
+- **Optional semantic recall (Channel 5).** `vec_knn` over memory-level
+  embeddings surfaces memories with zero lexical overlap. Candidates get a vec
+  floor score (2.5) so they beat content-only noise but lose to subject/tags
+  hits. `query_embedding` parameter added to `memory_search`.
+- Config: `recall_pool_cap`, `content_like_cap`.
+
+### Fixed
+- Diagnose vec-disabled cause in status warnings.
+
+## [0.3.0] — 2026-06-14
+
+### Added
+- **Wide-recall + soft-rerank.** Multi-channel recall (FTS5 AND, FTS5 OR, LIKE,
+  content LIKE) feeds a candidate pool; soft-rerank applies subject/tags/content
+  scoring with penalties for noise governance.
+
+## [0.2.6] — 2026-06-10
+
+### Added
+- **`memory_supersede`.** Explicit retire with audit trail; bypasses
+  user-confirmed protection with authorization. Superseded records sink below
+  active in search ranking and are excluded by default (`include_superseded`
+  flag restores them for audit walkthroughs).
+
+## [0.2.4] — 2026-06-08
+
+### Added
+- `memory_supersede` tool (refined in 0.2.6).
+
+### Fixed
+- FTS5 query sanitization.

@@ -118,7 +118,7 @@ _CONTENT_ONLY_PENALTY = 2.0     # r4 §8.3: subject/tags miss + content hits
 # beats content-only noise but never beats a real subject/tags hit.
 _VEC_FLOOR_SCORE = 2.5
 
-# v0.6.1: Channel 6 section-vec KNN multiplier. One memory's multiple
+# v0.6.3: Channel 6 section-vec KNN multiplier. One memory's multiple
 # sections can occupy KNN slots; over-fetch by this factor so dedup still
 # leaves enough unique memories to fill the pool gap.
 _SECTION_KNN_K_MULTIPLIER = 3
@@ -305,7 +305,7 @@ def _soft_rerank(
         # 1. subject/tags no strong or medium hit
         # 2. hits mainly from content
         # 3. content is long
-        # v0.6.1: exempt split-active memories — their length is structural
+        # v0.6.3: exempt split-active memories — their length is structural
         # (a long doc legitimately split into sections), not "附带提及" noise.
         subject_tags_weak = subject_level in ("none", "weak") and tag_level in ("none", "weak")
         content_long = len(content) > 2000
@@ -341,7 +341,7 @@ def _soft_rerank(
             if match_reason == "subject_or_tag_match":
                 match_reason = "vec_recall"
             notes.append("v0.3.1: semantic recall candidate, floor score applied")
-        # v0.6.1: distinguish section-vec (Channel 6) from memory-vec (Channel 5)
+        # v0.6.3: distinguish section-vec (Channel 6) from memory-vec (Channel 5)
         # in debug output. Both set _vec_candidate for the floor; this note
         # disambiguates the recall source.
         if rec.get("_section_vec_candidate"):
@@ -540,7 +540,7 @@ def _wide_recall(
             d["_vec_candidate"] = True
             pool[rid] = d
 
-    # Channel 6 (v0.6.1): section-vec KNN — recall memories via their section
+    # Channel 6 (v0.6.3): section-vec KNN — recall memories via their section
     # vectors. Catches the "query semantically matches a late chapter that the
     # memory-level embedding (truncated to ~3600 chars) never saw" case. Same
     # gate as Channel 5; pure gap-filler so existing channels are untouched.

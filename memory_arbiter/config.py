@@ -57,7 +57,7 @@ class Settings:
     section_fulltext_threshold: float = 0.8
     max_sections: int = 50
     max_section_chars: int = 3600
-    # v0.6.1: zero-match preview length (Channel 6 makes zero-match frequent;
+    # v0.6.3: zero-match preview length (Channel 6 makes zero-match frequent;
     # returning full text risks token explosion on long docs). Default matches
     # max_section_chars order of magnitude.
     section_zero_match_preview_chars: int = 2000

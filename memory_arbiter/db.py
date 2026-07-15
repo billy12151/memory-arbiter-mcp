@@ -438,7 +438,7 @@ class MemoryDB:
     def section_vec_knn(
         self, query_embedding: list[float], k: int = 10
     ) -> list[dict[str, Any]]:
-        """v0.6.1 Channel 6: section-level vec KNN recall.
+        """v0.6.3 Channel 6: section-level vec KNN recall.
 
         Returns the k nearest *sections* (not memories), joined to their
         parent memory's metadata. Unlike ``vec_knn`` this does NOT select

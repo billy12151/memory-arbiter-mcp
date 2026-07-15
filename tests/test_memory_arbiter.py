@@ -2513,3 +2513,44 @@ def test_v061_provenance_agent_when_anchors_are_not_headings(tmp_path: Path) -> 
     # "alpha"/"beta" are plain-text anchors, not Markdown headings → agent.
     assert sections[0]["provenance"] == "agent"
     assert sections[1]["provenance"] == "agent"
+
+
+def test_v061_r1_channel6_recall_superseded_with_include_superseded(tmp_path: Path) -> None:
+    """R1: include_superseded=True lets Channel 6 recall a superseded split-active
+    memory. Channel 6's post-filter mirrors Channel 5: superseded rows are only
+    skipped when 'superseded' is in like_status_clause (the default). With
+    include_superseded=True they pass through."""
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    # A split-active memory (no memory-level vec → only Channel 6 can recall).
+    target_content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    target_id = tools.memory_write(content=target_content, subject="stale")["data"]["id"]
+    _publish_two_sections(tools, target_id, target_content, "alpha", "beta")
+
+    # Supersede it (requires authorization).
+    replacement = tools.memory_write(content="replacement active", subject="stale")
+    tools.memory_supersede(
+        memory_id=target_id, reason="replaced",
+        superseded_by=replacement["data"]["id"], authorized=True,
+    )
+
+    # Default search excludes superseded → target should be absent.
+    default_result = tools.memory_search(
+        query="beta", query_embedding=_keyword_embedding("beta"), debug_ranking=True
+    )
+    default_ids = {r["id"] for r in default_result["data"]["results"]}
+    assert target_id not in default_ids, "superseded memory leaked into default search"
+
+    # include_superseded=True → Channel 6 should recall it via section vec.
+    included_result = tools.memory_search(
+        query="beta", query_embedding=_keyword_embedding("beta"),
+        include_superseded=True, debug_ranking=True,
+    )
+    included_map = {r["id"]: r for r in included_result["data"]["results"]}
+    assert target_id in included_map, (
+        "Channel 6 should recall superseded split-active memory when "
+        "include_superseded=True"
+    )

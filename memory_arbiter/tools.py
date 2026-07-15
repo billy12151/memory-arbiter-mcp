@@ -604,7 +604,7 @@ class MemoryTools:
             if mid not in current_mem_map:
                 continue
 
-            # v0.6.1: content 归一化（修第二轮评审 Bug）。
+            # v0.6.3: content 归一化（修第二轮评审 Bug）。
             # Channel 6 候选 content=""（A3 不拉全文），但 current_mem_map[mid]
             # 已通过 _fetch_memory 重读全文（tools.py:590）。在三分支之前统一
             # 补 content，覆盖 invariant guard / vec gate closed / fulltext 三
