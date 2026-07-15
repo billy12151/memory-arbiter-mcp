@@ -345,7 +345,7 @@ def _soft_rerank(
         # in debug output. Both set _vec_candidate for the floor; this note
         # disambiguates the recall source.
         if rec.get("_section_vec_candidate"):
-            notes.append("v0.6.1: section-vec recall candidate (Channel 6)")
+            notes.append("section-vec recall candidate (Channel 6)")
 
         rec_copy = dict(rec)
         rec_copy["_final_score"] = final_score

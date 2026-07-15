@@ -2173,11 +2173,11 @@ def test_v061_t3_split_active_exempt_from_long_content_penalty(tmp_path: Path) -
         query="alpha", query_embedding=_keyword_embedding("alpha"), debug_ranking=True
     )
     debug_map = {r["id"]: r for r in result["data"]["results"]}
-    if mid in debug_map:
-        notes = debug_map[mid].get("_ranking_notes", [])
-        assert "long content penalty applied" not in notes, (
-            "split-active long doc should be exempt from long-content penalty"
-        )
+    assert mid in debug_map, "target memory must appear in results for the test to be meaningful"
+    notes = debug_map[mid].get("_ranking_notes", [])
+    assert "long content penalty applied" not in notes, (
+        "split-active long doc should be exempt from long-content penalty"
+    )
 
 
 def test_v061_t4_non_split_still_gets_long_content_penalty(tmp_path: Path) -> None:
@@ -2268,9 +2268,9 @@ def test_v061_t8_c4_long_content_zero_match_truncated(tmp_path: Path) -> None:
 
     result = tools.memory_search(query="zzz", query_embedding=_keyword_embedding("zzz"))
     hit = next((r for r in result["data"]["results"] if r["id"] == mid), None)
-    if hit is not None:
-        assert hit["content_truncated"] is True
-        assert len(hit["content"]) <= 2000, "zero-match preview must be bounded"
+    assert hit is not None, "big doc must appear in zero-match results for the test to be meaningful"
+    assert hit["content_truncated"] is True
+    assert len(hit["content"]) <= 2000, "zero-match preview must be bounded"
 
 
 def test_v061_t9_debug_ranking_channel6_fields(tmp_path: Path) -> None:
@@ -2301,7 +2301,7 @@ def test_v061_t9_debug_ranking_channel6_fields(tmp_path: Path) -> None:
     assert rec.get("_section_vec_distance") == 0.3
     assert rec.get("_section_vec_section_id") == 42
     notes = rec.get("_ranking_notes", [])
-    assert "v0.6.1: section-vec recall candidate (Channel 6)" in notes
+    assert "section-vec recall candidate (Channel 6)" in notes
 
 
 def test_v061_t10_penalty_baseline_c9(tmp_path: Path) -> None:
@@ -2368,15 +2368,21 @@ def test_v061_t12_content_only_penalty_still_applies_to_split_active(tmp_path: P
         query="alpha", query_embedding=_keyword_embedding("alpha"), debug_ranking=True
     )
     debug_map = {r["id"]: r for r in result["data"]["results"]}
-    if mid in debug_map and not debug_map[mid].get("_vec_candidate"):
-        rec = debug_map[mid]
-        notes = rec.get("_ranking_notes", [])
-        # content_only still applies (A5: NOT exempted)...
+    assert mid in debug_map, "target memory must appear in results for the test to be meaningful"
+    rec = debug_map[mid]
+    notes = rec.get("_ranking_notes", [])
+    # The core assertion: split-active exempts long-content penalty regardless
+    # of which channel recalled the memory.
+    assert "long content penalty applied" not in notes, (
+        "split-active long doc should be exempt from long-content penalty"
+    )
+    # content_only_penalty still applies on the FTS path (A5: NOT exempted).
+    # Only check this when the memory was NOT recalled by vec (vec floor would
+    # mask the content_only signal).
+    if not rec.get("_vec_candidate"):
         assert any("matched content but not subject/tags" in n for n in notes) or (
             rec.get("_match_reason") == "content_only_match"
         )
-        # ...but long-content penalty is exempted for split-active.
-        assert "long content penalty applied" not in notes
         # relevance = 3.0 - 2.0 = 1.0; with recency the final lands in [1.0, 2.0).
         assert 1.0 <= rec["_final_score"] < 2.0
 
@@ -2407,7 +2413,7 @@ def test_v061_t13_fulltext_branch_channel6_not_empty_content(tmp_path: Path) -> 
         "subject": "t13",
     }
     normalized = tools._attach_sections(
-        [fake_candidate], _keyword_embedding("alpha"), {"state": "ready"}
+        [fake_candidate], _keyword_embedding("alpha"), []
     )
     hit = normalized[0]
     assert hit.get("content_omitted") is False
@@ -2439,7 +2445,7 @@ def test_v061_t14_partial_branch_does_not_leak_full_content(tmp_path: Path) -> N
         "subject": "t14",
     }
     normalized = tools._attach_sections(
-        [fake_candidate], _keyword_embedding("alpha"), {"state": "ready"}
+        [fake_candidate], _keyword_embedding("alpha"), []
     )
     hit = normalized[0]
     # Partial branch sets content=None even though normalization filled it.
