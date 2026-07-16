@@ -2,7 +2,7 @@ mcp-name: io.github.billy12151/memory-arbiter-mcp
 
 # memory-arbiter-mcp
 
-<p align="center"><img src="docs/assets/memory-arbiter-loop.gif" alt="Memory Arbiter demo" width="640"></p>
+<p align="center"><img src="docs/assets/memory-arbiter-loop.gif" alt="Memory Arbiter demo" width="800"></p>
 
 **[中文](#中文) | [English](#english)**
 
