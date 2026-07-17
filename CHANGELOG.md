@@ -3,6 +3,15 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.7.2] — 2026-07-17
+
+### Improved
+
+- **Doctor: actionable `db.unopenable` hints.** When the CLI can't open the DB, the fallback report now distinguishes two failure modes instead of a generic message:
+  - **File does not exist at the resolved path** → points the user at `--db` and `~/.config/memory-arbiter/config.json` (the common case when there's no config.json and doctor defaults to `cwd/memory_arbiter.sqlite3`, which isn't where the real DB lives).
+  - **File exists but won't open** → points at corruption / lock / recovery (the original hint).
+  The `evidence` now includes `file_exists` and `db_path` so scripts can branch on the cause. No change to path resolution itself — doctor still reads `config.json` > env > cwd via `Settings.from_env()`.
+
 ## [0.7.1] — 2026-07-17
 
 ### Fixed

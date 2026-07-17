@@ -170,6 +170,28 @@ class TestUnopenableFallback:
         assert f.severity == Severity.CRITICAL
         assert "boom" in f.evidence["error"]
 
+    def test_missing_file_hint_points_at_path_config(self, tmp_path):
+        """When the DB file does NOT exist, the hint should point the user at
+        --db / config.json (path mismatch), not at corruption/recovery."""
+        s = _settings(tmp_path, db_path=tmp_path / "never_created.sqlite3")
+        report = build_unopenable_report(s, RuntimeError("unable to open database file"))
+        f = report.findings[0]
+        assert f.evidence["file_exists"] is False
+        assert "--db" in f.fix_hint or "config.json" in f.fix_hint
+        assert "找不到" in f.title
+
+    def test_existing_file_hint_points_at_recovery(self, tmp_path):
+        """When the DB file exists but won't open, the hint should point at
+        corruption / lock / recovery, not path config."""
+        db_file = tmp_path / "exists.sqlite3"
+        db_file.write_bytes(b"not a real sqlite file")  # exists but corrupt
+        s = _settings(tmp_path, db_path=db_file)
+        report = build_unopenable_report(s, RuntimeError("database disk image is malformed"))
+        f = report.findings[0]
+        assert f.evidence["file_exists"] is True
+        assert "backup_jsonl" in f.fix_hint or "锁定" in f.fix_hint or "权限" in f.fix_hint
+        assert "无法打开" in f.title
+
     def test_cli_nonexistent_db_returns_unopenable_not_raise(self, tmp_path):
         """CLI ambulance: pointing at a missing DB must not raise."""
         s = _settings(tmp_path)
@@ -178,6 +200,8 @@ class TestUnopenableFallback:
         # mode=ro on a nonexistent file raises → fallback engages
         assert report.overall == Severity.CRITICAL
         assert report.findings[0].check_id == "db.unopenable"
+        # And the missing-file hint path is taken (points at --db/config.json)
+        assert report.findings[0].evidence["file_exists"] is False
 
     def test_mcp_unopenable_db_falls_back(self, tmp_path):
         """MCP entry on a DB marked unavailable returns unopenable report."""

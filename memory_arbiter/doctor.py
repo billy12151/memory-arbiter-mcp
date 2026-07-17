@@ -816,19 +816,40 @@ def run_all_checks(
 # =====================================================================
 
 def build_unopenable_report(settings: Settings, exc: Exception) -> OverviewReport:
-    """Minimal critical report when the DB cannot be opened (§11.1)."""
+    """Minimal critical report when the DB cannot be opened (§11.1).
+
+    Distinguishes two failure modes so the fix_hint is actionable:
+      - file does NOT exist at the resolved path → most likely a path/config
+        mismatch (doctor resolved the wrong DB, e.g. no config.json and cwd
+        has no DB); point the user at --db / config.json.
+      - file exists but won't open → corruption / locked / read-only FS;
+        point at recovery.
+    """
+    db_path = settings.db_path
+    file_exists = os.path.exists(str(db_path))
+    if not file_exists:
+        title = "找不到数据库文件，doctor 降级为最小报告"
+        detail = (f"解析到的 db_path 不存在：{db_path}（{type(exc).__name__}: {exc}）。"
+                  "18 项 check 均未执行。最常见原因：未配置 ~/.config/memory-arbiter/config.json，"
+                  "doctor 默认找当前目录下的 memory_arbiter.sqlite3，而你的库在别处。")
+        fix_hint = ("用 --db 指定库路径，或确认 ~/.config/memory-arbiter/config.json 的 db_path "
+                    "指向你的库（常见位置：~/.local/share/memory-arbiter/memory.sqlite3）。")
+    else:
+        title = "数据库无法打开，doctor 降级为最小报告"
+        detail = (f"连接失败：{exc}。18 项 check 均未执行。"
+                  "多数 jsonl_backup 是只读文件系统（文件可读仅不可写），mode=ro 能正常打开 → "
+                  "若本应能打开却失败，通常是文件损坏/丢失/locked。")
+        fix_hint = "检查 DB 文件权限、是否被独占锁定；可从 backup_jsonl 恢复。"
     return OverviewReport(
         snapshot_ts=utc_now_iso(),
         overall=Severity.CRITICAL,
-        summary={"mode": "unopenable", "db_path": str(settings.db_path)},
+        summary={"mode": "unopenable", "db_path": str(db_path), "file_exists": file_exists},
         findings=[Finding(
             check_id="db.unopenable", dimension="config", severity=Severity.CRITICAL,
-            status="fail", title="数据库无法打开，doctor 降级为最小报告",
-            detail=(f"连接失败：{exc}。18 项 check 均未执行。"
-                    "多数 jsonl_backup 是只读文件系统（文件可读仅不可写），mode=ro 能正常打开 → "
-                    "若本应能打开却失败，通常是文件损坏/丢失/locked。"),
-            evidence={"error": str(exc), "error_class": type(exc).__name__},
-            fix_hint="检查 DB 文件是否存在、权限、是否被独占锁定；可从 backup_jsonl 恢复。",
+            status="fail", title=title, detail=detail,
+            evidence={"error": str(exc), "error_class": type(exc).__name__,
+                      "db_path": str(db_path), "file_exists": file_exists},
+            fix_hint=fix_hint,
         )],
     )
 
