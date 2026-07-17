@@ -3,6 +3,15 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.7.1] — 2026-07-17
+
+### Fixed
+
+- **Doctor: `vec_effective` / `mode` self-consistency.** Previously, when the environment was fully configured for semantic recall (model + `vec.enabled` + extension + auto all on) but the database had never built its `memories_vec` table (e.g. an older DB created before vec was enabled, or a fresh config pointed at an old DB), the doctor report could contradict itself: all 5 vector-chain links green yet `mode=sqlite_vec` while no vec table existed. Now:
+  - `vec_effective` requires both the 5-link chain to pass **and** the `memories_vec` table to actually exist (capability ready + data ready).
+  - `mode` (summary + `config.degradation_mode` finding) is grounded in the actual table existence, not just the MCP process's startup-time probe (`runtime_state.mode`), which goes stale if the vec table is later dropped or the DB swapped. MCP mode is downgraded to `fts5`/`like` when the vec table is absent.
+  - `vec.link3.extension_loaded` notes in its detail when the extension is loadable but the vec table hasn't been created yet, so users understand why `vec_effective` is False despite all-green links.
+
 ## [0.7.0] — 2026-07-17
 
 ### Added

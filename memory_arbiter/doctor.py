@@ -129,10 +129,12 @@ def _check_vector_chain(
     runtime_state: Optional[DegradeState],
     embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]],
     vec_state: dict,
+    vec_table_exists: bool = False,
 ) -> list[Finding]:
     """Chain short-circuit: walk links 1→5; first break classifies, rest n/a."""
     dim = "vector"
     findings: list[Finding] = []
+    vec_table_exists_at_link3 = vec_table_exists
 
     # Link 1: configured
     configured = (
@@ -220,8 +222,11 @@ def _check_vector_chain(
     findings.append(Finding(
         check_id="vec.link3.extension_loaded", dimension=dim, severity=Severity.INFO,
         status="pass", title="sqlite-vec 扩展已加载",
-        detail=f"来源：{source}",
-        evidence={"sqlite_vec_available": True, "source": source},
+        detail=f"来源：{source}" + (
+            "；注意：扩展可加载，但 memories_vec 表尚未创建（此库未启用过向量召回，"
+            "写入新记忆或重启 MCP 触发初始化后才会建表）" if not vec_table_exists_at_link3 else ""),
+        evidence={"sqlite_vec_available": True, "source": source,
+                  "vec_table_exists": vec_table_exists_at_link3},
     ))
 
     # Link 4: model usable. MCP reuses the already-loaded embedder via probe;
@@ -363,11 +368,19 @@ def _check_db_writable(settings: Settings, runtime_state: Optional[DegradeState]
 def _check_degradation_mode(runtime_state: Optional[DegradeState],
                             vec_table_exists: bool, fts_table_exists: bool) -> Finding:
     if runtime_state is not None:
+        # Ground the runtime mode in actual DB state: runtime_state.mode is set
+        # once at MemoryDB init and can go stale if the vec table is later
+        # dropped or the DB swapped. If runtime says sqlite_vec but no vec table
+        # exists, downgrade to what the tables actually support.
         mode = runtime_state.mode
-        ev = {"mode": mode, "sqlite_vec_available": runtime_state.sqlite_vec_available,
+        if mode == "sqlite_vec" and not vec_table_exists:
+            mode = "fts5" if fts_table_exists else "like"
+        ev = {"mode": mode, "runtime_mode": runtime_state.mode,
+              "sqlite_vec_available": runtime_state.sqlite_vec_available,
               "fts5_available": runtime_state.fts5_available,
-              "sqlite_writable": runtime_state.sqlite_writable}
-        source = "MCP runtime state"
+              "sqlite_writable": runtime_state.sqlite_writable,
+              "vec_table_exists": vec_table_exists}
+        source = "MCP runtime state (grounded by table existence)"
     else:
         # CLI static inference from table existence.
         if vec_table_exists:
@@ -731,7 +744,8 @@ def run_all_checks(
     def _vec_chain() -> Finding:
         # This returns multiple findings; append directly and return None.
         findings.extend(_check_vector_chain(
-            conn, settings, deep, runtime_state, embedder_probe, vec_state))
+            conn, settings, deep, runtime_state, embedder_probe, vec_state,
+            vec_table_exists=vec_table_exists))
         return None
     _run("vec.chain", _vec_chain, "vector")
 
@@ -765,11 +779,31 @@ def run_all_checks(
         total_memories = _scalar(conn, "SELECT count(*) FROM memories") or 0
     except sqlite3.Error:
         pass
+    # vec_effective requires BOTH (a) all 5 chain links pass (capability ready:
+    # model configured, vec.enabled, extension loaded, model usable, auto on)
+    # AND (b) the memories_vec table actually exists (data ready: the DB has
+    # been initialized for vector recall). A DB can have the env configured
+    # but never have built the vec table (e.g. config added after the DB was
+    # created) — in that case semantic recall is NOT actually working, so
+    # vec_effective must be False even though every link passes.
+    vec_effective = vec_pass_count == 5 and vec_table_exists
+    # `mode` must be grounded in the actual DB state, not just the MCP
+    # process's startup-time probe (runtime_state.mode). The runtime mode is
+    # set once at MemoryDB init and goes stale if the vec table is later
+    # dropped or the DB is swapped — so when runtime says sqlite_vec but no
+    # vec table exists, downgrade to what the tables actually support. This
+    # keeps `mode` consistent with `vec_effective` (no vec table → both agree
+    # semantic recall is off).
+    if runtime_state is not None:
+        mode = runtime_state.mode
+        if mode == "sqlite_vec" and not vec_table_exists:
+            mode = "fts5" if fts_table_exists else "like"
+    else:
+        mode = "sqlite_vec" if vec_table_exists else ("fts5" if fts_table_exists else "like")
     summary = {
-        "mode": (runtime_state.mode if runtime_state else
-                 ("sqlite_vec" if vec_table_exists else ("fts5" if fts_table_exists else "like"))),
+        "mode": mode,
         "total_memories": total_memories,
-        "vec_effective": vec_pass_count == 5,
+        "vec_effective": vec_effective,
         "split_enabled": getattr(settings, "split_enabled", False),
     }
     return OverviewReport(

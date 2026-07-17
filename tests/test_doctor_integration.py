@@ -311,3 +311,58 @@ class TestVecEffectiveSemantics:
         link3 = next(f for f in report.findings if f.check_id == "vec.link3.extension_loaded")
         assert link3.status == "pass"
         assert "vec_version probe" in link3.evidence["source"]
+
+
+# =====================================================================
+#  Config-ready-but-data-not-ready: env has model+vec.enabled+extension
+#  all configured (5 links pass), but the DB never built a memories_vec
+#  table (e.g. an old DB created before vec was enabled). Semantic recall
+#  is NOT actually working in this state — vec_effective must be False and
+#  mode must not be sqlite_vec, otherwise the report contradicts itself.
+#  (Regression: found by testing doctor against the wrong DB path, which
+#  happened to be exactly this state — config ready, no vec table.)
+# =====================================================================
+
+class TestConfigReadyDataNotReady:
+    def test_vec_effective_false_without_vec_table(self, tmp_path):
+        """5 links pass but no memories_vec table → vec_effective=False."""
+        pytest.importorskip("sqlite_vec")
+        import sqlite_vec
+        # Build a DB with schema but WITHOUT the vec tables (simulate an old
+        # DB that predates vec enablement — drop them after MemoryDB init).
+        s = _settings(tmp_path,
+                      embedding_provider="gguf",
+                      embedding_model_path=tmp_path / "fake.gguf",
+                      enable_sqlite_vec=True, vec_dim=2)
+        db = MemoryDB(s)  # init creates the vec tables...
+        # ...so drop them to simulate the "data not ready" state.
+        with db.connection() as conn:
+            conn.execute("DROP TABLE IF EXISTS memories_vec")
+            conn.execute("DROP TABLE IF EXISTS memory_sections_vec")
+            conn.commit()
+        # Stub embedder so link4 passes (model "usable"); all 5 links green.
+        class _StubEmbedder:
+            embedding_space_id = "stub"
+            def embed_text(self, prefix="", body="", max_body_chars=None):
+                from memory_arbiter.embedder import EmbedResult
+                return EmbedResult(embedding=[0.1, 0.2], truncated=False,
+                                   original_tokens=0, used_tokens=0)
+        report = doctor_overview_mcp(
+            db, s, embedder_probe=lambda: (_StubEmbedder(), []),
+            runtime_state=db.state,
+        )
+        chain = {f.check_id: f.status for f in report.findings if f.dimension == "vector"}
+        # All 5 links pass (capability ready)...
+        assert all(chain[k] == "pass" for k in (
+            "vec.link1.configured", "vec.link2.enabled_flag",
+            "vec.link3.extension_loaded", "vec.link4.model_usable",
+            "vec.link5.auto_flags")), chain
+        # ...but vec_effective is False because no vec table (data not ready).
+        assert report.summary["vec_effective"] is False
+        # And mode is NOT sqlite_vec (no vec table → falls back to fts5/like).
+        assert report.summary["mode"] != "sqlite_vec"
+        # link3 should note the missing table so the user understands why
+        # vec_effective is False despite all-green links.
+        link3 = next(f for f in report.findings if f.check_id == "vec.link3.extension_loaded")
+        assert link3.evidence["vec_table_exists"] is False
+        assert "尚未创建" in link3.detail
