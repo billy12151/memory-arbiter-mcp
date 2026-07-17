@@ -77,6 +77,7 @@ Using two or more tools adds a shared memory layer: Tool A writes, Tool B search
 - **Long-document section split** — break 10K+ char documents into searchable sections; queries return the matching paragraph, not the whole document.
 - **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search.
 - **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup. Never crashes, even if optional extensions are missing.
+- **Health diagnostics** — a one-shot `doctor` check grades config integrity, the vector-enablement chain, split, data consistency, and capacity. Each finding carries a severity and a config-specific fix hint; works as an MCP tool (daily) or a standalone CLI (ambulance: runs even when the MCP process is down). Read-only.
 - **Zero cloud, zero LLM calls** — pure local SQLite. No Postgres, Redis, API keys, or external services.
 
 ### Quick Start
@@ -230,6 +231,7 @@ Grouped by use case. The first two groups cover daily read/write; the rest are f
 | `memory_status` | Show current mode, degradation status, storage paths |
 | `memory_list_conflicts` | List unresolved conflicts |
 | `memory_audit_summary` | Per-workspace stats overview (counts, oldest/newest, open conflicts, source_type distribution) |
+| `memory_doctor_overview` | Run a read-only health check and return a graded report (18 checks across config / vector chain / split / consistency / capacity). Each finding has a severity and a config-specific `fix_hint`. `deep=true` also loads the GGUF model for a dimension probe. Same engine as the `doctor` CLI below. |
 
 ### Optional: Semantic Recall (v0.5.0)
 
@@ -462,6 +464,25 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+### Doctor: Health Diagnostics (CLI ambulance)
+
+When something feels off — "search stopped working", "did my model switch break recall?", "is the DB silently losing writes?" — run the built-in doctor. It's the ambulance entry: a standalone CLI that opens its own read-only connection, so it works even when the MCP process is down or the DB is read-only.
+
+```bash
+memory-arbiter doctor              # colored text report (auto-disables color when piped)
+memory-arbiter doctor --json       # machine-readable, same shape as the MCP tool's data
+memory-arbiter doctor --deep       # also load the GGUF model for a dimension probe (seconds)
+memory-arbiter doctor --db PATH    # diagnose a different DB (disaster recovery)
+```
+
+It runs **18 read-only checks** across five dimensions, each with a severity (`info`/`warning`/`critical`) and a fix hint tailored to your current config:
+
+- **Config integrity** — parse warnings, write-probe result, degradation mode (`jsonl_backup` = silently losing data = critical).
+- **Vector-enablement chain** — the highest-value check. "Is semantic recall actually on?" is not a boolean; it walks five links (model configured → `vec.enabled` → extension loaded → model usable → auto flags) and short-circuits at the first break, telling you exactly which link is down and how to fix it. Catches the classic "I configured a model but recall still doesn't work" case (usually `vec.enabled=false`).
+- **Split, consistency, capacity** — section-split state, orphaned sections/vectors, version-chain breaks, open-conflict buildup, history bloat, DB size.
+
+Exit codes: `0` clean / `1` has warnings / `2` has criticals — usable in scripts and CI. If the DB can't be opened at all, doctor degrades to a single critical report instead of crashing (that's the whole point of an ambulance). The same engine is exposed as the `memory_doctor_overview` MCP tool for in-conversation use; the CLI just trades the MCP runtime state for a slightly less precise static inference (noted in the report).
+
 ### Testing
 
 ```bash
@@ -544,6 +565,7 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 - **长文档分段** —— 把万字文档拆成可搜索的段落，查询只返回命中的那段，不返回整篇。
 - **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。
 - **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
+- **健康体检** —— 一键 `doctor` 给配置完整性、向量化启用链、分段、数据一致性、容量堆积做分级体检。每条诊断带 severity 和针对当前配置的修复指引；既能作为 MCP 工具（日常）在对话里触发，也能作为独立 CLI（救护车：MCP 进程挂了也能连库诊断）。纯只读。
 - **零云依赖、零大模型调用** —— 纯本地 SQLite，不需要 Postgres、Redis、API key 或外部服务。
 
 ### 快速开始
@@ -693,6 +715,7 @@ doc_summary / research / progress）、event_time（ISO 8601）、workspace
 | `memory_status` | 查看运行状态、模式、降级原因 |
 | `memory_list_conflicts` | 列出未解决的冲突 |
 | `memory_audit_summary` | 各 workspace 记忆统计概览（条目数、最旧/最新、open 冲突数、来源分布） |
+| `memory_doctor_overview` | 跑一次只读健康体检，返回分级报告（18 项检查，覆盖配置 / 向量链 / 分段 / 一致性 / 容量）。每条诊断带 severity 和针对当前配置的 `fix_hint`。`deep=true` 时额外加载 GGUF 模型做维度探针。与下面的 `doctor` CLI 用同一套引擎。 |
 
 ### 可选：语义检索（v0.5.0）
 
@@ -924,6 +947,25 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
+
+### Doctor：健康体检（CLI 救护车）
+
+感觉不对劲——"搜索突然不好用了"、"换模型是不是把召回弄坏了"、"数据库是不是在静默丢写入？"——跑一下内置的 doctor。它是救护车入口：一个独立 CLI，自己开只读连接，所以即使 MCP 进程挂了、或数据库只读，也能诊断。
+
+```bash
+memory-arbiter doctor              # 彩色文本报告（管道/重定向时自动关颜色）
+memory-arbiter doctor --json       # 机器可读，结构与 MCP 工具的 data 一致
+memory-arbiter doctor --deep       # 额外加载 GGUF 模型做维度探针（秒级）
+memory-arbiter doctor --db PATH    # 诊断另一个 DB（灾祸恢复）
+```
+
+它跑 **18 项只读检查**，分五个维度，每条带 severity（`info`/`warning`/`critical`）和针对你当前配置的修复指引：
+
+- **配置完整性** —— 解析告警、写探针结果、降级模式（`jsonl_backup` = 正在静默丢数据 = critical）。
+- **向量化启用链** —— 最高价值的检查。"语义召回到底开没开？"不是布尔值；它走五环链（配置了模型 → `vec.enabled` → 扩展已加载 → 模型可用 → auto 开关），在第一处断裂处短路，明确告诉你哪一环断了、怎么修。专治"我明明配了模型，召回怎么还是不准"（通常是 `vec.enabled=false`）。
+- **分段、一致性、容量** —— 分段状态、孤儿分段/向量、版本链断链、open 冲突堆积、历史快照膨胀、DB 容量。
+
+退出码：`0` 正常 / `1` 有 warning / `2` 有 critical —— 可在脚本和 CI 里用。如果数据库根本打不开，doctor 会降级成单条 critical 报告而不是崩溃（这正是救护车的意义）。同一套引擎也作为 `memory_doctor_overview` MCP 工具暴露，供对话内使用；CLI 只是用静态推断替代了 MCP 运行时状态（精度略低，报告里会标注）。
 
 ### 测试
 

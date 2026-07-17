@@ -98,6 +98,33 @@ class MemoryDB:
         finally:
             conn.close()
 
+    @contextmanager
+    def diagnostic_connection(self) -> Iterator[sqlite3.Connection]:
+        """Read-only connection for doctor diagnostics (design doc §11.1).
+
+        Opens with ``mode=ro`` via URI so the connection can never write, even
+        if buggy check SQL ever tried.  Loads sqlite-vec when loadable so check
+        SQL referencing the vec0 virtual tables can run.  Safe to run
+        concurrently with MCP tool calls: it never takes the write lock.
+        """
+        if not self._db_available:
+            raise sqlite3.Error("Database not available")
+        conn = sqlite3.connect(
+            f"file:{self.settings.db_path}?mode=ro", uri=True,
+            timeout=_BUSY_TIMEOUT_MS / 1000,
+        )
+        conn.row_factory = sqlite3.Row
+        if self._sqlite_vec_loadable:
+            conn.enable_load_extension(True)
+            import sqlite_vec  # type: ignore
+
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------------
     #  One-time init (runs before any tool call)
     # ------------------------------------------------------------------

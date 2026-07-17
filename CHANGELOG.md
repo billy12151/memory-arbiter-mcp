@@ -3,6 +3,23 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.7.0] — 2026-07-17
+
+### Added
+
+- **Doctor health diagnostics** — a read-only, one-shot health check for memory-arbiter, exposed as both an MCP tool and a standalone CLI.
+  - **MCP tool**: `memory_doctor_overview(deep=false)` returns a graded report. Run it in-conversation to ask "is my setup healthy?".
+  - **CLI ambulance**: `memory-arbiter doctor [--json] [--deep] [--db PATH]` works even when the MCP process is down or the DB is read-only — it opens its own read-only connection and never touches the write lock. Exit codes: `0` clean / `1` warnings / `2` criticals (script/CI friendly). If the DB can't be opened at all, it degrades to a single critical report instead of crashing.
+  - **18 checks across 5 dimensions**: config integrity (parse warnings, write-probe, degradation mode), the **vector-enablement chain** (5-link short-circuit: model configured → `vec.enabled` → extension loaded → model usable → auto flags — catches the classic "configured a model but recall still doesn't work" case), split state, data consistency (orphaned sections/vectors, version-chain breaks, section-vector coverage), and capacity (conflicts, superseded ratio, history bloat, DB size).
+  - Each finding carries a `severity` (`info`/`warning`/`critical`) and a config-specific `fix_hint` — not a flat field dump.
+  - **Two-layer error defense**: per-check try/except isolation (one check failing never aborts the other 17) + a platform-entry `except Exception` fallback that guarantees doctor always returns a structured report.
+  - `deep=true` additionally loads the GGUF model for a dimension probe; the MCP path reuses an already-loaded embedder at zero cost.
+- README: bilingual (EN/CN) sections for the doctor feature (Features list, MCP tools table, dedicated CLI section).
+
+### Changed
+
+- `MemoryDB` gained a `diagnostic_connection()` method — a read-only (`mode=ro`) connection context manager that loads sqlite-vec when available, for doctor's check SQL to run against the vec0 virtual tables. Does not affect existing `connection()` / `write_transaction()` behavior.
+
 ## [0.6.3] — 2026-07-15
 
 ### Added

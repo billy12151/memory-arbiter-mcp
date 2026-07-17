@@ -118,6 +118,11 @@ def build_server() -> Any:
         return tools.memory_audit_summary()
 
     @app.tool()
+    def memory_doctor_overview(deep: bool = False) -> dict[str, Any]:
+        """对 memory-arbiter 做一次健康体检，返回分级诊断报告（只读）。覆盖配置完整性、向量化启用链、分段、数据一致性、容量堆积。每条诊断带 severity 与针对当前配置的 fix_hint。deep=true 时额外实际加载 GGUF 模型做维度探针（秒级开销）。"""
+        return tools.memory_doctor_overview(deep=deep)
+
+    @app.tool()
     def memory_edit(
         memory_id: int,
         new_content: Optional[str] = None,
@@ -211,6 +216,10 @@ def build_server() -> Any:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        from .doctor_cli import run_cli
+        run_cli(sys.argv[2:])
+        return
     try:
         build_server().run()
     except RuntimeError as exc:

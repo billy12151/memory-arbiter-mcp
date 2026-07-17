@@ -343,6 +343,25 @@ class MemoryTools:
             extra_warnings=self.settings.config_warnings,
         )
 
+    def memory_doctor_overview(self, deep: bool = False, **_: Any) -> dict[str, Any]:
+        """Run a read-only health check and return a graded diagnostic report.
+
+        Covers config integrity, the vector-enablement chain, split, data
+        consistency, and capacity. Each finding carries a severity and a
+        fix_hint tailored to the current config.json. Read-only: never writes,
+        never changes schema. ``deep=true`` additionally loads the GGUF model
+        for a dimension probe (seconds-level cost); MCP reuses an
+        already-loaded embedder at zero cost.
+        """
+        from .doctor import doctor_overview_mcp, report_to_dict
+
+        report = doctor_overview_mcp(
+            self.db, self.settings, deep,
+            embedder_probe=self._ensure_embedder,
+            runtime_state=self.db.state,
+        )
+        return self.db.state.response(report_to_dict(report))
+
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
         summary = self.db.audit_summary()
         return self.db.state.response(summary)

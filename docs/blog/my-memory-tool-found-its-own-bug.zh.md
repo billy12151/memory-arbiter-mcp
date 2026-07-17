@@ -1,4 +1,4 @@
-# 跨工具共享记忆：一个 MCP server 的自举故事
+# 我给 AI 做的记忆工具，被它自己的搜索扒出了一个祖传 bug
 
 *我做了个叫 [`memory-arbiter`](https://github.com/billy12151/memory-arbiter-mcp) 的 MCP server，让 ZCode、Codex、Cursor、Claude Code 这些 AI 工具共享同一份记忆。发版用它自己的时候，它自己的搜索暴露了它自己的 FTS5 bug。这个闭环让我对"做开发者工具"这件事想了很多。*
 
