@@ -110,7 +110,7 @@ If you just want to run the server without managing a Python env — install [`u
 uvx --from memory-arbiter-mcp memory-arbiter
 ```
 
-This pulls the published package and launches the `memory-arbiter` entry point. No venv, no `pip install`. The entry points `memory-arbiter` and `memory-arbiter-mcp` are equivalent — use the shorter one. Note: `uvx` only shortens the **install** step; embedding model and `sqlite-vec` still need separate setup (see [Semantic Recall](#optional-semantic-recall-v050)).
+This pulls the published package and launches the `memory-arbiter` entry point. No venv, no `pip install`. The two entry points `memory-arbiter-mcp` and `memory-arbiter` are identical — the examples here use the shorter `memory-arbiter` for `uvx` (fewer keystrokes) and `memory-arbiter-mcp` for the local-venv path (matches the venv binary name). Use either. Note: `uvx` only shortens the **install** step; embedding model and `sqlite-vec` still need separate setup (see [Semantic Recall](#optional-semantic-recall-v050)).
 
 ### Connect Your Tool
 
@@ -147,7 +147,7 @@ Or, zero-install via `uvx` (no local clone needed):
 }
 ```
 
-> Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `zcode`, `codex`, `cursor`, `claude-code`). Put shared paths/vector/model settings in `~/.config/memory-arbiter/config.json`; keep per-client identity in the MCP env block. If you are not using a config file, put `MEMORY_ARBITER_DB_PATH` in each client's env and point them at the same SQLite file. (GUI tools like OpenDesign inherit the host CLI's config — no separate client name.)
+> Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `zcode`, `codex`, `cursor`, `claude-code`). Put shared paths/vector/model settings in `~/.config/memory-arbiter/config.json`; keep per-client identity in the MCP env block. The config file is the recommended home for `db_path` too — it survives client reinstalls. If you are **not** using a config file, fall back to putting `MEMORY_ARBITER_DB_PATH` in each client's env and pointing them at the same SQLite file (config wins when both are set). (GUI tools like OpenDesign inherit the host CLI's config — no separate client name.)
 
 > ⚠️ **New session required**: MCP servers are loaded at session startup. Already-open sessions won't see the new tools. Start a fresh session after configuring.
 
@@ -161,9 +161,10 @@ agent persona). Anything that might be reused by another agent or platform —
 not just project info: requirements, research, decisions, progress, user
 preferences, knowledge conclusions — goes into memory-arbiter.
 
-Every write must fill: subject, tags, source_type (one of: requirement /
-decision / doc_summary / research / progress), event_time (ISO 8601),
-workspace (project name), source_ref.
+Every write must fill: subject, tags, source_type (one of: `user_confirmed`
+/ `agent_generated` / `document_extracted`; `user_confirmed` auto-locks the
+record — reserve it for facts the user explicitly verified), event_time
+(ISO 8601), workspace (project name), source_ref.
 
 Search via memory_search first; read source files only for detail. When you
 find a contradiction, don't overwrite — if you know which is correct, use
@@ -309,7 +310,7 @@ After configuration, normal `memory_search(query="...")` can generate the query 
 - **New filter params** on `memory_search` (all optional, off = v0.7.2 behaviour):
   - `tags_filter: list[str]` — strict AND, memory must contain *every* listed tag
   - `after_time` / `before_time` — ISO 8601 bounds on `ingest_time` (naive = UTC)
-  - `source_type` — one of `user_confirmed` / `agent_generated` / `document_extracted` / `decision` / `requirement`
+  - `source_type` — one of `user_confirmed` / `agent_generated` / `document_extracted` (the enum also has `unknown` / `pending`, but those are defaults/intermediate states, not values to write deliberately)
 
 **Caveats (accepted this version).**
 - Filters post-filter the query-recalled pool; they do not recall on their own. An empty `query` + `tags_filter` returns empty with a warning — use `memory_recent` + client-side filter for "list everything with tag X".
@@ -625,7 +626,7 @@ memory-arbiter-mcp
 uvx --from memory-arbiter-mcp memory-arbiter
 ```
 
-这会拉取已发布的包并启动 `memory-arbiter` 入口。无需 venv、无需 `pip install`。`memory-arbiter` 和 `memory-arbiter-mcp` 两个入口等价，用短的那个即可。注意：`uvx` 只省掉**安装**这一步，embedding 模型和 `sqlite-vec` 仍需单独配置（见 [语义检索](#可选语义检索v050)）。
+这会拉取已发布的包并启动 `memory-arbiter` 入口。无需 venv、无需 `pip install`。两个入口 `memory-arbiter-mcp` 和 `memory-arbiter` 完全等价——下面的示例在 `uvx` 路径用短的 `memory-arbiter`（少打几个字），在本地 venv 路径用 `memory-arbiter-mcp`（和 venv 里的二进制名一致）。用哪个都行。注意：`uvx` 只省掉**安装**这一步，embedding 模型和 `sqlite-vec` 仍需单独配置（见 [语义检索](#可选语义检索v050)）。
 
 ### 接入工具
 
@@ -662,7 +663,7 @@ uvx --from memory-arbiter-mcp memory-arbiter
 }
 ```
 
-> 每个工具改一下 `MEMORY_ARBITER_CLIENT` 标识（`openclaw`、`zcode`、`codex`、`cursor`、`claude-code`）。共享路径、向量、模型配置放 `~/.config/memory-arbiter/config.json`；每客户端身份放 MCP env 段。如果不用配置文件，再把 `MEMORY_ARBITER_DB_PATH` 放到每个客户端 env，并指向同一个 SQLite 文件。（OpenDesign 这类 GUI 工具继承宿主 CLI 的配置，不需要单独的 client 名称。）
+> 每个工具改一下 `MEMORY_ARBITER_CLIENT` 标识（`openclaw`、`zcode`、`codex`、`cursor`、`claude-code`）。共享路径、向量、模型配置放 `~/.config/memory-arbiter/config.json`；每客户端身份放 MCP env 段。`db_path` 也建议放配置文件——客户端重装不会丢。**不**用配置文件时，再把 `MEMORY_ARBITER_DB_PATH` 放到每个客户端 env 并指向同一个 SQLite 文件（两者都设时配置文件优先）。（OpenDesign 这类 GUI 工具继承宿主 CLI 的配置，不需要单独的 client 名称。）
 
 > ⚠️ **需要新建会话**：MCP Server 在客户端启动时加载，已经打开的会话不会识别新添加的 Server。配置好后请新建一个会话。
 
@@ -675,9 +676,10 @@ uvx --from memory-arbiter-mcp memory-arbiter
 或平台复用的信息（不只是项目信息——需求、调研、决策、进展、用户偏好、
 知识结论等），一律写入 memory-arbiter。
 
-每次写入必填：subject、tags、source_type（限 requirement / decision /
-doc_summary / research / progress）、event_time（ISO 8601）、workspace
-（项目名）、source_ref。
+每次写入必填：subject、tags、source_type（限 `user_confirmed` /
+`agent_generated` / `document_extracted`；其中 `user_confirmed` 会自动
+锁定该条记忆——只用于用户明确确认过的事实）、event_time（ISO 8601）、
+workspace（项目名）、source_ref。
 
 查找先 memory_search，细节读源文件。发现矛盾不覆盖：明确知道哪条对时
 用 memory_supersede（废弃错的），不确定时用 memory_arbitrate（系统按
@@ -820,7 +822,7 @@ doc_summary / research / progress）、event_time（ISO 8601）、workspace
 - **`memory_search` 新增过滤参数**（全部可选，不传 = v0.7.2 行为）：
   - `tags_filter: list[str]` —— 严格 AND，记忆必须**同时**含所有列出的 tag
   - `after_time` / `before_time` —— ISO 8601，按 `ingest_time` 过滤（naive 当 UTC）
-  - `source_type` —— `user_confirmed` / `agent_generated` / `document_extracted` / `decision` / `requirement` 之一
+  - `source_type` —— `user_confirmed` / `agent_generated` / `document_extracted` 之一（enum 另有 `unknown` / `pending`，但那两个是默认值/中间态，不应主动写入）
 
 **已知限制（本版接受）。**
 - 过滤只对 query 召回的 pool 做后过滤，本身不召回。空 `query` + `tags_filter` 返回空 + warning——要"列出所有带 X tag 的"用 `memory_recent` + 客户端过滤。
