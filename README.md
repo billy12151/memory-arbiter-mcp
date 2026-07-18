@@ -75,6 +75,7 @@ Using two or more tools adds a shared memory layer: Tool A writes, Tool B search
 - **Cross-tool sharing** — one SQLite database, every connected tool reads and writes the same memory. No file handoff, no copy-paste, no version drift.
 - **Version history** — edit a memory in place; the old version is archived, not lost. Full audit trail of who changed what and when.
 - **Long-document section split** — break 10K+ char documents into searchable sections; queries return the matching paragraph, not the whole document.
+- **Smart tag ranking & search filters** (v0.7.3) — tags are scored as discrete labels (token overlap, not substring), so a tag set hitting every query token finally outranks a subject that merely contains one query word. `memory_search` also gains `tags_filter` / `after_time` / `before_time` / `source_type`, plus `has_more` + `total_estimate` so exhaustive queries know whether the page is complete.
 - **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search.
 - **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup. Never crashes, even if optional extensions are missing.
 - **Health diagnostics** — a one-shot `doctor` check grades config integrity, the vector-enablement chain, split, data consistency, and capacity. Each finding carries a severity and a config-specific fix hint; works as an MCP tool (daily) or a standalone CLI (ambulance: runs even when the MCP process is down). Read-only.
@@ -316,7 +317,7 @@ After configuration, normal `memory_search(query="...")` can generate the query 
 - Mixed ASCII+CJK tokens (e.g. `v0.7.2发版` written without a space) take the equality path and may miss — **separate them with whitespace** (`"v0.7.2 发版"`).
 - `has_more` can over-report when `pool_cap` (default 50) truncates the recall pool on large libraries; `total_estimate` stays accurate when filters are active (it uses a SQL `COUNT`).
 
-**Validation.** A 2000×5-seed synthetic corpus (`scripts/tune_tag_weights.py`) proved `specific_coverage=0.6` is the inflection point (pairwise accuracy 0.5 → 1.000); 0.5 is too loose, 0.7+ adds nothing. On the real production library, dogfooding query `"v0.7.2 发版"` lifted the target memory from rank #13 to #1 with no regression on 6 sample queries.
+**Validation.** A 2000×5-seed synthetic corpus (`scripts/tune_tag_weights.py`) proved `specific_coverage=0.6` is the inflection point. The decisive metric is the A>B pair (TAG_PRECISE should beat SUBJ_INCIDENTAL — the id=206 vs id=105 case that motivated the fix): it goes from **0.520 under the baseline to 1.000** when the subject threshold is tightened to 0.6; 0.5 is too loose, 0.7+ adds nothing. Overall pairwise accuracy on the corpus rises 0.958 → 0.984. On the real production library, dogfooding query `"v0.7.2 发版"` lifted the target memory from rank #13 to #1 with no regression on 6 sample queries.
 
 ### Optional: Long-Document Section Split (v0.6.0)
 
@@ -589,6 +590,7 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 - **跨工具共享** —— 一个 SQLite 数据库，所有接入的工具读写同一份记忆。零文件传递、零复制粘贴、零版本混乱。
 - **版本历史** —— 原地编辑记忆，旧版本自动归档不丢失。谁改了什么、什么时候改的，完整可追溯。
 - **长文档分段** —— 把万字文档拆成可搜索的段落，查询只返回命中的那段，不返回整篇。
+- **tag 精排 + 搜索过滤**（v0.7.3）—— tag 按离散标签集评分（token 重叠，不再当句子做整串匹配），tag 精确命中每个 query token 时终于能排到 subject 只是偶然含一个词的记忆之上。`memory_search` 还新增了 `tags_filter` / `after_time` / `before_time` / `source_type`，响应里带 `has_more` + `total_estimate`，让穷举式查询知道这一页是不是已经拿全。
 - **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。
 - **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
 - **健康体检** —— 一键 `doctor` 给配置完整性、向量化启用链、分段、数据一致性、容量堆积做分级体检。每条诊断带 severity 和针对当前配置的修复指引；既能作为 MCP 工具（日常）在对话里触发，也能作为独立 CLI（救护车：MCP 进程挂了也能连库诊断）。纯只读。
@@ -826,7 +828,7 @@ doc_summary / research / progress）、event_time（ISO 8601）、workspace
 - ASCII+CJK 混合 token（如 `v0.7.2发版` 不带空格）走等值路径会漏匹配——**用空格分隔**（`"v0.7.2 发版"`）。
 - `has_more` 在 `pool_cap`（默认 50）截断召回 pool 时可能高报；带过滤时 `total_estimate` 仍准确（走 SQL `COUNT`）。
 
-**验证。** 合成数据 2000×5 seed（`scripts/tune_tag_weights.py`）证明 `specific_coverage=0.6` 是临界点（pairwise 准确率 0.5 → 1.000）；0.5 太松、0.7+ 无额外收益。真生产库 dogfooding query `"v0.7.2 发版"` 把目标记忆从 #13 提到 #1，6 个抽样查询无回归。
+**验证。** 合成数据 2000×5 seed（`scripts/tune_tag_weights.py`）证明 `specific_coverage=0.6` 是临界点。关键指标是 A>B 这一对（TAG_PRECISE 应胜过 SUBJ_INCIDENTAL——即触发本次修复的 id=206 vs id=105 场景）：在 baseline 下只有 **0.520，subject 阈值收紧到 0.6 后达到 1.000**；0.5 太松、0.7+ 无额外收益。总 pairwise 准确率从 0.958 升到 0.984。真生产库 dogfooding query `"v0.7.2 发版"` 把目标记忆从 #13 提到 #1，6 个抽样查询无回归。
 
 ### 可选：长文分段检索（v0.6.0）
 
