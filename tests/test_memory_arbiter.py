@@ -2745,6 +2745,131 @@ def test_cjk_substring_match_contract() -> None:
     assert _cjk_substring_match("bcxy", "abcxyz") is False  # middle 不命中
 
 
+# ---- v0.7.3 commit 5: subject classify_match_level coverage threshold ----
+# 守护 anchors.classify_match_level 的 specific_coverage 阈值（0.4→0.6，
+# id=210/id=211 dogfooding 真根因）。这是 commit 5 三大修正之一，但此前
+# anchors.py 没有任何测试 import，改阈值不会触发测试失败。这一组测试
+# 用直接构造的 Anchor/AnchorMatch 钉死阈值数值，防止手滑改回 0.4/0.5
+# 让 id=105 场景（subject 偶然含一字）静默升回 medium(6.0)，重新挤掉
+# tag 双命中的 id=206。
+#
+# 合成数据证据见 scripts/tune_tag_weights.py（n=2000×5 seed）：
+#   coverage 0.5 无效（A>B=0.5），0.6 是临界点（A>B=1.000），0.7+ 无额外收益。
+
+from memory_arbiter.anchors import (
+    Anchor as _Anchor,
+    AnchorMatch as _AnchorMatch,
+    classify_match_level as _classify_match_level,
+)
+
+
+def _classify(
+    specific_hits: int, generic_hits: int, query_specific_count: int
+) -> str:
+    """直接构造 matches dict + query_anchors，绕开 extract_anchors 的 bigram
+    干扰，精确控制 specific_coverage = specific_hits / query_specific_count。
+
+    query_specific_count = query 里非 generic 的 anchor 数（分母）。
+    构造的 query_anchors 全部 is_generic=False，所以 query_specific_count
+    等于传入值；total_hits 由 specific+generic 决定（走 summary）。
+    """
+    query_anchors = [_Anchor(text=f"q{i}", is_generic=False)
+                     for i in range(query_specific_count)]
+    matches = {
+        "_summary": _AnchorMatch(
+            hit=True, kind="summary",
+            specific_hits=specific_hits,
+            generic_hits=generic_hits,
+            total_hits=specific_hits + generic_hits,
+        ),
+    }
+    return _classify_match_level(query_anchors, matches)
+
+
+def test_classify_coverage_half_is_weak_not_medium() -> None:
+    # id=210 dogfooding 核心 bug：subject 偶然含 query 一半 anchor
+    # （specific=1, query_specific=2 → coverage=0.500）。
+    # 0.6 阈值下落 weak(2.0)，旧 0.4 阈值会误升 medium(6.0)。
+    # 改回 0.4/0.5 这个断言会失败 —— 这就是回归守门员。
+    assert _classify(specific_hits=1, generic_hits=0, query_specific_count=2) == "weak"
+
+
+def test_classify_coverage_full_is_medium() -> None:
+    # 对照：query 两个 specific anchor 全命中（coverage=1.000）→ medium。
+    # 这是 id=206 真正讲主题时该拿的 level。
+    assert _classify(specific_hits=2, generic_hits=0, query_specific_count=2) == "medium"
+
+
+def test_classify_coverage_threshold_boundary_0_6() -> None:
+    # 阈值数值本身：3/5 = 0.600 刚好 >= 0.6 → medium。
+    # 构造必须让第一条 medium 规则（specific>=1 AND total>=2）不触发，
+    # 才能真正走到 coverage 判断：这里 specific=3 但 total 也=3 会先命中
+    # 第一条规则——所以用 specific=3, total=1 是不可能的（total>=specific）。
+    # 改用 1/2=0.5（守 weak）+ 2/2=1.0（守 medium）这对边界，见上下两条。
+    # 本条留作"第一规则优先于 coverage"的文档性断言：3/5 走 medium 是因为
+    # specific>=1 AND total>=2，不是因为 coverage。
+    assert _classify(specific_hits=3, generic_hits=0, query_specific_count=5) == "medium"
+
+
+def test_classify_coverage_just_below_threshold_is_weak() -> None:
+    # 守"低于 0.6 阈值（且不触发第一规则）必须落 weak"。
+    # 构造 specific=1, total=1（避开第一规则 specific>=1 AND total>=2），
+    # query_specific=3 → coverage=0.333 < 0.6 → weak。
+    # 这条钉死 coverage 规则的阈值：若有人改回 0.4 阈值，0.333 仍是 weak
+    # （因为 0.333 < 0.4），所以它守的是"阈值不能低于 0.333"；真正守"0.5
+    # 边界"的是上面那条 coverage_half 测试。
+    assert _classify(specific_hits=1, generic_hits=0, query_specific_count=3) == "weak"
+
+
+def test_classify_medium_via_specific_plus_total_rule() -> None:
+    # medium 的第一条规则：specific_hits>=1 AND total_hits>=2（与 coverage 无关）。
+    # 1 specific + 1 generic = total 2，query_specific=3 → coverage 0.333 < 0.6，
+    # 但靠 specific+total 规则仍升 medium。
+    assert _classify(specific_hits=1, generic_hits=1, query_specific_count=3) == "medium"
+
+
+def test_classify_only_generic_is_weak() -> None:
+    # 只有 generic 命中、specific=0：coverage=0，不满足 medium 两条规则，
+    # 但 total>=1 → weak（不是 none）。
+    assert _classify(specific_hits=0, generic_hits=2, query_specific_count=3) == "weak"
+
+
+def test_classify_no_hits_is_none() -> None:
+    # 一个都没命中 → none。
+    assert _classify(specific_hits=0, generic_hits=0, query_specific_count=3) == "none"
+
+
+def test_classify_single_specific_anchor_hit_is_medium() -> None:
+    # coverage 规则的独占触发区：query 只有 1 个 specific anchor（如裸 query
+    # "发版"），它命中时 specific=1 total=1，第一规则（total>=2）不满足，
+    # 靠 coverage=1.0>=0.6 升 medium。
+    # 这条守"coverage 规则不能被废掉"：把阈值改到 >1.0（如 2.0）会让
+    # 单 token query 永远拿不到 medium，subject 命中只剩 weak(2.0)。
+    # 上一轮把阈值改 2.0 跑全量 184 全绿，就是漏了这个场景。
+    assert _classify(specific_hits=1, generic_hits=0, query_specific_count=1) == "medium"
+
+
+def test_classify_id105_regression_via_real_pipeline() -> None:
+    # 端到端回归：用真实 extract_anchors 复现 id=105 bug 场景。
+    # query "v0.7.2 发版" 的两个 specific anchor 中，subject 只命中"发版"
+    # （v0.4.0 ≠ v0.7.2）→ coverage=0.500 → 必须落 weak，不能 medium。
+    # 这条覆盖"extract_anchors → score_anchor_overlap → classify_match_level"
+    # 完整链路，守 subject 路径在真实 bigram 切分下的阈值行为。
+    from memory_arbiter.anchors import (
+        extract_anchors, score_anchor_overlap, classify_match_level,
+    )
+    query = "v0.7.2 发版"
+    subject_id105 = "[已完成] README v0.4.0 发版"  # 含"发版"但不含 v0.7.2
+    qa = extract_anchors(query)
+    sa = extract_anchors(subject_id105)
+    matches = score_anchor_overlap(qa, sa)
+    assert classify_match_level(qa, matches) == "weak"
+    # 同时验证 subject 语义全命中时能正确升 medium（id=206 的 subject 路径）
+    subject_full = "v0.7.2 发版记录"
+    matches_full = score_anchor_overlap(qa, extract_anchors(subject_full))
+    assert classify_match_level(qa, matches_full) == "medium"
+
+
 # ---- v0.7.3 change 2: search enhancement (tags_filter / time /
 # source_type / has_more / 4-tuple / shortcut) end-to-end tests ---------
 #
