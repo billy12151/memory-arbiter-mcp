@@ -2554,3 +2554,192 @@ def test_v061_r1_channel6_recall_superseded_with_include_superseded(tmp_path: Pa
         "Channel 6 should recall superseded split-active memory when "
         "include_superseded=True"
     )
+
+
+# ---- v0.7.3 change 1: tag scoring unit tests (design §2.6 matrix) ------
+# These exercise _score_tags_surface / _cjk_substring_match /
+# _normalize_token_for_tag_match directly, not the full search pipeline.
+
+from memory_arbiter.search import (
+    _score_tags_surface,
+    _cjk_substring_match,
+    _normalize_token_for_tag_match,
+    _is_pure_cjk_token,
+    _TAGS_STRONG_WEIGHT,
+    _TAGS_MEDIUM_WEIGHT,
+    _TAGS_WEAK_WEIGHT,
+    _TAGS_SCORE_CAP,
+)
+
+
+def _tags_score(query: str, tags: list[str]) -> tuple[float, str]:
+    """Convenience wrapper returning (score, level)."""
+    return _score_tags_surface(
+        query, tags,
+        _TAGS_STRONG_WEIGHT, _TAGS_MEDIUM_WEIGHT, _TAGS_WEAK_WEIGHT, _TAGS_SCORE_CAP,
+    )[:2]
+
+
+def test_tag_all_tokens_match_strong() -> None:
+    # id=206 修复目标：query 两个 token 都是精确 tag → strong
+    score, level = _tags_score("v0.7.2 发版", ["v0.7.2", "发版"])
+    assert level == "strong"
+    assert score == 7.0
+
+
+def test_tag_long_cjk_query() -> None:
+    # 长 CJK query 单 token，tags 前缀+后缀都命中 → strong（修 v1 CJK bug）
+    score, level = _tags_score("发版历史", ["发版", "历史"])
+    assert level == "strong"
+    assert score == 7.0
+
+
+def test_tag_mixed_long_query() -> None:
+    score, level = _tags_score("v0.7.2 发版历史", ["v0.7.2", "发版", "历史"])
+    assert level == "strong"
+    assert score == 7.0
+
+
+def test_tag_half_match_medium() -> None:
+    score, level = _tags_score("v0.7.2 发版", ["v0.7.2", "技术参考"])
+    assert level == "medium"
+    assert score == 4.0
+
+
+def test_tag_one_token_match_weak() -> None:
+    # 3 个 query token，只命中 1 个 → ratio 1/3 < 0.5 → weak
+    score, level = _tags_score("v0.7.2 发版 历史", ["发版", "其它"])
+    assert level == "weak"
+    assert score == 1.5
+
+
+def test_tag_no_match_none() -> None:
+    score, level = _tags_score("v0.7.2 发版", ["doctor", "bug"])
+    assert level == "none"
+    assert score == 0.0
+
+
+def test_tag_version_word_boundary() -> None:
+    # query v0.7.2 vs tag v0.7.0 → ASCII equality 不命中（防伪召回）
+    score, level = _tags_score("v0.7.2", ["v0.7.0"])
+    assert level == "none"
+    assert score == 0.0
+
+
+def test_tag_version_normalization_bidirectional() -> None:
+    # query 0.7.2 vs tag V0.7.2 → 双向归一化后都成 0.7.2 → 命中
+    score, level = _tags_score("0.7.2", ["V0.7.2"])
+    assert level == "strong"
+    assert score == 7.0
+
+
+def test_tag_v_not_stripped_for_words() -> None:
+    # query vue 不剥 v（不跟数字）→ 不匹配 tag ue
+    score, level = _tags_score("vue", ["ue"])
+    assert level == "none"
+
+
+def test_tag_cjk_prefix_substring() -> None:
+    # tag 发版 是 query token 发版历史 的前缀 → 命中
+    score, level = _tags_score("发版历史", ["发版"])
+    assert level == "strong"
+
+
+def test_tag_cjk_suffix_substring() -> None:
+    # tag 历史 是 query token 发版历史 的后缀 → 命中
+    score, level = _tags_score("发版历史", ["历史"])
+    assert level == "strong"
+
+
+def test_tag_cjk_middle_substring_excluded() -> None:
+    # tag 版历 是 query token 发版历史 的中间子串 → 不命中（review_2 漏洞 1）
+    score, level = _tags_score("发版历史", ["版历"])
+    assert level == "none"
+
+
+def test_tag_ascii_no_substring() -> None:
+    # tag memory vs query memory-arbiter → ASCII 不 substring → none
+    score, level = _tags_score("memory-arbiter", ["memory"])
+    assert level == "none"
+
+
+def test_tag_empty_tags_list() -> None:
+    score, level = _tags_score("v0.7.2 发版", [])
+    assert level == "none"
+    assert score == 0.0
+
+
+def test_tag_empty_query() -> None:
+    score, level = _tags_score("", ["v0.7.2", "发版"])
+    assert level == "none"
+    assert score == 0.0
+
+
+def test_tag_subject_unchanged() -> None:
+    # subject 仍走原 _score_surface：整串 substring 命中仍判 strong，不受 tag 改动影响
+    from memory_arbiter.search import _score_surface, extract_anchors
+    q = "v0.7.2 发版"
+    subject = "v0.7.2 发版记录"
+    score, level = _score_surface(
+        extract_anchors(q), subject,
+        10.0, 6.0, 2.0, 10.0, q.lower(),
+    )
+    assert level == "strong"
+
+
+def test_tag_mixed_ascii_cjk_no_space_none() -> None:
+    # 第五轮 S1 / 第八轮 E2：无空格混合 token 走 equality → 不命中（已知盲区）
+    score, level = _tags_score("v0.7.2发版", ["v0.7.2", "发版"])
+    assert level == "none"
+
+
+def test_tag_mixed_with_space_strong() -> None:
+    # 对照：有空格的混合 query → strong（推荐写法）
+    score, level = _tags_score("v0.7.2 发版", ["v0.7.2", "发版"])
+    assert level == "strong"
+
+
+def test_tag_debug_fields_populated() -> None:
+    # debug dict 字段齐全（用于 _soft_rerank 写 _tag_query_tokens 等）
+    from memory_arbiter.search import _score_tags_surface
+    _, _, debug = _score_tags_surface(
+        "v0.7.2 发版", ["v0.7.2", "发版"],
+        _TAGS_STRONG_WEIGHT, _TAGS_MEDIUM_WEIGHT, _TAGS_WEAK_WEIGHT, _TAGS_SCORE_CAP,
+    )
+    assert debug == {"total": 2, "matched": 2, "ratio": 1.0}
+
+
+# ---- _is_pure_cjk_token / _cjk_substring_match / _normalize direct -------
+# 设计 §2.3 E2 明确：_is_pure_cjk_token 不能用 token.isascii() 反向判定，
+# 否则混合 token "0.7.2发版"（含 ASCII 数字）会被归入 CJK 类走 substring。
+# 这些单元测试钉死判定函数的行为契约。
+
+
+def test_is_pure_cjk_token_contract() -> None:
+    assert _is_pure_cjk_token("发版") is True
+    assert _is_pure_cjk_token("发版历史") is True
+    assert _is_pure_cjk_token("v0.7.2") is False   # 纯 ASCII
+    assert _is_pure_cjk_token("0.7.2发版") is False  # 混合（含 ASCII 数字）—— 关键
+    assert _is_pure_cjk_token("memory") is False
+    assert _is_pure_cjk_token("") is True           # 无 ASCII alnum → 视为 pure（空 query 已在调用方拦截）
+
+
+def test_normalize_token_for_tag_match_contract() -> None:
+    assert _normalize_token_for_tag_match("v0.7.2") == "0.7.2"
+    assert _normalize_token_for_tag_match("0.7.2") == "0.7.2"
+    assert _normalize_token_for_tag_match("V0.7.2") == "0.7.2"
+    assert _normalize_token_for_tag_match("vue") == "vue"           # v 不跟数字，不剥
+    assert _normalize_token_for_tag_match("  Abc  ") == "abc"        # strip + lower
+    assert _normalize_token_for_tag_match("发版") == "发版"
+
+
+def test_cjk_substring_match_contract() -> None:
+    assert _cjk_substring_match("发版", "发版历史") is True   # prefix
+    assert _cjk_substring_match("历史", "发版历史") is True   # suffix
+    assert _cjk_substring_match("发版历史", "发版历史") is True  # equal
+    assert _cjk_substring_match("版历", "发版历史") is False  # middle（bigram 伪 tag）
+    assert _cjk_substring_match("发", "发版") is False       # 单字 tag 长度门槛
+    # _cjk_substring_match 本身是纯字符串 prefix/suffix 判定，ASCII 串按同样的规则：
+    assert _cjk_substring_match("xyz", "abcxyz") is True    # suffix 命中（调用方 _is_pure_cjk_token 保证 ASCII 串不进这条路径）
+    assert _cjk_substring_match("abc", "abcxyz") is True    # prefix 命中
+    assert _cjk_substring_match("bcxy", "abcxyz") is False  # middle 不命中

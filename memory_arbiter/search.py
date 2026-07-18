@@ -240,6 +240,136 @@ def _score_surface(
     return 0.0, level
 
 
+# ---- v0.7.3: tag-specific scoring (design §2) --------------------------
+# _score_surface treats subject and tags the same way — both go through the
+# "is the whole query a contiguous substring?" strong check. That's right for
+# subject (a natural-language sentence) but wrong for tags (a discrete label
+# set that almost never concatenates into the exact query string). The result
+# was that tags could only ever reach medium (4.0), never strong (7.0), even
+# when every query token was an exact tag — see id=206 / id=210.
+#
+# _score_tags_surface replaces _score_surface for the tags field only. It
+# scores by *semantic token overlap*: split the query on whitespace, normalize
+# both sides (strip v-prefix on version-like tokens), and match each query
+# token against the tag list. ASCII tokens match by equality (no substring —
+# "v0.7" must not match tag "v0.7.0"); pure-CJK tokens match by prefix/suffix
+# substring only (middle substrings would let bigram-artifact tags like "版历"
+# leak through). See design doc §2.3-§2.6.
+
+def _normalize_token_for_tag_match(token: str) -> str:
+    """Normalize a token for tag-level matching.
+
+    Applied to BOTH query tokens and tags (bidirectional — review_1 漏洞 2).
+    Strips a leading ``v`` only when it prefixes a version-like token
+    (``v0.7.2`` → ``0.7.2``) so ``query="v0.7.2"`` matches ``tag="0.7.2"``.
+    Words like ``vue`` are left alone (v not followed by a digit).
+    """
+    s = (token or "").lower().strip()
+    if len(s) > 1 and s[0] == "v" and s[1].isdigit():
+        s = s[1:]
+    return s
+
+
+def _cjk_substring_match(tag_norm: str, query_token_norm: str) -> bool:
+    """CJK substring match — prefix/suffix only, never middle.
+
+    - prefix: tag ``发版`` matches query token ``发版历史`` (tag is query's prefix)
+    - suffix: tag ``历史`` matches query token ``发版历史`` (tag is query's suffix)
+    - middle: tag ``版历`` does NOT match query token ``发版历史`` (prevents
+      bigram-artifact tags created by anchor slicing from leaking through)
+
+    The ``len >= 2`` gate on both sides also excludes single-char tags, which
+    would over-match (design §8 risk 4 / S2: actual risk is under-match of
+    single-char tags, accepted).
+    """
+    if tag_norm == query_token_norm:
+        return True
+    if len(tag_norm) >= 2 and len(query_token_norm) >= 2:
+        return query_token_norm.startswith(tag_norm) or query_token_norm.endswith(tag_norm)
+    return False
+
+
+def _is_pure_cjk_token(token: str) -> bool:
+    """A token is "pure CJK" if it contains NO ASCII alphanumeric chars.
+
+    Used by _score_tags_surface to pick the match path per query token:
+      - pure CJK  → prefix/suffix substring match (发版 / 发版历史)
+      - otherwise → equality match (v0.7.2 / memory / 0.7.2发版 mixed)
+
+    Note this is the OPPOSITE of the existing ``_is_cjk_token`` (which returns
+    True if a token contains ANY CJK char, and serves the FTS trigram path).
+    A mixed token like ``0.7.2发版`` is _is_cjk_token=True but _is_pure_cjk=False,
+    so it correctly takes the equality path (design S1/E2/M3). Do not merge
+    these two helpers.
+    """
+    return not any(c.isascii() and c.isalnum() for c in token)
+
+
+def _score_tags_surface(
+    query: str,
+    tags_list: list[str],
+    strong_weight: float,
+    medium_weight: float,
+    weak_weight: float,
+    cap: float,
+) -> tuple[float, str, dict]:
+    """Score tags by semantic token overlap with the query (v0.7.3).
+
+    Algorithm (design §2.3):
+      1. Split query on whitespace into semantic tokens.
+      2. Normalize each token (_normalize_token_for_tag_match), applied to
+         BOTH query tokens and tags.
+      3. For each normalized query token, match against the normalized tag set:
+         - pure-CJK token → _cjk_substring_match (prefix/suffix only)
+         - otherwise      → equality only (ASCII/mixed tokens)
+      4. ratio = matched_query_tokens / total_query_tokens.
+         - 1.0           → strong (min(strong_weight, cap))
+         - 0.5 <= r < 1  → medium
+         - 0   < r < 0.5 → weak
+         - 0             → none
+
+    Returns (score, level, debug) where debug has keys
+    total / matched / ratio for the debug_ranking fields.
+    """
+    if not tags_list:
+        return 0.0, "none", {"total": 0, "matched": 0, "ratio": 0.0}
+
+    query_tokens = [t for t in (query or "").split() if t]
+    if not query_tokens:
+        return 0.0, "none", {"total": 0, "matched": 0, "ratio": 0.0}
+
+    tags_norm = [_normalize_token_for_tag_match(str(t)) for t in tags_list]
+    tags_norm_set = set(tags_norm)
+
+    matched = 0
+    for raw_token in query_tokens:
+        token_norm = _normalize_token_for_tag_match(raw_token)
+        if not token_norm:
+            continue
+        if _is_pure_cjk_token(token_norm):
+            hit = any(_cjk_substring_match(tn, token_norm) for tn in tags_norm_set)
+        else:
+            hit = token_norm in tags_norm_set
+        if hit:
+            matched += 1
+
+    total = len(query_tokens)
+    ratio = matched / total if total else 0.0
+    if ratio >= 1.0:
+        level = "strong"
+        score = min(strong_weight, cap)
+    elif ratio >= 0.5:
+        level = "medium"
+        score = min(medium_weight, cap)
+    elif ratio > 0:
+        level = "weak"
+        score = min(weak_weight, cap)
+    else:
+        level = "none"
+        score = 0.0
+    return score, level, {"total": total, "matched": matched, "ratio": ratio}
+
+
 def _soft_rerank(
     query: str,
     candidates: list[dict[str, Any]],
@@ -275,11 +405,11 @@ def _soft_rerank(
             _SUBJECT_STRONG_WEIGHT, _SUBJECT_MEDIUM_WEIGHT, _SUBJECT_WEAK_WEIGHT,
             _SUBJECT_SCORE_CAP, query_lower,
         )
-        tag_score, tag_level = _score_surface(
-            query_anchors, tags_text,
+        tag_score, tag_level, tag_debug = _score_tags_surface(
+            query, tags_list,
             _TAGS_STRONG_WEIGHT, _TAGS_MEDIUM_WEIGHT, _TAGS_WEAK_WEIGHT,
-            _TAGS_SCORE_CAP, query_lower,
-        )
+            _TAGS_SCORE_CAP,
+        ) if tags_list else (0.0, "none", {"total": 0, "matched": 0, "ratio": 0.0})
         # Content: cheap signal — substring check on lowercased text.
         content_hit = bool(query_lower) and query_lower in content.lower()
         # Also count anchor hits in content for a weak content_score signal.
@@ -355,6 +485,9 @@ def _soft_rerank(
         rec_copy["_ranking_notes"] = notes
         rec_copy["_subject_score"] = subject_score
         rec_copy["_tag_score"] = tag_score
+        rec_copy["_tag_query_tokens"] = tag_debug.get("total", 0)
+        rec_copy["_tag_matched_tokens"] = tag_debug.get("matched", 0)
+        rec_copy["_tag_match_ratio"] = tag_debug.get("ratio", 0.0)
         rec_copy["_content_score"] = content_score
         rec_copy["_recency_bonus"] = recency
         rec_copy["_trust_bonus"] = trust
