@@ -2584,33 +2584,33 @@ def test_tag_all_tokens_match_strong() -> None:
     # id=206 修复目标：query 两个 token 都是精确 tag → strong
     score, level = _tags_score("v0.7.2 发版", ["v0.7.2", "发版"])
     assert level == "strong"
-    assert score == 7.0
+    assert score == _TAGS_STRONG_WEIGHT
 
 
 def test_tag_long_cjk_query() -> None:
     # 长 CJK query 单 token，tags 前缀+后缀都命中 → strong（修 v1 CJK bug）
     score, level = _tags_score("发版历史", ["发版", "历史"])
     assert level == "strong"
-    assert score == 7.0
+    assert score == _TAGS_STRONG_WEIGHT
 
 
 def test_tag_mixed_long_query() -> None:
     score, level = _tags_score("v0.7.2 发版历史", ["v0.7.2", "发版", "历史"])
     assert level == "strong"
-    assert score == 7.0
+    assert score == _TAGS_STRONG_WEIGHT
 
 
 def test_tag_half_match_medium() -> None:
     score, level = _tags_score("v0.7.2 发版", ["v0.7.2", "技术参考"])
     assert level == "medium"
-    assert score == 4.0
+    assert score == _TAGS_MEDIUM_WEIGHT
 
 
 def test_tag_one_token_match_weak() -> None:
     # 3 个 query token，只命中 1 个 → ratio 1/3 < 0.5 → weak
     score, level = _tags_score("v0.7.2 发版 历史", ["发版", "其它"])
     assert level == "weak"
-    assert score == 1.5
+    assert score == _TAGS_WEAK_WEIGHT
 
 
 def test_tag_no_match_none() -> None:
@@ -2630,7 +2630,7 @@ def test_tag_version_normalization_bidirectional() -> None:
     # query 0.7.2 vs tag V0.7.2 → 双向归一化后都成 0.7.2 → 命中
     score, level = _tags_score("0.7.2", ["V0.7.2"])
     assert level == "strong"
-    assert score == 7.0
+    assert score == _TAGS_STRONG_WEIGHT
 
 
 def test_tag_v_not_stripped_for_words() -> None:

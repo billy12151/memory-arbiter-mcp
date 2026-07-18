@@ -204,14 +204,24 @@ def classify_match_level(
 ) -> str:
     """Classify the overlap into one of: none | weak | medium | strong.
 
-    Rules from r4 §8.1.2:
+    Rules (r4 §8.1.2, v0.7.3 修订):
 
       strong: query's main contiguous phrase is a substring of the surface
               (handled by the caller via direct substring check, not anchors)
       medium: (specific_hits >= 1 AND total_hits >= 2)
-              OR (specific_coverage >= 0.4)
+              OR (specific_coverage >= 0.6)
       weak:   some anchors hit but neither medium condition holds
       none:   no specific anchors hit (only generic, or nothing)
+
+    v0.7.3 修订（id=210/id=211 dogfooding 数据驱动）：specific_coverage 阈值从
+    0.4 提到 0.6。原 0.4 让"subject 只命中 query 一半 anchor"（coverage 0.5）
+    也拿 medium(6.0)，结果是 subject 偶然含一个 query 词的记录（如 id=105 的
+    "[已完成] README ... (v0.4.0 发版)"）和真正讲该主题的记录同分，挤掉了 tag
+    精确双命中但 subject 不含的记录（id=206）。0.6 阈值让 1/2 命中降到 weak
+    (2.0)，2/2 才 medium——subject 的"过度奖励"被收紧。
+
+    合成数据实验（scripts/tune_tag_weights.py，n=2000×5 seed）证明这个阈值
+    是临界点：0.5 无效（A>B=0.5），0.6 让 A>B=1.000，0.7+ 无额外收益。
     """
     summary = matches.get("_summary")
     if summary is None:
@@ -231,7 +241,7 @@ def classify_match_level(
         return "none"
     if specific_hits >= 1 and total_hits >= 2:
         return "medium"
-    if specific_coverage >= 0.4:
+    if specific_coverage >= 0.6:
         return "medium"
     if total_hits >= 1:
         return "weak"

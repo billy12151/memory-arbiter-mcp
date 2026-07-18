@@ -105,7 +105,7 @@ def _get_ranking_mode() -> str:
 # These are deliberately conservative initial values. Per r4 risk-5, we only
 # tune 1-2 of these based on A/B; the rest stay fixed.
 _SUBJECT_SCORE_CAP = 10.0       # r4 §8.2.1: subject score cannot grow unbounded
-_TAGS_SCORE_CAP = 7.0           # r4 §8.2.1: tags score cannot grow unbounded
+_TAGS_SCORE_CAP = 10.0          # v0.7.3: 从 7.0 提到 10.0（与 subject cap 持平，配套 tag 权重提升）
 _CONTENT_SCORE_CAP = 3.0        # content is weak signal, capped low
 _TRUST_BONUS_USER_CONFIRMED = 0.5   # r4 §7: trust is *small* bonus, not override
 _TRUST_BONUS_DOCUMENT_EXTRACTED = 0.3
@@ -128,9 +128,14 @@ _SECTION_KNN_K_MULTIPLIER = 3
 _SUBJECT_STRONG_WEIGHT = 10.0
 _SUBJECT_MEDIUM_WEIGHT = 6.0
 _SUBJECT_WEAK_WEIGHT = 2.0
-_TAGS_STRONG_WEIGHT = 7.0
-_TAGS_MEDIUM_WEIGHT = 4.0
-_TAGS_WEAK_WEIGHT = 1.5
+# v0.7.3: tag 权重从 7.0/4.0/1.5 提到 10.0/6.0/2.0（与 subject 持平）。
+# 数据驱动决策（scripts/tune_tag_weights.py，n=2000×5 seed）：tag 是 LLM 主动
+# 打的精确分类标签，命中信号比 subject 偶然含字面更可靠（id=210 原始论证）。
+# 配合 classify_match_level 的 coverage 0.4→0.6 收紧 subject，让 tag 精确命中
+# 的记录（id=206）排到 subject 偶然命中的记录（id=105）之上。详见 id=211。
+_TAGS_STRONG_WEIGHT = 10.0
+_TAGS_MEDIUM_WEIGHT = 6.0
+_TAGS_WEAK_WEIGHT = 2.0
 
 # v0.4.1: recency bonus tiers. Capped low so recency only breaks ties between
 # equally-relevant records — it must never override a subject/tags hit. The
