@@ -4,6 +4,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
 
@@ -602,6 +603,59 @@ class MemoryDB:
                 params,
             ).fetchall()
             return [row_to_dict(row) for row in rows]
+
+    def count_filtered_memories(
+        self,
+        workspace: Optional[str],
+        like_status_clause: str,
+        tags_filter: Optional[list[str]],
+        after_dt: Optional[datetime],
+        before_dt: Optional[datetime],
+        source_type: Optional[str],
+    ) -> int:
+        """v0.7.3: COUNT(*) under the same filters used by search's _passes_filters.
+
+        Only called when has_filters=True (design §3.6/§3.7). Mirrors the
+        Python post-filter so has_more/total_estimate agree with what the
+        agent actually receives (modulo pool_cap truncation — see §8 risk 5).
+
+        - Time filters use ISO 8601 string comparison (SQLite lexicographic
+          order == chronological order,前提 ingest_time 落库是标准 ISO 8601 —
+          see §3.7 D2 caveat: normalize_iso's except branch can let malformed
+          strings through, edge case accepted).
+        - tags_filter uses json_each exact match (AND semantics), equivalent
+          to the Python set-intersection check.
+        - source_type is a plain equality.
+        like_status_clause is passed through unchanged from search.py:640 (no
+        m. alias — COUNT doesn't JOIN).
+        """
+        if not self._db_available:
+            return 0
+        clauses: list[str] = [like_status_clause]
+        params: list[Any] = []
+        if workspace:
+            clauses.append("workspace = ?")
+            params.append(workspace)
+        if tags_filter:
+            for tag in tags_filter:
+                clauses.append("EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)")
+                params.append(tag)
+        if after_dt is not None:
+            clauses.append("ingest_time >= ?")
+            params.append(after_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat())
+        if before_dt is not None:
+            clauses.append("ingest_time <= ?")
+            params.append(before_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat())
+        if source_type:
+            clauses.append("source_type = ?")
+            params.append(source_type)
+        sql = f"SELECT COUNT(*) AS c FROM memories WHERE {' AND '.join(clauses)}"
+        with self.connection() as conn:
+            try:
+                row = conn.execute(sql, params).fetchone()
+                return int(row["c"]) if row else 0
+            except sqlite3.Error:
+                return 0
 
     # ------------------------------------------------------------------
     #  Conflicts

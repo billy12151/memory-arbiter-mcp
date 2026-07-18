@@ -1209,9 +1209,9 @@ def test_auto_embedding_injects_query_embedding(tmp_path: Path, monkeypatch) -> 
     tools._ensure_embedder = lambda: (_MockManagedEmbedder(lambda text: [0.1, 0.2, 0.3]), [])  # type: ignore[method-assign]
     captured = {}
 
-    def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None):
+    def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None, **kwargs):
         captured["query_embedding"] = query_embedding
-        return [], []
+        return [], [], False, 0
 
     monkeypatch.setattr("memory_arbiter.tools.search_memories", fake_search_memories)
 
@@ -1238,9 +1238,9 @@ def test_explicit_embedding_overrides_auto(tmp_path: Path, monkeypatch) -> None:
     tools._ensure_embedder = fail_ensure  # type: ignore[method-assign]
     captured = {}
 
-    def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None):
+    def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None, **kwargs):
         captured["query_embedding"] = query_embedding
-        return [], []
+        return [], [], False, 0
 
     monkeypatch.setattr("memory_arbiter.tools.search_memories", fake_search_memories)
 
@@ -2743,3 +2743,338 @@ def test_cjk_substring_match_contract() -> None:
     assert _cjk_substring_match("xyz", "abcxyz") is True    # suffix 命中（调用方 _is_pure_cjk_token 保证 ASCII 串不进这条路径）
     assert _cjk_substring_match("abc", "abcxyz") is True    # prefix 命中
     assert _cjk_substring_match("bcxy", "abcxyz") is False  # middle 不命中
+
+
+# ---- v0.7.3 change 2: search enhancement (tags_filter / time /
+# source_type / has_more / 4-tuple / shortcut) end-to-end tests ---------
+#
+# 这些测试走 MemoryTools.memory_search 端到端（真实 sqlite + 真实 search_memories），
+# 覆盖设计 §5.2 测试矩阵的核心场景。每次测试用一个全新的 tmp_path 库，写入已知
+# 数据，断言行为。
+
+import datetime as _dt
+
+
+def _write_mem(tools: MemoryTools, *, content: str, subject: str, tags: list[str],
+               source_type: str = "agent_generated", ingest_time: Optional[str] = None,
+               workspace: str = "ws") -> int:
+    """Helper: write one memory via tools.memory_write, return its id."""
+    payload = {
+        "content": content, "subject": subject, "tags": tags,
+        "source_type": source_type, "workspace": workspace,
+        "agent_id": "tester",
+    }
+    if ingest_time is not None:
+        payload["ingest_time"] = ingest_time
+    res = tools.memory_write(**payload)
+    assert res["ok"], f"write failed: {res}"
+    return res["data"]["id"]
+
+
+def test_tags_filter_exact_match(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="v0.7.2 发版记录", subject="发版", tags=["v0.7.2", "发版"])
+    _write_mem(tools, content="其他无关", subject="其他", tags=["其它"])
+    res = tools.memory_search(query="发版", tags_filter=["发版"])
+    ids = [r["id"] for r in res["data"]["results"]]
+    assert len(ids) == 1, f"tags_filter should exact-match only the 发版 tag, got {ids}"
+
+
+def test_tags_filter_no_substring_false_positive(tmp_path: Path) -> None:
+    # tags_filter=["v0.7"] 不应该命中 tags=["v0.7.0"]（精确匹配，防 LIKE 误命中）
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="x", subject="x", tags=["v0.7.0"])
+    res = tools.memory_search(query="v0.7.0", tags_filter=["v0.7"])
+    assert res["data"]["results"] == [], "tags_filter must not substring-match"
+
+
+def test_tags_filter_and_semantics(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="both", subject="s", tags=["发版", "v0.7.2"])
+    _write_mem(tools, content="only one", subject="s2", tags=["发版"])
+    res = tools.memory_search(query="发版", tags_filter=["发版", "v0.7.2"])
+    ids = [r["id"] for r in res["data"]["results"]]
+    assert len(ids) == 1, f"AND semantics: only the memory with both tags, got {ids}"
+
+
+def test_tags_filter_empty_result_no_fallback(tmp_path: Path) -> None:
+    # 匹配不到时不走 fallback（fallback 会返回不符合过滤条件的记忆）
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="recent1", subject="r1", tags=["other"])
+    res = tools.memory_search(query="发版", tags_filter=["发版"])
+    assert res["data"]["results"] == []
+    # 不应有 fallback warning（fallback 才会附加 "No direct memory match"）
+    assert not any("No direct memory match" in w for w in res["warnings"])
+
+
+def test_tags_filter_empty_list_treated_as_none(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="c", subject="s", tags=["发版"])
+    # tags_filter=[] 等同不传 → 不过滤 → 命中（走 fallback 或正常召回）
+    res = tools.memory_search(query="不存在的词", tags_filter=[])
+    # 空 query 路径才走 fallback；这里 query 非空无匹配 → fallback
+    assert "count" in res["data"]
+
+
+def test_tags_filter_duplicates_deduped(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="c", subject="s", tags=["发版"])
+    res = tools.memory_search(query="发版", tags_filter=["发版", "发版"])
+    assert len(res["data"]["results"]) == 1
+
+
+def test_tags_filter_empty_string_ignored(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="c", subject="s", tags=["发版"])
+    res = tools.memory_search(query="发版", tags_filter=["发版", ""])
+    assert len(res["data"]["results"]) == 1
+
+
+def test_after_time_filter(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="old", subject="old", tags=["t"], ingest_time="2026-01-15T00:00:00+00:00")
+    _write_mem(tools, content="new", subject="new", tags=["t"], ingest_time="2026-07-15T00:00:00+00:00")
+    res = tools.memory_search(query="t", after_time="2026-06-01")
+    subjects = [r["subject"] for r in res["data"]["results"]]
+    assert "new" in subjects and "old" not in subjects
+
+
+def test_after_time_with_timezone(tmp_path: Path) -> None:
+    # after_time=2026-06-01T00:00:00+08:00 == 2026-05-31T16:00:00 UTC
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="before", subject="before", tags=["t"], ingest_time="2026-05-31T15:00:00+00:00")
+    _write_mem(tools, content="after", subject="after", tags=["t"], ingest_time="2026-05-31T17:00:00+00:00")
+    res = tools.memory_search(query="t", after_time="2026-06-01T00:00:00+08:00")
+    subjects = [r["subject"] for r in res["data"]["results"]]
+    assert "after" in subjects and "before" not in subjects
+
+
+def test_after_time_invalid_format(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="x", subject="x", tags=["t"])
+    res = tools.memory_search(query="t", after_time="xyz")
+    assert any("invalid ISO 8601" in w for w in res["warnings"])
+    # 无效 after_time 被忽略 → 正常返回
+    assert res["ok"]
+
+
+def test_before_time_filter(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="old", subject="old", tags=["t"], ingest_time="2026-01-15T00:00:00+00:00")
+    _write_mem(tools, content="new", subject="new", tags=["t"], ingest_time="2026-07-15T00:00:00+00:00")
+    res = tools.memory_search(query="t", before_time="2026-06-01")
+    subjects = [r["subject"] for r in res["data"]["results"]]
+    assert "old" in subjects and "new" not in subjects
+
+
+def test_filters_disable_fallback(tmp_path: Path) -> None:
+    # 有过滤但 pool 空 → 返回空 + 精准 warning，不走 recent_fallback
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="recent", subject="recent", tags=["other"])
+    res = tools.memory_search(query="发版", tags_filter=["发版"])
+    assert res["data"]["results"] == []
+    assert not any("No direct memory match" in w for w in res["warnings"])
+
+
+def test_source_type_filter(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="uc", subject="uc", tags=["t"], source_type="user_confirmed")
+    _write_mem(tools, content="ag", subject="ag", tags=["t"], source_type="agent_generated")
+    res = tools.memory_search(query="t", source_type="user_confirmed")
+    subjects = [r["subject"] for r in res["data"]["results"]]
+    assert subjects == ["uc"]
+
+
+def test_has_more_when_more_exist(tmp_path: Path) -> None:
+    # 库里 > limit 条匹配 tags_filter → has_more=True
+    tools = make_tools(tmp_path)
+    for i in range(15):
+        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    res = tools.memory_search(query="发版", tags_filter=["发版"], limit=10)
+    assert res["data"]["has_more"] is True
+    assert res["data"]["total_estimate"] == 15
+    assert len(res["data"]["results"]) == 10
+
+
+def test_has_more_false_when_exact(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    for i in range(10):
+        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    res = tools.memory_search(query="发版", tags_filter=["发版"], limit=10)
+    assert res["data"]["has_more"] is False
+    assert res["data"]["total_estimate"] == 10
+
+
+def test_has_more_false_when_fewer(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    for i in range(7):
+        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    res = tools.memory_search(query="发版", tags_filter=["发版"], limit=10)
+    assert res["data"]["has_more"] is False
+    assert res["data"]["total_estimate"] == 7
+
+
+def test_has_more_false_when_query_matches_few_no_filter(tmp_path: Path) -> None:
+    # E1：无过滤场景，query 只匹配少数，全库更大 → has_more=False（修 count_active 误报）
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="alpha beta", subject="alpha beta", tags=[])
+    _write_mem(tools, content="alpha beta", subject="alpha beta", tags=[])
+    _write_mem(tools, content="alpha beta", subject="alpha beta", tags=[])
+    # 写一堆不匹配 query 的记忆
+    for i in range(20):
+        _write_mem(tools, content=f"noise{i}", subject=f"noise{i}", tags=[])
+    res = tools.memory_search(query="alpha beta", limit=10)
+    assert res["data"]["has_more"] is False, (
+        f"E1: 无过滤场景 total_estimate 应=len(pool)=3，不是全库 23；got has_more={res['data']['has_more']}, total={res['data']['total_estimate']}"
+    )
+    assert res["data"]["total_estimate"] == 3
+
+
+def test_no_filters_backward_compat(tmp_path: Path) -> None:
+    # 不传任何新参数 → 完全同 v0.7.2（含 fallback 行为）
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="hello world", subject="hello", tags=[])
+    res = tools.memory_search(query="hello")
+    assert res["ok"]
+    assert len(res["data"]["results"]) >= 1
+    # 返回结构应含新字段 has_more/total_estimate（即使不用过滤）
+    assert "has_more" in res["data"]
+    assert "total_estimate" in res["data"]
+
+
+def test_search_returns_4_tuple_at_search_memories_level(tmp_path: Path) -> None:
+    # 直接调 search_memories 验证 4-tuple 返回（不经过 tools 包装）
+    from memory_arbiter.search import search_memories
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="hello", subject="hello", tags=[])
+    result = search_memories(tools.db, "hello")
+    assert len(result) == 4, f"search_memories must return 4-tuple, got {len(result)}-tuple"
+    results, warnings, has_more, total_estimate = result
+    assert isinstance(results, list)
+    assert isinstance(warnings, list)
+    assert isinstance(has_more, bool)
+    assert isinstance(total_estimate, int)
+
+
+def test_tools_layer_exposes_has_more(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="x", subject="x", tags=[])
+    res = tools.memory_search(query="x")
+    assert "has_more" in res["data"]
+    assert "total_estimate" in res["data"]
+
+
+def test_invalid_after_time_falls_back_to_none(tmp_path: Path) -> None:
+    # after_time 无效 → warning + 视为 None；如果同时有其他 filter，has_filters 仍 True
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="x", subject="x", tags=["发版"])
+    res = tools.memory_search(query="发版", after_time="not-a-date", tags_filter=["发版"])
+    assert any("invalid ISO 8601" in w for w in res["warnings"])
+    # tags_filter 仍生效
+    assert len(res["data"]["results"]) == 1
+
+
+def test_after_gt_before_warns(tmp_path: Path) -> None:
+    # D4：after > before 矛盾 → warning + 两者都忽略
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="x", subject="x", tags=["t"], ingest_time="2026-06-15T00:00:00+00:00")
+    res = tools.memory_search(query="t", after_time="2026-07-01", before_time="2026-06-01")
+    assert any("after_time" in w and "before_time" in w and "empty" in w for w in res["warnings"]), (
+        f"D4: after>before should warn; got {res['warnings']}"
+    )
+
+
+def test_empty_query_with_tags_filter_returns_empty(tmp_path: Path) -> None:
+    # K2/C1/D3：空 query + tags_filter → 不走短路，post-filter 后空，精准 warning
+    tools = make_tools(tmp_path)
+    for i in range(5):
+        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    res = tools.memory_search(query="", tags_filter=["发版"])
+    assert res["data"]["results"] == [], "空 query + tags_filter 本版不独立召回（K2/C1）"
+    # 不应返回未过滤的 fallback 记忆（C1 短路改造的验证）
+    assert not any("No direct memory match" in w for w in res["warnings"])
+    # 应有精准 warning（D3）
+    assert any("query required" in w or "filters too restrictive" in w for w in res["warnings"])
+
+
+def test_empty_query_no_filters_goes_fallback(tmp_path: Path) -> None:
+    # 短路改造后，空 query + 无过滤仍应走 fallback（保留 v0.7.2 行为）
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="r1", subject="r1", tags=[])
+    res = tools.memory_search(query="")
+    # fallback 路径：返回 recent memories + fallback warning
+    assert any("No direct memory match" in w for w in res["warnings"]) or len(res["data"]["results"]) > 0
+
+
+def test_bm25_mode_warns_on_filter_params(tmp_path: Path, monkeypatch) -> None:
+    # D2：bm25 模式 + 过滤参数 → warning 提示过滤被忽略
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="hello", subject="hello", tags=["t"])
+    monkeypatch.setenv("MEMORY_ARBITER_RANKING_MODE", "bm25")
+    try:
+        res = tools.memory_search(query="hello", tags_filter=["t"])
+        assert any("bm25 mode ignores" in w for w in res["warnings"]), (
+            f"D2: bm25 + tags_filter should warn; got {res['warnings']}"
+        )
+        assert res["data"]["has_more"] is False  # bm25 写死
+        assert res["data"]["total_estimate"] == 0
+    finally:
+        monkeypatch.delenv("MEMORY_ARBITER_RANKING_MODE", raising=False)
+
+
+def test_passes_filters_unit() -> None:
+    # B3：_passes_filters 直接单元测试
+    from memory_arbiter.search import _passes_filters
+    from datetime import datetime, timezone
+
+    def mk(ingest_time: Optional[str] = "2026-06-15T00:00:00+00:00", tags: list = None, source_type: str = "agent_generated"):
+        rec = {"tags": json.dumps(tags or []), "ingest_time": ingest_time, "source_type": source_type}
+        return rec
+
+    after = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    before = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    # tags AND
+    assert _passes_filters(mk(tags=["发版", "v0.7.2"]), ["发版", "v0.7.2"], None, None, None) is True
+    assert _passes_filters(mk(tags=["发版"]), ["发版", "v0.7.2"], None, None, None) is False
+
+    # time bounds
+    assert _passes_filters(mk(ingest_time="2026-06-15T00:00:00+00:00"), None, after, before, None) is True
+    assert _passes_filters(mk(ingest_time="2026-05-15T00:00:00+00:00"), None, after, None, None) is False
+    assert _passes_filters(mk(ingest_time="2026-08-15T00:00:00+00:00"), None, None, before, None) is False
+
+    # time 无效 → 过滤掉
+    assert _passes_filters(mk(ingest_time="not-a-date"), None, after, None, None) is False
+
+    # source_type 等值
+    assert _passes_filters(mk(source_type="user_confirmed"), None, None, None, "user_confirmed") is True
+    assert _passes_filters(mk(source_type="agent_generated"), None, None, None, "user_confirmed") is False
+
+    # JSON parse 失败 → 空集 → 不命中
+    rec_bad = {"tags": "{bad json", "ingest_time": "2026-06-15T00:00:00+00:00", "source_type": "x"}
+    assert _passes_filters(rec_bad, ["any"], None, None, None) is False
+
+
+def test_pool_cap_truncates_results(tmp_path: Path) -> None:
+    # B1/T1：库里很多匹配 tags_filter，pool_cap 截断后 reranked ≤ limit，has_more=True，total=全库匹配数
+    tools = make_tools(tmp_path)
+    for i in range(60):  # 超过 pool_cap=50
+        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    res = tools.memory_search(query="发版", tags_filter=["发版"], limit=10)
+    assert len(res["data"]["results"]) <= 10
+    assert res["data"]["has_more"] is True
+    # total_estimate 走 count_filtered（SQL 全表），=60
+    assert res["data"]["total_estimate"] == 60
+
+
+def test_count_matches_post_filter(tmp_path: Path) -> None:
+    # T2：count_filtered_memories 返回值 == Python post-filter 后、切片前的 pool 长度
+    tools = make_tools(tmp_path)
+    for i in range(8):
+        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    # 用 tags_filter 让 has_filters=True，count_filtered 会算全表匹配数
+    res = tools.memory_search(query="发版", tags_filter=["发版"], limit=10)
+    # 8 条全匹配，pool 召回 8，reranked=8，total=8
+    assert res["data"]["total_estimate"] == 8
+    assert len(res["data"]["results"]) == 8
+    assert res["data"]["has_more"] is False

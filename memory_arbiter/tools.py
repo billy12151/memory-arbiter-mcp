@@ -129,7 +129,7 @@ class MemoryTools:
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, **_: Any) -> dict[str, Any]:
         extra_warnings = list(self._embedder_warnings)
         vec_state = self.db.get_vec_index_state()
         vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
@@ -155,10 +155,29 @@ class MemoryTools:
                         )
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
-        results, warnings = search_memories(self.db, query, workspace, tags, limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
+        # v0.7.3: search_memories now returns (results, warnings, has_more, total_estimate)
+        results, warnings, has_more, total_estimate = search_memories(
+            self.db, query, workspace, tags, limit,
+            include_superseded=include_superseded,
+            debug_ranking=debug_ranking,
+            query_embedding=query_embedding,
+            tags_filter=tags_filter,
+            after_time=after_time,
+            before_time=before_time,
+            source_type=source_type,
+        )
         # v0.6.0: attach section enhancement to active-split results
         results = self._attach_sections(results, query_embedding, extra_warnings)
-        return self.db.state.response({"results": results, "count": len(results)}, extra_warnings=extra_warnings + warnings)
+        return self.db.state.response(
+            {
+                "results": results,
+                "count": len(results),
+                # v0.7.3: exhaustive-query support (design §3.6)
+                "has_more": has_more,
+                "total_estimate": total_estimate,
+            },
+            extra_warnings=extra_warnings + warnings,
+        )
 
     def memory_get(self, memory_id: int, **_: Any) -> dict[str, Any]:
         """通过 ID 直接获取一条记忆的完整信息。只读，不修改任何数据。"""

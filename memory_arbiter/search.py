@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
@@ -752,10 +753,115 @@ def _sanitize_fts_query_or(query: str) -> str:
     return " OR ".join(parts)
 
 
-def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None) -> Tuple[list[dict[str, Any]], list[str]]:
+def _parse_time(s: Any) -> Optional[datetime]:
+    """v0.7.3: parse an ISO 8601 time string for after_time/before_time filtering.
+
+    Naive datetimes are treated as UTC (conservative). Returns None on:
+      - falsy input (None / "" / 0 / [] / {} — also caught falsy by callers)
+      - non-string input that reaches the try (int / list → TypeError)
+      - unparseable strings (ValueError)
+    Catches (ValueError, TypeError) to mirror _parse_ingest_time (search.py:173);
+    without TypeError the whole search would crash if an MCP caller passed a
+    non-string value (design §3.4 D1).
+    """
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s) if isinstance(s, str) else datetime.fromisoformat(str(s))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _sanitize_tags_filter(tags_filter: Optional[list[str]]) -> Optional[list[str]]:
+    """v0.7.3: normalize the tags_filter argument (design §3.2).
+
+    Drops non-strings, empty strings, and duplicates (preserving first-seen
+    order). An empty result is returned as None so callers treat it as
+    "no filter" (same as not passing the argument).
+    """
+    if tags_filter is None:
+        return None
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags_filter:
+        if not isinstance(t, str):
+            continue
+        t = t.strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out if out else None
+
+
+def _passes_filters(
+    rec: dict[str, Any],
+    tags_filter: Optional[list[str]],
+    after_dt: Optional[datetime],
+    before_dt: Optional[datetime],
+    source_type: Optional[str],
+) -> bool:
+    """v0.7.3: post-filter a candidate row against user-provided filters.
+
+    Mirrors db.count_filtered_memories so COUNT and post-filter stay in sync
+    (design §3.5/§3.7 B2).
+      - tags_filter: AND semantics — rec['tags'] (JSON list) must contain every
+        listed tag (set intersection, equivalent to SQL json_each AND EXISTS).
+      - after_dt / before_dt: compare against ingest_time (parsed aware UTC).
+        rec's ingest_time goes through _parse_ingest_time (search.py:162);
+        naive treated as UTC.
+      - source_type: equality.
+    """
+    if tags_filter:
+        try:
+            rec_tags_raw = rec.get("tags") or "[]"
+            rec_tags = json.loads(rec_tags_raw) if isinstance(rec_tags_raw, str) else rec_tags_raw
+            rec_tags_set = {str(t) for t in rec_tags}
+        except Exception:
+            rec_tags_set = set()
+        if not all(t in rec_tags_set for t in tags_filter):
+            return False
+    if source_type and rec.get("source_type") != source_type:
+        return False
+    if after_dt or before_dt:
+        rec_dt = _parse_ingest_time(rec)
+        if rec_dt is None:
+            # Time filter active but rec has no parseable time — drop conservatively.
+            return False
+        if after_dt and rec_dt < after_dt:
+            return False
+        if before_dt and rec_dt > before_dt:
+            return False
+    return True
+
+
+def search_memories(
+    db: MemoryDB,
+    query: str,
+    workspace: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    limit: int = 10,
+    include_superseded: bool = False,
+    debug_ranking: bool = False,
+    query_embedding: Optional[list[float]] = None,
+    # v0.7.3 additions (design §3.1) — all optional, omit == v0.7.2 behaviour
+    tags_filter: Optional[list[str]] = None,
+    after_time: Optional[str] = None,
+    before_time: Optional[str] = None,
+    source_type: Optional[str] = None,
+) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
+    """v0.7.3: returns (reranked, warnings, has_more, total_estimate).
+
+    has_more/total_estimate give the caller a way to tell exhaustive queries
+    ("all release notes") from complete ones. Pagination itself is not in
+    scope this version (design §3.1 review_1 漏洞 5).
+    """
     warnings: list[str] = []
     if not db.db_available:
-        return [], ["SQLite unavailable; search cannot read JSONL backup in MVP."]
+        return [], ["SQLite unavailable; search cannot read JSONL backup in MVP."], False, 0
     limit = max(1, min(int(limit), 100))
     query = (query or "").strip()
     mode = _get_ranking_mode()
@@ -772,25 +878,92 @@ def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, t
     status_clause = "m.status != 'deleted'" if include_superseded else "(m.status != 'deleted' AND m.status != 'superseded')"
     like_status_clause = "status != 'deleted'" if include_superseded else "(status != 'deleted' AND status != 'superseded')"
 
-    # === bm25 mode: legacy v0.2.6 single-FTS ordering ===
-    if mode == "bm25":
-        return _search_bm25(db, query, workspace, tags, limit, status_clause, like_status_clause, warnings, debug_ranking)
+    # === v0.7.3: parse + sanitize filter params (design §3.5 第一步) ===
+    after_dt = _parse_time(after_time) if after_time else None
+    if after_time and after_dt is None:
+        warnings.append(f"after_time={after_time!r} invalid ISO 8601; ignored")
+        after_time = None
+    before_dt = _parse_time(before_time) if before_time else None
+    if before_time and before_dt is None:
+        warnings.append(f"before_time={before_time!r} invalid ISO 8601; ignored")
+        before_time = None
+    # D4: after > before 矛盾检查（严格 >；== 是单点区间，合法）
+    if after_dt and before_dt and after_dt > before_dt:
+        warnings.append(
+            f"after_time ({after_dt.replace(microsecond=0).isoformat()}) > before_time "
+            f"({before_dt.replace(microsecond=0).isoformat()}); interval is empty; both ignored"
+        )
+        after_dt = None
+        before_dt = None
+        after_time = None
+        before_time = None
+    tags_filter = _sanitize_tags_filter(tags_filter)
+    has_filters = bool(tags_filter or after_time or before_time or source_type)
 
-    # === hybrid mode: wide recall + soft rerank ===
-    if not query:
-        # Empty query: same as v0.2.6 recent fallback (no reranking needed).
+    # === bm25 mode: legacy v0.2.6 single-FTS ordering ===
+    # v0.7.3 D2: _search_bm25 doesn't accept the new filter params. Warn if the
+    # caller passed any so the agent knows filtering was silently skipped.
+    if mode == "bm25":
+        if has_filters:
+            warnings.append(
+                "bm25 mode ignores tags_filter/after_time/before_time/source_type; "
+                "switch to hybrid ranking for filter support."
+            )
+        result, bm_warnings = _search_bm25(
+            db, query, workspace, tags, limit, status_clause, like_status_clause, warnings, debug_ranking,
+        )
+        return result, bm_warnings, False, 0
+
+    # === v0.7.3 F1/C1: search.py empty-query shortcut ===
+    # 现状是 `if not query: return _recent_fallback(...)`，会让 query 为空时
+    # 无条件走 fallback——即使 has_filters=True 也跳过 post-filter，返回未
+    # 过滤的最近记忆。改成 query 空 且 无过滤 才短路；query 空 + 有过滤
+    # 继续往下（wide_recall 内部仍会因 not query 返 []，post-filter 后仍空，
+    # 最终走第二步的 "query required for filter-aware recall" 精准 warning）。
+    if not query and not has_filters:
         return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
 
+    # === v0.7.3: pool 组装 + post-filter（design §3.5 第三步） ===
     pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause, query_embedding=query_embedding,
                         pool_cap=getattr(db.settings, "recall_pool_cap", 50),
                         content_like_cap=getattr(db.settings, "content_like_cap", 30))
-    if not pool:
-        # No direct hits: fall back to recent memories (r4 §4.2 safety net).
-        return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
+
+    if has_filters:
+        pool = [r for r in pool if _passes_filters(r, tags_filter, after_dt, before_dt, source_type)]
+        if not pool:
+            # 有过滤但召回空：返回空结果，不走 fallback（fallback 会返回不
+            # 符合过滤条件的记忆，违反语义）。区分两种空因给出精准 warning。
+            if not query:
+                empty_reason = (
+                    "query required for filter-aware recall; tags_filter/after_time/"
+                    "before_time/source_type only post-filter query-recalled candidates "
+                    "(see §8 risk 9)"
+                )
+            else:
+                empty_reason = "filters too restrictive or no matches; pool was empty after post-filter"
+            return [], warnings + [empty_reason], False, 0
+    else:
+        # 无过滤：保留 v0.7.2 行为，pool 空走 fallback
+        if not pool:
+            return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
 
     reranked = _soft_rerank(query, pool)
     # Slice to limit.
     reranked = reranked[:limit]
+
+    # === v0.7.3: has_more / total_estimate（design §3.6 E1） ===
+    # E1: 无过滤场景 total_estimate = len(pool)（query 召回数，反映 query
+    # 匹配，不是全库大小）；有过滤场景走 count_filtered_memories（SQL 全表
+    # 按过滤计数，受 pool_cap 截断影响的只是 reranked，total_estimate 仍准）。
+    if has_filters:
+        total_estimate = db.count_filtered_memories(
+            workspace, like_status_clause, tags_filter, after_dt, before_dt, source_type,
+        )
+    else:
+        total_estimate = len(pool)
+    # K1: has_more = total > len(reranked)。修了原公式 len==limit and total>limit
+    # 在 pool 召回不足时漏报（reranked<limit 但 total>reranked 应判 True）。
+    has_more = total_estimate > len(reranked)
 
     # hybrid mode: strip debug fields unless explicitly requested.
     if not debug_ranking:
@@ -798,7 +971,7 @@ def search_memories(db: MemoryDB, query: str, workspace: Optional[str] = None, t
             for k in list(r.keys()):
                 if k.startswith("_"):
                     r.pop(k, None)
-    return reranked, warnings
+    return reranked, warnings, has_more, total_estimate
 
 
 def _search_bm25(
@@ -812,7 +985,11 @@ def _search_bm25(
     warnings: list[str],
     debug_ranking: bool,
 ) -> Tuple[list[dict[str, Any]], list[str]]:
-    """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback."""
+    """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback.
+
+    v0.7.3: does NOT accept the new filter params; the caller (search_memories)
+    warns the agent before forwarding here when filters were supplied.
+    """
     rows = []
     conn = db._new_connection()
     if db.state.fts5_available and query:
@@ -855,7 +1032,12 @@ def _search_bm25(
             warnings.append("Using LIKE/keyword search because sqlite-vec and FTS5 are unavailable.")
     conn.close()
     if query and not rows:
-        return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
+        # _recent_fallback now returns a 4-tuple (v0.7.3 K4); _search_bm25 itself
+        # stays a 2-tuple — search_memories补补 (False, 0) when forwarding bm25.
+        fb_rows, fb_warnings, _fb_has_more, _fb_total = _recent_fallback(
+            db, workspace, tags, limit, like_status_clause, warnings,
+        )
+        return fb_rows, fb_warnings
     out = [row_to_dict(row) for row in rows]
     if not debug_ranking:
         for r in out:
@@ -870,7 +1052,7 @@ def _recent_fallback(
     limit: int,
     like_status_clause: str,
     warnings: list[str],
-) -> Tuple[list[dict[str, Any]], list[str]]:
+) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
     """Recent-memory fallback when no direct match found (r4 §4.2 safety net)."""
     clauses = [like_status_clause]
     params: list[Any] = []
@@ -910,4 +1092,6 @@ def _recent_fallback(
         warnings.append(
             "No direct memory match. Returning recent memories from this workspace; refine keywords, try memory_recent, or compare candidates before reading source files."
         )
-    return [row_to_dict(row) for row in rows], warnings
+    # v0.7.3 K4/E5: fallback path has no has_more semantics — "还有更多匹配"
+    # 不成立（这是"没匹配给你最近的"），写死 (False, 0)。
+    return [row_to_dict(row) for row in rows], warnings, False, 0
