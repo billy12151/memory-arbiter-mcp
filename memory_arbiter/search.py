@@ -343,10 +343,14 @@ def _score_tags_surface(
     tags_norm_set = set(tags_norm)
 
     matched = 0
+    total = 0
     for raw_token in query_tokens:
         token_norm = _normalize_token_for_tag_match(raw_token)
         if not token_norm:
+            # Skip tokens that normalize to empty (e.g. stray punctuation) so
+            # they don't drag down the ratio without a chance to match.
             continue
+        total += 1
         if _is_pure_cjk_token(token_norm):
             hit = any(_cjk_substring_match(tn, token_norm) for tn in tags_norm_set)
         else:
@@ -354,7 +358,6 @@ def _score_tags_surface(
         if hit:
             matched += 1
 
-    total = len(query_tokens)
     ratio = matched / total if total else 0.0
     if ratio >= 1.0:
         level = "strong"
