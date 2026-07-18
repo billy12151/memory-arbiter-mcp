@@ -35,7 +35,15 @@ def build_server() -> Any:
         subject: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """写入一条结构化记忆到跨工具共享记忆库。必填 content，建议填 subject/tags/source_type。v0.5.0：如果配置了 GGUF embedding + sqlite-vec，写入成功后会自动存向量；响应里仅在尝试过向量化时返回 embedding_stored。"""
+        """写入一条结构化记忆到跨工具共享记忆库。必填 content，建议填 subject/tags/source_type。
+
+tags 是排序和过滤的关键信号（tag 精确命中权重高于 content）。建议打"查询意图词"——用户将来可能用什么词查这条记忆？
+  例：发版记录 → tags 含 "发版" + 版本号
+      技术决策 → tags 含 "决策" + 主题词
+      用户偏好 → tags 含 "偏好" + 偏好类型
+避免打 subject 已有的描述词（冗余，不增加检索价值）。
+
+v0.5.0：如果配置了 GGUF embedding + sqlite-vec，写入成功后会自动存向量；响应里仅在尝试过向量化时返回 embedding_stored。"""
         return tools.memory_write(
             content=content,
             agent_id=agent_id,
@@ -53,9 +61,21 @@ def build_server() -> Any:
         )
 
     @app.tool()
-    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None) -> dict[str, Any]:
-        """搜索跨工具共享记忆库。项目知识、历史决策、偏好、文档摘要类问题应先查记忆，再读源文件。优先用 2-4 个核心词；一次搜不到先换同义词/短关键词重试；空 query 或 memory_recent 可列最近记忆。默认不返回 superseded；审计历史链路时传 include_superseded=true。debug_ranking=true 返回排序调试字段。v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会自动对 query 向量化；显式 query_embedding 仍优先。"""
-        return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding)
+    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None) -> dict[str, Any]:
+        """按相关性检索记忆。limit 是单页大小（默认 10），不是结果上限。返回的 has_more=true 表示还有更多未返回的结果——本版不提供翻页机制，调用方可换更精确的 query、放大 limit（上限 100）、或加 tags_filter 收窄范围。
+
+项目知识、历史决策、偏好、文档摘要类问题应先查记忆，再读源文件。优先用 2-4 个核心词；一次搜不到先换同义词/短关键词重试；空 query 或 memory_recent 可列最近记忆。默认不返回 superseded；审计历史链路时传 include_superseded=true。debug_ranking=true 返回排序调试字段。
+
+参数：
+  query: 检索词。为空时仍可调用（返回最近记忆走 fallback），但 tags_filter / after_time / before_time / source_type 在 query 为空时不会独立召回——这些过滤只对 query 召回的 pool 做后过滤，不单独查询。要"列出所有带 X tag 的"用 memory_recent + 客户端过滤。含 ASCII 标识符 + CJK 词时**应空格分隔**（如 "v0.7.2 发版" 而非 "v0.7.2发版"），否则混合 token 走 equality 路径可能漏匹配。
+  tags_filter: 严格过滤（AND 语义），记忆的 tags 必须包含这里列出的所有标签。注意：开启 tags_filter 时 vec 语义召回大概率失效（vec 候选 tags 与 query 字面无关，会被精确匹配的 post-filter 砍掉）。
+  after_time / before_time: ISO 8601 时间区间（按 ingest_time 过滤，naive 当 UTC）。无效格式会被忽略并返回 warning。
+  source_type: 按来源类型过滤（user_confirmed / agent_generated / document_extracted 等）
+
+注意：tags_filter 是 AND 语义——必须同时含所有列出的 tag。适合：找最相关的 N 条 / 带过滤条件的穷举式查询。不适合：纯结构化查询（query 为空）。
+
+v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会自动对 query 向量化；显式 query_embedding 仍优先。"""
+        return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding, tags_filter=tags_filter, after_time=after_time, before_time=before_time, source_type=source_type)
 
     @app.tool()
     def memory_get(memory_id: int) -> dict[str, Any]:
