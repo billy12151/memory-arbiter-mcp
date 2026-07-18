@@ -1041,7 +1041,7 @@ def _search_bm25(
     conn.close()
     if query and not rows:
         # _recent_fallback now returns a 4-tuple (v0.7.3 K4); _search_bm25 itself
-        # stays a 2-tuple — search_memories补补 (False, 0) when forwarding bm25.
+        # stays a 2-tuple — search_memories 补 (False, 0) when forwarding bm25.
         fb_rows, fb_warnings, _fb_has_more, _fb_total = _recent_fallback(
             db, workspace, tags, limit, like_status_clause, warnings,
         )

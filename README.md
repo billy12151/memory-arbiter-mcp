@@ -193,8 +193,8 @@ Grouped by use case. The first two groups cover daily read/write; the rest are f
 
 | Tool | Description |
 |---|---|
-| `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks) |
-| `memory_search` | Search memories (FTS5 → LIKE fallback) |
+| `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks). **Tags matter (v0.7.3)** — they're a ranking + filter signal heavier than content; tag both *query-intent words* (what users will search by) and category/version labels. See [Tag scoring & search filters (v0.7.3)](#tag-scoring-search-filters-v073). |
+| `memory_search` | Search memories (FTS5 → LIKE fallback). `limit` is a page size, not a cap — `has_more=true` in the response means more matches exist. v0.7.3 adds `tags_filter` (AND) / `after_time` / `before_time` / `source_type` for exhaustive queries. See [Tag scoring & search filters (v0.7.3)](#tag-scoring-search-filters-v073). |
 | `memory_get` | Get a single memory by ID. Use when you already know the `memory_id` (e.g. from conflict lists, audit results, or previous search results) to quickly fetch full details without re-running a search. Read-only. |
 | `memory_compare` | Compare two memories, returns explanation only |
 | `memory_arbitrate` | Arbitrate conflict, can record result (`apply=true`) |
@@ -291,6 +291,32 @@ After configuration, normal `memory_search(query="...")` can generate the query 
 | Top-1 hit rate | 46.7% | 53.3% | 53.3% |
 | Top-3 hit rate | 60.0% | 66.7% | **73.3%** |
 | Pairwise pass rate | 77.8% | 88.9% | **100.0%** |
+
+### Tag scoring & search filters (v0.7.3)
+
+**The problem it solves.** Two pain points in v0.7.2 dogfooding:
+
+1. **Tags were under-rewarded.** A memory whose `tags` precisely contained both query tokens (e.g. `["v0.7.2", "发版"]` for query `"v0.7.2 发版"`) ranked *below* a memory whose `subject` only incidentally contained one of them. The old scorer treated tags like a sentence (contiguous-substring match) — but tags are a discrete label set that almost never concatenates into the exact query string, so tags could never reach the `strong` tier.
+2. **No way to express exhaustive queries.** `limit` was both the page size and the result cap. An agent asking "all release notes" had no way to tell whether the 10 results returned were everything or just the first page.
+
+**What changed.**
+
+- **Tag scoring is now token-based** (`_score_tags_surface`). The query is split on whitespace, each token matched against the tag set, and the match ratio decides the tier: all tokens matched → `strong`, ≥half → `medium`, some → `weak`. Pure-CJK tokens use prefix/suffix substring (so tag `发版` matches query token `发版历史`); ASCII/mixed tokens use equality (so `v0.7` does *not* match tag `v0.7.0`). A bidirectional normalize strips the `v` prefix on version-like tokens.
+- **Subject scoring is tighter.** `classify_match_level`'s `specific_coverage` threshold moved `0.4 → 0.6`, so a subject that hits only half the query's anchors no longer gets `medium` (the incidental-subject trap that was suppressing tag-precise records).
+- **Tag weights reached parity with subject** (`7/4/1.5 → 10/6/2`, cap `7.0 → 10.0`). Tags are an actively-curated signal — when they say "this is exactly what the query asked for", that should weigh the same as a subject hit, not less.
+- **`limit` is now a page size.** The response carries `has_more: bool` and `total_estimate: int` so the caller can tell an exhaustive query from a complete one. This version does not ship a pagination cursor — when `has_more=true`, refine the query, raise `limit` (cap 100), or add `tags_filter` to narrow.
+- **New filter params** on `memory_search` (all optional, off = v0.7.2 behaviour):
+  - `tags_filter: list[str]` — strict AND, memory must contain *every* listed tag
+  - `after_time` / `before_time` — ISO 8601 bounds on `ingest_time` (naive = UTC)
+  - `source_type` — one of `user_confirmed` / `agent_generated` / `document_extracted` / `decision` / `requirement`
+
+**Caveats (accepted this version).**
+- Filters post-filter the query-recalled pool; they do not recall on their own. An empty `query` + `tags_filter` returns empty with a warning — use `memory_recent` + client-side filter for "list everything with tag X".
+- Opening `tags_filter` disables semantic-vec recall in practice (vec candidates' tags rarely match the literal filter, so post-filter culls them). Hybrid lexical recall still works.
+- Mixed ASCII+CJK tokens (e.g. `v0.7.2发版` written without a space) take the equality path and may miss — **separate them with whitespace** (`"v0.7.2 发版"`).
+- `has_more` can over-report when `pool_cap` (default 50) truncates the recall pool on large libraries; `total_estimate` stays accurate when filters are active (it uses a SQL `COUNT`).
+
+**Validation.** A 2000×5-seed synthetic corpus (`scripts/tune_tag_weights.py`) proved `specific_coverage=0.6` is the inflection point (pairwise accuracy 0.5 → 1.000); 0.5 is too loose, 0.7+ adds nothing. On the real production library, dogfooding query `"v0.7.2 发版"` lifted the target memory from rank #13 to #1 with no regression on 6 sample queries.
 
 ### Optional: Long-Document Section Split (v0.6.0)
 
@@ -677,8 +703,8 @@ doc_summary / research / progress）、event_time（ISO 8601）、workspace
 
 | 工具 | 说明 |
 |---|---|
-| `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定） |
-| `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级） |
+| `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定）。**tags 是关键信号（v0.7.3）**——权重高于 content，既影响排序也用于过滤；建议同时打"查询意图词"（用户将来用什么词查）和分类/版本号。详见 [Tag 评分与搜索过滤（v0.7.3）](#tag-评分与搜索过滤v073)。 |
+| `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级）。`limit` 是单页大小不是上限——响应里的 `has_more=true` 表示还有更多结果。v0.7.3 新增 `tags_filter`（AND 语义）/ `after_time` / `before_time` / `source_type`，用于穷举式查询。详见 [Tag 评分与搜索过滤（v0.7.3）](#tag-评分与搜索过滤v073)。 |
 | `memory_get` | 通过 ID 直接获取单条记忆的完整信息。当已知 `memory_id`（如从冲突列表、审计结果、搜索结果中获取）时，直接用此工具获取记忆详情，无需重新搜索。只读。 |
 | `memory_compare` | 比较两条记忆，只返回解释 |
 | `memory_arbitrate` | 仲裁冲突，自动判定胜者（`apply=true` 时落记录） |
@@ -775,6 +801,32 @@ doc_summary / research / progress）、event_time（ISO 8601）、workspace
 | Top-1 命中率 | 46.7% | 53.3% | 53.3% |
 | Top-3 命中率 | 60.0% | 66.7% | **73.3%** |
 | Pairwise 通过率 | 77.8% | 88.9% | **100.0%** |
+
+### Tag 评分与搜索过滤（v0.7.3）
+
+**解决的问题。** v0.7.2 dogfooding 暴露了两个痛点：
+
+1. **tag 信号被系统性低估。** 一条 tags 精确含 query 两个 token 的记忆（如 query `"v0.7.2 发版"` 命中 tags `["v0.7.2", "发版"]`），排序竟然输给一条 subject 只是偶然含其中一个词的记忆。原因是旧评分器把 tags 当句子做整串 substring 匹配——但 tags 天然是离散标签集合，几乎永远拼不成 query 整串，结果 tags 永远到不了 `strong` 档。
+2. **没法表达穷举式查询。** `limit` 同时是"单页大小"和"结果上限"。agent 问"所有发版记录"拿到 10 条后，没法判断这是全部还是只是第一页。
+
+**做了什么改动。**
+
+- **tag 评分改为 token 级**（`_score_tags_surface`）。query 按空格切 token，每个 token 去 tag 集合里匹配，命中率决定档位：全部命中 → `strong`、≥半数 → `medium`、有命中 → `weak`。纯 CJK token 走前缀/后缀子串（tag `发版` 能匹配 query token `发版历史`）；ASCII/混合 token 走精确等值（`v0.7` 不会命中 tag `v0.7.0`）。双向归一化会剥掉版本号前面的 `v`。
+- **subject 评分收紧。** `classify_match_level` 的 `specific_coverage` 阈值 `0.4 → 0.6`，subject 只命中 query 一半 anchor 不再拿 `medium`（这正是压制 tag 精确命中记录的"subject 偶然命中"陷阱）。
+- **tag 权重追平 subject**（`7/4/1.5 → 10/6/2`，cap `7.0 → 10.0`）。tag 是主动维护的精确分类——当它说"这正是 query 所问"，权重应该和 subject 命中一样，而不是更低。
+- **`limit` 变成单页大小。** 响应里带 `has_more: bool` 和 `total_estimate: int`，调用方可以区分穷举式查询和已完成查询。本版**不提供翻页游标**——`has_more=true` 时换更精确的 query、放大 `limit`（上限 100）、或加 `tags_filter` 收窄。
+- **`memory_search` 新增过滤参数**（全部可选，不传 = v0.7.2 行为）：
+  - `tags_filter: list[str]` —— 严格 AND，记忆必须**同时**含所有列出的 tag
+  - `after_time` / `before_time` —— ISO 8601，按 `ingest_time` 过滤（naive 当 UTC）
+  - `source_type` —— `user_confirmed` / `agent_generated` / `document_extracted` / `decision` / `requirement` 之一
+
+**已知限制（本版接受）。**
+- 过滤只对 query 召回的 pool 做后过滤，本身不召回。空 `query` + `tags_filter` 返回空 + warning——要"列出所有带 X tag 的"用 `memory_recent` + 客户端过滤。
+- 开启 `tags_filter` 时 vec 语义召回实际失效（vec 候选的 tags 通常和字面 filter 无关，会被 post-filter 砍光）。混合字面召回仍正常。
+- ASCII+CJK 混合 token（如 `v0.7.2发版` 不带空格）走等值路径会漏匹配——**用空格分隔**（`"v0.7.2 发版"`）。
+- `has_more` 在 `pool_cap`（默认 50）截断召回 pool 时可能高报；带过滤时 `total_estimate` 仍准确（走 SQL `COUNT`）。
+
+**验证。** 合成数据 2000×5 seed（`scripts/tune_tag_weights.py`）证明 `specific_coverage=0.6` 是临界点（pairwise 准确率 0.5 → 1.000）；0.5 太松、0.7+ 无额外收益。真生产库 dogfooding query `"v0.7.2 发版"` 把目标记忆从 #13 提到 #1，6 个抽样查询无回归。
 
 ### 可选：长文分段检索（v0.6.0）
 
