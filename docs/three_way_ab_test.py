@@ -52,10 +52,12 @@ def run_eval_semantic(encode_fn) -> dict:
     for g in GOLDEN_QUERIES:
         qemb = encode_fn(g["query"])
         t0 = time.time()
-        rows, warnings = search_memories(
+        outcome = search_memories(
             db, g["query"], workspace=None, tags=None, limit=10,
             include_superseded=False, debug_ranking=True, query_embedding=qemb,
         )
+        rows = outcome.results
+        warnings = outcome.warnings
         latencies.append((time.time() - t0) * 1000)
         top_ids = [r["id"] for r in rows[:3]]
         all_ids = [r["id"] for r in rows]

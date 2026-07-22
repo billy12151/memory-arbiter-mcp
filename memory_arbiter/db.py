@@ -590,9 +590,6 @@ class MemoryDB:
             return []
         clauses = ["status != 'deleted'"]
         params: list[Any] = []
-        if workspace:
-            clauses.append("workspace = ?")
-            params.append(workspace)
         if subject:
             clauses.append("subject = ?")
             params.append(subject)
@@ -633,9 +630,6 @@ class MemoryDB:
             return 0
         clauses: list[str] = [like_status_clause]
         params: list[Any] = []
-        if workspace:
-            clauses.append("workspace = ?")
-            params.append(workspace)
         if tags_filter:
             for tag in tags_filter:
                 clauses.append("EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)")
@@ -765,6 +759,122 @@ class MemoryDB:
             except sqlite3.Error:
                 conn.rollback()
                 return None
+
+    def complete_open_item(
+        self,
+        memory_id: int,
+        reason: Optional[str] = None,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """v0.7.4 (M5): atomically remove the ``'todo'`` tag from an active memory.
+
+        Closes the linked_open_items loop — done todos need a completion exit
+        (the design calls this out: default-on linked items + no completion
+        path = stale todos recur forever). Only the exact ``'todo'`` tag is
+        removed; all other tags are preserved. Never touches content, subject,
+        sections, split_status, split_revision, or embeddings.
+
+        Returns an outcome dict:
+          ``completed``         — 'todo' was present and removed (history snapshot
+                                  written, version bumped, FTS re-synced).
+          ``already_completed`` — memory is active but has no 'todo' tag; this is
+                                  the target state, so it's a zero-write no-op with
+                                  no version bump (covers repeat calls too).
+          ``not_found``         — memory_id absent.
+          ``not_active``        — superseded / deleted.
+          ``forbidden``         — protection_level='locked' or source_type=
+                                  'user_confirmed' and ``authorized`` is False.
+          ``unavailable``       — DB not writable.
+
+        TOCTOU-safe: status / tags / protection are re-read inside the same
+        transaction that writes, so a concurrent change between the tools-layer
+        pre-read and this write is caught.
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return {"outcome": "unavailable", "memory_id": memory_id}
+        # v0.7.4 (M5): BEGIN IMMEDIATE acquires the write lock up front, so the
+        # re-read + protection check below run inside the same transaction that
+        # writes — closing the TOCTOU window between a tools-layer pre-read and
+        # this write (a concurrent status/tags change is caught here, not after).
+        try:
+            with self.write_transaction() as conn:
+                current = self._fetch_memory(conn, memory_id)
+                if not current:
+                    return {"outcome": "not_found", "memory_id": memory_id}
+                status = current.get("status")
+                if status != "active":
+                    return {"outcome": "not_active", "memory_id": memory_id, "status": status}
+                # row_to_dict already parsed valid-JSON tags to a list; guard malformed.
+                raw_tags = current.get("tags")
+                if isinstance(raw_tags, list):
+                    old_tags = raw_tags
+                elif isinstance(raw_tags, str):
+                    try:
+                        parsed = json.loads(raw_tags)
+                        old_tags = parsed if isinstance(parsed, list) else []
+                    except (json.JSONDecodeError, ValueError):
+                        old_tags = []
+                else:
+                    old_tags = []
+                if "todo" not in old_tags:
+                    return {"outcome": "already_completed", "memory_id": memory_id, "tags": old_tags}
+                # Removal needed — check protection inside the tx (TOCTOU-safe).
+                protection = current.get("protection_level")
+                source_type = current.get("source_type")
+                is_protected = protection == "locked" or source_type == "user_confirmed"
+                if is_protected and not authorized:
+                    return {
+                        "outcome": "forbidden",
+                        "memory_id": memory_id,
+                        "protection_level": protection,
+                        "source_type": source_type,
+                    }
+                old_content = current["content"]
+                old_subject = current.get("subject")
+                old_version = int(current.get("version") or 1)
+                new_tags = [t for t in old_tags if t != "todo"]
+                new_tags_json = json.dumps(new_tags, ensure_ascii=False)
+                history_cur = conn.execute(
+                    """
+                    INSERT INTO memory_history
+                    (memory_id, content_snapshot, subject_snapshot, tags_snapshot, version, changed_at, reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (memory_id, old_content, old_subject,
+                     json.dumps(old_tags, ensure_ascii=False), old_version,
+                     utc_now_iso(), reason or "complete_open_item: removed 'todo' tag"),
+                )
+                history_id = int(history_cur.lastrowid)
+                # Only tags + version change; content/subject untouched, so no
+                # section deletion, no split_revision bump, no re-embedding.
+                conn.execute(
+                    "UPDATE memories SET tags=?, version=? WHERE id=?",
+                    (new_tags_json, old_version + 1, memory_id),
+                )
+                if self.state.fts5_available:
+                    # FTS delete/re-insert with ORIGINAL content/subject — the
+                    # only column that differs is tags.
+                    conn.execute(
+                        "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) VALUES('delete', ?, ?, ?, ?)",
+                        (memory_id, old_content, " ".join(old_tags), old_subject or ""),
+                    )
+                    conn.execute(
+                        "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
+                        (memory_id, old_content, " ".join(new_tags), old_subject or ""),
+                    )
+                # write_transaction() commits on normal exit; if any statement
+                # above raised, it rolls back and re-raises (caught below).
+                return {
+                    "outcome": "completed",
+                    "memory_id": memory_id,
+                    "history_id": history_id,
+                    "tags": new_tags,
+                    "version": old_version + 1,
+                }
+        except sqlite3.Error:
+            # write_transaction() already rolled back; surface a clean error so
+            # no partial write (history without tags, or tags without FTS) leaks.
+            return {"outcome": "error", "memory_id": memory_id}
 
     def list_history(self, memory_id: int) -> list[dict[str, Any]]:
         if not self._db_available:

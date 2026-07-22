@@ -12,7 +12,7 @@ mcp-name: io.github.billy12151/memory-arbiter-mcp
 
 ## English
 
-A shared memory layer for AI coding tools. One local SQLite database — every tool you use (Cursor, Claude Code, Codex, ZCode, …) searches the same verified facts instead of re-loading markdown files every turn.
+A shared memory layer for AI agents. One local SQLite database — every tool you use (Cursor, Claude Code, Codex, ZCode, WorkBuddy, …) searches the same verified facts instead of re-loading markdown files every turn.
 
 ```
 # Instead of dumping 20K tokens of MEMORY.md into every prompt:
@@ -59,7 +59,7 @@ Replacing full-file loading with targeted search is the most visible effect. (Th
 
 #### One tool or many: it scales
 
-Even with a single tool (Cursor, Claude Code, Codex, ZCode), Memory Arbiter upgrades your memory from flat markdown to a queryable database: thousands of entries at near-zero retrieval cost, structured conflict detection, source-trust levels, and a full audit trail — instead of manually trimming a growing markdown file.
+Even with a single tool (Cursor, Claude Code, Codex, ZCode, WorkBuddy), Memory Arbiter upgrades your memory from flat markdown to a queryable database: thousands of entries at near-zero retrieval cost, structured conflict detection, source-trust levels, and a full audit trail — instead of manually trimming a growing markdown file.
 
 Using two or more tools adds a shared memory layer: Tool A writes, Tool B searches. No file handoff, no copy-paste, no version drift. One database, zero duplication.
 
@@ -76,6 +76,7 @@ Using two or more tools adds a shared memory layer: Tool A writes, Tool B search
 - **Version history** — edit a memory in place; the old version is archived, not lost. Full audit trail of who changed what and when.
 - **Long-document section split** — break 10K+ char documents into searchable sections; queries return the matching paragraph, not the whole document.
 - **Smart tag ranking & search filters** (v0.7.3) — tags are scored as discrete labels (token overlap, not substring), so a tag set hitting every query token finally outranks a subject that merely contains one query word. `memory_search` also gains `tags_filter` / `after_time` / `before_time` / `source_type`, plus `has_more` + `total_estimate` so exhaustive queries know whether the page is complete.
+- **Linked open items & todo completion** (v0.7.4) — on a genuine query hit, `memory_search` attaches up to 5 active todos (tagged `todo`) that share meaningful tags with the result set, in a separate `linked_open_items` field — pure read-only, never affects ranking, filtered by a generic-tag stoplist. Close the loop with `memory_complete_open_item`, which atomically strips the `todo` tag (preserving everything else) in one transaction. Every response also carries a `retrieval_mode` (`direct` / `recent_fallback` / `recent_browse` / `empty` / `unavailable`) describing how the rows were produced.
 - **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search.
 - **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup. Never crashes, even if optional extensions are missing.
 - **Health diagnostics** — a one-shot `doctor` check grades config integrity, the vector-enablement chain, split, data consistency, and capacity. Each finding carries a severity and a config-specific fix hint; works as an MCP tool (daily) or a standalone CLI (ambulance: runs even when the MCP process is down). Read-only.
@@ -164,15 +165,17 @@ preferences, knowledge conclusions — goes into memory-arbiter.
 Every write must fill: subject, tags, source_type (one of: `user_confirmed`
 / `agent_generated` / `document_extracted`; `user_confirmed` auto-locks the
 record — reserve it for facts the user explicitly verified), event_time
-(ISO 8601), workspace (project name), source_ref.
+(ISO 8601), workspace (project name; v0.7.4: reserved metadata — stored and returned but does **not** filter `memory_search` / `memory_recent` results), source_ref.
 
 Search via memory_search first; read source files only for detail. When you
 find a contradiction, don't overwrite — if you know which is correct, use
 memory_supersede (retire the wrong one); if unsure, use memory_arbitrate
 (the system decides by timeline + trust level). When a to-do entry is done,
-write the status back to the original record (update status/subject to done);
-don't just mention "done" in a new memory, or the old entry stays in to-do
-state and misleads future searches.
+write the status back to the original record; the v0.7.4 completion exit is
+`memory_complete_open_item` — it atomically removes the `todo` tag (preserving
+all other tags and the content), writes a history snapshot, and drops the item
+from `linked_open_items`. Don't just mention "done" in a new memory, or the
+old entry stays in to-do state and misleads future searches.
 ```
 
 ### Client Config Locations
@@ -183,6 +186,7 @@ state and misleads future searches.
 | Codex CLI | `~/.codex/` MCP config |
 | Claude Code | `.mcp.json` in project root |
 | Cursor | `~/.cursor/mcp.json` |
+| WorkBuddy | `~/.workbuddy/mcp.json` |
 | OpenClaw | `~/.openclaw/openclaw.json` MCP config |
 
 > **OpenDesign / OpenClaw GUI tools**: these run on top of a host CLI (Codex CLI, Claude Code, etc.) and do **not** have their own MCP config entry. Whatever MCP server the host client has loaded is automatically available — e.g. once Codex CLI configures Memory Arbiter, OpenDesign running on top of Codex can call `memory_search` / `memory_write` natively with no extra setup.
@@ -471,9 +475,9 @@ Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbi
 
 | Variable | Default | What to tune |
 |---|---|---|
-| `MEMORY_ARBITER_CLIENT` | `codex` | Per-tool identity (`codex`, `claude-code`, `cursor`, `zcode`, ...). |
+| `MEMORY_ARBITER_CLIENT` | `codex` | Per-tool identity (`codex`, `claude-code`, `cursor`, `zcode`, `workbuddy`, ...). |
 | `MEMORY_ARBITER_AGENT_ID` | `default` | Agent identity within a client. |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | Record field on each memory. Not used for search filtering (v0.6.2). Kept for future project-level features. |
+| `MEMORY_ARBITER_WORKSPACE` | `default` | Record field on each memory. Reserved metadata (v0.7.4): stored and returned but does **not** filter `memory_search` / `memory_recent` results. Kept for future project-level features. |
 | `MEMORY_ARBITER_CONFIG` | _(none)_ | Optional path to an alternate JSON config file. If set, memory-arbiter reads that file instead of the default `~/.config/memory-arbiter/config.json`; file values still override other env fallbacks. |
 | `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid` (default) or `bm25` (legacy). No config-file equivalent. |
 | `MEMORY_ARBITER_GGUF` | _(none)_ | Legacy GGUF path fallback; prefer `embedding.model_path` in the config file. |
@@ -528,7 +532,7 @@ MIT
 
 ## 中文
 
-AI 编码工具的共享记忆层。一个本地 SQLite 数据库——你用的每个工具（Cursor、Claude Code、Codex、ZCode……）搜索同一套已验证的事实，而不是每轮对话重新加载 markdown 文件。
+AI Agent 的共享记忆层。一个本地 SQLite 数据库——你用的每个工具（Cursor、Claude Code、Codex、ZCode、WorkBuddy……）搜索同一套已验证的事实，而不是每轮对话重新加载 markdown 文件。
 
 ```
 # 不用每轮把 2 万 token 的 MEMORY.md 塞进 prompt：
@@ -575,7 +579,7 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 
 #### 一个工具或多个工具：都能扩展
 
-即使只用一个工具（Cursor、Claude Code、Codex、ZCode），memory-arbiter 也把你的记忆从扁平 markdown 升级成可查询的数据库：几千条记忆、检索成本接近零、结构化冲突检测、来源可信度分层、完整审计追溯——不用再手动精简越来越大的 markdown 文件。
+即使只用一个工具（Cursor、Claude Code、Codex、ZCode、WorkBuddy），memory-arbiter 也把你的记忆从扁平 markdown 升级成可查询的数据库：几千条记忆、检索成本接近零、结构化冲突检测、来源可信度分层、完整审计追溯——不用再手动精简越来越大的 markdown 文件。
 
 同时用两个或更多工具时，再加一层共享记忆：工具 A 写、工具 B 搜。零文件传递、零复制粘贴、零版本混乱。一个数据库，零重复。
 
@@ -592,6 +596,7 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 - **版本历史** —— 原地编辑记忆，旧版本自动归档不丢失。谁改了什么、什么时候改的，完整可追溯。
 - **长文档分段** —— 把万字文档拆成可搜索的段落，查询只返回命中的那段，不返回整篇。
 - **tag 精排 + 搜索过滤**（v0.7.3）—— tag 按离散标签集评分（token 重叠，不再当句子做整串匹配），tag 精确命中每个 query token 时终于能排到 subject 只是偶然含一个词的记忆之上。`memory_search` 还新增了 `tags_filter` / `after_time` / `before_time` / `source_type`，响应里带 `has_more` + `total_estimate`，让穷举式查询知道这一页是不是已经拿全。
+- **关联待办与待办闭环**（v0.7.4）—— 真实命中查询时，`memory_search` 在独立的 `linked_open_items` 字段附最多 5 条与结果集共享 meaningful tag 的 active 待办（带 `todo` tag），纯只读、不影响排序、经泛 tag stoplist 过滤。闭环用 `memory_complete_open_item` 原子移除 `todo` tag（保留其余一切）。每次响应还带 `retrieval_mode`（`direct` / `recent_fallback` / `recent_browse` / `empty` / `unavailable`）说明结果是怎么来的。
 - **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。
 - **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
 - **健康体检** —— 一键 `doctor` 给配置完整性、向量化启用链、分段、数据一致性、容量堆积做分级体检。每条诊断带 severity 和针对当前配置的修复指引；既能作为 MCP 工具（日常）在对话里触发，也能作为独立 CLI（救护车：MCP 进程挂了也能连库诊断）。纯只读。
@@ -679,12 +684,13 @@ uvx --from memory-arbiter-mcp memory-arbiter
 每次写入必填：subject、tags、source_type（限 `user_confirmed` /
 `agent_generated` / `document_extracted`；其中 `user_confirmed` 会自动
 锁定该条记忆——只用于用户明确确认过的事实）、event_time（ISO 8601）、
-workspace（项目名）、source_ref。
+workspace（项目名；v0.7.4：保留元数据——会存储和返回，但**不**过滤 memory_search / memory_recent 结果）、source_ref。
 
 查找先 memory_search，细节读源文件。发现矛盾不覆盖：明确知道哪条对时
 用 memory_supersede（废弃错的），不确定时用 memory_arbitrate（系统按
-时间线和可信度仲裁）。待办处理完成后回写原条目（更新 status/subject
-标注已完成），不要只在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
+时间线和可信度仲裁）。待办处理完成后用 memory_complete_open_item（v0.7.4）
+移除 todo tag——原子操作、保留其他 tags 和正文、写历史快照、从 linked_open_items
+移除；不要只在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
 ```
 
 ### 客户端配置位置
@@ -985,7 +991,7 @@ memory_get(memory_id)                       ← 需要时取全文
 |---|---|---|
 | `MEMORY_ARBITER_CLIENT` | `codex` | 每个工具一个标识（`codex`、`claude-code`、`cursor`、`zcode`…）。 |
 | `MEMORY_ARBITER_AGENT_ID` | `default` | 客户端内的 agent 身份。 |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | 记忆记录上的字段。v0.6.2 起不再用于搜索过滤，保留供后续项目级功能使用。 |
+| `MEMORY_ARBITER_WORKSPACE` | `default` | 记忆记录上的字段。保留元数据（v0.7.4）：会存储和返回，但**不**过滤 memory_search / memory_recent 结果。保留供后续项目级功能使用。 |
 | `MEMORY_ARBITER_CONFIG` | _(无)_ | 可选：指定另一个 JSON 配置文件路径。设置后读取该文件，而不是默认的 `~/.config/memory-arbiter/config.json`；配置文件里的字段仍然优先于其他 env 兜底值。 |
 | `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid`（默认）或 `bm25`（legacy）。无配置文件对应。 |
 | `MEMORY_ARBITER_GGUF` | _(无)_ | 旧版 GGUF 路径兜底；建议改用配置文件里的 `embedding.model_path`。 |

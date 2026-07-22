@@ -10,7 +10,7 @@ from .config import Settings
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
 from .models import MemoryRecord, ProtectionLevel, SourceType
-from .search import search_memories
+from .search import search_memories, _linked_open_items_for_search
 
 
 class MemoryTools:
@@ -129,7 +129,7 @@ class MemoryTools:
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, **_: Any) -> dict[str, Any]:
         extra_warnings = list(self._embedder_warnings)
         vec_state = self.db.get_vec_index_state()
         vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
@@ -155,8 +155,8 @@ class MemoryTools:
                         )
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
-        # v0.7.3: search_memories now returns (results, warnings, has_more, total_estimate)
-        results, warnings, has_more, total_estimate = search_memories(
+        # v0.7.4 (M2): search_memories now returns a SearchOutcome dataclass.
+        outcome = search_memories(
             self.db, query, workspace, tags, limit,
             include_superseded=include_superseded,
             debug_ranking=debug_ranking,
@@ -166,8 +166,18 @@ class MemoryTools:
             before_time=before_time,
             source_type=source_type,
         )
+        results = outcome.results
+        warnings = outcome.warnings
+        has_more = outcome.has_more
+        total_estimate = outcome.total_estimate
+        retrieval_mode = outcome.retrieval_mode
         # v0.6.0: attach section enhancement to active-split results
         results = self._attach_sections(results, query_embedding, extra_warnings)
+        # v0.7.4: linked_open_items — only on genuine query hits (direct mode),
+        # never on browse/fallback/empty. Failures degrade to [] + warning.
+        linked: list[dict[str, Any]] = []
+        if include_linked_open_items and retrieval_mode == "direct" and results:
+            linked = _linked_open_items_for_search(self.db, results, extra_warnings)
         return self.db.state.response(
             {
                 "results": results,
@@ -175,6 +185,10 @@ class MemoryTools:
                 # v0.7.3: exhaustive-query support (design §3.6)
                 "has_more": has_more,
                 "total_estimate": total_estimate,
+                # v0.7.4 (M2): expose retrieval_mode so callers know how rows were produced.
+                "retrieval_mode": retrieval_mode,
+                # v0.7.4: related active todos, separated from the ranking engine.
+                "linked_open_items": linked,
             },
             extra_warnings=extra_warnings + warnings,
         )
@@ -211,7 +225,10 @@ class MemoryTools:
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         limit = max(1, min(int(limit), 100))
-        results = self.db.list_memories(workspace=workspace, limit=limit)
+        # v0.7.4 (M3): workspace is reserved metadata; memory_recent lists
+        # across the whole library (shared memory layer). The parameter stays
+        # in the signature for interface stability but does not filter.
+        results = self.db.list_memories(limit=limit)
         return self.db.state.response({"results": results, "count": len(results)})
 
     def memory_compare(self, left_id: Optional[int] = None, right_id: Optional[int] = None, left: Optional[dict[str, Any]] = None, right: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
@@ -516,6 +533,65 @@ class MemoryTools:
                 "history": history,
                 "count": len(history),
             }
+        )
+
+    def memory_complete_open_item(self, memory_id: int, reason: str = "", authorized: bool = False, **_: Any) -> dict[str, Any]:
+        """v0.7.4 (M5): mark an active todo memory as done by removing its 'todo' tag.
+
+        Closes the linked_open_items loop — without this, completed todos keep
+        resurfacing in linked_open_items forever. Only the exact 'todo' tag is
+        removed; all other tags are preserved. content/subject/sections/
+        split_status/embeddings are never touched. A history snapshot is written
+        and FTS tags are re-synced in one transaction.
+
+        Protected memories (protection_level='locked' or source_type=
+        'user_confirmed') require ``authorized=True``. An active memory that
+        already lacks the 'todo' tag returns already_completed=True with zero
+        writes (idempotent — safe to call repeatedly).
+        """
+        try:
+            memory_id_int = int(memory_id)
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
+        result = self.db.complete_open_item(memory_id_int, reason=reason, authorized=authorized)
+        outcome = result.get("outcome")
+        if outcome == "completed":
+            return self.db.state.response({
+                "completed": True,
+                "already_completed": False,
+                "memory_id": memory_id_int,
+                "history_id": result.get("history_id"),
+                "tags": result.get("tags"),
+                "version": result.get("version"),
+            })
+        if outcome == "already_completed":
+            return self.db.state.response({
+                "completed": False,
+                "already_completed": True,
+                "memory_id": memory_id_int,
+                "tags": result.get("tags"),
+            })
+        if outcome == "forbidden":
+            return self.db.state.response({
+                "error": (
+                    f"memory is protected (protection_level={result.get('protection_level')}, "
+                    f"source_type={result.get('source_type')}); authorized=True required to complete"
+                ),
+                "completed": False,
+            }, ok=False)
+        if outcome == "not_found":
+            return self.db.state.response({"error": f"memory id {memory_id_int} not found"}, ok=False)
+        if outcome == "not_active":
+            return self.db.state.response({
+                "error": f"memory is not active (status={result.get('status')}); cannot complete",
+                "completed": False,
+            }, ok=False)
+        if outcome == "unavailable":
+            return self.db.state.response({"error": "database not available"}, ok=False)
+        # outcome == "error" — sqlite3.Error during the transaction; fully rolled back.
+        return self.db.state.response(
+            {"error": "complete_open_item failed; transaction rolled back, no changes applied"},
+            ok=False,
         )
 
     def memory_cleanup_history(

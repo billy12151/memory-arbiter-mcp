@@ -3,6 +3,48 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.7.4] — 2026-07-22
+
+### Added
+
+- **`linked_open_items`** — `memory_search` now attaches up to 5 active todos (memories tagged `todo`) that share meaningful tags with the current result set, in a separate `linked_open_items` field alongside `results`. Pure read-only enhancement; never affects ranking. Fires only on genuine query hits (`retrieval_mode=direct`), never on browse/fallback/empty. A generic-tag stoplist (tag == `todo`, single-char, or appearing in ≥20% of active memories with df≥3) keeps noise out. Failures degrade to `[]` + a warning, never crashing the main search. Pass `include_linked_open_items=false` to suppress.
+- **`memory_complete_open_item`** — closes the todo loop: atomically removes the `todo` tag from an active memory (preserving all other tags), writes a `memory_history` snapshot, bumps the version, and re-syncs FTS — all in one `BEGIN IMMEDIATE` transaction (re-read + protection check + writes share the write lock, closing the TOCTOU window). Content/subject/sections/embeddings are never touched. Protected (`locked`/`user_confirmed`) memories require `authorized=true`. An active memory already lacking `todo` returns `already_completed=true` with zero writes (idempotent).
+- **`retrieval_mode`** — every `memory_search` response now carries a `retrieval_mode` (`direct` / `recent_fallback` / `recent_browse` / `empty` / `unavailable`) describing how the rows were produced. `search_memories` returns a `SearchOutcome` dataclass instead of a bare 4-tuple; callers use attribute access.
+
+### Changed
+
+- **`workspace` is now reserved metadata and no longer filters results.** This is a **behaviour change**: `memory_search` and `memory_recent` return matches across the whole shared library regardless of the `workspace` argument. The parameter remains in all signatures for interface stability and is still written/returned as a field, but it does not enter any SQL or vector post-filter. memory-arbiter is a shared memory layer — filtering by workspace made cross-project knowledge invisible. If you relied on workspace isolation, filter client-side until an explicit scope API lands.
+
+### Internal
+
+- `json_valid(tags)` SQL guard introduced (first use in the codebase) so malformed-tag rows are silently skipped by the linked-items side query without raising or emitting a warning.
+- M1: the stoplist rule is uniform — no longer relaxed when few todos exist.
+- M5 hardening: `complete_open_item` uses `write_transaction()` (`BEGIN IMMEDIATE`) instead of a deferred `connection()`, so the re-read and protection check run inside the same locked transaction as the writes. The fallback "no direct match" warning no longer says "from this workspace" (results are library-wide since the workspace change).
+- Test coverage: added 4 tests for gaps the original v0.7.4 suite omitted — FTS-failure transaction rollback (no partial write), linked-items sort stability (score → ingest_time → id), duplicate-tag no-inflation, and MCP server-wrapper pass-through of `include_linked_open_items`. 212 tests pass (was 208).
+
+## [0.7.3] — 2026-07-19
+
+### Added
+
+- **Tag scoring via token overlap** (`_score_tags_surface`) replaces contiguous-substring matching on the `tags` field. Query is split on whitespace, both sides normalized (v-prefix stripped on version-like tokens); each query token is matched against the tag set. Pure-CJK tokens use prefix/suffix substring (no middle — blocks bigram-artifact tags like `版历`); ASCII/mixed tokens use equality only (blocks `v0.7` matching `v0.7.0` and mixed-token leakage like `0.7.2发版`). Match ratio → strong/medium/weak/none. A memory whose tags contain both query tokens now reaches `strong` instead of being capped at `medium`. Fixes id=206.
+- **`memory_search` filters**: `tags_filter` (AND semantics), `after_time` / `before_time` (ISO 8601), `source_type`. Empty query + filters still applies the post-filter to the recalled pool (filters never recall on their own). Responses now carry `has_more` and `total_estimate` (`has_more = total_estimate > len(reranked)`). `limit` is now page size, not a recall ceiling. bm25 mode warns when filter params are passed (it can't honour them).
+- `db.count_filtered_memories` — SQL push-down of the same filters (`json_each` for tags AND, ISO 8601 string compare for time) mirroring the Python post-filter so COUNT and reranked stay consistent.
+
+### Changed
+
+- **Subject anchor overlap tightened.** `classify_match_level` `specific_coverage` threshold `0.4 → 0.6`. Hitting half the query's specific anchors (coverage 0.5) now drops to `weak` instead of `medium` — an incidental-subject record (subject mentions one query word) no longer suppresses a tag-precise record. This is the root-cause fix for the id=206/id=105 dogfooding case.
+- **Tag weights parity with subject**: `7/4/1.5 → 10/6/2`, `_TAGS_SCORE_CAP` `7.0 → 10.0` so a `strong` tag score isn't capped below its weight.
+
+### Fixed
+
+- `_score_tags_surface` now skips query tokens that normalize to empty (stray punctuation) before incrementing the denominator, so the match ratio reflects only tokens actually attempted.
+- README `source_type` values corrected to match the `SourceType` enum (`user_confirmed` / `agent_generated` / `document_extracted` / `unknown` / `pending`) — the previously documented values (`requirement` / `decision` / `doc_summary` / `research` / `progress`) were silently unfilterable.
+- Version sync: `memory_arbiter/__init__.py` was stale at `0.6.6` since v0.6.6 — bumped to `0.7.3` alongside `pyproject.toml`.
+
+### Internal
+
+- 9 targeted unit tests added for `classify_match_level`'s coverage threshold (zero prior coverage) guarding both directions: relaxing reintroduces the id=105 regression, raising breaks single-specific-anchor queries. 176 tests pass.
+
 ## [0.7.2] — 2026-07-17
 
 ### Improved

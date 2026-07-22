@@ -203,7 +203,9 @@ def test_recent_fallback_ranks_by_trust_then_recency(tmp_path: Path) -> None:
     assert results[1]["subject"] == "release-chatter"
 
 
-def test_memory_recent_lists_recent_workspace_memories(tmp_path: Path) -> None:
+def test_memory_recent_ignores_workspace_filter(tmp_path: Path) -> None:
+    # v0.7.4 (M3): workspace is reserved metadata; memory_recent lists the
+    # whole shared library regardless of the workspace argument.
     tools = make_tools(tmp_path)
     tools.memory_write(content="Old memory", subject="old", event_time="2026-01-01T00:00:00Z")
     tools.memory_write(content="New memory", subject="new", event_time="2026-02-01T00:00:00Z")
@@ -212,7 +214,13 @@ def test_memory_recent_lists_recent_workspace_memories(tmp_path: Path) -> None:
     recent = tools.memory_recent(workspace="repo-a", limit=10)
 
     assert recent["ok"] is True
-    assert [record["subject"] for record in recent["data"]["results"]] == ["new", "old"]
+    subjects = [record["subject"] for record in recent["data"]["results"]]
+    # All three visible — passing workspace="repo-a" does NOT hide repo-b.
+    assert "other" in subjects
+    assert "new" in subjects
+    assert "old" in subjects
+    # Ordered newest-first by event_time.
+    assert subjects == ["other", "new", "old"]
 
 
 def test_arbitration_prefers_event_time(tmp_path: Path) -> None:
@@ -1211,7 +1219,7 @@ def test_auto_embedding_injects_query_embedding(tmp_path: Path, monkeypatch) -> 
 
     def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None, **kwargs):
         captured["query_embedding"] = query_embedding
-        return [], [], False, 0
+        return SearchOutcome([], [], False, 0, "empty")
 
     monkeypatch.setattr("memory_arbiter.tools.search_memories", fake_search_memories)
 
@@ -1240,7 +1248,7 @@ def test_explicit_embedding_overrides_auto(tmp_path: Path, monkeypatch) -> None:
 
     def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None, **kwargs):
         captured["query_embedding"] = query_embedding
-        return [], [], False, 0
+        return SearchOutcome([], [], False, 0, "empty")
 
     monkeypatch.setattr("memory_arbiter.tools.search_memories", fake_search_memories)
 
@@ -2569,6 +2577,7 @@ from memory_arbiter.search import (
     _TAGS_MEDIUM_WEIGHT,
     _TAGS_WEAK_WEIGHT,
     _TAGS_SCORE_CAP,
+    SearchOutcome,
 )
 
 
@@ -3067,18 +3076,19 @@ def test_no_filters_backward_compat(tmp_path: Path) -> None:
     assert "total_estimate" in res["data"]
 
 
-def test_search_returns_4_tuple_at_search_memories_level(tmp_path: Path) -> None:
-    # 直接调 search_memories 验证 4-tuple 返回（不经过 tools 包装）
-    from memory_arbiter.search import search_memories
+def test_search_returns_search_outcome_at_search_memories_level(tmp_path: Path) -> None:
+    # v0.7.4 (M2): search_memories now returns a SearchOutcome dataclass, not a tuple.
+    from memory_arbiter.search import search_memories, SearchOutcome
     tools = make_tools(tmp_path)
     _write_mem(tools, content="hello", subject="hello", tags=[])
     result = search_memories(tools.db, "hello")
-    assert len(result) == 4, f"search_memories must return 4-tuple, got {len(result)}-tuple"
-    results, warnings, has_more, total_estimate = result
-    assert isinstance(results, list)
-    assert isinstance(warnings, list)
-    assert isinstance(has_more, bool)
-    assert isinstance(total_estimate, int)
+    assert isinstance(result, SearchOutcome), f"search_memories must return SearchOutcome, got {type(result)}"
+    assert isinstance(result.results, list)
+    assert isinstance(result.warnings, list)
+    assert len(result.results) >= 1
+    assert result.retrieval_mode == "direct"
+    assert isinstance(result.has_more, bool)
+    assert isinstance(result.total_estimate, int)
 
 
 def test_tools_layer_exposes_has_more(tmp_path: Path) -> None:

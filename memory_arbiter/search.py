@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional, Tuple
+from typing import Any, Literal, Optional, Tuple
 
 from .anchors import (
     Anchor,
@@ -12,6 +14,34 @@ from .anchors import (
     score_anchor_overlap,
 )
 from .db import MemoryDB, row_to_dict
+
+# v0.7.4 (M2): retrieval_mode classifies how the returned rows were produced.
+# linked_open_items only triggers on "direct" (a real query hit) — the other
+# modes return browse/fallback/empty rows where injecting todos would be noise.
+RetrievalMode = Literal[
+    "direct",            # FTS/LIKE/vector/section genuinely matched the query
+    "recent_fallback",   # query was non-empty but nothing matched; recent returned
+    "recent_browse",     # empty query, no filters — caller is browsing recent
+    "empty",             # filters yielded nothing, or pool empty after post-filter
+    "unavailable",       # SQLite not available
+]
+
+
+@dataclass
+class SearchOutcome:
+    """v0.7.4 (M2): structured return for search_memories.
+
+    Replaces the bare (results, warnings, has_more, total_estimate) 4-tuple so
+    retrieval_mode can travel with the result without growing into a 5-tuple
+    (which would break every tuple-unpacking caller). All callers must use
+    attribute access.
+    """
+
+    results: list[dict[str, Any]]
+    warnings: list[str]
+    has_more: bool
+    total_estimate: int
+    retrieval_mode: RetrievalMode
 
 
 import re
@@ -560,9 +590,6 @@ def _wide_recall(
                 WHERE memories_fts MATCH ? AND {status_clause_m}
             """
             params: list[Any] = [fts_main]
-            if workspace:
-                sql += " AND m.workspace = ?"
-                params.append(workspace)
             sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
             params.append(per_channel_cap)
             try:
@@ -583,9 +610,6 @@ def _wide_recall(
                     WHERE memories_fts MATCH ? AND {status_clause_m}
                 """
                 params = [fts_or]
-                if workspace:
-                    sql += " AND m.workspace = ?"
-                    params.append(workspace)
                 sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
                 params.append(per_channel_cap)
                 try:
@@ -601,9 +625,6 @@ def _wide_recall(
         like_q = f"%{query}%"
         clauses = [like_status_clause, "(subject LIKE ? OR tags LIKE ?)"]
         params = [like_q, like_q]
-        if workspace:
-            clauses.append("workspace = ?")
-            params.append(workspace)
         for tag in tags or []:
             clauses.append("tags LIKE ?")
             params.append(f"%{tag}%")
@@ -627,9 +648,6 @@ def _wide_recall(
             like_q = f"%{query}%"
             clauses = [like_status_clause, "content LIKE ?"]
             params = [like_q]
-            if workspace:
-                clauses.append("workspace = ?")
-                params.append(workspace)
             for tag in tags or []:
                 clauses.append("tags LIKE ?")
                 params.append(f"%{tag}%")
@@ -664,9 +682,6 @@ def _wide_recall(
     ):
         knn_rows = db.vec_knn(query_embedding, k=max(pool_cap - len(pool), 10))
         for row in knn_rows:
-            # Apply the same workspace filter the other channels use.
-            if workspace and row.get("workspace") != workspace:
-                continue
             # Respect status filtering — vec0 rows are joined from memories,
             # but we still need to honour the active/superseded gate.
             status = row.get("status")
@@ -696,9 +711,6 @@ def _wide_recall(
         k = need * _SECTION_KNN_K_MULTIPLIER
         sec_rows = db.section_vec_knn(query_embedding, k=k)
         for row in sec_rows:
-            # Post-filter: workspace + status (mirror Channel 5's logic).
-            if workspace and row.get("workspace") != workspace:
-                continue
             status = row.get("status")
             if status == "deleted":
                 continue
@@ -860,16 +872,17 @@ def search_memories(
     after_time: Optional[str] = None,
     before_time: Optional[str] = None,
     source_type: Optional[str] = None,
-) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
-    """v0.7.3: returns (reranked, warnings, has_more, total_estimate).
+) -> SearchOutcome:
+    """v0.7.4 (M2): returns a SearchOutcome with retrieval_mode.
 
     has_more/total_estimate give the caller a way to tell exhaustive queries
     ("all release notes") from complete ones. Pagination itself is not in
-    scope this version (design §3.1 review_1 漏洞 5).
+    scope this version (design §3.1 review_1 漏洞 5). retrieval_mode drives
+    linked_open_items triggering (only "direct" is eligible).
     """
     warnings: list[str] = []
     if not db.db_available:
-        return [], ["SQLite unavailable; search cannot read JSONL backup in MVP."], False, 0
+        return SearchOutcome([], ["SQLite unavailable; search cannot read JSONL backup in MVP."], False, 0, "unavailable")
     limit = max(1, min(int(limit), 100))
     query = (query or "").strip()
     mode = _get_ranking_mode()
@@ -920,7 +933,18 @@ def search_memories(
         result, bm_warnings = _search_bm25(
             db, query, workspace, tags, limit, status_clause, like_status_clause, warnings, debug_ranking,
         )
-        return result, bm_warnings, False, 0
+        # Infer retrieval_mode for the legacy bm25 path: _search_bm25 internally
+        # falls back to _recent_fallback when query has no hit (appending its
+        # distinctive warning), so sniff the warnings to tell the two apart.
+        if not query:
+            bm_mode: RetrievalMode = "recent_browse"
+        elif not result:
+            bm_mode = "empty"
+        elif any("No direct memory match" in w for w in bm_warnings):
+            bm_mode = "recent_fallback"
+        else:
+            bm_mode = "direct"
+        return SearchOutcome(result, bm_warnings, False, 0, bm_mode)
 
     # === v0.7.3 F1/C1: search.py empty-query shortcut ===
     # 现状是 `if not query: return _recent_fallback(...)`，会让 query 为空时
@@ -929,7 +953,8 @@ def search_memories(
     # 继续往下（wide_recall 内部仍会因 not query 返 []，post-filter 后仍空，
     # 最终走第二步的 "query required for filter-aware recall" 精准 warning）。
     if not query and not has_filters:
-        return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
+        fb_rows, fb_warnings, _fb_hm, _fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
+        return SearchOutcome(fb_rows, fb_warnings, False, 0, "recent_browse")
 
     # === v0.7.3: pool 组装 + post-filter（design §3.5 第三步） ===
     pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause, query_embedding=query_embedding,
@@ -949,11 +974,12 @@ def search_memories(
                 )
             else:
                 empty_reason = "filters too restrictive or no matches; pool was empty after post-filter"
-            return [], warnings + [empty_reason], False, 0
+            return SearchOutcome([], warnings + [empty_reason], False, 0, "empty")
     else:
         # 无过滤：保留 v0.7.2 行为，pool 空走 fallback
         if not pool:
-            return _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
+            fb_rows, fb_warnings, _fb_hm, _fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
+            return SearchOutcome(fb_rows, fb_warnings, False, 0, "recent_fallback")
 
     reranked = _soft_rerank(query, pool)
     # Slice to limit.
@@ -979,7 +1005,200 @@ def search_memories(
             for k in list(r.keys()):
                 if k.startswith("_"):
                     r.pop(k, None)
-    return reranked, warnings, has_more, total_estimate
+    return SearchOutcome(reranked, warnings, has_more, total_estimate, "direct")
+
+
+def _coerce_tags(raw: Any) -> list[str]:
+    """v0.7.4: normalise a memory's ``tags`` field into a deduped ``list[str]``.
+
+    Accepts whatever row_to_dict / the DB hands us: an actual list, a JSON
+    string, a malformed string, a scalar, or None. Never raises — bad shapes
+    yield []. Deduplicates preserving first-seen order.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        tags = raw
+    elif isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            tags = parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return []
+    else:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in tags:
+        if isinstance(t, str) and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _linked_open_items_for_search(
+    db: MemoryDB,
+    results: list[dict[str, Any]],
+    warnings: list[str],
+    max_items: int = 5,
+) -> list[dict[str, Any]]:
+    """v0.7.4: attach up to ``max_items`` active todo memories that share
+    meaningful tags with the current result set (linked_open_items).
+
+    Pure read-only enhancement — never writes. Never raises: on any DB error
+    returns [] and appends a degradation warning to ``warnings``.
+
+    Three-layer short-circuit (design 性能设计):
+      L0 (memory): bail without touching DB if results carry no meaningful tag
+           (after stripping ``todo`` and single-char tags).
+      L1 (DB): EXISTS check for any active memory tagged ``todo``; bail if none.
+      L2 (DB): a single read snapshot computes ``active_count``, per-tag ``df``,
+           todo candidates, applies the M1 stoplist, scores, sorts, truncates.
+
+    Stoplist (M1 — uniform, independent of todo count):
+      tag == 'todo' | len(tag) <= 1 | df >= 3 AND df/active_count >= 0.20
+
+    ``json_valid(tags)`` is applied in SQL so malformed-tag rows are silently
+    filtered (M4-A) — this does NOT produce a warning. Only a real DB failure
+    produces a warning (M4-B).
+    """
+    if not results:
+        return []
+
+    # --- L0: collect meaningful tags from results (strip todo / single-char) ---
+    result_id_to_tags: dict[int, set[str]] = {}
+    all_meaningful: set[str] = set()
+    for rec in results:
+        rid = rec.get("id")
+        tags = _coerce_tags(rec.get("tags"))
+        meaningful = {t for t in tags if t != "todo" and len(t) > 1}
+        if rid is not None and meaningful:
+            result_id_to_tags[int(rid)] = meaningful
+            all_meaningful |= meaningful
+    if not all_meaningful or not db.db_available:
+        return []
+
+    result_ids = list(result_id_to_tags.keys())
+
+    def _is_stoplisted(tag: str, df: int, active_count: int) -> bool:
+        # M1: uniform stoplist — no todo-count branching.
+        if tag == "todo":
+            return True
+        if len(tag) <= 1:
+            return True
+        if df >= 3 and active_count > 0 and df / active_count >= 0.20:
+            return True
+        return False
+
+    try:
+        conn = db._new_connection()
+        try:
+            # --- L1: EXISTS check for active+todo memories ---
+            todo_exists = conn.execute(
+                "SELECT EXISTS ("
+                " SELECT 1 FROM memories m"
+                " WHERE m.status='active'"
+                "   AND EXISTS ("
+                "     SELECT 1 FROM json_each("
+                "       CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END"
+                "     ) WHERE json_each.value='todo' AND json_each.type='text'"
+                "   )"
+                ") AS e"
+            ).fetchone()["e"]
+            if not todo_exists:
+                return []
+
+            # --- L2: active_count ---
+            active_count = int(conn.execute(
+                "SELECT COUNT(*) AS c FROM memories WHERE status='active'"
+            ).fetchone()["c"])
+            if active_count <= 0:
+                return []
+
+            # todo candidates: active + tagged 'todo', excluding result IDs.
+            ph = ",".join("?" * len(result_ids)) if result_ids else ""
+            exclude_clause = f"AND m.id NOT IN ({ph})" if result_ids else ""
+            cand_rows = conn.execute(
+                f"""
+                SELECT m.id, m.subject, m.tags, m.ingest_time
+                FROM memories m
+                WHERE m.status='active' {exclude_clause}
+                  AND EXISTS (
+                    SELECT 1 FROM json_each(
+                      CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END
+                    ) WHERE json_each.value='todo' AND json_each.type='text'
+                  )
+                """,
+                list(result_ids),
+            ).fetchall()
+            if not cand_rows:
+                return []
+
+            # per-tag df across the active set (json_valid guard ⇒ M4-A silence).
+            tag_df: dict[str, int] = {}
+            df_rows = conn.execute(
+                """
+                SELECT tag.value AS t, COUNT(DISTINCT m.id) AS df
+                FROM memories m, json_each(
+                  CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END
+                ) AS tag
+                WHERE m.status='active' AND tag.type='text'
+                GROUP BY tag.value
+                """
+            ).fetchall()
+            for r in df_rows:
+                tag_df[r["t"]] = int(r["df"])
+
+            scored: list[dict[str, Any]] = []
+            for row in cand_rows:
+                cand_id = int(row["id"])
+                cand_tags = _coerce_tags(row["tags"])
+                cand_subject = row["subject"] or f"memory #{cand_id}"
+                cand_ingest = row["ingest_time"] or ""
+                matched_meaningful: set[str] = set()
+                matched_result_ids: set[int] = set()
+                for tag in cand_tags:
+                    if tag not in all_meaningful:
+                        continue
+                    if _is_stoplisted(tag, tag_df.get(tag, 0), active_count):
+                        continue
+                    matched_meaningful.add(tag)
+                    for rid, rtags in result_id_to_tags.items():
+                        if tag in rtags:
+                            matched_result_ids.add(rid)
+                # score: 2 per matched meaningful tag (≥ 2 ⇒ ≥ 1 overlap).
+                score = 2 * len(matched_meaningful)
+                if score < 2:
+                    continue
+                scored.append({
+                    "id": cand_id,
+                    "subject": cand_subject,
+                    "tags": cand_tags,
+                    "ingest_time": cand_ingest,
+                    "reason": "tag_overlap: " + ", ".join(sorted(matched_meaningful)),
+                    "matched_result_ids": sorted(matched_result_ids),
+                    "_score": score,
+                })
+            if not scored:
+                return []
+            # score DESC → ingest_time DESC → id DESC.
+            scored.sort(
+                key=lambda x: (x["_score"], x["ingest_time"], x["id"]),
+                reverse=True,
+            )
+            out: list[dict[str, Any]] = []
+            for item in scored[:max_items]:
+                item.pop("_score", None)
+                out.append(item)
+            return out
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        warnings.append(f"linked_open_items lookup failed: {exc}; returned [].")
+        return []
+    except Exception as exc:  # pragma: no cover - defensive
+        warnings.append(f"linked_open_items lookup failed: {exc}; returned [].")
+        return []
 
 
 def _search_bm25(
@@ -1008,9 +1227,6 @@ def _search_bm25(
             WHERE memories_fts MATCH ? AND {status_clause_m}
         """
         params: list[Any] = [_sanitize_fts_query(query)]
-        if workspace:
-            sql += " AND m.workspace = ?"
-            params.append(workspace)
         sql += " ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
         params.append(limit)
         try:
@@ -1025,9 +1241,6 @@ def _search_bm25(
         if query:
             clauses.append("(content LIKE ? OR subject LIKE ? OR tags LIKE ?)")
             params.extend([like, like, like])
-        if workspace:
-            clauses.append("workspace = ?")
-            params.append(workspace)
         for tag in tags or []:
             clauses.append("tags LIKE ?")
             params.append(f"%{tag}%")
@@ -1064,9 +1277,6 @@ def _recent_fallback(
     """Recent-memory fallback when no direct match found (r4 §4.2 safety net)."""
     clauses = [like_status_clause]
     params: list[Any] = []
-    if workspace:
-        clauses.append("workspace = ?")
-        params.append(workspace)
     for tag in tags or []:
         clauses.append("tags LIKE ?")
         params.append(f"%{tag}%")
@@ -1098,7 +1308,7 @@ def _recent_fallback(
         conn.close()
     if rows:
         warnings.append(
-            "No direct memory match. Returning recent memories from this workspace; refine keywords, try memory_recent, or compare candidates before reading source files."
+            "No direct memory match. Returning recent memories from the shared library; refine keywords, try memory_recent, or compare candidates before reading source files."
         )
     # v0.7.3 K4/E5: fallback path has no has_more semantics — "还有更多匹配"
     # 不成立（这是"没匹配给你最近的"），写死 (False, 0)。

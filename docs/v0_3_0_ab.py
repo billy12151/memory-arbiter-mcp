@@ -154,10 +154,12 @@ def run_eval(ranking_mode: str) -> dict:
     fallback_count = 0
 
     for g in GOLDEN_QUERIES:
-        rows, warnings = search_memories(
+        outcome = search_memories(
             db, g["query"], workspace=None, tags=None, limit=10,
             include_superseded=False, debug_ranking=True,
         )
+        rows = outcome.results
+        warnings = outcome.warnings
         top_ids = [r["id"] for r in rows[:3]]
         all_ids = [r["id"] for r in rows]
         is_fallback = any("recent memories" in w for w in warnings)
