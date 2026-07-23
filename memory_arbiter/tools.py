@@ -1017,7 +1017,21 @@ class MemoryTools:
     ) -> list[dict[str, Any]]:
         """Post-process search results: attach section enhancement for active-split memories.
 
-        Uses a short read snapshot so all reads are consistent (design doc §4.3).
+        v0.8.0 protocol (design doc §6.3). Each result carries a top-level
+        ``content`` that is the directly-consumable complete content unit, and
+        a ``content_scope`` tag the caller must use to interpret it:
+
+          * full_memory      — the whole memory content
+          * matched_sections — the matched sections' full text, joined
+
+        Branch matrix:
+          | coverage ≥ threshold            | full_memory   | (matched refs)      | –            |
+          | 0 < coverage < threshold        | matched_sections | full section bodies | catalog(unmatched) |
+          | memory hit, section zero-match  | full_memory   | –                   | –            |
+          | invariant broken / vec gate down| full_memory   | –                   | optional     |
+
+        Ordinary ``matched_sections`` never carry embedding budget diagnostics;
+        those live only in catalog/get/doctor (or debug_ranking).
         """
         if not results or not self.db.db_available:
             return results
@@ -1028,7 +1042,6 @@ class MemoryTools:
             and query_embedding is not None
             and self.db.state.sqlite_vec_available
         )
-        # Real reason the vec gate is closed, for accurate per-result warnings.
         if not query_embedding:
             vec_disabled_reason = "no_query_embedding"
         elif vec_state.get("state") in {"mismatch", "failed"}:
@@ -1075,57 +1088,50 @@ class MemoryTools:
             if mid not in current_mem_map:
                 continue
 
-            # v0.6.3: content 归一化（修第二轮评审 Bug）。
-            # Channel 6 候选 content=""（A3 不拉全文），但 current_mem_map[mid]
-            # 已通过 _fetch_memory 重读全文（tools.py:590）。在三分支之前统一
-            # 补 content，覆盖 invariant guard / vec gate closed / fulltext 三
-            # 个"不碰 content"的分支——否则它们对 Channel 6 候选返回空串。
-            # current_mem_map 只含 split-active，Channel 6 post-filter 也只留
-            # split-active（§3.2），故 Channel 6 候选必在此 map 中。
-            real_content = current_mem_map[mid].get("content")
+            # Normalise content: Channel-6 candidates carry content="" upstream,
+            # but current_mem_map has the full text. Ensure the result content is
+            # the real full text before branching.
+            real_content = current_mem_map[mid].get("content") or ""
             if real_content and not result.get("content"):
                 result["content"] = real_content
-            # content_truncated 跨分支初始化：仅 zero-match 分支可能覆写为 True。
-            result.setdefault("content_truncated", False)
+            full_content = result.get("content") or ""
 
             sections = sections_map.get(mid, [])
             total_sections = len(sections)
+            sec_by_id: dict[int, dict] = {s["id"]: s for s in sections}
 
-            # Invariant guards — these fire regardless of the vec gate, so a
-            # corrupted section state is always detectable.  On every degrade
-            # path we explicitly mark content_omitted=False and
-            # section_enhancement_applied=False so the "return full text"
-            # invariant does NOT rely on upstream content being untouched
-            # (a fragile implicit contract).
+            # ---- Invariant guards: always return full memory, but flag the
+            # corruption so it is detectable regardless of the vec gate.
             if total_sections == 0:
                 result.setdefault("warnings", []).append("split_invariant_broken_empty_sections")
-                result["content_omitted"] = False
+                result["content_scope"] = "full_memory"
                 result["section_enhancement_applied"] = False
+                result["content"] = full_content
                 continue
             if total_sections == 1:
                 result.setdefault("warnings", []).append("split_invariant_broken_too_few_sections")
-                result["content_omitted"] = False
+                result["content_scope"] = "full_memory"
                 result["section_enhancement_applied"] = False
+                result["content"] = full_content
                 continue
-
-            # Check section vec completeness BEFORE the gate check, so a missing
-            # section vector is reported even when the vec gate is closed.
             section_ids = {s["id"] for s in sections}
             vec_ids = section_vec_ids_map.get(mid, set())
             if section_ids - vec_ids:
                 result.setdefault("warnings", []).append("split_invariant_broken_missing_section_vec")
-                result["content_omitted"] = False
+                result["content_scope"] = "full_memory"
                 result["section_enhancement_applied"] = False
+                result["content"] = full_content
                 continue
 
-            # Vec gate closed → return full text (explicit degrade).
+            # ---- Vec gate closed → return full memory (explicit degrade).
             if not vec_gate_open:
                 result.setdefault("warnings", []).append(f"vec_disabled={vec_disabled_reason}")
-                result["content_omitted"] = False
+                result["content_scope"] = "full_memory"
                 result["section_enhancement_applied"] = False
+                result["content"] = full_content
                 continue
 
-            # Section Vec matching
+            # ---- Section vec matching
             try:
                 vec_hits = self.db.section_vec_distance_match(mid, query_embedding, threshold)
             except Exception:
@@ -1134,47 +1140,56 @@ class MemoryTools:
             matched_ids = {h["section_id"] for h in vec_hits}
             matched_count = len(matched_ids)
 
+            # Build matched_sections with FULL section bodies, ordered by index.
+            # Embedding diagnostics are deliberately omitted from ordinary search.
+            def _matched_entry(h: dict) -> dict:
+                s = sec_by_id.get(h["section_id"], {})
+                body = full_content[s.get("start_offset", 0):s.get("end_offset", 0)] if s else ""
+                return {
+                    "section_id": h["section_id"],
+                    "section_index": s.get("section_index"),
+                    "title": s.get("title"),
+                    "title_path": s.get("title_path"),
+                    "summary": s.get("summary"),
+                    "content": body,
+                    "char_count": len(body),
+                }
+
             if matched_count == 0:
-                # True zero match. §4.2 归一化已在循环顶部把 content 补全为
-                # 真实全文；这里截断为预览而非返回全文——zero-match 是零 section
-                # 置信度，一篇 50000 字文档走 zero-match 返回全文会 token 爆炸，
-                # 且 Channel 6 的无 threshold KNN 使此路径高频（A2）。
-                full_content = result.get("content") or ""
-                preview_chars = getattr(self.settings, "section_zero_match_preview_chars", 2000)
-                result["content"] = full_content[:preview_chars]
-                result["content_truncated"] = len(full_content) > preview_chars
-                result["content_omitted"] = False
+                # Zero section match → return the FULL memory (design §6.3).
+                # No preview, no truncation.
+                result["content_scope"] = "full_memory"
+                result["content"] = full_content
                 result["section_enhancement_applied"] = True
-                result["section_catalog"] = [self._catalog_entry(s) for s in sections]
+                result["zero_section_match"] = True
                 result["hint"] = (
-                    f"已拆分为 {total_sections} 段，零段落命中阈值，已返回前 {preview_chars} 字预览；"
-                    f"可用 get_sections 获取特定段落"
+                    f"已拆分为 {total_sections} 段，零段落命中阈值，已返回完整全文"
                 )
             elif matched_count / total_sections >= fulltext_threshold:
-                # Most sections matched → return full text
-                result["content_omitted"] = False
+                # Coverage ≥ threshold → return full memory.
+                ordered = sorted(vec_hits, key=lambda h: (sec_by_id.get(h["section_id"], {}).get("section_index", 0)))
+                result["content_scope"] = "full_memory"
+                result["content"] = full_content
                 result["section_enhancement_applied"] = True
-                result["matched_sections"] = [
-                    {"section_id": h["section_id"], "title": h.get("title"),
-                     "title_path": h.get("title_path"), "summary": h.get("summary")}
-                    for h in vec_hits
-                ]
+                result["matched_sections"] = [_matched_entry(h) for h in ordered]
                 pct = round(100 * matched_count / total_sections)
                 result["hint"] = f"{pct}% 段落命中，建议直接看全文"
             else:
-                # Partial match
-                result["content"] = None
-                result["content_omitted"] = True
+                # Partial match → join matched sections' full text by index.
+                ordered = sorted(vec_hits, key=lambda h: (sec_by_id.get(h["section_id"], {}).get("section_index", 0)))
+                matched = [_matched_entry(h) for h in ordered]
+                joined = "\n\n".join(m["content"] for m in matched)
+                result["content_scope"] = "matched_sections"
+                result["content"] = joined
                 result["section_enhancement_applied"] = True
-                result["matched_sections"] = [
-                    {"section_id": h["section_id"], "title": h.get("title"),
-                     "title_path": h.get("title_path"), "summary": h.get("summary")}
-                    for h in vec_hits
-                ]
+                result["matched_sections"] = matched
+                result["matched_section_count"] = len(matched)
+                result["total_section_count"] = total_sections
+                # Catalog of UNMATCHED sections (diagnostic fields allowed here).
                 result["section_catalog"] = [
                     self._catalog_entry(s) for s in sections if s["id"] not in matched_ids
                 ]
-                result["hint"] = "已返回命中段落元数据，用 get_sections 获取段落原文"
+                result["hint"] = "已返回命中段落完整原文；未命中段落见 section_catalog"
 
         return results
 

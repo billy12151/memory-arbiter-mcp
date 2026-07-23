@@ -1842,15 +1842,18 @@ def test_split_publish_success_then_search_returns_matched_sections(tmp_path: Pa
     result = tools.memory_search(query="beta", query_embedding=_keyword_embedding("beta"))
     assert result["ok"] is True
     hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
-    # 1/2 matched → partial branch → content omitted, matched_sections present
-    assert hit["content_omitted"] is True
+    # 1/2 matched → partial branch → content_scope=matched_sections, full
+    # section bodies present in matched_sections.
+    assert hit["content_scope"] == "matched_sections"
     assert hit["section_enhancement_applied"] is True
     assert hit.get("matched_sections")
     assert hit["matched_sections"][0]["title"] == "beta"
+    # v0.8: matched_sections carry the full section content.
+    assert hit["matched_sections"][0].get("content")
 
 
-def test_split_publish_success_zero_hit_returns_catalog(tmp_path: Path) -> None:
-    """Zero section matches → bounded preview (not full text) + full section_catalog."""
+def test_split_publish_success_zero_hit_returns_full_memory(tmp_path: Path) -> None:
+    """Zero section matches → return the FULL memory (design §6.3), no preview."""
     tools = make_vec_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
@@ -1863,18 +1866,12 @@ def test_split_publish_success_zero_hit_returns_catalog(tmp_path: Path) -> None:
     # Query with a token that maps to neither section's vector.
     result = tools.memory_search(query="zzz", query_embedding=_keyword_embedding("zzz"))
     hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
-    # v0.6.1: zero-match now returns a bounded preview (A2 token-explosion fix),
-    # not content_omitted=True. content_truncated reflects whether the preview
-    # was actually shorter than the full text.
-    assert hit["content_omitted"] is False
-    assert hit["content"] is not None          # preview non-empty
-    assert hit.get("content_truncated") is not None  # truncation flag present
+    # v0.8: zero-match returns the full memory, not a bounded preview.
+    assert hit["content_scope"] == "full_memory"
+    assert hit["content"] == content
+    assert hit.get("content_truncated") is None  # removed in v0.8
+    assert "content_omitted" not in hit           # removed in v0.8
     assert hit["section_enhancement_applied"] is True
-    assert hit.get("section_catalog")
-    assert len(hit["section_catalog"]) == 2
-    # Unified catalog schema: embedding diagnostic fields present.
-    assert "embedding_truncated" in hit["section_catalog"][0]
-    assert "embedding_original_tokens" in hit["section_catalog"][0]
 
 
 def test_split_publish_success_fulltext_fallback(tmp_path: Path) -> None:
@@ -1892,7 +1889,7 @@ def test_split_publish_success_fulltext_fallback(tmp_path: Path) -> None:
 
     result = tools.memory_search(query="alpha", query_embedding=_keyword_embedding("alpha"))
     hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
-    assert hit["content_omitted"] is False
+    assert hit["content_scope"] == "full_memory"
     assert hit["section_enhancement_applied"] is True
     assert hit.get("matched_sections")  # reference list still present
     assert hit.get("content")  # full text returned
@@ -1942,7 +1939,7 @@ def test_attach_sections_invariant_missing_section_vec(tmp_path: Path) -> None:
     result = tools.memory_search(query="alpha", query_embedding=_keyword_embedding("alpha"))
     hit = next(r for r in result["data"]["results"] if r["id"] == memory_id)
     assert "split_invariant_broken_missing_section_vec" in hit.get("warnings", [])
-    assert hit["content_omitted"] is False
+    assert hit["content_scope"] == "full_memory"
     assert hit["section_enhancement_applied"] is False
 
 
@@ -2261,29 +2258,31 @@ def test_v061_t7_channel5_candidate_has_split_status(tmp_path: Path) -> None:
     assert target_row["split_status"] == "active"
 
 
-@pytest.mark.xfail(reason="T2: zero-match returns full memory, not preview; this asserts the removed behaviour")
-def test_v061_t8_c4_long_content_zero_match_truncated(tmp_path: Path) -> None:
-    """T8/C4: a 50000-char split-active doc under zero-match returns ≤preview_chars.
-
-    SUPERSEDED by v0.8 §6.3 (zero-match returns the FULL memory, no preview).
-    T2 rewrites this to assert full-memory + content_scope=full_memory.
-    """
+def test_v080_long_content_zero_match_returns_full_memory(tmp_path: Path) -> None:
+    """v0.8 §6.3: a long split-active doc under zero-match returns the FULL
+    memory, not a bounded preview. Supersedes the v0.6.1 preview behaviour."""
     tools = _make_channel6_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
-    tools.settings.section_zero_match_preview_chars = 2000
+    tools.settings.section_zero_match_preview_chars = 2000  # legacy; ignored in v0.8
     _set_vec_ready(tools)
 
-    # A very long doc whose sections embed to alpha/beta; query "zzz" hits none.
-    big = "alpha " + ("q" * 25000) + "\nbeta " + ("r" * 24000)
+    # Two compliant sections (each ≤ max_section_chars=3600), total > preview.
+    chunk_a = "alpha " + ("q" * 3000)
+    chunk_b = "beta " + ("r" * 3000)
+    big = chunk_a + "\n" + chunk_b
     mid = tools.memory_write(content=big, subject="bigdoc")["data"]["id"]
-    _publish_two_sections(tools, mid, big, "alpha", "beta")
+    published = _publish_two_sections(tools, mid, big, "alpha", "beta")
+    assert published["ok"] is True
 
     result = tools.memory_search(query="zzz", query_embedding=_keyword_embedding("zzz"))
     hit = next((r for r in result["data"]["results"] if r["id"] == mid), None)
     assert hit is not None, "big doc must appear in zero-match results for the test to be meaningful"
-    assert hit["content_truncated"] is True
-    assert len(hit["content"]) <= 2000, "zero-match preview must be bounded"
+    # v0.8: full memory returned, no truncation.
+    assert hit["content_scope"] == "full_memory"
+    assert hit["content"] == big
+    assert len(hit["content"]) > 2000, "full text must exceed the legacy preview bound"
+    assert "content_truncated" not in hit
 
 
 def test_v061_t9_debug_ranking_channel6_fields(tmp_path: Path) -> None:
@@ -2429,7 +2428,9 @@ def test_v061_t13_fulltext_branch_channel6_not_empty_content(tmp_path: Path) -> 
         [fake_candidate], _keyword_embedding("alpha"), []
     )
     hit = normalized[0]
-    assert hit.get("content_omitted") is False
+    # v0.8: fulltext branch returns the full memory for Channel 6 candidates
+    # (content normalized from current_mem_map).
+    assert hit.get("content_scope") == "full_memory"
     assert hit.get("content"), (
         "fulltext branch must return non-empty content for Channel 6 candidates "
         "(second-round Bug regression)"
@@ -2461,9 +2462,15 @@ def test_v061_t14_partial_branch_does_not_leak_full_content(tmp_path: Path) -> N
         [fake_candidate], _keyword_embedding("alpha"), []
     )
     hit = normalized[0]
-    # Partial branch sets content=None even though normalization filled it.
-    assert hit.get("content") is None
-    assert hit.get("content_omitted") is True
+    # v0.8: partial branch returns only the matched section's full text (joined),
+    # NOT the full memory — the unmatched "beta" section body must not leak.
+    assert hit.get("content_scope") == "matched_sections"
+    assert hit.get("content")  # non-empty: the matched section's text
+    # The matched alpha section's content is present...
+    assert any(ms.get("content") for ms in hit.get("matched_sections", []))
+    # ...but the unmatched beta section body must NOT appear in the partial content.
+    beta_body = full_text.split("\nbeta ", 1)[-1] if "\nbeta " in full_text else "y" * 60
+    assert beta_body not in hit["content"]
 
 
 # ===========================================================================

@@ -455,7 +455,6 @@ def test_rebuild_failure_preserves_old_active(tmp_path: Path) -> None:
 #  §6.3 — memory_search content_scope
 # ==================================================================
 
-@pytest.mark.xfail(reason="T2: partial must return full matched section content")
 def test_search_partial_returns_full_section_content(tmp_path: Path) -> None:
     """§6.3: partial hit → matched_sections carry full section content."""
     tools = make_vec_tools(tmp_path)
@@ -480,7 +479,6 @@ def test_search_partial_returns_full_section_content(tmp_path: Path) -> None:
         assert ms.get("content")   # full section body present
 
 
-@pytest.mark.xfail(reason="T2: zero-match must return full memory, not preview")
 def test_search_zero_match_returns_full_memory(tmp_path: Path) -> None:
     """§6.3: zero section match → full memory, content_scope=full_memory."""
     tools = make_vec_tools(tmp_path)
