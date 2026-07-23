@@ -1335,36 +1335,6 @@ class MemoryTools:
         return result
 
     @staticmethod
-    def _detect_markdown_headings(content: str) -> list[tuple[int, str]]:
-        """Detect ATX headings outside fenced code blocks.
-
-        Returns list of (char_offset, heading_text) where heading_text is the
-        heading text with the ``#`` prefix stripped (e.g. ``"标题"`` not
-        ``"## 标题"``). Consumers compare against section titles/anchors.
-        """
-        in_fence = False
-        fence_marker = None
-        headings: list[tuple[int, str]] = []
-        pos = 0
-        for line in content.splitlines(keepends=True):
-            stripped = line.lstrip()
-            # Fence tracking
-            if stripped.startswith("```") or stripped.startswith("~~~"):
-                marker = stripped[:3]
-                if not in_fence:
-                    in_fence = True
-                    fence_marker = marker
-                elif marker == fence_marker:
-                    in_fence = False
-                    fence_marker = None
-            elif not in_fence:
-                m = re.match(r"^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$", line.rstrip())
-                if m:
-                    headings.append((pos, m.group(2).strip()))
-            pos += len(line)
-        return headings
-
-    @staticmethod
     def _rule_plan_sections(
         content: str, max_sections: int, max_section_chars: int,
     ) -> tuple[Optional[list[dict[str, Any]]], str]:
