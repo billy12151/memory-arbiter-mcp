@@ -26,6 +26,12 @@ RetrievalMode = Literal[
     "unavailable",       # SQLite not available
 ]
 
+# v0.7.4.1: single source of truth for the recent-fallback warning. The legacy
+# bm25 path infers retrieval_mode by sniffing this warning (it has no structured
+# mode signal), so the literal must live here as a constant — never inline it.
+# Tests match on the prefix substring, so keep the prefix stable.
+_NO_DIRECT_MATCH_PREFIX = "No direct memory match"
+
 
 @dataclass
 class SearchOutcome:
@@ -936,11 +942,14 @@ def search_memories(
         # Infer retrieval_mode for the legacy bm25 path: _search_bm25 internally
         # falls back to _recent_fallback when query has no hit (appending its
         # distinctive warning), so sniff the warnings to tell the two apart.
+        # Coupling note: the literal lives in _NO_DIRECT_MATCH_PREFIX; matching
+        # on the prefix constant (not an inline string) keeps this robust to
+        # wording tweaks of the warning's tail.
         if not query:
             bm_mode: RetrievalMode = "recent_browse"
         elif not result:
             bm_mode = "empty"
-        elif any("No direct memory match" in w for w in bm_warnings):
+        elif any(w.startswith(_NO_DIRECT_MATCH_PREFIX) for w in bm_warnings):
             bm_mode = "recent_fallback"
         else:
             bm_mode = "direct"
@@ -1052,8 +1061,13 @@ def _linked_open_items_for_search(
       L0 (memory): bail without touching DB if results carry no meaningful tag
            (after stripping ``todo`` and single-char tags).
       L1 (DB): EXISTS check for any active memory tagged ``todo``; bail if none.
-      L2 (DB): a single read snapshot computes ``active_count``, per-tag ``df``,
-           todo candidates, applies the M1 stoplist, scores, sorts, truncates.
+      L2 (DB): multiple SELECTs on one connection compute ``active_count``,
+           per-tag ``df``, todo candidates, apply the M1 stoplist, score, sort,
+           truncate. Note: this is a best-effort read, NOT a transactional
+           snapshot — the bare SELECTs don't share a read snapshot under WAL,
+           so concurrent writes can in principle make the count/df/candidates
+           slightly inconsistent. Acceptable for an advisory side-hint; if
+           consistency ever matters here, wrap the SELECTs in a read txn.
 
     Stoplist (M1 — uniform, independent of todo count):
       tag == 'todo' | len(tag) <= 1 | df >= 3 AND df/active_count >= 0.20
@@ -1308,7 +1322,8 @@ def _recent_fallback(
         conn.close()
     if rows:
         warnings.append(
-            "No direct memory match. Returning recent memories from the shared library; refine keywords, try memory_recent, or compare candidates before reading source files."
+            _NO_DIRECT_MATCH_PREFIX
+            + ". Returning recent memories from the shared library; refine keywords, try memory_recent, or compare candidates before reading source files."
         )
     # v0.7.3 K4/E5: fallback path has no has_more semantics — "还有更多匹配"
     # 不成立（这是"没匹配给你最近的"），写死 (False, 0)。

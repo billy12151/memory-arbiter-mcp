@@ -3,6 +3,32 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.7.5] — 2026-07-23
+
+### Added
+
+- **Conflict scan (path-B, id=243)** — three new MCP tools for a scan→compare→record→resolve loop, with the core package remaining headless (no LLM, no network):
+  - **`memory_scan_conflict_candidates`** — vector-recalls candidate conflict pairs via sqlite-vec KNN. Incremental (only new `id > watermark` + recently edited memories), same-workspace filtered, pair-canonicalised (`left<right`), distance-ranked, `max_pairs` truncated. Writes a diagnostic `scan_log.jsonl` entry for doctor freshness tracking. Returns `scanned=False` with a hint when sqlite-vec is unavailable (config state, not an error).
+  - **`memory_record_conflict`** — persists a conflict with enrichment fields (`conflict_type` / `conflict_point` / `suggested_winner` / `confidence_hint` / `source`). Idempotent: a duplicate open pair returns `deduped=True` without writing.
+  - **`memory_resolve_conflict`** — closes a single open conflict by `conflict_id` (dismiss a false positive without touching either memory). Distinct from `resolve_conflicts_for` (which closes all conflicts touching a memory).
+- **`get_embedding`** (db helper) — reads a memory's embedding back as `list[float]` via `struct.unpack` on the vec0 binary blob (sqlite-vec stores JSON input as packed float32 internally; SELECT returns bytes, not the JSON that was written).
+- **Schema** — `conflicts` table gains 5 columns: `conflict_type`, `conflict_point`, `suggested_winner`, `confidence_hint`, `source` (idempotent migration via `_migrate_add_column`).
+
+### Changed
+
+- **`_check_conflicts_open` (doctor)** — rewritten as a three-state sentinel: warns "never scanned" when `scan_log.jsonl` has no `completed` entry; warns "stale" if last scan > 15 days; reports open-count normally when fresh. When sqlite-vec is off, falls back to the legacy table-count behaviour. The old bare `SELECT count(*)` systematically false-negatived once scan became the primary conflict source.
+- **Workspace is reserved metadata** (carried over from v0.7.4) — scan candidates are same-workspace filtered at the Python layer (`vec_knn` itself does not filter by workspace).
+
+### Removed
+
+- **`docs/scheduled_conflict_check.py`** — the tag-overlap + `memory_compare` cron script, superseded by the vector-recall MCP tools. `docs/INTEGRATION.md` references updated to point at the new tools (EN + ZH sections).
+
+### Fixed (v0.7.4.1 review follow-ups, bundled into this release)
+
+- `_linked_open_items_for_search` docstring no longer over-promises "single read snapshot" — the bare SELECTs don't share a WAL snapshot; corrected to "best-effort read".
+- bm25 legacy path's `retrieval_mode` inference no longer relies on an inline warning literal — extracted to module constant `_NO_DIRECT_MATCH_PREFIX`.
+- `authorized` flag documented (README EN/ZH + docstrings) as a "caller-side confirmation gate", not strong authentication.
+
 ## [0.7.4] — 2026-07-22
 
 ### Added
