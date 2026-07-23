@@ -533,7 +533,6 @@ def test_search_matched_sections_no_embedding_diagnostics(tmp_path: Path) -> Non
 #  §6.4 — memory_get parameter matrix
 # ==================================================================
 
-@pytest.mark.xfail(reason="T3: memory_get sections param not implemented")
 def test_get_sections_none_catalog_all_and_section_ids(tmp_path: Path) -> None:
     """§6.4: none/catalog/all + section_ids matrix."""
     tools = make_vec_tools(tmp_path)
@@ -572,7 +571,6 @@ def test_get_sections_none_catalog_all_and_section_ids(tmp_path: Path) -> None:
     assert 999999 in by_id.get("missing_section_ids", [])
 
 
-@pytest.mark.xfail(reason="T3: sections=matched is illegal in get")
 def test_get_rejects_matched_mode(tmp_path: Path) -> None:
     tools = make_vec_tools(tmp_path)
     mid = tools.memory_write(content="x", subject="s")["data"]["id"]
@@ -580,7 +578,6 @@ def test_get_rejects_matched_mode(tmp_path: Path) -> None:
     assert r["ok"] is False
 
 
-@pytest.mark.xfail(reason="T3: split sub-object not returned by get")
 def test_get_returns_split_subobject(tmp_path: Path) -> None:
     tools = make_vec_tools(tmp_path)
     tools._embedder = _keyword_embedder()

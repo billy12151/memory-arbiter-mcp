@@ -270,16 +270,80 @@ class MemoryTools:
             extra_warnings=extra_warnings + warnings,
         )
 
-    def memory_get(self, memory_id: int, **_: Any) -> dict[str, Any]:
-        """通过 ID 直接获取一条记忆的完整信息。只读，不修改任何数据。"""
+    # v0.8 split-status values the new flow may write. Anything else is a
+    # legacy/unknown status surfaced read-only for repair (design §5.2).
+    _V08_SPLIT_STATUSES = (None, "active", "failed", "declined")
+
+    def memory_get(
+        self,
+        memory_id: int,
+        sections: str = "catalog",
+        section_ids: Optional[list[int]] = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """通过 ID 获取一条记忆的全文、分段目录或指定 section 原文（只读）。
+
+        v0.8（§6.4）合并了原 get_sections / memory_split_status 的读取能力：
+          sections: none | catalog | all（默认 catalog）。matched 非法（get
+                    没有 search 上下文）。
+          section_ids: 优先于 sections；不存在或不属于该 memory 的 ID 进入
+                       missing_section_ids，不会因单个缺失让整个调用失败。
+        返回 split 子对象（status / legacy_status / revision / section_count /
+        content_hash）。全局 vec 状态留在 memory_status / doctor。
+        """
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
             return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
+        if sections not in ("none", "catalog", "all"):
+            return self.db.state.response(
+                {"error": "sections must be one of none|catalog|all (matched is not valid without a search context)"},
+                ok=False,
+            )
         memory = self.db.get_memory(memory_id_int)
         if not memory:
             return self.db.state.response({"error": f"memory id {memory_id_int} not found"}, ok=False)
-        return self.db.state.response({"memory": memory})
+
+        content = memory.get("content") or ""
+        data: dict[str, Any] = {"memory": memory}
+
+        # ---- split sub-object ----
+        raw_status = memory.get("split_status")
+        legacy_status = raw_status if raw_status not in self._V08_SPLIT_STATUSES else None
+        all_sections = self.db.get_sections_by_memory(memory_id_int)
+        data["split"] = {
+            "status": raw_status,
+            "legacy_status": legacy_status,
+            "revision": int(memory.get("split_revision") or 0),
+            "section_count": len(all_sections),
+            "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest() if content else None,
+        }
+
+        # ---- section_ids takes precedence over the sections mode ----
+        if section_ids:
+            found, missing = self.db.get_sections_by_ids(memory_id_int, section_ids)
+            data["sections"] = [
+                {**s, "content": content[s["start_offset"]:s["end_offset"]]}
+                for s in found
+            ]
+            data["missing_section_ids"] = missing
+            # When explicit IDs are requested, also surface a catalog so the
+            # caller sees the surrounding sections.
+            data["section_catalog"] = [self._catalog_entry(s) for s in all_sections]
+            return self.db.state.response(data)
+
+        if sections == "none":
+            return self.db.state.response(data)
+        if sections == "catalog":
+            data["section_catalog"] = [self._catalog_entry(s) for s in all_sections]
+            return self.db.state.response(data)
+        # sections == "all"
+        data["section_catalog"] = [self._catalog_entry(s) for s in all_sections]
+        data["sections"] = [
+            {**s, "content": content[s["start_offset"]:s["end_offset"]]}
+            for s in all_sections
+        ]
+        return self.db.state.response(data)
 
     def memory_store_embedding(self, memory_id: int, embedding: list[float], **_: Any) -> dict[str, Any]:
         """Store or replace an embedding for a memory (v0.3.1 semantic recall).
