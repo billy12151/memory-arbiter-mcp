@@ -50,17 +50,14 @@ class Settings:
     # ── Embedding pipeline params (v0.6.0: part of embedding_space_id) ──
     embedding_n_ctx: int = 2048
     embedding_reserved_tokens: int = 64
-    # ── Section split (v0.6.0, advanced feature, all default off) ──
-    split_enabled: bool = False
+    # ── Section split (v0.8.0): capability bound to vec readiness ──
+    # split_enabled and section_zero_match_preview_chars were removed in v0.8;
+    # a residual split.enabled in config is warned + ignored (see from_env).
     split_threshold: int = 4000
     section_vec_distance_threshold: float = 0.42
     section_fulltext_threshold: float = 0.8
     max_sections: int = 50
     max_section_chars: int = 3600
-    # v0.6.3: zero-match preview length (Channel 6 makes zero-match frequent;
-    # returning full text risks token explosion on long docs). Default matches
-    # max_section_chars order of magnitude.
-    section_zero_match_preview_chars: int = 2000
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -84,6 +81,18 @@ class Settings:
             config_warnings.append(f"split={split_cfg!r} invalid; using env/defaults")
             split_cfg = {}
         split_cfg = {str(k): v for k, v in split_cfg.items() if not str(k).startswith("_")}
+        # v0.8: split.enabled and section_zero_match_preview_chars are removed.
+        # A residual value in config is warned + ignored (never blocks startup).
+        if "enabled" in split_cfg:
+            config_warnings.append(
+                "split.enabled is removed in v0.8 (capability is bound to vec readiness); "
+                "the setting is ignored."
+            )
+        if "section_zero_match_preview_chars" in split_cfg:
+            config_warnings.append(
+                "section_zero_match_preview_chars is removed in v0.8 (zero-match returns the "
+                "full memory); the setting is ignored."
+            )
 
         def pick_str(cfg_key: str, env_key: str, default: str) -> str:
             try:
@@ -165,9 +174,6 @@ class Settings:
                 pick_int_field(emb_cfg.get("reserved_tokens"), "MEMORY_ARBITER_EMBEDDING_RESERVED_TOKENS", 64, name="embedding.reserved_tokens"),
                 0, 4096, name="embedding.reserved_tokens", warnings=config_warnings,
             ),
-            split_enabled=pick_bool_field(
-                split_cfg.get("enabled"), "MEMORY_ARBITER_SPLIT_ENABLED", "false", name="split.enabled", default_bool=False
-            ),
             split_threshold=clamp_int(
                 pick_int_field(split_cfg.get("threshold"), "MEMORY_ARBITER_SPLIT_THRESHOLD", 4000, name="split.threshold"),
                 100, 1_000_000, name="split.threshold", warnings=config_warnings,
@@ -187,10 +193,6 @@ class Settings:
             max_section_chars=clamp_int(
                 pick_int_field(split_cfg.get("max_section_chars"), "MEMORY_ARBITER_MAX_SECTION_CHARS", 3600, name="split.max_section_chars"),
                 100, 1_000_000, name="split.max_section_chars", warnings=config_warnings,
-            ),
-            section_zero_match_preview_chars=clamp_int(
-                pick_int_field(split_cfg.get("section_zero_match_preview_chars"), "MEMORY_ARBITER_SECTION_ZERO_MATCH_PREVIEW_CHARS", 2000, name="split.section_zero_match_preview_chars"),
-                100, 10000, name="split.section_zero_match_preview_chars", warnings=config_warnings,
             ),
         )
         settings.config_warnings = config_warnings

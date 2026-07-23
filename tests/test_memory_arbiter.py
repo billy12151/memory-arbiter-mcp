@@ -66,7 +66,6 @@ def make_vec_tools(tmp_path: Path) -> MemoryTools:
         workspace="repo-a",
         enable_sqlite_vec=True,
         vec_dim=2,
-        split_enabled=True,
         split_threshold=1,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
@@ -2091,7 +2090,6 @@ def _make_channel6_tools(tmp_path: Path, pool_cap: int = 50) -> MemoryTools:
         workspace="repo-a",
         enable_sqlite_vec=True,
         vec_dim=2,
-        split_enabled=True,
         split_threshold=1,
         recall_pool_cap=pool_cap,
     )
@@ -2264,7 +2262,6 @@ def test_v080_long_content_zero_match_returns_full_memory(tmp_path: Path) -> Non
     tools = _make_channel6_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
-    tools.settings.section_zero_match_preview_chars = 2000  # legacy; ignored in v0.8
     _set_vec_ready(tools)
 
     # Two compliant sections (each ≤ max_section_chars=3600), total > preview.

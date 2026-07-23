@@ -3,6 +3,32 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.8.0] — 2026-07-23
+
+The section-split experience is internalized into the write path. Users only express "remember this"; structured long docs are split server-side, unstructured long docs are handed to the calling Agent's own LLM via a `split_request`. The Core never configures or calls an LLM provider, never does mechanical fallback, and never writes `pending`/`fallback_active`.
+
+### Breaking
+
+- **Removed MCP tools `get_sections` and `memory_split_status`.** Their read capability is merged into `memory_get` (new `sections` / `section_ids` params), `memory_search` (returns full matched sections), and `doctor`.
+- **`memory_search` partial / zero-match return protocol changed.** Partial hits now return the full matched-section text (`content_scope=matched_sections`); zero-match returns the full memory (`content_scope=full_memory`). Removed `content_omitted` / `content_truncated` / the bounded preview.
+- **`memory_get` signature changed** — new `sections` (`none`|`catalog`|`all`, default `catalog`) and `section_ids` params; `matched` is rejected (no search context). Returns a `split` sub-object (`status` / `legacy_status` / `revision` / `section_count` / `content_hash`).
+- **Removed config `split_enabled` and `section_zero_match_preview_chars`.** Split capability is now bound to vec readiness. A residual `split.enabled` in config produces a deprecated warning and is ignored (never blocks startup).
+- **`memory_status`** no longer shows `split_enabled`; it shows `split_capability = {available, reason}`.
+
+### Changed
+
+- **`memory_split` retained but repositioned** as the Agent internal continuation / history-repair / active-rebuild entry — not the "sole split entry". `prepare` no longer sets `requires_user_confirmation`; active records return `allowed_decision=rebuild` instead of erroring. Provenance is now an explicit caller argument (`parser` for rules, `agent` for `memory_split`), no longer inferred from anchor-vs-heading text. `max_section_chars` is now a hard publish gate (`section_too_large`).
+- **`memory_write` / content `memory_edit`** now run a post-write split decision: vec ready + long + a fenced-code-safe Markdown heading plan (2..`max_sections` sections, each ≤ `max_section_chars`) → synchronous rules auto-split; otherwise a full `split_request` (content + snapshot + schema) is returned and `split_status` stays `NULL`. `tags_only` edits are unchanged.
+
+### Added
+
+- **Doctor split checks** (replacing the single `split.enabled` toggle): `split.capability`, `split.long_unsplit_backlog` (active + long + `split_status IS NULL`), `split.failed_count`, `split.legacy_declined`, `split.legacy_unknown_status` (pending/fallback_active surfaced read-only), `split.index_integrity` (active-but-no-sections / <2 / missing section vec / non-positive offsets). Backlog/failed/integrity are n/a when vec is not ready.
+- **Unified publish helper** `_publish_sections`, shared by the rules path and the Agent path (replaces the inline validate-then-write block). `rebuild` failures never touch `split_status` — old active sections are preserved.
+
+### Migration
+
+No schema change. Historical `declined` records are read compatibly; unknown legacy statuses are surfaced by doctor for repair. Config migration only warns + ignores the removed keys.
+
 ## [0.7.6] — 2026-07-23
 
 ### Added

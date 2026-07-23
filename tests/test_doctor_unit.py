@@ -222,7 +222,7 @@ class TestRendering:
         return OverviewReport(
             snapshot_ts="2026-07-17T00:00:00+00:00",
             overall=Severity.WARNING,
-            summary={"mode": "fts5", "total_memories": 5, "vec_effective": False, "split_enabled": False},
+            summary={"mode": "fts5", "total_memories": 5, "vec_effective": False, "split_capability_available": False},
             findings=[
                 Finding("config.warnings", "config", Severity.INFO, "pass", "ok", "d", {}),
                 Finding("vec.link2.enabled_flag", "vector", Severity.WARNING, "fail", "vec off", "d", {},

@@ -1936,66 +1936,6 @@ class MemoryTools:
         except Exception:
             pass
 
-    def get_sections(
-        self,
-        memory_id: int,
-        section_ids: Optional[list[int]] = None,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Get section content + metadata by IDs."""
-        mid = int(memory_id)
-        memory = self.db.get_memory(mid)
-        if not memory:
-            return self.db.state.response({"error": "memory not found"}, ok=False)
-        content = memory.get("content") or ""
-        if section_ids is None:
-            sections = self.db.get_sections_by_memory(mid)
-        else:
-            sections, missing = self.db.get_sections_by_ids(mid, section_ids)
-            if missing:
-                return self.db.state.response({
-                    "memory_id": mid,
-                    "sections": [
-                        {**s, "content": content[s["start_offset"]:s["end_offset"]]}
-                        for s in sections
-                    ],
-                    "found_count": len(sections),
-                    "missing_section_ids": missing,
-                })
-        return self.db.state.response({
-            "memory_id": mid,
-            "sections": [
-                {**s, "content": content[s["start_offset"]:s["end_offset"]]}
-                for s in sections
-            ],
-            "found_count": len(sections),
-            "missing_section_ids": [],
-        })
-
-    def memory_split_status(self, memory_id: int, **_: Any) -> dict[str, Any]:
-        """Check split status of a memory."""
-        mid = int(memory_id)
-        memory = self.db.get_memory(mid)
-        if not memory:
-            return self.db.state.response({"error": "memory not found"}, ok=False)
-        sections = self.db.get_sections_by_memory(mid)
-        vec_state = self.db.get_vec_index_state()
-        return self.db.state.response({
-            "memory_id": mid,
-            "split_status": memory.get("split_status"),
-            "split_revision": memory.get("split_revision", 0),
-            "content_hash": hashlib.sha256(
-                (memory.get("content") or "").encode("utf-8")
-            ).hexdigest(),
-            "sections": [
-                {"section_id": s["id"], "title": s.get("title"),
-                 "title_path": s.get("title_path"), "summary": s.get("summary")}
-                for s in sections
-            ],
-            "section_count": len(sections),
-            "vec_index_state": vec_state,
-        })
-
     def memory_rebuild_embeddings(
         self,
         memory_ids: Optional[list[int]] = None,

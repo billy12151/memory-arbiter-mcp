@@ -126,7 +126,6 @@ def _content_with_fenced_fake_heading() -> str:
 #  §2.1 / §6.5 — Registry: which tools exist
 # ==================================================================
 
-@pytest.mark.xfail(reason="T6: get_sections/memory_split_status wrappers not removed yet")
 def test_registry_keeps_memory_split_removes_status_and_get_sections() -> None:
     """§2.1(1): registry keeps memory_split; drops memory_split_status + get_sections."""
     from memory_arbiter.server import build_server
@@ -313,7 +312,7 @@ def test_write_vec_not_ready_does_not_enter_split(tmp_path: Path) -> None:
     assert tools.db.get_sections_by_memory(mem["id"]) == []
     # status should report capability unavailable
     status = tools.memory_status()["data"]
-    assert "split_capability" in status or status.get("split_enabled") is False
+    assert status["split_capability"]["available"] is False
 
 
 # ==================================================================
