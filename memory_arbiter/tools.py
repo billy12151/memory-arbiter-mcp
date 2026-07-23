@@ -107,24 +107,16 @@ class MemoryTools:
                             )
                     except Exception as exc:
                         embedding_warnings.append(f"auto-embedding write failed: {exc}")
-            # v0.6.0: split_hint
-            if (
-                memory_id is not None
-                and getattr(self.settings, "split_enabled", False)
-                and len(record.content) > getattr(self.settings, "split_threshold", 4000)
-            ):
-                vec_state = self.db.get_vec_index_state()
-                if vec_state.get("state") == "ready":
-                    data["split_hint"] = {
-                        "char_count": len(record.content),
-                        "split_threshold": getattr(self.settings, "split_threshold", 4000),
-                        "prompt": (
-                            f"已保存。该记忆 {len(record.content)} 字符，"
-                            "分段可提升检索精度。如需分段，调用 memory_split(memory_id="
-                            f"{memory_id})。"
-                        ),
-                        "memory_id": memory_id,
-                    }
+            # v0.8.0: post-write split (design §6.1). Replaces the v0.6 split_hint.
+            # vec ready + long enough + safe heading plan → rules auto-split;
+            # otherwise a full split_request is returned for the Agent to
+            # continue with its own LLM. Never gated on split_enabled.
+            if memory_id is not None:
+                split_block, split_request, split_warnings = self._after_write_split(memory_id)
+                data["split"] = split_block
+                if split_request is not None:
+                    data["split_request"] = split_request
+                embedding_warnings.extend(split_warnings)
             return self.db.state.response(self._enrich_write_response(data, memory_id, record), extra_warnings=warnings + write_warnings + embedding_warnings)
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
@@ -804,6 +796,17 @@ class MemoryTools:
         }
         if embedding_stored is not None:
             data["embedding_stored"] = embedding_stored
+        # v0.8: a content edit re-runs the post-write split decision. The DB
+        # layer already cleared old sections + reset split_status to NULL and
+        # bumped split_revision (db.edit_memory). If the new content has a
+        # publishable rule plan it is re-split synchronously (revision bumps
+        # again); otherwise a split_request is returned. tags-only edits
+        # return early above and never reach here.
+        split_block, split_request, split_warnings = self._after_write_split(memory_id_int)
+        data["split"] = split_block
+        if split_request is not None:
+            data["split_request"] = split_request
+        embedding_warnings.extend(split_warnings)
         return self.db.state.response(
             data,
             extra_warnings=embedding_warnings,
@@ -1353,6 +1356,102 @@ class MemoryTools:
         return headings
 
     @staticmethod
+    def _rule_plan_sections(
+        content: str, max_sections: int, max_section_chars: int,
+    ) -> tuple[Optional[list[dict[str, Any]]], str]:
+        """Build a publishable rule plan from fenced-code-safe Markdown headings.
+
+        Design §7. Returns (sections, reason). When sections is non-None the
+        plan is immediately publishable (count/size/coverage all satisfied).
+        When sections is None, ``reason`` explains why the caller should fall
+        back to an Agent split_request:
+
+          * no_rule_structure            — no heading found
+          * rule_section_count_out_of_range — <2 or >max_sections headings
+          * rule_section_too_large       — some section slice > max_section_chars
+
+        Each section carries title/anchor_text/occurrence_index/title_path.
+        summary is left empty (rules path does not generate summaries; the
+        Agent path does). Offsets are NOT computed here — the publish helper
+        re-derives them from the anchors as a cross-check.
+        """
+        if not content:
+            return None, "no_rule_structure"
+
+        # Parse headings outside fenced code, capturing offset/level/raw/title.
+        in_fence = False
+        fence_marker: Optional[str] = None
+        raw_headings: list[dict[str, Any]] = []
+        pos = 0
+        for line in content.splitlines(keepends=True):
+            stripped = line.lstrip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                marker = stripped[:3]
+                if not in_fence:
+                    in_fence = True
+                    fence_marker = marker
+                elif marker == fence_marker:
+                    in_fence = False
+                    fence_marker = None
+            elif not in_fence:
+                m = re.match(r"^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$", line.rstrip())
+                if m:
+                    raw_headings.append({
+                        "offset": pos,
+                        "level": len(m.group(1)),
+                        "raw_line": line.rstrip("\n"),
+                        "title": m.group(2).strip(),
+                    })
+            pos += len(line)
+
+        if len(raw_headings) < 2:
+            return None, "no_rule_structure"
+
+        # occurrence_index: n-th occurrence of the same raw_line in document order.
+        seen: dict[str, int] = {}
+        # title_path via a heading-level stack.
+        stack: list[tuple[int, str]] = []
+
+        sections: list[dict[str, Any]] = []
+        for idx, h in enumerate(raw_headings):
+            raw = h["raw_line"]
+            occ = seen.get(raw, 0)
+            seen[raw] = occ + 1
+            # Maintain the level stack for title_path.
+            while stack and stack[-1][0] >= h["level"]:
+                stack.pop()
+            stack.append((h["level"], h["title"]))
+            title_path = " / ".join(t for _, t in stack) if len(stack) > 1 else None
+
+            if idx == 0:
+                # First section: spans from 0 to the next heading. Its anchor is
+                # the heading itself, but the publish helper treats the first
+                # section as starting at offset 0 (anchor ignored for sec 0).
+                anchor = raw
+            else:
+                anchor = raw
+            sections.append({
+                "title": h["title"],
+                "summary": "",
+                "anchor_text": anchor,
+                "occurrence_index": occ,
+                "title_path": title_path,
+            })
+
+        # Count gate.
+        if len(sections) < 2 or len(sections) > max_sections:
+            return None, "rule_section_count_out_of_range"
+
+        # Size gate: compute each section's slice length from heading offsets.
+        offsets = [h["offset"] for h in raw_headings]
+        bounds = offsets + [len(content)]
+        for i in range(len(bounds) - 1):
+            if bounds[i + 1] - bounds[i] > max_section_chars:
+                return None, "rule_section_too_large"
+
+        return sections, ""
+
+    @staticmethod
     def _split_snapshot_error(
         memory: dict[str, Any],
         decision_content_hash: Optional[str],
@@ -1553,6 +1652,106 @@ class MemoryTools:
             "section_count": len(offset_result),
         })
 
+    def _after_write_split(
+        self, memory_id: int,
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]], list[str]]:
+        """Run the post-write split decision (design §6.1).
+
+        Shared by memory_write and content memory_edit. Returns
+        ``(split_block, split_request_or_None, warnings)``.
+
+          * Below threshold / vec not ready / already active → split.required
+            is False (capability reported when vec is off).
+          * Rule plan publishable → publish via the unified helper
+            (provenance='parser'); split_block reports mode='rules', applied.
+          * No publishable plan → return a full split_request for the Agent;
+            split_status stays NULL (NOT failed, NOT pending).
+          * Rule publish genuinely fails → split_block reports failed; the
+            original content is untouched.
+        """
+        warnings: list[str] = []
+        threshold = getattr(self.settings, "split_threshold", 4000)
+        max_sections = getattr(self.settings, "max_sections", 50)
+        max_section_chars = getattr(self.settings, "max_section_chars", 3600)
+
+        mem = self.db.get_memory(memory_id)
+        if mem is None or mem.get("status") != "active":
+            return ({"required": False, "applied": False, "mode": None,
+                     "status": None, "reason": None, "action_required": None,
+                     "extra_llm_call_required": False}, None, warnings)
+        content = mem.get("content") or ""
+        if len(content) < threshold:
+            return ({"required": False, "applied": False, "mode": None,
+                     "status": None, "reason": None, "action_required": None,
+                     "extra_llm_call_required": False}, None, warnings)
+
+        vec_state = self.db.get_vec_index_state()
+        if vec_state.get("state") != "ready":
+            warnings.append("split_skipped_vec_not_ready")
+            return ({"required": False, "applied": False, "mode": None,
+                     "status": None, "reason": "vec_not_ready",
+                     "action_required": None, "extra_llm_call_required": False,
+                     "split_capability": {"available": False, "reason": "vec_not_ready"},
+                     }, None, warnings)
+
+        # Already actively split for this content version → nothing to do.
+        if mem.get("split_status") == "active":
+            return ({"required": False, "applied": False, "mode": None,
+                     "status": "active", "reason": None, "action_required": None,
+                     "extra_llm_call_required": False}, None, warnings)
+
+        plan, reason = self._rule_plan_sections(content, max_sections, max_section_chars)
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        snapshot = {
+            "memory_id": memory_id,
+            "content": content,
+            "content_hash": content_hash,
+            "memory_version": int(mem.get("version") or 1),
+            "split_status": mem.get("split_status"),
+            "split_revision": int(mem.get("split_revision") or 0),
+        }
+
+        if plan is not None:
+            # Rules path → publish synchronously (provenance='parser').
+            pub = self._publish_sections(
+                memory_id, content, plan,
+                snapshot["content_hash"], snapshot["memory_version"],
+                snapshot["split_status"], snapshot["split_revision"],
+                decision_kind="split", provenance="parser",
+            )
+            if pub.get("ok"):
+                return ({"required": True, "applied": True, "mode": "rules",
+                         "status": "active", "reason": None,
+                         "action_required": None, "extra_llm_call_required": False,
+                         "section_count": pub["data"].get("section_count")},
+                        None, warnings)
+            # Genuine publish failure: content intact, status failed.
+            after = self.db.get_memory(memory_id)
+            return ({"required": True, "applied": False, "mode": "rules",
+                     "status": after.get("split_status"), "reason": pub["data"].get("error"),
+                     "action_required": None, "extra_llm_call_required": False},
+                    None, warnings + [f"rules publish failed: {pub['data'].get('error')}"])
+
+        # No publishable rule plan → hand a full split_request to the Agent.
+        split_request = {
+            **snapshot,
+            "char_count": len(content),
+            "reason": reason,
+            "split_schema": {
+                "sections": [{
+                    "title": "str",
+                    "summary": "str",
+                    "anchor_text": "str (除第一段外必填)",
+                    "occurrence_index": "int (0-based)",
+                    "title_path": "str (可选)",
+                }],
+            },
+        }
+        return ({"required": True, "applied": False, "mode": "agent_semantic",
+                 "status": None, "reason": reason,
+                 "action_required": "memory_split", "extra_llm_call_required": True},
+                split_request, warnings)
+
     def memory_split(
         self,
         memory_id: int,
@@ -1584,42 +1783,27 @@ class MemoryTools:
 
         # ---- PREPARE ----
         if split_decision is None:
-            # Prerequisites
-            if not getattr(self.settings, "split_enabled", False):
-                return self.db.state.response({"error": "split_enabled is false"}, ok=False)
+            # v0.8: capability is bound to vec readiness, not split_enabled.
             vec_state = self.db.get_vec_index_state()
             if vec_state.get("state") != "ready":
                 return self.db.state.response({
                     "error": "vec index not ready",
                     "vec_index_state": vec_state,
                 }, ok=False)
-            if split_status == "active":
-                return self.db.state.response({
-                    "error": "already active, use split_decision='rebuild' to rebuild",
-                    "split_status": split_status,
-                }, ok=False)
             if len(content) <= getattr(self.settings, "split_threshold", 4000):
                 return self.db.state.response({"error": "content below threshold, no need to split"})
 
-            # Detect headings
-            headings = self._detect_markdown_headings(content)
-            parser_detected = len(headings) >= 2
-
-            # Single-batch prepare: returns the full content for one LLM pass.
-            # For ultra-long docs the caller should pre-chunk before memory_write.
+            # v0.8: prepare returns the full snapshot for the Agent to continue.
+            # No user-confirmation gate — this is an internal continuation /
+            # repair protocol. Active records return allowed_decision='rebuild'.
             return self.db.state.response({
-                "requires_user_confirmation": True,
                 "content": content,
                 "content_hash": content_hash,
                 "memory_version": memory_version,
                 "split_status": split_status,
                 "split_revision": split_revision,
                 "char_count": len(content),
-                "parser_detected": parser_detected,
-                "split_prompt": (
-                    f"该记忆 {len(content)} 字符。分段为单批：原文一次性返回。"
-                    "原文已完整保存，分段仅影响检索精度。是否分段？"
-                ),
+                "allowed_decision": "rebuild" if split_status == "active" else "split",
                 "split_schema": {
                     "sections": [{
                         "title": "str",

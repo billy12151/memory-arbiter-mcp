@@ -2480,24 +2480,33 @@ def test_v061_t14_partial_branch_does_not_leak_full_content(tmp_path: Path) -> N
 
 def test_v080_provenance_is_explicit_not_inferred(tmp_path: Path) -> None:
     """v0.8 (§6.2): provenance is an explicit caller argument, not inferred
-    from whether an anchor happens to equal a Markdown heading. The
-    memory_split Agent path is always 'agent' regardless of whether the
-    caller reused the document's own heading text as a section title."""
+    from anchor text. Two paths, two values:
+      * rules path (memory_write auto-split)         → provenance='parser'
+      * agent path (memory_split publish)            → provenance='agent'
+    """
     tools = make_vec_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
     _set_vec_ready(tools)
 
-    # A document with real Markdown headings — but the caller goes through
-    # memory_split (the Agent continuation path), so provenance='agent'.
-    content = (
+    # --- rules path: Markdown headings → auto-split → provenance='parser' ---
+    md_content = (
         "# alpha\n" + ("x" * 60) + "\n\n"
         "## beta\n" + ("y" * 60)
     )
-    mid = tools.memory_write(content=content, subject="md-doc")["data"]["id"]
-    mem = tools.db.get_memory(mid)
+    md_mid = tools.memory_write(content=md_content, subject="md-doc")["data"]["id"]
+    md_sections = tools.db.get_sections_by_memory(md_mid)
+    assert len(md_sections) == 2, "write should auto-split the heading doc"
+    assert all(s["provenance"] == "parser" for s in md_sections)
+
+    # --- agent path: plain text (no headings) → write returns a split_request,
+    #     Agent publishes via memory_split → provenance='agent' ---
+    plain = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    plain_mid = tools.memory_write(content=plain, subject="plain-doc")["data"]["id"]
+    mem = tools.db.get_memory(plain_mid)
+    assert mem["split_status"] is None   # write did not split (no headings)
     published = tools.memory_split(
-        memory_id=mid,
+        memory_id=plain_mid,
         split_decision="split",
         decision_content_hash=hashlib.sha256(mem["content"].encode("utf-8")).hexdigest(),
         decision_memory_version=mem["version"],
@@ -2505,17 +2514,12 @@ def test_v080_provenance_is_explicit_not_inferred(tmp_path: Path) -> None:
         decision_split_revision=mem["split_revision"],
         sections=[
             {"title": "alpha"},
-            {"title": "beta", "anchor_text": "## beta", "occurrence_index": 0},
+            {"title": "beta", "anchor_text": "beta", "occurrence_index": 0},
         ],
     )
     assert published["ok"] is True
-
-    sections = tools.db.get_sections_by_memory(mid)
-    assert len(sections) == 2
-    # Even though the anchors ARE Markdown headings, the Agent path records
-    # provenance='agent' — the old heading-text heuristic is removed.
-    assert sections[0]["provenance"] == "agent"
-    assert sections[1]["provenance"] == "agent"
+    agent_sections = tools.db.get_sections_by_memory(plain_mid)
+    assert all(s["provenance"] == "agent" for s in agent_sections)
 
 
 def test_v061_r1_channel6_recall_superseded_with_include_superseded(tmp_path: Path) -> None:

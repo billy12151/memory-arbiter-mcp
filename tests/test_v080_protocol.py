@@ -110,10 +110,14 @@ def _content_with_two_headings() -> str:
 
 
 def _content_with_fenced_fake_heading() -> str:
-    """A ``` block contains a line that looks like a heading — must be ignored."""
+    """Two real headings outside fences + a heading-looking line inside a fence.
+
+    The fenced ``## 假标题`` must NOT become a section boundary.
+    """
     return (
-        "# 真标题\n" + ("正文 " * 40) + "\n\n"
-        "```\n## 代码块里的假标题\n```\n\n"
+        "# 真标题一\n" + ("正文一 " * 40) + "\n\n"
+        "# 真标题二\n" + ("正文二 " * 40) + "\n\n"
+        "```\n## 代码块里的假标题\n代码内容\n```\n\n"
         + ("更多正文 " * 40)
     )
 
@@ -208,7 +212,6 @@ def test_no_pending_timeout_or_fallback_semantics_in_status_dict(tmp_path: Path)
 #  §6.1 — memory_write split return object shape
 # ==================================================================
 
-@pytest.mark.xfail(reason="T4: memory_write rules auto-split not implemented yet")
 def test_write_rules_auto_split_for_two_headings(tmp_path: Path) -> None:
     """§2.2(2): 2 safe headings + vec ready → rules publish, split.mode=rules applied."""
     tools = make_vec_tools(tmp_path)
@@ -229,7 +232,6 @@ def test_write_rules_auto_split_for_two_headings(tmp_path: Path) -> None:
     assert len(tools.db.get_sections_by_memory(mem["id"])) == 2
 
 
-@pytest.mark.xfail(reason="T4: split_request not returned yet")
 def test_write_returns_split_request_for_unstructured_long_doc(tmp_path: Path) -> None:
     """§2.2(3): no safe heading plan → full split_request, content already stored, status NULL."""
     tools = make_vec_tools(tmp_path)
@@ -248,14 +250,15 @@ def test_write_returns_split_request_for_unstructured_long_doc(tmp_path: Path) -
     assert sp["status"] is None
     assert sp["action_required"] == "memory_split"
     sr = r["data"]["split_request"]
-    assert sr["content"] == long_plain            # full content, no truncation
-    assert sr["content_hash"] == hashlib.sha256(long_plain.encode("utf-8")).hexdigest()
+    # Compare against the DB-normalised content (trailing whitespace stripped).
+    stored = mem["content"]
+    assert sr["content"] == stored                 # full content, no truncation
+    assert sr["content_hash"] == hashlib.sha256(stored.encode("utf-8")).hexdigest()
     assert sr["memory_version"] == mem["version"]
     assert sr["split_revision"] == mem["split_revision"]
     assert "split_schema" in sr
 
 
-@pytest.mark.xfail(reason="T4: fenced-code-aware parser not wired into write")
 def test_write_rules_split_ignores_fenced_code_headings(tmp_path: Path) -> None:
     """§7.1: a heading-looking line inside ``` must not become a section boundary.
 
@@ -275,7 +278,6 @@ def test_write_rules_split_ignores_fenced_code_headings(tmp_path: Path) -> None:
     assert "代码块里的假标题" not in titles
 
 
-@pytest.mark.xfail(reason="T4: single heading must yield split_request, not failed")
 def test_write_single_heading_yields_split_request(tmp_path: Path) -> None:
     """§7.3: only one heading → split_request, not failed."""
     tools = make_vec_tools(tmp_path)
@@ -328,7 +330,6 @@ def test_write_vec_not_ready_does_not_enter_split(tmp_path: Path) -> None:
 #  §6.2 — memory_split as Agent continuation entry
 # ==================================================================
 
-@pytest.mark.xfail(reason="T4: prepare no longer sets requires_user_confirmation")
 def test_split_prepare_does_not_require_user_confirmation(tmp_path: Path) -> None:
     """§6.2: prepare returns full snapshot + schema, no user-confirmation gate."""
     tools = make_vec_tools(tmp_path)
@@ -337,10 +338,12 @@ def test_split_prepare_does_not_require_user_confirmation(tmp_path: Path) -> Non
     _set_vec_ready(tools)
     content = "无标题纯文本 " * 400
     mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    mem = tools.db.get_memory(mid)
     prep = tools.memory_split(memory_id=mid)
     assert prep["ok"] is True
     assert prep["data"].get("requires_user_confirmation") is not True
-    assert prep["data"]["content"] == content
+    # Compare against the DB-stored content (normalised), not the raw input.
+    assert prep["data"]["content"] == mem["content"]
     for k in ("content_hash", "memory_version", "split_status", "split_revision"):
         assert k in prep["data"]
 
