@@ -271,4 +271,9 @@ class TestMCPEntryViaTools:
         assert "snapshot_ts" in data
         assert "overall" in data
         assert "findings" in data
-        assert len(data["findings"]) == 18  # all checks ran
+        # v0.8 (§12.3): do not hard-code the count; just assert checks ran
+        # across all dimensions and the v0.8 split checks are present.
+        assert len(data["findings"]) >= 18
+        ids = {f["check_id"] for f in data["findings"]}
+        assert {"split.capability", "split.long_unsplit_backlog",
+                "split.index_integrity"} <= ids

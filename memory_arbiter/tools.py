@@ -572,6 +572,14 @@ class MemoryTools:
             }
         )
 
+    def _split_capability(self, vec_state: dict[str, Any]) -> dict[str, Any]:
+        """v0.8 §6.5: whether the server can split, and why/why not."""
+        if vec_state.get("state") == "ready":
+            return {"available": True, "reason": "vec_ready"}
+        if self.db.state.sqlite_vec_available and not self._embedding_configured():
+            return {"available": False, "reason": "embedder_unavailable"}
+        return {"available": False, "reason": "vec_not_ready"}
+
     def memory_status(self, **_: Any) -> dict[str, Any]:
         vec_state = self.db.get_vec_index_state()
         return self.db.state.response(
@@ -589,7 +597,8 @@ class MemoryTools:
                 "embedding_configured": self._embedding_configured(),
                 "embedding_auto_query": self.settings.embedding_auto_query,
                 "embedding_auto_write": self.settings.embedding_auto_write,
-                "split_enabled": getattr(self.settings, "split_enabled", False),
+                # v0.8: split capability is bound to vec readiness, not a toggle.
+                "split_capability": self._split_capability(vec_state),
                 "vec_index_state": vec_state,
                 "policy": {
                     "client_defaults": self.settings.policy.client_defaults,

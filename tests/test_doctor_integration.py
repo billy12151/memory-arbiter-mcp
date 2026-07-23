@@ -220,9 +220,11 @@ class TestEmptyDB:
         report = doctor_overview_mcp(db, s)
         # Empty db, nothing configured → everything info/pass/na
         warnings = [f for f in report.findings if f.severity in (Severity.WARNING, Severity.CRITICAL)]
-        # split_enabled default false → split check is info/pass; allow none-warning
         assert report.overall == Severity.INFO, f"unexpected warnings: {[(f.check_id, f.title) for f in warnings]}"
-        assert len(report.findings) == 18
+        # v0.8 (§12.3): do NOT hard-code the finding count — checks are added/
+        # removed per version. Only assert the dimensions are all represented.
+        dims = {f.dimension for f in report.findings}
+        assert {"config", "vector", "split", "consistency", "capacity"} <= dims
 
 
 # =====================================================================

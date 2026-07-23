@@ -54,7 +54,7 @@ def _render_text(report: OverviewReport, use_color: bool) -> str:
     s = report.summary
     lines.append(
         f"模式: {s.get('mode')}  |  记忆数: {s.get('total_memories')}  |  "
-        f"向量生效: {s.get('vec_effective')}  |  分段: {s.get('split_enabled')}"
+        f"向量生效: {s.get('vec_effective')}  |  分段能力: {s.get('split_capability_available')}"
     )
     lines.append("")
 

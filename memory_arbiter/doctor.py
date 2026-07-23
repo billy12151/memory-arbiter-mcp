@@ -16,6 +16,7 @@ Never calls any authorized write tool, never changes schema.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -449,36 +450,221 @@ def _check_degradation_mode(runtime_state: Optional[DegradeState],
 
 
 # =====================================================================
-#  Split check (design doc §8 + §9) — 1 item
+#  Split checks (v0.8 design doc §6.5) — 6 items
+#  Replaces the v0.7 split.enabled toggle check. Capability is now bound
+#  to vec readiness; backlog/failed/legacy/integrity surface repair work.
 # =====================================================================
 
-def _check_split(conn: sqlite3.Connection, settings: Settings) -> Finding:
-    enabled = getattr(settings, "split_enabled", False)
-    if not enabled:
-        return Finding(
-            check_id="split.enabled", dimension="split", severity=Severity.INFO,
-            status="pass", title="分段未启用（正常可选）",
-            detail="split.enabled=false。长文整条存单向量，召回粒度粗。",
-            evidence={"split_enabled": False},
-            fix_hint='如需段落级召回：config.json 加 "split":{"enabled":true}',
-        )
-    if not _table_exists(conn, "memory_sections"):
-        return Finding(
-            check_id="split.enabled", dimension="split", severity=Severity.INFO,
-            status="n/a", title="分段已启用但 memory_sections 表不存在",
-            detail="可能为全新库尚未初始化",
-            evidence={"split_enabled": True, "table_exists": False},
-        )
-    count = _scalar(conn, "SELECT count(*) FROM memory_sections") or 0
-    sev = Severity.INFO
-    status = "pass"
-    detail = f"已启用，{count} 条分段记录"
-    if count == 0:
-        detail = "已启用但尚无分段记录，正常（尚未遇到长文）"
+def _vec_state_from_meta(conn: sqlite3.Connection) -> str:
+    if not _table_exists(conn, "_vec_index_meta"):
+        return "unmanaged"
+    row = conn.execute(
+        "SELECT value FROM _vec_index_meta WHERE key='state'"
+    ).fetchone()
+    return str(row["value"]) if row else "unmanaged"
+
+
+def _check_split_capability(conn: sqlite3.Connection, settings: Settings) -> Finding:
+    """§6.5: whether the server can split (vec + embedder available)."""
+    state = _vec_state_from_meta(conn)
+    embedder_configured = (
+        settings.embedding_provider == "gguf"
+        and settings.embedding_model_path is not None
+    )
+    if state == "ready":
+        available, reason = True, "vec_ready"
+    elif embedder_configured:
+        available, reason = False, "vec_not_ready"
+    else:
+        available, reason = False, "embedder_unavailable"
+    title = "分段能力可用（vec ready）" if available else f"分段能力不可用（{reason}）"
     return Finding(
-        check_id="split.enabled", dimension="split", severity=sev, status=status,
-        title=f"分段已启用（{count} 条记录）" if count else "分段已启用（暂无记录）",
-        detail=detail, evidence={"split_enabled": True, "section_count": count},
+        check_id="split.capability", dimension="split",
+        severity=Severity.INFO if available else Severity.INFO,
+        status="pass" if available else "n/a",
+        title=title,
+        detail=f"vec_state={state}, embedder_configured={embedder_configured}",
+        evidence={"available": available, "reason": reason, "vec_state": state},
+        fix_hint="" if available else (
+            "配置 embedding.model_path + vec.enabled=true 并完成向量迁移"
+        ),
+    )
+
+
+def _check_split_backlog(conn: sqlite3.Connection, settings: Settings) -> Finding:
+    """§6.5: long active memories with split_status IS NULL (awaiting Agent
+    continuation). Only meaningful when vec is ready."""
+    if _vec_state_from_meta(conn) != "ready":
+        return _na("split.long_unsplit_backlog", "split",
+                   "vec 未 ready，分段能力不可用，backlog 检查不适用")
+    if not _table_exists(conn, "memories"):
+        return _na("split.long_unsplit_backlog", "split", "memories 表不存在")
+    threshold = getattr(settings, "split_threshold", 4000)
+    rows = conn.execute(
+        "SELECT id, length(content) AS clen FROM memories "
+        "WHERE status='active' AND split_status IS NULL "
+        "AND length(content) >= ? ORDER BY id",
+        (threshold,),
+    ).fetchall()
+    count = len(rows)
+    sample = [int(r["id"]) for r in rows[:20]]
+    if count == 0:
+        return Finding(
+            check_id="split.long_unsplit_backlog", dimension="split",
+            severity=Severity.INFO, status="pass",
+            title="无未分段长文 backlog",
+            detail=f"无 active 且 content≥{threshold} 且 split_status IS NULL 的记录",
+            evidence={"backlog_count": 0, "split_threshold": threshold},
+        )
+    sev = Severity.WARNING if count > 10 else Severity.INFO
+    return Finding(
+        check_id="split.long_unsplit_backlog", dimension="split",
+        severity=sev, status="warn" if sev == Severity.WARNING else "pass",
+        title=f"{count} 条长文待分段（split_status=NULL）",
+        detail="这些记录原文已保存但尚未发布 sections；Agent 收到 split_request 后应续接",
+        evidence={"backlog_count": count, "split_threshold": threshold,
+                  "sample_memory_ids": sample},
+        fix_hint="对 sample_memory_ids 逐条调 memory_split(memory_id) 续接分段",
+    )
+
+
+def _check_split_failed(conn: sqlite3.Connection, settings: Settings) -> Finding:
+    """§6.5: memories whose real publish failed (split_status='failed')."""
+    if not _table_exists(conn, "memories"):
+        return _na("split.failed_count", "split", "memories 表不存在")
+    rows = conn.execute(
+        "SELECT id, metadata FROM memories WHERE status='active' AND split_status='failed'"
+    ).fetchall()
+    count = len(rows)
+    if count == 0:
+        return Finding(
+            check_id="split.failed_count", dimension="split",
+            severity=Severity.INFO, status="pass", title="无分段失败记录",
+            detail="无 split_status='failed' 的 active 记录",
+            evidence={"failed_count": 0},
+        )
+    recent: list[dict] = []
+    for r in rows[:10]:
+        try:
+            meta = json.loads(r["metadata"] or "{}") if r["metadata"] else {}
+            err = (meta.get("_split") or {}).get("last_split_error") or {}
+        except Exception:
+            err = {}
+        recent.append({"memory_id": int(r["id"]), "last_split_error": err})
+    return Finding(
+        check_id="split.failed_count", dimension="split",
+        severity=Severity.WARNING, status="warn",
+        title=f"{count} 条分段失败记录",
+        detail="真实发布失败（schema/anchor/offset/embedding）；原文仍可读",
+        evidence={"failed_count": count, "recent": recent},
+        fix_hint="对 memory_id 调 memory_split(memory_id) 重试；修正 anchor 后重新 publish",
+    )
+
+
+def _check_split_legacy_declined(conn: sqlite3.Connection, settings: Settings) -> Finding:
+    """§6.5: historical declined records (v0.6/v0.7人工拒绝)."""
+    if not _table_exists(conn, "memories"):
+        return _na("split.legacy_declined", "split", "memories 表不存在")
+    count = _scalar(conn,
+        "SELECT count(*) FROM memories WHERE status='active' AND split_status='declined'") or 0
+    if count == 0:
+        return Finding(
+            check_id="split.legacy_declined", dimension="split",
+            severity=Severity.INFO, status="pass", title="无历史 declined 记录",
+            detail="无 split_status='declined' 的记录",
+            evidence={"legacy_declined_count": 0},
+        )
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM memories WHERE status='active' AND split_status='declined' LIMIT 20"
+    )]
+    return Finding(
+        check_id="split.legacy_declined", dimension="split",
+        severity=Severity.INFO, status="warn",
+        title=f"{count} 条历史 declined 记录",
+        detail="v0.6/v0.7 人工拒绝分段；新流程不再产生 declined，仅兼容读取",
+        evidence={"legacy_declined_count": count, "sample_memory_ids": ids},
+        fix_hint="如需分段：memory_split(memory_id) 重新 publish",
+    )
+
+
+def _check_split_legacy_unknown_status(conn: sqlite3.Connection, settings: Settings) -> Finding:
+    """§5.2: non-v0.8 statuses (pending/fallback_active) — surfaced read-only."""
+    if not _table_exists(conn, "memories"):
+        return _na("split.legacy_unknown_status", "split", "memories 表不存在")
+    rows = conn.execute(
+        "SELECT split_status, count(*) AS c FROM memories "
+        "WHERE split_status IS NOT NULL "
+        "AND split_status NOT IN ('active','failed','declined') "
+        "GROUP BY split_status"
+    ).fetchall()
+    if not rows:
+        return Finding(
+            check_id="split.legacy_unknown_status", dimension="split",
+            severity=Severity.INFO, status="pass", title="无非 v0.8 分段状态",
+            detail="无 pending/fallback_active 或其他未知 split_status",
+            evidence={"unknown_status_count": 0},
+        )
+    by_status = {r["split_status"]: r["c"] for r in rows}
+    total = sum(by_status.values())
+    return Finding(
+        check_id="split.legacy_unknown_status", dimension="split",
+        severity=Severity.WARNING, status="warn",
+        title=f"{total} 条记录含非 v0.8 分段状态",
+        detail=f"未知 split_status 分布：{by_status}。新代码不写入这些状态；仅暴露以便修复",
+        evidence={"unknown_status_count": total, "by_status": by_status},
+        fix_hint="这些状态无 v0.8 执行语义；逐条 memory_split 重新分段或人工核验",
+    )
+
+
+def _check_split_index_integrity(conn: sqlite3.Connection, settings: Settings) -> Finding:
+    """§6.5: active records whose derived section index is inconsistent."""
+    if not _table_exists(conn, "memory_sections"):
+        return _na("split.index_integrity", "split", "memory_sections 表不存在")
+    issues: list[dict] = []
+    # active but no sections / fewer than 2 sections
+    for r in conn.execute(
+        "SELECT m.id, (SELECT count(*) FROM memory_sections s WHERE s.memory_id=m.id) AS sc "
+        "FROM memories m WHERE m.status='active' AND m.split_status='active'"
+    ).fetchall():
+        mid, sc = int(r["id"]), int(r["sc"])
+        if sc == 0:
+            issues.append({"memory_id": mid, "problem": "active_but_no_sections"})
+        elif sc < 2:
+            issues.append({"memory_id": mid, "problem": "active_but_fewer_than_2_sections"})
+    # missing section vectors for active memories
+    if _table_exists(conn, "memory_sections_vec"):
+        for r in conn.execute(
+            "SELECT s.memory_id, count(*) AS missing FROM memory_sections s "
+            "WHERE NOT EXISTS (SELECT 1 FROM memory_sections_vec v WHERE v.id=s.id) "
+            "AND s.memory_id IN (SELECT id FROM memories WHERE split_status='active' AND status='active') "
+            "GROUP BY s.memory_id LIMIT 20"
+        ).fetchall():
+            issues.append({"memory_id": int(r["memory_id"]),
+                           "problem": "missing_section_vec", "missing": int(r["missing"])})
+    # offset continuity spot-check: detect overlaps/gaps within a memory
+    bad_offset = conn.execute(
+        "SELECT s.memory_id, s.section_index, s.start_offset, s.end_offset "
+        "FROM memory_sections s JOIN memories m ON m.id=s.memory_id "
+        "WHERE m.split_status='active' AND s.end_offset <= s.start_offset LIMIT 20"
+    ).fetchall()
+    for r in bad_offset:
+        issues.append({"memory_id": int(r["memory_id"]),
+                       "problem": "non_positive_section_length",
+                       "section_index": int(r["section_index"])})
+    if not issues:
+        return Finding(
+            check_id="split.index_integrity", dimension="split",
+            severity=Severity.INFO, status="pass", title="分段派生索引一致",
+            detail="所有 active 记忆的 section 数量、向量覆盖、offset 均正常",
+            evidence={"issue_count": 0},
+        )
+    return Finding(
+        check_id="split.index_integrity", dimension="split",
+        severity=Severity.WARNING, status="warn",
+        title=f"{len(issues)} 处分段派生索引不一致",
+        detail="active 无 sections / section<2 / 缺向量 / offset 异常",
+        evidence={"issue_count": len(issues), "issues": issues[:20]},
+        fix_hint="对受影响 memory 调 memory_split(split_decision='rebuild') 重建索引",
     )
 
 
@@ -865,8 +1051,13 @@ def run_all_checks(
         f.check_id == "vec.link3.extension_loaded" and f.status == "pass" for f in findings
     )
 
-    # --- split (1) ---
-    _run("split.enabled", lambda: _check_split(conn, settings), "split")
+    # --- split (6) — v0.8 capability/backlog/failed/legacy/integrity ---
+    _run("split.capability", lambda: _check_split_capability(conn, settings), "split")
+    _run("split.long_unsplit_backlog", lambda: _check_split_backlog(conn, settings), "split")
+    _run("split.failed_count", lambda: _check_split_failed(conn, settings), "split")
+    _run("split.legacy_declined", lambda: _check_split_legacy_declined(conn, settings), "split")
+    _run("split.legacy_unknown_status", lambda: _check_split_legacy_unknown_status(conn, settings), "split")
+    _run("split.index_integrity", lambda: _check_split_index_integrity(conn, settings), "split")
 
     # --- consistency (5) ---
     _run("consistency.vec_index_state",
@@ -916,7 +1107,8 @@ def run_all_checks(
         "mode": mode,
         "total_memories": total_memories,
         "vec_effective": vec_effective,
-        "split_enabled": getattr(settings, "split_enabled", False),
+        # v0.8: split capability is derived from vec readiness, not a toggle.
+        "split_capability_available": vec_effective,
     }
     return OverviewReport(
         snapshot_ts=utc_now_iso(), overall=overall, findings=findings, summary=summary,

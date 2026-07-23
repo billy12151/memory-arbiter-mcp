@@ -189,21 +189,11 @@ def test_new_flow_never_writes_fallback_active(tmp_path: Path) -> None:
     assert mem["split_status"] != "fallback_active"
 
 
-@pytest.mark.xfail(reason="T5: status split block still uses split_enabled, not split_capability")
 def test_no_pending_timeout_or_fallback_semantics_in_status_dict(tmp_path: Path) -> None:
-    """§6.5: memory_status split info must not surface pending/fallback_active.
-
-    Checks the split-related surface specifically (not a whole-blob scan, which
-    would false-positive on unrelated substrings like "backup"). After T5 lands
-    this becomes a direct assertion on split_capability.
-    """
+    """§6.5: memory_status split_capability must not surface pending/fallback."""
     tools = make_plain_tools(tmp_path)
     status = tools.memory_status()["data"]
-    # The only split-status-shaped values that may appear must come from the
-    # allowed enum. pending / fallback_active must never be written or reported.
-    sp = status.get("split_capability")
-    if sp is None:
-        pytest.xfail("split_capability not yet present (T5)")
+    sp = status["split_capability"]
     assert "pending" not in repr(sp).lower()
     assert "fallback" not in repr(sp).lower()
 
@@ -607,7 +597,6 @@ def test_get_returns_split_subobject(tmp_path: Path) -> None:
 #  §6.5 — status & doctor: split_capability
 # ==================================================================
 
-@pytest.mark.xfail(reason="T5: status still exposes split_enabled instead of split_capability")
 def test_status_exposes_split_capability(tmp_path: Path) -> None:
     tools = make_plain_tools(tmp_path)
     status = tools.memory_status()["data"]
@@ -617,7 +606,6 @@ def test_status_exposes_split_capability(tmp_path: Path) -> None:
     assert sc["reason"] in ("vec_not_ready", "embedder_unavailable")
 
 
-@pytest.mark.xfail(reason="T5: doctor split checks not expanded")
 def test_doctor_reports_backlog_and_capability(tmp_path: Path) -> None:
     """§6.5: doctor surfaces split.capability + long_unsplit_backlog."""
     tools = make_plain_tools(tmp_path)
