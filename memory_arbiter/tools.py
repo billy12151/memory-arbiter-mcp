@@ -259,6 +259,81 @@ class MemoryTools:
         conflicts = self.db.list_conflicts(status=status, limit=int(limit))
         return self.db.state.response({"conflicts": conflicts, "count": len(conflicts)})
 
+    def memory_scan_conflict_candidates(
+        self,
+        workspace: Optional[str] = None,
+        top_k: int = 8,
+        max_pairs: int = 200,
+        max_distance: float = 12.0,
+        incremental: bool = True,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """v0.7.5 (id=243): vector-recall candidate conflict pairs (no LLM).
+
+        Returns up to ``max_pairs`` candidate pairs ranked by vector distance.
+        Pairs are canonicalised (left<right), filtered to same workspace, and
+        truncated. Writes a ``scan_log.jsonl`` entry for doctor freshness
+        tracking. When sqlite-vec is unavailable, returns a normal
+        ``scanned=False`` with a hint (config state, not an error). The agent
+        is expected to run LLM comparison on each pair, then call
+        ``memory_record_conflict`` to persist the verdict.
+        """
+        result = self.db.scan_conflict_candidates(
+            workspace=workspace,
+            top_k=int(top_k),
+            max_pairs=int(max_pairs),
+            max_distance=float(max_distance),
+            incremental=bool(incremental),
+        )
+        return self.db.state.response(result)
+
+    def memory_record_conflict(
+        self,
+        left_id: int,
+        right_id: int,
+        reason: str,
+        conflict_type: Optional[str] = None,
+        conflict_point: Optional[str] = None,
+        suggested_winner: Optional[int] = None,
+        confidence_hint: Optional[str] = None,
+        source: Optional[str] = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """v0.7.5 (id=243): persist a conflict with scan-enrichment fields.
+
+        Pairs are canonicalised (left<right). Idempotent: if an open conflict
+        on the same pair already exists, returns ``deduped=True`` without
+        writing. The ``source`` field (e.g. ``"llm_informed"``) records whether
+        the suggestion came from an LLM that read the content or from a
+        metadata heuristic.
+        """
+        result = self.db.record_conflict_enriched(
+            int(left_id), int(right_id),
+            conflict_type=conflict_type,
+            conflict_point=conflict_point,
+            reason=reason,
+            suggested_winner=int(suggested_winner) if suggested_winner is not None else None,
+            confidence_hint=confidence_hint,
+            source=source,
+        )
+        return self.db.state.response(result)
+
+    def memory_resolve_conflict(
+        self,
+        conflict_id: int,
+        reason: str = "",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """v0.7.5 (id=243): close a single open conflict by id (dismiss).
+
+        Unlike ``memory_supersede`` (which resolves all conflicts touching a
+        memory via ``resolve_conflicts_for``), this targets exactly one
+        conflict row — used to dismiss a false positive without touching
+        either memory.
+        """
+        result = self.db.resolve_conflict(int(conflict_id), reason=reason)
+        return self.db.state.response(result)
+
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, **_: Any) -> dict[str, Any]:
         memory = self.db.get_memory(int(memory_id))
         if not memory:
@@ -548,6 +623,10 @@ class MemoryTools:
         'user_confirmed') require ``authorized=True``. An active memory that
         already lacks the 'todo' tag returns already_completed=True with zero
         writes (idempotent — safe to call repeatedly).
+
+        Note on ``authorized``: it is a **caller-side confirmation gate**, not
+        strong authentication — memory-arbiter is a single-trust-domain local
+        tool, so the override lives at the calling agent.
         """
         try:
             memory_id_int = int(memory_id)

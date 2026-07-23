@@ -96,6 +96,45 @@ def _na(check_id: str, dimension: str, reason: str) -> Finding:
     )
 
 
+def _read_scan_log_last_completed(path) -> Optional[dict]:
+    """Read the last ``status=completed`` line from ``scan_log.jsonl``.
+
+    Tolerant: missing file -> None; malformed lines skipped; no completed
+    line -> None. Pure diagnostic, never raises.
+    """
+    import json as _json
+    try:
+        if not path.exists():
+            return None
+        last_completed: Optional[dict] = None
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(rec, dict) and rec.get("status") == "completed":
+                    last_completed = rec
+        return last_completed
+    except OSError:
+        return None
+
+
+def _days_since_iso(iso_ts: str) -> Optional[int]:
+    """Whole days between an ISO-8601 timestamp and now. None on parse failure."""
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0, (datetime.now(timezone.utc) - dt).days)
+    except (ValueError, TypeError):
+        return None
+
+
 def _embedder_shallow_probe(settings: Settings) -> tuple[Optional[Any], list[str]]:
     """Shallow model-usability probe without loading the GGUF (design doc §7).
 
@@ -610,28 +649,100 @@ def _check_history_version_chain(conn: sqlite3.Connection) -> Finding:
 #  Capacity checks (design doc §9.D) — 4 items
 # =====================================================================
 
-def _check_conflicts_open(conn: sqlite3.Connection) -> Finding:
+def _check_conflicts_open(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    runtime_state: Optional[DegradeState] = None,
+) -> Finding:
+    """Three-state sentinel for conflict scan freshness (v0.7.5, id=243).
+
+    The old implementation just counted open rows in the conflicts table — but
+    ``count = 0`` is ambiguous (could mean "no conflicts" *or* "never scanned").
+    Once scan becomes the primary source of conflicts, a bare table count
+    systematically false-negatives. The correct signal for "has a scan run?"
+    comes from scan_log, not from the table scan writes to.
+    """
     if not _table_exists(conn, "conflicts"):
         return _na("capacity.conflicts_open", "capacity", "conflicts 表不存在")
+
+    # Gate 1: vector not available -> scan can't run, report INFO (not WARN).
+    vec_ok = (runtime_state.sqlite_vec_available if runtime_state else False)
+    if not vec_ok:
+        # Fall back to table count for legacy reporting when vec is off.
+        row = conn.execute(
+            "SELECT count(*) AS c, min(created_at) AS oldest "
+            "FROM conflicts WHERE status='open'"
+        ).fetchone()
+        count = row["c"] if row else 0
+        oldest = row["oldest"] if row else None
+        if count == 0:
+            return Finding(
+                check_id="capacity.conflicts_open", dimension="capacity",
+                severity=Severity.INFO, status="pass",
+                title="无 open 冲突（向量未启用，扫描不可用）",
+                detail="向量未启用，冲突扫描不可用；仅统计已有冲突",
+                evidence={"open_count": 0, "vec_available": False},
+            )
+        sev = Severity.WARNING if count > 20 else Severity.INFO
+        return Finding(
+            check_id="capacity.conflicts_open", dimension="capacity",
+            severity=sev, status="warn" if sev == Severity.WARNING else "pass",
+            title=f"{count} 条 open 冲突未仲裁" + (f"，最老 {oldest}" if oldest else ""),
+            detail=f"open_count={count}, oldest={oldest}, vec_available=False",
+            evidence={"open_count": count, "oldest": oldest, "vec_available": False},
+            fix_hint="建议 memory_list_conflicts 处理" if count > 20 else "",
+        )
+
+    # Gate 2: read scan_log last completed entry (file-system, best-effort).
+    scan_log_path = settings.db_path.parent / "scan_log.jsonl"
+    last_scan = _read_scan_log_last_completed(scan_log_path)
+
+    if last_scan is None:
+        return Finding(
+            check_id="capacity.conflicts_open", dimension="capacity",
+            severity=Severity.WARNING, status="warn",
+            title="从未运行冲突扫描",
+            detail="scan_log.jsonl 无 status=completed 记录；conflicts 表可能未反映全库矛盾",
+            evidence={"scanned": False, "reason": "no_completed_scan"},
+            fix_hint="建议运行 memory_scan_conflict_candidates 进行冲突扫描",
+        )
+
+    # Gate 3: staleness check (warn if > 15 days).
+    scan_time = last_scan.get("scan_time")
+    days_ago = _days_since_iso(scan_time) if scan_time else None
+    if days_ago is not None and days_ago > 15:
+        return Finding(
+            check_id="capacity.conflicts_open", dimension="capacity",
+            severity=Severity.WARNING, status="warn",
+            title=f"上次冲突扫描在 {days_ago} 天前",
+            detail=f"last_scan={scan_time}, days_ago={days_ago}",
+            evidence={"scanned": True, "last_scan_time": scan_time, "days_ago": days_ago},
+            fix_hint=f"建议重新运行 memory_scan_conflict_candidates（上次扫描距今 {days_ago} 天）",
+        )
+
+    # Gate 4: scan is fresh — report open count.
     row = conn.execute(
-        "SELECT count(*) AS c, min(created_at) AS oldest FROM conflicts WHERE status='open'"
+        "SELECT count(*) AS c, min(created_at) AS oldest "
+        "FROM conflicts WHERE status='open'"
     ).fetchone()
     count = row["c"] if row else 0
     oldest = row["oldest"] if row else None
     if count == 0:
         return Finding(
-            check_id="capacity.conflicts_open", dimension="capacity", severity=Severity.INFO,
-            status="pass", title="无 open 冲突",
-            detail="所有冲突已仲裁",
-            evidence={"open_count": 0},
+            check_id="capacity.conflicts_open", dimension="capacity",
+            severity=Severity.INFO, status="pass",
+            title="无 open 冲突（扫描新鲜）",
+            detail=f"last_scan={scan_time}, days_ago={days_ago}, open_count=0",
+            evidence={"open_count": 0, "last_scan_time": scan_time, "days_ago": days_ago},
         )
     sev = Severity.WARNING if count > 20 else Severity.INFO
     return Finding(
         check_id="capacity.conflicts_open", dimension="capacity", severity=sev,
         status="warn" if sev == Severity.WARNING else "pass",
         title=f"{count} 条 open 冲突未仲裁" + (f"，最老 {oldest}" if oldest else ""),
-        detail=f"open_count={count}, oldest={oldest}",
-        evidence={"open_count": count, "oldest": oldest},
+        detail=f"open_count={count}, oldest={oldest}, last_scan={scan_time}",
+        evidence={"open_count": count, "oldest": oldest,
+                  "last_scan_time": scan_time, "days_ago": days_ago},
         fix_hint="建议 memory_list_conflicts 处理" if count > 20 else "",
     )
 
@@ -767,7 +878,8 @@ def run_all_checks(
          lambda: _check_history_version_chain(conn), "consistency")
 
     # --- capacity (4) ---
-    _run("capacity.conflicts_open", lambda: _check_conflicts_open(conn), "capacity")
+    _run("capacity.conflicts_open",
+         lambda: _check_conflicts_open(conn, settings, runtime_state), "capacity")
     _run("capacity.superseded_ratio", lambda: _check_superseded_ratio(conn), "capacity")
     _run("capacity.history_bloat", lambda: _check_history_bloat(conn), "capacity")
     _run("capacity.db_size", lambda: _check_db_size(conn), "capacity")

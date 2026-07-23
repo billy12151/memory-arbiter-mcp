@@ -176,6 +176,14 @@ write the status back to the original record; the v0.7.4 completion exit is
 all other tags and the content), writes a history snapshot, and drops the item
 from `linked_open_items`. Don't just mention "done" in a new memory, or the
 old entry stays in to-do state and misleads future searches.
+
+The `authorized=true` flag on write tools (`memory_supersede` / `memory_edit`
+/ `memory_complete_open_item` / `memory_cleanup_history`) is a **caller-side
+confirmation gate**, not strong authentication. It lets the calling agent
+explicitly assert "yes, override the `locked` / `user_confirmed` protection"
+— memory-arbiter is a local, single-trust-domain tool, so the gate lives at
+the caller. If you ever run multi-tenant, add caller identity + policy before
+relying on it.
 ```
 
 ### Client Config Locations
@@ -691,6 +699,12 @@ workspace（项目名；v0.7.4：保留元数据——会存储和返回，但**
 时间线和可信度仲裁）。待办处理完成后用 memory_complete_open_item（v0.7.4）
 移除 todo tag——原子操作、保留其他 tags 和正文、写历史快照、从 linked_open_items
 移除；不要只在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
+
+写工具上的 `authorized=true`（`memory_supersede` / `memory_edit` /
+`memory_complete_open_item` / `memory_cleanup_history`）是**调用方确认门**，
+不是强鉴权。它让调用方 agent 显式声明"是的，突破 `locked` /
+`user_confirmed` 保护"——memory-arbiter 是本地、单信任域工具，这道门在
+调用方。若将来多租户使用，需先引入调用方身份 + 策略再依赖它。
 ```
 
 ### 客户端配置位置

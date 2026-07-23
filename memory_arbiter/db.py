@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import struct
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -244,6 +246,21 @@ class MemoryDB:
                                  "TEXT")
         self._migrate_add_column(conn, "memories", "split_revision",
                                  "INTEGER NOT NULL DEFAULT 0")
+        # v0.7.5: conflict-scan enrichment columns on the conflicts table.
+        # conflict_type / conflict_point carry the *what* (agent LLM judgement);
+        # suggested_winner / confidence_hint / source carry the *suggestion*
+        # (who wins + provenance). Distinct from the existing winner_id/reason
+        # columns which record the *outcome* of arbitration.
+        self._migrate_add_column(conn, "conflicts", "conflict_type",
+                                 "TEXT")
+        self._migrate_add_column(conn, "conflicts", "conflict_point",
+                                 "TEXT")
+        self._migrate_add_column(conn, "conflicts", "suggested_winner",
+                                 "INTEGER")
+        self._migrate_add_column(conn, "conflicts", "confidence_hint",
+                                 "TEXT")
+        self._migrate_add_column(conn, "conflicts", "source",
+                                 "TEXT")
 
     @staticmethod
     def _migrate_add_column(
@@ -690,6 +707,402 @@ class MemoryDB:
                 (status, limit),
             ).fetchall()
             return [row_to_dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # v0.7.5: conflict-scan enrichment (id=243 path-B).
+    # Three new helpers — none of them touch memories/FTS/embeddings. They
+    # only read/write the conflicts table + memories_vec (read-only KNN).
+    # ------------------------------------------------------------------
+
+    def record_conflict_enriched(
+        self,
+        left_id: int,
+        right_id: int,
+        conflict_type: Optional[str],
+        conflict_point: Optional[str],
+        reason: str,
+        suggested_winner: Optional[int] = None,
+        confidence_hint: Optional[str] = None,
+        source: Optional[str] = None,
+        status: str = "open",
+    ) -> dict[str, Any]:
+        """Insert a conflict row carrying scan-enrichment fields.
+
+        Pairs are canonicalised to ``left_id < right_id``. Idempotent: if an
+        open conflict on the same (left, right) pair already exists, no new
+        row is written and ``deduped=True`` is returned.
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return {"outcome": "unavailable"}
+        a, b = sorted((int(left_id), int(right_id)))
+        subject = conflict_point or reason
+        with self.connection() as conn:
+            existing = conn.execute(
+                "SELECT id FROM conflicts WHERE status='open' AND left_id=? AND right_id=?",
+                (a, b),
+            ).fetchone()
+            if existing:
+                conn.commit()
+                return {"outcome": "deduped", "conflict_id": int(existing["id"])}
+            cur = conn.execute(
+                """
+                INSERT INTO conflicts(
+                    left_id, right_id, subject, status, reason, winner_id,
+                    created_at, resolved_at,
+                    conflict_type, conflict_point, suggested_winner,
+                    confidence_hint, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    a, b, subject, status, reason, suggested_winner,
+                    utc_now_iso(), utc_now_iso() if status != "open" else None,
+                    conflict_type, conflict_point, suggested_winner,
+                    confidence_hint, source,
+                ),
+            )
+            conn.commit()
+            return {"outcome": "inserted", "conflict_id": int(cur.lastrowid)}
+
+    def resolve_conflict(
+        self, conflict_id: int, reason: str = ""
+    ) -> dict[str, Any]:
+        """Close a single open conflict by id (status -> resolved).
+
+        Unlike ``resolve_conflicts_for`` (which closes *all* conflicts touching
+        a given memory), this targets exactly one row. Returns the rowcount.
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return {"outcome": "unavailable"}
+        with self.connection() as conn:
+            cur = conn.execute(
+                "UPDATE conflicts SET status='resolved', resolved_at=?, reason=? "
+                "WHERE id=? AND status='open'",
+                (utc_now_iso(), reason, int(conflict_id)),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return {"outcome": "not_open", "conflict_id": int(conflict_id)}
+            return {"outcome": "resolved", "conflict_id": int(conflict_id)}
+
+    def get_embedding(self, memory_id: int) -> Optional[list[float]]:
+        """Read back a memory's embedding vector as a list of floats.
+
+        sqlite-vec stores embeddings internally as packed float32 little-endian
+        bytes even though ``store_embedding`` writes JSON — vec0 converts on
+        INSERT and returns binary on SELECT. So we ``struct.unpack`` here, not
+        ``json.loads``. Returns ``None`` if vec is unavailable, the DB is
+        unavailable, or the memory has no embedding row.
+        """
+        if not self._db_available or not self.state.sqlite_vec_available:
+            return None
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT embedding FROM memories_vec WHERE id = ?",
+                    (int(memory_id),),
+                ).fetchone()
+            if not row or row["embedding"] is None:
+                return None
+            raw = row["embedding"]
+            if isinstance(raw, (bytes, bytearray)):
+                n = len(raw) // 4
+                if n == 0:
+                    return None
+                return list(struct.unpack(f"<{n}f", raw))
+            # Legacy / forward-compat: if a future vec build returns JSON or a
+            # list, accept it without crashing.
+            if isinstance(raw, (list, tuple)):
+                return list(raw)
+            import json as _json
+            return list(_json.loads(raw))
+        except sqlite3.Error:
+            return None
+
+    # ------------------------------------------------------------------
+    #  v0.7.5: scan_log.jsonl (diagnostic layer for conflict scan + doctor)
+    # ------------------------------------------------------------------
+
+    @property
+    def scan_log_path(self) -> Path:
+        """``scan_log.jsonl`` sits next to ``memory.sqlite3``."""
+        return self.settings.db_path.parent / "scan_log.jsonl"
+
+    def _scan_log_append(self, entry: dict[str, Any]) -> None:
+        """Append one JSONL line to scan_log. Best-effort (diagnostic layer).
+
+        Uses ``"a"`` mode + a single ``write`` so concurrent scans don't
+        corrupt each other's lines under POSIX (< PIPE_BUF atomicity).
+        Never raises — a failed diagnostic write must not break the scan.
+        """
+        try:
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            with open(self.scan_log_path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        except OSError:
+            pass
+
+    def _scan_log_last_completed(self) -> Optional[dict[str, Any]]:
+        """Read the last ``status=completed`` entry from scan_log.
+
+        Tolerant: missing file -> None; corrupted lines skipped; if no
+        ``completed`` line exists, returns None. Doctor and the scan tool
+        both key off this for the incremental watermark.
+        """
+        path = self.scan_log_path
+        if not path.exists():
+            return None
+        last_completed: Optional[dict[str, Any]] = None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(rec, dict) and rec.get("status") == "completed":
+                        last_completed = rec
+        except OSError:
+            return None
+        return last_completed
+
+    # ------------------------------------------------------------------
+    #  v0.7.5: conflict candidate scan (id=243 path-B, tool-side, no LLM)
+    # ------------------------------------------------------------------
+
+    def scan_conflict_candidates(
+        self,
+        workspace: Optional[str] = None,
+        top_k: int = 8,
+        max_pairs: int = 200,
+        max_distance: float = 12.0,
+        incremental: bool = True,
+    ) -> dict[str, Any]:
+        """Vector-recall candidate conflict pairs (no LLM, no writes to memories).
+
+        Returns a dict with ``candidates`` (list of pairs with distance/tags/
+        excerpts), ``checked_pairs``, ``truncated``, ``max_memory_id``, and
+        ``scan_log_written``. When sqlite-vec is unavailable, returns a normal
+        (non-error) ``scanned=False`` result with a hint — this is a config
+        state, not an exception.
+        """
+        if not self._db_available:
+            return {"scanned": False, "reason": "db_unavailable",
+                    "hint": "SQLite unavailable; conflict scan cannot run."}
+        if not self.state.sqlite_vec_available:
+            return {"scanned": False, "reason": "sqlite_vec_unavailable",
+                    "hint": "向量未启用，冲突扫描不可用。请先配置 sqlite-vec embedding。"}
+
+        t0 = time.time()
+        # Record the scan *start* (not end) so edits during/after this scan
+        # are caught next time. Catch uses >= against this baseline; because
+        # utc_now_iso has second-level precision, using the end time + strict >
+        # would miss same-second edits. Re-processing is idempotent
+        # (record_conflict dedupes), so a little overlap is harmless.
+        scan_start_iso = utc_now_iso()
+
+        # --- determine incremental watermark + last scan time ---
+        watermark = 0
+        last_scan_time: Optional[str] = None
+        if incremental:
+            last = self._scan_log_last_completed()
+            if last:
+                watermark = int(last.get("max_memory_id") or 0)
+                last_scan_time = last.get("scan_time")
+
+        # --- pick memories to scan: new (id > watermark) + edited since last scan ---
+        with self.connection() as conn:
+            if workspace:
+                new_rows = conn.execute(
+                    "SELECT id, workspace, subject, tags, content FROM memories "
+                    "WHERE status='active' AND id > ? AND workspace=? "
+                    "ORDER BY id",
+                    (watermark, workspace),
+                ).fetchall()
+            else:
+                new_rows = conn.execute(
+                    "SELECT id, workspace, subject, tags, content FROM memories "
+                    "WHERE status='active' AND id > ? ORDER BY id",
+                    (watermark,),
+                ).fetchall()
+            scan_ids = {int(r["id"]) for r in new_rows}
+            edited_rows: list = []
+            if last_scan_time:
+                edited_rows = conn.execute(
+                    "SELECT DISTINCT h.memory_id FROM memory_history h "
+                    "WHERE h.changed_at >= ?",
+                    (last_scan_time,),
+                ).fetchall()
+                for er in edited_rows:
+                    mid = int(er["memory_id"])
+                    if mid not in scan_ids:
+                        scan_ids.add(mid)
+
+        if not scan_ids:
+            self._scan_log_append({
+                "scan_time": scan_start_iso,
+                "duration_sec": round(time.time() - t0, 4),
+                "workspace": workspace,
+                "status": "completed",
+                "max_memory_id": watermark,
+                "checked_pairs": 0,
+                "truncated": False,
+            })
+            return {"scanned": True, "candidates": [], "checked_pairs": 0,
+                    "truncated": False, "max_memory_id": watermark,
+                    "scan_log_written": True, "reason": "no_new_or_edited"}
+
+        # --- cache: id -> (workspace, subject, tags, excerpt) ---
+        # Seed from new_rows (already fetched); edited-only memories need a
+        # status check — a memory edited then superseded must not be scanned.
+        id_meta: dict[int, dict[str, Any]] = {}
+        max_seen_id = watermark
+        for r in new_rows:
+            mid = int(r["id"])
+            content = r["content"] or ""
+            id_meta[mid] = {
+                "workspace": r["workspace"],
+                "subject": r["subject"] or f"memory #{mid}",
+                "tags": _coerce_tags_db(r["tags"]),
+                "excerpt": content[:200],
+            }
+            if mid > max_seen_id:
+                max_seen_id = mid
+        # backfill meta for edited-only memories not in new_rows;
+        # drop non-active (edited-then-superseded) from the scan set.
+        edited_only = [int(er["memory_id"]) for er in edited_rows
+                       if int(er["memory_id"]) not in id_meta]
+        if edited_only:
+            self._bulk_backfill_meta(id_meta, edited_only)
+            # prune: a memory edited but now superseded/deleted must not scan.
+            scan_ids = {mid for mid in scan_ids
+                        if mid not in edited_only or mid in id_meta}
+
+        # --- recall top-K neighbours for each scan memory ---
+        seen_pairs: set[tuple[int, int]] = set()
+        candidates: list[dict[str, Any]] = []
+        # collect neighbour ids whose meta we still need (non-scan side).
+        missing_meta_ids: set[int] = set()
+
+        for mid in sorted(scan_ids):
+            if mid not in id_meta:
+                # pruned (edited-then-superseded) — skip.
+                continue
+            emb = self.get_embedding(mid)
+            if emb is None:
+                continue
+            neighbours = self.vec_knn(emb, k=top_k)
+            for nb in neighbours:
+                nb_id = int(nb["id"])
+                if nb_id == mid:
+                    continue
+                # canonicalise pair
+                a, b = sorted((mid, nb_id))
+                key = (a, b)
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                dist = float(nb["distance"])
+                if dist > max_distance:
+                    continue
+                # defer meta fetch for the non-scan neighbour; collect first,
+                # bulk-fetch after the loop to avoid N+1 queries.
+                if a not in id_meta:
+                    missing_meta_ids.add(a)
+                if b not in id_meta:
+                    missing_meta_ids.add(b)
+                candidates.append((a, b, dist))
+
+        # bulk-fetch all missing neighbour meta in one query.
+        if missing_meta_ids:
+            self._bulk_backfill_meta(id_meta, list(missing_meta_ids))
+
+        # materialise candidate dicts (now that all meta is present) + ws filter.
+        resolved: list[dict[str, Any]] = []
+        for a, b, dist in candidates:
+            ws_a = id_meta.get(a, {}).get("workspace")
+            ws_b = id_meta.get(b, {}).get("workspace")
+            if ws_a is None or ws_b is None:
+                # neighbour memory vanished (deleted between KNN and fetch).
+                continue
+            if ws_a != ws_b:
+                continue
+            resolved.append({
+                "left_id": a, "right_id": b,
+                "left_subject": id_meta.get(a, {}).get("subject", f"memory #{a}"),
+                "right_subject": id_meta.get(b, {}).get("subject", f"memory #{b}"),
+                "left_tags": id_meta.get(a, {}).get("tags", []),
+                "right_tags": id_meta.get(b, {}).get("tags", []),
+                "left_excerpt": id_meta.get(a, {}).get("excerpt", ""),
+                "right_excerpt": id_meta.get(b, {}).get("excerpt", ""),
+                "distance": dist,
+                "workspace": ws_a,
+            })
+
+        checked_pairs = len(resolved)
+        resolved.sort(key=lambda c: c["distance"])
+        truncated = False
+        if len(resolved) > max_pairs:
+            resolved = resolved[:max_pairs]
+            truncated = True
+
+        new_max = max(max_seen_id, watermark)
+        self._scan_log_append({
+            "scan_time": scan_start_iso,
+            "duration_sec": round(time.time() - t0, 4),
+            "workspace": workspace,
+            "status": "completed",
+            "max_memory_id": new_max,
+            "checked_pairs": checked_pairs,
+            "truncated": truncated,
+        })
+        return {
+            "scanned": True,
+            "candidates": resolved,
+            "checked_pairs": checked_pairs,
+            "truncated": truncated,
+            "max_memory_id": new_max,
+            "scan_log_written": True,
+        }
+
+    def _bulk_backfill_meta(
+        self, id_meta: dict[int, dict[str, Any]], ids: list[int]
+    ) -> None:
+        """Bulk-fetch subject/workspace/tags/excerpt for ids missing from ``id_meta``.
+
+        Only active memories are loaded; superseded/deleted ids are simply
+        absent from the result (caller treats absence as "pruned"). One query
+        instead of N (avoids the N+1 the per-pair backfill caused).
+        """
+        missing = [i for i in ids if i not in id_meta]
+        if not missing:
+            return
+        # SQLite has a variable limit (999 by default); chunk to be safe.
+        try:
+            with self.connection() as conn:
+                for chunk_start in range(0, len(missing), 500):
+                    chunk = missing[chunk_start:chunk_start + 500]
+                    placeholders = ",".join("?" * len(chunk))
+                    rows = conn.execute(
+                        f"SELECT id, workspace, subject, tags, content, status "
+                        f"FROM memories WHERE id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    for r in rows:
+                        if r["status"] != "active":
+                            continue
+                        content = r["content"] or ""
+                        mid = int(r["id"])
+                        id_meta[mid] = {
+                            "workspace": r["workspace"],
+                            "subject": r["subject"] or f"memory #{mid}",
+                            "tags": _coerce_tags_db(r["tags"]),
+                            "excerpt": content[:200],
+                        }
+        except sqlite3.Error:
+            pass
 
     # ------------------------------------------------------------------
     #  Edit / History
@@ -1238,3 +1651,31 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
             except json.JSONDecodeError:
                 pass
     return data
+
+
+def _coerce_tags_db(raw: Any) -> list[str]:
+    """Normalise a ``tags`` value into a deduped ``list[str]`` (db-side copy).
+
+    Mirrors ``search._coerce_tags`` but lives here so db.py scan logic doesn't
+    reverse-depend on search.py. Accepts list / JSON string / malformed / None;
+    never raises.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        tags = raw
+    elif isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            tags = parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return []
+    else:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in tags:
+        if isinstance(t, str) and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
