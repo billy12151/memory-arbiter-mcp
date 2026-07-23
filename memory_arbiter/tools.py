@@ -125,11 +125,84 @@ class MemoryTools:
                         ),
                         "memory_id": memory_id,
                     }
-            return self.db.state.response(data, extra_warnings=warnings + write_warnings + embedding_warnings)
+            return self.db.state.response(self._enrich_write_response(data, memory_id, record), extra_warnings=warnings + write_warnings + embedding_warnings)
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, **_: Any) -> dict[str, Any]:
+    def _enrich_write_response(
+        self, data: dict[str, Any], memory_id: Optional[int], record: MemoryRecord,
+    ) -> dict[str, Any]:
+        """v0.7.6: post-write enrichment — attach write_hints if duplicates found.
+
+        Never raises; hint failures are silently swallowed (hint is advisory).
+        """
+        if memory_id is None:
+            return data
+        try:
+            hints = self._write_duplicate_hints(memory_id, record)
+            if hints:
+                data["write_hints"] = hints
+        except Exception:
+            pass
+        return data
+
+    def _write_duplicate_hints(
+        self, memory_id: int, record: MemoryRecord,
+    ) -> Optional[dict[str, Any]]:
+        """Detect possible duplicates/evolution of the just-written memory.
+
+        Returns ``{possible_supersede_targets: [...]}`` or None if no
+        candidates found. Uses DB candidate recall + Python overlap scoring.
+        """
+        candidates = self.db.find_metadata_overlap_candidates(
+            subject=record.subject,
+            tags=record.tags,
+            exclude_id=memory_id,
+        )
+        if not candidates:
+            return None
+        new_content = record.content or ""
+        targets: list[dict[str, Any]] = []
+        my_tags = set(record.tags or [])
+        my_subject_tokens = set((record.subject or "").lower().split())
+        for cand in candidates:
+            cand_tags = set(cand.get("tags") or [])
+            cand_subject_tokens = set((cand.get("subject") or "").lower().split())
+            # Tags Jaccard.
+            if my_tags and cand_tags:
+                common_tags = my_tags & cand_tags
+                if len(common_tags) < 2:
+                    continue
+                tags_jaccard = len(common_tags) / len(my_tags | cand_tags)
+                if tags_jaccard < 0.8:
+                    continue
+            else:
+                continue
+            # Subject overlap.
+            if my_subject_tokens and cand_subject_tokens:
+                subj_overlap = len(my_subject_tokens & cand_subject_tokens) / len(my_subject_tokens | cand_subject_tokens)
+                if subj_overlap < 0.7:
+                    continue
+            # Determine hint type.
+            cand_content = cand.get("content") or ""
+            hint_type = "possible_duplicate"
+            reason = f"tags Jaccard {len(my_tags & cand_tags)}/{len(my_tags | cand_tags)} + subject overlap"
+            if len(new_content) >= len(cand_content) * 1.3:
+                hint_type = "possible_evolution_of"
+                reason += "; new content ≥1.3× candidate"
+            targets.append({
+                "id": int(cand["id"]),
+                "subject": cand.get("subject"),
+                "reason": reason,
+                "hint_type": hint_type,
+            })
+            if len(targets) >= 3:
+                break
+        if not targets:
+            return None
+        return {"possible_supersede_targets": targets}
+
+    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
         extra_warnings = list(self._embedder_warnings)
         vec_state = self.db.get_vec_index_state()
         vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
@@ -173,6 +246,10 @@ class MemoryTools:
         retrieval_mode = outcome.retrieval_mode
         # v0.6.0: attach section enhancement to active-split results
         results = self._attach_sections(results, query_embedding, extra_warnings)
+        # v0.7.6: attach conflict signals (open_table + runtime_metadata_hint),
+        # only on genuine query hits (direct mode). Failures degrade silently.
+        if include_conflict_signal and retrieval_mode == "direct" and results:
+            results = self._attach_conflict_signals(results, extra_warnings)
         # v0.7.4: linked_open_items — only on genuine query hits (direct mode),
         # never on browse/fallback/empty. Failures degrade to [] + warning.
         linked: list[dict[str, Any]] = []
@@ -297,15 +374,24 @@ class MemoryTools:
         suggested_winner: Optional[int] = None,
         confidence_hint: Optional[str] = None,
         source: Optional[str] = None,
+        refresh: bool = False,
+        left_version: Optional[int] = None,
+        right_version: Optional[int] = None,
+        scan_prompt_version: Optional[str] = None,
+        scan_model: Optional[str] = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """v0.7.5 (id=243): persist a conflict with scan-enrichment fields.
+        """v0.7.5/v0.7.6: persist a conflict with scan-enrichment fields.
 
         Pairs are canonicalised (left<right). Idempotent: if an open conflict
-        on the same pair already exists, returns ``deduped=True`` without
-        writing. The ``source`` field (e.g. ``"llm_informed"``) records whether
-        the suggestion came from an LLM that read the content or from a
-        metadata heuristic.
+        on the same pair already exists, returns ``deduped`` without writing.
+        Pass ``refresh=True`` to update the existing row's enrichment fields
+        in place (returns ``refreshed``); use when the scan task re-runs LLM
+        after a memory version or model change. The ``source`` field (e.g.
+        ``"llm_informed"``) records whether the suggestion came from an LLM
+        that read the content or from a metadata heuristic. ``conflict_type``
+        can be ``contradiction``, ``evolution`` (stale_active_memory — should
+        supersede but both still active), or other.
         """
         result = self.db.record_conflict_enriched(
             int(left_id), int(right_id),
@@ -315,6 +401,11 @@ class MemoryTools:
             suggested_winner=int(suggested_winner) if suggested_winner is not None else None,
             confidence_hint=confidence_hint,
             source=source,
+            refresh=refresh,
+            left_version=left_version,
+            right_version=right_version,
+            scan_prompt_version=scan_prompt_version,
+            scan_model=scan_model,
         )
         return self.db.state.response(result)
 
@@ -487,12 +578,18 @@ class MemoryTools:
         new_tags: Optional[list[str]] = None,
         reason: str = "",
         authorized: bool = False,
+        tags_only: bool = False,
+        add_tags: Optional[list[str]] = None,
+        remove_tags: Optional[list[str]] = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """In-place edit a memory's content, archiving the prior version to
-        ``memory_history`` (version chain) and syncing the FTS index.
+        """In-place edit a memory's content or tags.
 
-        Two edit modes:
+        Edit modes:
+          * tags-only (v0.7.6): pass ``tags_only=True`` with
+            ``add_tags``/``remove_tags`` to update tags without touching
+            content, memory_history, version, embeddings, or sections.
+            FTS is re-synced because tags are indexed in FTS5.
           * full replace: pass ``new_content`` (old_text/new_text must be empty)
           * partial replace: pass ``old_text`` + ``new_text`` for an exact
             substring substitution (new_content must be empty)
@@ -501,7 +598,62 @@ class MemoryTools:
         ``user_confirmed`` records require ``authorized=True`` (mirrors
         ``memory_supersede``). Records already superseded/deleted are rejected.
         """
-        memory = self.db.get_memory(int(memory_id))
+        try:
+            memory_id_int = int(memory_id)
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "memory_id must be an integer", "edited": False}, ok=False)
+
+        # ---- tags-only fast path (v0.7.6) ----
+        if tags_only:
+            result = self.db.update_tags_low_side_effect(
+                memory_id_int,
+                add_tags=add_tags or [],
+                remove_tags=remove_tags or [],
+                authorized=authorized,
+            )
+            outcome = result.get("outcome")
+            if outcome == "updated":
+                updated_mem = self.db.get_memory(memory_id_int)
+                return self.db.state.response({
+                    "edited": True,
+                    "tags_only": True,
+                    "memory_id": memory_id_int,
+                    "tags": result.get("tags"),
+                    "record": updated_mem,
+                })
+            if outcome == "no_change":
+                return self.db.state.response({
+                    "edited": False,
+                    "tags_only": True,
+                    "already_completed": True,
+                    "memory_id": memory_id_int,
+                    "tags": result.get("tags"),
+                })
+            if outcome == "forbidden":
+                return self.db.state.response({
+                    "error": (
+                        f"memory is protected (protection_level={result.get('protection_level')}, "
+                        f"source_type={result.get('source_type')}); authorized=True required to edit tags"
+                    ),
+                    "edited": False,
+                }, ok=False)
+            if outcome == "not_found":
+                return self.db.state.response({"error": f"memory id {memory_id_int} not found", "edited": False}, ok=False)
+            if outcome == "not_active":
+                return self.db.state.response({
+                    "error": f"memory is not active (status={result.get('status')}); cannot edit tags",
+                    "edited": False,
+                }, ok=False)
+            if outcome == "unavailable":
+                return self.db.state.response({"error": "database not available", "edited": False}, ok=False)
+            # outcome == "error"
+            return self.db.state.response(
+                {"error": "tags-only edit failed; transaction rolled back, no changes applied", "edited": False},
+                ok=False,
+            )
+
+        # ---- full / partial content edit (existing path) ----
+        memory = self.db.get_memory(memory_id_int)
         if not memory:
             return self.db.state.response({"error": "memory id not found", "edited": False}, ok=False)
         if memory.get("status") in {"superseded", "deleted"}:
@@ -536,11 +688,11 @@ class MemoryTools:
             resolved_content = current_content.replace(old_text, new_text, 1)
         else:
             return self.db.state.response(
-                {"error": "provide new_content for full replace, or old_text+new_text for partial replace", "edited": False},
+                {"error": "provide new_content for full replace, or old_text+new_text for partial replace, or tags_only=true", "edited": False},
                 ok=False,
             )
         history_id = self.db.edit_memory(
-            int(memory_id),
+            memory_id_int,
             resolved_content,
             new_subject=new_subject,
             new_tags=new_tags,
@@ -548,7 +700,7 @@ class MemoryTools:
         )
         if history_id is None:
             return self.db.state.response({"error": "edit failed (db not writable)", "edited": False}, ok=False)
-        updated = self.db.get_memory(int(memory_id))
+        updated = self.db.get_memory(memory_id_int)
         embedding_warnings: list[str] = []
         embedding_stored: Optional[bool] = None
         if self.settings.embedding_auto_write and self._embedding_configured():
@@ -556,7 +708,7 @@ class MemoryTools:
             embedder, ensure_warnings = self._ensure_embedder()
             embedding_warnings.extend(ensure_warnings)
             if embedder is None:
-                _deleted, delete_warnings = self.db.delete_embedding(int(memory_id))
+                _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
                 embedding_warnings.extend(delete_warnings)
                 embedding_warnings.append("re-embedding on edit skipped because embedder unavailable; deleted stale embedding to avoid dirty recall.")
             elif updated is not None:
@@ -569,19 +721,19 @@ class MemoryTools:
                         raise RuntimeError(
                             f"encode returned empty embedding: {getattr(embedder, 'last_encode_error', None) or 'unknown'}"
                         )
-                    embedding_stored, store_warnings = self.db.store_embedding(int(memory_id), embedding_result.embedding)
+                    embedding_stored, store_warnings = self.db.store_embedding(memory_id_int, embedding_result.embedding)
                     embedding_warnings.extend(store_warnings)
                     if not embedding_stored:
-                        _deleted, delete_warnings = self.db.delete_embedding(int(memory_id))
+                        _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
                         embedding_warnings.extend(delete_warnings)
                         embedding_warnings.append("re-embedding on edit failed; deleted stale embedding to avoid dirty recall.")
                 except Exception as exc:
-                    _deleted, delete_warnings = self.db.delete_embedding(int(memory_id))
+                    _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
                     embedding_warnings.extend(delete_warnings)
                     embedding_warnings.append(f"re-embedding on edit failed: {exc}; deleted stale embedding to avoid dirty recall.")
         data = {
             "edited": True,
-            "memory_id": int(memory_id),
+            "memory_id": memory_id_int,
             "new_version": int(updated.get("version") or 1) if updated else None,
             "history_id": history_id,
             "record": updated,
@@ -608,69 +760,6 @@ class MemoryTools:
                 "history": history,
                 "count": len(history),
             }
-        )
-
-    def memory_complete_open_item(self, memory_id: int, reason: str = "", authorized: bool = False, **_: Any) -> dict[str, Any]:
-        """v0.7.4 (M5): mark an active todo memory as done by removing its 'todo' tag.
-
-        Closes the linked_open_items loop — without this, completed todos keep
-        resurfacing in linked_open_items forever. Only the exact 'todo' tag is
-        removed; all other tags are preserved. content/subject/sections/
-        split_status/embeddings are never touched. A history snapshot is written
-        and FTS tags are re-synced in one transaction.
-
-        Protected memories (protection_level='locked' or source_type=
-        'user_confirmed') require ``authorized=True``. An active memory that
-        already lacks the 'todo' tag returns already_completed=True with zero
-        writes (idempotent — safe to call repeatedly).
-
-        Note on ``authorized``: it is a **caller-side confirmation gate**, not
-        strong authentication — memory-arbiter is a single-trust-domain local
-        tool, so the override lives at the calling agent.
-        """
-        try:
-            memory_id_int = int(memory_id)
-        except (TypeError, ValueError):
-            return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
-        result = self.db.complete_open_item(memory_id_int, reason=reason, authorized=authorized)
-        outcome = result.get("outcome")
-        if outcome == "completed":
-            return self.db.state.response({
-                "completed": True,
-                "already_completed": False,
-                "memory_id": memory_id_int,
-                "history_id": result.get("history_id"),
-                "tags": result.get("tags"),
-                "version": result.get("version"),
-            })
-        if outcome == "already_completed":
-            return self.db.state.response({
-                "completed": False,
-                "already_completed": True,
-                "memory_id": memory_id_int,
-                "tags": result.get("tags"),
-            })
-        if outcome == "forbidden":
-            return self.db.state.response({
-                "error": (
-                    f"memory is protected (protection_level={result.get('protection_level')}, "
-                    f"source_type={result.get('source_type')}); authorized=True required to complete"
-                ),
-                "completed": False,
-            }, ok=False)
-        if outcome == "not_found":
-            return self.db.state.response({"error": f"memory id {memory_id_int} not found"}, ok=False)
-        if outcome == "not_active":
-            return self.db.state.response({
-                "error": f"memory is not active (status={result.get('status')}); cannot complete",
-                "completed": False,
-            }, ok=False)
-        if outcome == "unavailable":
-            return self.db.state.response({"error": "database not available"}, ok=False)
-        # outcome == "error" — sqlite3.Error during the transaction; fully rolled back.
-        return self.db.state.response(
-            {"error": "complete_open_item failed; transaction rolled back, no changes applied"},
-            ok=False,
         )
 
     def memory_cleanup_history(
@@ -713,6 +802,195 @@ class MemoryTools:
                 "older_than_days": older_than_days,
             }
         )
+
+    # ==================================================================
+    #  v0.7.6: Conflict-signal attachment for search results
+    # ==================================================================
+
+    # Trust rank for runtime_metadata_hint (higher = more authoritative).
+    _TRUST_RANK: dict[str, int] = {
+        "locked": 100,
+        "user_confirmed": 100,
+        "document_extracted": 70,
+        "agent_generated": 45,
+        "pending": 20,
+        "unknown": 10,
+    }
+
+    def _trust_score(self, record: dict[str, Any]) -> int:
+        """Composite trust rank from source_type + protection_level."""
+        st = self._TRUST_RANK.get(record.get("source_type", ""), 0)
+        pl = self._TRUST_RANK.get(record.get("protection_level", ""), 0)
+        return max(st, pl)
+
+    @staticmethod
+    def _confidence_rank(hint: Optional[str]) -> int:
+        return {"high": 3, "medium": 2, "low": 1}.get(hint or "", 0)
+
+    def _attach_conflict_signals(
+        self,
+        results: list[dict[str, Any]],
+        warnings: list[str],
+    ) -> list[dict[str, Any]]:
+        """v0.7.6: attach conflict_signal to each direct-mode search result.
+
+        Two sources, strongly distinguished by ``conflict_source``:
+          * ``open_table``: conflict already in the conflicts table (written by
+            scan + record_conflict). Carries structured fields.
+          * ``runtime_metadata_hint``: computed on-the-fly from subject/tags
+            overlap + trust disparity. **Not LLM-verified** — advisory only.
+
+        open_table takes priority. Both attach a ``conflict_peer`` summary so
+        the caller knows who the conflict is with, even if the peer was cut by
+        ``limit``. Never raises; failures degrade to no signal.
+        """
+        if not results:
+            return results
+        try:
+            result_ids = [int(r["id"]) for r in results if r.get("id") is not None]
+            if not result_ids:
+                return results
+
+            # Batch-fetch open conflicts for all result IDs (one SQL, no N+1).
+            conflicts = self.db.list_open_conflicts_for_memory_ids(result_ids)
+            # Build memory_id → list of conflicts.
+            conflicts_by_mem: dict[int, list[dict[str, Any]]] = {}
+            all_peer_ids: set[int] = set()
+            for c in conflicts:
+                left = int(c.get("left_id"))
+                right = int(c.get("right_id"))
+                conflicts_by_mem.setdefault(left, []).append(c)
+                conflicts_by_mem.setdefault(right, []).append(c)
+                all_peer_ids.add(left)
+                all_peer_ids.add(right)
+
+            # Batch-fetch summaries for all IDs that appear in any conflict.
+            summaries: dict[int, dict[str, Any]] = {}
+            if all_peer_ids:
+                summaries = self.db.get_memory_summaries(list(all_peer_ids))
+
+            # Attach signals.
+            result_id_set = set(result_ids)
+            for rec in results:
+                mid = int(rec["id"])
+                if mid in conflicts_by_mem:
+                    signal = self._build_open_table_signal(
+                        mid, conflicts_by_mem[mid], summaries, result_id_set,
+                    )
+                    if signal:
+                        rec["conflict_signal"] = signal
+                        continue
+                # No open_table signal → try runtime_metadata_hint.
+                hint = self._compute_runtime_hint(mid, rec, results, result_id_set)
+                if hint:
+                    rec["conflict_signal"] = hint
+        except Exception as exc:
+            warnings.append(f"conflict_signal attachment failed: {exc}")
+        return results
+
+    def _build_open_table_signal(
+        self,
+        memory_id: int,
+        conflicts: list[dict[str, Any]],
+        summaries: dict[int, dict[str, Any]],
+        result_id_set: set[int],
+    ) -> Optional[dict[str, Any]]:
+        """Build an open_table conflict_signal for a memory with open conflicts.
+
+        If a memory has multiple open conflicts, pick the primary one by
+        confidence_hint > created_at > conflict_id.
+        """
+        def conflict_sort_key(c: dict[str, Any]) -> tuple:
+            return (
+                self._confidence_rank(c.get("confidence_hint")),
+                str(c.get("created_at", "")),
+                int(c.get("id", 0)),
+            )
+
+        primary = max(conflicts, key=conflict_sort_key)
+        peer_id = int(primary["right_id"]) if primary["left_id"] == memory_id else int(primary["left_id"])
+        peer_summary = summaries.get(peer_id, {})
+        return {
+            "conflict_source": "open_table",
+            "conflict_id": int(primary["id"]),
+            "conflict_type": primary.get("conflict_type"),
+            "conflict_point": primary.get("conflict_point"),
+            "suggested_winner": primary.get("suggested_winner"),
+            "confidence_hint": primary.get("confidence_hint"),
+            "source": primary.get("source"),
+            "open_conflict_count": len(conflicts),
+            "conflict_peer": {
+                "id": peer_id,
+                "subject": peer_summary.get("subject"),
+                "status": peer_summary.get("status"),
+                "snippet": peer_summary.get("snippet"),
+            },
+        }
+
+    def _compute_runtime_hint(
+        self,
+        memory_id: int,
+        rec: dict[str, Any],
+        all_results: list[dict[str, Any]],
+        result_id_set: set[int],
+    ) -> Optional[dict[str, Any]]:
+        """Compute a runtime_metadata_hint by comparing this result against
+        other results in the same result set (bounded to first 20).
+
+        Only fires on high subject/tags overlap + trust disparity.
+        """
+        my_tags = set(rec.get("tags") or [])
+        my_subject = (rec.get("subject") or "").lower()
+        my_trust = self._trust_score(rec)
+        # Cap to avoid O(n²) blowup on large result sets.
+        candidates = [r for r in all_results[:20] if int(r.get("id", 0)) != memory_id]
+        best_peer: Optional[dict[str, Any]] = None
+        best_score = 0.0
+        for peer in candidates:
+            peer_id = int(peer.get("id", 0))
+            peer_tags = set(peer.get("tags") or [])
+            peer_subject = (peer.get("subject") or "").lower()
+            # Tags overlap.
+            if my_tags and peer_tags:
+                common = my_tags & peer_tags
+                if len(common) >= 2:
+                    overlap_ratio = len(common) / len(my_tags | peer_tags)
+                    if overlap_ratio >= 0.8:
+                        trust_gap = abs(my_trust - self._trust_score(peer))
+                        if trust_gap > 0:
+                            score = overlap_ratio + trust_gap * 0.01
+                            if score > best_score:
+                                best_score = score
+                                best_peer = peer
+            # Subject overlap.
+            if my_subject and peer_subject and best_peer is None:
+                # Simple token overlap for ASCII.
+                my_tokens = set(my_subject.split())
+                peer_tokens = set(peer_subject.split())
+                if my_tokens and peer_tokens:
+                    overlap = len(my_tokens & peer_tokens) / len(my_tokens | peer_tokens)
+                    if overlap >= 0.7:
+                        trust_gap = abs(my_trust - self._trust_score(peer))
+                        if trust_gap > 0:
+                            score = overlap + trust_gap * 0.01
+                            if score > best_score:
+                                best_score = score
+                                best_peer = peer
+        if best_peer is None:
+            return None
+        peer_id = int(best_peer.get("id", 0))
+        return {
+            "conflict_source": "runtime_metadata_hint",
+            "conflict_type": "metadata_overlap",
+            "confidence_hint": "low",
+            "conflict_point": "subject/tags overlap; not LLM-verified",
+            "conflict_peer": {
+                "id": peer_id,
+                "subject": best_peer.get("subject"),
+                "status": best_peer.get("status"),
+                "snippet": (best_peer.get("content") or "")[:200],
+            },
+        }
 
     # ==================================================================
     #  v0.6.0: Section split tools

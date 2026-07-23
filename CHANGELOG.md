@@ -3,6 +3,31 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.7.6] — 2026-07-23
+
+### Added
+
+- **`memory_search` conflict signals** — on a genuine query hit (`retrieval_mode=direct`), each result may now carry a `conflict_signal` field indicating it is involved in an unresolved conflict. Two sources are strongly distinguished: `open_table` (from scan/record-verified conflicts, carrying `conflict_type`/`conflict_point`/`suggested_winner`/`confidence_hint`/`source`/`conflict_peer`) and `runtime_metadata_hint` (computed from subject/tags overlap + trust disparity; advisory only, not LLM-verified). Pass `include_conflict_signal=false` to suppress. Open conflicts are batch-fetched in a single SQL (no N+1). If the conflict peer was cut by `limit`, a lightweight peer summary is still attached.
+- **`memory_write` write_hints** — after a successful write, the response may carry a `write_hints.possible_supersede_targets` array listing up to 3 active memories that share high subject/tags overlap. Two hint types: `possible_duplicate` and `possible_evolution_of` (new content ≥1.3× candidate length). Hints are advisory only — never written to the conflicts table. Computed synchronously; failures degrade silently (write still succeeds).
+- **`memory_edit(tags_only=true)`** — a low-side-effect tag-only edit mode: pass `tags_only=true` with `add_tags`/`remove_tags` to update tags without writing `memory_history`, bumping `version`, re-embedding, or re-splitting. FTS tags are re-synced. `locked`/`user_confirmed` still require `authorized=true` (re-checked inside the transaction to close the TOCTOU window). Idempotent: removing a tag that is already absent returns `no_change` (zero writes).
+- **`memory_record_conflict(refresh=true)`** — when an open conflict already exists on the same pair, `refresh=true` updates the enrichment fields in place (returns `refreshed`); `refresh=false` (default) preserves the old `deduped` behavior. Use this in the scan task when re-running LLM after a memory version or model change.
+- **Schema** — `conflicts` table gains 5 columns for scan-refresh provenance: `left_version`, `right_version`, `scan_prompt_version`, `scan_model`, `refreshed_at` (idempotent migration). Three ordinary indexes added: `idx_conflicts_status_left`, `idx_conflicts_status_right`, `idx_conflicts_status_created`.
+
+### Changed
+
+- **`memory_record_conflict` docstring** — `conflict_type` semantics expanded: `evolution` now explicitly covers `stale_active_memory` (new version should supersede old but both are still active).
+- **`memory_compare` / `memory_arbitrate`** — docstring downgraded to "low-frequency diagnostic / compatibility-retained tool". New conflict workflows should use `scan_conflict_candidates` → `record_conflict` → `list_conflicts` → `supersede`/`resolve`. `memory_arbitrate(mark_conflict=true)` still uses the legacy `record_conflict` path (no enrichment fields); this is documented to avoid confusion with enriched conflicts.
+- **`memory_scan_conflict_candidates` / `memory_record_conflict` / `memory_resolve_conflict`** — docstring clarifies these are for agent-side scheduled/manual scan loops, not general conversation tools.
+
+### Removed
+
+- **`memory_complete_open_item`** — the MCP tool entry, `tools.memory_complete_open_item()`, `db.complete_open_item()`, and ~10 associated tests have been removed. Completing a todo is now done via `memory_edit(tags_only=true, remove_tags=["todo"])`, which is strictly lower-side-effect (no history write, no version bump, no re-embedding). Breaking change (0.7.5 had no users on this interface).
+
+### Docs
+
+- `README.md` — feature list and agent instructions updated for conflict signals, write_hints, tags-only edit, and complete_open_item removal. MCP tools table reflects new parameters.
+- `docs/INTEGRATION.md` — agent guidance updated for conflict_signal consumption, scan prompt templates (with refresh), batch-arbitration workflow, and tags-only todo completion.
+
 ## [0.7.5] — 2026-07-23
 
 ### Added

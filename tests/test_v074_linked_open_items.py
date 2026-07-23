@@ -1,10 +1,12 @@
-"""v0.7.4 tests: linked_open_items (M1-M4) + memory_complete_open_item (M5).
+"""linked_open_items + v0.7.6 tags-only todo completion tests.
 
-Covers the acceptance checklist from the v0.7.4 design (id=242):
+Covers the acceptance checklist from the v0.7.4 design (id=242), updated for
+v0.7.6 where memory_complete_open_item was removed and todo completion moved
+to memory_edit(tags_only=true, remove_tags=["todo"]):
   A. linked_open_items main flow (dirty tags, generic-tag stoplist, modes, …)
   B. retrieval_mode / SearchOutcome contract
   C. server wrapper parameter pass-through
-  D. memory_complete_open_item outcomes + transaction safety
+  D. memory_edit(tags_only=true) outcomes + transaction safety
   plus the M3 workspace-no-filter guarantee at the search layer.
 """
 from __future__ import annotations
@@ -257,92 +259,83 @@ def test_search_result_envelope_has_linked_field(tmp_path: Path) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  D. memory_complete_open_item (M5)
+#  D. memory_edit(tags_only=true) — replaces complete_open_item (v0.7.6)
 # ──────────────────────────────────────────────────────────────────────────
 
-def test_complete_open_item_removes_todo(tmp_path: Path) -> None:
+def test_memory_edit_tags_only_removes_todo(tmp_path: Path) -> None:
+    """tags_only remove_tags=['todo'] removes todo, preserves other tags,
+    does NOT bump version, does NOT write history."""
     tools = _tools(tmp_path)
     mem_id = _write(tools, content="do it", subject="task", tags=["todo", "feature"])
-    res = tools.memory_complete_open_item(memory_id=mem_id)
+    version_before = tools.db.get_memory(mem_id)["version"]
+    history_before = len(tools.db.list_history(mem_id))
+    res = tools.memory_edit(memory_id=mem_id, tags_only=True, remove_tags=["todo"])
     assert res["ok"]
-    assert res["data"]["completed"] is True
-    assert res["data"]["already_completed"] is False
-    assert "todo" not in res["data"]["tags"]
-    assert "feature" in res["data"]["tags"]
-    # Version bumped, content unchanged.
+    assert res["data"]["tags_only"] is True
+    assert res["data"]["edited"] is True
     mem = tools.db.get_memory(mem_id)
-    assert mem["version"] == 2
-    assert mem["content"] == "do it"
+    assert "todo" not in mem["tags"]
+    assert "feature" in mem["tags"]
+    # No version bump, no history snapshot.
+    assert mem["version"] == version_before
+    assert len(tools.db.list_history(mem_id)) == history_before
 
 
-def test_complete_open_item_already_completed(tmp_path: Path) -> None:
+def test_memory_edit_tags_only_idempotent(tmp_path: Path) -> None:
+    """Removing a tag that is already absent returns no_change (zero writes)."""
     tools = _tools(tmp_path)
     mem_id = _write(tools, content="done", subject="task", tags=["feature"])
-    res = tools.memory_complete_open_item(memory_id=mem_id)
+    res = tools.memory_edit(memory_id=mem_id, tags_only=True, remove_tags=["todo"])
     assert res["ok"]
-    assert res["data"]["completed"] is False
+    assert res["data"]["edited"] is False
     assert res["data"]["already_completed"] is True
-    # Zero writes: version unchanged.
     assert tools.db.get_memory(mem_id)["version"] == 1
 
 
-def test_complete_open_item_idempotent(tmp_path: Path) -> None:
+def test_memory_edit_tags_only_not_found(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
-    mem_id = _write(tools, content="do it", subject="task", tags=["todo"])
-    first = tools.memory_complete_open_item(memory_id=mem_id)
-    assert first["data"]["completed"] is True
-    second = tools.memory_complete_open_item(memory_id=mem_id)
-    assert second["data"]["completed"] is False
-    assert second["data"]["already_completed"] is True
-    # Only one version bump total.
-    assert tools.db.get_memory(mem_id)["version"] == 2
-
-
-def test_complete_open_item_not_found(tmp_path: Path) -> None:
-    tools = _tools(tmp_path)
-    res = tools.memory_complete_open_item(memory_id=99999)
+    res = tools.memory_edit(memory_id=99999, tags_only=True, remove_tags=["todo"])
     assert res["ok"] is False
     assert "not found" in res["data"]["error"]
 
 
-def test_complete_open_item_not_active(tmp_path: Path) -> None:
+def test_memory_edit_tags_only_not_active(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
     mem_id = _write(tools, content="do it", subject="task", tags=["todo"])
     tools.memory_supersede(memory_id=mem_id, reason="done elsewhere", authorized=True)
-    res = tools.memory_complete_open_item(memory_id=mem_id)
+    res = tools.memory_edit(memory_id=mem_id, tags_only=True, remove_tags=["todo"])
     assert res["ok"] is False
     assert "not active" in res["data"]["error"]
 
 
-def test_complete_open_item_forbidden_without_authorization(tmp_path: Path) -> None:
+def test_memory_edit_tags_only_forbidden_without_authorization(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
     mem_id = _write(
         tools, content="protected todo", subject="pt", tags=["todo"],
         protection_level="locked", source_type="user_confirmed",
     )
-    res = tools.memory_complete_open_item(memory_id=mem_id)
+    res = tools.memory_edit(memory_id=mem_id, tags_only=True, remove_tags=["todo"])
     assert res["ok"] is False
     assert "authorized=True" in res["data"]["error"]
     # Zero writes: tag unchanged.
     assert "todo" in tools.db.get_memory(mem_id)["tags"]
 
 
-def test_complete_open_item_authorized_succeeds(tmp_path: Path) -> None:
+def test_memory_edit_tags_only_authorized_succeeds(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
     mem_id = _write(
         tools, content="protected todo", subject="pt", tags=["todo", "keep"],
         protection_level="locked", source_type="user_confirmed",
     )
-    res = tools.memory_complete_open_item(memory_id=mem_id, authorized=True)
+    res = tools.memory_edit(memory_id=mem_id, tags_only=True, remove_tags=["todo"], authorized=True)
     assert res["ok"]
-    assert res["data"]["completed"] is True
     mem = tools.db.get_memory(mem_id)
     assert "todo" not in mem["tags"]
     assert "keep" in mem["tags"]
 
 
-def test_complete_open_item_removes_from_linked(tmp_path: Path) -> None:
-    """After completion, the memory no longer appears in linked_open_items."""
+def test_memory_edit_tags_only_removes_from_linked(tmp_path: Path) -> None:
+    """After tags-only todo removal, the memory no longer appears in linked_open_items."""
     tools = _tools(tmp_path)
     _write(tools, content="quantum documentation", subject="physics", tags=["feature-auth"])
     todo_id = _write(
@@ -350,20 +343,47 @@ def test_complete_open_item_removes_from_linked(tmp_path: Path) -> None:
     )
     before = tools.memory_search(query="quantum")
     assert any(l["id"] == todo_id for l in before["data"]["linked_open_items"])
-    tools.memory_complete_open_item(memory_id=todo_id)
+    tools.memory_edit(memory_id=todo_id, tags_only=True, remove_tags=["todo"])
     after = tools.memory_search(query="auth")
     assert not any(l["id"] == todo_id for l in after["data"]["linked_open_items"])
 
 
-def test_complete_open_item_preserves_sections_and_content(tmp_path: Path) -> None:
-    """Completing a todo must not alter content/subject/sections/split_status."""
+def test_memory_edit_tags_only_preserves_content(tmp_path: Path) -> None:
+    """tags-only edit must not alter content/subject/sections/split_status."""
     tools = _tools(tmp_path)
     mem_id = _write(tools, content="body text here", subject="s", tags=["todo"])
-    tools.memory_complete_open_item(memory_id=mem_id)
+    tools.memory_edit(memory_id=mem_id, tags_only=True, remove_tags=["todo"])
     mem = tools.db.get_memory(mem_id)
     assert mem["content"] == "body text here"
     assert mem["subject"] == "s"
     assert mem["split_status"] is None
+
+
+def test_memory_edit_tags_only_add_tags(tmp_path: Path) -> None:
+    """add_tags appends new tags without touching existing ones."""
+    tools = _tools(tmp_path)
+    mem_id = _write(tools, content="body", subject="s", tags=["existing"])
+    tools.memory_edit(memory_id=mem_id, tags_only=True, add_tags=["new", "tags"])
+    mem = tools.db.get_memory(mem_id)
+    assert "existing" in mem["tags"]
+    assert "new" in mem["tags"]
+    assert "tags" in mem["tags"]
+
+
+def test_memory_edit_tags_only_fts_failure_rolls_back(tmp_path: Path) -> None:
+    """A mid-transaction FTS failure must roll back the tag update."""
+    tools = _tools(tmp_path)
+    mem_id = _write(tools, content="do it", subject="task", tags=["todo", "feature"])
+    tags_before = tools.db.get_memory(mem_id)["tags"]
+    # Sabotage FTS so the in-transaction re-sync raises sqlite3.Error.
+    with tools.db.connection() as conn:
+        conn.execute("DROP TABLE memories_fts")
+        conn.commit()
+    result = tools.db.update_tags_low_side_effect(mem_id, remove_tags=["todo"])
+    assert result["outcome"] == "error"
+    mem_after = tools.db.get_memory(mem_id)
+    # Zero partial writes: tags unchanged.
+    assert mem_after["tags"] == tags_before
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -386,33 +406,6 @@ def test_search_ignores_workspace_filter(tmp_path: Path) -> None:
 #  Gap coverage: tests the design checklist called for but the original
 #  v0.7.4 suite omitted (items 10, 13, 17, 22).
 # ──────────────────────────────────────────────────────────────────────────
-
-def test_complete_open_item_fts_failure_rolls_back(tmp_path: Path) -> None:
-    """Design item 22: a mid-transaction FTS failure must roll back EVERYTHING.
-
-    history INSERT, memories UPDATE, and FTS re-sync all run in one
-    write_transaction(); if any statement raises, no partial write leaks
-    (no history row, tags/version unchanged). Drops memories_fts to force
-    the FTS delete/insert inside the transaction to raise.
-    """
-    tools = _tools(tmp_path)
-    mem_id = _write(tools, content="do it", subject="task", tags=["todo", "feature"])
-    tags_before = tools.db.get_memory(mem_id)["tags"]
-    version_before = tools.db.get_memory(mem_id)["version"]
-    history_before = len(tools.db.list_history(mem_id))
-    # Sabotage FTS so the in-transaction re-sync raises sqlite3.Error.
-    with tools.db.connection() as conn:
-        conn.execute("DROP TABLE memories_fts")
-        conn.commit()
-    # complete_open_item still believes FTS is available (state is probed once
-    # at startup), so it enters the FTS branch and hits the dropped table.
-    result = tools.db.complete_open_item(mem_id, reason="fts probe")
-    assert result["outcome"] == "error"
-    mem_after = tools.db.get_memory(mem_id)
-    # Zero partial writes: tags, version, and history all unchanged.
-    assert mem_after["tags"] == tags_before
-    assert mem_after["version"] == version_before
-    assert len(tools.db.list_history(mem_id)) == history_before
 
 
 def test_linked_open_items_sort_stability(tmp_path: Path) -> None:

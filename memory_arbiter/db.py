@@ -197,6 +197,11 @@ class MemoryDB:
                 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(workspace, agent_id, status);
                 CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(workspace, subject);
                 CREATE INDEX IF NOT EXISTS idx_memories_event ON memories(event_time, ingest_time);
+                -- v0.7.6: conflict-lookup indexes (ordinary, not unique partial —
+                -- uniqueness is enforced by record_conflict_enriched logic).
+                CREATE INDEX IF NOT EXISTS idx_conflicts_status_left ON conflicts(status, left_id);
+                CREATE INDEX IF NOT EXISTS idx_conflicts_status_right ON conflicts(status, right_id);
+                CREATE INDEX IF NOT EXISTS idx_conflicts_status_created ON conflicts(status, created_at);
                 CREATE TABLE IF NOT EXISTS memory_history (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   memory_id INTEGER NOT NULL,
@@ -261,6 +266,16 @@ class MemoryDB:
                                  "TEXT")
         self._migrate_add_column(conn, "conflicts", "source",
                                  "TEXT")
+        # v0.7.6: scan-refresh metadata. These columns let the agent-side scan
+        # task decide whether to re-run LLM on an existing open conflict (e.g.
+        # when memory version or scan model changed). The system itself never
+        # auto-triggers refresh — it just stores the provenance and exposes a
+        # refresh interface (record_conflict_enriched(refresh=True)).
+        self._migrate_add_column(conn, "conflicts", "left_version", "INTEGER")
+        self._migrate_add_column(conn, "conflicts", "right_version", "INTEGER")
+        self._migrate_add_column(conn, "conflicts", "scan_prompt_version", "TEXT")
+        self._migrate_add_column(conn, "conflicts", "scan_model", "TEXT")
+        self._migrate_add_column(conn, "conflicts", "refreshed_at", "TEXT")
 
     @staticmethod
     def _migrate_add_column(
@@ -709,6 +724,76 @@ class MemoryDB:
             return [row_to_dict(row) for row in rows]
 
     # ------------------------------------------------------------------
+    # v0.7.6: batch conflict-signal helpers for search attachment.
+    # Both are read-only, chunked to respect SQLite's parameter limit,
+    # and never raise (callers treat failure as empty).
+    # ------------------------------------------------------------------
+
+    def list_open_conflicts_for_memory_ids(
+        self, memory_ids: list[int],
+    ) -> list[dict[str, Any]]:
+        """Batch-fetch all open conflicts where either side is in *memory_ids*.
+
+        Returns row_to_dict rows. Single SQL per chunk (no N+1). DB-unavailable
+        or empty input → [].
+        """
+        if not memory_ids or not self._db_available:
+            return []
+        unique_ids = sorted(set(int(i) for i in memory_ids if i is not None))
+        if not unique_ids:
+            return []
+        results: list[dict[str, Any]] = []
+        try:
+            with self.connection() as conn:
+                # chunk=250 because the query binds each id twice (left_id IN + right_id IN);
+                # 2×250=500 stays under SQLite's default SQLITE_MAX_VARIABLE_NUMBER=999.
+                for chunk_start in range(0, len(unique_ids), 250):
+                    chunk = unique_ids[chunk_start:chunk_start + 250]
+                    ph = ",".join("?" * len(chunk))
+                    rows = conn.execute(
+                        f"SELECT * FROM conflicts WHERE status='open' "
+                        f"AND (left_id IN ({ph}) OR right_id IN ({ph}))",
+                        (*chunk, *chunk),
+                    ).fetchall()
+                    results.extend(row_to_dict(r) for r in rows)
+        except sqlite3.Error:
+            return []
+        return results
+
+    def get_memory_summaries(
+        self, memory_ids: list[int],
+    ) -> dict[int, dict[str, Any]]:
+        """Batch-fetch lightweight summaries for a set of memory IDs.
+
+        Returns ``{id: {id, subject, status, source_type, protection_level,
+        tags, snippet}}``. Missing / non-active IDs are simply absent from the
+        result (callers treat absence as "vanished"). Never raises.
+        """
+        if not memory_ids or not self._db_available:
+            return {}
+        unique_ids = sorted(set(int(i) for i in memory_ids if i is not None))
+        if not unique_ids:
+            return {}
+        out: dict[int, dict[str, Any]] = {}
+        try:
+            with self.connection() as conn:
+                for chunk_start in range(0, len(unique_ids), 500):
+                    chunk = unique_ids[chunk_start:chunk_start + 500]
+                    ph = ",".join("?" * len(chunk))
+                    rows = conn.execute(
+                        f"SELECT id, subject, status, source_type, "
+                        f"protection_level, tags, "
+                        f"substr(content, 1, 200) AS snippet "
+                        f"FROM memories WHERE id IN ({ph})",
+                        chunk,
+                    ).fetchall()
+                    for r in rows:
+                        out[int(r["id"])] = row_to_dict(r)
+        except sqlite3.Error:
+            return {}
+        return out
+
+    # ------------------------------------------------------------------
     # v0.7.5: conflict-scan enrichment (id=243 path-B).
     # Three new helpers — none of them touch memories/FTS/embeddings. They
     # only read/write the conflicts table + memories_vec (read-only KNN).
@@ -725,23 +810,53 @@ class MemoryDB:
         confidence_hint: Optional[str] = None,
         source: Optional[str] = None,
         status: str = "open",
+        refresh: bool = False,
+        left_version: Optional[int] = None,
+        right_version: Optional[int] = None,
+        scan_prompt_version: Optional[str] = None,
+        scan_model: Optional[str] = None,
     ) -> dict[str, Any]:
         """Insert a conflict row carrying scan-enrichment fields.
 
         Pairs are canonicalised to ``left_id < right_id``. Idempotent: if an
         open conflict on the same (left, right) pair already exists, no new
-        row is written and ``deduped=True`` is returned.
+        row is written and ``deduped`` is returned — *unless* ``refresh=True``,
+        in which case the existing row's enrichment fields are UPDATEd in place
+        and ``refreshed`` is returned (``created_at`` is preserved).
         """
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable"}
         a, b = sorted((int(left_id), int(right_id)))
         subject = conflict_point or reason
+        now = utc_now_iso()
         with self.connection() as conn:
             existing = conn.execute(
                 "SELECT id FROM conflicts WHERE status='open' AND left_id=? AND right_id=?",
                 (a, b),
             ).fetchone()
             if existing:
+                if refresh:
+                    cur = conn.execute(
+                        """
+                        UPDATE conflicts SET
+                            conflict_type=?, conflict_point=?, reason=?,
+                            winner_id=?, suggested_winner=?, confidence_hint=?,
+                            source=?, left_version=?, right_version=?,
+                            scan_prompt_version=?, scan_model=?, refreshed_at=?
+                        WHERE id=?
+                        """,
+                        (
+                            conflict_type, conflict_point, reason,
+                            suggested_winner, suggested_winner, confidence_hint,
+                            source, left_version, right_version,
+                            scan_prompt_version, scan_model, now,
+                            int(existing["id"]),
+                        ),
+                    )
+                    conn.commit()
+                    if cur.rowcount == 0:
+                        return {"outcome": "not_open", "conflict_id": int(existing["id"])}
+                    return {"outcome": "refreshed", "conflict_id": int(existing["id"])}
                 conn.commit()
                 return {"outcome": "deduped", "conflict_id": int(existing["id"])}
             cur = conn.execute(
@@ -750,14 +865,16 @@ class MemoryDB:
                     left_id, right_id, subject, status, reason, winner_id,
                     created_at, resolved_at,
                     conflict_type, conflict_point, suggested_winner,
-                    confidence_hint, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    confidence_hint, source,
+                    left_version, right_version, scan_prompt_version, scan_model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     a, b, subject, status, reason, suggested_winner,
-                    utc_now_iso(), utc_now_iso() if status != "open" else None,
+                    now, now if status != "open" else None,
                     conflict_type, conflict_point, suggested_winner,
                     confidence_hint, source,
+                    left_version, right_version, scan_prompt_version, scan_model,
                 ),
             )
             conn.commit()
@@ -1108,6 +1225,169 @@ class MemoryDB:
     #  Edit / History
     # ------------------------------------------------------------------
 
+    def update_tags_low_side_effect(
+        self,
+        memory_id: int,
+        add_tags: Optional[list[str]] = None,
+        remove_tags: Optional[list[str]] = None,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """v0.7.6: low-side-effect tag-only update.
+
+        Unlike ``edit_memory``, this does NOT write ``memory_history``,
+        does NOT bump ``version``, does NOT touch content/subject/sections/
+        split_status/split_revision, and does NOT trigger re-embedding.
+        It only updates the ``tags`` column and re-syncs FTS (tags are
+        indexed in FTS5).
+
+        Uses ``write_transaction()`` (BEGIN IMMEDIATE) so the re-read +
+        protection check + writes share the write lock (TOCTOU-safe).
+
+        Returns an outcome dict:
+          ``updated``       — tags changed, FTS re-synced.
+          ``no_change``     — add/remove yielded no difference; zero writes.
+          ``not_found``     — memory_id absent.
+          ``not_active``    — superseded/deleted.
+          ``forbidden``     — protected and not authorized.
+          ``unavailable``   — DB not writable.
+          ``error``         — sqlite3.Error mid-transaction; fully rolled back.
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return {"outcome": "unavailable", "memory_id": memory_id}
+        try:
+            with self.write_transaction() as conn:
+                current = self._fetch_memory(conn, memory_id)
+                if not current:
+                    return {"outcome": "not_found", "memory_id": memory_id}
+                status = current.get("status")
+                if status != "active":
+                    return {"outcome": "not_active", "memory_id": memory_id, "status": status}
+                raw_tags = current.get("tags")
+                if isinstance(raw_tags, list):
+                    old_tags = raw_tags
+                elif isinstance(raw_tags, str):
+                    try:
+                        parsed = json.loads(raw_tags)
+                        old_tags = parsed if isinstance(parsed, list) else []
+                    except (json.JSONDecodeError, ValueError):
+                        old_tags = []
+                else:
+                    old_tags = []
+
+                # Protection check inside the transaction (TOCTOU-safe).
+                protection = current.get("protection_level")
+                source_type = current.get("source_type")
+                is_protected = protection == "locked" or source_type == "user_confirmed"
+                if is_protected and not authorized:
+                    return {
+                        "outcome": "forbidden",
+                        "memory_id": memory_id,
+                        "protection_level": protection,
+                        "source_type": source_type,
+                    }
+
+                # Compute new tags preserving order + deduping.
+                current_set: set[str] = set(old_tags)
+                new_tags_list = list(old_tags)
+                for t in (remove_tags or []):
+                    if t in current_set:
+                        current_set.discard(t)
+                        new_tags_list = [x for x in new_tags_list if x != t]
+                for t in (add_tags or []):
+                    if t not in current_set:
+                        current_set.add(t)
+                        new_tags_list.append(t)
+
+                if new_tags_list == old_tags:
+                    # Zero-write no-op (covers idempotent remove of absent tag).
+                    return {"outcome": "no_change", "memory_id": memory_id, "tags": old_tags}
+
+                new_tags_json = json.dumps(new_tags_list, ensure_ascii=False)
+                conn.execute(
+                    "UPDATE memories SET tags=? WHERE id=?",
+                    (new_tags_json, memory_id),
+                )
+                if self.state.fts5_available:
+                    old_content = current["content"]
+                    old_subject = current.get("subject")
+                    conn.execute(
+                        "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) "
+                        "VALUES('delete', ?, ?, ?, ?)",
+                        (memory_id, old_content, " ".join(old_tags), old_subject or ""),
+                    )
+                    conn.execute(
+                        "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
+                        (memory_id, old_content, " ".join(new_tags_list), old_subject or ""),
+                    )
+                # write_transaction() commits on normal exit; rolls back on raise.
+                return {
+                    "outcome": "updated",
+                    "memory_id": memory_id,
+                    "tags": new_tags_list,
+                }
+        except sqlite3.Error:
+            return {"outcome": "error", "memory_id": memory_id}
+
+    def find_metadata_overlap_candidates(
+        self,
+        subject: Optional[str],
+        tags: list[str],
+        exclude_id: int,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """v0.7.6: recall active memories that might duplicate/evolve the
+        given (subject, tags). Used by write_hints.
+
+        Two recall channels (each capped at *limit*):
+          - tag overlap: ``json_each`` match on any of *tags*.
+          - subject overlap: LIKE on the first few subject tokens.
+        Results are merged/deduped, limited, and returned as
+        ``{id, subject, tags, content}`` dicts. Never raises.
+        """
+        if not self._db_available:
+            return []
+        candidates: dict[int, dict[str, Any]] = {}
+        try:
+            with self.connection() as conn:
+                # Channel 1: tag overlap.
+                if tags:
+                    clean_tags = [t for t in tags if isinstance(t, str) and t.strip()]
+                    if clean_tags:
+                        ph = ",".join("?" * len(clean_tags))
+                        ph_placeholders = clean_tags
+                        rows = conn.execute(
+                            f"SELECT id, subject, tags, content FROM memories "
+                            f"WHERE status='active' AND id != ? AND "
+                            f"EXISTS (SELECT 1 FROM json_each(tags) "
+                            f"WHERE json_each.value IN ({ph}) AND json_each.type='text') "
+                            f"LIMIT ?",
+                            (exclude_id, *ph_placeholders, limit),
+                        ).fetchall()
+                        for r in rows:
+                            candidates[int(r["id"])] = row_to_dict(r)
+                # Channel 2: subject overlap.
+                if subject:
+                    tokens = _subject_tokens(subject)
+                    like_clauses: list[str] = []
+                    like_params: list[Any] = []
+                    for tok in tokens[:4]:  # cap at first 4 tokens
+                        if len(tok) >= 2:
+                            like_clauses.append("subject LIKE ?")
+                            like_params.append(f"%{tok}%")
+                    if like_clauses:
+                        joined = " OR ".join(like_clauses)
+                        rows = conn.execute(
+                            f"SELECT id, subject, tags, content FROM memories "
+                            f"WHERE status='active' AND id != ? AND ({joined}) "
+                            f"LIMIT ?",
+                            (exclude_id, *like_params, limit),
+                        ).fetchall()
+                        for r in rows:
+                            candidates[int(r["id"])] = row_to_dict(r)
+        except sqlite3.Error:
+            return []
+        return list(candidates.values())
+
     def edit_memory(
         self,
         memory_id: int,
@@ -1172,122 +1452,6 @@ class MemoryDB:
             except sqlite3.Error:
                 conn.rollback()
                 return None
-
-    def complete_open_item(
-        self,
-        memory_id: int,
-        reason: Optional[str] = None,
-        authorized: bool = False,
-    ) -> dict[str, Any]:
-        """v0.7.4 (M5): atomically remove the ``'todo'`` tag from an active memory.
-
-        Closes the linked_open_items loop — done todos need a completion exit
-        (the design calls this out: default-on linked items + no completion
-        path = stale todos recur forever). Only the exact ``'todo'`` tag is
-        removed; all other tags are preserved. Never touches content, subject,
-        sections, split_status, split_revision, or embeddings.
-
-        Returns an outcome dict:
-          ``completed``         — 'todo' was present and removed (history snapshot
-                                  written, version bumped, FTS re-synced).
-          ``already_completed`` — memory is active but has no 'todo' tag; this is
-                                  the target state, so it's a zero-write no-op with
-                                  no version bump (covers repeat calls too).
-          ``not_found``         — memory_id absent.
-          ``not_active``        — superseded / deleted.
-          ``forbidden``         — protection_level='locked' or source_type=
-                                  'user_confirmed' and ``authorized`` is False.
-          ``unavailable``       — DB not writable.
-
-        TOCTOU-safe: status / tags / protection are re-read inside the same
-        transaction that writes, so a concurrent change between the tools-layer
-        pre-read and this write is caught.
-        """
-        if not self._db_available or not self.state.sqlite_writable:
-            return {"outcome": "unavailable", "memory_id": memory_id}
-        # v0.7.4 (M5): BEGIN IMMEDIATE acquires the write lock up front, so the
-        # re-read + protection check below run inside the same transaction that
-        # writes — closing the TOCTOU window between a tools-layer pre-read and
-        # this write (a concurrent status/tags change is caught here, not after).
-        try:
-            with self.write_transaction() as conn:
-                current = self._fetch_memory(conn, memory_id)
-                if not current:
-                    return {"outcome": "not_found", "memory_id": memory_id}
-                status = current.get("status")
-                if status != "active":
-                    return {"outcome": "not_active", "memory_id": memory_id, "status": status}
-                # row_to_dict already parsed valid-JSON tags to a list; guard malformed.
-                raw_tags = current.get("tags")
-                if isinstance(raw_tags, list):
-                    old_tags = raw_tags
-                elif isinstance(raw_tags, str):
-                    try:
-                        parsed = json.loads(raw_tags)
-                        old_tags = parsed if isinstance(parsed, list) else []
-                    except (json.JSONDecodeError, ValueError):
-                        old_tags = []
-                else:
-                    old_tags = []
-                if "todo" not in old_tags:
-                    return {"outcome": "already_completed", "memory_id": memory_id, "tags": old_tags}
-                # Removal needed — check protection inside the tx (TOCTOU-safe).
-                protection = current.get("protection_level")
-                source_type = current.get("source_type")
-                is_protected = protection == "locked" or source_type == "user_confirmed"
-                if is_protected and not authorized:
-                    return {
-                        "outcome": "forbidden",
-                        "memory_id": memory_id,
-                        "protection_level": protection,
-                        "source_type": source_type,
-                    }
-                old_content = current["content"]
-                old_subject = current.get("subject")
-                old_version = int(current.get("version") or 1)
-                new_tags = [t for t in old_tags if t != "todo"]
-                new_tags_json = json.dumps(new_tags, ensure_ascii=False)
-                history_cur = conn.execute(
-                    """
-                    INSERT INTO memory_history
-                    (memory_id, content_snapshot, subject_snapshot, tags_snapshot, version, changed_at, reason)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (memory_id, old_content, old_subject,
-                     json.dumps(old_tags, ensure_ascii=False), old_version,
-                     utc_now_iso(), reason or "complete_open_item: removed 'todo' tag"),
-                )
-                history_id = int(history_cur.lastrowid)
-                # Only tags + version change; content/subject untouched, so no
-                # section deletion, no split_revision bump, no re-embedding.
-                conn.execute(
-                    "UPDATE memories SET tags=?, version=? WHERE id=?",
-                    (new_tags_json, old_version + 1, memory_id),
-                )
-                if self.state.fts5_available:
-                    # FTS delete/re-insert with ORIGINAL content/subject — the
-                    # only column that differs is tags.
-                    conn.execute(
-                        "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) VALUES('delete', ?, ?, ?, ?)",
-                        (memory_id, old_content, " ".join(old_tags), old_subject or ""),
-                    )
-                    conn.execute(
-                        "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
-                        (memory_id, old_content, " ".join(new_tags), old_subject or ""),
-                    )
-                # write_transaction() commits on normal exit; if any statement
-                # above raised, it rolls back and re-raises (caught below).
-                return {
-                    "outcome": "completed",
-                    "memory_id": memory_id,
-                    "history_id": history_id,
-                    "tags": new_tags,
-                    "version": old_version + 1,
-                }
-        except sqlite3.Error:
-            # write_transaction() already rolled back; surface a clean error so
-            # no partial write (history without tags, or tags without FTS) leaks.
-            return {"outcome": "error", "memory_id": memory_id}
 
     def list_history(self, memory_id: int) -> list[dict[str, Any]]:
         if not self._db_available:
@@ -1679,3 +1843,31 @@ def _coerce_tags_db(raw: Any) -> list[str]:
             seen.add(t)
             out.append(t)
     return out
+
+
+# CJK Unicode range for subject tokenisation (write_hints candidate recall).
+import re as _re
+
+_CJK_CHAR_RE = _re.compile(r"[㐀-鿿豈-﫿぀-ヿ가-힯]")
+
+
+def _subject_tokens(subject: str) -> list[str]:
+    """Split a subject into tokens for LIKE-based candidate recall.
+
+    CJK: split into 2-char sliding windows (LIKE %xx% is coarse enough).
+    ASCII: split on whitespace/punctuation, keep tokens ≥ 2 chars.
+    """
+    if not subject:
+        return []
+    tokens: list[str] = []
+    for word in subject.split():
+        if not word:
+            continue
+        if _CJK_CHAR_RE.search(word):
+            # CJK-heavy token: use 2-char sliding windows.
+            chars = "".join(c for c in word if _CJK_CHAR_RE.match(c) or c.isalnum())
+            for i in range(len(chars) - 1):
+                tokens.append(chars[i:i + 2])
+        elif len(word) >= 2:
+            tokens.append(word.lower())
+    return tokens

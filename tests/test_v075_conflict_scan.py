@@ -277,6 +277,8 @@ def test_get_embedding_none_when_no_vec(tmp_path: Path) -> None:
 
 def test_doctor_conflicts_warns_when_never_scanned(tmp_path: Path) -> None:
     """Vec available but no scan_log -> WARN 'never scanned'."""
+    if not _VEC_AVAILABLE:
+        pytest.skip("sqlite-vec not installed")
     from memory_arbiter.doctor import _check_conflicts_open, doctor_overview_mcp
     tools = _tools(tmp_path, vec=True, dim=4)
     _write(tools, content="x", subject="s")

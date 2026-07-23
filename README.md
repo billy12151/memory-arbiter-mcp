@@ -76,8 +76,8 @@ Using two or more tools adds a shared memory layer: Tool A writes, Tool B search
 - **Version history** — edit a memory in place; the old version is archived, not lost. Full audit trail of who changed what and when.
 - **Long-document section split** — break 10K+ char documents into searchable sections; queries return the matching paragraph, not the whole document.
 - **Smart tag ranking & search filters** (v0.7.3) — tags are scored as discrete labels (token overlap, not substring), so a tag set hitting every query token finally outranks a subject that merely contains one query word. `memory_search` also gains `tags_filter` / `after_time` / `before_time` / `source_type`, plus `has_more` + `total_estimate` so exhaustive queries know whether the page is complete.
-- **Linked open items & todo completion** (v0.7.4) — on a genuine query hit, `memory_search` attaches up to 5 active todos (tagged `todo`) that share meaningful tags with the result set, in a separate `linked_open_items` field — pure read-only, never affects ranking, filtered by a generic-tag stoplist. Close the loop with `memory_complete_open_item`, which atomically strips the `todo` tag (preserving everything else) in one transaction. Every response also carries a `retrieval_mode` (`direct` / `recent_fallback` / `recent_browse` / `empty` / `unavailable`) describing how the rows were produced.
-- **Conflict scan** (v0.7.5) — `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories), then the calling agent runs LLM comparison and persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type` / `suggested_winner` / `source`). Dismiss false positives with `memory_resolve_conflict`. The core package stays headless — no LLM, no network — the scan only produces candidates; the agent does the judging. `doctor` reports scan freshness via `scan_log.jsonl` (warns if never scanned or stale > 15 days).
+- **Linked open items & conflict signals** (v0.7.4 → v0.7.6) — on a genuine query hit, `memory_search` attaches up to 5 active todos (tagged `todo`) that share meaningful tags with the result set, in a separate `linked_open_items` field — pure read-only, never affects ranking. Every response also carries a `retrieval_mode`. v0.7.6 adds `conflict_signal` on each result: `open_table` (from scan/record-verified conflicts) or `runtime_metadata_hint` (advisory, not LLM-verified). Complete todos with `memory_edit(tags_only=true, remove_tags=["todo"])` — a low-side-effect tag update that doesn't write history, bump version, or re-embed.
+- **Conflict scan** (v0.7.5–v0.7.6) — `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories), then the calling agent runs LLM comparison and persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type` / `suggested_winner` / `source`; v0.7.6 adds `refresh=true` for re-judgement after memory/model changes). Dismiss false positives with `memory_resolve_conflict`. The core package stays headless — no LLM, no network. `doctor` reports scan freshness via `scan_log.jsonl`. v0.7.6: `memory_search` surfaces these conflicts as `conflict_signal` on matching results; `memory_write` returns `write_hints` for possible duplicates/evolution.
 - **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search.
 - **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup. Never crashes, even if optional extensions are missing.
 - **Health diagnostics** — a one-shot `doctor` check grades config integrity, the vector-enablement chain, split, data consistency, and capacity. Each finding carries a severity and a config-specific fix hint; works as an MCP tool (daily) or a standalone CLI (ambulance: runs even when the MCP process is down). Read-only.
@@ -172,14 +172,14 @@ Search via memory_search first; read source files only for detail. When you
 find a contradiction, don't overwrite — if you know which is correct, use
 memory_supersede (retire the wrong one); if unsure, use memory_arbitrate
 (the system decides by timeline + trust level). When a to-do entry is done,
-write the status back to the original record; the v0.7.4 completion exit is
-`memory_complete_open_item` — it atomically removes the `todo` tag (preserving
-all other tags and the content), writes a history snapshot, and drops the item
-from `linked_open_items`. Don't just mention "done" in a new memory, or the
-old entry stays in to-do state and misleads future searches.
+remove the `todo` tag via `memory_edit(tags_only=true, remove_tags=["todo"])`
+— a low-side-effect update that doesn't write history or bump the version,
+and drops the item from `linked_open_items`. Don't just mention "done" in a
+new memory, or the old entry stays in to-do state and misleads future
+searches.
 
 The `authorized=true` flag on write tools (`memory_supersede` / `memory_edit`
-/ `memory_complete_open_item` / `memory_cleanup_history`) is a **caller-side
+/ `memory_cleanup_history`) is a **caller-side
 confirmation gate**, not strong authentication. It lets the calling agent
 explicitly assert "yes, override the `locked` / `user_confirmed` protection"
 — memory-arbiter is a local, single-trust-domain tool, so the gate lives at
@@ -202,27 +202,33 @@ relying on it.
 
 ### MCP Tools
 
-Grouped by use case. The first two groups cover daily read/write; the rest are for versioning, long-doc split, semantic ops, and system status.
+Grouped by use case. For day-to-day agent work, the intended mental model is deliberately small: use `memory_write`, `memory_search`, and `memory_get`. The remaining groups are for correction/versioning, conflict workflows, long-doc split, semantic ops, and system status.
 
 **Daily read & write** — what most sessions use.
 
 | Tool | Description |
 |---|---|
-| `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks). **Tags matter (v0.7.3)** — they're a ranking + filter signal heavier than content; tag both *query-intent words* (what users will search by) and category/version labels. See [Tag scoring & search filters (v0.7.3)](#tag-scoring-search-filters-v073). |
-| `memory_search` | Search memories (FTS5 → LIKE fallback). `limit` is a page size, not a cap — `has_more=true` in the response means more matches exist. v0.7.3 adds `tags_filter` (AND) / `after_time` / `before_time` / `source_type` for exhaustive queries. See [Tag scoring & search filters (v0.7.3)](#tag-scoring-search-filters-v073). |
+| `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks). **Tags matter (v0.7.3)** — they're a ranking + filter signal heavier than content; tag both *query-intent words* (what users will search by) and category/version labels. v0.7.6 may return advisory `write_hints` for likely duplicate/evolution records; these hints do not write the conflicts table. See [Tag scoring & search filters (v0.7.3)](#tag-scoring-search-filters-v073). |
+| `memory_search` | Search memories (FTS5 → LIKE fallback). `limit` is a page size, not a cap — `has_more=true` in the response means more matches exist. v0.7.6 can attach `conflict_signal` to direct hits; `open_table` comes from recorded conflicts, while `runtime_metadata_hint` is advisory only. See [Tag scoring & search filters (v0.7.3)](#tag-scoring-search-filters-v073). |
 | `memory_get` | Get a single memory by ID. Use when you already know the `memory_id` (e.g. from conflict lists, audit results, or previous search results) to quickly fetch full details without re-running a search. Read-only. |
-| `memory_compare` | Compare two memories, returns explanation only |
-| `memory_arbitrate` | Arbitrate conflict, can record result (`apply=true`) |
-| `memory_confirm` | Promote a memory to user-confirmed and locked |
-| `memory_supersede` | Explicitly retire a memory; bypasses user-confirmed/locked protection (`authorized=true` required) |
 
-**Version management** — edit in place without re-creating a record, and audit the change history.
+**Correction & version management** — edit in place, confirm facts, retire stale records, and audit change history.
 
 | Tool | Description |
 |---|---|
-| `memory_edit` | (v0.4.0) In-place edit a memory's content (full or partial `old_text`→`new_text`), archiving the prior version to a history table and re-syncing FTS. `locked`/`user_confirmed` records need `authorized=true`. The right tool for *partial* corrections — `supersede` retires the whole record, which also sinks the parts you didn't mean to negate. |
+| `memory_edit` | (v0.4.0, v0.7.6) In-place edit a memory's content (full or partial `old_text`→`new_text`), or tags-only via `tags_only=true`+`add_tags`/`remove_tags`. Content edits archive the prior version to a history table and re-sync FTS. Tags-only edits are low-side-effect: no history, no version bump, no re-embedding. `locked`/`user_confirmed` records need `authorized=true`. |
 | `memory_history` | (v0.4.0) View the version chain (historical snapshots) of a memory, newest version first. Read-only. |
+| `memory_confirm` | Promote a memory to user-confirmed and locked. Use when the user explicitly validates a memory as authoritative. |
+| `memory_supersede` | Explicitly retire a memory; bypasses user-confirmed/locked protection (`authorized=true` required). This is the status-change primitive used by conflict workflows, not an automatic edit. |
 | `memory_cleanup_history` | (v0.4.0) Delete historical snapshots from `memory_history` (never touches active records). Per-memory / by-age / full; full cleanup requires `authorized=true`. |
+
+**Conflict workflow & diagnostics** — low-frequency tools used after search/doctor/scan surfaces an issue.
+
+| Tool | Description |
+|---|---|
+| `memory_list_conflicts` | List unresolved conflicts. This is the main follow-up entry after `memory_search` reports an `open_table` conflict signal, doctor reports conflict backlog, or a scan task records conflicts. |
+| `memory_compare` | Low-frequency diagnostic tool: compare two memories and return an explanation only. It does not write conflicts. |
+| `memory_arbitrate` | Compatibility/manual arbitration tool. New conflict workflows should prefer `scan_conflict_candidates → record_conflict → list_conflicts → supersede/resolve`; this is not a daily entry point. |
 
 **Long-document section split** (v0.6.0) — paragraph-level retrieval for docs over `split.threshold`. Requires sqlite-vec + GGUF embedding + `split.enabled`.
 
@@ -605,7 +611,7 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 - **版本历史** —— 原地编辑记忆，旧版本自动归档不丢失。谁改了什么、什么时候改的，完整可追溯。
 - **长文档分段** —— 把万字文档拆成可搜索的段落，查询只返回命中的那段，不返回整篇。
 - **tag 精排 + 搜索过滤**（v0.7.3）—— tag 按离散标签集评分（token 重叠，不再当句子做整串匹配），tag 精确命中每个 query token 时终于能排到 subject 只是偶然含一个词的记忆之上。`memory_search` 还新增了 `tags_filter` / `after_time` / `before_time` / `source_type`，响应里带 `has_more` + `total_estimate`，让穷举式查询知道这一页是不是已经拿全。
-- **关联待办与待办闭环**（v0.7.4）—— 真实命中查询时，`memory_search` 在独立的 `linked_open_items` 字段附最多 5 条与结果集共享 meaningful tag 的 active 待办（带 `todo` tag），纯只读、不影响排序、经泛 tag stoplist 过滤。闭环用 `memory_complete_open_item` 原子移除 `todo` tag（保留其余一切）。每次响应还带 `retrieval_mode`（`direct` / `recent_fallback` / `recent_browse` / `empty` / `unavailable`）说明结果是怎么来的。
+- **关联待办与冲突信号**（v0.7.4 → v0.7.6）—— 真实命中查询时，`memory_search` 在独立的 `linked_open_items` 字段附最多 5 条与结果集共享 meaningful tag 的 active 待办（带 `todo` tag），纯只读、不影响排序。每次响应还带 `retrieval_mode` 说明结果是怎么来的。v0.7.6 新增 `conflict_signal`：每条结果可能带 `open_table`（scan/record 验证过的结构化冲突）或 `runtime_metadata_hint`（运行时启发式，未经 LLM 验证）。完成待办用 `memory_edit(tags_only=true, remove_tags=["todo"])`——低副作用、不写历史、不增加 version、不重算 embedding。
 - **冲突扫描**（v0.7.5）—— `memory_scan_conflict_candidates` 向量召回候选冲突对（增量：只扫新增 + 最近编辑的记忆），调用方 agent 跑 LLM 比对后用 `memory_record_conflict` 落表（幂等，带 `conflict_type` / `suggested_winner` / `source`）。误报用 `memory_resolve_conflict` 关闭。核心包保持无头——不调 LLM、不联网——扫描只产候选对，判断交给 agent。`doctor` 通过 `scan_log.jsonl` 报告扫描新鲜度（从未扫描或超 15 天会 WARN）。
 - **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。
 - **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
@@ -698,12 +704,13 @@ workspace（项目名；v0.7.4：保留元数据——会存储和返回，但**
 
 查找先 memory_search，细节读源文件。发现矛盾不覆盖：明确知道哪条对时
 用 memory_supersede（废弃错的），不确定时用 memory_arbitrate（系统按
-时间线和可信度仲裁）。待办处理完成后用 memory_complete_open_item（v0.7.4）
-移除 todo tag——原子操作、保留其他 tags 和正文、写历史快照、从 linked_open_items
-移除；不要只在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
+时间线和可信度仲裁）。待办处理完成后用 memory_edit(tags_only=true,
+remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历史、不
+增加 version、不触发重算 embedding、从 linked_open_items 移除；不要只
+在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
 
 写工具上的 `authorized=true`（`memory_supersede` / `memory_edit` /
-`memory_complete_open_item` / `memory_cleanup_history`）是**调用方确认门**，
+`memory_cleanup_history`）是**调用方确认门**，
 不是强鉴权。它让调用方 agent 显式声明"是的，突破 `locked` /
 `user_confirmed` 保护"——memory-arbiter 是本地、单信任域工具，这道门在
 调用方。若将来多租户使用，需先引入调用方身份 + 策略再依赖它。
@@ -723,27 +730,33 @@ workspace（项目名；v0.7.4：保留元数据——会存储和返回，但**
 
 ### MCP 工具
 
-按使用场景分组。前两组覆盖日常读写；其余用于版本管理、长文档分段、语义检索运维和系统状态。
+按使用场景分组。日常 Agent 心智模型刻意收敛为 `memory_write`、`memory_search`、`memory_get` 三个工具；其余工具用于修正/版本管理、冲突工作流、长文档分段、语义检索运维和系统状态。
 
 **日常读写** —— 大多数会话只用到这些。
 
 | 工具 | 说明 |
 |---|---|
-| `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定）。**tags 是关键信号（v0.7.3）**——权重高于 content，既影响排序也用于过滤；建议同时打"查询意图词"（用户将来用什么词查）和分类/版本号。详见 [Tag 评分与搜索过滤（v0.7.3）](#tag-评分与搜索过滤v073)。 |
-| `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级）。`limit` 是单页大小不是上限——响应里的 `has_more=true` 表示还有更多结果。v0.7.3 新增 `tags_filter`（AND 语义）/ `after_time` / `before_time` / `source_type`，用于穷举式查询。详见 [Tag 评分与搜索过滤（v0.7.3）](#tag-评分与搜索过滤v073)。 |
+| `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定）。**tags 是关键信号（v0.7.3）**——权重高于 content，既影响排序也用于过滤；建议同时打"查询意图词"（用户将来用什么词查）和分类/版本号。v0.7.6 可能返回 advisory `write_hints` 提示疑似重复/演进，但不会写 conflicts 表。详见 [Tag 评分与搜索过滤（v0.7.3）](#tag-评分与搜索过滤v073)。 |
+| `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级）。`limit` 是单页大小不是上限——响应里的 `has_more=true` 表示还有更多结果。v0.7.6 可在 direct 命中上附 `conflict_signal`；`open_table` 来自已记录冲突，`runtime_metadata_hint` 只是运行时启发式提示。详见 [Tag 评分与搜索过滤（v0.7.3）](#tag-评分与搜索过滤v073)。 |
 | `memory_get` | 通过 ID 直接获取单条记忆的完整信息。当已知 `memory_id`（如从冲突列表、审计结果、搜索结果中获取）时，直接用此工具获取记忆详情，无需重新搜索。只读。 |
-| `memory_compare` | 比较两条记忆，只返回解释 |
-| `memory_arbitrate` | 仲裁冲突，自动判定胜者（`apply=true` 时落记录） |
-| `memory_confirm` | 用户确认某条记忆，锁定保护 |
-| `memory_supersede` | 显式废弃某条记忆；可突破 user_confirmed/locked 保护（需 `authorized=true`） |
 
-**版本管理** —— 原地修改而不重建记录，并审计改动历史。
+**修正与版本管理** —— 原地修改、确认事实、废弃旧记录，并审计改动历史。
 
 | 工具 | 说明 |
 |---|---|
-| `memory_edit` | （v0.4.0）原地编辑记忆正文（整体替换 `new_content` 或局部替换 `old_text`→`new_text`），旧版本自动存入历史表并同步 FTS。`locked`/`user_confirmed` 记忆需 `authorized=true`。**部分否定的正确做法**——`supersede` 会整条沉掉（连同你没否定那部分），`edit` 只改你要改的。 |
+| `memory_edit` | （v0.4.0，v0.7.6）原地编辑记忆正文（整体替换 `new_content` 或局部替换 `old_text`→`new_text`），或通过 `tags_only=true`+`add_tags`/`remove_tags` 仅更新 tags。正文编辑旧版本自动存入历史表并同步 FTS；tags-only 编辑低副作用：不写历史、不增加 version、不重算 embedding。`locked`/`user_confirmed` 记忆需 `authorized=true`。 |
 | `memory_history` | （v0.4.0）查看一条记忆的版本演化轨迹（历史快照，按版本号倒序）。只读。 |
+| `memory_confirm` | 将用户明确确认的记忆提升为 user_confirmed + locked，作为权威事实保护。 |
+| `memory_supersede` | 显式废弃某条记忆；可突破 user_confirmed/locked 保护（需 `authorized=true`）。这是冲突工作流中的状态变更原语，不是自动编辑。 |
 | `memory_cleanup_history` | （v0.4.0）清理历史表快照（**绝不碰活跃记录**）。支持单条 / 按时间 / 全量；全量清理需 `authorized=true`。 |
+
+**冲突工作流与诊断** —— search / doctor / scan 暴露问题后的低频工具。
+
+| 工具 | 说明 |
+|---|---|
+| `memory_list_conflicts` | 列出未解决的冲突。通常在 `memory_search` 返回 `open_table` 冲突信号、doctor 报冲突积压、或 scan 任务记录冲突后使用。 |
+| `memory_compare` | 低频诊断工具：比较两条记忆，只返回解释，不写 conflicts 表。 |
+| `memory_arbitrate` | 兼容保留的手动仲裁工具。新冲突工作流优先使用 `scan_conflict_candidates → record_conflict → list_conflicts → supersede/resolve`；本工具不是日常入口。 |
 
 **长文档分段**（v0.6.0）—— 超过 `split.threshold` 的文档走段落级检索。需 sqlite-vec + GGUF embedding + `split.enabled`。
 

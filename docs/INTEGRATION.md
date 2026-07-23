@@ -81,7 +81,17 @@ scheduled trigger
 
 `memory_audit_summary` is the cheapest entry point — pure SQL aggregation, no semantic work. Use it to decide whether a deeper, model-assisted review is worth it.
 
-**v0.7.5 conflict scan**: `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories). It returns pairs with distance/excerpt/tags — no LLM, no writes. The calling agent runs LLM comparison on each pair, then persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type`/`suggested_winner`/`source`). Dismiss false positives with `memory_resolve_conflict`. `memory_doctor_overview` reports scan freshness via `scan_log.jsonl` (warns if never scanned or stale > 15 days).
+**v0.7.5–v0.7.6 conflict scan**: `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories). It returns pairs with distance/excerpt/tags — no LLM, no writes. The calling agent runs LLM comparison on each pair, then persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type`/`suggested_winner`/`source`). If an open conflict already exists but the memory version or scan model changed since it was recorded, re-run LLM and persist with `memory_record_conflict(refresh=true)` to update the enrichment fields in place. Dismiss false positives with `memory_resolve_conflict`. `memory_doctor_overview` reports scan freshness via `scan_log.jsonl` (warns if never scanned or stale > 15 days).
+
+**v0.7.6 consuming conflict signals**: when `memory_search` returns a result with a `conflict_signal` field, read `conflict_source` to decide:
+- `open_table`: the conflict is scan/record-verified. Mention to the user "this memory has an unresolved conflict" and optionally guide them to `memory_list_conflicts` for details. Use `suggested_winner`/`confidence_hint` to decide who to trust.
+- `runtime_metadata_hint`: advisory only, not LLM-verified. Surface as a low-confidence hint ("there may be a duplicate"), don't auto-delete or auto-supersede based on it alone.
+
+**Batch arbitration workflow** (v0.7.6): when the user says "handle these conflicts" or "arbitrate by suggestion":
+1. `memory_list_conflicts(status="open")` → filter to `confidence_hint == "high"` with a `suggested_winner`.
+2. For each conflict, the loser is the side that is NOT `suggested_winner`. Check the loser's `protection_level`/`source_type` — skip `locked`/`user_confirmed` losers unless the user explicitly confirms.
+3. `memory_supersede(memory_id=loser_id, superseded_by=suggested_winner, authorized=true, reason="batch arbitrate: conflict #N")` for safe losers.
+4. Low-confidence (`confidence_hint == "low"`) conflicts are always skipped — leave for manual review.
 
 **When to use**: scheduled maintenance, knowledge-base hygiene, before handing off to a new agent.
 
@@ -90,14 +100,13 @@ scheduled trigger
 Detect conflicts at the moment a new memory is written, before it silently diverges from existing knowledge.
 
 ```
-about to write new knowledge
-  → memory_search(relevant keywords)            # find existing memories on the same topic
-  → memory_compare(new, existing)               # structural verdict, no LLM guess
-  → conflict? → memory_arbitrate(mark_conflict=true)   # record + (optionally) supersede the loser
-  → no conflict? → memory_write(...)
+write new knowledge via memory_write(...)
+  → check response for write_hints.possible_supersede_targets
+  → hint present? → memory_search to verify, then memory_supersede the stale one
+  → no hint? → done (low-confidence conflicts will be caught by scheduled scan)
 ```
 
-**When to use**: when a tool learns something that might contradict prior knowledge (config changes, policy updates, corrected facts).
+**v0.7.6**: `memory_write` now synchronously returns `write_hints` when an active memory shares high subject/tags overlap with the just-written record. Two hint types: `possible_duplicate` (likely the same thing) and `possible_evolution_of` (new content is significantly longer — the new one may supersede the candidate). Hints are advisory; they never write to the conflicts table. If a hint fires, the agent can prompt the user or immediately supersede the stale one. Semantic conflicts (where subject/tags don't overlap) are still the domain of the scheduled vector scan — not write-time hints.
 
 ### Real-world example — Cross-tool task delegation
 
