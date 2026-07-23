@@ -1306,6 +1306,174 @@ class MemoryTools:
             return "split_revision_conflict"
         return None
 
+    # ------------------------------------------------------------------
+    #  v0.8.0: Unified publish helper (design doc §9.1)
+    #
+    #  Shared by the rules path (memory_write/edit auto-split) and the Agent
+    #  path (memory_split publish/rebuild). Replaces the inline validate-then-
+    #  write block that previously lived only inside memory_split.
+    #
+    #  Provenance is now an explicit caller argument ("parser" for rules,
+    #  "agent" for memory_split) instead of inferred from anchor text — the
+    #  old heuristic guessed "parser" when an anchor happened to equal a
+    #  heading string, which conflated the two paths.
+    #
+    #  Failure semantics (design doc §5.3 / §9.2):
+    #    * decision_kind="split": a real failure marks split_status=failed
+    #      via CAS (_mark_split_failed), and returns an error.
+    #    * decision_kind="rebuild": failures NEVER touch split_status — the
+    #      old active sections stay intact. Only an error is returned.
+    # ------------------------------------------------------------------
+
+    def _publish_sections(
+        self,
+        memory_id: int,
+        content: str,
+        sections_data: list[dict[str, Any]],
+        decision_content_hash: str,
+        decision_memory_version: int,
+        decision_split_status: Optional[str],
+        decision_split_revision: int,
+        decision_kind: str,
+        provenance: str,
+    ) -> dict[str, Any]:
+        """Validate, embed, and atomically publish sections + section vectors.
+
+        Returns a state.response() dict. On failure, the original content is
+        untouched. ``decision_kind`` is "split" (initial publish from
+        NULL/failed/declined) or "rebuild" (replace existing active sections).
+        """
+        mid = memory_id
+        max_sections = getattr(self.settings, "max_sections", 50)
+        max_section_chars = getattr(self.settings, "max_section_chars", 3600)
+
+        # 1) Count gate.
+        if len(sections_data) < 2 or len(sections_data) > max_sections:
+            return self.db.state.response({
+                "error": f"sections count must be 2..{max_sections}, got {len(sections_data)}",
+            }, ok=False)
+
+        # 2) Compute + validate offsets (anchor→offset, continuity, coverage).
+        #    Pure text computation — run it before touching the embedder so a
+        #    bad anchor fails fast and (for split) records the failure reason.
+        offset_result = self._compute_offsets(content, sections_data)
+        if offset_result is None:
+            if decision_kind == "split":
+                self._mark_split_failed(
+                    mid, decision_content_hash, decision_memory_version,
+                    decision_split_revision, decision_split_status,
+                    "validation", "offset computation failed",
+                )
+            return self.db.state.response({"error": "offset validation failed"}, ok=False)
+
+        # 3) Section-size hard gate (design doc §6.2): a section slice that
+        #    exceeds max_section_chars would embed only its front portion,
+        #    producing a misleading section vector. Reject before embedding.
+        for i, sec in enumerate(offset_result):
+            slice_len = sec["end_offset"] - sec["start_offset"]
+            if slice_len > max_section_chars:
+                if decision_kind == "split":
+                    self._mark_split_failed(
+                        mid, decision_content_hash, decision_memory_version,
+                        decision_split_revision, decision_split_status,
+                        "validation", f"section {i} too large: {slice_len}>{max_section_chars}",
+                    )
+                return self.db.state.response({
+                    "error": f"section_too_large: section {i} is {slice_len} chars (max {max_section_chars})",
+                }, ok=False)
+
+        # 4) Vec state + embedder must be ready before the expensive embedding.
+        vec_state = self.db.get_vec_index_state()
+        if vec_state.get("state") != "ready":
+            return self.db.state.response({
+                "error": "vec index not ready, complete migration first",
+                "vec_index_state": vec_state,
+            }, ok=False)
+        embedder, _ = self._ensure_embedder()
+        if embedder is None:
+            return self.db.state.response({"error": "embedder unavailable"}, ok=False)
+
+        # 5) Generate section embeddings (outside the write transaction).
+        section_embeddings: list[tuple[int, list[float], int, int, int, bool]] = []
+        for i, sec in enumerate(offset_result):
+            title_path = sec.get("title_path") or sec.get("title") or ""
+            body = content[sec["start_offset"]:sec["end_offset"]]
+            try:
+                er = embedder.embed_text(prefix=title_path, body=body, max_body_chars=max_section_chars)
+                if not er.embedding:
+                    raise RuntimeError(
+                        f"section {i}: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
+                    )
+                section_embeddings.append((i, er.embedding, int(er.truncated), er.original_tokens, er.used_tokens, True))
+            except Exception as exc:
+                if decision_kind == "split":
+                    self._mark_split_failed(
+                        mid, decision_content_hash, decision_memory_version,
+                        decision_split_revision, decision_split_status,
+                        "embedding", f"section {i}: {exc}",
+                    )
+                return self.db.state.response({"error": f"section embedding failed at {i}: {exc}"}, ok=False)
+
+        # 6) Atomic publish: re-CAS inside the write transaction, then swap.
+        try:
+            with self.db.write_transaction() as conn:
+                cur = conn.execute(
+                    "SELECT status, content, version, split_status, split_revision FROM memories WHERE id = ?",
+                    (mid,),
+                ).fetchone()
+                if cur is None:
+                    raise ValueError("memory_changed")
+                if cur["status"] != "active":
+                    raise ValueError("memory_changed")
+                if hashlib.sha256(str(cur["content"]).encode("utf-8")).hexdigest() != decision_content_hash:
+                    raise ValueError("memory_changed")
+                if int(cur["version"]) != int(decision_memory_version):
+                    raise ValueError("memory_changed")
+                if cur["split_status"] != decision_split_status:
+                    raise ValueError("split_revision_conflict")
+                if int(cur["split_revision"]) != int(decision_split_revision):
+                    raise ValueError("split_revision_conflict")
+                if MemoryDB._get_meta(conn, "state") != "ready":
+                    raise ValueError("vec_space_changed")
+                active_space = MemoryDB._get_meta(conn, "active_space_id")
+                if active_space != embedder.embedding_space_id:
+                    raise ValueError("vec_space_changed")
+
+                MemoryDB._delete_sections_for_memory(conn, mid)
+                for i, sec in enumerate(offset_result):
+                    em = section_embeddings[i]
+                    section_id = MemoryDB._insert_section(
+                        conn, mid, i,
+                        title=sec.get("title"),
+                        title_path=sec.get("title_path"),
+                        summary=sec.get("summary"),
+                        anchor_text=sec.get("anchor_text"),
+                        occurrence_index=sec.get("occurrence_index", 0),
+                        start_offset=sec["start_offset"],
+                        end_offset=sec["end_offset"],
+                        provenance=provenance,
+                        embedding_truncated=em[2],
+                        embedding_original_tokens=em[3],
+                        embedding_used_tokens=em[4],
+                    )
+                    MemoryDB._store_section_vec(conn, section_id, em[1])
+                updated = conn.execute(
+                    "UPDATE memories SET split_status = 'active', "
+                    "split_revision = split_revision + 1 "
+                    "WHERE id = ? AND split_revision = ?",
+                    (mid, int(decision_split_revision)),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("split_revision_conflict")
+        except ValueError as e:
+            return self.db.state.response({"error": str(e)}, ok=False)
+
+        return self.db.state.response({
+            "split_active": True,
+            "memory_id": mid,
+            "section_count": len(offset_result),
+        })
+
     def memory_split(
         self,
         memory_id: int,
@@ -1442,141 +1610,16 @@ class MemoryTools:
             if not sections:
                 return self.db.state.response({"error": "sections required for publish"}, ok=False)
 
-            # Validate count
-            max_sections = getattr(self.settings, "max_sections", 50)
-            if len(sections) < 2 or len(sections) > max_sections:
-                return self.db.state.response({
-                    "error": f"sections count must be 2..{max_sections}, got {len(sections)}",
-                }, ok=False)
-
-            # Vec state check
-            vec_state = self.db.get_vec_index_state()
-            if vec_state.get("state") != "ready":
-                return self.db.state.response({
-                    "error": "vec index not ready, complete migration first",
-                    "vec_index_state": vec_state,
-                }, ok=False)
-
-            # Compute offsets
-            offset_result = self._compute_offsets(content, sections)
-            if offset_result is None:
-                if split_decision == "split":
-                    self._mark_split_failed(
-                        mid, str(decision_content_hash), int(decision_memory_version),
-                        int(decision_split_revision), decision_split_status,
-                        "validation", "offset computation failed",
-                    )
-                return self.db.state.response({"error": "offset validation failed"}, ok=False)
-
-            # Generate section embeddings
-            embedder, _ = self._ensure_embedder()
-            if embedder is None:
-                return self.db.state.response({"error": "embedder unavailable"}, ok=False)
-
-            max_section_chars = getattr(self.settings, "max_section_chars", 3600)
-            section_embeddings: list[tuple[int, list[float], int, int, int, bool]] = []
-            for i, sec in enumerate(offset_result):
-                title_path = sec.get("title_path") or sec.get("title") or ""
-                body = content[sec["start_offset"]:sec["end_offset"]]
-                try:
-                    er = embedder.embed_text(prefix=title_path, body=body, max_body_chars=max_section_chars)
-                    if not er.embedding:
-                        raise RuntimeError(
-                            f"section {i}: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
-                        )
-                    section_embeddings.append((i, er.embedding, int(er.truncated), er.original_tokens, er.used_tokens, True))
-                except Exception as exc:
-                    if split_decision == "split":
-                        self._mark_split_failed(
-                            mid, str(decision_content_hash), int(decision_memory_version),
-                            int(decision_split_revision), decision_split_status,
-                            "embedding", f"section {i}: {exc}",
-                        )
-                    return self.db.state.response({"error": f"section embedding failed at {i}: {exc}"}, ok=False)
-
-            # Atomic publish
-            try:
-                with self.db.write_transaction() as conn:
-                    # CAS
-                    cur = conn.execute(
-                        "SELECT status, content, version, split_status, split_revision FROM memories WHERE id = ?",
-                        (mid,),
-                    ).fetchone()
-                    if cur is None:
-                        raise ValueError("memory disappeared")
-                    if cur["status"] != "active":
-                        raise ValueError("memory_changed")
-                    if hashlib.sha256(str(cur["content"]).encode("utf-8")).hexdigest() != decision_content_hash:
-                        raise ValueError("memory_changed")
-                    if int(cur["version"]) != int(decision_memory_version):
-                        raise ValueError("memory_changed")
-                    if cur["split_status"] != decision_split_status:
-                        raise ValueError("split_revision_conflict")
-                    if int(cur["split_revision"]) != int(decision_split_revision):
-                        raise ValueError("split_revision_conflict")
-
-                    # Vec space check
-                    if MemoryDB._get_meta(conn, "state") != "ready":
-                        raise ValueError("vec_space_changed")
-                    active_space = MemoryDB._get_meta(conn, "active_space_id")
-                    if active_space != embedder.embedding_space_id:
-                        raise ValueError("vec_space_changed")
-
-                    # Delete old sections
-                    MemoryDB._delete_sections_for_memory(conn, mid)
-
-                    # v0.6.3: determine each section's provenance. content is
-                    # CAS-verified unchanged, so re-running the heading detector
-                    # gives the same result as prepare. If a section's title /
-                    # anchor is one of the document's own Markdown headings, the
-                    # caller used the parser output directly (no LLM); otherwise
-                    # the caller (or an LLM) supplied the title/anchor.
-                    heading_texts = {
-                        h[1] for h in self._detect_markdown_headings(content)
-                    }
-
-                    # Insert new sections + vecs
-                    for i, sec in enumerate(offset_result):
-                        em = section_embeddings[i]
-                        # First section has no anchor (starts at 0); judge by
-                        # title. Later sections judge by anchor_text. Strip a
-                        # leading "#"-prefix so "## beta" matches heading "beta".
-                        label = sec.get("anchor_text") or sec.get("title") or ""
-                        label = re.sub(r"^#{1,6}\s+", "", label).strip()
-                        provenance = "parser" if label in heading_texts else "agent"
-                        section_id = MemoryDB._insert_section(
-                            conn, mid, i,
-                            title=sec.get("title"),
-                            title_path=sec.get("title_path"),
-                            summary=sec.get("summary"),
-                            anchor_text=sec.get("anchor_text"),
-                            occurrence_index=sec.get("occurrence_index", 0),
-                            start_offset=sec["start_offset"],
-                            end_offset=sec["end_offset"],
-                            provenance=provenance,
-                            embedding_truncated=em[2],
-                            embedding_original_tokens=em[3],
-                            embedding_used_tokens=em[4],
-                        )
-                        MemoryDB._store_section_vec(conn, section_id, em[1])
-
-                    # Update status
-                    updated = conn.execute(
-                        "UPDATE memories SET split_status = 'active', "
-                        "split_revision = split_revision + 1 "
-                        "WHERE id = ? AND split_revision = ?",
-                        (mid, int(decision_split_revision)),
-                    )
-                    if updated.rowcount != 1:
-                        raise ValueError("split_revision_conflict")
-            except ValueError as e:
-                return self.db.state.response({"error": str(e)}, ok=False)
-
-            return self.db.state.response({
-                "split_active": True,
-                "memory_id": mid,
-                "section_count": len(offset_result),
-            })
+            # Delegate to the unified publish helper (v0.8.0). The Agent
+            # continuation/repair path is always provenance="agent"; the rules
+            # path (memory_write/edit) calls the same helper with "parser".
+            return self._publish_sections(
+                mid, content, sections,
+                str(decision_content_hash), int(decision_memory_version),
+                decision_split_status, int(decision_split_revision),
+                decision_kind=split_decision,
+                provenance="agent",
+            )
 
         return self.db.state.response({"error": f"unknown split_decision: {split_decision}"}, ok=False)
 

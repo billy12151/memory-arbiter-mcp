@@ -2261,8 +2261,13 @@ def test_v061_t7_channel5_candidate_has_split_status(tmp_path: Path) -> None:
     assert target_row["split_status"] == "active"
 
 
+@pytest.mark.xfail(reason="T2: zero-match returns full memory, not preview; this asserts the removed behaviour")
 def test_v061_t8_c4_long_content_zero_match_truncated(tmp_path: Path) -> None:
-    """T8/C4: a 50000-char split-active doc under zero-match returns ≤preview_chars."""
+    """T8/C4: a 50000-char split-active doc under zero-match returns ≤preview_chars.
+
+    SUPERSEDED by v0.8 §6.3 (zero-match returns the FULL memory, no preview).
+    T2 rewrites this to assert full-memory + content_scope=full_memory.
+    """
     tools = _make_channel6_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
@@ -2466,15 +2471,18 @@ def test_v061_t14_partial_branch_does_not_leak_full_content(tmp_path: Path) -> N
 # ===========================================================================
 
 
-def test_v061_provenance_parser_when_anchors_are_markdown_headings(tmp_path: Path) -> None:
-    """When the caller uses the document's own Markdown headings as section
-    titles/anchors, provenance='parser' (no LLM was needed)."""
+def test_v080_provenance_is_explicit_not_inferred(tmp_path: Path) -> None:
+    """v0.8 (§6.2): provenance is an explicit caller argument, not inferred
+    from whether an anchor happens to equal a Markdown heading. The
+    memory_split Agent path is always 'agent' regardless of whether the
+    caller reused the document's own heading text as a section title."""
     tools = make_vec_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
     _set_vec_ready(tools)
 
-    # A document with real Markdown headings.
+    # A document with real Markdown headings — but the caller goes through
+    # memory_split (the Agent continuation path), so provenance='agent'.
     content = (
         "# alpha\n" + ("x" * 60) + "\n\n"
         "## beta\n" + ("y" * 60)
@@ -2497,28 +2505,8 @@ def test_v061_provenance_parser_when_anchors_are_markdown_headings(tmp_path: Pat
 
     sections = tools.db.get_sections_by_memory(mid)
     assert len(sections) == 2
-    # Both sections use the document's own headings → parser.
-    assert sections[0]["provenance"] == "parser"
-    assert sections[1]["provenance"] == "parser"
-
-
-def test_v061_provenance_agent_when_anchors_are_not_headings(tmp_path: Path) -> None:
-    """When the caller supplies anchors that are NOT Markdown headings (e.g. an
-    LLM invented the section boundaries), provenance='agent'."""
-    tools = make_vec_tools(tmp_path)
-    tools._embedder = _keyword_embedder()
-    tools._embedder_loaded = True
-    _set_vec_ready(tools)
-
-    # No Markdown headings — just plain text with an anchor word.
-    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
-    mid = tools.memory_write(content=content, subject="plain-doc")["data"]["id"]
-    published = _publish_two_sections(tools, mid, content, "alpha", "beta")
-    assert published["ok"] is True
-
-    sections = tools.db.get_sections_by_memory(mid)
-    assert len(sections) == 2
-    # "alpha"/"beta" are plain-text anchors, not Markdown headings → agent.
+    # Even though the anchors ARE Markdown headings, the Agent path records
+    # provenance='agent' — the old heading-text heuristic is removed.
     assert sections[0]["provenance"] == "agent"
     assert sections[1]["provenance"] == "agent"
 

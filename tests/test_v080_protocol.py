@@ -370,7 +370,6 @@ def test_split_publish_agent_metadata_succeeds(tmp_path: Path) -> None:
     assert r["data"]["split_active"] is True
 
 
-@pytest.mark.xfail(reason="T1: max_section_chars not yet a hard publish gate")
 def test_split_publish_rejects_oversized_section(tmp_path: Path) -> None:
     """§6.2: a section slice exceeding max_section_chars → section_too_large."""
     tools = make_vec_tools(tmp_path)
