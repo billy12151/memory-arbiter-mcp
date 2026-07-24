@@ -3,6 +3,16 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.8.1] — 2026-07-24
+
+Docstring-only hotfix. Three MCP tool docstrings in `server.py` were stale relative to the v0.8.0 release (the `tools.py` method layer and README were already correct). Since MCP clients and AI agents derive tool descriptions from these docstrings at runtime, the drift could mislead callers. No behaviour change — 301 tests pass unchanged.
+
+### Fixed
+
+- **`memory_get`** — the docstring still described the pre-v0.8 behaviour ("section_ids empty → returns all sections"). Rewritten to the v0.8 contract: default `sections="catalog"`, `section_ids` precedence with `missing_section_ids`, `matched` rejected (no search context), and the returned `split` sub-object (`status` / `legacy_status` / `revision` / `section_count` / `content_hash`).
+- **`memory_split`** — documented the missing `decline` branch, the `allowed_decision` return values (`rebuild` for active records, `split` otherwise), the CAS snapshot checks on publish, and that provenance is fixed to `"agent"` (the rules path runs inside `memory_write`/`memory_edit`, not via this tool).
+- **`memory_recent`** — dropped the pre-v0.7.4 "specified workspace" wording; workspace is reserved metadata and does not filter results. The parameter remains for interface stability.
+
 ## [0.8.0] — 2026-07-23
 
 The section-split experience is internalized into the write path. Users only express "remember this"; structured long docs are split server-side, unstructured long docs are handed to the calling Agent's own LLM via a `split_request`. The Core never configures or calls an LLM provider, never does mechanical fallback, and never writes `pending`/`fallback_active`.
