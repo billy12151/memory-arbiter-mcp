@@ -115,7 +115,7 @@ pip install memory-arbiter-mcp
 Repo: [github.com/billy12151/memory-arbiter-mcp](https://github.com/billy12151/memory-arbiter-mcp)
 PyPI: [pypi.org/project/memory-arbiter-mcp](https://pypi.org/project/memory-arbiter-mcp/)
 
-It's MIT, fully local, and won't send your memory anywhere you don't want it to.
+It's Apache-2.0 licensed for the 0.8.2 line going forward, fully local, and won't send your memory anywhere you don't want it to.
 
 ---
 

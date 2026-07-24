@@ -117,7 +117,7 @@ pip install memory-arbiter-mcp
 仓库：[github.com/billy12151/memory-arbiter-mcp](https://github.com/billy12151/memory-arbiter-mcp)
 PyPI：[pypi.org/project/memory-arbiter-mcp](https://pypi.org/project/memory-arbiter-mcp/)
 
-MIT 协议，完全本地，不会把你的记忆发到任何你没同意的地方。
+0.8.2 及后续版本从现在起按 Apache-2.0 授权，完全本地，不会把你的记忆发到任何你没同意的地方。
 
 ---
 

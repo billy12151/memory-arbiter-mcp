@@ -544,7 +544,9 @@ python3.11 -m pytest
 
 ### License
 
-MIT
+Apache License 2.0. Copyright (c) 2026 张志维 (billy12151).
+
+Memory Arbiter version 0.8.2 and later are offered under Apache-2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
 
 ---
 
@@ -1076,4 +1078,6 @@ python3.11 -m pytest
 
 ### License
 
-MIT
+Apache License 2.0。版权所有 (c) 2026 张志维 (billy12151)。
+
+Memory Arbiter 0.8.2 及后续版本从现在起按 Apache-2.0 授权；此前已经按 MIT 分发的副本，其既有 MIT 授权继续有效（含 0.8.0 与 0.8.1）。0.8.2 之前版本按 MIT 发布。

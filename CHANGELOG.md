@@ -3,6 +3,23 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## License policy
+
+Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
+
+## [0.8.2] — 2026-07-24
+
+License switch release. Starting with this version, the project is offered under Apache License 2.0 going forward. See the License policy section above for the full statement.
+
+### Changed
+
+- **License: MIT → Apache-2.0** for version 0.8.2 and later. Prior versions (0.8.0, 0.8.1 and earlier) remain MIT; existing MIT grants for previously distributed copies stay valid.
+- **Copyright holder declared as 张志维 (billy12151)** — the real name behind the billy12151 handle. Applied consistently across `NOTICE`, `pyproject.toml` authors, and README license sections. Apache-2.0's reciprocal patent grant (§3) makes copyright-holder determinacy more material than under MIT, which is why the real name is used while the handle is retained in parentheses as a brand reference.
+- `LICENSE` replaced with the Apache License 2.0 full text; `NOTICE` added.
+- `server.json` MCP registry metadata updated: top-level `license` MIT → Apache-2.0.
+
+No code or behaviour changes. 301 tests pass unchanged.
+
 ## [0.8.1] — 2026-07-24
 
 Docstring-only hotfix. Three MCP tool docstrings in `server.py` were stale relative to the v0.8.0 release (the `tools.py` method layer and README were already correct). Since MCP clients and AI agents derive tool descriptions from these docstrings at runtime, the drift could mislead callers. No behaviour change — 301 tests pass unchanged.
