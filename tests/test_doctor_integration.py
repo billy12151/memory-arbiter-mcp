@@ -25,6 +25,11 @@ from memory_arbiter.doctor import (
     _check_orphan_sections,
     _check_orphan_vectors,
     _check_section_vec_coverage,
+    _check_split_backlog,
+    _check_split_failed,
+    _check_split_index_integrity,
+    _check_split_legacy_declined,
+    _check_split_legacy_unknown_status,
     doctor_overview_cli,
     doctor_overview_mcp,
     run_all_checks,
@@ -368,3 +373,152 @@ class TestConfigReadyDataNotReady:
         link3 = next(f for f in report.findings if f.check_id == "vec.link3.extension_loaded")
         assert link3.evidence["vec_table_exists"] is False
         assert "尚未创建" in link3.detail
+
+
+# =====================================================================
+#  v0.8.0 split findings (design doc §6.5) — crafted pathological data.
+#  These checks existed but had ZERO data-driven coverage; this block is the
+#  "never trust SQL that hasn't run against crafted data" gate for them.
+# =====================================================================
+
+def _make_split_conn() -> sqlite3.Connection:
+    """Schema with the columns the v0.8 split checks touch (split_status,
+    split_revision, metadata, section offsets, a vec-id table). Hand-built so
+    we can craft states the normal write path would never produce."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE memories(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT, status TEXT DEFAULT 'active',
+            version INTEGER NOT NULL DEFAULT 1,
+            split_status TEXT, split_revision INTEGER NOT NULL DEFAULT 0,
+            metadata TEXT);
+        CREATE TABLE memory_sections(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id INTEGER NOT NULL,
+            section_index INTEGER NOT NULL, start_offset INTEGER NOT NULL,
+            end_offset INTEGER NOT NULL);
+        CREATE TABLE memory_sections_vec(id INTEGER PRIMARY KEY);
+        CREATE TABLE _vec_index_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    """)
+    return conn
+
+
+class TestSplitIndexIntegrity:
+    def test_active_but_no_sections_reported(self):
+        """active memory, split_status='active', but zero section rows → warn."""
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO memories(id, status, split_status) VALUES (1,'active','active')")
+        conn.commit()
+        f = _check_split_index_integrity(conn, _settings(Path(".")))
+        assert f.status == "warn"
+        assert f.severity == Severity.WARNING
+        probs = [i["problem"] for i in f.evidence["issues"]]
+        assert "active_but_no_sections" in probs
+
+    def test_missing_section_vec_reported(self):
+        """active+active memory with a section row but no matching vec row → warn."""
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO memories(id, status, split_status) VALUES (1,'active','active')")
+        # section id=10 has no vec row; section id=11 has a matching vec row (clean).
+        conn.execute("INSERT INTO memory_sections(id, memory_id, section_index, start_offset, end_offset) VALUES (10,1,0,0,5),(11,1,1,5,10)")
+        conn.execute("INSERT INTO memory_sections_vec(id) VALUES (11)")
+        conn.commit()
+        f = _check_split_index_integrity(conn, _settings(Path(".")))
+        assert f.status == "warn"
+        missing = [i for i in f.evidence["issues"] if i["problem"] == "missing_section_vec"]
+        assert len(missing) == 1
+        assert missing[0]["memory_id"] == 1
+        assert missing[0]["missing"] == 1   # only section 10 is missing its vec
+
+    def test_non_positive_section_length_reported(self):
+        """a section with end_offset <= start_offset → offset anomaly warn."""
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO memories(id, status, split_status) VALUES (1,'active','active')")
+        conn.execute("INSERT INTO memory_sections(id, memory_id, section_index, start_offset, end_offset) VALUES (10,1,0,5,5)")
+        conn.commit()
+        f = _check_split_index_integrity(conn, _settings(Path(".")))
+        assert f.status == "warn"
+        probs = [i["problem"] for i in f.evidence["issues"]]
+        assert "non_positive_section_length" in probs
+
+    def test_clean_active_memory_not_reported(self):
+        """active+active memory with 2 well-formed sections + vec rows → pass."""
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO memories(id, status, split_status) VALUES (1,'active','active')")
+        conn.execute("INSERT INTO memory_sections(id, memory_id, section_index, start_offset, end_offset) VALUES (10,1,0,0,5),(11,1,1,5,10)")
+        conn.execute("INSERT INTO memory_sections_vec(id) VALUES (10),(11)")
+        conn.commit()
+        f = _check_split_index_integrity(conn, _settings(Path(".")))
+        assert f.status == "pass"
+        assert f.evidence["issue_count"] == 0
+
+
+class TestSplitLegacyStatuses:
+    def test_unknown_legacy_status_reported(self):
+        """a memory with split_status='pending' (non-v0.8) → legacy_unknown_status warn."""
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO memories(id, status, split_status) VALUES (1,'active','pending')")
+        conn.commit()
+        f = _check_split_legacy_unknown_status(conn, _settings(Path(".")))
+        assert f.status == "warn"
+        assert f.severity == Severity.WARNING
+        assert f.evidence["unknown_status_count"] == 1
+        assert f.evidence["by_status"]["pending"] == 1
+
+    def test_declined_reported_as_legacy(self):
+        """historical 'declined' → legacy_declined (info/warn, NOT a failure)."""
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO memories(id, status, split_status) VALUES (1,'active','declined')")
+        conn.commit()
+        f = _check_split_legacy_declined(conn, _settings(Path(".")))
+        assert f.evidence["legacy_declined_count"] == 1
+        assert 1 in f.evidence["sample_memory_ids"]
+        # declined is historical/compat, not a v0.8 failure status
+        assert f.severity == Severity.INFO
+
+    def test_clean_statuses_not_reported(self):
+        """only v0.8 statuses (NULL/active/failed/declined) → unknown-status pass."""
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO memories(id, status, split_status) VALUES (1,'active','active'),(2,'active','failed'),(3,'active','declined'),(4,'active',NULL)")
+        conn.commit()
+        fu = _check_split_legacy_unknown_status(conn, _settings(Path(".")))
+        assert fu.status == "pass"
+        assert fu.evidence["unknown_status_count"] == 0
+
+
+class TestSplitFailed:
+    def test_failed_with_error_metadata_reported(self):
+        """split_status='failed' → failed_count warn, with last_split_error surfaced."""
+        import json as _json
+        conn = _make_split_conn()
+        meta = _json.dumps({"_split": {"last_split_error": {"stage": "embedding", "message": "boom"}}})
+        conn.execute("INSERT INTO memories(id, status, split_status, metadata) VALUES (1,'active','failed',?)", (meta,))
+        conn.commit()
+        f = _check_split_failed(conn, _settings(Path(".")))
+        assert f.status == "warn"
+        assert f.severity == Severity.WARNING
+        assert f.evidence["failed_count"] == 1
+        assert f.evidence["recent"][0]["last_split_error"]["stage"] == "embedding"
+
+
+class TestSplitBacklog:
+    def test_long_null_content_reported_when_vec_ready(self):
+        """vec ready + active + content≥threshold + split_status NULL → backlog."""
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO _vec_index_meta(key, value) VALUES ('state','ready')")
+        conn.execute("INSERT INTO memories(id, status, split_status, content) VALUES (1,'active',NULL,?)", ("x" * 100,))
+        conn.commit()
+        s = _settings(Path("."), split_threshold=10)
+        f = _check_split_backlog(conn, s)
+        assert f.evidence["backlog_count"] == 1
+        assert 1 in f.evidence["sample_memory_ids"]
+
+    def test_backlog_not_applicable_when_vec_not_ready(self):
+        """vec not ready → backlog check returns n/a (capability down, not a split failure)."""
+        conn = _make_split_conn()
+        # state not set → not ready
+        conn.execute("INSERT INTO memories(id, status, split_status, content) VALUES (1,'active',NULL,?)", ("x" * 100,))
+        conn.commit()
+        f = _check_split_backlog(conn, _settings(Path("."), split_threshold=10))
+        assert f.status == "n/a"

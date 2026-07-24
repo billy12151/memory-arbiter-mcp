@@ -122,6 +122,36 @@ def _content_with_fenced_fake_heading() -> str:
     )
 
 
+def _content_with_colliding_heading_in_fence() -> str:
+    """A real heading whose raw_line ALSO appears inside an EARLIER fence.
+
+    Regression guard for the silent mis-segmentation fixed in v0.8.0: the rules
+    parser is fence-aware, but offset re-location was a raw substring search
+    (not fence-aware), so it silently picked the fenced occurrence as the
+    boundary. The boundary must sit at the REAL heading.
+    """
+    return (
+        "# 真标题一\n" + ("alpha 正文 " * 30) + "\n\n"
+        "```python\n## 重复标题\nfoo = 1\nbar = 2\n```\n\n"
+        "## 重复标题\n" + ("beta 正文 " * 30)
+    )
+
+
+def _content_with_colliding_heading_in_body() -> str:
+    """A real heading whose raw_line ALSO appears earlier as a body substring.
+
+    Same regression class as the fence variant: the parser ignores the body
+    mention (the line does not start with ``#``), but a raw substring search
+    would locate it first.
+    """
+    return (
+        "# 真标题一\n"
+        "注意：下方 see ## 重复标题 那段是正文引用，不是标题。\n"
+        + ("alpha 正文 " * 30) + "\n\n"
+        "## 重复标题\n" + ("beta 正文 " * 30)
+    )
+
+
 # ==================================================================
 #  §2.1 / §6.5 — Registry: which tools exist
 # ==================================================================
@@ -265,6 +295,67 @@ def test_write_rules_split_ignores_fenced_code_headings(tmp_path: Path) -> None:
     assert len(sections) == 2, f"rules split must yield 2 real headings, got {len(sections)}"
     titles = [s["title"] for s in sections]
     assert "代码块里的假标题" not in titles
+
+
+def test_write_rules_split_boundary_at_real_heading_not_fence(tmp_path: Path) -> None:
+    """§7.1/§7.3 regression: a heading raw_line that ALSO appears inside an
+    earlier fence must still split at the REAL heading.
+
+    Before the v0.8.0 fix the parser was fence-aware but offset re-location was
+    a raw substring search, so it silently picked the fenced occurrence — the
+    continuity/coverage check still passed, producing a section whose title did
+    not match its body. This test pins the boundary to the real heading.
+    """
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    content = _content_with_colliding_heading_in_fence()
+    r = tools.memory_write(content=content, subject="doc")
+    assert r["ok"] is True
+    mem = tools.db.get_memory(r["data"]["id"])
+    assert mem["split_status"] == "active"
+    sections = tools.db.get_sections_by_memory(mem["id"])
+    assert len(sections) == 2
+    stored = mem["content"]
+    fence_off = stored.find("## 重复标题\nfoo = 1")
+    real_off = stored.find("## 重复标题\nbeta 正文")
+    assert fence_off != -1 and real_off != -1 and fence_off < real_off
+    # The boundary MUST be the real heading, never the fenced occurrence.
+    assert sections[1]["start_offset"] == real_off
+    assert sections[1]["start_offset"] != fence_off
+    sec0 = stored[sections[0]["start_offset"]:sections[0]["end_offset"]]
+    sec1 = stored[sections[1]["start_offset"]:sections[1]["end_offset"]]
+    assert "beta 正文" not in sec0          # real heading's body not leaked into sec 0
+    assert sec1.startswith("## 重复标题")    # sec 1 starts at the real heading
+    assert "beta 正文" in sec1
+    assert "foo = 1" not in sec1             # fence content stays in sec 0
+
+
+def test_write_rules_split_boundary_at_real_heading_not_body(tmp_path: Path) -> None:
+    """Same regression class as the fence variant, but the colliding text is a
+    body substring (a line that does not start with ``#``). The body mention
+    must not become the boundary either."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    content = _content_with_colliding_heading_in_body()
+    r = tools.memory_write(content=content, subject="doc")
+    assert r["ok"] is True
+    mem = tools.db.get_memory(r["data"]["id"])
+    assert mem["split_status"] == "active"
+    sections = tools.db.get_sections_by_memory(mem["id"])
+    assert len(sections) == 2
+    stored = mem["content"]
+    body_off = stored.find("see ## 重复标题")
+    real_off = stored.find("## 重复标题\nbeta 正文")
+    assert body_off != -1 and real_off != -1 and body_off < real_off
+    assert sections[1]["start_offset"] == real_off
+    assert sections[1]["start_offset"] != body_off
+    sec1 = stored[sections[1]["start_offset"]:sections[1]["end_offset"]]
+    assert sec1.startswith("## 重复标题")
+    assert "beta 正文" in sec1
 
 
 def test_write_single_heading_yields_split_request(tmp_path: Path) -> None:
@@ -624,3 +715,343 @@ def test_config_has_no_split_llm_fallback() -> None:
     assert "split_llm_fallback" not in fields
     assert "llm_provider" not in fields
     assert "llm_model" not in fields
+
+
+# ==================================================================
+#  Coverage backfill — closes review gaps G3–G12 (non-blocking debt).
+#  Each block is labelled with its gap id from the v0.8.0 review report.
+# ==================================================================
+
+def _vec_tools(tmp_path: Path) -> MemoryTools:
+    """vec-ready tools with the keyword embedder wired in (common setup)."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    return tools
+
+
+def _publish_agent_sections(tools: MemoryTools, mid: int, sections: list[dict]) -> dict:
+    """Publish agent-authored sections against the current memory snapshot."""
+    mem = tools.db.get_memory(mid)
+    ch = hashlib.sha256((mem["content"] or "").encode("utf-8")).hexdigest()
+    return tools.memory_split(
+        memory_id=mid, split_decision="split",
+        decision_content_hash=ch, decision_memory_version=mem["version"],
+        decision_split_status=mem["split_status"], decision_split_revision=mem["split_revision"],
+        sections=sections,
+    )
+
+
+def _two_heading_doc() -> str:
+    return "# 第一章\n" + ("alpha 内容 " * 40) + "\n# 第二章\n" + ("beta 内容 " * 40)
+
+
+# ---- G3: write-time count / size gates → split_request ----------------------
+
+def test_write_exceeds_max_sections_returns_split_request(tmp_path: Path) -> None:
+    """G3: > max_sections headings → split_request with rule_section_count_out_of_range."""
+    tools = _vec_tools(tmp_path)
+    tools.settings.max_sections = 3
+    content = "\n\n".join(f"# 标题 {i}\n正文 {i}" for i in range(5))  # 5 headings
+    r = tools.memory_write(content=content, subject="doc")
+    mem = tools.db.get_memory(r["data"]["id"])
+    assert mem["split_status"] is None                      # NOT failed, NOT pending
+    sp = r["data"]["split"]
+    assert sp["applied"] is False and sp["mode"] == "agent_semantic"
+    assert sp["reason"] == "rule_section_count_out_of_range"
+    assert r["data"]["split_request"]["reason"] == "rule_section_count_out_of_range"
+
+
+def test_write_candidate_section_too_large_returns_split_request(tmp_path: Path) -> None:
+    """G3: a section slice > max_section_chars → split_request with rule_section_too_large."""
+    tools = _vec_tools(tmp_path)
+    tools.settings.max_section_chars = 20
+    content = "# 标题一\n" + ("alpha正文 " * 30) + "\n# 标题二\nbeta 正文"
+    r = tools.memory_write(content=content, subject="doc")
+    mem = tools.db.get_memory(r["data"]["id"])
+    assert mem["split_status"] is None
+    sp = r["data"]["split"]
+    assert sp["applied"] is False
+    assert sp["reason"] == "rule_section_too_large"
+    assert tools.db.get_sections_by_memory(mem["id"]) == []  # nothing published
+
+
+# ---- G4: content edit re-runs the split decision ----------------------------
+
+def test_edit_content_re_splits_via_rules(tmp_path: Path) -> None:
+    """G4: editing content to a rules-publishable doc re-splits synchronously."""
+    tools = _vec_tools(tmp_path)
+    mid = tools.memory_write(content="短初始内容", subject="doc")["data"]["id"]
+    assert tools.db.get_memory(mid)["split_status"] is None
+    r = tools.memory_edit(memory_id=mid, new_content=_two_heading_doc())
+    assert r["ok"] is True
+    mem = tools.db.get_memory(mid)
+    assert mem["split_status"] == "active"
+    assert len(tools.db.get_sections_by_memory(mid)) == 2
+    assert r["data"]["split"]["mode"] == "rules" and r["data"]["split"]["applied"] is True
+
+
+def test_edit_content_to_unstructured_returns_split_request(tmp_path: Path) -> None:
+    """G4: editing an active-split doc to unstructured long → clears sections, split_request."""
+    tools = _vec_tools(tmp_path)
+    mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    assert tools.db.get_memory(mid)["split_status"] == "active"
+    assert len(tools.db.get_sections_by_memory(mid)) == 2
+    r = tools.memory_edit(memory_id=mid, new_content="无标题纯文本 " * 400)
+    assert r["ok"] is True
+    mem = tools.db.get_memory(mid)
+    assert mem["split_status"] is None
+    assert tools.db.get_sections_by_memory(mid) == []
+    assert r["data"]["split"]["action_required"] == "memory_split"
+    assert "split_request" in r["data"]
+
+
+# ---- G5: tags-only edit on an active-split memory ---------------------------
+
+def test_tags_only_edit_preserves_active_split_index(tmp_path: Path) -> None:
+    """G5: tags-only edit on an already-split memory leaves sections/revision untouched."""
+    tools = _vec_tools(tmp_path)
+    mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    before = tools.db.get_memory(mid)
+    before_rev = before["split_revision"]
+    before_secs = tools.db.get_sections_by_memory(mid)
+    assert before["split_status"] == "active"
+    r = tools.memory_edit(memory_id=mid, tags_only=True, add_tags=["newtag"])
+    assert r["ok"] is True
+    after = tools.db.get_memory(mid)
+    assert after["split_status"] == "active"
+    assert after["split_revision"] == before_rev                 # revision unchanged
+    assert tools.db.get_sections_by_memory(mid) == before_secs   # same sections
+    assert "split_request" not in r["data"]                      # no Agent request
+    assert r["data"].get("split", {}).get("action_required") is None
+    assert "newtag" in r["data"]["tags"]
+
+
+# ---- G6: CAS rejects when any single snapshot field is stale -----------------
+
+@pytest.mark.parametrize("field,value,expect", [
+    ("decision_content_hash", "0" * 64, "memory_changed"),
+    ("decision_memory_version", 99999, "memory_changed"),
+    ("decision_split_status", "failed", "split_revision_conflict"),
+    ("decision_split_revision", 99999, "split_revision_conflict"),
+])
+def test_split_publish_rejects_each_stale_snapshot_field(
+    tmp_path: Path, field, value, expect,
+) -> None:
+    """G6: changing any one of the four CAS fields rejects the publish."""
+    tools = _vec_tools(tmp_path)
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    mem = tools.db.get_memory(mid)
+    ch = hashlib.sha256((mem["content"] or "").encode("utf-8")).hexdigest()
+    kwargs = dict(
+        memory_id=mid, split_decision="split",
+        decision_content_hash=ch, decision_memory_version=mem["version"],
+        decision_split_status=mem["split_status"], decision_split_revision=mem["split_revision"],
+        sections=[{"title": "a"}, {"title": "b", "anchor_text": "beta", "occurrence_index": 0}],
+    )
+    kwargs[field] = value
+    r = tools.memory_split(**kwargs)
+    assert r["ok"] is False
+    assert expect in str(r["data"].get("error", ""))
+
+
+# ---- G7: partial search joins multiple matched sections ---------------------
+
+def test_search_partial_joins_multiple_matched_sections(tmp_path: Path) -> None:
+    """G7: when ≥2 sections match, content is their full bodies joined by blank line."""
+    tools = _vec_tools(tmp_path)
+    content = ("alpha 内容一 " * 20) + "\n" + ("alpha 内容二 " * 20) + "\n" + ("beta 内容三 " * 20)
+    mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    pub = _publish_agent_sections(tools, mid, [
+        {"title": "一"},
+        {"title": "二", "anchor_text": "alpha 内容二", "occurrence_index": 0},
+        {"title": "三", "anchor_text": "beta 内容三", "occurrence_index": 0},
+    ])
+    assert pub["ok"] is True and pub["data"]["section_count"] == 3
+    r = tools.memory_search(query="alpha", query_embedding=_keyword_embedding("alpha"))
+    hit = next(x for x in r["data"]["results"] if x["id"] == mid)
+    assert hit["content_scope"] == "matched_sections"
+    assert hit["matched_section_count"] == 2
+    assert hit["total_section_count"] == 3
+    ms = hit["matched_sections"]
+    assert [m["section_index"] for m in ms] == [0, 1]           # joined in index order
+    assert hit["content"] == ms[0]["content"] + "\n\n" + ms[1]["content"]
+
+
+# ---- G8: Core defers all LLM work on the split_request path -----------------
+
+class _SpyEmbedder:
+    """Wraps an embedder and counts embed_text calls."""
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = 0
+        self.embedding_space_id = inner.embedding_space_id
+        self.last_encode_error = None
+
+    def embed_text(self, prefix="", body="", max_body_chars=None):
+        self.calls += 1
+        return self._inner.embed_text(prefix=prefix, body=body, max_body_chars=max_body_chars)
+
+
+def test_split_request_path_makes_no_embedder_call(tmp_path: Path) -> None:
+    """G8: the split_request (unstructured) path defers ALL section/LLM work to the
+    agent. Core must not attempt any — a spy on the only external component records
+    zero calls, and the response explicitly flags extra_llm_call_required."""
+    tools = _vec_tools(tmp_path)
+    spy = _SpyEmbedder(_keyword_embedder())
+    tools._embedder = spy
+    r = tools.memory_write(content="无标题纯文本内容 " * 400, subject="plain")
+    assert r["ok"] is True
+    sp = r["data"]["split"]
+    assert sp["action_required"] == "memory_split"
+    assert sp["extra_llm_call_required"] is True
+    assert spy.calls == 0          # Core did no section / LLM work itself
+
+
+# ---- G9: every publish-failure mode leaves the original content readable -----
+
+def test_split_missing_anchor_keeps_original_content(tmp_path: Path) -> None:
+    """G9: a non-first section with no anchor → offset fail, original intact."""
+    tools = _vec_tools(tmp_path)
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    mem = tools.db.get_memory(mid)
+    r = tools.memory_split(
+        memory_id=mid, split_decision="split",
+        decision_content_hash=hashlib.sha256((mem["content"] or "").encode("utf-8")).hexdigest(),
+        decision_memory_version=mem["version"], decision_split_status=mem["split_status"],
+        decision_split_revision=mem["split_revision"],
+        sections=[{"title": "a"}, {"title": "b"}],   # b has no anchor_text
+    )
+    assert r["ok"] is False
+    assert tools.db.get_memory(mid)["content"] == content       # original intact
+    assert tools.db.get_sections_by_memory(mid) == []           # nothing published
+
+
+def test_split_oversized_section_keeps_original_content(tmp_path: Path) -> None:
+    """G9: section_too_large rejection leaves the original content readable."""
+    tools = _vec_tools(tmp_path)
+    tools.settings.max_section_chars = 10
+    content = "alpha " + ("x" * 200) + "\n" + "beta " + ("y" * 200)
+    mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    r = _publish_agent_sections(tools, mid, [
+        {"title": "a"}, {"title": "b", "anchor_text": "beta", "occurrence_index": 0},
+    ])
+    assert r["ok"] is False and "section_too_large" in str(r["data"].get("error", ""))
+    assert tools.db.get_memory(mid)["content"] == content
+    assert tools.db.get_sections_by_memory(mid) == []
+
+
+def test_split_embedding_failure_keeps_original_content(tmp_path: Path) -> None:
+    """G9: an embedder that returns empty → embedding failure, original intact."""
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _MockManagedEmbedder(lambda text: [])   # always empty embedding
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    content = "alpha " + ("x" * 60) + "\n" + "beta " + ("y" * 60)
+    mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    r = _publish_agent_sections(tools, mid, [
+        {"title": "a"}, {"title": "b", "anchor_text": "beta", "occurrence_index": 0},
+    ])
+    assert r["ok"] is False and "embedding" in str(r["data"].get("error", ""))
+    assert tools.db.get_memory(mid)["content"] == content
+    assert tools.db.get_sections_by_memory(mid) == []
+
+
+# ---- G10: catalog + sections=all expose embedding diagnostics ---------------
+
+def test_get_catalog_and_all_expose_embedding_diagnostics(tmp_path: Path) -> None:
+    """G10: the diagnostic surfaces (catalog/get all/doctor) DO carry embedding
+    budget fields, unlike ordinary search matched_sections."""
+    tools = _vec_tools(tmp_path)
+    mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    assert tools.db.get_memory(mid)["split_status"] == "active"
+    diag_keys = ("embedding_truncated", "embedding_original_tokens", "embedding_used_tokens")
+    cat = tools.memory_get(memory_id=mid, sections="catalog")["data"]["section_catalog"]
+    for e in cat:
+        for k in diag_keys:
+            assert k in e
+    allr = tools.memory_get(memory_id=mid, sections="all")["data"]["sections"]
+    for s in allr:
+        for k in diag_keys:
+            assert k in s
+
+
+# ---- G11: legacy split.enabled / preview_chars warn + ignore ----------------
+
+def test_legacy_split_config_keys_warned_and_ignored(tmp_path: Path, monkeypatch) -> None:
+    """G11: an old config with split.enabled + section_zero_match_preview_chars
+    starts up, ignores both keys, and emits exactly two deprecation warnings."""
+    import json as _json
+    cfg = {
+        "db_path": str(tmp_path / "legacy.sqlite3"),
+        "backup_jsonl": str(tmp_path / "legacy.jsonl"),
+        "split": {
+            "enabled": True, "threshold": 4000,
+            "section_zero_match_preview_chars": 2000, "max_section_chars": 3600,
+        },
+    }
+    cfg_path = tmp_path / "legacy.json"
+    cfg_path.write_text(_json.dumps(cfg), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+    s = Settings.from_env()
+    assert not hasattr(s, "split_enabled")
+    assert s.split_threshold == 4000 and s.max_section_chars == 3600   # other keys still parsed
+    warns = [w for w in s.config_warnings if "removed in v0.8" in w]
+    assert len(warns) == 2
+    assert any("split.enabled" in w for w in warns)
+    assert any("section_zero_match_preview_chars" in w for w in warns)
+
+
+# ---- G12: parser edge cases (preamble / title_path / CRLF / empty title) ----
+
+def test_rules_split_preamble_folded_into_first_section(tmp_path: Path) -> None:
+    """G12: text before the first heading is part of section 0 (start_offset 0)."""
+    tools = _vec_tools(tmp_path)
+    content = "这是前言 preamble\n# 第一章\n" + ("alpha 内容 " * 30) + "\n# 第二章\n" + ("beta 内容 " * 30)
+    mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    secs = tools.db.get_sections_by_memory(mid)
+    assert len(secs) == 2
+    assert secs[0]["start_offset"] == 0
+    stored = tools.db.get_memory(mid)["content"]
+    assert stored[secs[0]["start_offset"]:secs[0]["end_offset"]].startswith("这是前言")
+
+
+def test_rules_split_title_path_for_nested_headings(tmp_path: Path) -> None:
+    """G12: a nested heading carries a title_path of its ancestor chain."""
+    tools = _vec_tools(tmp_path)
+    content = "# 父级\n" + ("alpha 内容 " * 30) + "\n## 子级\n" + ("beta 内容 " * 30)
+    mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    secs = tools.db.get_sections_by_memory(mid)
+    assert len(secs) == 2
+    # section 1 is the nested ## 子级 under # 父级
+    assert secs[1]["title_path"] == "父级 / 子级"
+    assert secs[0]["title_path"] is None      # top-level heading has no path
+
+
+def test_rules_split_handles_crlf_line_endings(tmp_path: Path) -> None:
+    """G12: CRLF (\\r\\n) line endings still parse into 2 sections."""
+    tools = _vec_tools(tmp_path)
+    content = "# 第一章\r\n" + ("alpha 内容 " * 30) + "\r\n# 第二章\r\n" + ("beta 内容 " * 30)
+    mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    mem = tools.db.get_memory(mid)
+    assert mem["split_status"] == "active"
+    secs = tools.db.get_sections_by_memory(mid)
+    assert len(secs) == 2
+    # full coverage with CRLF preserved
+    stored = mem["content"]
+    assert stored[secs[0]["start_offset"]:secs[0]["end_offset"]] + stored[secs[1]["start_offset"]:secs[1]["end_offset"]] == stored
+
+
+def test_empty_title_heading_is_not_a_section(tmp_path: Path) -> None:
+    """G12: a '## ' line with no title text is not a heading → with only one real
+    heading left, the write returns a split_request rather than crashing."""
+    tools = _vec_tools(tmp_path)
+    content = "## \n正文\n# 唯一真标题\n" + ("alpha 内容 " * 30)
+    r = tools.memory_write(content=content, subject="doc")
+    mem = tools.db.get_memory(r["data"]["id"])
+    assert mem["split_status"] is None                 # only 1 valid heading → no publish
+    assert r["data"]["split"]["action_required"] == "memory_split"
+    assert tools.db.get_sections_by_memory(mem["id"]) == []

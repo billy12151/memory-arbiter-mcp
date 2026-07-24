@@ -417,6 +417,7 @@ memory_get(memory_id)                                  ← fetch full text if ne
 
 > **Good to know:**
 > - **`memory_write` auto-splits on write.** It detects Markdown headings at write time and rule-splits structured documents synchronously — no agent round-trip. Only unstructured long prose (no heading / single heading / over `max_section_chars` / over `max_sections`) returns a `split_request` for the agent to continue with its own LLM. Don't pre-call `memory_split` on ordinary writes.
+> - **Auto-continue silently on `split_request`.** Receiving a `split_request` (with `action_required=memory_split`) is an **internal** signal, not a user step. Read the full `content` it carries, generate section metadata with your own LLM, and publish via `memory_split` — do not surface the prepare/publish/offset protocol to the user.
 > - **Search never degrades.** If the vector index is temporarily unavailable, `memory_search` returns the full memory (`content_scope=full_memory`) — you lose section precision but search keeps working.
 > - **Context-window overflow stays as backlog.** If the full original content exceeds the current agent LLM's context window, do **not** truncate or mechanically chunk it — leave `split_status=NULL` and let `doctor` record it as a `long-unsplit` backlog entry.
 > - **Edit clears sections.** A content `memory_edit` clears the old derived section index and resets split status, then re-runs rule-based splitting on the new content.
@@ -487,7 +488,7 @@ Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbi
 | `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | Section Vec cosine distance cutoff. Calibrated on embeddinggemma-300m; re-calibrate if you switch models. |
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | Return full text when ≥X% of sections match. |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory (min 2). |
-| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding input. |
+| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding input; v0.8.0 also rejects publish with `section_too_large` if a section slice exceeds it (hard gate). |
 
 **Environment variables** — keep per-client identity in each MCP client's env block. Some fields also have config-file equivalents, but config wins; use env here when the value must differ by client/session.
 
@@ -530,6 +531,7 @@ It runs **18 read-only checks** across five dimensions, each with a severity (`i
 - **Config integrity** — parse warnings, write-probe result, degradation mode (`jsonl_backup` = silently losing data = critical).
 - **Vector-enablement chain** — the highest-value check. "Is semantic recall actually on?" is not a boolean; it walks five links (model configured → `vec.enabled` → extension loaded → model usable → auto flags) and short-circuits at the first break, telling you exactly which link is down and how to fix it. Catches the classic "I configured a model but recall still doesn't work" case (usually `vec.enabled=false`).
 - **Split, consistency, capacity** — section-split state, orphaned sections/vectors, version-chain breaks, open-conflict buildup, history bloat, DB size.
+- **Section-split detail (v0.8.0)** — when vec is ready, doctor reports six split checks: `split.capability` (vec/embedder available), `split.long_unsplit_backlog` (active long docs still at `split_status=NULL`), `split.failed_count` (with recent error summaries), `split.legacy_declined`, `split.legacy_unknown_status` (legacy `pending`/`fallback_active` surfaced read-only), and `split.index_integrity` (orphaned/overlapping/non-covering offsets, missing section vectors). Backlog/failed/legacy findings return sample memory IDs you can feed straight into `memory_split` for repair.
 
 Exit codes: `0` clean / `1` has warnings / `2` has criticals — usable in scripts and CI. If the DB can't be opened at all, doctor degrades to a single critical report instead of crashing (that's the whole point of an ambulance). The same engine is exposed as the `memory_doctor_overview` MCP tool for in-conversation use; the CLI just trades the MCP runtime state for a slightly less precise static inference (noted in the report).
 
@@ -947,6 +949,7 @@ memory_get(memory_id)                                  ← 需要时取全文
 
 > **值得知道的：**
 > - **`memory_write` 写入时自动分段。** 它在写入时检测 Markdown 标题，对结构化文档同步规则分段——不需要 agent 往返。只有无结构长文（无标题 / 单标题 / 超 `max_section_chars` / 超 `max_sections`）才会返回 `split_request`，让 agent 用自身 LLM 续接。普通写入不要预先调 `memory_split`。
+> - **收到 `split_request` 就静默自动续接。** 收到 `split_request`（带 `action_required=memory_split`）是**内部**信号，不是用户操作步骤。用它携带的完整 `content`，结合 agent 自身 LLM 生成段落元数据，再通过 `memory_split` 发布——不要把 prepare/publish/offset 协议暴露给用户。
 > - **检索永不退化。** 如果向量索引临时不可用，`memory_search` 直接返回完整 memory（`content_scope=full_memory`）——丢的是段落精度，但检索照常工作。
 > - **上下文窗口超限就留作 backlog。** 如果完整原文超出当前 agent LLM 的上下文窗口，**不要**截断或机械切块——保持 `split_status=NULL`，由 `doctor` 记录为 `long-unsplit` backlog。
 > - **编辑会清空段落。** 对 content 跑 `memory_edit` 会清空旧的派生段落索引并重置分段状态，然后对新内容重跑规则分段。
@@ -1017,7 +1020,7 @@ memory_get(memory_id)                                  ← 需要时取全文
 | `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | section Vec 余弦距离上限。基于 embeddinggemma-300m 校准，换模型需重校准。 |
 | `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比达到此值时返回全文。 |
 | `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大段数（最小 2）。 |
-| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入字符上限。 |
+| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入字符上限；v0.8.0 起同时也是发布硬门——任一段落切片超限会以 `section_too_large` 拒绝发布。 |
 
 **环境变量**——每客户端身份建议放在各自 MCP env 段。部分字段也有配置文件对应项，但 config 优先；当某个值必须按客户端/会话变化时再放 env。
 
@@ -1060,6 +1063,7 @@ memory-arbiter doctor --db PATH    # 诊断另一个 DB（灾祸恢复）
 - **配置完整性** —— 解析告警、写探针结果、降级模式（`jsonl_backup` = 正在静默丢数据 = critical）。
 - **向量化启用链** —— 最高价值的检查。"语义召回到底开没开？"不是布尔值；它走五环链（配置了模型 → `vec.enabled` → 扩展已加载 → 模型可用 → auto 开关），在第一处断裂处短路，明确告诉你哪一环断了、怎么修。专治"我明明配了模型，召回怎么还是不准"（通常是 `vec.enabled=false`）。
 - **分段、一致性、容量** —— 分段状态、孤儿分段/向量、版本链断链、open 冲突堆积、历史快照膨胀、DB 容量。
+- **分段明细（v0.8.0）** —— vec ready 时，doctor 报告六项分段检查：`split.capability`（vec/embedder 可用性）、`split.long_unsplit_backlog`（长内容但仍 `split_status=NULL` 的 active 记录）、`split.failed_count`（带最近错误摘要）、`split.legacy_declined`、`split.legacy_unknown_status`（历史 `pending`/`fallback_active` 只读暴露）、`split.index_integrity`（孤儿/重叠/不连续/不覆盖的 offset、缺失段落向量）。backlog/failed/legacy 类问题会返回样例 memory ID，可直接喂给 `memory_split` 逐条修复。
 
 退出码：`0` 正常 / `1` 有 warning / `2` 有 critical —— 可在脚本和 CI 里用。如果数据库根本打不开，doctor 会降级成单条 critical 报告而不是崩溃（这正是救护车的意义）。同一套引擎也作为 `memory_doctor_overview` MCP 工具暴露，供对话内使用；CLI 只是用静态推断替代了 MCP 运行时状态（精度略低，报告里会标注）。
 

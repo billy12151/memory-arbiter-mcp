@@ -33,7 +33,6 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
 # Use the real config + DB (read-only access only)
-os.environ.setdefault("MEMORY_ARBITER_SPLIT_ENABLED", "true")
 
 from memory_arbiter.tools import MemoryTools  # noqa: E402
 
@@ -112,21 +111,15 @@ def main() -> int:
         mid = item["mid"]
         if mid in section_info:
             continue
-        st = tools.memory_split_status(mid)["data"]
-        secs = st["sections"]
-        mem = tools.db.get_memory(mid)
-        content_len[mid] = len(mem.get("content", ""))
+        # v0.8.0: memory_get(sections="all") replaces the removed memory_split_status +
+        # get_sections pair — the title catalog and offsets come back in one read-only call.
+        g = tools.memory_get(mid, sections="all")["data"]
+        secs = g.get("sections") or []
+        content_len[mid] = len((g.get("memory") or {}).get("content", ""))
         section_info[mid] = {
-            s["title"]: {"id": s["section_id"], "start": None, "end": None}
+            s["title"]: {"id": s["id"], "start": s["start_offset"], "end": s["end_offset"]}
             for s in secs
         }
-        # fetch offsets via get_sections
-        gs = tools.get_sections(mid)["data"]["sections"]
-        for s in gs:
-            for tinfo in section_info[mid].values():
-                if tinfo["id"] == s["id"]:
-                    tinfo["start"] = s["start_offset"]
-                    tinfo["end"] = s["end_offset"]
 
     # --- Run queries -------------------------------------------------------
     rows = []
