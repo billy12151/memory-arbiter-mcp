@@ -1286,13 +1286,28 @@ class MemoryTools:
         self,
         content: str,
         sections_data: list[dict[str, Any]],
+        trust_planner_offsets: bool = False,
     ) -> Optional[list[dict[str, Any]]]:
-        """Compute global offsets from LLM-provided anchors.
+        """Compute global offsets for each section.
 
-        Returns list of {start_offset, end_offset, ...section_data} or None on
-        failure.  v0.6.0 is single-batch: every anchor is located in the full
-        content and its offset is already global.  The caller must not supply
-        start_offset/end_offset — only anchors.
+        Returns list of {start_offset, end_offset, ...section_data} (with the
+        internal ``_planner_start_offset`` stripped) or None on failure.
+
+        Two location strategies, selected by ``trust_planner_offsets``:
+
+        * True  — the rules path. The deterministic fence-aware parser already
+          knows each heading's real offset; it passes ``_planner_start_offset``
+          per section. We trust it but STILL cross-check the anchor text appears
+          at that offset (defense in depth against a parser bug). This avoids
+          the silent mis-segmentation that a raw substring search caused when a
+          heading line also appeared inside a fenced code block / body text
+          (the search was not fence-aware, so it could locate an earlier,
+          wrong occurrence that still passed continuity/coverage validation).
+
+        * False — the Agent path. Only anchors + occurrence_index are trusted;
+          any offset field the caller supplied is IGNORED (design §5.1: LLM
+          offsets must be ignored), and each non-first section is located via
+          ``_find_nth_occurrence``.
         """
         result: list[dict[str, Any]] = []
         for i, sec in enumerate(sections_data):
@@ -1300,13 +1315,26 @@ class MemoryTools:
                 local_start = 0
             else:
                 anchor = sec.get("anchor_text")
-                occ = sec.get("occurrence_index", 0)
                 if not anchor:
                     return None
-                local_start = self._find_nth_occurrence(content, anchor, occ)
-                if local_start == -1:
-                    return None
-            result.append({**sec, "start_offset": local_start})
+                planner_off = sec.get("_planner_start_offset")
+                if trust_planner_offsets and isinstance(planner_off, int):
+                    if planner_off < 0 or planner_off > len(content):
+                        return None
+                    # Anchored cross-check: the parser's offset must point at
+                    # the anchor text exactly. Catches any planner drift.
+                    if not content.startswith(anchor, planner_off):
+                        return None
+                    local_start = planner_off
+                else:
+                    occ = sec.get("occurrence_index", 0)
+                    local_start = self._find_nth_occurrence(content, anchor, occ)
+                    if local_start == -1:
+                        return None
+            # Drop the internal planner hint so it never reaches the DB / response.
+            entry = {k: v for k, v in sec.items() if k != "_planner_start_offset"}
+            entry["start_offset"] = local_start
+            result.append(entry)
 
         # Derive end_offsets
         for i in range(len(result)):
@@ -1349,10 +1377,14 @@ class MemoryTools:
           * rule_section_count_out_of_range — <2 or >max_sections headings
           * rule_section_too_large       — some section slice > max_section_chars
 
-        Each section carries title/anchor_text/occurrence_index/title_path.
-        summary is left empty (rules path does not generate summaries; the
-        Agent path does). Offsets are NOT computed here — the publish helper
-        re-derives them from the anchors as a cross-check.
+        Each section carries title/anchor_text/occurrence_index/title_path and
+        a ``_planner_start_offset`` (0 for the first section, the heading's real
+        offset otherwise). v0.8.0: the publish helper now trusts this offset on
+        the rules path (provenance='parser') and only cross-checks the anchor
+        sits there — it no longer re-derives offsets via a non-fence-aware
+        substring search, which silently mis-segmented when a heading line also
+        appeared in a fenced code block. summary is left empty (rules path does
+        not generate summaries; the Agent path does).
         """
         if not content:
             return None, "no_rule_structure"
@@ -1415,6 +1447,10 @@ class MemoryTools:
                 "anchor_text": anchor,
                 "occurrence_index": occ,
                 "title_path": title_path,
+                # Trusted offset from the deterministic parser (method B fix).
+                # Section 0 starts at 0 (preamble归入第一段); others start at
+                # their heading. The publish helper verifies the anchor sits here.
+                "_planner_start_offset": 0 if idx == 0 else h["offset"],
             })
 
         # Count gate.
@@ -1513,7 +1549,11 @@ class MemoryTools:
         # 2) Compute + validate offsets (anchor→offset, continuity, coverage).
         #    Pure text computation — run it before touching the embedder so a
         #    bad anchor fails fast and (for split) records the failure reason.
-        offset_result = self._compute_offsets(content, sections_data)
+        #    The rules path trusts the parser's offsets (verified); the Agent
+        #    path re-derives from anchors and ignores any caller offset.
+        offset_result = self._compute_offsets(
+            content, sections_data, trust_planner_offsets=(provenance == "parser"),
+        )
         if offset_result is None:
             if decision_kind == "split":
                 self._mark_split_failed(
