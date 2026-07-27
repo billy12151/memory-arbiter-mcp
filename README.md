@@ -114,6 +114,22 @@ uvx --from memory-arbiter-mcp memory-arbiter
 
 This pulls the published package and launches the `memory-arbiter` entry point. No venv, no `pip install`. The two entry points `memory-arbiter-mcp` and `memory-arbiter` are identical — the examples here use the shorter `memory-arbiter` for `uvx` (fewer keystrokes) and `memory-arbiter-mcp` for the local-venv path (matches the venv binary name). Use either. Note: `uvx` only shortens the **install** step; embedding model and `sqlite-vec` still need separate setup (see [Semantic Recall](#optional-semantic-recall-v050)).
 
+#### One-shot setup helper (macOS + Windows)
+
+Instead of editing `config.json` by hand, run the bundled setup helper. It writes a working config to `~/.config/memory-arbiter/config.json`, then checks your environment and prints the **exact** commands / download URLs you still need to run:
+
+```bash
+memory-arbiter setup
+```
+
+This is **semi-automatic by design** — setup never calls `pip` or downloads the model itself (so install failures stay your environment's problem, not a setup bug). It only tells you precisely what's missing:
+
+- `sqlite-vec` / `llama-cpp-python` install commands (with the correct `--extra-index-url` for the CPU prebuilt wheel)
+- HuggingFace + ModelScope (China-friendly mirror) download URLs for the GGUF model
+- A Python-version warning if you're outside the 3.10–3.12 range that prebuilt wheels cover
+
+Flags: `--print-config` (dry-run preview), `--no-config` (checks only), `--force` (overwrite an existing config without backup). After running the suggested commands once, re-run `memory-arbiter setup` to verify. When everything reads `✓`, restart your MCP client — semantic recall activates on the next query.
+
 ### Connect Your Tool
 
 Add to your tool's MCP config (see `examples/` for ready-made templates). With a local venv:
@@ -655,6 +671,22 @@ uvx --from memory-arbiter-mcp memory-arbiter
 ```
 
 这会拉取已发布的包并启动 `memory-arbiter` 入口。无需 venv、无需 `pip install`。两个入口 `memory-arbiter-mcp` 和 `memory-arbiter` 完全等价——下面的示例在 `uvx` 路径用短的 `memory-arbiter`（少打几个字），在本地 venv 路径用 `memory-arbiter-mcp`（和 venv 里的二进制名一致）。用哪个都行。注意：`uvx` 只省掉**安装**这一步，embedding 模型和 `sqlite-vec` 仍需单独配置（见 [语义检索](#可选语义检索v050)）。
+
+#### 一键配置助手（macOS + Windows 通用）
+
+不想手编 `config.json`？跑内置的配置助手。它会把一份可用配置写到 `~/.config/memory-arbiter/config.json`，然后检测你的环境，并打印你**还需要执行**的精确命令和下载链接：
+
+```bash
+memory-arbiter setup
+```
+
+**设计上是半自动的**——setup 绝不替你调 `pip`、绝不替你下模型（这样依赖装失败、模型下不动就还是你环境的问题，不会变成 setup 的 bug）。它只负责告诉你缺什么：
+
+- `sqlite-vec` / `llama-cpp-python` 的安装命令（CPU 预构建 wheel 要带正确的 `--extra-index-url`）
+- GGUF 模型的 HuggingFace + ModelScope（国内镜像）下载链接
+- Python 版本提示：若不在预构建 wheel 覆盖的 3.10–3.12 范围内会给出说明
+
+参数：`--print-config`（只预览不写盘）、`--no-config`（只跑自检）、`--force`（已有 config 时直接覆盖不备份）。照提示跑完命令后，再跑一次 `memory-arbiter setup` 验证。当所有项都显示 `✓` 时，重启 MCP 客户端，语义召回下次查询即生效。
 
 ### 接入工具
 

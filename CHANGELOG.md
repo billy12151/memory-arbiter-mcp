@@ -7,6 +7,12 @@ Versions follow semantic versioning.
 
 Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
 
+## [0.8.3] — 2026-07-27
+
+### Added
+
+- **`memory-arbiter setup` 子命令** — 一键生成 `~/.config/memory-arbiter/config.json` + 环境自检 + 精确指引。半自动方案：setup 检测 `sqlite-vec` / `llama-cpp-python` / GGUF 模型文件是否就位，对缺失项打印**可直接复制**的安装命令（含 llama-cpp-python CPU 预构建 wheel 的正确 `--extra-index-url`）和 HuggingFace + ModelScope（国内镜像）下载链接；Python 版本若不在预构建 wheel 覆盖的 3.10–3.12 范围会给出提示。**不调 pip、不下模型、不碰网络**——依赖装失败是用户环境问题，不是 setup 的 bug。参数：`--print-config`（dry-run 预览）、`--no-config`（只跑自检）、`--force`（覆盖已有 config 不备份）、`--config-path`（自定义写入路径）。macOS + Windows 通用，路径全程 `Path.home()` 自动适配。沿用 `doctor` 的 `argv[1]` 分流模式，不新增 console script。321 tests pass (20 new).
+
 ## [0.8.2] — 2026-07-24
 
 License switch release. Starting with this version, the project is offered under Apache License 2.0 going forward. See the License policy section above for the full statement.
