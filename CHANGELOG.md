@@ -7,6 +7,12 @@ Versions follow semantic versioning.
 
 Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
 
+## [0.8.4] — 2026-07-27
+
+### Fixed
+
+- **`memory-arbiter setup` 保留用户已有的向量模型** — 修复 v0.8.3 的体验缺陷：当用户已在 `config.json` 里配置了 `embedding.model_path` 且该路径指向真实存在的模型文件时，setup 不再用 embeddinggemma 默认路径覆盖，而是**沿用用户的模型**，只在配置文件顶部打印一条 `ℹ 检测到你已配置的模型: X（沿用，未覆盖）` 提示。这避免了"用户装了 BGE / nomic 等别的 GGUF 模型，跑完 setup 后被覆盖成 embeddinggemma"的问题。新用户（无 config 或 model_path 指向不存在的文件）行为不变，仍走 embeddinggemma 默认。`--force` 显式绕过此保留逻辑，强制重置为默认模型。用户的自定义模型不做大小基准校验（无法预知正确大小），仅报文件大小作参考。7 个新测试覆盖：无 config / 路径失效 / 默认 embeddinggemma / 真实自定义模型 / 损坏 JSON / 端到端保留 / `--force` 绕过。328 tests pass (321 + 7 new).
+
 ## [0.8.3] — 2026-07-27
 
 ### Added

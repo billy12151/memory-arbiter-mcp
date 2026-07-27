@@ -283,3 +283,100 @@ def test_model_size_missing(tmp_path):
     ok, size = setup_cli._model_size_ok(tmp_path / "nope.gguf")
     assert ok is False
     assert size == 0
+
+
+# ---------------------------------------------------------------------
+#  Existing-model preservation (v0.8.4)
+# ---------------------------------------------------------------------
+
+def test_detect_existing_model_path_none_when_no_config(tmp_path):
+    """No existing config → nothing to preserve."""
+    p, note = setup_cli._detect_existing_model_path(tmp_path / "missing.json")
+    assert p is None
+    assert note == ""
+
+
+def test_detect_existing_model_path_none_when_file_missing(tmp_path):
+    """Config points at a path that doesn't exist on disk → don't preserve."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"embedding": {"model_path": "/nonexistent/model.gguf"}}), encoding="utf-8")
+    p, note = setup_cli._detect_existing_model_path(cfg)
+    assert p is None
+    assert note == ""
+
+
+def test_detect_existing_model_path_none_when_default_embeddinggemma(tmp_path):
+    """Even if the default embeddinggemma path exists, treat it as 'nothing to preserve'
+    (we'd write that path anyway)."""
+    # Simulate the default model file existing at its expected location.
+    model_file = tmp_path / "embeddinggemma-300m-qat-Q8_0.gguf"
+    model_file.write_bytes(b"\0")  # existence is enough for this check
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"embedding": {"model_path": str(model_file)}}), encoding="utf-8")
+    p, note = setup_cli._detect_existing_model_path(cfg)
+    assert p is None, "default embeddinggemma must not be treated as user-supplied"
+
+
+def test_detect_existing_model_path_preserves_real_custom_model(tmp_path):
+    """A real, non-default GGUF file referenced in config is preserved."""
+    custom_model = tmp_path / "bge-small-zh.gguf"
+    custom_model.write_bytes(b"\0" * 1000)
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"embedding": {"model_path": str(custom_model)}}), encoding="utf-8")
+    p, note = setup_cli._detect_existing_model_path(cfg)
+    assert p == custom_model
+    assert "bge-small-zh.gguf" in note
+    assert "沿用" in note
+
+
+def test_detect_existing_model_path_handles_corrupt_json(tmp_path):
+    """Corrupt JSON in existing config → no crash, no preservation."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{not valid json", encoding="utf-8")
+    p, note = setup_cli._detect_existing_model_path(cfg)
+    assert p is None
+    assert note == ""
+
+
+def test_setup_preserves_custom_model_in_written_config(isolated_env, tmp_path, capsys):
+    """End-to-end: existing config with a real custom model → new config keeps it."""
+    # Place a fake user model on disk.
+    custom_model = tmp_path / "my-bge-model.gguf"
+    custom_model.write_bytes(b"\0" * 5000)
+    # Pre-write a config pointing at it.
+    config_path, *_ = _default_paths()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps({"embedding": {"model_path": str(custom_model)}}),
+        encoding="utf-8",
+    )
+
+    rc = run_cli([])
+    out = capsys.readouterr().out
+
+    # New config must reference the custom model, not embeddinggemma.
+    parsed = json.loads(config_path.read_text(encoding="utf-8"))
+    assert parsed["embedding"]["model_path"] == str(custom_model)
+    assert "embeddinggemma" not in parsed["embedding"]["model_path"]
+    # Setup log mentions the preservation.
+    assert "沿用" in out
+    assert "my-bge-model.gguf" in out
+
+
+def test_setup_does_not_preserve_when_force(isolated_env, tmp_path, capsys):
+    """--force overwrites everything including model_path, even if a custom model exists."""
+    custom_model = tmp_path / "my-bge.gguf"
+    custom_model.write_bytes(b"\0" * 5000)
+    config_path, *_ = _default_paths()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps({"embedding": {"model_path": str(custom_model)}}),
+        encoding="utf-8",
+    )
+
+    rc = run_cli(["--force"])
+    capsys.readouterr()
+
+    parsed = json.loads(config_path.read_text(encoding="utf-8"))
+    # --force should write the embeddinggemma default, overriding the custom one.
+    assert parsed["embedding"]["model_path"].endswith("embeddinggemma-300m-qat-Q8_0.gguf")

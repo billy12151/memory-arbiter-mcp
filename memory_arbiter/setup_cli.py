@@ -128,15 +128,50 @@ def _check_llama_cpp() -> bool:
         return False
 
 
-def _model_size_ok(path: Path) -> tuple[bool, int]:
-    """Return (size_looks_right, actual_bytes). Missing → (False, 0)."""
+def _model_size_ok(path: Path, *, expected: int = EXPECTED_MODEL_BYTES) -> tuple[bool, int]:
+    """Return (size_looks_right, actual_bytes). Missing → (False, 0).
+
+    When the user supplies their own model (different from the bundled
+    embeddinggemma), pass its expected size via ``expected``; otherwise we
+    only sanity-check against the embeddinggemma baseline.
+    """
     try:
         size = path.stat().st_size
     except OSError:
         return False, 0
-    low = EXPECTED_MODEL_BYTES * (1 - MODEL_SIZE_TOLERANCE)
-    high = EXPECTED_MODEL_BYTES * (1 + MODEL_SIZE_TOLERANCE)
+    low = expected * (1 - MODEL_SIZE_TOLERANCE)
+    high = expected * (1 + MODEL_SIZE_TOLERANCE)
     return low <= size <= high, size
+
+
+def _detect_existing_model_path(config_path: Path) -> tuple[Path | None, str]:
+    """If an existing config.json points at a real model file, honour it.
+
+    Returns (resolved_model_path, note) where note is a short human-readable
+    explanation for the setup log, or (None, "") when there is nothing to
+    preserve. We only preserve when the file actually exists on disk — a
+    stale path from a long-ago uninstall should not block the embeddinggemma
+    default.
+    """
+    if not config_path.exists():
+        return None, ""
+    try:
+        parsed = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, ""
+    if not isinstance(parsed, dict):
+        return None, ""
+    raw = parsed.get("embedding", {}).get("model_path") if isinstance(parsed.get("embedding"), dict) else None
+    if not raw:
+        return None, ""
+    resolved = Path(str(raw)).expanduser()
+    if not resolved.is_file():
+        return None, ""
+    # Don't treat the embeddinggemma default as "user-supplied" — that path
+    # is what we'd write anyway, so there's nothing to preserve.
+    if resolved.name == DEFAULT_MODEL_FILENAME:
+        return None, ""
+    return resolved, f"检测到你已配置的模型: {resolved.name}（沿用，未覆盖）"
 
 
 # ── Rendering ──────────────────────────────────────────────────────────────
@@ -302,15 +337,25 @@ def run_cli(argv: list[str]) -> int:
     # Resolve paths (all platform-correct via Path.home()).
     default_config_path, default_model_path, default_db_path, default_backup_jsonl = _default_paths()
     config_path = Path(args.config_path).expanduser() if args.config_path else default_config_path
-    # Model path is derived from defaults; --config-path only relocates the config file.
-    model_path = default_model_path
+
+    # Honour a user-supplied model already present in an existing config:
+    # if embedding.model_path points at a real file (and isn't our default
+    # embeddinggemma), keep it instead of overwriting with the bundled path.
+    # --force bypasses this: it means "reset to defaults, including model".
+    if args.force:
+        preserved_model, preserve_note = None, ""
+    else:
+        preserved_model, preserve_note = _detect_existing_model_path(config_path)
+    model_path = preserved_model or default_model_path
 
     out_lines: list[str] = []
     out_lines.append(_color("memory-arbiter setup — 配置助手（半自动）", _BOLD, use_color))
     out_lines.append(_color("生成 config + 检测环境 + 给出可复制的命令。不调 pip、不下模型。", _DIM, use_color))
+    if preserved_model is not None:
+        out_lines.append(_color(f"  ℹ {preserve_note}", _CYAN, use_color))
 
     # ── Step 1: config.json ──
-    config_dict = _default_config_dict(default_model_path, default_db_path, default_backup_jsonl)
+    config_dict = _default_config_dict(model_path, default_db_path, default_backup_jsonl)
     backup_path: Path | None = None
     written = False
     config_write_error: str | None = None
@@ -380,7 +425,17 @@ def run_cli(argv: list[str]) -> int:
             config_load_error_str = f"{type(exc).__name__}: {exc}"
 
     model_exists = model_path.exists()
-    size_ok, size_bytes = _model_size_ok(model_path)
+    # For a user-supplied model we can't know the right size, so only run the
+    # baseline comparison against embeddinggemma; otherwise just report size.
+    if preserved_model is not None:
+        # User's own model: exists check is enough; size is informational only.
+        size_ok = True
+        try:
+            size_bytes = model_path.stat().st_size
+        except OSError:
+            size_bytes = 0
+    else:
+        size_ok, size_bytes = _model_size_ok(model_path)
 
     checks = {
         "sqlite_vec": _check_sqlite_vec(),
