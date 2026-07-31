@@ -3178,17 +3178,64 @@ def test_after_gt_before_warns(tmp_path: Path) -> None:
     )
 
 
-def test_empty_query_with_tags_filter_returns_empty(tmp_path: Path) -> None:
-    # K2/C1/D3：空 query + tags_filter → 不走短路，post-filter 后空，精准 warning
+def test_empty_query_tags_filter_returns_matches(tmp_path: Path) -> None:
+    # G6 (v0.8.5): empty query + tags_filter now does filter-driven recall
+    # (was a dead path returning [] with a "query required" warning).
     tools = make_tools(tmp_path)
-    for i in range(5):
-        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    matched = [_write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"]) for i in range(5)]
+    _write_mem(tools, content="noise", subject="noise", tags=["决策"])  # different tag, must be excluded
     res = tools.memory_search(query="", tags_filter=["发版"])
-    assert res["data"]["results"] == [], "空 query + tags_filter 本版不独立召回（K2/C1）"
-    # 不应返回未过滤的 fallback 记忆（C1 短路改造的验证）
-    assert not any("No direct memory match" in w for w in res["warnings"])
-    # 应有精准 warning（D3）
-    assert any("query required" in w or "filters too restrictive" in w for w in res["warnings"])
+    assert res["data"]["retrieval_mode"] == "direct"
+    assert {r["id"] for r in res["data"]["results"]} == set(matched)
+    assert res["data"]["total_estimate"] == 5
+    assert res["data"]["has_more"] is False
+    # The old "query required" warning is gone.
+    assert not any("query required" in w for w in res["warnings"])
+
+
+def test_empty_query_tags_filter_and_semantics(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    both = _write_mem(tools, content="both", subject="both", tags=["发版", "v0.8"])
+    _write_mem(tools, content="one", subject="one", tags=["发版"])  # only one of the two tags
+    res = tools.memory_search(query="", tags_filter=["发版", "v0.8"])
+    assert [r["id"] for r in res["data"]["results"]] == [both]
+
+
+def test_empty_query_after_time_filter(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="old", subject="old", tags=["t"], ingest_time="2026-01-01T00:00:00Z")
+    new_id = _write_mem(tools, content="new", subject="new", tags=["t"], ingest_time="2026-07-01T00:00:00Z")
+    res = tools.memory_search(query="", tags_filter=["t"], after_time="2026-06-01T00:00:00Z")
+    assert [r["id"] for r in res["data"]["results"]] == [new_id]
+
+
+def test_empty_query_source_type_filter(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    uc = _write_mem(tools, content="uc", subject="uc", tags=["t"], source_type="user_confirmed")
+    _write_mem(tools, content="ag", subject="ag", tags=["t"], source_type="agent_generated")
+    res = tools.memory_search(query="", source_type="user_confirmed")
+    assert [r["id"] for r in res["data"]["results"]] == [uc]
+
+
+def test_empty_query_has_more_and_total(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    for i in range(15):
+        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    res = tools.memory_search(query="", tags_filter=["发版"], limit=10)
+    assert len(res["data"]["results"]) == 10
+    assert res["data"]["total_estimate"] == 15
+    assert res["data"]["has_more"] is True
+
+
+def test_empty_query_pool_cap_total_is_full_count(tmp_path: Path) -> None:
+    # total_estimate comes from count_filtered_memories (full-table count), not pool-capped.
+    tools = make_tools(tmp_path)
+    for i in range(60):
+        _write_mem(tools, content=f"c{i}", subject=f"s{i}", tags=["发版"])
+    res = tools.memory_search(query="", tags_filter=["发版"], limit=10)
+    assert len(res["data"]["results"]) == 10
+    assert res["data"]["total_estimate"] == 60
+    assert res["data"]["has_more"] is True
 
 
 def test_empty_query_no_filters_goes_fallback(tmp_path: Path) -> None:

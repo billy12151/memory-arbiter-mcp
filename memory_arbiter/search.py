@@ -965,6 +965,25 @@ def search_memories(
         fb_rows, fb_warnings, _fb_hm, _fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
         return SearchOutcome(fb_rows, fb_warnings, False, 0, "recent_browse")
 
+    # === G6 (v0.8.5): empty query + filters → filter-driven recall ===
+    # query 为空但带了 tags_filter / 时间 / source_type：不再走 wide_recall
+    # （它会因 not query 返 []），而是直接按 filter 召回、ingest_time 倒序。
+    # 解锁 list-by-tag / by-source_type / by-time（id=211 risk#9 推迟到 v0.7.4+
+    # 的活）。无分页（id=211），靠 has_more + total_estimate。
+    if not query and has_filters:
+        pool_cap = getattr(db.settings, "recall_pool_cap", 50)
+        rows = db.recall_by_filters(like_status_clause, tags_filter, after_dt, before_dt, source_type, pool_cap)
+        total_estimate = db.count_filtered_memories(
+            workspace, like_status_clause, tags_filter, after_dt, before_dt, source_type,
+        )
+        if not rows:
+            return SearchOutcome([], warnings + ["no memories match the given filters"], False, 0, "empty")
+        results = rows[:limit]
+        has_more = total_estimate > len(results)
+        # No _soft_rerank on this branch (empty query) and recall_by_filters returns
+        # bare SELECT * rows, so there are no _-prefixed debug fields to strip.
+        return SearchOutcome(results, warnings, has_more, total_estimate, "direct")
+
     # === v0.7.3: pool 组装 + post-filter（design §3.5 第三步） ===
     pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause, query_embedding=query_embedding,
                         pool_cap=getattr(db.settings, "recall_pool_cap", 50),

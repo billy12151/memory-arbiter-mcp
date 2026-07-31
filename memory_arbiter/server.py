@@ -67,7 +67,7 @@ v0.5.0: with GGUF embedding + sqlite-vec configured, the vector is stored automa
 For project knowledge, past decisions, preferences, or doc-summary questions, search memory before reading source files. Prefer 2-4 core keywords; if nothing hits, retry with synonyms/shorter terms; an empty query or memory_recent lists recent memories. Superseded memories are excluded by default; pass include_superseded=true to audit the history chain. debug_ranking=true returns ranking debug fields.
 
 Parameters:
-  query: search terms. An empty query still works (returns recent memories via fallback), but tags_filter / after_time / before_time / source_type do NOT independently recall when query is empty — they only post-filter the query-recalled pool. To "list all entries with tag X", use memory_recent + client-side filtering. When mixing ASCII identifiers with CJK terms, separate with spaces (e.g. "v0.7.2 release" not "v0.7.2release"), otherwise mixed tokens take an equality path and may miss.
+  query: search terms. An empty query still works: with no filters it returns recent memories via fallback; WITH filters (tags_filter / after_time / before_time / source_type) it runs filter-driven recall — e.g. "list all entries with tag X" — ordered by ingest_time (newest first). When mixing ASCII identifiers with CJK terms, separate with spaces (e.g. "v0.7.2 release" not "v0.7.2release"), otherwise mixed tokens take an equality path and may miss.
   tags_filter: strict AND filter — the memory's tags must contain every listed tag. Note: enabling tags_filter usually disables vector semantic recall (vector candidates' tags are unrelated to the literal query and get cut by the exact-match post-filter).
   after_time / before_time: ISO 8601 time window (filters on ingest_time; naive values treated as UTC). Invalid formats are ignored with a warning.
   source_type: filter by source type (user_confirmed / agent_generated / document_extracted, etc.).
@@ -75,7 +75,7 @@ Parameters:
 
 include_conflict_signal: default true. When a hit involves open conflicts, attaches a conflict_signal field (sources: open_table = structured conflicts recorded by scan/record; runtime_metadata_hint = runtime heuristic, not LLM-verified). Fires only on a real hit (retrieval_mode=direct).
 
-Note: tags_filter is AND semantics — every listed tag must be present. Suited to: finding the N most relevant entries / exhaustive queries with filters. Not suited to: pure structured queries (empty query).
+Note: tags_filter is AND semantics — every listed tag must be present. Suited to: finding the N most relevant entries, exhaustive queries with filters, and structured listing via empty query + filters.
 
 v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized automatically even without query_embedding; an explicit query_embedding still takes precedence."""
         return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding, tags_filter=tags_filter, after_time=after_time, before_time=before_time, source_type=source_type, include_linked_open_items=include_linked_open_items, include_conflict_signal=include_conflict_signal)

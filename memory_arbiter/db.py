@@ -633,33 +633,20 @@ class MemoryDB:
             ).fetchall()
             return [row_to_dict(row) for row in rows]
 
-    def count_filtered_memories(
+    def _filter_clauses(
         self,
-        workspace: Optional[str],
         like_status_clause: str,
         tags_filter: Optional[list[str]],
         after_dt: Optional[datetime],
         before_dt: Optional[datetime],
         source_type: Optional[str],
-    ) -> int:
-        """v0.7.3: COUNT(*) under the same filters used by search's _passes_filters.
+    ) -> Tuple[list[str], list[Any]]:
+        """WHERE clause + params shared by count_filtered_memories and recall_by_filters.
 
-        Only called when has_filters=True (design §3.6/§3.7). Mirrors the
-        Python post-filter so has_more/total_estimate agree with what the
-        agent actually receives (modulo pool_cap truncation — see §8 risk 5).
-
-        - Time filters use ISO 8601 string comparison (SQLite lexicographic
-          order == chronological order,前提 ingest_time 落库是标准 ISO 8601 —
-          see §3.7 D2 caveat: normalize_iso's except branch can let malformed
-          strings through, edge case accepted).
-        - tags_filter uses json_each exact match (AND semantics), equivalent
-          to the Python set-intersection check.
-        - source_type is a plain equality.
-        like_status_clause is passed through unchanged from search.py:640 (no
-        m. alias — COUNT doesn't JOIN).
+        Mirrors search._passes_filters: like_status_clause + per-tag json_each exact
+        match (AND semantics) + ingest_time ISO-string bounds + source_type equality.
+        workspace is intentionally NOT filtered (v0.7.4 cross-workspace search).
         """
-        if not self._db_available:
-            return 0
         clauses: list[str] = [like_status_clause]
         params: list[Any] = []
         if tags_filter:
@@ -675,6 +662,26 @@ class MemoryDB:
         if source_type:
             clauses.append("source_type = ?")
             params.append(source_type)
+        return clauses, params
+
+    def count_filtered_memories(
+        self,
+        workspace: Optional[str],
+        like_status_clause: str,
+        tags_filter: Optional[list[str]],
+        after_dt: Optional[datetime],
+        before_dt: Optional[datetime],
+        source_type: Optional[str],
+    ) -> int:
+        """v0.7.3: COUNT(*) under the same filters used by search's _passes_filters.
+
+        Only called when has_filters=True. Clauses are built by _filter_clauses so the
+        SQL count and the SQL recall (recall_by_filters) share one source of truth.
+        workspace is accepted for signature stability but not filtered (cross-workspace).
+        """
+        if not self._db_available:
+            return 0
+        clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
         sql = f"SELECT COUNT(*) AS c FROM memories WHERE {' AND '.join(clauses)}"
         with self.connection() as conn:
             try:
@@ -682,6 +689,33 @@ class MemoryDB:
                 return int(row["c"]) if row else 0
             except sqlite3.Error:
                 return 0
+
+    def recall_by_filters(
+        self,
+        like_status_clause: str,
+        tags_filter: Optional[list[str]],
+        after_dt: Optional[datetime],
+        before_dt: Optional[datetime],
+        source_type: Optional[str],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """G6 (v0.8.5): filter-driven recall for empty-query + filters in memory_search.
+
+        SELECT * mirroring count_filtered_memories' WHERE (via _filter_clauses),
+        ordered by ingest_time DESC, capped at ``limit`` (pool_cap). Returns
+        row_to_dict rows — same shape as _wide_recall pool rows. Enables
+        list-by-tag / by-source_type / by-time when query is empty.
+        """
+        if not self._db_available:
+            return []
+        clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
+        sql = f"SELECT * FROM memories WHERE {' AND '.join(clauses)} ORDER BY ingest_time DESC LIMIT ?"
+        with self.connection() as conn:
+            try:
+                rows = conn.execute(sql, params + [int(limit)]).fetchall()
+            except sqlite3.Error:
+                return []
+        return [row_to_dict(row) for row in rows]
 
     # ------------------------------------------------------------------
     #  Conflicts
