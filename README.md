@@ -639,6 +639,8 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 - **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。
 - **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
 - **健康体检** —— 一键 `doctor` 给配置完整性、向量化启用链、分段、数据一致性、容量堆积做分级体检。每条诊断带 severity 和针对当前配置的修复指引；既能作为 MCP 工具（日常）在对话里触发，也能作为独立 CLI（救护车：MCP 进程挂了也能连库诊断）。纯只读。
+- **鉴权门**（v0.8.5）—— `memory_arbitrate` / `memory_confirm` / `memory_supersede` 要求 `authorized=true` 才执行破坏性或提权操作，防止 LLM 绕过信任模型自动覆盖用户确认的记忆；传入旧参数 `apply` 返回显式迁移错误而非静默失效。
+- **按标签/时间/来源列出记忆**（v0.8.5）—— `memory_search(query="", tags_filter=["todo"])` 直接按过滤条件从库召回并 `ingest_time` 倒序，而非仅对关键词搜索结果做后过滤，解锁 list-by-tag / by-source_type / by-time 场景（此前空 query + filter 是死路径）。
 - **零云依赖、零大模型调用** —— 纯本地 SQLite，不需要 Postgres、Redis、API key 或外部服务。
 
 ### 快速开始

@@ -580,105 +580,106 @@ def _wide_recall(
         return []
     pool: dict[int, dict[str, Any]] = {}
     conn = db._new_connection()
-
-    # Channel 1+2: FTS main + OR. _sanitize_fts_query already OR-joins CJK
-    # trigrams; for the OR channel we additionally try a loosened query that
-    # only requires any single trigram/token to hit.
-    if db.state.fts5_available:
-        per_channel_cap = max(pool_cap, 30)
-        # Main FTS query (AND across token groups).
-        fts_main = _sanitize_fts_query(query)
-        if fts_main:
-            sql = f"""
-                SELECT m.*, bm25(memories_fts) AS score
-                FROM memories_fts
-                JOIN memories m ON memories_fts.rowid = m.id
-                WHERE memories_fts MATCH ? AND {status_clause_m}
-            """
-            params: list[Any] = [fts_main]
-            sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
-            params.append(per_channel_cap)
-            try:
-                for row in conn.execute(sql, params).fetchall():
-                    d = row_to_dict(row)
-                    pool[d["id"]] = d
-            except Exception:
-                pass
-        # OR channel: only if main didn't fill the pool. This catches the
-        # "query was overspecified" case where AND'd trigrams miss.
-        if len(pool) < pool_cap:
-            fts_or = _sanitize_fts_query_or(query)
-            if fts_or and fts_or != fts_main:
+    try:
+        # Channel 1+2: FTS main + OR. _sanitize_fts_query already OR-joins CJK
+        # trigrams; for the OR channel we additionally try a loosened query that
+        # only requires any single trigram/token to hit.
+        if db.state.fts5_available:
+            per_channel_cap = max(pool_cap, 30)
+            # Main FTS query (AND across token groups).
+            fts_main = _sanitize_fts_query(query)
+            if fts_main:
                 sql = f"""
                     SELECT m.*, bm25(memories_fts) AS score
                     FROM memories_fts
                     JOIN memories m ON memories_fts.rowid = m.id
                     WHERE memories_fts MATCH ? AND {status_clause_m}
                 """
-                params = [fts_or]
+                params: list[Any] = [fts_main]
                 sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
                 params.append(per_channel_cap)
                 try:
                     for row in conn.execute(sql, params).fetchall():
                         d = row_to_dict(row)
-                        if d["id"] not in pool:
-                            pool[d["id"]] = d
+                        pool[d["id"]] = d
                 except Exception:
                     pass
+            # OR channel: only if main didn't fill the pool. This catches the
+            # "query was overspecified" case where AND'd trigrams miss.
+            if len(pool) < pool_cap:
+                fts_or = _sanitize_fts_query_or(query)
+                if fts_or and fts_or != fts_main:
+                    sql = f"""
+                        SELECT m.*, bm25(memories_fts) AS score
+                        FROM memories_fts
+                        JOIN memories m ON memories_fts.rowid = m.id
+                        WHERE memories_fts MATCH ? AND {status_clause_m}
+                    """
+                    params = [fts_or]
+                    sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
+                    params.append(per_channel_cap)
+                    try:
+                        for row in conn.execute(sql, params).fetchall():
+                            d = row_to_dict(row)
+                            if d["id"] not in pool:
+                                pool[d["id"]] = d
+                    except Exception:
+                        pass
 
-    # Channel 3: subject/tags LIKE — precise surface recall.
-    if len(pool) < pool_cap:
-        like_q = f"%{query}%"
-        clauses = [like_status_clause, "(subject LIKE ? OR tags LIKE ?)"]
-        params = [like_q, like_q]
-        for tag in tags or []:
-            clauses.append("tags LIKE ?")
-            params.append(f"%{tag}%")
-        params.append(pool_cap)
-        sql = f"""SELECT *, 0 AS score FROM memories
-                  WHERE {' AND '.join(clauses)}
-                  ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
-                           ingest_time DESC LIMIT ?"""
-        try:
-            for row in conn.execute(sql, params).fetchall():
-                d = row_to_dict(row)
-                if d["id"] not in pool:
-                    pool[d["id"]] = d
-        except Exception:
-            pass
-
-    # Channel 4: content LIKE — a limited gap-filler. Requires ≥2 query anchors hit
-    # (r4 §6.1) and is capped at 5-10 to avoid noise explosion.
-    if content_like_fallback and len(pool) < pool_cap:
-        # Only run if query has at least 2 anchors — otherwise the ≥2-anchor
-        # gate can never be satisfied and we save the scan.
-        q_anchors = extract_anchors(query)
-        if len(q_anchors) >= 2:
+        # Channel 3: subject/tags LIKE — precise surface recall.
+        if len(pool) < pool_cap:
             like_q = f"%{query}%"
-            clauses = [like_status_clause, "content LIKE ?"]
-            params = [like_q]
+            clauses = [like_status_clause, "(subject LIKE ? OR tags LIKE ?)"]
+            params = [like_q, like_q]
             for tag in tags or []:
                 clauses.append("tags LIKE ?")
                 params.append(f"%{tag}%")
-            params.append(content_like_cap)  # cap content-LIKE gap-fill (configurable via MEMORY_ARBITER_CONTENT_LIKE_CAP)
+            params.append(pool_cap)
             sql = f"""SELECT *, 0 AS score FROM memories
                       WHERE {' AND '.join(clauses)}
                       ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
                                ingest_time DESC LIMIT ?"""
             try:
-                added = 0
                 for row in conn.execute(sql, params).fetchall():
                     d = row_to_dict(row)
                     if d["id"] not in pool:
-                        # Mark as content_only candidate for soft-rerank awareness.
-                        d["_content_only_candidate"] = True
                         pool[d["id"]] = d
-                        added += 1
-                        if added >= content_like_cap or len(pool) >= pool_cap:
-                            break
             except Exception:
                 pass
-    conn.close()
+
+        # Channel 4: content LIKE — a limited gap-filler. Requires ≥2 query anchors hit
+        # (r4 §6.1) and is capped at 5-10 to avoid noise explosion.
+        if content_like_fallback and len(pool) < pool_cap:
+            # Only run if query has at least 2 anchors — otherwise the ≥2-anchor
+            # gate can never be satisfied and we save the scan.
+            q_anchors = extract_anchors(query)
+            if len(q_anchors) >= 2:
+                like_q = f"%{query}%"
+                clauses = [like_status_clause, "content LIKE ?"]
+                params = [like_q]
+                for tag in tags or []:
+                    clauses.append("tags LIKE ?")
+                    params.append(f"%{tag}%")
+                params.append(content_like_cap)  # cap content-LIKE gap-fill (configurable via MEMORY_ARBITER_CONTENT_LIKE_CAP)
+                sql = f"""SELECT *, 0 AS score FROM memories
+                          WHERE {' AND '.join(clauses)}
+                          ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
+                                   ingest_time DESC LIMIT ?"""
+                try:
+                    added = 0
+                    for row in conn.execute(sql, params).fetchall():
+                        d = row_to_dict(row)
+                        if d["id"] not in pool:
+                            # Mark as content_only candidate for soft-rerank awareness.
+                            d["_content_only_candidate"] = True
+                            pool[d["id"]] = d
+                            added += 1
+                            if added >= content_like_cap or len(pool) >= pool_cap:
+                                break
+                except Exception:
+                    pass
+    finally:
+        conn.close()
 
     # Channel 5 (v0.3.1): vec0 KNN — optional semantic recall. Only runs when
     # the caller supplied a query_embedding AND sqlite-vec is available. This
