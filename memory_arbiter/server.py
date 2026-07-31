@@ -35,15 +35,15 @@ def build_server() -> Any:
         subject: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """写入一条结构化记忆到跨工具共享记忆库。必填 content，建议填 subject/tags/source_type。
+        """Write one structured memory into the cross-tool shared store. content is required; subject/tags/source_type are strongly recommended.
 
-tags 是排序和过滤的关键信号（tag 精确命中权重高于 content）。建议打"查询意图词"——用户将来可能用什么词查这条记忆？
-  例：发版记录 → tags 含 "发版" + 版本号
-      技术决策 → tags 含 "决策" + 主题词
-      用户偏好 → tags 含 "偏好" + 偏好类型
-避免打 subject 已有的描述词（冗余，不增加检索价值）。
+tags are the primary ranking and filter signal (a tag exact-match outweighs content). Tag with "query-intent words" — terms a user might later search with. Examples:
+  release note -> tags include "release" + version number
+  technical decision -> tags include "decision" + topic word
+  user preference -> tags include "preference" + preference type
+Avoid re-tagging words already in subject (redundant, no retrieval gain).
 
-v0.5.0：如果配置了 GGUF embedding + sqlite-vec，写入成功后会自动存向量；响应里仅在尝试过向量化时返回 embedding_stored。"""
+v0.5.0: with GGUF embedding + sqlite-vec configured, the vector is stored automatically on write; the response only echoes embedding_stored when vectorization was actually attempted."""
         return tools.memory_write(
             content=content,
             agent_id=agent_id,
@@ -62,22 +62,22 @@ v0.5.0：如果配置了 GGUF embedding + sqlite-vec，写入成功后会自动�
 
     @app.tool()
     def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True) -> dict[str, Any]:
-        """按相关性检索记忆。limit 是单页大小（默认 10），不是结果上限。返回的 has_more=true 表示还有更多未返回的结果——本版不提供翻页机制，调用方可换更精确的 query、放大 limit（上限 100）、或加 tags_filter 收窄范围。
+        """Retrieve memories by relevance. limit is page size (default 10), not a result cap. has_more=true means more unreturned results exist — this version has no pagination; narrow with a more specific query, a larger limit (max 100), or tags_filter.
 
-项目知识、历史决策、偏好、文档摘要类问题应先查记忆，再读源文件。优先用 2-4 个核心词；一次搜不到先换同义词/短关键词重试；空 query 或 memory_recent 可列最近记忆。默认不返回 superseded；审计历史链路时传 include_superseded=true。debug_ranking=true 返回排序调试字段。
+For project knowledge, past decisions, preferences, or doc-summary questions, search memory before reading source files. Prefer 2-4 core keywords; if nothing hits, retry with synonyms/shorter terms; an empty query or memory_recent lists recent memories. Superseded memories are excluded by default; pass include_superseded=true to audit the history chain. debug_ranking=true returns ranking debug fields.
 
-参数：
-  query: 检索词。为空时仍可调用（返回最近记忆走 fallback），但 tags_filter / after_time / before_time / source_type 在 query 为空时不会独立召回——这些过滤只对 query 召回的 pool 做后过滤，不单独查询。要"列出所有带 X tag 的"用 memory_recent + 客户端过滤。含 ASCII 标识符 + CJK 词时**应空格分隔**(如 "v0.7.2 发版" 而非 "v0.7.2发版")，否则混合 token 走 equality 路径可能漏匹配。
-  tags_filter: 严格过滤（AND 语义），记忆的 tags 必须包含这里列出的所有标签。注意：开启 tags_filter 时 vec 语义召回大概率失效（vec 候选 tags 与 query 字面无关，会被精确匹配的 post-filter 砍掉）。
-  after_time / before_time: ISO 8601 时间区间（按 ingest_time 过滤，naive 当 UTC）。无效格式会被忽略并返回 warning。
-  source_type: 按来源类型过滤（user_confirmed / agent_generated / document_extracted 等）
-  include_linked_open_items: 默认 true。命中查询时，在 linked_open_items 字段附最多 5 条同主题的 active 待办（tags 含 todo）。高噪声场景可传 false 关闭。仅在真实命中（retrieval_mode=direct）时触发。
+Parameters:
+  query: search terms. An empty query still works (returns recent memories via fallback), but tags_filter / after_time / before_time / source_type do NOT independently recall when query is empty — they only post-filter the query-recalled pool. To "list all entries with tag X", use memory_recent + client-side filtering. When mixing ASCII identifiers with CJK terms, separate with spaces (e.g. "v0.7.2 release" not "v0.7.2release"), otherwise mixed tokens take an equality path and may miss.
+  tags_filter: strict AND filter — the memory's tags must contain every listed tag. Note: enabling tags_filter usually disables vector semantic recall (vector candidates' tags are unrelated to the literal query and get cut by the exact-match post-filter).
+  after_time / before_time: ISO 8601 time window (filters on ingest_time; naive values treated as UTC). Invalid formats are ignored with a warning.
+  source_type: filter by source type (user_confirmed / agent_generated / document_extracted, etc.).
+  include_linked_open_items: default true. On a query hit, attaches up to 5 same-topic active todos (tags containing "todo") in linked_open_items. Pass false to suppress in noisy contexts. Fires only on a real hit (retrieval_mode=direct).
 
-include_conflict_signal: 默认 true。命中结果如涉及 open conflicts，在 result 上附 conflict_signal 字段（来源分 open_table：scan/record 落表的结构化冲突；runtime_metadata_hint：运行时启发式，未经 LLM 验证）。仅在真实命中（retrieval_mode=direct）时触发。
+include_conflict_signal: default true. When a hit involves open conflicts, attaches a conflict_signal field (sources: open_table = structured conflicts recorded by scan/record; runtime_metadata_hint = runtime heuristic, not LLM-verified). Fires only on a real hit (retrieval_mode=direct).
 
-注意：tags_filter 是 AND 语义——必须同时含所有列出的 tag。适合：找最相关的 N 条 / 带过滤条件的穷举式查询。不适合：纯结构化查询（query 为空）。
+Note: tags_filter is AND semantics — every listed tag must be present. Suited to: finding the N most relevant entries / exhaustive queries with filters. Not suited to: pure structured queries (empty query).
 
-v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会自动对 query 向量化；显式 query_embedding 仍优先。"""
+v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized automatically even without query_embedding; an explicit query_embedding still takes precedence."""
         return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding, tags_filter=tags_filter, after_time=after_time, before_time=before_time, source_type=source_type, include_linked_open_items=include_linked_open_items, include_conflict_signal=include_conflict_signal)
 
     @app.tool()
@@ -86,40 +86,41 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         sections: str = "catalog",
         section_ids: Optional[list[int]] = None,
     ) -> dict[str, Any]:
-        """通过 ID 获取单条记忆的全文、分段目录或指定 section 原文（只读）。
+        """Get a single memory's full text, section catalog, or specified section text by ID (read-only).
 
-        v0.8.0 合并了原 get_sections / memory_split_status 的读取能力：
-          sections: none | catalog | all（默认 catalog）。matched 非法（get
-                    没有 search 上下文）。
-          section_ids: 优先于 sections；不存在或不属于该 memory 的 ID 进入
-                       missing_section_ids，不会因单个缺失让整个调用失败。
-        返回 split 子对象（status / legacy_status / revision / section_count /
-        content_hash）。全局 vec 状态留在 memory_status / doctor。"""
+v0.8.0 merged the former get_sections / memory_split_status read paths:
+  sections: none | catalog | all (default catalog). "matched" is illegal (get
+            has no search context).
+  section_ids: takes precedence over sections; IDs that don't exist or don't
+            belong to this memory go into missing_section_ids — a single missing
+            ID never fails the whole call.
+Returns a split sub-object (status / legacy_status / revision / section_count /
+content_hash). Global vec state lives in memory_status / doctor."""
         return tools.memory_get(memory_id=memory_id, sections=sections, section_ids=section_ids)
 
     @app.tool()
     def memory_store_embedding(memory_id: int, embedding: list[float]) -> dict[str, Any]:
-        """为指定记忆手动存入或替换语义向量。v0.5.0 配置 GGUF embedding 后，新写入/普通查询可自动向量化；这个工具仍适合 backfill、非 GGUF 模型、远程 API 或自定义向量流程。向量维度必须匹配 vec.dim。"""
+        """Manually store or replace the semantic vector for a memory. With v0.5.0 GGUF embedding configured, new writes and ordinary queries vectorize automatically; this tool still suits backfill, non-GGUF models, remote APIs, or custom vector pipelines. The vector dimension must match vec.dim."""
         return tools.memory_store_embedding(memory_id=memory_id, embedding=embedding)
 
     @app.tool()
     def memory_recent(workspace: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
-        """列出最近记忆（不按关键词过滤）。v0.7.4 起 workspace 是保留元数据——跨全库返回，不再按 workspace 过滤；参数保留仅为接口稳定。用于关键词不确定、memory_search 直接命中为空、或需要先浏览库存再决定是否读源文件的场景。"""
+        """List recent memories (no keyword filtering). As of v0.7.4, workspace is reserved metadata — results span the whole DB and are no longer filtered by workspace; the parameter is kept only for interface stability. Use when keywords are uncertain, memory_search returns nothing, or you want to browse the store before deciding whether to read source files."""
         return tools.memory_recent(workspace=workspace, limit=limit)
 
     @app.tool()
     def memory_compare(left_id: int, right_id: int) -> dict[str, Any]:
-        """低频诊断工具：比较两条记忆的规则优先级（保护→event_time→source_type→confidence→ingest_time），返回可解释的比较理由，不落冲突记录。日常冲突发现请依赖 memory_search 的 conflict_signal（open_table / runtime_metadata_hint）或 scan_conflict_candidates → record_conflict 工作流。"""
+        """Low-frequency diagnostic tool: compare two memories by rule priority (protection -> event_time -> source_type -> confidence -> ingest_time) and return an explainable comparison reason; it records no conflict. For daily conflict discovery, rely on memory_search's conflict_signal (open_table / runtime_metadata_hint) or the scan_conflict_candidates -> record_conflict workflow."""
         return tools.memory_compare(left_id=left_id, right_id=right_id)
 
     @app.tool()
-    def memory_arbitrate(left_id: int, right_id: int, mark_conflict: bool = True, apply: bool = False) -> dict[str, Any]:
-        """兼容保留的手动仲裁工具。mark_conflict=true 使用旧版 record_conflict 路径（不带 v0.7.5 富化字段），apply=true 自动将非保护败方标记为 superseded。新冲突系统推荐使用 scan_conflict_candidates → record_conflict → list_conflicts → supersede/resolve 工作流；本工具不作为日常入口。"""
-        return tools.memory_arbitrate(left_id=left_id, right_id=right_id, mark_conflict=mark_conflict, apply=apply)
+    def memory_arbitrate(left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, apply: Optional[bool] = None) -> dict[str, Any]:
+        """Legacy manual arbitration tool. mark_conflict=true uses the legacy record_conflict path (without v0.7.5 enrichment fields). With authorized=true, the non-protected loser is automatically marked superseded; authorized defaults to false, so only the comparison is returned unless a human has confirmed. The new conflict workflow (scan_conflict_candidates -> record_conflict -> list_conflicts -> supersede/resolve) is preferred for daily use; this tool is not the main entry point. The old `apply` parameter was renamed to `authorized` in v0.8.5; passing `apply` now returns an explicit migration error instead of being silently ignored."""
+        return tools.memory_arbitrate(left_id=left_id, right_id=right_id, mark_conflict=mark_conflict, authorized=authorized, apply=apply)
 
     @app.tool()
     def memory_list_conflicts(status: str = "open", limit: int = 50) -> dict[str, Any]:
-        """列出记忆冲突记录，默认只看 open 状态。"""
+        """List memory conflict records; by default only open ones are returned."""
         return tools.memory_list_conflicts(status=status, limit=limit)
 
     @app.tool()
@@ -130,7 +131,7 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         max_distance: float = 12.0,
         incremental: bool = True,
     ) -> dict[str, Any]:
-        """向量召回候选冲突对（无 LLM）。增量扫描（只扫新增 + 最近编辑的记忆）、组对去重、同 workspace 过滤、按 distance 截断。每条记忆取 embedding 跑 top-K 近邻，配对后规范化（left<right）。向量不可用时正常返回 scanned=False + hint（非报错）。agent 拿到候选对后应逐对跑 LLM 比对，再用 memory_record_conflict 落表。**注意：本工具设计用于 agent 侧定时/手动扫描闭环，不建议普通对话主动调用。**"""
+        """Vector-recall candidate conflict pairs (no LLM). Incremental scan (only newly added + recently edited memories), pair dedup, same-workspace filter, distance cutoff. Each memory's embedding runs top-K nearest neighbors; pairs are canonicalized (left<right). When sqlite-vec is unavailable, returns scanned=False with a hint (a config state, not an error). After receiving candidate pairs, the agent should run an LLM comparison on each pair, then persist the verdict via memory_record_conflict. Note: this tool is designed for the agent-side scheduled/manual scan loop; it is not meant to be called from ordinary conversation."""
         return tools.memory_scan_conflict_candidates(
             workspace=workspace, top_k=top_k, max_pairs=max_pairs,
             max_distance=max_distance, incremental=incremental,
@@ -152,7 +153,7 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         scan_prompt_version: Optional[str] = None,
         scan_model: Optional[str] = None,
     ) -> dict[str, Any]:
-        """记录一条冲突，带扫描富化字段（conflict_type/conflict_point/suggested_winner/confidence_hint/source）。规范 pair（left<right）+ 幂等（已有 open 同 pair 返回 deduped=True 不重写）。refresh=true 时更新已有行的富化字段（返回 refreshed），用于 scan 定时任务重判后回写。source 标注建议来源（如 llm_informed）。conflict_type 可为 contradiction/evolution 等；evolution 特指同主题演进残留（stale_active_memory）：新版应 supersede 旧版但两条仍 active。**注意：本工具设计用于 agent 侧定时/手动扫描闭环，不建议普通对话主动调用。**"""
+        """Record a conflict with scan-enrichment fields (conflict_type/conflict_point/suggested_winner/confidence_hint/source). Canonical pair (left<right) + idempotent (an existing open pair returns deduped=True without rewriting). refresh=true updates the enrichment fields of an existing row (returns refreshed), used by the scheduled scan task to rewrite after re-judging. source marks the suggestion origin (e.g. llm_informed). conflict_type may be contradiction/evolution/etc.; evolution specifically means same-topic evolution residue (stale_active_memory): the newer version should supersede the older, but both are still active. Note: this tool is designed for the agent-side scheduled/manual scan loop; it is not meant to be called from ordinary conversation."""
         return tools.memory_record_conflict(
             left_id=left_id, right_id=right_id, reason=reason,
             conflict_type=conflict_type, conflict_point=conflict_point,
@@ -164,13 +165,13 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
 
     @app.tool()
     def memory_resolve_conflict(conflict_id: int, reason: str = "") -> dict[str, Any]:
-        """按 conflict_id 关闭单条 open 冲突（dismiss 误报用）。零 schema 变更。与 memory_supersede 的 resolve_conflicts_for（按 memory 关所有相关冲突）不同，本工具只关指定那一条。**注意：本工具设计用于 agent 侧扫描闭环，不建议普通对话主动调用。**"""
+        """Close a single open conflict by conflict_id (use to dismiss a false positive). Zero schema change. Unlike memory_supersede's resolve_conflicts_for (which closes all conflicts involving a memory), this tool closes only the specified one. Note: this tool is designed for the agent-side scan loop; it is not meant to be called from ordinary conversation."""
         return tools.memory_resolve_conflict(conflict_id=conflict_id, reason=reason)
 
     @app.tool()
-    def memory_confirm(memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0) -> dict[str, Any]:
-        """将一条记忆标记为用户确认，提升为 user_confirmed + locked 保护级别，禁止自动覆盖。"""
-        return tools.memory_confirm(memory_id=memory_id, source_ref=source_ref, confidence=confidence)
+    def memory_confirm(memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False) -> dict[str, Any]:
+        """Mark a memory as user-confirmed, promoting it to source_type=user_confirmed + protection_level=locked so it cannot be overwritten automatically. Requires authorized=true — promotion to the highest trust/protection tier must be an explicit, human-confirmed action."""
+        return tools.memory_confirm(memory_id=memory_id, source_ref=source_ref, confidence=confidence, authorized=authorized)
 
     @app.tool()
     def memory_supersede(
@@ -179,7 +180,7 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         superseded_by: Optional[int] = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
-        """显式废弃一条记忆，可突破 user_confirmed/locked 保护（memory_arbitrate 被挡时用）。必须 authorized=true 才执行；联动降保护级别并把相关 open 冲突标记为 resolved，审计记录写入 conflicts 表。废弃后不可逆。"""
+        """Explicitly supersede a memory, bypassing user_confirmed/locked protection (use when memory_arbitrate is blocked). Requires authorized=true. Side effects: protection level is lowered and related open conflicts are marked resolved; an audit row is written to the conflicts table. Irreversible."""
         return tools.memory_supersede(
             memory_id=memory_id,
             reason=reason,
@@ -189,17 +190,17 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
 
     @app.tool()
     def memory_status() -> dict[str, Any]:
-        """查看 memory-arbiter 运行状态：数据库路径、降级模式、客户端标识、策略配置、配置解析 warning、自动 embedding 是否已配置。"""
+        """Show memory-arbiter runtime status: database path, degradation mode, client identity, policy config, config-parse warnings, and whether auto-embedding is configured."""
         return tools.memory_status()
 
     @app.tool()
     def memory_audit_summary() -> dict[str, Any]:
-        """返回各 workspace 的记忆统计概览：条目数、最旧/最新条目时间、open 冲突数、各 source_type 分布。纯 SQL 聚合，不做语义判断，用于快速判断是否需要深入审查。"""
+        """Return a per-workspace memory statistics overview: entry counts, oldest/newest entry times, open-conflict count, and source_type distribution. Pure SQL aggregation, no semantic judgment — use it to quickly decide whether a deeper review is needed."""
         return tools.memory_audit_summary()
 
     @app.tool()
     def memory_doctor_overview(deep: bool = False) -> dict[str, Any]:
-        """对 memory-arbiter 做一次健康体检，返回分级诊断报告（只读）。覆盖配置完整性、向量化启用链、分段、数据一致性、容量堆积。每条诊断带 severity 与针对当前配置的 fix_hint。deep=true 时额外实际加载 GGUF 模型做维度探针（秒级开销）。"""
+        """Run a health check on memory-arbiter and return a graded diagnostic report (read-only). Covers config integrity, the vectorization enablement chain, section splitting, data consistency, and capacity buildup. Each finding carries a severity and a fix_hint tailored to the current config. With deep=true, it additionally loads the GGUF model for a dimension probe (seconds of overhead)."""
         return tools.memory_doctor_overview(deep=deep)
 
     @app.tool()
@@ -216,7 +217,7 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         add_tags: Optional[list[str]] = None,
         remove_tags: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        """原地编辑记忆正文或 tags。三种模式：new_content 整体替换、old_text+new_text 精确局部替换、tags_only=true+add_tags/remove_tags 仅更新 tags。tags-only 模式不写 memory_history、不增加 version、不重算 embedding、不触发重分段（FTS 仍同步 tags）；locked/user_confirmed 需 authorized=true。v0.7.6 起：完成 todo 用 tags_only=true+remove_tags=["todo"]。"""
+        """Edit a memory's content or tags in place. Three modes: new_content for full replacement, old_text+new_text for precise local replacement, or tags_only=true with add_tags/remove_tags to update tags only. tags-only mode writes no memory_history, increments no version, recomputes no embedding, and triggers no re-segmentation (FTS still syncs tags); locked/user_confirmed memories require authorized=true. As of v0.7.6, complete a todo with tags_only=true + remove_tags=["todo"]."""
         return tools.memory_edit(
             memory_id=memory_id,
             new_content=new_content,
@@ -233,7 +234,7 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
 
     @app.tool()
     def memory_history(memory_id: int) -> dict[str, Any]:
-        """查看一条记忆的版本演化轨迹（memory_history 表的历史快照，按版本号倒序）。只读，不动任何表。配合 memory_edit 使用：每次编辑前的旧正文都存在这里，必要时可人工恢复。"""
+        """View a memory's version history (snapshots from the memory_history table, ordered by version descending). Read-only, touches no tables. Pairs with memory_edit: every pre-edit snapshot is stored here and can be manually restored if needed."""
         return tools.memory_history(memory_id=memory_id)
 
     @app.tool()
@@ -242,7 +243,7 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         older_than_days: Optional[int] = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
-        """清理 memory_history 表的历史快照（不碰 memories 活跃记录）。三种粒度：传 memory_id 只清指定记忆的历史；传 older_than_days 只清 N 天前的快照；两者都不传=全量瘦身，必须 authorized=true 作为确认门。绝对安全：无论传什么参数，只 DELETE FROM memory_history，memories 表一条都不动。"""
+        """Trim history snapshots from the memory_history table (never touches active memories). Three granularities: pass memory_id to trim one memory's history; pass older_than_days to trim snapshots older than N days; pass neither for a full trim, which requires authorized=true as a confirmation gate. Absolutely safe: regardless of arguments, it only ever runs DELETE FROM memory_history — never touches a row in the memories table."""
         return tools.memory_cleanup_history(
             memory_id=memory_id,
             older_than_days=older_than_days,
@@ -250,9 +251,11 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         )
 
     # ── v0.8.0: Section split (Agent continuation/repair entry) ──
-    # 日常写入请用 memory_write（规则文档会自动分段；无结构长文返回 split_request
-    #  供 Agent 续接）。本工具只用于：收到 split_request 后的内部续接、历史
-    #  NULL/failed/declined 修复、active 记录 rebuild。普通写入不要预先调用。
+    # For normal writes use memory_write (rule-based documents auto-split; unstructured
+    #  long text returns a split_request for the agent to continue). This tool is only
+    #  for: internal continuation on receiving a split_request, repair of historical
+    #  NULL/failed/declined records, and active-memory rebuild. Do not pre-call for
+    #  ordinary writes.
 
     @app.tool()
     def memory_split(
@@ -264,23 +267,20 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         decision_split_revision: Optional[int] = None,
         sections: Optional[list[dict]] = None,
     ) -> dict[str, Any]:
-        """长文分段内部续接/修复入口（v0.8.0 重新定位）。两阶段 CAS 协议：
+        """Long-content section split — internal continuation/repair entry (repositioned in v0.8.0). Two-phase CAS protocol:
 
-          split_decision=None（prepare）——返回完整原文 + content_hash + snapshot
-            + section schema，供 Agent 用自身 LLM 只产出段落元数据（title/
-            summary/anchor_text/occurrence_index/title_path）。active 记录返回
-            allowed_decision="rebuild"，其余返回 allowed_decision="split"。
-          split_decision="split"——校验 content_hash/版本快照 + anchor/offset/
-            section-size（≤max_section_chars），原子发布段落与向量。
-            仅允许 split_status ∈ {NULL, failed, declined} 的记忆。
-          split_decision="rebuild"——重建已 active 记录的派生索引；失败保留旧索引。
-          split_decision="decline"——显式放弃，置 split_status="declined"。
+          split_decision=None (prepare) — returns the full text + content_hash + snapshot
+            + section schema, for the agent's own LLM to produce only section metadata
+            (title/summary/anchor_text/occurrence_index/title_path). An active memory
+            returns allowed_decision="rebuild"; others return allowed_decision="split".
+          split_decision="split" — validates content_hash/version snapshot + anchor/offset/
+            section-size (<=max_section_chars) and atomically publishes sections + vectors.
+            Only allowed for memories with split_status in {NULL, failed, declined}.
+          split_decision="rebuild" — rebuilds the derived index of an already-active memory;
+            on failure the old index is kept.
+          split_decision="decline" — explicitly give up; sets split_status="declined".
 
-        发布阶段的 provenance 固定为 "agent"（rules 路径由 memory_write/edit
-        内部走，不经本工具）。日常写入用 memory_write（有规则 heading 的文档会
-        自动分段，无结构长文返回 split_request 由 Agent 续接）；本工具只在收到
-        split_request、历史 NULL/failed/declined 修复或 active rebuild 时调用，
-        普通写入不要预先调用。"""
+The publish stage provenance is fixed to "agent" (the rules path runs internally via memory_write/edit, not this tool). For normal writes use memory_write (documents with rule headings auto-split; unstructured long text returns a split_request for the agent to continue). This tool is only called on receipt of a split_request, to repair historical NULL/failed/declined records, or to rebuild an active memory — do not pre-call it for ordinary writes."""
         return tools.memory_split(
             memory_id=memory_id,
             split_decision=split_decision,
@@ -297,7 +297,7 @@ v0.5.0：配置 GGUF embedding + sqlite-vec 后，不传 query_embedding 也会�
         dry_run: bool = True,
         batch_size: Optional[int] = 50,
     ) -> dict[str, Any]:
-        """批量重建向量（v0.6.0）。用于 embedding 模型切换后的向量层迁移，或 ready 状态下的局部修复。不需要 LLM 调用——只重算向量。dry_run=True 只返回清单不执行。"""
+        """Rebuild vectors in bulk (v0.6.0). Used to migrate the vector layer after switching embedding models, or for localized repair when the index is ready. Needs no LLM call — it only recomputes vectors. dry_run=true returns the plan without executing."""
         return tools.memory_rebuild_embeddings(
             memory_ids=memory_ids,
             dry_run=dry_run,

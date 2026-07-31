@@ -371,7 +371,12 @@ class MemoryTools:
             return self.db.state.response({"error": "left and right records are required"}, ok=False)
         return self.db.state.response({"comparison": compare_memories(left_record, right_record), "left": left_record, "right": right_record})
 
-    def memory_arbitrate(self, left_id: int, right_id: int, mark_conflict: bool = True, apply: bool = False, **_: Any) -> dict[str, Any]:
+    def memory_arbitrate(self, left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, **_: Any) -> dict[str, Any]:
+        if _.get("apply") is not None:
+            return self.db.state.response(
+                {"error": "the 'apply' parameter was renamed to 'authorized' in v0.8.5 and no longer takes effect; pass authorized=True to auto-supersede the non-protected loser", "applied": False},
+                ok=False,
+            )
         left = self.db.get_memory(int(left_id))
         right = self.db.get_memory(int(right_id))
         if not left or not right:
@@ -382,7 +387,7 @@ class MemoryTools:
             reason = "; ".join(comparison["reasons"])
             conflict_id = self.db.record_conflict(int(left_id), int(right_id), left.get("subject") or right.get("subject"), reason, comparison["winner_id"])
         applied = False
-        if apply and comparison["winner_id"] and comparison["loser_id"] and not comparison["manual_review"]:
+        if authorized and comparison["winner_id"] and comparison["loser_id"] and not comparison["manual_review"]:
             loser = self.db.get_memory(int(comparison["loser_id"]))
             if loser and loser.get("protection_level") != ProtectionLevel.LOCKED.value and loser.get("source_type") != SourceType.USER_CONFIRMED.value:
                 applied = self.db.update_memory(int(comparison["loser_id"]), {"status": "superseded"})
@@ -481,7 +486,12 @@ class MemoryTools:
         result = self.db.resolve_conflict(int(conflict_id), reason=reason)
         return self.db.state.response(result)
 
-    def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, **_: Any) -> dict[str, Any]:
+    def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
+        if not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required to confirm a memory", "confirmed": False},
+                ok=False,
+            )
         memory = self.db.get_memory(int(memory_id))
         if not memory:
             return self.db.state.response({"error": "memory id not found"}, ok=False)

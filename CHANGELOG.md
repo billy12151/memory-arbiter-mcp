@@ -7,6 +7,23 @@ Versions follow semantic versioning.
 
 Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
 
+## [0.8.5] — 2026-07-31
+
+### Breaking
+
+- **`memory_arbitrate` 参数 `apply` 改名为 `authorized`** — 此前 `apply=true` 是全库唯一无授权门的破坏性路径（LLM 传 `apply=true` 即按启发式自动退役败方）。现统一为 `authorized` 语义：默认 false 只返回比对结果，`authorized=true`（用户确认后）才自动将非保护败方标记为 superseded。mark_conflict 半边不变、只读比对不变；响应键 `applied` 保持不变（仅参数名变更）。内层保护检查（跳过 LOCKED / USER_CONFIRMED 败方）作为纵深防御保留。传入旧的 `apply` 参数会返回**显式迁移错误**（指向 `authorized`），而非静默忽略——防止已部署的旧 Agent 误以为生效（静默失效）。
+- **`memory_confirm` 新增 `authorized` 门** — 此前任意调用方可把任意记忆自封为 USER_CONFIRMED + LOCKED，绕过 source_type 信任模型。现要求 `authorized=true` 才执行（与 `memory_supersede` 对齐）——提升到最高信任/保护档必须是显式、用户确认的动作。
+
+### Fixed
+
+- **`__init__.py` 版本号漂移** — `__version__` 此前停在 0.8.2（连续两个版本漏改，复现发版自查清单的老问题），本次同步到 0.8.5，四处（`__init__.py` / `pyproject.toml` / `server.json` ×2）一致。
+
+### Docs
+
+- **21 条 MCP 工具描述英文化** — `server.py` 全部 `@app.tool()` docstring 由中文改为英文（MCP 生态惯例），与项目面向全球的定位（双语 README、PyPI、awesome-mcp-servers、「any AI client」）一致。保留全部操作护栏（tags_filter 废 vec、空 query + filter 行为、ASCII+CJK 空格分隔、limit 是单页非上限、has_more 无翻页、split 仅内部续接、supersede/confirm/edit-of-protected 需 authorized 等），只换语言；过长描述顺手收紧。不做全文双语（避免 2x token，与省 token 卖点冲突）。测试不依赖描述文本，无回归。
+
+331 tests pass (328 + 3 new).
+
 ## [0.8.4] — 2026-07-27
 
 ### Fixed

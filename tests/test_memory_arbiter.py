@@ -247,17 +247,80 @@ def test_user_confirmed_is_protected(tmp_path: Path) -> None:
         source_type="agent_generated",
         event_time="2026-03-01T00:00:00Z",
     )
-    result = tools.memory_arbitrate(confirmed["data"]["id"], generated["data"]["id"], apply=True)
+    result = tools.memory_arbitrate(confirmed["data"]["id"], generated["data"]["id"], authorized=True)
 
     assert result["data"]["comparison"]["winner_id"] == confirmed["data"]["id"]
     assert "automatic overwrite is forbidden" in result["data"]["comparison"]["reasons"][0]
 
 
+def test_arbitrate_apply_requires_authorization(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(
+        content="old fact",
+        subject="fact",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    new = tools.memory_write(
+        content="new fact",
+        subject="fact",
+        source_type="agent_generated",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    loser_id, winner_id = old["data"]["id"], new["data"]["id"]
+
+    # Unauthorized: the comparison still runs, but the loser is NOT auto-superseded.
+    rejected = tools.memory_arbitrate(loser_id, winner_id, authorized=False)
+    assert rejected["ok"] is True
+    assert rejected["data"]["applied"] is False
+    assert tools.db.get_memory(loser_id)["status"] == "active"
+
+    # Authorized: the non-protected loser is auto-superseded.
+    applied = tools.memory_arbitrate(loser_id, winner_id, authorized=True)
+    assert applied["data"]["applied"] is True
+    assert tools.db.get_memory(loser_id)["status"] == "superseded"
+
+
+def test_arbitrate_deprecated_apply_param_errors_loudly(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(content="old", subject="s", source_type="agent_generated", event_time="2026-01-01T00:00:00Z")
+    new = tools.memory_write(content="new", subject="s", source_type="agent_generated", event_time="2026-02-01T00:00:00Z")
+
+    # The deprecated `apply` arg must fail loudly with a migration hint — never a silent no-op.
+    rejected = tools.memory_arbitrate(old["data"]["id"], new["data"]["id"], apply=True)
+    assert rejected["ok"] is False
+    assert rejected["data"]["applied"] is False
+    assert "authorized" in rejected["data"]["error"]
+    # Loser is untouched.
+    assert tools.db.get_memory(old["data"]["id"])["status"] == "active"
+
+
 def test_confirm_promotes_record(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     written = tools.memory_write(content="OpenClaw memory plugin is enabled for agent alpha", source_type="pending")
-    confirmed = tools.memory_confirm(written["data"]["id"], source_ref="user-chat")
+    confirmed = tools.memory_confirm(written["data"]["id"], source_ref="user-chat", authorized=True)
 
+    assert confirmed["ok"] is True
+    assert confirmed["data"]["record"]["source_type"] == SourceType.USER_CONFIRMED.value
+    assert confirmed["data"]["record"]["protection_level"] == "locked"
+
+
+def test_confirm_requires_authorization(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(content="a fact to confirm", source_type="agent_generated")
+    memory_id = written["data"]["id"]
+
+    rejected = tools.memory_confirm(memory_id=memory_id, source_ref="chat", authorized=False)
+    assert rejected["ok"] is False
+    assert rejected["data"]["confirmed"] is False
+    assert "authorized" in rejected["data"]["error"]
+    # Memory must stay unchanged when unauthorized.
+    unchanged = tools.db.get_memory(memory_id)
+    assert unchanged["source_type"] == "agent_generated"
+    assert unchanged["protection_level"] == "normal"
+
+    # Authorized: promotion succeeds.
+    confirmed = tools.memory_confirm(memory_id=memory_id, source_ref="chat", authorized=True)
     assert confirmed["ok"] is True
     assert confirmed["data"]["record"]["source_type"] == SourceType.USER_CONFIRMED.value
     assert confirmed["data"]["record"]["protection_level"] == "locked"
@@ -299,7 +362,7 @@ def test_supersede_marks_record_and_resolves_conflicts(tmp_path: Path) -> None:
     old_id, new_id = old["data"]["id"], new["data"]["id"]
 
     # arbitrate hits the user-protected wall and leaves an open conflict
-    blocked = tools.memory_arbitrate(old_id, new_id, mark_conflict=True, apply=True)
+    blocked = tools.memory_arbitrate(old_id, new_id, mark_conflict=True, authorized=True)
     assert blocked["data"]["comparison"]["manual_review"] is True
     open_conflicts_before = tools.memory_list_conflicts(status="open")["data"]["count"]
     assert open_conflicts_before >= 1
