@@ -50,17 +50,18 @@ class MemoryTools:
     def _ensure_embedder(self) -> Tuple[Optional[ManagedEmbedder], list[str]]:
         if self._embedder_loaded:
             return self._embedder, []
-        self._embedder_loaded = True
         if not self._embedding_configured():
+            self._embedder_loaded = True  # deterministic config state; safe to cache
             return None, []
         if not self.settings.enable_sqlite_vec:
             warning = "embedding configured but vec.enabled=false; auto-embedding disabled. Set vec.enabled=true to enable."
             self._embedder_warnings.append(warning)
+            self._embedder_loaded = True  # deterministic config state
             return None, [warning]
         from .embedder import build_embedder
 
         assert self.settings.embedding_model_path is not None
-        self._embedder, warnings = build_embedder(
+        embedder, warnings = build_embedder(
             str(self.settings.embedding_model_path),
             self.settings.vec_dim,
             n_ctx=getattr(self.settings, "embedding_n_ctx", 2048),
@@ -68,6 +69,12 @@ class MemoryTools:
             max_section_chars=getattr(self.settings, "max_section_chars", 3600),
         )
         self._embedder_warnings.extend(warnings)
+        if embedder is None:
+            # Build failed (missing model / dim mismatch / load error). Do NOT cache —
+            # a later retry (e.g. model installed) should still be able to succeed.
+            return None, warnings
+        self._embedder = embedder
+        self._embedder_loaded = True  # cache only on successful build
         return self._embedder, warnings
 
     @staticmethod
@@ -750,6 +757,11 @@ class MemoryTools:
         if new_content is not None and (old_text or new_text):
             return self.db.state.response(
                 {"error": "pass either new_content (full replace) or old_text+new_text (partial), not both", "edited": False},
+                ok=False,
+            )
+        if new_content is not None and not str(new_content).strip():
+            return self.db.state.response(
+                {"error": "new_content is empty; refusing to wipe memory content (use memory_supersede to retire it, or pass real content)", "edited": False},
                 ok=False,
             )
         if new_content is not None:

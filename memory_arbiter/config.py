@@ -196,21 +196,28 @@ class Settings:
             ),
         )
         settings.config_warnings = config_warnings
-        settings.policy = load_policy(settings.policy_path)
+        settings.policy = load_policy(settings.policy_path, config_warnings)
         return settings
 
     def defaults(self) -> dict[str, str]:
         return {"agent_id": self.agent_id, "workspace": self.workspace}
 
 
-def load_policy(path: Optional[Path]) -> AgentPolicy:
+def load_policy(path: Optional[Path], warnings: Optional[list[str]] = None) -> AgentPolicy:
     if not path or not path.exists():
         return AgentPolicy()
-    with path.open("r", encoding="utf-8") as fh:
-        raw: dict[str, Any] = json.load(fh)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            raw: dict[str, Any] = json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        # Malformed/missing policy must not crash startup — fall back to default allow-all.
+        if warnings is not None:
+            warnings.append(f"Policy file {path} parse failed: {exc}; using default allow-all policy.")
+        return AgentPolicy()
+    # parse_bool so a hand-edited JSON string like "false" isn't truthy (#5).
     return AgentPolicy(
-        client_defaults=dict(raw.get("client_defaults") or AgentPolicy().client_defaults),
-        default_enabled=bool(raw.get("default_enabled", True)),
+        client_defaults={str(k): parse_bool(v, True) for k, v in (raw.get("client_defaults") or {}).items()},
+        default_enabled=parse_bool(raw.get("default_enabled", True), True),
         allow_agents=list(raw.get("allow_agents") or []),
         deny_agents=list(raw.get("deny_agents") or []),
     )

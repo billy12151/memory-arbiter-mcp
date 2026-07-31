@@ -639,10 +639,13 @@ def _wide_recall(
                   WHERE {' AND '.join(clauses)}
                   ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
                            ingest_time DESC LIMIT ?"""
-        for row in conn.execute(sql, params).fetchall():
-            d = row_to_dict(row)
-            if d["id"] not in pool:
-                pool[d["id"]] = d
+        try:
+            for row in conn.execute(sql, params).fetchall():
+                d = row_to_dict(row)
+                if d["id"] not in pool:
+                    pool[d["id"]] = d
+        except Exception:
+            pass
 
     # Channel 4: content LIKE — a limited gap-filler. Requires ≥2 query anchors hit
     # (r4 §6.1) and is capped at 5-10 to avoid noise explosion.
@@ -662,16 +665,19 @@ def _wide_recall(
                       WHERE {' AND '.join(clauses)}
                       ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
                                ingest_time DESC LIMIT ?"""
-            added = 0
-            for row in conn.execute(sql, params).fetchall():
-                d = row_to_dict(row)
-                if d["id"] not in pool:
-                    # Mark as content_only candidate for soft-rerank awareness.
-                    d["_content_only_candidate"] = True
-                    pool[d["id"]] = d
-                    added += 1
-                    if added >= content_like_cap or len(pool) >= pool_cap:
-                        break
+            try:
+                added = 0
+                for row in conn.execute(sql, params).fetchall():
+                    d = row_to_dict(row)
+                    if d["id"] not in pool:
+                        # Mark as content_only candidate for soft-rerank awareness.
+                        d["_content_only_candidate"] = True
+                        pool[d["id"]] = d
+                        added += 1
+                        if added >= content_like_cap or len(pool) >= pool_cap:
+                            break
+            except Exception:
+                pass
     conn.close()
 
     # Channel 5 (v0.3.1): vec0 KNN — optional semantic recall. Only runs when
@@ -974,7 +980,7 @@ def search_memories(
         pool_cap = getattr(db.settings, "recall_pool_cap", 50)
         rows = db.recall_by_filters(like_status_clause, tags_filter, after_dt, before_dt, source_type, pool_cap)
         total_estimate = db.count_filtered_memories(
-            workspace, like_status_clause, tags_filter, after_dt, before_dt, source_type,
+            like_status_clause, tags_filter, after_dt, before_dt, source_type,
         )
         if not rows:
             return SearchOutcome([], warnings + ["no memories match the given filters"], False, 0, "empty")
@@ -1019,7 +1025,7 @@ def search_memories(
     # 按过滤计数，受 pool_cap 截断影响的只是 reranked，total_estimate 仍准）。
     if has_filters:
         total_estimate = db.count_filtered_memories(
-            workspace, like_status_clause, tags_filter, after_dt, before_dt, source_type,
+            like_status_clause, tags_filter, after_dt, before_dt, source_type,
         )
     else:
         total_estimate = len(pool)
@@ -1278,10 +1284,14 @@ def _search_bm25(
             clauses.append("tags LIKE ?")
             params.append(f"%{tag}%")
         params.append(limit)
-        rows = conn.execute(
-            f"SELECT *, 0 AS score FROM memories WHERE {' AND '.join(clauses)} ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END, event_time DESC, ingest_time DESC LIMIT ?",
-            params,
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                f"SELECT *, 0 AS score FROM memories WHERE {' AND '.join(clauses)} ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END, event_time DESC, ingest_time DESC LIMIT ?",
+                params,
+            ).fetchall()
+        except Exception as exc:
+            warnings.append(f"LIKE fallback query failed: {exc}.")
+            rows = []
         if query and not db.state.fts5_available:
             warnings.append("Using LIKE/keyword search because sqlite-vec and FTS5 are unavailable.")
     conn.close()

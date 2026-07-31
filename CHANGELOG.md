@@ -21,12 +21,21 @@ Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 
 ### Fixed
 
 - **`__init__.py` 版本号漂移** — `__version__` 此前停在 0.8.2（连续两个版本漏改，复现发版自查清单的老问题），本次同步到 0.8.5，四处（`__init__.py` / `pyproject.toml` / `server.json` ×2）一致。
+- **`edit_memory` 并发竞态（#3）** — 改用 `write_transaction`（BEGIN IMMEDIATE），读前取写锁串行化并发编辑；此前用 `connection()`，两个并发编辑都读 v=1 都写 v=2 → 丢更新 + `memory_history` 版本号重复。
+- **`load_policy` 启动崩溃（#4）** — 损坏的 policy.json 不再让 server 启动崩溃：try/except 回退默认全放行策略并 warning（对齐 `load_config_file`）。
+- **`client_defaults` / `default_enabled` 字符串真值（#5）** — 手写的 `"false"` 不再被当真值；load 时统一 `parse_bool`。
+- **`memory-arbiter setup` 配置写入原子化（#6）** — 先写临时文件再原子 rename，写入失败不再让 config_path 缺失/半写。
+- **search 通道 3/4 + bm25 容错（#7）** — 此前无 try/except、`conn.close()` 不在 finally，瞬时 SQLite 错误会泄露连接并中断整个搜索；现对齐通道 1/2 的 per-channel try/except。
+- **embedder 失败不再永久缓存** — `_embedder_loaded` 仅在构建成功后置 True；此前一次失败（模型缺失/维度不符）后永久返回 None，重装模型也无法自愈。
+- **`memory_edit(new_content="")` 拒绝静默清空** — 空/纯空白 new_content 返回错误而非抹空正文。
+- **`get_memory_summaries` 过滤 `status='active'`** — 对齐其 docstring 契约（非 active 视为"消失"），不再把 superseded 摘要混进 conflict_signal。
+- **`count_filtered_memories` 去掉遗留 `workspace` 形参** — v0.7.4 起不过滤 workspace，去掉误导性死参数，与新 `recall_by_filters` 对称（zcode review 反馈）。
 
 ### Docs
 
 - **21 条 MCP 工具描述英文化** — `server.py` 全部 `@app.tool()` docstring 由中文改为英文（MCP 生态惯例），与项目面向全球的定位（双语 README、PyPI、awesome-mcp-servers、「any AI client」）一致。保留全部操作护栏（tags_filter 废 vec、空 query + filter 行为、ASCII+CJK 空格分隔、limit 是单页非上限、has_more 无翻页、split 仅内部续接、supersede/confirm/edit-of-protected 需 authorized 等），只换语言；过长描述顺手收紧。不做全文双语（避免 2x token，与省 token 卖点冲突）。测试不依赖描述文本，无回归。
 
-336 tests pass (328 + 8 new).
+337 tests pass (328 + 9 new).
 
 ## [0.8.4] — 2026-07-27
 

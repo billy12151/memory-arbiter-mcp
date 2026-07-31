@@ -369,15 +369,19 @@ def run_cli(argv: list[str]) -> int:
     else:
         try:
             config_path.parent.mkdir(parents=True, exist_ok=True)
+            # Write to a temp file first, then atomically swap it into place — so a
+            # write failure never leaves config_path missing or half-written (#6).
+            tmp_path = config_path.with_name(f"{config_path.name}.tmp")
+            tmp_path.write_text(
+                json.dumps(config_dict, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
             if config_path.exists() and not args.force:
                 ts = datetime.now().strftime("%Y%m%d%H%M%S")
                 backup_path = config_path.with_name(f"{config_path.name}.bak.{ts}")
                 # On case-insensitive filesystems (macOS default) rename is atomic and safe.
                 config_path.rename(backup_path)
-            config_path.write_text(
-                json.dumps(config_dict, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            tmp_path.replace(config_path)
             written = True
         except OSError as exc:
             config_write_error = f"{type(exc).__name__}: {exc}"

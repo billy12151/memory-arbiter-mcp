@@ -666,7 +666,6 @@ class MemoryDB:
 
     def count_filtered_memories(
         self,
-        workspace: Optional[str],
         like_status_clause: str,
         tags_filter: Optional[list[str]],
         after_dt: Optional[datetime],
@@ -677,7 +676,7 @@ class MemoryDB:
 
         Only called when has_filters=True. Clauses are built by _filter_clauses so the
         SQL count and the SQL recall (recall_by_filters) share one source of truth.
-        workspace is accepted for signature stability but not filtered (cross-workspace).
+        Cross-workspace (v0.7.4) — workspace is not filtered.
         """
         if not self._db_available:
             return 0
@@ -818,7 +817,7 @@ class MemoryDB:
                         f"SELECT id, subject, status, source_type, "
                         f"protection_level, tags, "
                         f"substr(content, 1, 200) AS snippet "
-                        f"FROM memories WHERE id IN ({ph})",
+                        f"FROM memories WHERE id IN ({ph}) AND status = 'active'",
                         chunk,
                     ).fetchall()
                     for r in rows:
@@ -1433,17 +1432,22 @@ class MemoryDB:
         """In-place edit a memory's content, archiving the prior version."""
         if not self._db_available or not self.state.sqlite_writable:
             return None
-        with self.connection() as conn:
-            current = self._fetch_memory(conn, memory_id)
-            if not current:
-                return None
-            old_content = current["content"]
-            old_subject = current.get("subject")
-            old_tags = current.get("tags") or []
-            old_version = int(current.get("version") or 1)
-            tags_json = json.dumps(new_tags, ensure_ascii=False) if new_tags is not None else json.dumps(old_tags, ensure_ascii=False)
-            subject_value = new_subject if new_subject is not None else old_subject
-            try:
+        try:
+            # write_transaction (BEGIN IMMEDIATE) serializes concurrent edits: the
+            # write lock is taken BEFORE the read, so a second edit blocks until the
+            # first commits and then sees the bumped version (#3 — was self.connection(),
+            # which let two edits both read v=1 and both write v=2: lost update + dup
+            # history version).
+            with self.write_transaction() as conn:
+                current = self._fetch_memory(conn, memory_id)
+                if not current:
+                    return None
+                old_content = current["content"]
+                old_subject = current.get("subject")
+                old_tags = current.get("tags") or []
+                old_version = int(current.get("version") or 1)
+                tags_json = json.dumps(new_tags, ensure_ascii=False) if new_tags is not None else json.dumps(old_tags, ensure_ascii=False)
+                subject_value = new_subject if new_subject is not None else old_subject
                 history_cur = conn.execute(
                     """
                     INSERT INTO memory_history
@@ -1481,11 +1485,9 @@ class MemoryDB:
                         "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
                         (memory_id, new_content, " ".join(new_tags) if new_tags is not None else " ".join(old_tags), subject_value or ""),
                     )
-                conn.commit()
                 return history_id
-            except sqlite3.Error:
-                conn.rollback()
-                return None
+        except sqlite3.Error:
+            return None
 
     def list_history(self, memory_id: int) -> list[dict[str, Any]]:
         if not self._db_available:

@@ -997,6 +997,18 @@ def test_edit_normal_memory_no_auth_needed(tmp_path: Path) -> None:
     assert result["data"]["edited"] is True
 
 
+def test_edit_rejects_empty_new_content(tmp_path: Path) -> None:
+    """An empty new_content must be rejected rather than silently wiping the memory."""
+    tools = make_tools(tmp_path)
+    memory_id = tools.memory_write(content="keep this", subject="s", source_type="agent_generated")["data"]["id"]
+
+    rejected = tools.memory_edit(memory_id=memory_id, new_content="   ")
+    assert rejected["ok"] is False
+    assert rejected["data"]["edited"] is False
+    # Content is untouched.
+    assert tools.db.get_memory(memory_id)["content"] == "keep this"
+
+
 def test_edit_rejects_superseded(tmp_path: Path) -> None:
     """Editing a superseded record is refused (idempotency / terminal-state gate)."""
     tools = make_tools(tmp_path)
