@@ -131,28 +131,63 @@ class MemoryTools:
     def _enrich_write_response(
         self, data: dict[str, Any], memory_id: Optional[int], record: MemoryRecord,
     ) -> dict[str, Any]:
-        """v0.7.6: post-write enrichment — attach write_hints if duplicates found.
+        """v0.7.6/v0.8.8: post-write enrichment — write_hints + advisory 落表 + Layer 0.
 
-        Never raises; hint failures are silently swallowed (hint is advisory).
+        Never raises; failures are silently swallowed (advisory is best-effort —
+        the insert already committed before this runs, so it can never lose the
+        write). v0.8.8: each duplicate candidate is recorded as a dismissable
+        ``metadata_write_hint`` conflict row; pairs the user already dismissed
+        (not_a_conflict, version match) are skipped (Layer 0). ``open`` pairs
+        still re-ring on repeat writes (an unresolved conflict is worth reminding).
         """
         if memory_id is None:
             return data
         try:
             hints = self._write_duplicate_hints(memory_id, record)
-            if hints:
-                data["write_hints"] = hints
-                # v0.8.7: promote to a loud flag so the calling agent notices
-                # even on a quick scan — write_hints alone is easy to skip.
-                targets = hints.get("possible_supersede_targets") or []
-                if targets:
-                    t = targets[0]
-                    summary = f"Possible duplicate/evolution of memory #{t.get('id')}"
+            if not hints:
+                return data
+            data["write_hints"] = hints
+            targets = hints.get("possible_supersede_targets") or []
+            new_ver = self.db.get_memory_version(memory_id) or 1
+            rang = False
+            for t in targets:
+                cand_id = int(t["id"])
+                # Layer 0: pair already dismissed → skip. Fail-open: if the check
+                # itself errors, treat as NOT dismissed (ring) — a diagnostic
+                # failure must never silently suppress the duplicate prompt.
+                try:
+                    dismissed = self.db.is_pair_dismissed(memory_id, cand_id)
+                except Exception:
+                    dismissed = False
+                if dismissed:
+                    continue
+                # v0.8.8: record as a dismissable advisory conflict row (idempotent
+                # if a row already exists for this pair).
+                self.db.record_conflict_enriched(
+                    memory_id, cand_id,
+                    conflict_type="metadata_overlap",
+                    conflict_point=t.get("reason") or "write metadata overlap",
+                    reason=t.get("reason") or "possible duplicate/evolution",
+                    confidence_hint="low",
+                    source="metadata_write_hint", status="open",
+                    left_version=new_ver,
+                    right_version=self.db.get_memory_version(cand_id) or 1,
+                )
+                # Ring + log once, for the first non-dismissed target.
+                if not rang:
+                    rang = True
+                    summary = f"Possible duplicate/evolution of memory #{cand_id}"
                     if t.get("subject"):
                         summary += f" ({t['subject']})"
                     if len(targets) > 1:
                         summary += f" and {len(targets) - 1} more"
                     data["attention_required"] = True
                     data["attention_summary"] = summary
+                    self.db.log_attention(
+                        trigger="write",
+                        source=str(t.get("hint_type", "possible_duplicate")),
+                        memory_ids=[memory_id, cand_id],
+                    )
         except Exception:
             pass
         return data
@@ -268,27 +303,51 @@ class MemoryTools:
         # each result's nested conflict_signal.
         attention_required = False
         attention_summary: Optional[str] = None
-        if retrieval_mode == "direct" and results:
+        if include_conflict_signal and retrieval_mode == "direct" and results:
+            # Distinct conflict_signal sources on these hits (source -> first
+            # result carrying it): each source is logged once, and the loud
+            # flag can be gated by source.
+            seen_sources: dict[str, dict[str, Any]] = {}
             for r in results:
                 sig = r.get("conflict_signal")
                 if not sig:
                     continue
-                attention_required = True
-                head = f"Search hit #{r.get('id')}"
-                if r.get("subject"):
-                    head += f" ({r['subject']})"
-                head += f" carries a {sig.get('conflict_source', 'conflict')} signal"
+                seen_sources.setdefault(str(sig.get("conflict_source", "conflict")), r)
+            # v0.8.8: log every source that appeared (doctor reports volume by
+            # source, so advisory flooding stays visible even when it doesn't
+            # ring the loud flag below).
+            for src, r in seen_sources.items():
+                sig = r.get("conflict_signal") or {}
                 peer = sig.get("conflict_peer") or {}
+                ids = [int(r["id"])] if r.get("id") is not None else []
+                if isinstance(peer, dict) and peer.get("id") is not None:
+                    ids.append(int(peer["id"]))
+                self.db.log_attention(trigger="search", source=src, memory_ids=ids)
+            # v0.8.8: the loud must-surface flag fires ONLY for verified
+            # open_table signals. runtime_metadata_hint is advisory (unverified,
+            # and re-fires on every retrieval of an overlapping pair), so a
+            # must-surface flag would nag. It stays a per-result signal for the
+            # calling agent to judge by content (see memory_search docstring):
+            # surface only if the two genuinely contradict, else silently proceed.
+            ot = seen_sources.get("open_table")
+            if ot is not None:
+                attention_required = True
+                ot_sig = ot.get("conflict_signal") or {}
+                head = f"Search hit #{ot.get('id')}"
+                if ot.get("subject"):
+                    head += f" ({ot['subject']})"
+                head += " carries an open_table signal"
+                peer = ot_sig.get("conflict_peer") or {}
                 if isinstance(peer, dict) and peer.get("id") is not None:
                     peer_txt = f"#{peer['id']}"
                     if peer.get("subject"):
                         peer_txt += f" ({peer['subject']})"
                     head += f" vs {peer_txt}"
-                n = sum(1 for x in results if x.get("conflict_signal"))
+                n = sum(1 for x in results
+                        if (x.get("conflict_signal") or {}).get("conflict_source") == "open_table")
                 if n > 1:
                     head += f" and {n - 1} more"
                 attention_summary = head
-                break
         # v0.7.4: linked_open_items — only on genuine query hits (direct mode),
         # never on browse/fallback/empty. Failures degrade to [] + warning.
         linked: list[dict[str, Any]] = []
@@ -444,8 +503,8 @@ class MemoryTools:
                 applied = self.db.update_memory(int(comparison["loser_id"]), {"status": "superseded"})
         return self.db.state.response({"comparison": comparison, "conflict_id": conflict_id, "applied": applied})
 
-    def memory_list_conflicts(self, status: str = "open", limit: int = 50, **_: Any) -> dict[str, Any]:
-        conflicts = self.db.list_conflicts(status=status, limit=int(limit))
+    def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
+        conflicts = self.db.list_conflicts(status=status, limit=int(limit), source=source)
         return self.db.state.response({"conflicts": conflicts, "count": len(conflicts)})
 
     def memory_scan_conflict_candidates(
@@ -525,16 +584,23 @@ class MemoryTools:
         self,
         conflict_id: int,
         reason: str = "",
+        status: str = "resolved",
         **_: Any,
     ) -> dict[str, Any]:
         """v0.7.5 (id=243): close a single open conflict by id (dismiss).
+
+        ``status``: ``'resolved'`` (default; arbitrated, has winner) or
+        ``'not_a_conflict'`` (v0.8.8; pair judged NOT a real conflict — advisory
+        dismissal; write/search then skip it via Layer 0 until a version change
+        invalidates it). Use ``'not_a_conflict'`` when the user confirms an
+        advisory/duplicate hint was a false positive.
 
         Unlike ``memory_supersede`` (which resolves all conflicts touching a
         memory via ``resolve_conflicts_for``), this targets exactly one
         conflict row — used to dismiss a false positive without touching
         either memory.
         """
-        result = self.db.resolve_conflict(int(conflict_id), reason=reason)
+        result = self.db.resolve_conflict(int(conflict_id), reason=reason, status=status)
         return self.db.state.response(result)
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
@@ -1048,6 +1114,9 @@ class MemoryTools:
 
             # Attach signals.
             result_id_set = set(result_ids)
+            # v0.8.8 Layer 0: pairs already dismissed (not_a_conflict, version
+            # match) — the computed-overlap advisory path must skip them.
+            dismissed_pairs = self.db.dismissed_pairs_for(result_ids)
             for rec in results:
                 mid = int(rec["id"])
                 if mid in conflicts_by_mem:
@@ -1058,7 +1127,7 @@ class MemoryTools:
                         rec["conflict_signal"] = signal
                         continue
                 # No open_table signal → try runtime_metadata_hint.
-                hint = self._compute_runtime_hint(mid, rec, results, result_id_set)
+                hint = self._compute_runtime_hint(mid, rec, results, result_id_set, dismissed_pairs)
                 if hint:
                     rec["conflict_signal"] = hint
         except Exception as exc:
@@ -1087,14 +1156,18 @@ class MemoryTools:
         primary = max(conflicts, key=conflict_sort_key)
         peer_id = int(primary["right_id"]) if primary["left_id"] == memory_id else int(primary["left_id"])
         peer_summary = summaries.get(peer_id, {})
+        src = primary.get("source")
+        advisory = (src == "metadata_write_hint")
         return {
-            "conflict_source": "open_table",
+            # v0.8.8: route by row source — write-hint rows are advisory, NOT
+            # verified; presenting them as open_table would cry-wolf. (漏洞#1)
+            "conflict_source": "runtime_metadata_hint" if advisory else "open_table",
             "conflict_id": int(primary["id"]),
             "conflict_type": primary.get("conflict_type"),
             "conflict_point": primary.get("conflict_point"),
             "suggested_winner": primary.get("suggested_winner"),
-            "confidence_hint": primary.get("confidence_hint"),
-            "source": primary.get("source"),
+            "confidence_hint": "low" if advisory else primary.get("confidence_hint"),
+            "source": src,
             "open_conflict_count": len(conflicts),
             "conflict_peer": {
                 "id": peer_id,
@@ -1110,12 +1183,16 @@ class MemoryTools:
         rec: dict[str, Any],
         all_results: list[dict[str, Any]],
         result_id_set: set[int],
+        dismissed_pairs: Optional[set] = None,
     ) -> Optional[dict[str, Any]]:
         """Compute a runtime_metadata_hint by comparing this result against
         other results in the same result set (bounded to first 20).
 
-        Only fires on high subject/tags overlap + trust disparity.
+        Only fires on high subject/tags overlap + trust disparity. ``dismissed_pairs``
+        (v0.8.8 Layer 0): canonical (a,b) pairs the user already judged
+        not-a-conflict — skipped so a dismissed pair can't nag via this path.
         """
+        dismissed_pairs = dismissed_pairs or set()
         my_tags = set(rec.get("tags") or [])
         my_subject = (rec.get("subject") or "").lower()
         my_trust = self._trust_score(rec)
@@ -1125,6 +1202,8 @@ class MemoryTools:
         best_score = 0.0
         for peer in candidates:
             peer_id = int(peer.get("id", 0))
+            if (min(memory_id, peer_id), max(memory_id, peer_id)) in dismissed_pairs:
+                continue  # v0.8.8 Layer 0: user already dismissed this pair.
             peer_tags = set(peer.get("tags") or [])
             peer_subject = (peer.get("subject") or "").lower()
             # Tags overlap.

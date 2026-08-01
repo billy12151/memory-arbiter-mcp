@@ -743,17 +743,31 @@ class MemoryDB:
                 "WHERE status='open' AND (left_id=? OR right_id=?)",
                 (utc_now_iso(), memory_id, memory_id),
             )
+            # v0.8.8: a memory resolved-away (supersede) also obsoletes any
+            # not_a_conflict (advisory dismissal) rows touching it — the
+            # dismissal has no referent once the memory is superseded.
+            conn.execute(
+                "DELETE FROM conflicts WHERE status='not_a_conflict' "
+                "AND (left_id=? OR right_id=?)",
+                (memory_id, memory_id),
+            )
             conn.commit()
             return cur.rowcount
 
-    def list_conflicts(self, status: str = "open", limit: int = 50) -> list[dict[str, Any]]:
+    def list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None) -> list[dict[str, Any]]:
         if not self._db_available:
             return []
         with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM conflicts WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                (status, limit),
-            ).fetchall()
+            if source is None:
+                rows = conn.execute(
+                    "SELECT * FROM conflicts WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM conflicts WHERE status = ? AND source = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, source, limit),
+                ).fetchall()
             return [row_to_dict(row) for row in rows]
 
     # ------------------------------------------------------------------
@@ -914,25 +928,118 @@ class MemoryDB:
             return {"outcome": "inserted", "conflict_id": int(cur.lastrowid)}
 
     def resolve_conflict(
-        self, conflict_id: int, reason: str = ""
+        self, conflict_id: int, reason: str = "", status: str = "resolved",
     ) -> dict[str, Any]:
-        """Close a single open conflict by id (status -> resolved).
+        """Close a single open conflict by id (status -> resolved or not_a_conflict).
 
-        Unlike ``resolve_conflicts_for`` (which closes *all* conflicts touching
-        a given memory), this targets exactly one row. Returns the rowcount.
+        ``status='not_a_conflict'`` records that the pair was judged NOT a real
+        conflict (advisory dismissal): write/search then skip it (Layer 0) until
+        a version change invalidates the row. ``status`` must be 'resolved' or
+        'not_a_conflict'. Unlike ``resolve_conflicts_for`` (which closes *all*
+        conflicts touching a memory), this targets exactly one row.
         """
+        if status not in ("resolved", "not_a_conflict"):
+            return {"outcome": "invalid_status", "conflict_id": int(conflict_id)}
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable"}
         with self.connection() as conn:
             cur = conn.execute(
-                "UPDATE conflicts SET status='resolved', resolved_at=?, reason=? "
+                "UPDATE conflicts SET status=?, resolved_at=?, reason=? "
                 "WHERE id=? AND status='open'",
-                (utc_now_iso(), reason, int(conflict_id)),
+                (status, utc_now_iso(), reason, int(conflict_id)),
             )
             conn.commit()
             if cur.rowcount == 0:
                 return {"outcome": "not_open", "conflict_id": int(conflict_id)}
-            return {"outcome": "resolved", "conflict_id": int(conflict_id)}
+            return {"outcome": status, "conflict_id": int(conflict_id)}
+
+    def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
+        """v0.8.8: True if (left, right) has a ``not_a_conflict`` row whose pinned
+        ``left_version``/``right_version`` still match the memories' current
+        versions (neither edited since dismissal). One correlated query; never
+        raises (best-effort: on error returns False → fail-open, re-ring).
+        """
+        if not self._db_available:
+            return False
+        a, b = sorted((int(left_id), int(right_id)))
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM conflicts c "
+                    "WHERE c.status='not_a_conflict' AND c.left_id=? AND c.right_id=? "
+                    "AND (c.left_version IS NULL OR c.left_version = (SELECT version FROM memories WHERE id=c.left_id)) "
+                    "AND (c.right_version IS NULL OR c.right_version = (SELECT version FROM memories WHERE id=c.right_id)) "
+                    "LIMIT 1",
+                    (a, b),
+                ).fetchone()
+                return row is not None
+        except sqlite3.Error:
+            return False
+
+    def purge_stale_dismissals(self) -> int:
+        """v0.8.8: delete ``not_a_conflict`` rows whose pinned versions no longer
+        match the memories' current versions (a side was edited after dismissal).
+        Called by scan. Garbage collection only — functional re-enable is already
+        handled by ``is_pair_dismissed``'s version CAS at check time. Best-effort.
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return 0
+        try:
+            with self.connection() as conn:
+                cur = conn.execute(
+                    "DELETE FROM conflicts WHERE status='not_a_conflict' AND ( "
+                    "(left_version IS NOT NULL AND left_version <> "
+                    "(SELECT version FROM memories WHERE id=conflicts.left_id)) "
+                    "OR (right_version IS NOT NULL AND right_version <> "
+                    "(SELECT version FROM memories WHERE id=conflicts.right_id)) )"
+                )
+                conn.commit()
+                return cur.rowcount
+        except sqlite3.Error:
+            return 0
+
+    def get_memory_version(self, memory_id: int) -> Optional[int]:
+        """v0.8.8: current version of a memory (for conflict-row version pinning)."""
+        if not self._db_available:
+            return None
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT version FROM memories WHERE id=?", (int(memory_id),)
+                ).fetchone()
+                return int(row["version"]) if row else None
+        except sqlite3.Error:
+            return None
+
+    def dismissed_pairs_for(self, memory_ids: list[int]) -> set:
+        """v0.8.8: canonical ``(a, b)`` pairs (a<b) that are currently dismissed
+        — a ``not_a_conflict`` row whose pinned versions still match the
+        memories' current versions. Restricted to pairs touching *memory_ids*.
+        For Layer 0 gating of the computed-overlap advisory path. Best-effort.
+        """
+        if not memory_ids or not self._db_available:
+            return set()
+        ids = sorted(set(int(i) for i in memory_ids if i is not None))
+        if not ids:
+            return set()
+        out: set = set()
+        try:
+            with self.connection() as conn:
+                ph = ",".join("?" * len(ids))
+                rows = conn.execute(
+                    "SELECT left_id, right_id FROM conflicts "
+                    "WHERE status='not_a_conflict' "
+                    f"AND (left_id IN ({ph}) OR right_id IN ({ph})) "
+                    "AND (left_version IS NULL OR left_version = (SELECT version FROM memories WHERE id=conflicts.left_id)) "
+                    "AND (right_version IS NULL OR right_version = (SELECT version FROM memories WHERE id=conflicts.right_id))",
+                    (*ids, *ids),
+                ).fetchall()
+                for r in rows:
+                    a, b = int(r["left_id"]), int(r["right_id"])
+                    out.add((min(a, b), max(a, b)))
+        except sqlite3.Error:
+            return set()
+        return out
 
     def get_embedding(self, memory_id: int) -> Optional[list[float]]:
         """Read back a memory's embedding vector as a list of floats.
@@ -976,6 +1083,35 @@ class MemoryDB:
     def scan_log_path(self) -> Path:
         """``scan_log.jsonl`` sits next to ``memory.sqlite3``."""
         return self.settings.db_path.parent / "scan_log.jsonl"
+
+    #  v0.8.8: attention_log.jsonl — diagnostic layer for the attention_required
+    #  flag. Doctor reports volume by source so the operator can see whether a
+    #  given source (esp. the advisory runtime_metadata_hint) is flooding the
+    #  flag — the cry-wolf indicator. Same best-effort discipline as scan_log.
+    @property
+    def attention_log_path(self) -> Path:
+        """``attention_log.jsonl`` sits next to ``memory.sqlite3``."""
+        return self.settings.db_path.parent / "attention_log.jsonl"
+
+    def log_attention(self, *, trigger: str, source: str, memory_ids: list) -> None:
+        """Append one attention event (v0.8.8). Best-effort diagnostic layer.
+
+        Same append discipline as ``_scan_log_append`` ("a" mode, single
+        write, POSIX < PIPE_BUF atomicity). Never raises — a failed
+        diagnostic write must not break the write/search that triggered it.
+        """
+        try:
+            entry = {
+                "ts": utc_now_iso(),
+                "trigger": trigger,
+                "source": source,
+                "ids": [int(i) for i in memory_ids if i is not None],
+            }
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            with open(self.attention_log_path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        except (OSError, ValueError, TypeError):
+            pass
 
     def _scan_log_append(self, entry: dict[str, Any]) -> None:
         """Append one JSONL line to scan_log. Best-effort (diagnostic layer).
@@ -1041,6 +1177,10 @@ class MemoryDB:
         if not self._db_available:
             return {"scanned": False, "reason": "db_unavailable",
                     "hint": "SQLite unavailable; conflict scan cannot run."}
+        # v0.8.8: GC stale advisory dismissals (rows whose pinned versions no
+        # longer match — a side was edited). Functional re-enable is already
+        # handled by is_pair_dismissed's version CAS; this just reclaims dead rows.
+        self.purge_stale_dismissals()
         if not self.state.sqlite_vec_available:
             return {"scanned": False, "reason": "sqlite_vec_unavailable",
                     "hint": "向量未启用，冲突扫描不可用。请先配置 sqlite-vec embedding。"}

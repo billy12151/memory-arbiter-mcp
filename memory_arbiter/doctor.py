@@ -5,7 +5,7 @@ Three-layer architecture (design doc §5):
      depends only on a read-only sqlite connection + Settings (+ optional
      runtime state / embedder probe). Never on ``MemoryDB``.
   2. ``run_all_checks(conn, settings, deep, runtime_state, embedder_probe)``
-     — orchestration: runs all 18 checks on one ro connection (consistent
+     — orchestration: runs all 19 checks on one ro connection (consistent
      snapshot), with per-check try/except isolation (§9 constraint 4).
   3. Platform entries ``doctor_overview_mcp`` (used by tools.py) and the CLI
      entry (doctor_cli.py) — each owns connection acquisition + the global
@@ -134,6 +134,91 @@ def _days_since_iso(iso_ts: str) -> Optional[int]:
         return max(0, (datetime.now(timezone.utc) - dt).days)
     except (ValueError, TypeError):
         return None
+
+
+def _read_attention_log_counts(path, since_days: int = 7) -> dict:
+    """Read ``attention_log.jsonl`` and count events within the last
+    ``since_days`` days (v0.8.8). Best-effort: missing/corrupt -> empty.
+
+    Counts along two independent axes because write and search fire with
+    very different frequency characteristics (write = event, low-freq;
+    search = query, the same conflict pair re-fires on every retrieval),
+    so a single ``total`` would let high-freq search drown write's signal.
+    """
+    by_source: dict[str, int] = {}
+    by_trigger: dict[str, int] = {}
+    by_source_trigger: dict[str, dict[str, int]] = {}
+    total = 0
+    p = Path(path)
+    if not p.exists():
+        return {"total": 0, "window_days": since_days, "by_source": {},
+                "by_trigger": {}, "by_source_trigger": {}}
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ts = rec.get("ts")
+                days = _days_since_iso(ts) if isinstance(ts, str) else None
+                if days is None or days > since_days:
+                    continue
+                src = str(rec.get("source", "unknown"))
+                trig = str(rec.get("trigger", "unknown"))
+                by_source[src] = by_source.get(src, 0) + 1
+                by_trigger[trig] = by_trigger.get(trig, 0) + 1
+                sub = by_source_trigger.setdefault(src, {})
+                sub[trig] = sub.get(trig, 0) + 1
+                total += 1
+    except OSError:
+        pass
+    return {"total": total, "window_days": since_days, "by_source": by_source,
+            "by_trigger": by_trigger, "by_source_trigger": by_source_trigger}
+
+
+def _check_attention_volume(settings: Settings) -> Finding:
+    """v0.8.8: report ``attention_required`` flag volume (last 7 days), split
+    by trigger (write/search) AND source.
+
+    Pure diagnostic (always INFO). The write/search split matters: write is
+    event-driven (one fire per new duplicate, low-freq), search is query-driven
+    (the same conflict re-fires on every retrieval that hits it). A single
+    total would let high-freq search mask whether write is producing real new
+    duplicates — so both axes are surfaced and the human judges what's noisy.
+    """
+    path = settings.db_path.parent / "attention_log.jsonl"
+    rep = _read_attention_log_counts(path, since_days=7)
+    total = rep["total"]
+    window = rep["window_days"]
+    by_src = rep["by_source"]
+    by_trig = rep["by_trigger"]
+    if total == 0:
+        return Finding(
+            check_id="capacity.attention_volume", dimension="capacity",
+            severity=Severity.INFO, status="pass",
+            title=f"近 {window} 天无 attention 响铃",
+            detail="attention_log.jsonl 无记录（或文件不存在）",
+            evidence={"total": 0, "window_days": window, "by_source": {},
+                      "by_trigger": {}, "by_source_trigger": {}},
+        )
+    w = by_trig.get("write", 0)
+    s = by_trig.get("search", 0)
+    src_parts = ", ".join(f"{k}: {v}" for k, v in sorted(by_src.items(), key=lambda kv: -kv[1]))
+    return Finding(
+        check_id="capacity.attention_volume", dimension="capacity",
+        severity=Severity.INFO, status="pass",
+        title=f"近 {window} 天 attention 响铃 {total} 次（write {w} / search {s}；{src_parts}）",
+        detail=("write=事件性(每次写入,低频), search=查询性(同一冲突被反复检索会重复响)。"
+                "判断刷屏看 search 占比 + by_source_trigger 的来源分布。"),
+        evidence={"total": total, "window_days": window, "by_source": by_src,
+                  "by_trigger": by_trig, "by_source_trigger": rep["by_source_trigger"]},
+    )
 
 
 def _embedder_shallow_probe(settings: Settings) -> tuple[Optional[Any], list[str]]:
@@ -835,6 +920,20 @@ def _check_history_version_chain(conn: sqlite3.Connection) -> Finding:
 #  Capacity checks (design doc §9.D) — 4 items
 # =====================================================================
 
+def _open_conflicts_by_source(conn: sqlite3.Connection) -> dict:
+    """v0.8.8: open conflict counts grouped by source — lets the operator see
+    how many open rows are verified (llm_informed) vs advisory write-hints
+    (metadata_write_hint), so write落表 doesn't silently inflate the count."""
+    try:
+        rows = conn.execute(
+            "SELECT COALESCE(source, 'unknown') AS src, count(*) AS c "
+            "FROM conflicts WHERE status='open' GROUP BY src"
+        ).fetchall()
+        return {r["src"]: r["c"] for r in rows}
+    except sqlite3.Error:
+        return {}
+
+
 def _check_conflicts_open(
     conn: sqlite3.Connection,
     settings: Settings,
@@ -875,7 +974,8 @@ def _check_conflicts_open(
             severity=sev, status="warn" if sev == Severity.WARNING else "pass",
             title=f"{count} 条 open 冲突未仲裁" + (f"，最老 {oldest}" if oldest else ""),
             detail=f"open_count={count}, oldest={oldest}, vec_available=False",
-            evidence={"open_count": count, "oldest": oldest, "vec_available": False},
+            evidence={"open_count": count, "oldest": oldest, "vec_available": False,
+                      "by_source": _open_conflicts_by_source(conn)},
             fix_hint="建议 memory_list_conflicts 处理" if count > 20 else "",
         )
 
@@ -928,7 +1028,8 @@ def _check_conflicts_open(
         title=f"{count} 条 open 冲突未仲裁" + (f"，最老 {oldest}" if oldest else ""),
         detail=f"open_count={count}, oldest={oldest}, last_scan={scan_time}",
         evidence={"open_count": count, "oldest": oldest,
-                  "last_scan_time": scan_time, "days_ago": days_ago},
+                  "last_scan_time": scan_time, "days_ago": days_ago,
+                  "by_source": _open_conflicts_by_source(conn)},
         fix_hint="建议 memory_list_conflicts 处理" if count > 20 else "",
     )
 
@@ -1068,12 +1169,13 @@ def run_all_checks(
     _run("consistency.history_version_chain",
          lambda: _check_history_version_chain(conn), "consistency")
 
-    # --- capacity (4) ---
+    # --- capacity (5) ---
     _run("capacity.conflicts_open",
          lambda: _check_conflicts_open(conn, settings, runtime_state), "capacity")
     _run("capacity.superseded_ratio", lambda: _check_superseded_ratio(conn), "capacity")
     _run("capacity.history_bloat", lambda: _check_history_bloat(conn), "capacity")
     _run("capacity.db_size", lambda: _check_db_size(conn), "capacity")
+    _run("capacity.attention_volume", lambda: _check_attention_volume(settings), "capacity")
 
     overall = _max_severity(findings)
     vec_pass_count = sum(1 for f in findings if f.dimension == "vector" and f.status == "pass")
