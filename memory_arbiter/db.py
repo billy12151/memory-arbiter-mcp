@@ -981,6 +981,14 @@ class MemoryDB:
         match the memories' current versions (a side was edited after dismissal).
         Called by scan. Garbage collection only — functional re-enable is already
         handled by ``is_pair_dismissed``'s version CAS at check time. Best-effort.
+
+        Symmetry note (v0.8.8 review): the read path (``is_pair_dismissed`` /
+        ``dismissed_pairs_for``) treats a NULL version pin as a *valid* dismissal
+        (``IS NULL OR =``). This GC must agree, so a row is reclaimed ONLY when a
+        pin is non-NULL AND differs from the memory's current version
+        (``IS NOT NULL AND <>`` — a NULL pin is left alone). A NULL pin can't be
+        invalidated by version CAS alone; ``_enrich_write_response`` avoids
+        creating NULL pins by defaulting missing versions to 1 (``or 1``).
         """
         if not self._db_available or not self.state.sqlite_writable:
             return 0

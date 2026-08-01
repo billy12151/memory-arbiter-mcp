@@ -620,4 +620,25 @@ def test_dismiss_survives_null_version_pin(tmp_path: Path) -> None:
         conn.commit()
     # Still dismissed — NULL pin is treated as a valid dismissal, not a re-nag.
     assert tools.db.is_pair_dismissed(a, b) is True
+    # Read/GC symmetry: the read path treats NULL as valid, so purge must NOT
+    # reclaim it (IS DISTINCT FROM: NULL IS DISTINCT FROM NULL is false).
+    # A stale-NULL row would otherwise accumulate forever (read says "valid",
+    # GC says "leave it" — consistent).
+    assert tools.db.purge_stale_dismissals() == 0
+
+
+def test_purge_reclaims_edited_dismissal_not_null_pin(tmp_path: Path) -> None:
+    """v0.8.8 (ZCode review): purge must reclaim a dismissal whose pinned
+    version was invalidated by an edit (the non-NULL stale case), while
+    leaving a NULL-pinned row alone. Covers the read/GC symmetry contract."""
+    tools = _tools(tmp_path)
+    a = _write(tools, content="x", subject="s", tags=["t1", "t2"])
+    b = _write(tools, content="y", subject="s", tags=["t1", "t2"])
+    row = tools.memory_list_conflicts(status="open")["data"]["conflicts"][0]
+    tools.memory_resolve_conflict(conflict_id=row["id"], status="not_a_conflict")
+    # Edit one side → its pinned version is now stale (non-NULL inequality).
+    tools.db.edit_memory(b, new_content="y-edited", new_subject="s", new_tags=["t1", "t2"])
+    assert tools.db.is_pair_dismissed(a, b) is False  # edit invalidated the dismiss
+    n = tools.db.purge_stale_dismissals()
+    assert n == 1  # the edited-side stale row was reclaimed
 
