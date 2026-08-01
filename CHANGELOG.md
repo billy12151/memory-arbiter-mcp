@@ -7,6 +7,14 @@ Versions follow semantic versioning.
 
 Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
 
+## [0.8.6] — 2026-08-01
+
+### Fixed
+
+- **`memory_edit` content 模式现支持 `add_tags`/`remove_tags`** — content 编辑路径(整体 `new_content` 替换 / `old_text`+`new_text` 局部替换)此前静默丢弃 `add_tags`/`remove_tags`,只转发 `new_tags` 给 `db.edit_memory`。"重写正文同时微调一个 tag"在 tag 侧是空操作,调用方不得不追加一次 `tags_only` 编辑(v0.8.5 回写 todo 时连踩 3 次发现)。现修复:`add`/`remove` 在 content 路径内合并,叠加在 `new_tags`(若传)或现有 tags 之上,复用 `update_tags_low_side_effect` 的保序去重算法(先 remove 再 add)。`new_tags` 单独传仍是全量替换;`new_tags=None` 且无增删时透传 None(`edit_memory` 保持原 tags),既有调用零影响。
+
+338 tests pass (337 + 1 new).
+
 ## [0.8.5] — 2026-07-31
 
 ### Breaking
