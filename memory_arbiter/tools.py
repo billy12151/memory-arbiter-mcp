@@ -676,6 +676,12 @@ class MemoryTools:
           * partial replace: pass ``old_text`` + ``new_text`` for an exact
             substring substitution (new_content must be empty)
 
+        Tags in content modes: ``add_tags``/``remove_tags`` also work in
+        full/partial mode — they overlay on top of ``new_tags`` (if given)
+        else the current tags, mirroring the tags-only path's
+        order-preserving dedup (remove first, then add). ``new_tags`` alone
+        is a full replace.
+
         Authorization (layered): normal records edit freely; ``locked`` /
         ``user_confirmed`` records require ``authorized=True`` (mirrors
         ``memory_supersede``). Records already superseded/deleted are rejected.
@@ -778,11 +784,40 @@ class MemoryTools:
                 {"error": "provide new_content for full replace, or old_text+new_text for partial replace, or tags_only=true", "edited": False},
                 ok=False,
             )
+        # Resolve tags: new_tags (full replace) + add_tags/remove_tags (delta).
+        # add/remove overlay on top of new_tags (if given) else current tags,
+        # mirroring update_tags_low_side_effect's order-preserving dedup
+        # (remove first, then add). Previously the content path dropped
+        # add_tags/remove_tags entirely (silent no-op) — fixed.
+        current_tags_raw = memory.get("tags") or []
+        if isinstance(current_tags_raw, str):
+            try:
+                current_tags_raw = json.loads(current_tags_raw)
+            except (json.JSONDecodeError, ValueError):
+                current_tags_raw = []
+        if new_tags is not None:
+            resolved_new_tags = list(new_tags)
+        else:
+            resolved_new_tags = list(current_tags_raw)
+        if add_tags or remove_tags:
+            tag_set = set(resolved_new_tags)
+            for t in (remove_tags or []):
+                if t in tag_set:
+                    tag_set.discard(t)
+                    resolved_new_tags = [x for x in resolved_new_tags if x != t]
+            for t in (add_tags or []):
+                if t not in tag_set:
+                    tag_set.add(t)
+                    resolved_new_tags.append(t)
+        else:
+            # No delta: pass new_tags through as-is, or None to keep current.
+            resolved_new_tags = new_tags
+
         history_id = self.db.edit_memory(
             memory_id_int,
             resolved_content,
             new_subject=new_subject,
-            new_tags=new_tags,
+            new_tags=resolved_new_tags,
             reason=reason or None,
         )
         if history_id is None:

@@ -1049,6 +1049,43 @@ def test_history_returns_version_chain(tmp_path: Path) -> None:
     assert result["data"]["history"][0]["content_snapshot"] == "rev two"
 
 
+def test_memory_edit_content_plus_add_remove_tags(tmp_path: Path) -> None:
+    """Content edit path honors add_tags/remove_tags (was silently ignored).
+
+    add/remove overlay on current tags, order-preserving + deduped (mirrors
+    the tags-only path). new_tags acts as the base when both are passed.
+    """
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="original body", subject="s", tags=["a", "b"],
+        source_type="agent_generated", event_time="2026-01-01T00:00:00Z",
+    )
+    mid = written["data"]["id"]
+
+    # add + remove against current tags ["a","b"] -> ["b","c"]
+    edited = tools.memory_edit(
+        memory_id=mid, new_content="new body", add_tags=["c"], remove_tags=["a"], reason="retag",
+    )
+    assert edited["ok"] is True
+    updated = tools.memory_get(memory_id=mid)["data"]["memory"]
+    assert updated["content"] == "new body"
+    assert updated["tags"] == ["b", "c"]  # removed "a", appended "c", order preserved
+    assert updated["version"] == 2
+    assert tools.memory_history(memory_id=mid)["data"]["count"] == 1  # content edit wrote history
+
+    # new_tags as base + add overlay -> ["x","y"] (new_tags wins over current tags)
+    written2 = tools.memory_write(
+        content="second", subject="s2", tags=["a", "b"],
+        source_type="agent_generated", event_time="2026-01-01T00:00:00Z",
+    )
+    mid2 = written2["data"]["id"]
+    edited2 = tools.memory_edit(
+        memory_id=mid2, new_content="second v2", new_tags=["x"], add_tags=["y"], reason="base",
+    )
+    assert edited2["ok"] is True
+    assert tools.memory_get(memory_id=mid2)["data"]["memory"]["tags"] == ["x", "y"]
+
+
 def test_cleanup_history_full_requires_authorization(tmp_path: Path) -> None:
     """Full history cleanup needs authorized=True; per-memory cleanup does not.
     And under no arguments must the memories table lose zero rows."""
