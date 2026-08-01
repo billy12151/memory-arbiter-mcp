@@ -77,6 +77,8 @@ Parameters:
 
 include_conflict_signal: default true. When a hit involves open conflicts, attaches a conflict_signal field (sources: open_table = structured conflicts recorded by scan/record; runtime_metadata_hint = runtime heuristic, not LLM-verified). Fires only on a real hit (retrieval_mode=direct).
 
+Conflict surfacing (v0.8.7): when any direct hit carries a conflict_signal, the response also sets a top-level `attention_required` flag + `attention_summary` (e.g. "Search hit #42 (api-token-policy) carries an open_table signal vs #17 (legacy-token-policy)"). ALWAYS check `attention_required` after a search and, when true, surface it to the user before relying on the results — e.g. "⚠️ 命中的记忆里 #N 与 #M 存在冲突信号,引用前请先用 memory_compare / memory_get 核实。" This is advisory; the per-result conflict_signal has the detail.
+
 Note: tags_filter is AND semantics — every listed tag must be present. Suited to: finding the N most relevant entries, exhaustive queries with filters, and structured listing via empty query + filters.
 
 v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized automatically even without query_embedding; an explicit query_embedding still takes precedence."""

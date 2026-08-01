@@ -11,9 +11,10 @@ Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 
 
 ### Added
 
-- **写入时的重复/演化提示现在会要求 agent 转告用户** — `memory_write` 早已在响应里返回 `write_hints`(subject/tags 高度重叠时标记 `possible_duplicate` / `possible_evolution_of`),但调用方 agent 几乎从不把它告诉用户,两个原因:① 工具描述对 `write_hints` / "要不要提醒用户"只字未提,agent 根本不知道有这回事;② 信号藏在嵌套的 `data.write_hints.possible_supersede_targets`、字段名又是 "possible"(读着像可忽略)。现修两处:`memory_write` 的 docstring 显式要求写入后**必须**检查 `attention_required` / `write_hints`,命中时**必须**转告用户(给出现成话术)再视为写入完成;`_enrich_write_response` 命中时在 `data` 顶层新增布尔 `attention_required` + 现成可读的 `attention_summary`(如 "Possible duplicate/evolution of memory #42 (api-token-policy)"),让 agent 扫一眼响应就能撞见、不必钻进 `write_hints`。仍是 advisory、且只覆盖 metadata 重叠(**重复/演化**),**不查语义矛盾**(那是 0.9 结构化冲突检测的范围)。无法"强制"(MCP 工具不能指令 LLM 必须说话),但描述 + 顶层强标志双管齐下,把"从不提示"推到"大多数情况会提示";写入那一刻漏的,由搜索路径已有的 `conflict_signal` 兜底。1 个新测试覆盖 attention 标志(命中/不命中两路)。
+- **写入时的重复/演化提示现在会要求 agent 转告用户** — `memory_write` 早已在响应里返回 `write_hints`(subject/tags 高度重叠时标记 `possible_duplicate` / `possible_evolution_of`),但调用方 agent 几乎从不把它告诉用户,两个原因:① 工具描述对 `write_hints` / "要不要提醒用户"只字未提,agent 根本不知道有这回事;② 信号藏在嵌套的 `data.write_hints.possible_supersede_targets`、字段名又是 "possible"(读着像可忽略)。现修两处:`memory_write` 的 docstring 显式要求写入后**必须**检查 `attention_required` / `write_hints`,命中时**必须**转告用户(给出现成话术)再视为写入完成;`_enrich_write_response` 命中时在 `data` 顶层新增布尔 `attention_required` + 现成可读的 `attention_summary`(如 "Possible duplicate/evolution of memory #42 (api-token-policy)"),让 agent 扫一眼响应就能撞见、不必钻进 `write_hints`。仍是 advisory、且只覆盖 metadata 重叠(**重复/演化**),**不查语义矛盾**(那是 0.9 结构化冲突检测的范围)。无法"强制"(MCP 工具不能指令 LLM 必须说话),但描述 + 顶层强标志双管齐下,把"从不提示"推到"大多数情况会提示";写入那一刻漏的,由搜索路径已有的 `conflict_signal` 兜底。
+- **搜索路径的 `conflict_signal` 同步提升为顶层 `attention_required` 强标志** — 上一条只改了写入路径,搜索路径的 `conflict_signal`(v0.7.6,每个 result 各自附 `open_table` / `runtime_metadata_hint`)仍是嵌套字段,agent 不一定逐条翻看,会和写入提示存在同样的"有信号但不被注意"的不对称。现补齐对称:`memory_search` 在任一 direct 命中带 `conflict_signal` 时,在 `data` 顶层同样置 `attention_required` + `attention_summary`(如 "Search hit #1 (revenue) carries a open_table signal vs #2 (revenue-v2) and 1 more"),并要求 agent 命中时转告用户(给出核实话术)。细节仍在各 result 的 `conflict_signal`,顶层标志只是"快扫描"用的响铃。两路(write/search)现在用同一套 `attention_required` / `attention_summary` 字段名,agent 的检查逻辑可统一。
 
-339 tests pass (338 + 1 new).
+341 tests pass (338 + 3 new).
 
 ## [0.8.6] — 2026-08-01
 

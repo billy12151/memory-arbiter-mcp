@@ -261,23 +261,55 @@ class MemoryTools:
         # only on genuine query hits (direct mode). Failures degrade silently.
         if include_conflict_signal and retrieval_mode == "direct" and results:
             results = self._attach_conflict_signals(results, extra_warnings)
+        # v0.8.7: promote conflict_signal to a loud top-level flag (mirrors the
+        # write path's attention_required). If any direct hit carries a
+        # conflict_signal, surface a one-line summary at data top level so the
+        # calling agent notices it on a quick scan instead of having to inspect
+        # each result's nested conflict_signal.
+        attention_required = False
+        attention_summary: Optional[str] = None
+        if retrieval_mode == "direct" and results:
+            for r in results:
+                sig = r.get("conflict_signal")
+                if not sig:
+                    continue
+                attention_required = True
+                head = f"Search hit #{r.get('id')}"
+                if r.get("subject"):
+                    head += f" ({r['subject']})"
+                head += f" carries a {sig.get('conflict_source', 'conflict')} signal"
+                peer = sig.get("conflict_peer") or {}
+                if isinstance(peer, dict) and peer.get("id") is not None:
+                    peer_txt = f"#{peer['id']}"
+                    if peer.get("subject"):
+                        peer_txt += f" ({peer['subject']})"
+                    head += f" vs {peer_txt}"
+                n = sum(1 for x in results if x.get("conflict_signal"))
+                if n > 1:
+                    head += f" and {n - 1} more"
+                attention_summary = head
+                break
         # v0.7.4: linked_open_items — only on genuine query hits (direct mode),
         # never on browse/fallback/empty. Failures degrade to [] + warning.
         linked: list[dict[str, Any]] = []
         if include_linked_open_items and retrieval_mode == "direct" and results:
             linked = _linked_open_items_for_search(self.db, results, extra_warnings)
+        response_data = {
+            "results": results,
+            "count": len(results),
+            # v0.7.3: exhaustive-query support (design §3.6)
+            "has_more": has_more,
+            "total_estimate": total_estimate,
+            # v0.7.4 (M2): expose retrieval_mode so callers know how rows were produced.
+            "retrieval_mode": retrieval_mode,
+            # v0.7.4: related active todos, separated from the ranking engine.
+            "linked_open_items": linked,
+        }
+        if attention_required:
+            response_data["attention_required"] = True
+            response_data["attention_summary"] = attention_summary
         return self.db.state.response(
-            {
-                "results": results,
-                "count": len(results),
-                # v0.7.3: exhaustive-query support (design §3.6)
-                "has_more": has_more,
-                "total_estimate": total_estimate,
-                # v0.7.4 (M2): expose retrieval_mode so callers know how rows were produced.
-                "retrieval_mode": retrieval_mode,
-                # v0.7.4: related active todos, separated from the ranking engine.
-                "linked_open_items": linked,
-            },
+            response_data,
             extra_warnings=extra_warnings + warnings,
         )
 

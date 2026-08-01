@@ -104,6 +104,43 @@ def test_search_conflict_signal_peer_outside_limit(tmp_path: Path) -> None:
     assert "id" in r["conflict_signal"]["conflict_peer"]
 
 
+def test_search_attention_flag_when_conflict_hits(tmp_path: Path) -> None:
+    """v0.8.7: a direct hit carrying conflict_signal promotes a top-level
+    attention_required flag + summary (mirrors the write path)."""
+    tools = _tools(tmp_path)
+    a = _write(tools, content="revenue is 20%", subject="revenue", tags=["finance"])
+    b = _write(tools, content="revenue is 30%", subject="revenue-v2", tags=["finance"])
+    tools.memory_record_conflict(
+        left_id=a, right_id=b, reason="contradiction",
+        conflict_type="contradiction", conflict_point="20% vs 30%",
+        suggested_winner=b, confidence_hint="high", source="llm_informed",
+    )
+    res = tools.memory_search(query="revenue")
+    assert res["data"].get("attention_required") is True
+    summary = res["data"].get("attention_summary")
+    assert isinstance(summary, str)
+    assert "signal" in summary
+    # Summary names the first hit and its peer.
+    assert f"#{a}" in summary or f"#{b}" in summary
+
+    # A no-conflict search on the same store must NOT set the flag.
+    res2 = tools.memory_search(query="finance")
+    if not any("conflict_signal" in r for r in res2["data"]["results"]):
+        assert not res2["data"].get("attention_required")
+
+
+def test_search_no_attention_flag_when_no_conflict(tmp_path: Path) -> None:
+    """v0.8.7: a search with no conflict_signal on any hit has no flag."""
+    tools = _tools(tmp_path)
+    _write(tools, content="harmless note about cats", subject="cats", tags=["animal"])
+    _write(tools, content="another note about dogs", subject="dogs", tags=["animal"])
+    res = tools.memory_search(query="cats")
+    # No conflicts recorded → no signal → no flag.
+    assert not any("conflict_signal" in r for r in res["data"]["results"])
+    assert "attention_required" not in res["data"]
+    assert "attention_summary" not in res["data"]
+
+
 def test_search_conflict_signal_disabled(tmp_path: Path) -> None:
     """include_conflict_signal=False suppresses the field entirely."""
     tools = _tools(tmp_path)
