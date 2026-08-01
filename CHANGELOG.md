@@ -7,6 +7,14 @@ Versions follow semantic versioning.
 
 Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
 
+## [0.8.7] — 2026-08-01
+
+### Added
+
+- **写入时的重复/演化提示现在会要求 agent 转告用户** — `memory_write` 早已在响应里返回 `write_hints`(subject/tags 高度重叠时标记 `possible_duplicate` / `possible_evolution_of`),但调用方 agent 几乎从不把它告诉用户,两个原因:① 工具描述对 `write_hints` / "要不要提醒用户"只字未提,agent 根本不知道有这回事;② 信号藏在嵌套的 `data.write_hints.possible_supersede_targets`、字段名又是 "possible"(读着像可忽略)。现修两处:`memory_write` 的 docstring 显式要求写入后**必须**检查 `attention_required` / `write_hints`,命中时**必须**转告用户(给出现成话术)再视为写入完成;`_enrich_write_response` 命中时在 `data` 顶层新增布尔 `attention_required` + 现成可读的 `attention_summary`(如 "Possible duplicate/evolution of memory #42 (api-token-policy)"),让 agent 扫一眼响应就能撞见、不必钻进 `write_hints`。仍是 advisory、且只覆盖 metadata 重叠(**重复/演化**),**不查语义矛盾**(那是 0.9 结构化冲突检测的范围)。无法"强制"(MCP 工具不能指令 LLM 必须说话),但描述 + 顶层强标志双管齐下,把"从不提示"推到"大多数情况会提示";写入那一刻漏的,由搜索路径已有的 `conflict_signal` 兜底。1 个新测试覆盖 attention 标志(命中/不命中两路)。
+
+339 tests pass (338 + 1 new).
+
 ## [0.8.6] — 2026-08-01
 
 ### Fixed

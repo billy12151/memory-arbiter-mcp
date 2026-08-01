@@ -189,6 +189,25 @@ def test_write_hints_duplicate(tmp_path: Path) -> None:
     assert targets[0]["hint_type"] == "possible_duplicate"
 
 
+def test_write_hints_attention_flag(tmp_path: Path) -> None:
+    """v0.8.7: a firing write_hint also promotes a loud attention_required flag."""
+    tools = _tools(tmp_path)
+    _write(
+        tools, content="original content about api tokens",
+        subject="api-token-policy", tags=["policy", "security"],
+    )
+    res = tools.memory_write(
+        content="new content about api tokens",
+        subject="api-token-policy", tags=["policy", "security"],
+        workspace="ws", source_type="agent_generated", agent_id="tester",
+    )
+    assert res["ok"]
+    data = res["data"]
+    assert data.get("attention_required") is True
+    summary = data.get("attention_summary")
+    assert isinstance(summary, str) and summary.startswith("Possible duplicate/evolution of memory #")
+
+
 def test_write_hints_evolution(tmp_path: Path) -> None:
     """Writing significantly longer content with same tags hints possible_evolution_of."""
     tools = _tools(tmp_path)
@@ -231,6 +250,7 @@ def test_write_hints_no_candidates(tmp_path: Path) -> None:
     )
     assert res["ok"]
     assert "write_hints" not in res["data"]
+    assert not res["data"].get("attention_required")  # v0.8.7: no flag when no hint
 
 
 # ──────────────────────────────────────────────────────────────────────────

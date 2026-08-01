@@ -43,7 +43,9 @@ tags are the primary ranking and filter signal (a tag exact-match outweighs cont
   user preference -> tags include "preference" + preference type
 Avoid re-tagging words already in subject (redundant, no retrieval gain).
 
-v0.5.0: with GGUF embedding + sqlite-vec configured, the vector is stored automatically on write; the response only echoes embedding_stored when vectorization was actually attempted."""
+v0.5.0: with GGUF embedding + sqlite-vec configured, the vector is stored automatically on write; the response only echoes embedding_stored when vectorization was actually attempted.
+
+Response duplicate/evolution check (v0.8.7): after writing, ALWAYS inspect the response's `attention_required` flag and `write_hints` field. When `attention_required` is true, a prior active memory looks like a near-duplicate or an evolution of what you just wrote — you MUST surface this to the user before treating the write as complete, e.g. "⚠️ 这条可能和已有记忆 #N (<subject>) 重复、或更新了它,是否要 supersede 旧的?" Do not silently ignore `attention_required`. Scope: this is advisory metadata-overlap only (tags ≥0.8 Jaccard + subject ≥0.7 overlap) — it catches duplicates/evolution, NOT semantic contradictions (those come from the conflict scan)."""
         return tools.memory_write(
             content=content,
             agent_id=agent_id,

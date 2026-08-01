@@ -141,6 +141,18 @@ class MemoryTools:
             hints = self._write_duplicate_hints(memory_id, record)
             if hints:
                 data["write_hints"] = hints
+                # v0.8.7: promote to a loud flag so the calling agent notices
+                # even on a quick scan — write_hints alone is easy to skip.
+                targets = hints.get("possible_supersede_targets") or []
+                if targets:
+                    t = targets[0]
+                    summary = f"Possible duplicate/evolution of memory #{t.get('id')}"
+                    if t.get("subject"):
+                        summary += f" ({t['subject']})"
+                    if len(targets) > 1:
+                        summary += f" and {len(targets) - 1} more"
+                    data["attention_required"] = True
+                    data["attention_summary"] = summary
         except Exception:
             pass
         return data
