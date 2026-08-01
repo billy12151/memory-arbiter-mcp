@@ -7,6 +7,23 @@ Versions follow semantic versioning.
 
 Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
 
+## [0.8.8] — 2026-08-01
+
+### Added
+
+- **`attention_required` 响铃计数 + doctor 统计** — 0.8.7 把 `attention_required` 提升为顶层强标志(写入路径 + 搜索路径),但响多少次、按来源(open_table / runtime_metadata_hint / 写入重复·演化)各多少,没有可观测的数——而 cry-wolf 疲劳是静默发生的(用户会下意识忽略、却说不清忽略了多少)。现每次 `attention_required` 触发时,往 `attention_log.jsonl`(与 `memory.sqlite3` 同目录,复用 scan_log 的 best-effort 追加纪律、绝不抛错)写一条 `{ts, trigger(write/search), source, ids}`;doctor 新增 `capacity.attention_volume` 检查(第 19 项),报告近 7 天响铃总数 + 按 **trigger(write/search) 和来源** 拆分——write 是事件性(每次写入、低频),search 是查询性(同一冲突被反复检索会重复响),两者混在一个 total 会让高频 search 掩盖 write 的真信号,故拆开看（by_trigger + by_source_trigger 交叉表）。**始终 INFO、绝不 WARN**——是否刷屏由人判断,doctor 不替你下结论(0.8.7 决定让 advisory 的 runtime_metadata_hint 也响铃、先跑跑看;这条计数就是"跑跑看"的硬依据:若 runtime_hint 的量是 open_table 的数倍,就该考虑只让 open_table 响)。
+
+- **搜索路径的 advisory 信号不再响强制铃,改由 LLM 按内容判断** — `runtime_metadata_hint`(advisory、未验证,且同一对重叠记忆每次检索都会重复触发)此前和 `open_table` 一样置顶层 `attention_required` + MUST-surface,误报会在每次搜索反复打断用户(cry-wolf)。现:仅 `open_table`(已验证、可 `memory_resolve_conflict` 关闭)响强制铃;`runtime_metadata_hint` 保留为 per-result signal,docstring 改为要求调用方**按内容判断**(对比命中正文与 `conflict_peer` snippet,确实矛盾才提示,只是话题相近就静默)——保留 advisory 的召回又不 nag 误报。doctor 的 by_source 仍记录 advisory 出现次数(即便不响铃),便于看它到底多频繁。
+
+- **write advisory 落表 + dismiss(not_a_conflict) 永久止闹** — 推翻 id=264「write 不落 conflicts 表」:write 命中 duplicate 现记录为 `source='metadata_write_hint'` 的 open 行,可 `resolve_conflict(status='not_a_conflict')` 永久 dismiss。新增 `is_pair_dismissed`(version CAS:编辑其中一条 memory 即失效 dismiss、重新可响)。`_build_open_table_signal` 按行 source 路由(`metadata_write_hint`→`runtime_metadata_hint` advisory,不冒充 verified `open_table`)。`memory_supersede` 连清涉及该 memory 的 not_a_conflict 行;scan GC 版本过期的 dismissed 行;`memory_list_conflicts` 加 source 过滤参;doctor `conflicts_open` 按 source 拆。口径 **(A)**:search advisory 不响强制铃(LLM 软判),write 响(低频)+ 可 dismiss。insert-first 硬规则:记忆先 active 入库再跑 advisory,best-effort、fail-open(dismiss 检查抛错也照常响)。
+
+### Fixed
+
+- 搜索 attention 块显式带上 `include_conflict_signal` 门;search 摘要现仅引用 open_table(advisory 不再进入强制铃路径,无需动态冠词)。
+- **NULL version CAS 修复(ZCode review id=434)** — write 落表时 candidate version 没兜底(`get_memory_version(cand_id)` 无 `or 1`),race/遗留 NULL 版本会让 dismiss 行的 version CAS 静默失效:`NULL = x` 恒为 NULL → `is_pair_dismissed` 误判「未 dismiss」→ 止闹失效、nag 复活;`purge_stale_dismissals` 的 `IS NOT NULL` 又护着死行不清理(同一 NULL 行,一处当失效、一处当有效,自相矛盾)。修:write 端 `or 1` 堵源头;`is_pair_dismissed` 与 `dismissed_pairs_for` 改 `IS NULL OR =`(NULL pin 视为有效 dismiss,不 re-nag);`dismissed_pairs_for` 补回 `IN (result_ids)` 约束(不再全表扫)。补 NULL 边界回归测试。
+
+350 tests pass (342 + 8 new).
+
 ## [0.8.7] — 2026-08-01
 
 ### Added

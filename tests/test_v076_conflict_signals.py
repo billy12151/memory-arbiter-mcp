@@ -141,6 +141,53 @@ def test_search_no_attention_flag_when_no_conflict(tmp_path: Path) -> None:
     assert "attention_summary" not in res["data"]
 
 
+def test_attention_events_logged_and_doctor_counts(tmp_path: Path) -> None:
+    """v0.8.8: firing attention_required (write + search paths) appends to
+    attention_log.jsonl, and the doctor volume check reads it back."""
+    import json as _json
+    from memory_arbiter.doctor import _check_attention_volume
+
+    tools = _tools(tmp_path)
+    log_path = tools.settings.db_path.parent / "attention_log.jsonl"
+
+    # Write path: a near-duplicate fires attention_required.
+    _write(tools, content="api token policy v1",
+           subject="api-token-policy", tags=["policy", "security"])
+    tools.memory_write(
+        content="api token policy v2", subject="api-token-policy",
+        tags=["policy", "security"], workspace="ws",
+        source_type="agent_generated", agent_id="tester",
+    )
+
+    # Search path: a recorded conflict + search fires attention_required.
+    a = _write(tools, content="revenue is 20%", subject="revenue", tags=["finance"])
+    b = _write(tools, content="revenue is 30%", subject="revenue-v2", tags=["finance"])
+    tools.memory_record_conflict(
+        left_id=a, right_id=b, reason="contradiction",
+        conflict_type="contradiction", conflict_point="20% vs 30%",
+        suggested_winner=b, confidence_hint="high", source="llm_informed",
+    )
+    tools.memory_search(query="revenue")
+
+    # Both event types should be in the log.
+    events = [_json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    triggers = {e["trigger"] for e in events}
+    assert "write" in triggers
+    assert "search" in triggers
+    search_ev = next(e for e in events if e["trigger"] == "search")
+    assert search_ev["source"] == "open_table"
+
+    # Doctor reports the volume by source.
+    finding = _check_attention_volume(tools.settings)
+    assert finding.check_id == "capacity.attention_volume"
+    assert finding.evidence["total"] >= 2
+    assert "open_table" in finding.evidence["by_source"]
+    # v0.8.8 review: trigger dimension is reported (write event vs search re-hit).
+    assert finding.evidence["by_trigger"]["write"] >= 1
+    assert finding.evidence["by_trigger"]["search"] >= 1
+    assert finding.evidence["by_source_trigger"]["open_table"]["search"] >= 1
+
+
 def test_search_conflict_signal_disabled(tmp_path: Path) -> None:
     """include_conflict_signal=False suppresses the field entirely."""
     tools = _tools(tmp_path)
@@ -150,6 +197,8 @@ def test_search_conflict_signal_disabled(tmp_path: Path) -> None:
     res = tools.memory_search(query="subj", include_conflict_signal=False)
     for r in res["data"]["results"]:
         assert "conflict_signal" not in r
+    # v0.8.8: disabling conflict_signal also suppresses the attention log.
+    assert not (tools.settings.db_path.parent / "attention_log.jsonl").exists()
 
 
 def test_search_conflict_signal_not_on_fallback(tmp_path: Path) -> None:
@@ -166,10 +215,11 @@ def test_search_conflict_signal_not_on_fallback(tmp_path: Path) -> None:
 
 
 def test_search_runtime_metadata_hint_is_distinct_and_advisory(tmp_path: Path) -> None:
-    """High metadata overlap without an open conflict yields an advisory runtime hint.
+    """v0.8.8: high metadata overlap yields an advisory runtime_metadata_hint.
 
-    The hint must be strongly distinguishable from scan/record-backed conflicts:
-    no conflict_id, confidence low, and no conflicts-table write.
+    With write落表, the overlapping write records a metadata_write_hint row,
+    which surfaces as runtime_metadata_hint (advisory, NOT open_table) — and,
+    unlike the old transient computed hint, CARRIES conflict_id (dismissable).
     """
     tools = _tools(tmp_path)
     low_id = _write(
@@ -197,9 +247,19 @@ def test_search_runtime_metadata_hint_is_distinct_and_advisory(tmp_path: Path) -
     sig = hinted[0]["conflict_signal"]
     assert sig["confidence_hint"] == "low"
     assert sig["conflict_type"] == "metadata_overlap"
-    assert "conflict_id" not in sig
+    assert "conflict_id" in sig  # v0.8.8: write-hint row is dismissable
+    assert sig.get("source") == "metadata_write_hint"
     assert sig["conflict_peer"]["id"] in {low_id, high_id}
-    assert tools.memory_list_conflicts(status="open")["data"]["conflicts"] == []
+    _opens = tools.memory_list_conflicts(status="open")["data"]["conflicts"]
+    assert len(_opens) == 1 and _opens[0]["source"] == "metadata_write_hint"
+    # v0.8.8: advisory runtime hints do NOT ring the loud must-surface flag
+    # (they'd nag on every retrieval) — the agent judges them by content. But
+    # they ARE logged for the doctor volume stat.
+    assert not res["data"].get("attention_required")
+    import json as _j
+    _log = tools.settings.db_path.parent / "attention_log.jsonl"
+    _ev = [_j.loads(l) for l in _log.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert any(e["trigger"] == "search" and e["source"] == "runtime_metadata_hint" for e in _ev)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -265,8 +325,9 @@ def test_write_hints_evolution(tmp_path: Path) -> None:
     assert targets[0]["hint_type"] == "possible_evolution_of"
 
 
-def test_write_hints_no_conflict_written(tmp_path: Path) -> None:
-    """write_hints never writes to the conflicts table."""
+def test_write_hints_records_dismissable_row(tmp_path: Path) -> None:
+    """v0.8.8: write_hints now records a dismissable metadata_write_hint row
+    (reverses id=264 / the old 'never writes to conflicts' contract)."""
     tools = _tools(tmp_path)
     _write(tools, content="first", subject="dup", tags=["tag-a", "tag-b"])
     tools.memory_write(
@@ -274,7 +335,8 @@ def test_write_hints_no_conflict_written(tmp_path: Path) -> None:
         workspace="ws", source_type="agent_generated", agent_id="tester",
     )
     conflicts = tools.memory_list_conflicts(status="open")["data"]["conflicts"]
-    assert len(conflicts) == 0
+    assert len(conflicts) == 1
+    assert conflicts[0]["source"] == "metadata_write_hint"
 
 
 def test_write_hints_no_candidates(tmp_path: Path) -> None:
@@ -432,4 +494,151 @@ def test_server_wrapper_passes_v076_parameters(tmp_path: Path) -> None:
     conflict = my_tools.memory_list_conflicts(status="open")["data"]["conflicts"][0]
     assert conflict["conflict_point"] == "new"
     assert conflict["scan_model"] == "wrapper-model"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  D. v0.8.8 advisory 双层:write 落表 + dismiss(not_a_conflict) + version CAS
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_is_pair_dismissed_and_version_cas(tmp_path: Path) -> None:
+    """v0.8.8: is_pair_dismissed tracks not_a_conflict + version CAS."""
+    tools = _tools(tmp_path)
+    a = _write(tools, content="api policy v1", subject="api-token-policy", tags=["policy", "security"])
+    b = _write(tools, content="api policy v2", subject="api-token-policy", tags=["policy", "security"])
+    row = tools.memory_list_conflicts(status="open")["data"]["conflicts"][0]
+    assert tools.db.is_pair_dismissed(a, b) is False
+    tools.memory_resolve_conflict(conflict_id=row["id"], status="not_a_conflict", reason="not a conflict")
+    assert tools.db.is_pair_dismissed(a, b) is True
+    # Editing one side bumps its version → CAS invalidates the dismissal.
+    tools.memory_edit(memory_id=a, new_content="api policy v1 revised")
+    assert tools.db.is_pair_dismissed(a, b) is False
+
+
+def test_dismissed_pair_not_surfaced_on_search(tmp_path: Path) -> None:
+    """v0.8.8 Layer 0: once a pair is dismissed, search no longer attaches a
+    conflict_signal for it (the nag is permanently stopped until a version change)."""
+    tools = _tools(tmp_path)
+    _write(tools, content="api policy v1", subject="api-token-policy", tags=["policy", "security"])
+    tools.memory_write(content="api policy v2", subject="api-token-policy",
+                       tags=["policy", "security"], workspace="ws",
+                       source_type="agent_generated", agent_id="tester")
+    # Before dismiss: the pair surfaces as an advisory runtime_metadata_hint.
+    res1 = tools.memory_search(query="api token")
+    assert any("conflict_signal" in r for r in res1["data"]["results"])
+    # Dismiss it.
+    row = tools.memory_list_conflicts(status="open")["data"]["conflicts"][0]
+    tools.memory_resolve_conflict(conflict_id=row["id"], status="not_a_conflict")
+    # After dismiss: no conflict_signal on any result.
+    res2 = tools.memory_search(query="api token")
+    assert not any("conflict_signal" in r for r in res2["data"]["results"])
+
+
+def test_resolve_conflict_status_validation(tmp_path: Path) -> None:
+    """v0.8.8: resolve_conflict accepts 'not_a_conflict'; rejects invalid status."""
+    tools = _tools(tmp_path)
+    _write(tools, content="x", subject="s", tags=["t1", "t2"])
+    _write(tools, content="y", subject="s", tags=["t1", "t2"])
+    row = tools.memory_list_conflicts(status="open")["data"]["conflicts"][0]
+    bad = tools.memory_resolve_conflict(conflict_id=row["id"], status="bogus")
+    assert bad["data"]["outcome"] == "invalid_status"
+    assert len(tools.memory_list_conflicts(status="open")["data"]["conflicts"]) == 1  # unchanged
+    good = tools.memory_resolve_conflict(conflict_id=row["id"], status="not_a_conflict")
+    assert good["data"]["outcome"] == "not_a_conflict"
+    assert len(tools.memory_list_conflicts(status="open")["data"]["conflicts"]) == 0
+    assert len(tools.memory_list_conflicts(status="not_a_conflict")["data"]["conflicts"]) == 1
+
+
+def test_supersede_cleans_dismissed_rows(tmp_path: Path) -> None:
+    """v0.8.8: superseding a memory clears not_a_conflict rows touching it
+    (the dismissal has no referent once the memory is superseded)."""
+    tools = _tools(tmp_path)
+    a = _write(tools, content="x", subject="s", tags=["t1", "t2"])
+    _write(tools, content="y", subject="s", tags=["t1", "t2"])
+    row = tools.memory_list_conflicts(status="open")["data"]["conflicts"][0]
+    tools.memory_resolve_conflict(conflict_id=row["id"], status="not_a_conflict")
+    assert len(tools.memory_list_conflicts(status="not_a_conflict")["data"]["conflicts"]) == 1
+    tools.memory_supersede(memory_id=a, authorized=True, reason="gone")
+    assert len(tools.memory_list_conflicts(status="not_a_conflict")["data"]["conflicts"]) == 0
+
+
+def test_list_conflicts_source_filter(tmp_path: Path) -> None:
+    """v0.8.8: list_conflicts returns source and supports source filtering."""
+    tools = _tools(tmp_path)
+    _write(tools, content="x", subject="s", tags=["t1", "t2"])
+    _write(tools, content="y", subject="s", tags=["t1", "t2"])
+    opens = tools.memory_list_conflicts(status="open")["data"]["conflicts"]
+    assert opens and opens[0]["source"] == "metadata_write_hint"
+    assert tools.memory_list_conflicts(status="open", source="llm_informed")["data"]["conflicts"] == []
+    assert len(tools.memory_list_conflicts(status="open", source="metadata_write_hint")["data"]["conflicts"]) == 1
+
+
+def test_doctor_open_conflicts_by_source(tmp_path: Path) -> None:
+    """v0.8.8: doctor helper groups open conflicts by source (漏洞#4)."""
+    from memory_arbiter.doctor import _open_conflicts_by_source
+    tools = _tools(tmp_path)
+    _write(tools, content="x", subject="s", tags=["t1", "t2"])
+    _write(tools, content="y", subject="s", tags=["t1", "t2"])
+    with tools.db.connection() as conn:
+        bs = _open_conflicts_by_source(conn)
+    assert bs.get("metadata_write_hint") == 1
+
+
+def test_write_fail_open_when_dismiss_check_throws(tmp_path: Path, monkeypatch) -> None:
+    """v0.8.8 T13b: if the dismiss check (is_pair_dismissed) raises, the write
+    must STILL ring attention + store the memory (fail-open). A diagnostic-layer
+    failure must never silently suppress the duplicate prompt or lose the write."""
+    tools = _tools(tmp_path)
+    _write(tools, content="api policy v1", subject="api-token-policy", tags=["policy", "security"])
+
+    def _boom(a, b):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(tools.db, "is_pair_dismissed", _boom)
+
+    res = tools.memory_write(
+        content="api policy v2", subject="api-token-policy", tags=["policy", "security"],
+        workspace="ws", source_type="agent_generated", agent_id="tester",
+    )
+    # Memory stored AND attention still rang despite the dismiss-check crash.
+    assert res["ok"]
+    assert res["data"]["id"] is not None
+    assert res["data"].get("attention_required") is True
+
+
+def test_dismiss_survives_null_version_pin(tmp_path: Path) -> None:
+    """v0.8.8 (ZCode review): a not_a_conflict row with a NULL version pin must
+    STILL count as dismissed — otherwise a race/legacy NULL silently re-enables
+    the nag. Defends `NULL = x` → NULL (not true) in the version CAS."""
+    tools = _tools(tmp_path)
+    a = _write(tools, content="x", subject="s", tags=["t1", "t2"])
+    b = _write(tools, content="y", subject="s", tags=["t1", "t2"])
+    row = tools.memory_list_conflicts(status="open")["data"]["conflicts"][0]
+    tools.memory_resolve_conflict(conflict_id=row["id"], status="not_a_conflict")
+    assert tools.db.is_pair_dismissed(a, b) is True
+    # Corrupt the pin to NULL (simulate the race / legacy-NULL case).
+    with tools.db.connection() as conn:
+        conn.execute("UPDATE conflicts SET left_version=NULL, right_version=NULL WHERE id=?", (row["id"],))
+        conn.commit()
+    # Still dismissed — NULL pin is treated as a valid dismissal, not a re-nag.
+    assert tools.db.is_pair_dismissed(a, b) is True
+    # Read/GC symmetry: the read path treats NULL as valid, so purge must NOT
+    # reclaim it (IS DISTINCT FROM: NULL IS DISTINCT FROM NULL is false).
+    # A stale-NULL row would otherwise accumulate forever (read says "valid",
+    # GC says "leave it" — consistent).
+    assert tools.db.purge_stale_dismissals() == 0
+
+
+def test_purge_reclaims_edited_dismissal_not_null_pin(tmp_path: Path) -> None:
+    """v0.8.8 (ZCode review): purge must reclaim a dismissal whose pinned
+    version was invalidated by an edit (the non-NULL stale case), while
+    leaving a NULL-pinned row alone. Covers the read/GC symmetry contract."""
+    tools = _tools(tmp_path)
+    a = _write(tools, content="x", subject="s", tags=["t1", "t2"])
+    b = _write(tools, content="y", subject="s", tags=["t1", "t2"])
+    row = tools.memory_list_conflicts(status="open")["data"]["conflicts"][0]
+    tools.memory_resolve_conflict(conflict_id=row["id"], status="not_a_conflict")
+    # Edit one side → its pinned version is now stale (non-NULL inequality).
+    tools.db.edit_memory(b, new_content="y-edited", new_subject="s", new_tags=["t1", "t2"])
+    assert tools.db.is_pair_dismissed(a, b) is False  # edit invalidated the dismiss
+    n = tools.db.purge_stale_dismissals()
+    assert n == 1  # the edited-side stale row was reclaimed
 

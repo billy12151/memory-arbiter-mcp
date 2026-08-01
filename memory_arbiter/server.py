@@ -45,7 +45,7 @@ Avoid re-tagging words already in subject (redundant, no retrieval gain).
 
 v0.5.0: with GGUF embedding + sqlite-vec configured, the vector is stored automatically on write; the response only echoes embedding_stored when vectorization was actually attempted.
 
-Response duplicate/evolution check (v0.8.7): after writing, ALWAYS inspect the response's `attention_required` flag and `write_hints` field. When `attention_required` is true, a prior active memory looks like a near-duplicate or an evolution of what you just wrote — you MUST surface this to the user before treating the write as complete, e.g. "⚠️ 这条可能和已有记忆 #N (<subject>) 重复、或更新了它,是否要 supersede 旧的?" Do not silently ignore `attention_required`. Scope: this is advisory metadata-overlap only (tags ≥0.8 Jaccard + subject ≥0.7 overlap) — it catches duplicates/evolution, NOT semantic contradictions (those come from the conflict scan)."""
+Response duplicate/evolution check (v0.8.7): after writing, ALWAYS inspect the response's `attention_required` flag and `write_hints` field. When `attention_required` is true, a prior active memory looks like a near-duplicate or an evolution of what you just wrote — you MUST surface this to the user before treating the write as complete, e.g. "⚠️ 这条可能和已有记忆 #N (<subject>) 重复、或更新了它,是否要 supersede 旧的?" Do not silently ignore `attention_required`. Scope: this is advisory metadata-overlap only (tags ≥0.8 Jaccard + subject ≥0.7 overlap) — it catches duplicates/evolution, NOT semantic contradictions (those come from the conflict scan). v0.8.8: write records the duplicate as a dismissable conflict row; pairs the user dismissed via `resolve_conflict(status='not_a_conflict')` do NOT re-trigger attention (Layer 0)."""
         return tools.memory_write(
             content=content,
             agent_id=agent_id,
@@ -77,7 +77,9 @@ Parameters:
 
 include_conflict_signal: default true. When a hit involves open conflicts, attaches a conflict_signal field (sources: open_table = structured conflicts recorded by scan/record; runtime_metadata_hint = runtime heuristic, not LLM-verified). Fires only on a real hit (retrieval_mode=direct).
 
-Conflict surfacing (v0.8.7): when any direct hit carries a conflict_signal, the response also sets a top-level `attention_required` flag + `attention_summary` (e.g. "Search hit #42 (api-token-policy) carries an open_table signal vs #17 (legacy-token-policy)"). ALWAYS check `attention_required` after a search and, when true, surface it to the user before relying on the results — e.g. "⚠️ 命中的记忆里 #N 与 #M 存在冲突信号,引用前请先用 memory_compare / memory_get 核实。" This is advisory; the per-result conflict_signal has the detail.
+Conflict surfacing (v0.8.8): a direct hit may carry a per-result `conflict_signal` (sources: `open_table` = scan/record-verified; `runtime_metadata_hint` = advisory, unverified). Handle by source:
+- `open_table` (verified): sets a top-level `attention_required` flag + `attention_summary`. Surface it to the user — e.g. "⚠️ 命中的 #N 与 #M 存在已记录冲突,引用前请核实"; they can dismiss it with `memory_resolve_conflict(status='not_a_conflict')` — once dismissed, the pair carries no conflict_signal (Layer 0), so it stops surfacing until one side is edited.
+- `runtime_metadata_hint` (advisory): does NOT set the top-level flag (it re-fires on every retrieval of an overlapping pair, so a must-surface flag would nag). It stays a per-result signal — JUDGE it by content before saying anything: compare the hit's content against `conflict_signal.conflict_peer`'s snippet (or `memory_get` the peer if the snippet is too thin). Only mention it to the user if the two genuinely contradict; if they are merely topically related, silently proceed. This keeps advisory's recall (catching pairs the verified paths missed) without nagging on false positives.
 
 Note: tags_filter is AND semantics — every listed tag must be present. Suited to: finding the N most relevant entries, exhaustive queries with filters, and structured listing via empty query + filters.
 
@@ -168,9 +170,9 @@ content_hash). Global vec state lives in memory_status / doctor."""
         )
 
     @app.tool()
-    def memory_resolve_conflict(conflict_id: int, reason: str = "") -> dict[str, Any]:
-        """Close a single open conflict by conflict_id (use to dismiss a false positive). Zero schema change. Unlike memory_supersede's resolve_conflicts_for (which closes all conflicts involving a memory), this tool closes only the specified one. Note: this tool is designed for the agent-side scan loop; it is not meant to be called from ordinary conversation."""
-        return tools.memory_resolve_conflict(conflict_id=conflict_id, reason=reason)
+    def memory_resolve_conflict(conflict_id: int, reason: str = "", status: str = "resolved") -> dict[str, Any]:
+        """Close a single open conflict by conflict_id. ``status``: 'resolved' (default) or 'not_a_conflict' (v0.8.8 — the pair was a false positive; write/search then skip it via Layer 0 until a version change). Unlike memory_supersede's resolve_conflicts_for (which closes all conflicts involving a memory), this tool closes only the specified one."""
+        return tools.memory_resolve_conflict(conflict_id=conflict_id, reason=reason, status=status)
 
     @app.tool()
     def memory_confirm(memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False) -> dict[str, Any]:
