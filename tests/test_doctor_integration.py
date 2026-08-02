@@ -243,12 +243,31 @@ class TestSectionVecCoverage:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         conn.execute("CREATE VIRTUAL TABLE memory_sections_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
+        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'active')")
         conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10,1),(11,1),(12,1)")
         conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (10,'[0.1,0.2]'),(12,'[0.3,0.4]')")  # 11 missing
         conn.commit()
         f = _check_section_vec_coverage(conn)
         assert f.status == "warn"
         assert f.evidence["missing_section_vec"] == 1
+
+    def test_missing_section_vec_ignores_inactive_parent(self):
+        """v0.9.2: superseded/deleted parents have no section vectors by design — not a warning."""
+        pytest.importorskip("sqlite_vec")
+        import sqlite_vec
+        conn = _make_conn()
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("CREATE VIRTUAL TABLE memory_sections_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
+        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'superseded'), (2, 'active')")
+        conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10,1),(11,2)")
+        # Section 10 (superseded parent) has no vector; section 11 (active) is covered.
+        conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (11,'[0.1,0.2]')")
+        conn.commit()
+        f = _check_section_vec_coverage(conn)
+        assert f.status == "pass"
+        assert f.evidence["missing_section_vec"] == 0
 
     def test_full_coverage_not_reported(self):
         pytest.importorskip("sqlite_vec")
@@ -258,6 +277,7 @@ class TestSectionVecCoverage:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         conn.execute("CREATE VIRTUAL TABLE memory_sections_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
+        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'active')")
         conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10,1)")
         conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (10,'[0.1,0.2]')")
         conn.commit()

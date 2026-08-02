@@ -1117,21 +1117,26 @@ def _check_section_vec_coverage(conn: sqlite3.Connection) -> Finding:
     if not _table_exists(conn, "memory_sections") or not _table_exists(conn, "memory_sections_vec"):
         return _na("consistency.section_vec_coverage", "consistency",
                    "memory_sections / memory_sections_vec 表不存在")
+    # Only active parents need section vectors — v0.9.2 cascade-deletes vectors
+    # for superseded/deleted memories, so their sections legitimately have none
+    # and must not trigger a false "missing coverage" warning.
     missing = _scalar(conn,
         "SELECT count(*) FROM memory_sections ms "
-        "WHERE NOT EXISTS (SELECT 1 FROM memory_sections_vec v WHERE v.id = ms.id)") or 0
+        "JOIN memories m ON m.id = ms.memory_id "
+        "WHERE m.status = 'active' "
+        "AND NOT EXISTS (SELECT 1 FROM memory_sections_vec v WHERE v.id = ms.id)") or 0
     if missing == 0:
         return Finding(
             check_id="consistency.section_vec_coverage", dimension="consistency",
-            severity=Severity.INFO, status="pass", title="所有分段均有向量覆盖",
-            detail="无缺失的 section 向量",
+            severity=Severity.INFO, status="pass", title="所有 active 分段均有向量覆盖",
+            detail="active 记忆无缺失的 section 向量",
             evidence={"missing_section_vec": 0},
         )
     return Finding(
         check_id="consistency.section_vec_coverage", dimension="consistency",
         severity=Severity.WARNING, status="warn",
-        title=f"{missing} 个 section 缺向量（段落级语义召回失效）",
-        detail="这些 section 退化为整条召回",
+        title=f"{missing} 个 active section 缺向量（段落级语义召回失效）",
+        detail="这些 active 记忆的 section 退化为整条召回",
         evidence={"missing_section_vec": missing},
         fix_hint="对所属记忆调用 memory_rebuild_embeddings(memory_ids=[...]) 修复",
     )
