@@ -1187,15 +1187,18 @@ class MemoryTools:
             status="resolved",
         )
         updated = self.db.get_memory(int(memory_id))
-        return self.db.state.response(
-            {
-                "superseded": True,
-                "memory_id": int(memory_id),
-                "linked_conflicts_resolved": resolved,
-                "conflict_id": conflict_id,
-                "record": updated,
-            }
-        )
+        resp = {
+            "superseded": True,
+            "memory_id": int(memory_id),
+            "linked_conflicts_resolved": resolved,
+            "conflict_id": conflict_id,
+            "record": updated,
+        }
+        # Surface (non-fatal) vector-cleanup failures so a residual slow-path
+        # vector doesn't go unnoticed; the supersede itself already committed.
+        if vec_warnings:
+            resp["warnings"] = vec_warnings
+        return self.db.state.response(resp)
 
     def _split_capability(self, vec_state: dict[str, Any]) -> dict[str, Any]:
         """v0.8 §6.5: whether the server can split, and why/why not."""
