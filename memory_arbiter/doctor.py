@@ -29,6 +29,7 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 from .config import Settings
 from .degrade import DegradeState
 from .models import utc_now_iso
+from . import __version__
 
 
 # =====================================================================
@@ -1517,6 +1518,7 @@ def report_to_dict(report: OverviewReport) -> dict[str, Any]:
     of plain dict literals (zero asdict() in existing code).
     """
     return {
+        "arbiter_version": __version__,
         "snapshot_ts": report.snapshot_ts,
         "overall": report.overall.value,
         "summary": report.summary,

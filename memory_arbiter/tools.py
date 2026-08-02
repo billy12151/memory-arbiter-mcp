@@ -13,6 +13,7 @@ from .db import MemoryDB, _canon_entity, _canon_scope
 from .embedder import ManagedEmbedder
 from .models import MemoryRecord, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
+from . import __version__
 
 
 class MemoryTools:
@@ -1192,6 +1193,7 @@ class MemoryTools:
         vec_state = self.db.get_vec_index_state()
         return self.db.state.response(
             {
+                "arbiter_version": __version__,
                 "db_path": str(self.settings.db_path),
                 "backup_jsonl": str(self.settings.backup_jsonl),
                 "sqlite_vec_available": self.db.state.sqlite_vec_available,
