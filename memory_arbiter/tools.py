@@ -971,6 +971,9 @@ class MemoryTools:
             loser = self.db.get_memory(int(comparison["loser_id"]))
             if loser and loser.get("protection_level") != ProtectionLevel.LOCKED.value and loser.get("source_type") != SourceType.USER_CONFIRMED.value:
                 applied = self.db.update_memory(int(comparison["loser_id"]), {"status": "superseded"})
+                if applied:
+                    # v0.9.2: keep the loser's vectors out of the KNN top-k pool.
+                    self.db.delete_vectors_for_memory(int(comparison["loser_id"]))
         return self.db.state.response({"comparison": comparison, "conflict_id": conflict_id, "applied": applied})
 
     def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
@@ -1169,6 +1172,10 @@ class MemoryTools:
                 },
                 ok=False,
             )
+        # v0.9.2: drop the superseded memory's vectors so they stop occupying
+        # vec0 KNN top-k slots (content/FTS kept for audit; vectors are a
+        # derivative and can be recomputed from content if ever needed).
+        _, vec_warnings = self.db.delete_vectors_for_memory(int(memory_id))
         resolved = self.db.resolve_conflicts_for(int(memory_id))
         audit_reason = f"USER-AUTHORIZED SUPERSEDE: {reason}"
         conflict_id = self.db.record_conflict(
@@ -1770,6 +1777,67 @@ class MemoryTools:
                 "older_than_days": older_than_days,
             }
         )
+
+    def memory_cleanup_inactive_vectors(
+        self,
+        dry_run: bool = True,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Delete vec rows whose parent memory is not active (v0.9.2).
+
+        superseded/deleted/orphan vectors keep occupying vec0 KNN top-k slots,
+        forcing every KNN onto the exact-L2 slow path (see doctor
+        ``consistency.inactive_vectors_slowpath``). This tool physically removes
+        them so the vec0 MATCH fast path is restored.
+
+        Scope: only ``memories_vec`` / ``memory_sections_vec`` rows whose parent
+        memory is not active. The memories table (content, FTS) is never touched
+        — audit history stays intact; vectors are a derivative and can be
+        recomputed from content via ``memory_rebuild_embeddings`` if ever needed.
+
+        ``dry_run=True`` (default) only reports how many rows would be deleted.
+        Actual deletion requires ``dry_run=False`` AND ``authorized=True``.
+        """
+        counts = self._count_inactive_vectors()
+        if dry_run:
+            return self.db.state.response(
+                {
+                    "dry_run": True,
+                    "would_delete": counts,
+                    "hint": "re-run with dry_run=False and authorized=True to delete",
+                }
+            )
+        if not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required to delete inactive vectors", "deleted": 0, "would_delete": counts},
+                ok=False,
+            )
+        deleted, warnings = self.db.delete_inactive_vectors()
+        resp = {"dry_run": False, "deleted": deleted}
+        if warnings:
+            resp["warnings"] = warnings
+        return self.db.state.response(resp, ok=not warnings)
+
+    def _count_inactive_vectors(self) -> dict[str, int]:
+        """Read-only count of inactive vec rows (mirrors doctor slow-path check)."""
+        if not self.db._db_available or not self.db.state.sqlite_vec_available:
+            return {"inactive_memory_vectors": 0, "inactive_section_vectors": 0}
+        try:
+            with self.db.connection() as conn:
+                mem = conn.execute(
+                    "SELECT COUNT(*) AS c FROM memories_vec v LEFT JOIN memories m ON m.id = v.id "
+                    "WHERE COALESCE(m.status, 'deleted') != 'active'"
+                ).fetchone()["c"]
+                sec = conn.execute(
+                    "SELECT COUNT(*) AS c FROM memory_sections_vec v "
+                    "LEFT JOIN memory_sections s ON s.id = v.id "
+                    "LEFT JOIN memories m ON m.id = s.memory_id "
+                    "WHERE s.id IS NULL OR COALESCE(m.status, 'deleted') != 'active'"
+                ).fetchone()["c"]
+                return {"inactive_memory_vectors": int(mem), "inactive_section_vectors": int(sec)}
+        except Exception:
+            return {"inactive_memory_vectors": 0, "inactive_section_vectors": 0}
 
     # ==================================================================
     #  v0.7.6: Conflict-signal attachment for search results

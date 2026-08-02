@@ -3,6 +3,31 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- **`memory_cleanup_inactive_vectors` tool** — physically deletes
+  `memories_vec` / `memory_sections_vec` rows whose parent memory is not
+  active (superseded/deleted/orphan). `dry_run=true` (default) reports counts;
+  actual deletion requires `dry_run=false` + `authorized=true`. Only vector
+  rows are touched — memory content, FTS and audit history are preserved, and
+  vectors can be rebuilt from content via `memory_rebuild_embeddings` if ever
+  needed. The doctor `consistency.inactive_vectors_slowpath` fix_hint now
+  points at this tool instead of manual SQL.
+
+### Changed
+
+- **Supersede / arbitrate now cascade-delete the loser's vectors** —
+  `memory_supersede` and the `memory_arbitrate` auto-apply path remove the
+  superseded memory's memory-level and section-level vectors, so they stop
+  accumulating in the vec tables and permanently forcing KNN onto the
+  exact-distance slow path introduced in v0.9.1. Side effect: explicit
+  `include_superseded=true` **vector** recall of a superseded memory is no
+  longer possible (its vectors are gone); auditing its content/FTS is
+  unaffected. This restores the vec0 MATCH fast path for all KNN once existing
+  inactive vectors are cleared.
+
 ## [0.9.1] — 2026-08-02
 
 ### Fixed

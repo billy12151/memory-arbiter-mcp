@@ -590,6 +590,71 @@ class MemoryDB:
         except sqlite3.Error as exc:
             return False, [f"delete_embedding failed: {exc}"]
 
+    def delete_vectors_for_memory(self, memory_id: int) -> Tuple[bool, list[str]]:
+        """Delete memory-level AND section-level vec rows for a memory (v0.9.2).
+
+        Called when a memory is superseded/deleted so its vectors stop occupying
+        vec0 KNN top-k slots. Without this the KNN permanently degrades to the
+        exact-L2 slow path (see consistency.inactive_vectors_slowpath). The
+        memory's content and FTS rows are kept for audit; vectors are a pure
+        derivative and can always be recomputed from content.
+        """
+        warnings: list[str] = []
+        if not self._db_available or not self.state.sqlite_writable:
+            return False, ["SQLite write unavailable; vectors not deleted."]
+        if not self.state.sqlite_vec_available:
+            return False, ["sqlite-vec unavailable; vectors not deleted."]
+        try:
+            with self.write_transaction() as conn:
+                conn.execute("DELETE FROM memories_vec WHERE id = ?", (int(memory_id),))
+                conn.execute(
+                    "DELETE FROM memory_sections_vec WHERE id IN "
+                    "(SELECT id FROM memory_sections WHERE memory_id = ?)",
+                    (int(memory_id),),
+                )
+            return True, []
+        except sqlite3.Error as exc:
+            return False, [f"delete_vectors_for_memory failed: {exc}"]
+
+    def delete_inactive_vectors(self) -> Tuple[dict[str, int], list[str]]:
+        """Delete vec rows whose parent memory is not active (v0.9.2 cleanup).
+
+        Removes superseded/deleted/orphan vectors from both memories_vec and
+        memory_sections_vec, restoring the vec0 MATCH fast path for all KNN.
+        Returns (counts, warnings).
+        """
+        warnings: list[str] = []
+        if not self._db_available or not self.state.sqlite_writable:
+            return {}, ["SQLite write unavailable; inactive vectors not deleted."]
+        if not self.state.sqlite_vec_available:
+            return {}, ["sqlite-vec unavailable; inactive vectors not deleted."]
+        try:
+            with self.write_transaction() as conn:
+                mem_cur = conn.execute(
+                    "DELETE FROM memories_vec WHERE id IN "
+                    "(SELECT v.id FROM memories_vec v LEFT JOIN memories m ON m.id = v.id "
+                    "WHERE COALESCE(m.status, 'deleted') != 'active')"
+                )
+                sec_cur = conn.execute(
+                    "DELETE FROM memory_sections_vec WHERE id IN "
+                    "(SELECT v.id FROM memory_sections_vec v "
+                    "JOIN memory_sections s ON s.id = v.id "
+                    "LEFT JOIN memories m ON m.id = s.memory_id "
+                    "WHERE COALESCE(m.status, 'deleted') != 'active')"
+                )
+                # Physical orphans: a section vec whose section row itself is gone.
+                orph_cur = conn.execute(
+                    "DELETE FROM memory_sections_vec WHERE id NOT IN "
+                    "(SELECT id FROM memory_sections)"
+                )
+            counts = {
+                "deleted_memory_vectors": max(0, mem_cur.rowcount),
+                "deleted_section_vectors": max(0, sec_cur.rowcount) + max(0, orph_cur.rowcount),
+            }
+            return counts, []
+        except sqlite3.Error as exc:
+            return {}, [f"delete_inactive_vectors failed: {exc}"]
+
     def vec_knn(
         self,
         query_embedding: list[float],

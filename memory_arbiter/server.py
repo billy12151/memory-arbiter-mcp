@@ -353,6 +353,17 @@ content_hash). Global vec state lives in memory_status / doctor."""
             authorized=authorized,
         )
 
+    @app.tool()
+    def memory_cleanup_inactive_vectors(
+        dry_run: bool = True,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """Delete vec rows whose parent memory is not active (v0.9.2). superseded/deleted/orphan vectors keep occupying vec0 KNN top-k slots, forcing every KNN onto the exact-L2 slow path (see doctor consistency.inactive_vectors_slowpath). This physically removes them to restore the vec0 MATCH fast path. Only touches memories_vec / memory_sections_vec; the memories table (content, FTS, audit history) is never modified — vectors are a derivative and can be recomputed via memory_rebuild_embeddings. dry_run=true (default) only reports counts; actual deletion requires dry_run=false AND authorized=true."""
+        return tools.memory_cleanup_inactive_vectors(
+            dry_run=dry_run,
+            authorized=authorized,
+        )
+
     # ── v0.8.0: Section split (Agent continuation/repair entry) ──
     # For normal writes use memory_write (rule-based documents auto-split; unstructured
     #  long text returns a split_request for the agent to continue). This tool is only

@@ -2678,7 +2678,16 @@ def test_v061_r1_channel6_recall_superseded_with_include_superseded(tmp_path: Pa
 
 
 def test_knn_prefilters_inactive_parent_before_top_k(tmp_path: Path) -> None:
-    """A closer superseded memory/section cannot consume the default KNN slot."""
+    """A closer superseded memory/section cannot consume the default KNN slot.
+
+    v0.9.2 note: supersede now cascade-deletes the loser's vectors, so the
+    default-path guarantee is enforced by deletion rather than by the v0.9.1
+    prefilter alone. include_superseded audit *vector* recall of a superseded
+    memory is intentionally no longer possible (its vectors are gone); audit of
+    the content/FTS is unaffected. The prefilter still guards non-supersede
+    inactive rows (deleted parents, physical orphans) — covered below and by
+    tests/test_v092_vector_cleanup.py.
+    """
     pytest.importorskip("sqlite_vec")
     tools = _make_channel6_tools(tmp_path)
     tools._embedder = _keyword_embedder()
@@ -2709,15 +2718,11 @@ def test_knn_prefilters_inactive_parent_before_top_k(tmp_path: Path) -> None:
         authorized=True,
     )["ok"] is True
 
+    # The stale memory's (closer) vector is gone, so the default KNN slot goes
+    # to the active memory — never the superseded one.
     default_memory_rows = tools.db.vec_knn(_keyword_embedding("alpha"), k=1)
     assert len(default_memory_rows) == 1
     assert default_memory_rows[0]["id"] == active_id
-
-    audit_memory_rows = tools.db.vec_knn(
-        _keyword_embedding("alpha"), k=1, include_superseded=True
-    )
-    assert len(audit_memory_rows) == 1
-    assert audit_memory_rows[0]["id"] == stale_id
 
     default_rows = tools.db.section_vec_knn(
         _keyword_embedding("alpha"), k=1
@@ -2725,22 +2730,16 @@ def test_knn_prefilters_inactive_parent_before_top_k(tmp_path: Path) -> None:
     assert len(default_rows) == 1
     assert default_rows[0]["memory_id"] == active_id
 
+    # include_superseded audit vector recall no longer resurfaces the superseded
+    # memory (its vectors were cascade-deleted); only active rows are returned.
+    audit_memory_rows = tools.db.vec_knn(
+        _keyword_embedding("alpha"), k=5, include_superseded=True
+    )
+    assert all(r["id"] != stale_id for r in audit_memory_rows)
     audit_rows = tools.db.section_vec_knn(
-        _keyword_embedding("alpha"), k=1, include_superseded=True
+        _keyword_embedding("alpha"), k=5, include_superseded=True
     )
-    assert len(audit_rows) == 1
-    assert audit_rows[0]["memory_id"] == stale_id
-
-    # Deleted parents are excluded even in explicit superseded audit mode.
-    assert tools.db.update_memory(stale_id, {"status": "deleted"}) is True
-    deleted_memory_rows = tools.db.vec_knn(
-        _keyword_embedding("alpha"), k=1, include_superseded=True
-    )
-    assert deleted_memory_rows[0]["id"] == active_id
-    deleted_section_rows = tools.db.section_vec_knn(
-        _keyword_embedding("alpha"), k=1, include_superseded=True
-    )
-    assert deleted_section_rows[0]["memory_id"] == active_id
+    assert all(r["memory_id"] != stale_id for r in audit_rows)
 
 
 # ---- v0.7.3 change 1: tag scoring unit tests (design §2.6 matrix) ------

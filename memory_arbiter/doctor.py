@@ -1107,8 +1107,9 @@ def _check_inactive_vectors_slowpath(conn: sqlite3.Connection) -> Finding:
                 "（预过滤后计算精确 L2 距离），但每次搜索退化为全量距离扫描，"
                 "库规模增大时延迟会上升。物理删除这些向量可恢复 vec0 快路径。"),
         evidence=evidence,
-        fix_hint="目前无对外清理工具；如需手动处理：DELETE FROM memories_vec / "
-                 "memory_sections_vec 中父记忆非 active 的行（请先备份）。已列入 v2 cleanup 候选。",
+        fix_hint="运行 memory_cleanup_inactive_vectors（先 dry_run=true 预览，"
+                 "再 dry_run=false + authorized=true 删除）物理清理，恢复 vec0 快路径。"
+                 "只删向量行，不动 memories 正文/FTS（审计历史保留）。",
     )
 
 
