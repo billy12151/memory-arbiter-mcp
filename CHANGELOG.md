@@ -3,6 +3,16 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.9.3] — 2026-08-03
+
+### Fixed
+
+- **Doctor `split.index_integrity` offset spot-check now scoped to active
+  parents** — the offset continuity sub-query still flagged anomalies on
+  superseded/deleted parents, whose sections are retained as audit history by
+  design (v0.9.2). It now joins `m.status='active'`, matching the other two
+  sub-queries in the same check and the v0.9.2 `section_vec_coverage` scoping.
+
 ## [0.9.2] — 2026-08-03
 
 ### Added
