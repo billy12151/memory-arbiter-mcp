@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
+from threading import Barrier
 
 import pytest
 
@@ -83,10 +85,14 @@ def test_v090_schema_migrates_legacy_database(tmp_path: Path) -> None:
         conflict_columns = {
             row["name"] for row in migrated.execute("PRAGMA table_info(conflicts)")
         }
-        assert {"claim_revision", "claims_indexed_revision"} <= memory_columns
+        assert {
+            "claim_revision", "claims_indexed_revision", "claims_reconciled_revision",
+            "structured_enrich_ms", "structured_candidate_count",
+        } <= memory_columns
         assert {
             "left_claim_revision", "right_claim_revision", "judgment_status",
-            "active_judgment_id", "structured_details",
+            "active_judgment_id", "structured_details", "structured_detected_at",
+            "scan_detected_at",
         } <= conflict_columns
         assert migrated.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_claims'"
@@ -154,6 +160,7 @@ def test_schema_and_zero_claim_are_distinct_from_failure(tmp_path: Path) -> None
     assert result["data"]["claim_indexed"] is True
     assert result["data"]["realtime_conflict_check"]["claim_count"] == 0
     assert memory["claim_revision"] == memory["claims_indexed_revision"] == 1
+    assert memory["claims_reconciled_revision"] == 1
     with tools.db.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM memory_claims").fetchone()[0] == 0
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -251,6 +258,7 @@ def test_edit_reindexes_and_resolves_pair(tmp_path: Path) -> None:
     assert record["version"] == 2
     assert record["claim_revision"] == 2
     assert record["claims_indexed_revision"] == 2
+    assert record["claims_reconciled_revision"] == 2
     assert tools.memory_list_conflicts()["data"]["count"] == 0
 
 
@@ -299,6 +307,7 @@ def test_entity_update_keeps_content_version_and_bumps_claim_revision(tmp_path: 
     assert before["version"] == after["version"] == 1
     assert after["claim_revision"] == 2
     assert after["claims_indexed_revision"] == 2
+    assert after["claims_reconciled_revision"] == 2
     assert after["metadata"] == {"entity": "my service", "scope": "prod"}
     entities = tools.memory_list_entities()["data"]
     assert entities["entities"][0]["entity"] == "my service"
@@ -612,6 +621,238 @@ def test_claim_failure_is_fail_open_and_doctor_visible(
     assert finding["evidence"]["stale_memories"] == 1
 
 
+def test_reconciliation_failure_remains_rebuildable_and_doctor_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _tools(tmp_path)
+    _write_claim(tools, "5432")
+    original_find = tools.db.find_structured_claim_pairs
+
+    def fail_collision_query(_memory_id: int) -> dict:
+        return {"pairs": [], "evolution_pairs": 0, "error": True}
+
+    monkeypatch.setattr(tools.db, "find_structured_claim_pairs", fail_collision_query)
+    second = _write_claim(tools, "3306")
+    second_id = second["data"]["id"]
+    assert second["data"]["claim_indexed"] is True
+    assert second["data"]["claim_reconciled"] is False
+    assert not second["data"].get("attention_required")
+    monkeypatch.setattr(tools.db, "find_structured_claim_pairs", original_find)
+
+    plan = tools.memory_rebuild_claims(dry_run=True)
+    assert second_id in plan["data"]["memory_ids"]
+    finding = next(
+        row for row in tools.memory_doctor_overview()["data"]["findings"]
+        if row["check_id"] == "consistency.structured_claims"
+    )
+    assert finding["evidence"]["stale_index_memories"] == 0
+    assert finding["evidence"]["unreconciled_memories"] == 1
+
+    repaired = tools.memory_rebuild_claims(memory_ids=[second_id], dry_run=False)
+    assert repaired["ok"] is True
+    assert repaired["data"]["results"][0]["diagnostic"]["claim_reconciled"] is True
+    assert repaired["data"]["results"][0]["conflicts"]
+    assert tools.db.get_memory(second_id)["claims_reconciled_revision"] == 1
+
+
+def test_open_conflict_read_failure_does_not_advance_reconciled_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _tools(tmp_path)
+    _write_claim(tools, "5432")
+    original_read = tools.db.read_structured_open_conflicts_for_memory
+
+    def fail_open_read(_memory_id: int) -> dict:
+        return {"rows": [], "error": "injected open-row read failure"}
+
+    monkeypatch.setattr(
+        tools.db, "read_structured_open_conflicts_for_memory", fail_open_read,
+    )
+    second = _write_claim(tools, "3306")
+    second_id = second["data"]["id"]
+    assert second["data"]["claim_indexed"] is True
+    assert second["data"]["claim_reconciled"] is False
+    assert tools.db.get_memory(second_id)["claims_reconciled_revision"] is None
+
+    monkeypatch.setattr(
+        tools.db, "read_structured_open_conflicts_for_memory", original_read,
+    )
+    assert second_id in tools.memory_rebuild_claims(dry_run=True)["data"]["memory_ids"]
+    repaired = tools.memory_rebuild_claims(memory_ids=[second_id], dry_run=False)
+    assert repaired["ok"] is True
+    assert tools.db.get_memory(second_id)["claims_reconciled_revision"] == 1
+
+
+def test_unexpected_pair_write_failure_is_fail_open_and_rebuildable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _tools(tmp_path)
+    _write_claim(tools, "5432")
+    original_record = tools.db.record_conflict_enriched
+
+    def fail_structured_record(*args: object, **kwargs: object) -> dict:
+        if kwargs.get("source") == "structured_claim":
+            raise sqlite3.OperationalError("injected pair write failure")
+        return original_record(*args, **kwargs)
+
+    monkeypatch.setattr(tools.db, "record_conflict_enriched", fail_structured_record)
+    second = _write_claim(tools, "3306")
+    second_id = second["data"]["id"]
+    assert second["ok"] is True
+    assert second["data"]["claim_indexed"] is True
+    assert second["data"]["claim_reconciled"] is False
+    assert second["data"]["realtime_conflict_check"]["skipped_reason"] == (
+        "structured_enrichment_error"
+    )
+    assert second_id in tools.memory_rebuild_claims(dry_run=True)["data"]["memory_ids"]
+
+    monkeypatch.setattr(tools.db, "record_conflict_enriched", original_record)
+    repaired = tools.memory_rebuild_claims(memory_ids=[second_id], dry_run=False)
+    assert repaired["ok"] is True
+    assert repaired["data"]["results"][0]["conflicts"]
+
+
+def test_concurrent_writes_surface_a_structured_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _tools(tmp_path)
+    rendezvous = Barrier(2)
+    original_publish = tools.db.publish_memory_claims
+
+    def synchronized_publish(*args: object, **kwargs: object) -> dict:
+        rendezvous.wait(timeout=5)
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(tools.db, "publish_memory_claims", synchronized_publish)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(_write_claim, tools, value)
+            for value in ("5432", "3306")
+        ]
+        results = [future.result(timeout=10) for future in futures]
+
+    assert all(result["ok"] for result in results)
+    assert any(result["data"].get("attention_required") for result in results)
+    conflicts = tools.memory_list_conflicts()["data"]["conflicts"]
+    assert len(conflicts) == 1
+    assert conflicts[0]["judgment_status"] == "pending_llm"
+    assert conflicts[0]["left_claim_revision"] == 1
+    assert conflicts[0]["right_claim_revision"] == 1
+
+
+def test_scan_refresh_preserves_structured_snapshot_and_gate(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+    left_id = _write_claim(tools, "5432")["data"]["id"]
+    right = _write_claim(tools, "3306")
+    right_id = right["data"]["id"]
+    conflict_id = right["data"]["conflict_judgment_requests"][0]["conflict_id"]
+
+    refreshed = tools.memory_record_conflict(
+        left_id=left_id, right_id=right_id,
+        reason="scheduled scan independently confirmed the contradiction",
+        conflict_type="contradiction", conflict_point="api.port",
+        source="llm_informed", refresh=True,
+        left_version=1, right_version=1,
+        scan_prompt_version="scan-v1", scan_model="test-model",
+    )
+    assert refreshed["data"]["outcome"] == "refreshed"
+    row = tools.memory_list_conflicts()["data"]["conflicts"][0]
+    assert row["id"] == conflict_id
+    assert row["left_claim_revision"] == row["right_claim_revision"] == 1
+    assert row["structured_detected_at"] is not None
+    assert row["scan_detected_at"] is not None
+    assert row["judgment_status"] == "pending_llm"
+
+    searched = tools.memory_search(query="3306")
+    assert searched["data"]["attention_required"] is True
+    assert searched["data"]["action_required"] == "judge_conflict_before_use"
+    finding = next(
+        item for item in tools.memory_doctor_overview()["data"]["findings"]
+        if item["check_id"] == "consistency.structured_claims"
+    )
+    assert finding["evidence"]["detection_channels"]["both"] == 1
+
+
+def test_scan_refresh_does_not_overwrite_active_judgment_projection(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+    left_id = _write_claim(tools, "5432")["data"]["id"]
+    right = _write_claim(tools, "3306")
+    request = right["data"]["conflict_judgment_requests"][0]
+    right_id = right["data"]["id"]
+    judged = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"], expected_left_version=1,
+        expected_right_version=1, expected_left_claim_revision=1,
+        expected_right_claim_revision=1, verdict="contradiction",
+        recommended_use="right", suggested_winner=right_id,
+        confidence_hint="high", reason="persisted host judgment",
+        affects_current_output=False, usage_context="unrelated",
+    )
+    assert judged["data"]["judgment_status"] == "llm_assessed"
+    before = tools.memory_list_conflicts()["data"]["conflicts"][0]
+
+    tools.memory_record_conflict(
+        left_id=left_id, right_id=right_id,
+        reason="later scan disagreed with the persisted receipt",
+        conflict_type="contradiction", conflict_point="api.port",
+        suggested_winner=left_id, confidence_hint="low",
+        source="llm_informed", refresh=True,
+        left_version=1, right_version=1,
+    )
+    after = tools.memory_list_conflicts()["data"]["conflicts"][0]
+    assert after["active_judgment_id"] == before["active_judgment_id"]
+    assert after["judgment_status"] == "llm_assessed"
+    assert after["suggested_winner"] == right_id
+    assert after["reason"] == "persisted host judgment"
+    assert after["confidence_hint"] == "high"
+    assert after["scan_detected_at"] is not None
+
+
+def test_scan_first_is_upgraded_to_structured_snapshot(tmp_path: Path) -> None:
+    tools = _tools(tmp_path, mode="off")
+    left_id = _write_claim(tools, "5432")["data"]["id"]
+    right_id = _write_claim(tools, "3306")["data"]["id"]
+    scanned = tools.memory_record_conflict(
+        left_id=left_id, right_id=right_id, reason="scan found mismatch",
+        conflict_type="contradiction", source="llm_informed",
+        left_version=1, right_version=1,
+    )
+    conflict_id = scanned["data"]["conflict_id"]
+
+    tools.settings.structured_claim_mode = "beta_all"
+    rebuilt = tools.memory_rebuild_claims(
+        memory_ids=[left_id, right_id], dry_run=False,
+    )
+    assert rebuilt["ok"] is True
+    row = tools.memory_list_conflicts()["data"]["conflicts"][0]
+    assert row["id"] == conflict_id
+    assert row["left_claim_revision"] == row["right_claim_revision"] == 1
+    assert row["judgment_status"] == "pending_llm"
+    assert row["structured_detected_at"] is not None
+    assert row["scan_detected_at"] is not None
+
+
+def test_non_structured_conflict_cannot_enter_judgment_state_machine(tmp_path: Path) -> None:
+    tools = _tools(tmp_path, mode="off")
+    left_id = _write_claim(tools, "5432")["data"]["id"]
+    right_id = _write_claim(tools, "3306")["data"]["id"]
+    conflict_id = tools.memory_record_conflict(
+        left_id=left_id, right_id=right_id, reason="scan-only mismatch",
+        conflict_type="contradiction", source="llm_informed",
+        left_version=1, right_version=1,
+    )["data"]["conflict_id"]
+
+    rejected = tools.memory_submit_conflict_judgment(
+        conflict_id=conflict_id, expected_left_version=1,
+        expected_right_version=1, expected_left_claim_revision=1,
+        expected_right_claim_revision=1, verdict="contradiction",
+        recommended_use="right", suggested_winner=right_id,
+        confidence_hint="high", reason="must not accept missing claim pins",
+        affects_current_output=True, usage_context="answer",
+    )
+    assert rejected["ok"] is False
+    assert rejected["data"]["outcome"] == "invalid_structured_snapshot"
+
+
 def test_inactive_write_does_not_publish_or_collide(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
     _write_claim(tools, "5432")
@@ -644,6 +885,12 @@ def test_doctor_reports_claim_state(tmp_path: Path) -> None:
     finding = next(f for f in report["findings"] if f["check_id"] == "consistency.structured_claims")
     assert finding["evidence"]["claims"] == 2
     assert finding["evidence"]["stale_memories"] == 0
+    assert finding["evidence"]["reconciled_memories"] == 2
+    assert finding["evidence"]["structured_latency_ms"]["count"] == 2
+    assert finding["evidence"]["candidate_peer_count"]["max"] == 1.0
+    assert finding["evidence"]["detection_channels"] == {
+        "structured_only": 1, "scan_only": 0, "both": 0,
+    }
     assert finding["evidence"]["pending"]["pending_llm"]["count"] == 1
     assert finding["evidence"]["outcomes_by_rule"]["p1_kv"]["pending_llm"] == 1
     assert finding["evidence"]["outcomes_by_attribute"]["port"]["pending_llm"] == 1

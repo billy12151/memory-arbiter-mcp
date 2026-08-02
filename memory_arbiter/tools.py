@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from typing import Any, Optional, Tuple
 
 from .arbitration import compare_memories
@@ -152,6 +153,9 @@ class MemoryTools:
             structured = self._index_and_reconcile_claims(memory_id)
             data["realtime_conflict_check"] = structured["diagnostic"]
             data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            data["claim_reconciled"] = bool(
+                structured["diagnostic"].get("claim_reconciled")
+            )
             data["record"] = self.db.get_memory(memory_id) or data.get("record")
             if structured.get("warnings"):
                 data["_claim_warnings"] = list(structured["warnings"])
@@ -201,6 +205,7 @@ class MemoryTools:
                     source="metadata_write_hint", status="open",
                     left_version=new_ver,
                     right_version=self.db.get_memory_version(cand_id) or 1,
+                    detection_channel="metadata",
                 )
                 # Ring + log once, for the first non-dismissed target.
                 if not rang and not conflicts:
@@ -219,6 +224,7 @@ class MemoryTools:
                     )
         except Exception as exc:
             data["claim_indexed"] = False
+            data["claim_reconciled"] = False
             data.setdefault("_claim_warnings", []).append(
                 f"structured claim enrichment failed: {type(exc).__name__}: {exc}"
             )
@@ -259,39 +265,100 @@ class MemoryTools:
             })
 
     def _index_and_reconcile_claims(self, memory_id: int) -> dict[str, Any]:
-        """Extract, atomically publish, and reconcile structured conflicts."""
-        if self.settings.structured_claim_mode == "off":
+        """Extract, publish, and durably reconcile structured conflicts."""
+        started = time.perf_counter()
+        try:
+            return self._index_and_reconcile_claims_impl(memory_id, started)
+        except Exception as exc:
+            try:
+                record = self.db.get_memory(int(memory_id))
+            except Exception:
+                record = None
+            current_revision = (
+                int(record.get("claim_revision") or 1) if record else None
+            )
+            indexed = bool(
+                record
+                and record.get("claims_indexed_revision") == current_revision
+            )
+            reconciled = bool(
+                indexed
+                and record.get("claims_reconciled_revision") == current_revision
+            )
             return {
-                "diagnostic": {"claim_indexed": False, "skipped_reason": "structured_claim_mode_off"},
-                "conflicts": [], "peer_ids": [], "warnings": [],
+                "diagnostic": {
+                    "claim_indexed": indexed,
+                    "claim_reconciled": reconciled,
+                    "skipped_reason": "structured_enrichment_error",
+                    "error": str(exc),
+                    "structured_enrich_ms": round(
+                        (time.perf_counter() - started) * 1000, 3
+                    ),
+                },
+                "conflicts": [],
+                "pending_user_conflicts": [],
+                "peer_ids": [],
+                "warnings": [
+                    f"structured claim enrichment failed: "
+                    f"{type(exc).__name__}: {exc}; rebuild will retry"
+                ],
             }
+
+    def _index_and_reconcile_claims_impl(
+        self, memory_id: int, started: float,
+    ) -> dict[str, Any]:
+        """Implementation behind the fail-open structured-enrichment boundary."""
+
+        def finish(payload: dict[str, Any]) -> dict[str, Any]:
+            diagnostic = payload.setdefault("diagnostic", {})
+            diagnostic["structured_enrich_ms"] = round(
+                (time.perf_counter() - started) * 1000, 3
+            )
+            return payload
+
+        if self.settings.structured_claim_mode == "off":
+            return finish({
+                "diagnostic": {
+                    "claim_indexed": False,
+                    "claim_reconciled": False,
+                    "skipped_reason": "structured_claim_mode_off",
+                },
+                "conflicts": [], "peer_ids": [], "warnings": [],
+            })
+
         diagnostics: dict[str, Any] = {}
         publish: dict[str, Any] = {}
-        # Extraction is intentionally outside the write transaction.  Pin the
-        # publish to claim_revision and retry once so a concurrent edit cannot
-        # publish old text under the new revision.
+        expected_revision = 1
         for _attempt in range(2):
             record = self.db.get_memory(int(memory_id))
             if not record:
-                return {
-                    "diagnostic": {"claim_indexed": False, "skipped_reason": "memory_not_found"},
+                return finish({
+                    "diagnostic": {
+                        "claim_indexed": False,
+                        "claim_reconciled": False,
+                        "skipped_reason": "memory_not_found",
+                    },
                     "conflicts": [], "peer_ids": [],
                     "warnings": ["claim indexing skipped: memory not found"],
-                }
+                })
             expected_revision = int(record.get("claim_revision") or 1)
             if record.get("status") != "active":
                 publish = self.db.publish_memory_claims(
-                    int(memory_id), [], 0, expected_claim_revision=expected_revision,
+                    int(memory_id), [], 0,
+                    expected_claim_revision=expected_revision,
                 )
                 if publish.get("outcome") == "stale_snapshot":
                     continue
-                return {
+                indexed = publish.get("outcome") == "skipped_inactive"
+                return finish({
                     "diagnostic": {
-                        "claim_indexed": publish.get("outcome") == "skipped_inactive",
+                        "claim_indexed": indexed,
+                        "claim_reconciled": indexed,
                         "skipped_reason": "inactive",
                     },
                     "conflicts": [], "peer_ids": [], "warnings": [],
-                }
+                })
+
             diagnostics = {}
             try:
                 claims = extract_claims(record, diagnostics)
@@ -304,40 +371,63 @@ class MemoryTools:
                 self.db.mark_claim_index_failed(
                     int(memory_id), expected_claim_revision=expected_revision,
                 )
-                return {
-                    "diagnostic": {"claim_indexed": False, "error": str(exc)},
+                return finish({
+                    "diagnostic": {
+                        "claim_indexed": False,
+                        "claim_reconciled": False,
+                        "error": str(exc),
+                    },
                     "conflicts": [], "peer_ids": [],
-                    "warnings": [f"claim extraction failed: {type(exc).__name__}: {exc}"],
-                }
+                    "warnings": [
+                        f"claim extraction failed: {type(exc).__name__}: {exc}"
+                    ],
+                })
             if publish.get("outcome") == "stale_snapshot":
                 continue
             break
         else:
-            return {
+            return finish({
                 "diagnostic": {
-                    **diagnostics, "claim_indexed": False,
-                    "skipped_reason": "concurrent_revision_change", "publish": publish,
+                    **diagnostics,
+                    "claim_indexed": False,
+                    "claim_reconciled": False,
+                    "skipped_reason": "concurrent_revision_change",
+                    "publish": publish,
                 },
                 "conflicts": [], "peer_ids": [],
-                "warnings": ["claim indexing deferred: memory changed during both publish attempts"],
-            }
+                "warnings": [
+                    "claim indexing deferred: memory changed during both publish attempts"
+                ],
+            })
+
         if publish.get("outcome") != "indexed":
             self.db.mark_claim_index_failed(
                 int(memory_id), expected_claim_revision=expected_revision,
             )
-            return {
-                "diagnostic": {**diagnostics, "claim_indexed": False, "publish": publish},
+            return finish({
+                "diagnostic": {
+                    **diagnostics,
+                    "claim_indexed": False,
+                    "claim_reconciled": False,
+                    "publish": publish,
+                },
                 "conflicts": [], "peer_ids": [],
-                "warnings": [f"claim index publish failed: {publish.get('error') or publish.get('outcome')}"],
-            }
+                "warnings": [
+                    f"claim index publish failed: "
+                    f"{publish.get('error') or publish.get('outcome')}"
+                ],
+            })
 
         detection = self.db.find_structured_claim_pairs(int(memory_id))
         if detection.get("stale_index") or detection.get("error"):
-            return {
+            return finish({
                 "diagnostic": {
-                    **diagnostics, "claim_indexed": False,
+                    **diagnostics,
+                    "claim_indexed": True,
+                    "claim_reconciled": False,
                     "skipped_reason": (
-                        "concurrent_revision_change" if detection.get("stale_index")
+                        "concurrent_revision_change"
+                        if detection.get("stale_index")
                         else "collision_query_failed"
                     ),
                     "claim_revision": publish.get("claim_revision"),
@@ -345,93 +435,214 @@ class MemoryTools:
                     "mode": self.settings.structured_claim_mode,
                 },
                 "conflicts": [], "peer_ids": [],
-                "warnings": ["claim collision reconciliation deferred; rebuild will retry"],
-            }
+                "warnings": [
+                    "claim collision reconciliation deferred; rebuild will retry"
+                ],
+            })
+
         current_pairs = {
             (int(pair["left_id"]), int(pair["right_id"])): pair
             for pair in detection.get("pairs", [])
         }
-        # Resolve old structured-origin rows that no longer have any current
-        # contradiction keys.  Rows with current keys are refreshed below.
-        for existing in self.db.list_structured_open_conflicts_for_memory(int(memory_id)):
+        reconciliation_errors: list[str] = []
+
+        existing_state = self.db.read_structured_open_conflicts_for_memory(
+            int(memory_id)
+        )
+        if existing_state.get("error"):
+            reconciliation_errors.append(
+                f"read existing structured conflicts: {existing_state['error']}"
+            )
+        existing_open = existing_state.get("rows") or []
+        for existing in existing_open:
             key = (int(existing["left_id"]), int(existing["right_id"]))
             if key not in current_pairs:
-                self.db.resolve_conflict(
-                    int(existing["id"]), reason="claims aligned after reindex", status="resolved",
+                resolved = self.db.resolve_conflict(
+                    int(existing["id"]),
+                    reason="claims aligned after reindex",
+                    status="resolved",
                 )
+                if resolved.get("outcome") not in {"resolved", "not_open"}:
+                    reconciliation_errors.append(
+                        f"resolve conflict #{existing['id']}: "
+                        f"{resolved.get('outcome')}"
+                    )
 
-        conflicts: list[dict[str, Any]] = []
-        pending_user_conflicts: list[dict[str, Any]] = []
+        gate_states = self.db.structured_pair_gate_states(
+            int(memory_id), list(current_pairs.values())
+        )
+        if gate_states.get("error"):
+            reconciliation_errors.append("structured pair gate query failed")
+        dismissed = gate_states.get("dismissed") or set()
+        closed = gate_states.get("closed") or set()
+
         peer_ids: list[int] = []
+        recorded: list[tuple[int, int]] = []
         for key, pair in current_pairs.items():
-            peer_id = pair["right_id"] if pair["left_id"] == int(memory_id) else pair["left_id"]
+            peer_id = (
+                pair["right_id"]
+                if pair["left_id"] == int(memory_id)
+                else pair["left_id"]
+            )
             peer_ids.append(int(peer_id))
-            if self.db.is_pair_dismissed(pair["left_id"], pair["right_id"]):
-                continue
-            if self.db.is_structured_pair_closed_for_snapshot(
-                pair["left_id"], pair["right_id"],
-                pair["left_version"], pair["right_version"],
-                pair["left_claim_revision"], pair["right_claim_revision"],
-            ):
+            if key in dismissed or key in closed:
                 continue
             point = self._structured_conflict_point(pair["claims"])
             result = self.db.record_conflict_enriched(
                 pair["left_id"], pair["right_id"],
-                conflict_type="contradiction", conflict_point=point,
-                reason="deterministic structured claims share entity/attribute but differ in value",
-                confidence_hint="high", source="structured_claim", status="open",
+                conflict_type="contradiction",
+                conflict_point=point,
+                reason=(
+                    "deterministic structured claims share "
+                    "entity/attribute but differ in value"
+                ),
+                confidence_hint="high",
+                source="structured_claim",
+                status="open",
                 refresh=True,
-                left_version=pair["left_version"], right_version=pair["right_version"],
+                left_version=pair["left_version"],
+                right_version=pair["right_version"],
                 left_claim_revision=pair["left_claim_revision"],
                 right_claim_revision=pair["right_claim_revision"],
                 judgment_status="pending_llm",
+                detection_channel="structured",
                 structured_details=[{
-                    "entity": claim["entity"], "attribute": claim["attribute"],
+                    "entity": claim["entity"],
+                    "attribute": claim["attribute"],
                     "scope": claim.get("scope") or "",
-                    "left_value": claim["left_value"], "right_value": claim["right_value"],
+                    "left_value": claim["left_value"],
+                    "right_value": claim["right_value"],
                     "extractor_rule": claim.get("extractor_rule"),
                 } for claim in pair["claims"]],
             )
             conflict_id = result.get("conflict_id")
             if conflict_id is None:
-                continue
-            request = self.db.build_conflict_judgment_request(int(conflict_id))
-            # Existing assessed/human guidance on the exact same snapshot is
-            # not reset by a no-op rebuild and therefore needs no new gate.
-            current_row = next(
-                (row for row in self.db.list_structured_open_conflicts_for_memory(int(memory_id))
-                 if int(row["id"]) == int(conflict_id)),
-                None,
-            )
-            current_status = current_row.get("judgment_status") if current_row else None
-            if request is not None and current_status in {None, "pending_llm"}:
-                conflicts.append({"conflict_id": int(conflict_id), "peer_id": int(peer_id), "judgment_request": request})
-                self.db.log_attention(
-                    trigger="structured_claim", source="candidate_surfaced",
-                    memory_ids=[int(memory_id), int(peer_id)],
+                reconciliation_errors.append(
+                    f"record pair {key}: {result.get('outcome') or 'missing conflict id'}"
                 )
-            elif current_status == "pending_user":
-                pending_user_conflicts.append({
-                    "conflict_id": int(conflict_id), "peer_id": int(peer_id),
-                    "suggested_winner": current_row.get("suggested_winner"),
-                    "reason": current_row.get("reason"),
-                })
+                continue
+            recorded.append((int(conflict_id), int(peer_id)))
+
+        conflicts: list[dict[str, Any]] = []
+        pending_user_conflicts: list[dict[str, Any]] = []
+        if recorded:
+            current_state = self.db.read_structured_open_conflicts_for_memory(
+                int(memory_id)
+            )
+            if current_state.get("error"):
+                reconciliation_errors.append(
+                    f"read current structured conflicts: {current_state['error']}"
+                )
+            current_rows = {
+                int(row["id"]): row
+                for row in current_state.get("rows") or []
+            }
+            pending_ids = [
+                conflict_id for conflict_id, _peer_id in recorded
+                if (current_rows.get(conflict_id) or {}).get("judgment_status")
+                in {None, "pending_llm"}
+            ]
+            requests = self.db.build_conflict_judgment_requests(pending_ids)
+            for conflict_id, peer_id in recorded:
+                current_row = current_rows.get(conflict_id)
+                if current_row is None:
+                    reconciliation_errors.append(
+                        f"recorded conflict #{conflict_id} is not open"
+                    )
+                    continue
+                current_status = current_row.get("judgment_status")
+                if current_status in {None, "pending_llm"}:
+                    request = requests.get(conflict_id)
+                    if request is None:
+                        reconciliation_errors.append(
+                            f"conflict #{conflict_id} judgment request unavailable"
+                        )
+                        continue
+                    conflicts.append({
+                        "conflict_id": conflict_id,
+                        "peer_id": peer_id,
+                        "judgment_request": request,
+                    })
+                    self.db.log_attention(
+                        trigger="structured_claim",
+                        source="candidate_surfaced",
+                        memory_ids=[int(memory_id), peer_id],
+                    )
+                elif current_status == "pending_user":
+                    pending_user_conflicts.append({
+                        "conflict_id": conflict_id,
+                        "peer_id": peer_id,
+                        "suggested_winner": current_row.get("suggested_winner"),
+                        "reason": current_row.get("reason"),
+                    })
+
+        candidate_count = len(current_pairs)
+        if reconciliation_errors:
+            return finish({
+                "diagnostic": {
+                    **diagnostics,
+                    "claim_indexed": True,
+                    "claim_reconciled": False,
+                    "skipped_reason": "conflict_reconciliation_failed",
+                    "claim_revision": publish.get("claim_revision"),
+                    "claim_count": publish.get("claim_count", 0),
+                    "candidate_count": candidate_count,
+                    "mode": self.settings.structured_claim_mode,
+                },
+                "conflicts": conflicts,
+                "pending_user_conflicts": pending_user_conflicts,
+                "peer_ids": peer_ids,
+                "warnings": reconciliation_errors,
+            })
+
+        elapsed_before_marker = (time.perf_counter() - started) * 1000
+        marker = self.db.mark_claim_reconciled(
+            int(memory_id),
+            expected_revision,
+            elapsed_before_marker,
+            candidate_count,
+        )
+        if marker.get("outcome") != "reconciled":
+            return finish({
+                "diagnostic": {
+                    **diagnostics,
+                    "claim_indexed": True,
+                    "claim_reconciled": False,
+                    "skipped_reason": "reconciliation_marker_failed",
+                    "claim_revision": publish.get("claim_revision"),
+                    "claim_count": publish.get("claim_count", 0),
+                    "candidate_count": candidate_count,
+                    "mode": self.settings.structured_claim_mode,
+                },
+                "conflicts": conflicts,
+                "pending_user_conflicts": pending_user_conflicts,
+                "peer_ids": peer_ids,
+                "warnings": [
+                    f"claim reconciliation marker failed: "
+                    f"{marker.get('error') or marker.get('outcome')}"
+                ],
+            })
+
         diagnostic = {
             **diagnostics,
             "claim_indexed": True,
+            "claim_reconciled": True,
             "claim_revision": publish.get("claim_revision"),
+            "claims_reconciled_revision": expected_revision,
             "claim_count": publish.get("claim_count", 0),
-            "candidate_count": len(current_pairs),
+            "candidate_count": candidate_count,
             "pending_llm_count": len(conflicts),
             "pending_user_count": len(pending_user_conflicts),
             "evolution_pair_count": int(detection.get("evolution_pairs") or 0),
             "mode": self.settings.structured_claim_mode,
         }
-        return {
-            "diagnostic": diagnostic, "conflicts": conflicts,
+        return finish({
+            "diagnostic": diagnostic,
+            "conflicts": conflicts,
             "pending_user_conflicts": pending_user_conflicts,
-            "peer_ids": peer_ids, "warnings": [],
-        }
+            "peer_ids": peer_ids,
+            "warnings": [],
+        })
 
     def _write_duplicate_hints(
         self, memory_id: int, record: MemoryRecord,
@@ -835,6 +1046,7 @@ class MemoryTools:
             right_version=right_version,
             scan_prompt_version=scan_prompt_version,
             scan_model=scan_model,
+            detection_channel="scan",
         )
         return self.db.state.response(result)
 
@@ -889,6 +1101,9 @@ class MemoryTools:
             structured = self._index_and_reconcile_claims(int(memory_id))
             data["realtime_conflict_check"] = structured["diagnostic"]
             data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            data["claim_reconciled"] = bool(
+                structured["diagnostic"].get("claim_reconciled")
+            )
             warnings.extend(structured.get("warnings") or [])
             self._apply_structured_gate(data, structured)
         return self.db.state.response(data, extra_warnings=warnings)
@@ -1074,6 +1289,9 @@ class MemoryTools:
             structured = self._index_and_reconcile_claims(memory_id_int)
             data["realtime_conflict_check"] = structured["diagnostic"]
             data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            data["claim_reconciled"] = bool(
+                structured["diagnostic"].get("claim_reconciled")
+            )
             warnings.extend(structured.get("warnings") or [])
             self._apply_structured_gate(data, structured)
         data["record"] = self.db.get_memory(memory_id_int)
@@ -1111,7 +1329,9 @@ class MemoryTools:
                 rows = conn.execute(
                     "SELECT id FROM memories WHERE status='active' "
                     "AND (claims_indexed_revision IS NULL "
-                    "OR claims_indexed_revision<>claim_revision) "
+                    "OR claims_indexed_revision<>claim_revision "
+                    "OR claims_reconciled_revision IS NULL "
+                    "OR claims_reconciled_revision<>claim_revision) "
                     "ORDER BY id LIMIT ?", (batch,)
                 ).fetchall()
                 ids = [int(row["id"]) for row in rows]
@@ -1125,7 +1345,11 @@ class MemoryTools:
         results = []
         for memory_id in ids:
             results.append({"memory_id": memory_id, **self._index_and_reconcile_claims(memory_id)})
-        failed = sum(1 for item in results if not item["diagnostic"].get("claim_indexed"))
+        failed = sum(
+            1 for item in results
+            if not item["diagnostic"].get("claim_indexed")
+            or not item["diagnostic"].get("claim_reconciled")
+        )
         return self.db.state.response({
             "dry_run": False, "processed": len(results), "failed": failed, "results": results,
         }, ok=failed == 0)
@@ -1294,6 +1518,9 @@ class MemoryTools:
                     structured = self._index_and_reconcile_claims(memory_id_int)
                     data["realtime_conflict_check"] = structured["diagnostic"]
                     data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+                    data["claim_reconciled"] = bool(
+                        structured["diagnostic"].get("claim_reconciled")
+                    )
                     claim_warnings.extend(structured.get("warnings") or [])
                     self._apply_structured_gate(data, structured)
                 return self.db.state.response(data, extra_warnings=claim_warnings)
@@ -1464,6 +1691,9 @@ class MemoryTools:
         structured = self._index_and_reconcile_claims(memory_id_int)
         data["realtime_conflict_check"] = structured["diagnostic"]
         data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+        data["claim_reconciled"] = bool(
+            structured["diagnostic"].get("claim_reconciled")
+        )
         embedding_warnings.extend(structured.get("warnings") or [])
         self._apply_structured_gate(data, structured)
         data["record"] = self.db.get_memory(memory_id_int)

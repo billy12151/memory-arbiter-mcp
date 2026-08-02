@@ -109,7 +109,7 @@ write new knowledge via memory_write(...)
   → done (periodic semantic scan still catches claims outside the whitelist)
 ```
 
-**v0.9**: the server first extracts conservative explicit claims (key/value, table rows, number+unit, semver) and compares records with the same canonical `entity + attribute + scope`. Give important memories `metadata.entity` (and `metadata.scope` when environments differ); subject and then tags are fallbacks. A collision is persisted as `pending_llm` with exact version/claim-revision CAS pins. Submitting a judgment records guidance only—it never edits or supersedes either memory. Uncertain, protected-vs-protected, and high-impact code/config/write/external-action cases become `pending_user`; a later authorized human correction is append-only. Metadata-overlap `write_hints` remain a separate advisory path. Scheduled vector scan remains necessary for semantic conflicts outside the deterministic whitelist.
+**v0.9**: the server first extracts conservative explicit claims (key/value, table rows, number+unit, semver) and compares records with the same canonical `entity + attribute + scope`. Give important memories `metadata.entity` (and `metadata.scope` when environments differ); subject and then tags are fallbacks. A collision is persisted as `pending_llm` with exact version/claim-revision CAS pins. Submitting a judgment records guidance only—it never edits or supersedes either memory. Uncertain, protected-vs-protected, and high-impact code/config/write/external-action cases become `pending_user`; a later authorized human correction is append-only. Claim publication and conflict reconciliation use separate revision markers: if collision reconciliation fails after a successful publish, `memory_rebuild_claims` will still select it and doctor reports it as unreconciled. Scheduled vector scan remains necessary for semantic conflicts outside the deterministic whitelist. Structured and scan detection timestamps coexist on one conflict row, so doctor can measure structured-only / scan-only / both coverage and real-time lead time without allowing a later scan refresh to erase structured CAS pins.
 
 ### Real-world example — Cross-tool task delegation
 
@@ -258,7 +258,7 @@ memory_write(...) 写入新知识
   → 完成（白名单之外仍由定期语义 scan 兜底）
 ```
 
-**v0.9**：server 先抽取保守的显式 claim（key/value、表格行、数字+单位、semver），比较相同规范 `entity + attribute + scope` 的记录。重要记忆建议提供 `metadata.entity`（环境不同时再给 `metadata.scope`）；subject、tag 依次兜底。碰撞以 `pending_llm` 持久化，并携带精确 version/claim-revision CAS。提交判断只记录 guidance，绝不编辑或 supersede 任何记忆。不确定、双保护以及会驱动代码/配置/记忆写入/外部动作的高影响场景转为 `pending_user`；之后的授权人工纠正以追加方式保留完整历史。metadata 重叠 `write_hints` 是另一条 advisory 路径。白名单外的语义冲突仍需定期向量 scan。
+**v0.9**：server 先抽取保守的显式 claim（key/value、表格行、数字+单位、semver），比较相同规范 `entity + attribute + scope` 的记录。重要记忆建议提供 `metadata.entity`（环境不同时再给 `metadata.scope`）；subject、tag 依次兜底。碰撞以 `pending_llm` 持久化，并携带精确 version/claim-revision CAS。提交判断只记录 guidance，绝不编辑或 supersede 任何记忆。不确定、双保护以及会驱动代码/配置/记忆写入/外部动作的高影响场景转为 `pending_user`；之后的授权人工纠正以追加方式保留完整历史。claim 发布与冲突对账使用独立 revision 标记：发布成功但对账失败时仍会被 `memory_rebuild_claims` 选中，doctor 也会报告 unreconciled。白名单外的语义冲突仍需定期向量 scan；同一 conflict 行可同时保留 structured/scan 首次发现时间，doctor 据此统计 structured-only / scan-only / both 和实时提前量，scan refresh 不得清空 structured CAS pins。
 
 **适用时机**：工具学到可能与既有知识矛盾的内容时（配置变更、策略更新、纠正事实）。
 

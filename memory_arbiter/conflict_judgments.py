@@ -25,102 +25,120 @@ class ConflictJudgmentStore:
     def build_conflict_judgment_request(
         self, conflict_id: int,
     ) -> Optional[dict[str, Any]]:
-        """Build the evidence/snapshot payload a host LLM must judge."""
+        requests = self.build_conflict_judgment_requests([int(conflict_id)])
+        return requests.get(int(conflict_id))
+
+    def build_conflict_judgment_requests(
+        self, conflict_ids: list[int],
+    ) -> dict[int, dict[str, Any]]:
+        """Build multiple host-LLM requests on one consistent read connection."""
         db = self._db
-        if not db._db_available:
-            return None
+        ids = list(dict.fromkeys(int(conflict_id) for conflict_id in conflict_ids))
+        if not db._db_available or not ids:
+            return {}
         try:
             with db.connection() as conn:
-                row = conn.execute(
-                    "SELECT * FROM conflicts WHERE id=? AND status='open'",
-                    (int(conflict_id),),
-                ).fetchone()
-                if not row:
-                    return None
-                conflict = dict(row)
-                left = db._fetch_memory(conn, int(conflict["left_id"]))
-                right = db._fetch_memory(conn, int(conflict["right_id"]))
-                if not left or not right:
-                    return None
-                pins = (
-                    conflict.get("left_version"), conflict.get("right_version"),
-                    conflict.get("left_claim_revision"),
-                    conflict.get("right_claim_revision"),
-                )
-                if any(value is None for value in pins):
-                    return None
-                if not self._snapshot_matches(
-                    conflict, left, right,
-                    int(conflict["left_version"]), int(conflict["right_version"]),
-                    int(conflict["left_claim_revision"]),
-                    int(conflict["right_claim_revision"]),
-                ):
-                    return None
-                if (
-                    left.get("claims_indexed_revision") != left.get("claim_revision")
-                    or right.get("claims_indexed_revision") != right.get("claim_revision")
-                ):
-                    return None
-                claim_rows = conn.execute(
-                    """
-                    SELECT l.entity, l.attribute, l.scope,
-                           l.value AS left_value, l.raw_value AS left_raw_value,
-                           l.evidence AS left_evidence, l.start_offset AS left_start_offset,
-                           l.end_offset AS left_end_offset,
-                           r.value AS right_value, r.raw_value AS right_raw_value,
-                           r.evidence AS right_evidence, r.start_offset AS right_start_offset,
-                           r.end_offset AS right_end_offset, l.extractor_rule
-                    FROM memory_claims l JOIN memory_claims r
-                      ON r.entity=l.entity AND r.attribute=l.attribute
-                    WHERE l.memory_id=? AND r.memory_id=?
-                      AND l.claim_revision=? AND r.claim_revision=?
-                      AND l.value<>r.value
-                      AND NOT (l.scope<>'' AND r.scope<>'' AND l.scope<>r.scope)
-                    ORDER BY l.attribute
-                    """,
-                    (
-                        int(conflict["left_id"]), int(conflict["right_id"]),
-                        int(left.get("claim_revision") or 1),
-                        int(right.get("claim_revision") or 1),
-                    ),
-                ).fetchall()
-                claims = [dict(claim_row) for claim_row in claim_rows]
-                if not claims:
-                    return None
-
-                def memory_evidence(memory: dict[str, Any]) -> dict[str, Any]:
-                    content = str(memory.get("content") or "")
-                    return {
-                        "id": int(memory["id"]),
-                        "version": int(memory.get("version") or 1),
-                        "claim_revision": int(memory.get("claim_revision") or 1),
-                        "subject": memory.get("subject"),
-                        "source_type": memory.get("source_type"),
-                        "protection_level": memory.get("protection_level"),
-                        "confidence": memory.get("confidence"),
-                        "event_time": memory.get("event_time"),
-                        "ingest_time": memory.get("ingest_time"),
-                        "source_ref": memory.get("source_ref"),
-                        "content": content if len(content) <= 2000 else None,
-                        "content_truncated": len(content) > 2000,
-                    }
-
-                return {
-                    "conflict_id": int(conflict["id"]),
-                    "verification_status": conflict.get("judgment_status") or "pending_llm",
-                    "left": memory_evidence(left),
-                    "right": memory_evidence(right),
-                    "claims": claims,
-                    "allowed_verdicts": [
-                        "contradiction", "evolution", "compatible", "uncertain",
-                    ],
-                    "allowed_recommendations": [
-                        "left", "right", "contextual", "merge", "ask_user", "none",
-                    ],
-                    "required_tool": "memory_submit_conflict_judgment",
-                }
+                requests: dict[int, dict[str, Any]] = {}
+                for conflict_id in ids:
+                    request = self._build_request_on_connection(conn, conflict_id)
+                    if request is not None:
+                        requests[conflict_id] = request
+                return requests
         except sqlite3.Error:
+            return {}
+
+    def _build_request_on_connection(
+        self, conn: sqlite3.Connection, conflict_id: int,
+    ) -> Optional[dict[str, Any]]:
+        db = self._db
+        row = conn.execute(
+            "SELECT * FROM conflicts WHERE id=? AND status='open'",
+            (int(conflict_id),),
+        ).fetchone()
+        if not row:
             return None
+        conflict = dict(row)
+        left = db._fetch_memory(conn, int(conflict["left_id"]))
+        right = db._fetch_memory(conn, int(conflict["right_id"]))
+        if not left or not right:
+            return None
+        pins = (
+            conflict.get("left_version"), conflict.get("right_version"),
+            conflict.get("left_claim_revision"),
+            conflict.get("right_claim_revision"),
+        )
+        if any(value is None for value in pins):
+            return None
+        if not self._snapshot_matches(
+            conflict, left, right,
+            int(conflict["left_version"]), int(conflict["right_version"]),
+            int(conflict["left_claim_revision"]),
+            int(conflict["right_claim_revision"]),
+        ):
+            return None
+        if (
+            left.get("claims_indexed_revision") != left.get("claim_revision")
+            or right.get("claims_indexed_revision") != right.get("claim_revision")
+        ):
+            return None
+        claim_rows = conn.execute(
+            """
+            SELECT l.entity, l.attribute, l.scope,
+                   l.value AS left_value, l.raw_value AS left_raw_value,
+                   l.evidence AS left_evidence, l.start_offset AS left_start_offset,
+                   l.end_offset AS left_end_offset,
+                   r.value AS right_value, r.raw_value AS right_raw_value,
+                   r.evidence AS right_evidence, r.start_offset AS right_start_offset,
+                   r.end_offset AS right_end_offset, l.extractor_rule
+            FROM memory_claims l JOIN memory_claims r
+              ON r.entity=l.entity AND r.attribute=l.attribute
+            WHERE l.memory_id=? AND r.memory_id=?
+              AND l.claim_revision=? AND r.claim_revision=?
+              AND l.value<>r.value
+              AND NOT (l.scope<>'' AND r.scope<>'' AND l.scope<>r.scope)
+            ORDER BY l.attribute
+            """,
+            (
+                int(conflict["left_id"]), int(conflict["right_id"]),
+                int(left.get("claim_revision") or 1),
+                int(right.get("claim_revision") or 1),
+            ),
+        ).fetchall()
+        claims = [dict(claim_row) for claim_row in claim_rows]
+        if not claims:
+            return None
+
+        def memory_evidence(memory: dict[str, Any]) -> dict[str, Any]:
+            content = str(memory.get("content") or "")
+            return {
+                "id": int(memory["id"]),
+                "version": int(memory.get("version") or 1),
+                "claim_revision": int(memory.get("claim_revision") or 1),
+                "subject": memory.get("subject"),
+                "source_type": memory.get("source_type"),
+                "protection_level": memory.get("protection_level"),
+                "confidence": memory.get("confidence"),
+                "event_time": memory.get("event_time"),
+                "ingest_time": memory.get("ingest_time"),
+                "source_ref": memory.get("source_ref"),
+                "content": content if len(content) <= 2000 else None,
+                "content_truncated": len(content) > 2000,
+            }
+
+        return {
+            "conflict_id": int(conflict["id"]),
+            "verification_status": conflict.get("judgment_status") or "pending_llm",
+            "left": memory_evidence(left),
+            "right": memory_evidence(right),
+            "claims": claims,
+            "allowed_verdicts": [
+                "contradiction", "evolution", "compatible", "uncertain",
+            ],
+            "allowed_recommendations": [
+                "left", "right", "contextual", "merge", "ask_user", "none",
+            ],
+            "required_tool": "memory_submit_conflict_judgment",
+        }
 
     @staticmethod
     def _snapshot_matches(
@@ -137,12 +155,10 @@ class ConflictJudgmentStore:
             and int(right.get("version") or 1) == int(expected_right_version)
             and int(left.get("claim_revision") or 1) == int(expected_left_claim_revision)
             and int(right.get("claim_revision") or 1) == int(expected_right_claim_revision)
-            and conflict.get("left_version") in (None, int(expected_left_version))
-            and conflict.get("right_version") in (None, int(expected_right_version))
-            and conflict.get("left_claim_revision")
-            in (None, int(expected_left_claim_revision))
-            and conflict.get("right_claim_revision")
-            in (None, int(expected_right_claim_revision))
+            and conflict.get("left_version") == int(expected_left_version)
+            and conflict.get("right_version") == int(expected_right_version)
+            and conflict.get("left_claim_revision") == int(expected_left_claim_revision)
+            and conflict.get("right_claim_revision") == int(expected_right_claim_revision)
         )
 
     @staticmethod
@@ -230,6 +246,16 @@ class ConflictJudgmentStore:
                 if not row:
                     return {"outcome": "not_open", "conflict_id": int(conflict_id)}
                 conflict = dict(row)
+                if any(
+                    conflict.get(key) is None for key in (
+                        "left_version", "right_version",
+                        "left_claim_revision", "right_claim_revision",
+                    )
+                ):
+                    return {
+                        "outcome": "invalid_structured_snapshot",
+                        "conflict_id": int(conflict_id),
+                    }
                 left = db._fetch_memory(conn, int(conflict["left_id"]))
                 right = db._fetch_memory(conn, int(conflict["right_id"]))
                 if not left or not right:
@@ -433,6 +459,16 @@ class ConflictJudgmentStore:
                 if not row:
                     return {"outcome": "not_found", "conflict_id": int(conflict_id)}
                 conflict = dict(row)
+                if any(
+                    conflict.get(key) is None for key in (
+                        "left_version", "right_version",
+                        "left_claim_revision", "right_claim_revision",
+                    )
+                ):
+                    return {
+                        "outcome": "invalid_structured_snapshot",
+                        "conflict_id": int(conflict_id),
+                    }
                 if int(conflict.get("active_judgment_id") or 0) != int(
                     expected_judgment_id
                 ):

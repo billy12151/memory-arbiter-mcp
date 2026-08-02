@@ -78,7 +78,7 @@ Using two or more tools adds a shared memory layer: Tool A writes, Tool B search
 - **Smart tag ranking & search filters** (v0.7.3) — tags are scored as discrete labels (token overlap, not substring), so a tag set hitting every query token finally outranks a subject that merely contains one query word. `memory_search` also gains `tags_filter` / `after_time` / `before_time` / `source_type`, plus `has_more` + `total_estimate` so exhaustive queries know whether the page is complete.
 - **Linked open items & conflict signals** (v0.7.4 → v0.7.6) — on a genuine query hit, `memory_search` attaches up to 5 active todos (tagged `todo`) that share meaningful tags with the result set, in a separate `linked_open_items` field — pure read-only, never affects ranking. Every response also carries a `retrieval_mode`. v0.7.6 adds `conflict_signal` on each result: `open_table` (from scan/record-verified conflicts) or `runtime_metadata_hint` (advisory, not LLM-verified). Complete todos with `memory_edit(tags_only=true, remove_tags=["todo"])` — a low-side-effect tag update that doesn't write history, bump version, or re-embed.
 - **Conflict scan** (v0.7.5–v0.7.6) — `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories), then the calling agent runs LLM comparison and persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type` / `suggested_winner` / `source`; v0.7.6 adds `refresh=true` for re-judgement after memory/model changes). Dismiss false positives with `memory_resolve_conflict`. The core package stays headless — no LLM, no network. `doctor` reports scan freshness via `scan_log.jsonl`. v0.7.6: `memory_search` surfaces these conflicts as `conflict_signal` on matching results; `memory_write` returns `write_hints` for possible duplicates/evolution.
-- **Real-time structured conflict gate** (v0.9.0 beta) — writes and edits synchronously extract explicit claims into a separate derived-index table and compare `entity + attribute + scope` values. New collisions return evidence plus a mandatory host-LLM judgment request. The judgment is persisted for future queries but never edits or supersedes memory; high-impact/uncertain cases escalate to the user, and an authorized human correction remains available. Periodic semantic scan stays enabled as the broad-coverage backstop.
+- **Real-time structured conflict gate** (v0.9.0 beta) — writes and edits synchronously extract explicit claims into a separate derived-index table and compare `entity + attribute + scope` values. New collisions return evidence plus a mandatory host-LLM judgment request. The judgment is persisted for future queries but never edits or supersedes memory; high-impact/uncertain cases escalate to the user, and an authorized human correction remains available. Index publication and conflict reconciliation have separate durable revision markers, so a post-index failure remains doctor-visible and rebuildable. Periodic semantic scan stays enabled as the broad-coverage backstop, while per-pair detection timestamps let doctor report structured-only / scan-only / both coverage and real-time lead time.
 - **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search.
 - **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup. Never crashes, even if optional extensions are missing.
 - **Health diagnostics** — a one-shot `doctor` check grades config integrity, the vector-enablement chain, split, data consistency, and capacity. Each finding carries a severity and a config-specific fix hint; works as an MCP tool (daily) or a standalone CLI (ambulance: runs even when the MCP process is down). Read-only.
@@ -250,7 +250,7 @@ Grouped by use case. For day-to-day agent work, the intended mental model is del
 | `memory_correct_conflict_judgment` | Append an authorized human correction and make it active while preserving prior LLM/policy judgments. |
 | `memory_list_conflict_judgments` | Read the append-only judgment history for one conflict. |
 | `memory_set_entity` / `memory_list_entities` | Assign canonical entity/scope metadata without content-history churn, or inspect entity coverage/unassigned memories. |
-| `memory_rebuild_claims` | Dry-run or process a bounded batch of stale/unindexed active memories. Re-run until the dry-run count reaches zero. |
+| `memory_rebuild_claims` | Dry-run or process a bounded batch of stale, unindexed, or indexed-but-unreconciled active memories. Re-run until the dry-run count reaches zero. |
 
 **Long-document section split** (v0.6.0) — paragraph-level retrieval for docs over `split.threshold`. Requires sqlite-vec + GGUF embedding. Most documents are split automatically by `memory_write` (rule-based, when Markdown headings are detected); `memory_split` below is only the agent-side continuation/repair entry, not part of the daily write path.
 
@@ -648,7 +648,7 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 - **tag 精排 + 搜索过滤**（v0.7.3）—— tag 按离散标签集评分（token 重叠，不再当句子做整串匹配），tag 精确命中每个 query token 时终于能排到 subject 只是偶然含一个词的记忆之上。`memory_search` 还新增了 `tags_filter` / `after_time` / `before_time` / `source_type`，响应里带 `has_more` + `total_estimate`，让穷举式查询知道这一页是不是已经拿全。
 - **关联待办与冲突信号**（v0.7.4 → v0.7.6）—— 真实命中查询时，`memory_search` 在独立的 `linked_open_items` 字段附最多 5 条与结果集共享 meaningful tag 的 active 待办（带 `todo` tag），纯只读、不影响排序。每次响应还带 `retrieval_mode` 说明结果是怎么来的。v0.7.6 新增 `conflict_signal`：每条结果可能带 `open_table`（scan/record 验证过的结构化冲突）或 `runtime_metadata_hint`（运行时启发式，未经 LLM 验证）。完成待办用 `memory_edit(tags_only=true, remove_tags=["todo"])`——低副作用、不写历史、不增加 version、不重算 embedding。
 - **冲突扫描**（v0.7.5）—— `memory_scan_conflict_candidates` 向量召回候选冲突对（增量：只扫新增 + 最近编辑的记忆），调用方 agent 跑 LLM 比对后用 `memory_record_conflict` 落表（幂等，带 `conflict_type` / `suggested_winner` / `source`）。误报用 `memory_resolve_conflict` 关闭。核心包保持无头——不调 LLM、不联网——扫描只产候选对，判断交给 agent。`doctor` 通过 `scan_log.jsonl` 报告扫描新鲜度（从未扫描或超 15 天会 WARN）。
-- **实时结构化冲突门（v0.9.0 beta）**——写入和编辑会同步抽取显式 claim 到独立派生索引，并比较 `entity + attribute + scope` 的值。新碰撞返回证据与必须执行的宿主 LLM 判断请求；判断会持久化供后续查询使用，但绝不修改或 supersede 记忆。高影响/不确定场景升级给用户，且保留授权人工纠正入口；定期语义 scan 继续作为广覆盖兜底。
+- **实时结构化冲突门（v0.9.0 beta）**——写入和编辑会同步抽取显式 claim 到独立派生索引，并比较 `entity + attribute + scope` 的值。新碰撞返回证据与必须执行的宿主 LLM 判断请求；判断会持久化供后续查询使用，但绝不修改或 supersede 记忆。高影响/不确定场景升级给用户，且保留授权人工纠正入口。索引发布与冲突对账分别持久化 revision，发布后的故障仍可由 doctor 发现和 rebuild 修复；定期语义 scan 继续作为广覆盖兜底，doctor 可根据双通道时间戳统计 structured-only / scan-only / both 与实时提前量。
 - **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。
 - **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
 - **健康体检** —— 一键 `doctor` 给配置完整性、向量化启用链、分段、数据一致性、容量堆积做分级体检。每条诊断带 severity 和针对当前配置的修复指引；既能作为 MCP 工具（日常）在对话里触发，也能作为独立 CLI（救护车：MCP 进程挂了也能连库诊断）。纯只读。
@@ -815,7 +815,7 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 | `memory_correct_conflict_judgment` | 追加一条授权人工纠正并设为 active；旧 LLM/policy 判断仍保留。 |
 | `memory_list_conflict_judgments` | 查看某个冲突的追加式判断历史。 |
 | `memory_set_entity` / `memory_list_entities` | 无内容历史副作用地设置规范 entity/scope，或查看实体覆盖率与未分配记忆。 |
-| `memory_rebuild_claims` | dry-run 或处理一批 stale/unindexed active 记忆；重复运行到 dry-run count 为 0。 |
+| `memory_rebuild_claims` | dry-run 或处理一批 stale、unindexed、或已索引但未完成冲突对账的 active 记忆；重复运行到 dry-run count 为 0。 |
 
 **长文档分段**（v0.6.0）—— 超过 `split.threshold` 的文档走段落级检索。需 sqlite-vec + GGUF embedding。大多数文档会被 `memory_write` 自动规则分段（检测到 Markdown 标题时）；下面的 `memory_split` 只是 agent 侧的续接/修复入口，不在日常写入路径上。
 
@@ -1123,6 +1123,7 @@ memory-arbiter doctor --db PATH    # 诊断另一个 DB（灾祸恢复）
 - **配置完整性** —— 解析告警、写探针结果、降级模式（`jsonl_backup` = 正在静默丢数据 = critical）。
 - **向量化启用链** —— 最高价值的检查。"语义召回到底开没开？"不是布尔值；它走五环链（配置了模型 → `vec.enabled` → 扩展已加载 → 模型可用 → auto 开关），在第一处断裂处短路，明确告诉你哪一环断了、怎么修。专治"我明明配了模型，召回怎么还是不准"（通常是 `vec.enabled=false`）。
 - **分段、一致性、容量** —— 分段状态、孤儿分段/向量、版本链断链、open 冲突堆积、历史快照膨胀、DB 容量。
+- **v0.9 实时冲突可观测性** —— structured claim 索引/对账是否同 revision、未完成对账能否 rebuild、写入链路延迟与候选 peer 数，以及已落表冲突的 structured-only / scan-only / both 和 structured 提前量。它提供 ROI 数据，不替代真实 Beta 样本判断。
 - **分段明细（v0.8.0）** —— vec ready 时，doctor 报告六项分段检查：`split.capability`（vec/embedder 可用性）、`split.long_unsplit_backlog`（长内容但仍 `split_status=NULL` 的 active 记录）、`split.failed_count`（带最近错误摘要）、`split.legacy_declined`、`split.legacy_unknown_status`（历史 `pending`/`fallback_active` 只读暴露）、`split.index_integrity`（孤儿/重叠/不连续/不覆盖的 offset、缺失段落向量）。backlog/failed/legacy 类问题会返回样例 memory ID，可直接喂给 `memory_split` 逐条修复。
 
 退出码：`0` 正常 / `1` 有 warning / `2` 有 critical —— 可在脚本和 CI 里用。如果数据库根本打不开，doctor 会降级成单条 critical 报告而不是崩溃（这正是救护车的意义）。同一套引擎也作为 `memory_doctor_overview` MCP 工具暴露，供对话内使用；CLI 只是用静态推断替代了 MCP 运行时状态（精度略低，报告里会标注）。

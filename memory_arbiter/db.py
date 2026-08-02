@@ -291,8 +291,11 @@ class MemoryDB:
             self._migrate_add_column(conn, "memories", "claim_revision",
                                      "INTEGER NOT NULL DEFAULT 1")
             self._migrate_add_column(conn, "memories", "claims_indexed_revision", "INTEGER")
+            self._migrate_add_column(conn, "memories", "claims_reconciled_revision", "INTEGER")
             self._migrate_add_column(conn, "memories", "claim_ambiguous_count",
                                      "INTEGER NOT NULL DEFAULT 0")
+            self._migrate_add_column(conn, "memories", "structured_enrich_ms", "REAL")
+            self._migrate_add_column(conn, "memories", "structured_candidate_count", "INTEGER")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_claims (
@@ -324,6 +327,8 @@ class MemoryDB:
             self._migrate_add_column(conn, "conflicts", "right_claim_revision", "INTEGER")
             self._migrate_add_column(conn, "conflicts", "judgment_status", "TEXT")
             self._migrate_add_column(conn, "conflicts", "structured_details", "TEXT")
+            self._migrate_add_column(conn, "conflicts", "structured_detected_at", "TEXT")
+            self._migrate_add_column(conn, "conflicts", "scan_detected_at", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conflict_judgments (
@@ -356,6 +361,18 @@ class MemoryDB:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conflicts_judgment_status "
                 "ON conflicts(status, judgment_status)"
+            )
+            # Best-effort provenance backfill for databases upgraded from the
+            # first v0.9 build. New writes set these channels explicitly.
+            conn.execute(
+                "UPDATE conflicts SET structured_detected_at=COALESCE(structured_detected_at, created_at) "
+                "WHERE left_claim_revision IS NOT NULL"
+            )
+            conn.execute(
+                "UPDATE conflicts SET scan_detected_at=COALESCE(scan_detected_at, created_at) "
+                "WHERE left_claim_revision IS NULL "
+                "AND source IS NOT NULL "
+                "AND source NOT IN ('structured_claim','metadata_write_hint')"
             )
             # SQLite cannot add a REFERENCES clause to an existing column
             # without rebuilding conflicts.  This trigger enforces both target
@@ -1022,6 +1039,7 @@ class MemoryDB:
         structured_details: Optional[list[dict[str, Any]]] = None,
         scan_prompt_version: Optional[str] = None,
         scan_model: Optional[str] = None,
+        detection_channel: Optional[str] = None,
     ) -> dict[str, Any]:
         """Insert a conflict row carrying scan-enrichment fields.
 
@@ -1033,6 +1051,14 @@ class MemoryDB:
         """
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable"}
+        if detection_channel is None:
+            detection_channel = (
+                "structured" if source == "structured_claim"
+                else "metadata" if source == "metadata_write_hint"
+                else "scan"
+            )
+        if detection_channel not in {"structured", "scan", "metadata"}:
+            return {"outcome": "invalid_detection_channel"}
         if source == "structured_claim" and any(
             value is None for value in (
                 left_version, right_version, left_claim_revision, right_claim_revision,
@@ -1058,6 +1084,8 @@ class MemoryDB:
                 structured_details = swapped_details
         subject = conflict_point or reason
         now = utc_now_iso()
+        structured_detected_at = now if detection_channel == "structured" else None
+        scan_detected_at = now if detection_channel == "scan" else None
         with self.write_transaction() as conn:
             existing = conn.execute(
                 "SELECT * FROM conflicts WHERE status='open' AND left_id=? AND right_id=?",
@@ -1075,16 +1103,52 @@ class MemoryDB:
                 }
                 incoming_priority = priority.get(source, 25)
                 existing_priority = priority.get(existing_row.get("source"), 25)
+                existing_structured = (
+                    existing_row.get("left_claim_revision") is not None
+                    and existing_row.get("right_claim_revision") is not None
+                )
+                incoming_structured = detection_channel == "structured"
+                # Conflict identity/provenance and judgment snapshot are separate
+                # ownership domains. A scan may enrich an existing structured
+                # conflict, but it must never erase the structured CAS pins or
+                # bypass the mandatory host-LLM receipt.
+                preserve_structured_snapshot = existing_structured and not incoming_structured
+                preserve_judgment_projection = (
+                    preserve_structured_snapshot
+                    and existing_row.get("active_judgment_id") is not None
+                )
+                effective_left_version = (
+                    existing_row.get("left_version")
+                    if preserve_structured_snapshot else left_version
+                )
+                effective_right_version = (
+                    existing_row.get("right_version")
+                    if preserve_structured_snapshot else right_version
+                )
+                effective_left_claim_revision = (
+                    existing_row.get("left_claim_revision")
+                    if preserve_structured_snapshot else left_claim_revision
+                )
+                effective_right_claim_revision = (
+                    existing_row.get("right_claim_revision")
+                    if preserve_structured_snapshot else right_claim_revision
+                )
                 pins_changed = (
-                    left_version != existing_row.get("left_version")
-                    or right_version != existing_row.get("right_version")
-                    or left_claim_revision != existing_row.get("left_claim_revision")
-                    or right_claim_revision != existing_row.get("right_claim_revision")
+                    effective_left_version != existing_row.get("left_version")
+                    or effective_right_version != existing_row.get("right_version")
+                    or effective_left_claim_revision != existing_row.get("left_claim_revision")
+                    or effective_right_claim_revision != existing_row.get("right_claim_revision")
                 )
                 # A source-revision change invalidates an old LLM/policy/human
                 # projection. Historical judgments remain append-only, but the
                 # conflict returns to a structured pending candidate.
-                reset_judgment = source == "structured_claim" and pins_changed
+                reset_judgment = incoming_structured and pins_changed
+                effective_structured_detected_at = (
+                    existing_row.get("structured_detected_at") or structured_detected_at
+                )
+                effective_scan_detected_at = (
+                    existing_row.get("scan_detected_at") or scan_detected_at
+                )
                 should_update = (
                     incoming_priority > existing_priority
                     or (refresh and incoming_priority >= existing_priority)
@@ -1096,6 +1160,22 @@ class MemoryDB:
                         (judgment_status if judgment_status is not None else existing_row.get("judgment_status"))
                     )
                     active_judgment_id = None if reset_judgment else existing_row.get("active_judgment_id")
+                    effective_reason = (
+                        existing_row.get("reason")
+                        if preserve_judgment_projection else reason
+                    )
+                    effective_winner = (
+                        existing_row.get("suggested_winner")
+                        if preserve_judgment_projection else suggested_winner
+                    )
+                    effective_confidence = (
+                        existing_row.get("confidence_hint")
+                        if preserve_judgment_projection else confidence_hint
+                    )
+                    effective_source = (
+                        existing_row.get("source")
+                        if preserve_judgment_projection else source
+                    )
                     cur = conn.execute(
                         """
                         UPDATE conflicts SET
@@ -1105,24 +1185,41 @@ class MemoryDB:
                             left_claim_revision=?, right_claim_revision=?,
                             judgment_status=?, active_judgment_id=?,
                             structured_details=COALESCE(?, structured_details),
-                            scan_prompt_version=?, scan_model=?, refreshed_at=?
+                            scan_prompt_version=?, scan_model=?,
+                            structured_detected_at=?, scan_detected_at=?, refreshed_at=?
                         WHERE id=?
                         """,
                         (
-                            conflict_type, conflict_point, reason,
-                            suggested_winner, suggested_winner, confidence_hint,
-                            source, left_version, right_version,
-                            left_claim_revision, right_claim_revision,
+                            conflict_type, conflict_point, effective_reason,
+                            effective_winner, effective_winner, effective_confidence,
+                            effective_source, effective_left_version, effective_right_version,
+                            effective_left_claim_revision, effective_right_claim_revision,
                             effective_judgment_status, active_judgment_id,
                             (json.dumps(structured_details, ensure_ascii=False)
                              if structured_details is not None else None),
-                            scan_prompt_version, scan_model, now,
+                            scan_prompt_version, scan_model,
+                            effective_structured_detected_at, effective_scan_detected_at, now,
                             int(existing["id"]),
                         ),
                     )
                     if cur.rowcount == 0:
                         return {"outcome": "not_open", "conflict_id": int(existing["id"])}
                     return {"outcome": "refreshed", "conflict_id": int(existing["id"])}
+                provenance_changed = (
+                    effective_structured_detected_at != existing_row.get("structured_detected_at")
+                    or effective_scan_detected_at != existing_row.get("scan_detected_at")
+                )
+                if provenance_changed:
+                    conn.execute(
+                        "UPDATE conflicts SET structured_detected_at=?, scan_detected_at=?, "
+                        "refreshed_at=? WHERE id=?",
+                        (
+                            effective_structured_detected_at,
+                            effective_scan_detected_at,
+                            now,
+                            int(existing["id"]),
+                        ),
+                    )
                 return {"outcome": "deduped", "conflict_id": int(existing["id"])}
             cur = conn.execute(
                 """
@@ -1133,8 +1230,8 @@ class MemoryDB:
                     confidence_hint, source,
                     left_version, right_version, scan_prompt_version, scan_model
                     , left_claim_revision, right_claim_revision, judgment_status,
-                    structured_details
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    structured_details, structured_detected_at, scan_detected_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     a, b, subject, status, reason, suggested_winner,
@@ -1145,6 +1242,7 @@ class MemoryDB:
                     left_claim_revision, right_claim_revision, judgment_status,
                     (json.dumps(structured_details, ensure_ascii=False)
                      if structured_details is not None else None),
+                    structured_detected_at, scan_detected_at,
                 ),
             )
             return {"outcome": "inserted", "conflict_id": int(cur.lastrowid)}
@@ -1304,6 +1402,17 @@ class MemoryDB:
     ) -> None:
         self._claim_store.mark_claim_index_failed(memory_id, expected_claim_revision)
 
+    def mark_claim_reconciled(
+        self,
+        memory_id: int,
+        expected_claim_revision: int,
+        enrich_ms: float,
+        candidate_count: int,
+    ) -> dict[str, Any]:
+        return self._claim_store.mark_claim_reconciled(
+            memory_id, expected_claim_revision, enrich_ms, candidate_count,
+        )
+
     def list_memory_claims(
         self, memory_id: int, current_only: bool = True,
     ) -> list[dict[str, Any]]:
@@ -1317,10 +1426,25 @@ class MemoryDB:
     ) -> list[dict[str, Any]]:
         return self._claim_store.list_structured_open_conflicts_for_memory(memory_id)
 
+    def read_structured_open_conflicts_for_memory(
+        self, memory_id: int,
+    ) -> dict[str, Any]:
+        return self._claim_store.read_structured_open_conflicts_for_memory(memory_id)
+
+    def structured_pair_gate_states(
+        self, memory_id: int, pairs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._claim_store.structured_pair_gate_states(memory_id, pairs)
+
     def build_conflict_judgment_request(
         self, conflict_id: int,
     ) -> Optional[dict[str, Any]]:
         return self._judgment_store.build_conflict_judgment_request(conflict_id)
+
+    def build_conflict_judgment_requests(
+        self, conflict_ids: list[int],
+    ) -> dict[int, dict[str, Any]]:
+        return self._judgment_store.build_conflict_judgment_requests(conflict_ids)
 
     def submit_conflict_judgment(
         self,

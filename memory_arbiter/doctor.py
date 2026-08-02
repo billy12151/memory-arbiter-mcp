@@ -21,6 +21,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
@@ -225,15 +226,29 @@ def _check_structured_claims(conn: sqlite3.Connection) -> Finding:
     """v0.9 claim-index consistency + pending judgment observability."""
     if not _table_exists(conn, "memory_claims") or not _table_exists(conn, "conflict_judgments"):
         return _na("consistency.structured_claims", "consistency", "v0.9 claim tables do not exist")
-    stale = int(_scalar(
+    stale_index = int(_scalar(
         conn,
         "SELECT COUNT(*) FROM memories WHERE status='active' "
         "AND (claims_indexed_revision IS NULL OR claims_indexed_revision<>claim_revision)",
     ) or 0)
+    unreconciled = int(_scalar(
+        conn,
+        "SELECT COUNT(*) FROM memories WHERE status='active' "
+        "AND claims_indexed_revision=claim_revision "
+        "AND (claims_reconciled_revision IS NULL "
+        "OR claims_reconciled_revision<>claim_revision)",
+    ) or 0)
+    stale = stale_index + unreconciled
     total_claims = int(_scalar(conn, "SELECT COUNT(*) FROM memory_claims") or 0)
     indexed_memories = int(_scalar(
         conn,
         "SELECT COUNT(*) FROM memories WHERE status='active' AND claims_indexed_revision=claim_revision",
+    ) or 0)
+    reconciled_memories = int(_scalar(
+        conn,
+        "SELECT COUNT(*) FROM memories WHERE status='active' "
+        "AND claims_indexed_revision=claim_revision "
+        "AND claims_reconciled_revision=claim_revision",
     ) or 0)
     ambiguous = int(_scalar(
         conn, "SELECT COALESCE(SUM(claim_ambiguous_count),0) FROM memories WHERE status='active'"
@@ -246,7 +261,7 @@ def _check_structured_claims(conn: sqlite3.Connection) -> Finding:
     ) or 0)
     pending_rows = conn.execute(
         "SELECT judgment_status, COUNT(*) AS c, MIN(created_at) AS oldest "
-        "FROM conflicts WHERE status='open' AND left_claim_revision IS NOT NULL "
+        "FROM conflicts WHERE status='open' AND structured_detected_at IS NOT NULL "
         "GROUP BY judgment_status"
     ).fetchall()
     pending = {
@@ -272,7 +287,7 @@ def _check_structured_claims(conn: sqlite3.Connection) -> Finding:
         "SELECT c.status, COALESCE(c.judgment_status,'pending_llm') AS judgment_status, "
         "COALESCE(j.verdict,'unjudged') AS verdict, COUNT(*) AS c "
         "FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
-        "WHERE c.left_claim_revision IS NOT NULL "
+        "WHERE c.structured_detected_at IS NOT NULL "
         "GROUP BY c.status, COALESCE(c.judgment_status,'pending_llm'), "
         "COALESCE(j.verdict,'unjudged')"
     ).fetchall()
@@ -289,7 +304,7 @@ def _check_structured_claims(conn: sqlite3.Connection) -> Finding:
         "SELECT c.status, COALESCE(c.judgment_status,'pending_llm') AS judgment_status, "
         "j.verdict AS verdict, c.structured_details "
         "FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
-        "WHERE c.left_claim_revision IS NOT NULL AND c.structured_details IS NOT NULL"
+        "WHERE c.structured_detected_at IS NOT NULL AND c.structured_details IS NOT NULL"
     ).fetchall()
     for row in telemetry_rows:
         outcome = (
@@ -311,22 +326,87 @@ def _check_structured_claims(conn: sqlite3.Connection) -> Finding:
             attribute_outcomes.setdefault(attribute, {})[outcome] = (
                 attribute_outcomes.setdefault(attribute, {}).get(outcome, 0) + 1
             )
+
+    def numeric_stats(values: list[float]) -> dict[str, Any]:
+        if not values:
+            return {"count": 0, "avg": None, "p50": None, "p95": None, "max": None}
+        ordered = sorted(values)
+
+        def nearest_rank(percent: int) -> float:
+            index = max(0, min(len(ordered) - 1, (len(ordered) * percent + 99) // 100 - 1))
+            return round(float(ordered[index]), 3)
+
+        return {
+            "count": len(ordered),
+            "avg": round(sum(ordered) / len(ordered), 3),
+            "p50": nearest_rank(50),
+            "p95": nearest_rank(95),
+            "max": round(float(ordered[-1]), 3),
+        }
+
+    latency_rows = conn.execute(
+        "SELECT structured_enrich_ms, structured_candidate_count FROM memories "
+        "WHERE status='active' AND claims_reconciled_revision=claim_revision "
+        "AND structured_enrich_ms IS NOT NULL"
+    ).fetchall()
+    latency_stats = numeric_stats([
+        float(row["structured_enrich_ms"]) for row in latency_rows
+    ])
+    candidate_stats = numeric_stats([
+        float(row["structured_candidate_count"] or 0) for row in latency_rows
+    ])
+
+    channel_rows = conn.execute(
+        "SELECT left_id, right_id, MIN(structured_detected_at) AS structured_at, "
+        "MIN(scan_detected_at) AS scan_at FROM conflicts "
+        "WHERE structured_detected_at IS NOT NULL OR scan_detected_at IS NOT NULL "
+        "GROUP BY left_id, right_id"
+    ).fetchall()
+    detection_channels = {"structured_only": 0, "scan_only": 0, "both": 0}
+    structured_lead_ms: list[float] = []
+    for row in channel_rows:
+        structured_at = row["structured_at"]
+        scan_at = row["scan_at"]
+        if structured_at and scan_at:
+            detection_channels["both"] += 1
+            try:
+                structured_dt = datetime.fromisoformat(str(structured_at).replace("Z", "+00:00"))
+                scan_dt = datetime.fromisoformat(str(scan_at).replace("Z", "+00:00"))
+                lead_ms = (scan_dt - structured_dt).total_seconds() * 1000
+                if lead_ms >= 0:
+                    structured_lead_ms.append(lead_ms)
+            except ValueError:
+                pass
+        elif structured_at:
+            detection_channels["structured_only"] += 1
+        else:
+            detection_channels["scan_only"] += 1
+    lead_stats = numeric_stats(structured_lead_ms)
+
     severity = Severity.WARNING if stale else Severity.INFO
     status = "warn" if stale else "pass"
     return Finding(
         check_id="consistency.structured_claims", dimension="consistency",
         severity=severity, status=status,
         title=(
-            f"structured claims: {total_claims} claims / {indexed_memories} indexed memories"
+            f"structured claims: {total_claims} claims / {reconciled_memories} reconciled memories"
             + (f"，{stale} stale" if stale else "，index current")
         ),
         detail=(
-            "stale means claim_revision differs from claims_indexed_revision; old rows are ignored "
-            "until memory_rebuild_claims repairs them. Pending judgment counts remain visible here."
+            "stale includes extraction/index drift and a completed claim publish whose conflict "
+            "reconciliation did not finish. memory_rebuild_claims repairs either state. Detection "
+            "channels and latency make the real-time path's incremental value measurable."
         ),
         evidence={
             "claims": total_claims, "indexed_memories": indexed_memories,
-            "stale_memories": stale, "ambiguous_keys": ambiguous,
+            "reconciled_memories": reconciled_memories,
+            "stale_memories": stale, "stale_index_memories": stale_index,
+            "unreconciled_memories": unreconciled,
+            "structured_latency_ms": latency_stats,
+            "candidate_peer_count": candidate_stats,
+            "detection_channels": detection_channels,
+            "structured_lead_ms": lead_stats,
+            "ambiguous_keys": ambiguous,
             "metadata_entity_missing": missing_entity, "pending": pending,
             "by_extractor_rule": by_rule, "by_attribute_top20": by_attribute,
             "structured_outcomes": outcomes,

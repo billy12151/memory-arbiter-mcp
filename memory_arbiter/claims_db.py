@@ -81,8 +81,9 @@ class StructuredClaimStore:
                 if memory.get("status") != "active":
                     conn.execute("DELETE FROM memory_claims WHERE memory_id=?", (int(memory_id),))
                     conn.execute(
-                        "UPDATE memories SET claims_indexed_revision=?, claim_ambiguous_count=? WHERE id=?",
-                        (revision, int(ambiguous_count), int(memory_id)),
+                        "UPDATE memories SET claims_indexed_revision=?, "
+                        "claims_reconciled_revision=?, claim_ambiguous_count=? WHERE id=?",
+                        (revision, revision, int(ambiguous_count), int(memory_id)),
                     )
                     return {
                         "outcome": "skipped_inactive", "memory_id": int(memory_id),
@@ -109,7 +110,8 @@ class StructuredClaimStore:
                         ),
                     )
                 conn.execute(
-                    "UPDATE memories SET claims_indexed_revision=?, claim_ambiguous_count=? WHERE id=?",
+                    "UPDATE memories SET claims_indexed_revision=?, "
+                    "claims_reconciled_revision=NULL, claim_ambiguous_count=? WHERE id=?",
                     (revision, int(ambiguous_count), int(memory_id)),
                 )
                 return {
@@ -131,18 +133,60 @@ class StructuredClaimStore:
             with db.connection() as conn:
                 if expected_claim_revision is None:
                     conn.execute(
-                        "UPDATE memories SET claims_indexed_revision=NULL WHERE id=?",
+                        "UPDATE memories SET claims_indexed_revision=NULL, "
+                        "claims_reconciled_revision=NULL WHERE id=?",
                         (int(memory_id),),
                     )
                 else:
                     conn.execute(
-                        "UPDATE memories SET claims_indexed_revision=NULL "
+                        "UPDATE memories SET claims_indexed_revision=NULL, "
+                        "claims_reconciled_revision=NULL "
                         "WHERE id=? AND claim_revision=?",
                         (int(memory_id), int(expected_claim_revision)),
                     )
                 conn.commit()
         except sqlite3.Error:
             pass
+
+    def mark_claim_reconciled(
+        self,
+        memory_id: int,
+        expected_claim_revision: int,
+        enrich_ms: float,
+        candidate_count: int,
+    ) -> dict[str, Any]:
+        """Advance reconciliation only after every pair transition succeeds."""
+        db = self._db
+        if not db._db_available or not db.state.sqlite_writable:
+            return {"outcome": "unavailable", "memory_id": int(memory_id)}
+        try:
+            with db.write_transaction() as conn:
+                cur = conn.execute(
+                    "UPDATE memories SET claims_reconciled_revision=?, "
+                    "structured_enrich_ms=?, structured_candidate_count=? "
+                    "WHERE id=? AND status='active' AND claim_revision=? "
+                    "AND claims_indexed_revision=?",
+                    (
+                        int(expected_claim_revision), float(enrich_ms),
+                        int(candidate_count), int(memory_id),
+                        int(expected_claim_revision), int(expected_claim_revision),
+                    ),
+                )
+                if cur.rowcount == 0:
+                    return {
+                        "outcome": "stale_snapshot",
+                        "memory_id": int(memory_id),
+                        "expected_claim_revision": int(expected_claim_revision),
+                    }
+                return {
+                    "outcome": "reconciled",
+                    "memory_id": int(memory_id),
+                    "claim_revision": int(expected_claim_revision),
+                }
+        except sqlite3.Error as exc:
+            return {
+                "outcome": "error", "memory_id": int(memory_id), "error": str(exc),
+            }
 
     def list_memory_claims(
         self, memory_id: int, current_only: bool = True,
@@ -283,9 +327,15 @@ class StructuredClaimStore:
     def list_structured_open_conflicts_for_memory(
         self, memory_id: int,
     ) -> list[dict[str, Any]]:
+        return self.read_structured_open_conflicts_for_memory(memory_id).get("rows", [])
+
+    def read_structured_open_conflicts_for_memory(
+        self, memory_id: int,
+    ) -> dict[str, Any]:
+        """Read open structured rows without collapsing read failure into empty."""
         db = self._db
         if not db._db_available:
-            return []
+            return {"rows": [], "error": "database unavailable"}
         try:
             with db.connection() as conn:
                 rows = conn.execute(
@@ -294,9 +344,63 @@ class StructuredClaimStore:
                     "AND (left_id=? OR right_id=?)",
                     (int(memory_id), int(memory_id)),
                 ).fetchall()
-                return [_decode_conflict_row(row) for row in rows]
+                return {"rows": [_decode_conflict_row(row) for row in rows]}
+        except sqlite3.Error as exc:
+            return {"rows": [], "error": str(exc)}
+
+    def structured_pair_gate_states(
+        self,
+        memory_id: int,
+        pairs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Batch dismissal/terminal-snapshot checks for one reconciliation pass."""
+        if not pairs:
+            return {"dismissed": set(), "closed": set()}
+        db = self._db
+        if not db._db_available:
+            return {"dismissed": set(), "closed": set(), "error": True}
+        snapshots = {
+            (int(pair["left_id"]), int(pair["right_id"])): (
+                int(pair["left_version"]), int(pair["right_version"]),
+                int(pair["left_claim_revision"]), int(pair["right_claim_revision"]),
+            )
+            for pair in pairs
+        }
+        dismissed: set[tuple[int, int]] = set()
+        closed: set[tuple[int, int]] = set()
+        try:
+            with db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT left_id, right_id, status, left_version, right_version, "
+                    "left_claim_revision, right_claim_revision FROM conflicts "
+                    "WHERE status IN ('resolved','not_a_conflict') "
+                    "AND (left_id=? OR right_id=?)",
+                    (int(memory_id), int(memory_id)),
+                ).fetchall()
         except sqlite3.Error:
-            return []
+            return {"dismissed": set(), "closed": set(), "error": True}
+        for row in rows:
+            key = (int(row["left_id"]), int(row["right_id"]))
+            snapshot = snapshots.get(key)
+            if snapshot is None:
+                continue
+            lv, rv, lcr, rcr = snapshot
+            exact = (
+                row["left_version"] == lv
+                and row["right_version"] == rv
+                and row["left_claim_revision"] == lcr
+                and row["right_claim_revision"] == rcr
+            )
+            if exact:
+                closed.add(key)
+            if row["status"] == "not_a_conflict" and (
+                row["left_version"] in (None, lv)
+                and row["right_version"] in (None, rv)
+                and row["left_claim_revision"] in (None, lcr)
+                and row["right_claim_revision"] in (None, rcr)
+            ):
+                dismissed.add(key)
+        return {"dismissed": dismissed, "closed": closed}
 
     def update_metadata_fields_low_side_effect(
         self,
