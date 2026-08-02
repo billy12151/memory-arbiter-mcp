@@ -79,7 +79,7 @@ Using two or more tools adds a shared memory layer: Tool A writes, Tool B search
 - **Linked open items & conflict signals** (v0.7.4 → v0.7.6) — on a genuine query hit, `memory_search` attaches up to 5 active todos (tagged `todo`) that share meaningful tags with the result set, in a separate `linked_open_items` field — pure read-only, never affects ranking. Every response also carries a `retrieval_mode`. v0.7.6 adds `conflict_signal` on each result: `open_table` (from scan/record-verified conflicts) or `runtime_metadata_hint` (advisory, not LLM-verified). Complete todos with `memory_edit(tags_only=true, remove_tags=["todo"])` — a low-side-effect tag update that doesn't write history, bump version, or re-embed.
 - **Conflict scan** (v0.7.5–v0.7.6) — `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories), then the calling agent runs LLM comparison and persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type` / `suggested_winner` / `source`; v0.7.6 adds `refresh=true` for re-judgement after memory/model changes). Dismiss false positives with `memory_resolve_conflict`. The core package stays headless — no LLM, no network. `doctor` reports scan freshness via `scan_log.jsonl`. v0.7.6: `memory_search` surfaces these conflicts as `conflict_signal` on matching results; `memory_write` returns `write_hints` for possible duplicates/evolution.
 - **Real-time structured conflict gate** (v0.9.0 beta) — writes and edits synchronously extract explicit claims into a separate derived-index table and compare `entity + attribute + scope` values. New collisions return evidence plus a mandatory host-LLM judgment request. The judgment is persisted for future queries but never edits or supersedes memory; high-impact/uncertain cases escalate to the user, and an authorized human correction remains available. Index publication and conflict reconciliation have separate durable revision markers, so a post-index failure remains doctor-visible and rebuildable. Periodic semantic scan stays enabled as the broad-coverage backstop, while per-pair detection timestamps let doctor report structured-only / scan-only / both coverage and real-time lead time.
-- **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search.
+- **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search. Since v0.9.1, KNN pre-filters by authoritative parent status before selecting top-k, so superseded/deleted vectors can no longer occupy near-neighbour slots and starve active recall (`include_superseded=true` remains the explicit audit path).
 - **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup. Never crashes, even if optional extensions are missing.
 - **Health diagnostics** — a one-shot `doctor` check grades config integrity, the vector-enablement chain, split, data consistency, and capacity. Each finding carries a severity and a config-specific fix hint; works as an MCP tool (daily) or a standalone CLI (ambulance: runs even when the MCP process is down). Read-only.
 - **Zero cloud, zero LLM calls** — pure local SQLite. No Postgres, Redis, API keys, or external services.
@@ -277,7 +277,7 @@ Grouped by use case. For day-to-day agent work, the intended mental model is del
 | `memory_status` | Show current mode, degradation status, storage paths. v0.8.0 reports `split_capability` (`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`) instead of the old boolean `split_enabled`. |
 | `memory_list_conflicts` | List unresolved conflicts |
 | `memory_audit_summary` | Per-workspace stats overview (counts, oldest/newest, open conflicts, source_type distribution) |
-| `memory_doctor_overview` | Run a read-only health check and return a graded report (25 findings across config / vector chain / split / consistency / capacity). Each finding has a severity and a config-specific `fix_hint`. `deep=true` also loads the GGUF model for a dimension probe. Same engine as the `doctor` CLI below. |
+| `memory_doctor_overview` | Run a read-only health check and return a graded report (26 findings across config / vector chain / split / consistency / capacity). Each finding has a severity and a config-specific `fix_hint`. `deep=true` also loads the GGUF model for a dimension probe. Same engine as the `doctor` CLI below. |
 
 ### Optional: Semantic Recall (v0.5.0)
 
@@ -559,11 +559,11 @@ memory-arbiter doctor --deep       # also load the GGUF model for a dimension pr
 memory-arbiter doctor --db PATH    # diagnose a different DB (disaster recovery)
 ```
 
-It runs **18 read-only checks** across five dimensions, each with a severity (`info`/`warning`/`critical`) and a fix hint tailored to your current config:
+It runs **26 read-only checks** across five dimensions, each with a severity (`info`/`warning`/`critical`) and a fix hint tailored to your current config:
 
 - **Config integrity** — parse warnings, write-probe result, degradation mode (`jsonl_backup` = silently losing data = critical).
 - **Vector-enablement chain** — the highest-value check. "Is semantic recall actually on?" is not a boolean; it walks five links (model configured → `vec.enabled` → extension loaded → model usable → auto flags) and short-circuits at the first break, telling you exactly which link is down and how to fix it. Catches the classic "I configured a model but recall still doesn't work" case (usually `vec.enabled=false`).
-- **Split, consistency, capacity** — section-split state, orphaned sections/vectors, version-chain breaks, open-conflict buildup, history bloat, DB size.
+- **Split, consistency, capacity** — section-split state, orphaned sections/vectors, version-chain breaks, open-conflict buildup, history bloat, DB size. v0.9.1 adds `consistency.inactive_vectors_slowpath`: how many inactive (superseded/deleted) vectors are currently forcing KNN recall onto the exact-distance slow path — a pure latency signal, correctness is unaffected.
 - **Section-split detail (v0.8.0)** — when vec is ready, doctor reports six split checks: `split.capability` (vec/embedder available), `split.long_unsplit_backlog` (active long docs still at `split_status=NULL`), `split.failed_count` (with recent error summaries), `split.legacy_declined`, `split.legacy_unknown_status` (legacy `pending`/`fallback_active` surfaced read-only), and `split.index_integrity` (orphaned/overlapping/non-covering offsets, missing section vectors). Backlog/failed/legacy findings return sample memory IDs you can feed straight into `memory_split` for repair.
 
 Exit codes: `0` clean / `1` has warnings / `2` has criticals — usable in scripts and CI. If the DB can't be opened at all, doctor degrades to a single critical report instead of crashing (that's the whole point of an ambulance). The same engine is exposed as the `memory_doctor_overview` MCP tool for in-conversation use; the CLI just trades the MCP runtime state for a slightly less precise static inference (noted in the report).
@@ -654,7 +654,7 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 - **关联待办与冲突信号**（v0.7.4 → v0.7.6）—— 真实命中查询时，`memory_search` 在独立的 `linked_open_items` 字段附最多 5 条与结果集共享 meaningful tag 的 active 待办（带 `todo` tag），纯只读、不影响排序。每次响应还带 `retrieval_mode` 说明结果是怎么来的。v0.7.6 新增 `conflict_signal`：每条结果可能带 `open_table`（scan/record 验证过的结构化冲突）或 `runtime_metadata_hint`（运行时启发式，未经 LLM 验证）。完成待办用 `memory_edit(tags_only=true, remove_tags=["todo"])`——低副作用、不写历史、不增加 version、不重算 embedding。
 - **冲突扫描**（v0.7.5）—— `memory_scan_conflict_candidates` 向量召回候选冲突对（增量：只扫新增 + 最近编辑的记忆），调用方 agent 跑 LLM 比对后用 `memory_record_conflict` 落表（幂等，带 `conflict_type` / `suggested_winner` / `source`）。误报用 `memory_resolve_conflict` 关闭。核心包保持无头——不调 LLM、不联网——扫描只产候选对，判断交给 agent。`doctor` 通过 `scan_log.jsonl` 报告扫描新鲜度（从未扫描或超 15 天会 WARN）。
 - **实时结构化冲突门（v0.9.0 beta）**——写入和编辑会同步抽取显式 claim 到独立派生索引，并比较 `entity + attribute + scope` 的值。新碰撞返回证据与必须执行的宿主 LLM 判断请求；判断会持久化供后续查询使用，但绝不修改或 supersede 记忆。高影响/不确定场景升级给用户，且保留授权人工纠正入口。索引发布与冲突对账分别持久化 revision，发布后的故障仍可由 doctor 发现和 rebuild 修复；定期语义 scan 继续作为广覆盖兜底，doctor 可根据双通道时间戳统计 structured-only / scan-only / both 与实时提前量。
-- **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。
+- **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。v0.9.1 起 KNN 先按权威父状态预过滤再选 top-k，superseded/deleted 向量不会再占满近邻槽位挤掉 active 召回（`include_superseded=true` 仍是显式审计入口）。
 - **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
 - **健康体检** —— 一键 `doctor` 给配置完整性、向量化启用链、分段、数据一致性、容量堆积做分级体检。每条诊断带 severity 和针对当前配置的修复指引；既能作为 MCP 工具（日常）在对话里触发，也能作为独立 CLI（救护车：MCP 进程挂了也能连库诊断）。纯只读。
 - **鉴权门**（v0.8.5）—— `memory_arbitrate` / `memory_confirm` / `memory_supersede` 要求 `authorized=true` 才执行破坏性或提权操作，防止 LLM 绕过信任模型自动覆盖用户确认的记忆；传入旧参数 `apply` 返回显式迁移错误而非静默失效。
@@ -847,7 +847,7 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 | `memory_status` | 查看运行状态、模式、降级原因。v0.8.0 用 `split_capability`（`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`）替代旧的布尔 `split_enabled`。 |
 | `memory_list_conflicts` | 列出未解决的冲突 |
 | `memory_audit_summary` | 各 workspace 记忆统计概览（条目数、最旧/最新、open 冲突数、来源分布） |
-| `memory_doctor_overview` | 跑一次只读健康体检，返回分级报告（25 项 finding，覆盖配置 / 向量链 / 分段 / 一致性 / 容量）。每条诊断带 severity 和针对当前配置的 `fix_hint`。`deep=true` 时额外加载 GGUF 模型做维度探针。与下面的 `doctor` CLI 用同一套引擎。 |
+| `memory_doctor_overview` | 跑一次只读健康体检，返回分级报告（26 项 finding，覆盖配置 / 向量链 / 分段 / 一致性 / 容量）。每条诊断带 severity 和针对当前配置的 `fix_hint`。`deep=true` 时额外加载 GGUF 模型做维度探针。与下面的 `doctor` CLI 用同一套引擎。 |
 
 ### 可选：语义检索（v0.5.0）
 
@@ -1128,11 +1128,11 @@ memory-arbiter doctor --deep       # 额外加载 GGUF 模型做维度探针（�
 memory-arbiter doctor --db PATH    # 诊断另一个 DB（灾祸恢复）
 ```
 
-它跑 **25 项只读 finding**，分五个维度，每条带 severity（`info`/`warning`/`critical`）和针对你当前配置的修复指引：
+它跑 **26 项只读 finding**，分五个维度，每条带 severity（`info`/`warning`/`critical`）和针对你当前配置的修复指引：
 
 - **配置完整性** —— 解析告警、写探针结果、降级模式（`jsonl_backup` = 正在静默丢数据 = critical）。
 - **向量化启用链** —— 最高价值的检查。"语义召回到底开没开？"不是布尔值；它走五环链（配置了模型 → `vec.enabled` → 扩展已加载 → 模型可用 → auto 开关），在第一处断裂处短路，明确告诉你哪一环断了、怎么修。专治"我明明配了模型，召回怎么还是不准"（通常是 `vec.enabled=false`）。
-- **分段、一致性、容量** —— 分段状态、孤儿分段/向量、版本链断链、open 冲突堆积、历史快照膨胀、DB 容量。
+- **分段、一致性、容量** —— 分段状态、孤儿分段/向量、版本链断链、open 冲突堆积、历史快照膨胀、DB 容量。v0.9.1 新增 `consistency.inactive_vectors_slowpath`：报告当前有多少条 inactive（superseded/deleted）向量正在迫使 KNN 召回走精确距离慢路径——纯延迟信号，正确性不受影响。
 - **v0.9 实时冲突可观测性** —— structured claim 索引/对账是否同 revision、未完成对账能否 rebuild、写入链路延迟与候选 peer 数，以及已落表冲突的 structured-only / scan-only / both 和 structured 提前量。它提供 ROI 数据，不替代真实 Beta 样本判断。
 - **分段明细（v0.8.0）** —— vec ready 时，doctor 报告六项分段检查：`split.capability`（vec/embedder 可用性）、`split.long_unsplit_backlog`（长内容但仍 `split_status=NULL` 的 active 记录）、`split.failed_count`（带最近错误摘要）、`split.legacy_declined`、`split.legacy_unknown_status`（历史 `pending`/`fallback_active` 只读暴露）、`split.index_integrity`（孤儿/重叠/不连续/不覆盖的 offset、缺失段落向量）。backlog/failed/legacy 类问题会返回样例 memory ID，可直接喂给 `memory_split` 逐条修复。
 
