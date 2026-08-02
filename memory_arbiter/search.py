@@ -556,6 +556,7 @@ def _wide_recall(
     tags: Optional[list[str]],
     status_clause_m: str,
     like_status_clause: str,
+    include_superseded: bool = False,
     pool_cap: int = 50,
     content_like_fallback: bool = True,
     query_embedding: Optional[list[float]] = None,
@@ -693,15 +694,18 @@ def _wide_recall(
         and vec_state in {"ready", "unmanaged"}
         and len(pool) < pool_cap
     ):
-        knn_rows = db.vec_knn(query_embedding, k=max(pool_cap - len(pool), 10))
+        knn_rows = db.vec_knn(
+            query_embedding,
+            k=max(pool_cap - len(pool), 10),
+            include_superseded=include_superseded,
+        )
         for row in knn_rows:
             # Respect status filtering — vec0 rows are joined from memories,
             # but we still need to honour the active/superseded gate.
             status = row.get("status")
             if status == "deleted":
                 continue
-            if status == "superseded" and "superseded" in like_status_clause:
-                # like_status_clause filters superseded by default; match that.
+            if status == "superseded" and not include_superseded:
                 continue
             rid = row.get("id")
             if rid is None or rid in pool:
@@ -722,12 +726,16 @@ def _wide_recall(
     ):
         need = max(pool_cap - len(pool), 10)
         k = need * _SECTION_KNN_K_MULTIPLIER
-        sec_rows = db.section_vec_knn(query_embedding, k=k)
+        sec_rows = db.section_vec_knn(
+            query_embedding,
+            k=k,
+            include_superseded=include_superseded,
+        )
         for row in sec_rows:
             status = row.get("status")
             if status == "deleted":
                 continue
-            if status == "superseded" and "superseded" in like_status_clause:
+            if status == "superseded" and not include_superseded:
                 continue
             # Only split-active memories have meaningful section vectors.
             if row.get("split_status") != "active":
@@ -992,7 +1000,8 @@ def search_memories(
         return SearchOutcome(results, warnings, has_more, total_estimate, "direct")
 
     # === v0.7.3: pool 组装 + post-filter（design §3.5 第三步） ===
-    pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause, query_embedding=query_embedding,
+    pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause,
+                        include_superseded=include_superseded, query_embedding=query_embedding,
                         pool_cap=getattr(db.settings, "recall_pool_cap", 50),
                         content_like_cap=getattr(db.settings, "content_like_cap", 30))
 

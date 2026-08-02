@@ -2677,6 +2677,72 @@ def test_v061_r1_channel6_recall_superseded_with_include_superseded(tmp_path: Pa
     )
 
 
+def test_knn_prefilters_inactive_parent_before_top_k(tmp_path: Path) -> None:
+    """A closer superseded memory/section cannot consume the default KNN slot."""
+    pytest.importorskip("sqlite_vec")
+    tools = _make_channel6_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+
+    stale_content = "alpha " + ("x" * 60) + "\nbeta " + ("y" * 60)
+    stale_id = tools.memory_write(content=stale_content, subject="alpha")["data"]["id"]
+    assert _publish_two_sections(
+        tools, stale_id, stale_content, "alpha", "beta"
+    )["ok"] is True
+
+    active_content = "gamma " + ("x" * 60) + "\ndelta " + ("y" * 60)
+    active_id = tools.memory_write(content=active_content, subject="gamma")["data"]["id"]
+    assert _publish_two_sections(
+        tools, active_id, active_content, "gamma", "delta"
+    )["ok"] is True
+    assert tools.db.store_embedding(
+        stale_id, _keyword_embedding("alpha")
+    )[0] is True
+    assert tools.db.store_embedding(
+        active_id, _keyword_embedding("gamma")
+    )[0] is True
+
+    assert tools.memory_supersede(
+        memory_id=stale_id,
+        reason="replaced",
+        authorized=True,
+    )["ok"] is True
+
+    default_memory_rows = tools.db.vec_knn(_keyword_embedding("alpha"), k=1)
+    assert len(default_memory_rows) == 1
+    assert default_memory_rows[0]["id"] == active_id
+
+    audit_memory_rows = tools.db.vec_knn(
+        _keyword_embedding("alpha"), k=1, include_superseded=True
+    )
+    assert len(audit_memory_rows) == 1
+    assert audit_memory_rows[0]["id"] == stale_id
+
+    default_rows = tools.db.section_vec_knn(
+        _keyword_embedding("alpha"), k=1
+    )
+    assert len(default_rows) == 1
+    assert default_rows[0]["memory_id"] == active_id
+
+    audit_rows = tools.db.section_vec_knn(
+        _keyword_embedding("alpha"), k=1, include_superseded=True
+    )
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["memory_id"] == stale_id
+
+    # Deleted parents are excluded even in explicit superseded audit mode.
+    assert tools.db.update_memory(stale_id, {"status": "deleted"}) is True
+    deleted_memory_rows = tools.db.vec_knn(
+        _keyword_embedding("alpha"), k=1, include_superseded=True
+    )
+    assert deleted_memory_rows[0]["id"] == active_id
+    deleted_section_rows = tools.db.section_vec_knn(
+        _keyword_embedding("alpha"), k=1, include_superseded=True
+    )
+    assert deleted_section_rows[0]["memory_id"] == active_id
+
+
 # ---- v0.7.3 change 1: tag scoring unit tests (design §2.6 matrix) ------
 # These exercise _score_tags_surface / _cjk_substring_match /
 # _normalize_token_for_tag_match directly, not the full search pipeline.

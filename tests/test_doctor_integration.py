@@ -22,6 +22,7 @@ from memory_arbiter.doctor import (
     Finding,
     Severity,
     _check_history_version_chain,
+    _check_inactive_vectors_slowpath,
     _check_orphan_sections,
     _check_orphan_vectors,
     _check_section_vec_coverage,
@@ -124,14 +125,15 @@ class TestOrphanSections:
         f = _check_orphan_sections(conn)
         assert f.status == "pass"
 
-    def test_section_pointing_to_superseded_reported(self):
+    def test_section_pointing_to_superseded_is_retained_history(self):
         conn = _make_conn()
         conn.execute("INSERT INTO memories(id, status) VALUES (1, 'superseded')")
         conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10, 1)")
         conn.commit()
         f = _check_orphan_sections(conn)
-        assert f.status == "warn"
+        assert f.status == "pass"
         assert f.evidence["stale_status"] == 1
+        assert f.evidence["retained_inactive"] == 1
 
     def test_physical_orphan_reported(self):
         """Section whose memory_id no longer exists (memory row physically gone)."""
@@ -171,6 +173,56 @@ class TestOrphanVectors:
         assert f.status == "warn"
         assert f.evidence["orphan_vectors"] == 1
         assert 99 in f.evidence["vector_ids"]
+
+
+# =====================================================================
+#  inactive_vectors_slowpath — vec0 table + parent status
+# =====================================================================
+
+def _make_vec_conn() -> sqlite3.Connection:
+    pytest.importorskip("sqlite_vec")
+    import sqlite_vec
+    conn = _make_conn()
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute("CREATE VIRTUAL TABLE memories_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
+    conn.execute("CREATE VIRTUAL TABLE memory_sections_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
+    return conn
+
+
+class TestInactiveVectorsSlowpath:
+    def test_table_missing_returns_na(self):
+        conn = _make_conn()
+        f = _check_inactive_vectors_slowpath(conn)
+        assert f.status == "n/a"
+
+    def test_all_active_passes_fast_path(self):
+        conn = _make_vec_conn()
+        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'active')")
+        conn.execute("INSERT INTO memories_vec(id, embedding) VALUES (1, '[0.1,0.2]')")
+        conn.commit()
+        f = _check_inactive_vectors_slowpath(conn)
+        assert f.status == "pass"
+        assert f.evidence["inactive_memory_vectors"] == 0
+        assert f.evidence["inactive_section_vectors"] == 0
+        assert "快路径" in f.title
+
+    def test_inactive_vectors_reported_with_counts(self):
+        conn = _make_vec_conn()
+        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'active'), (2, 'superseded'), (3, 'deleted')")
+        conn.execute("INSERT INTO memories_vec(id, embedding) VALUES (1,'[0.1,0.2]'),(2,'[0.3,0.4]'),(3,'[0.5,0.6]')")
+        conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10, 2)")
+        conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (10, '[0.7,0.8]')")
+        # Physical orphan section vector (parent memory row gone entirely).
+        conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (11, 999)")
+        conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (11, '[0.9,1.0]')")
+        conn.commit()
+        f = _check_inactive_vectors_slowpath(conn)
+        assert f.status == "pass"  # informational; correctness is unaffected
+        assert f.evidence["inactive_memory_vectors"] == 2
+        assert f.evidence["inactive_section_vectors"] == 2
+        assert "慢路径" in f.title
 
 
 # =====================================================================

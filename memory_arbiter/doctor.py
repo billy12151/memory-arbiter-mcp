@@ -1010,25 +1010,35 @@ def _check_orphan_sections(conn: sqlite3.Connection) -> Finding:
     stale = _scalar(conn,
         "SELECT count(*) FROM memory_sections ms JOIN memories m ON ms.memory_id=m.id "
         "WHERE m.status IN ('superseded','deleted')") or 0
-    orphan = phys + stale
-    if orphan == 0:
+    if phys == 0:
+        detail = (
+            "所有分段均有父记忆；无历史保留分段"
+            if stale == 0
+            else (
+                f"{stale} 条分段属于 superseded/deleted 父记忆并作为审计历史保留；"
+                "默认向量召回先按父状态过滤再计算距离，不会挤占 active 名额"
+            )
+        )
         return Finding(
             check_id="consistency.orphan_sections", dimension="consistency",
-            severity=Severity.INFO, status="pass", title="无孤儿分段",
-            detail="所有分段均指向 active 记忆",
-            evidence={"physical_orphans": 0, "stale_status": 0},
+            severity=Severity.INFO, status="pass", title="无物理孤儿分段",
+            detail=detail,
+            evidence={"physical_orphans": 0, "retained_inactive": stale,
+                      "stale_status": stale},
         )
     ids = [r[0] for r in conn.execute(
         "SELECT DISTINCT ms.memory_id FROM memory_sections ms "
         "LEFT JOIN memories m ON ms.memory_id=m.id "
-        "WHERE m.id IS NULL OR m.status IN ('superseded','deleted') LIMIT 20")]
+        "WHERE m.id IS NULL LIMIT 20")]
     return Finding(
         check_id="consistency.orphan_sections", dimension="consistency",
         severity=Severity.WARNING, status="warn",
-        title=f"存在孤儿分段（{orphan} 条指向已删/已废弃记忆）",
-        detail=f"物理孤儿={phys}，指向 superseded/deleted={stale}。召回会命中幽灵。",
-        evidence={"physical_orphans": phys, "stale_status": stale, "memory_ids": ids},
-        fix_hint="人工核验受影响 memory_id；必要时重建分段",
+        title=f"存在物理孤儿分段（{phys} 条父记忆不存在）",
+        detail=(f"物理孤儿={phys}；另有 {stale} 条 inactive 历史分段被正常保留。"
+                "物理孤儿按父状态缺失处理，不参与召回。"),
+        evidence={"physical_orphans": phys, "retained_inactive": stale,
+                  "stale_status": stale, "memory_ids": ids},
+        fix_hint="人工核验受影响 section；必要时清理物理孤儿行",
     )
 
 
@@ -1057,6 +1067,48 @@ def _check_orphan_vectors(conn: sqlite3.Connection) -> Finding:
         evidence={"orphan_vectors": orphan, "vector_ids": ids},
         fix_hint="无对外工具可清理；如需手动处理：DELETE FROM memories_vec "
                  "WHERE id NOT IN (SELECT id FROM memories)（请先备份）。已列入 v2 cleanup 候选。",
+    )
+
+
+def _check_inactive_vectors_slowpath(conn: sqlite3.Connection) -> Finding:
+    """Report inactive (superseded/deleted/orphan) vectors forcing the exact
+    L2 slow path in vec_knn / section_vec_knn.  Informational only: recall
+    correctness is preserved either way, but every KNN pays a full-table
+    distance scan while any ineligible vector exists."""
+    if not _table_exists(conn, "memories_vec"):
+        return _na("consistency.inactive_vectors_slowpath", "consistency",
+                   "memories_vec 表不存在（向量未启用）")
+    mem_inactive = _scalar(conn,
+        "SELECT count(*) FROM memories_vec v LEFT JOIN memories m ON m.id=v.id "
+        "WHERE COALESCE(m.status, 'deleted') != 'active'") or 0
+    sec_inactive = 0
+    if _table_exists(conn, "memory_sections_vec"):
+        sec_inactive = _scalar(conn,
+            "SELECT count(*) FROM memory_sections_vec v "
+            "LEFT JOIN memory_sections s ON s.id=v.id "
+            "LEFT JOIN memories m ON m.id=s.memory_id "
+            "WHERE COALESCE(m.status, 'deleted') != 'active'") or 0
+    evidence = {"inactive_memory_vectors": mem_inactive,
+                "inactive_section_vectors": sec_inactive}
+    if mem_inactive == 0 and sec_inactive == 0:
+        return Finding(
+            check_id="consistency.inactive_vectors_slowpath", dimension="consistency",
+            severity=Severity.INFO, status="pass",
+            title="无 inactive 向量，KNN 走 vec0 快路径",
+            detail="全部向量父记忆均为 active；向量召回使用 vec0 KNN 快路径",
+            evidence=evidence,
+        )
+    return Finding(
+        check_id="consistency.inactive_vectors_slowpath", dimension="consistency",
+        severity=Severity.INFO, status="pass",
+        title=f"{mem_inactive + sec_inactive} 条 inactive 向量使 KNN 走精确距离慢路径",
+        detail=(f"inactive 向量：memory 级 {mem_inactive} 条、section 级 {sec_inactive} 条"
+                "（父记忆 superseded/deleted 或物理孤儿）。召回正确性不受影响"
+                "（预过滤后计算精确 L2 距离），但每次搜索退化为全量距离扫描，"
+                "库规模增大时延迟会上升。物理删除这些向量可恢复 vec0 快路径。"),
+        evidence=evidence,
+        fix_hint="目前无对外清理工具；如需手动处理：DELETE FROM memories_vec / "
+                 "memory_sections_vec 中父记忆非 active 的行（请先备份）。已列入 v2 cleanup 候选。",
     )
 
 
@@ -1363,6 +1415,8 @@ def run_all_checks(
          lambda: _check_vec_index_state(conn, link3_passed), "consistency")
     _run("consistency.orphan_sections", lambda: _check_orphan_sections(conn), "consistency")
     _run("consistency.orphan_vectors", lambda: _check_orphan_vectors(conn), "consistency")
+    _run("consistency.inactive_vectors_slowpath",
+         lambda: _check_inactive_vectors_slowpath(conn), "consistency")
     _run("consistency.section_vec_coverage", lambda: _check_section_vec_coverage(conn), "consistency")
     _run("consistency.history_version_chain",
          lambda: _check_history_version_chain(conn), "consistency")

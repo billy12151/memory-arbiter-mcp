@@ -590,13 +590,66 @@ class MemoryDB:
         except sqlite3.Error as exc:
             return False, [f"delete_embedding failed: {exc}"]
 
-    def vec_knn(self, query_embedding: list[float], k: int = 10) -> list[dict[str, Any]]:
+    def vec_knn(
+        self,
+        query_embedding: list[float],
+        k: int = 10,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
         if not self._db_available or not self.state.sqlite_vec_available:
             return []
         try:
             with self.connection() as conn:
-                rows = conn.execute(
-                    """
+                eligible = (
+                    "COALESCE(m.status, 'deleted') != 'deleted'"
+                    if include_superseded
+                    else "COALESCE(m.status, 'deleted') = 'active'"
+                )
+                requested = max(0, int(k))
+                if requested == 0:
+                    return []
+                # The BEGIN is load-bearing, not redundant: without an explicit
+                # transaction the eligibility probe and the KNN query would run
+                # on different snapshots, reopening a TOCTOU window where a
+                # concurrent supersede between them revives the top-k pollution
+                # this branch exists to prevent.  No ROLLBACK/COMMIT handling on
+                # the error path is needed — closing the connection discards
+                # the open read transaction.
+                conn.execute("BEGIN")
+                excluded = int(conn.execute(
+                    f"SELECT count(*) AS excluded FROM memories_vec v "
+                    f"LEFT JOIN memories m ON m.id=v.id"
+                    f" WHERE NOT ({eligible})"
+                ).fetchone()["excluded"] or 0)
+                if excluded:
+                    # Joined-table predicates are post-KNN in vec0.  When any
+                    # inactive vector exists, calculate exact L2 distance only
+                    # across eligible parents so no hidden row can occupy k.
+                    rows = conn.execute(
+                        f"""
+                        SELECT v.id AS id,
+                               vec_distance_L2(v.embedding, ?) AS distance,
+                               m.workspace AS workspace,
+                               m.agent_id AS agent_id, m.status AS status,
+                               m.subject AS subject, m.tags AS tags,
+                               m.content AS content, m.source_type AS source_type,
+                               m.confidence AS confidence,
+                               m.protection_level AS protection_level,
+                               m.event_time AS event_time,
+                               m.ingest_time AS ingest_time,
+                               m.metadata AS metadata,
+                               m.split_status AS split_status
+                        FROM memories_vec v
+                        JOIN memories m ON m.id = v.id
+                        WHERE {eligible}
+                        ORDER BY distance
+                        LIMIT ?
+                        """,
+                        (json.dumps(query_embedding), requested),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
                     SELECT v.id AS id, v.distance AS distance, m.workspace AS workspace,
                            m.agent_id AS agent_id, m.status AS status, m.subject AS subject,
                            m.tags AS tags, m.content AS content, m.source_type AS source_type,
@@ -608,14 +661,18 @@ class MemoryDB:
                     WHERE v.embedding MATCH ? AND k = ?
                     ORDER BY v.distance
                     """,
-                    (json.dumps(query_embedding), k),
-                ).fetchall()
+                        (json.dumps(query_embedding), requested),
+                    ).fetchall()
+                conn.execute("COMMIT")
                 return [dict(row) for row in rows]
         except sqlite3.Error:
             return []
 
     def section_vec_knn(
-        self, query_embedding: list[float], k: int = 10
+        self,
+        query_embedding: list[float],
+        k: int = 10,
+        include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
         """v0.6.3 Channel 6: section-level vec KNN recall.
 
@@ -625,16 +682,63 @@ class MemoryDB:
         their content re-fetched by ``_attach_sections`` from
         ``current_mem_map``, so pulling k full texts here would be wasted I/O
         (k ≈ need×3, most rows dedup to the same handful of memories).
-        Workspace/status/split_status filtering is done Python-side in
-        ``_wide_recall`` (mirroring Channel 5) so like_status_clause semantics
-        stay aligned.
+        Parent status remains authoritative.  Because predicates on joined
+        tables are applied after vec0 chooses KNN slots, the clean fast path
+        uses vec0 KNN only when every vector is eligible.  If any inactive row
+        exists, exact distance is computed over status-filtered parents before
+        LIMIT.  This prevents recall starvation without duplicating lifecycle
+        state in the section index.
         """
         if not self._db_available or not self.state.sqlite_vec_available:
             return []
         try:
             with self.connection() as conn:
-                rows = conn.execute(
-                    """
+                eligible = (
+                    "COALESCE(m.status, 'deleted') != 'deleted'"
+                    if include_superseded
+                    else "COALESCE(m.status, 'deleted') = 'active'"
+                )
+                requested = max(0, int(k))
+                if requested == 0:
+                    return []
+                # Load-bearing BEGIN — see vec_knn above: keeps the probe and
+                # the KNN query on one snapshot; connection close rolls back.
+                conn.execute("BEGIN")
+                excluded = int(conn.execute(
+                    f"SELECT count(*) AS excluded FROM memory_sections_vec v "
+                    f"LEFT JOIN memory_sections s ON s.id=v.id "
+                    f"LEFT JOIN memories m ON m.id=s.memory_id"
+                    f" WHERE NOT ({eligible})"
+                ).fetchone()["excluded"] or 0)
+                if excluded:
+                    rows = conn.execute(
+                        f"""
+                        SELECT s.memory_id AS memory_id,
+                               s.id AS section_id,
+                               vec_distance_L2(v.embedding, ?) AS distance,
+                               s.title AS section_title,
+                               s.title_path AS section_title_path,
+                               m.workspace AS workspace, m.status AS status,
+                               m.subject AS subject, m.tags AS tags,
+                               m.source_type AS source_type,
+                               m.confidence AS confidence,
+                               m.protection_level AS protection_level,
+                               m.event_time AS event_time,
+                               m.ingest_time AS ingest_time,
+                               m.metadata AS metadata,
+                               m.split_status AS split_status
+                        FROM memory_sections_vec v
+                        JOIN memory_sections s ON s.id = v.id
+                        JOIN memories m ON m.id = s.memory_id
+                        WHERE {eligible}
+                        ORDER BY distance
+                        LIMIT ?
+                        """,
+                        (json.dumps(query_embedding), requested),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
                     SELECT s.memory_id AS memory_id, s.id AS section_id,
                            v.distance AS distance,
                            s.title AS section_title, s.title_path AS section_title_path,
@@ -650,8 +754,9 @@ class MemoryDB:
                     WHERE v.embedding MATCH ? AND k = ?
                     ORDER BY v.distance
                     """,
-                    (json.dumps(query_embedding), k),
-                ).fetchall()
+                        (json.dumps(query_embedding), requested),
+                    ).fetchall()
+                conn.execute("COMMIT")
                 return [dict(row) for row in rows]
         except sqlite3.Error:
             return []

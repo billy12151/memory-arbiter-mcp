@@ -1156,10 +1156,19 @@ class MemoryTools:
                     ok=False,
                 )
 
-        self.db.update_memory(
+        status_updated = self.db.update_memory(
             int(memory_id),
             {"status": "superseded", "protection_level": ProtectionLevel.NORMAL.value},
         )
+        if not status_updated:
+            return self.db.state.response(
+                {
+                    "error": "failed to update memory status",
+                    "superseded": False,
+                    "memory_id": int(memory_id),
+                },
+                ok=False,
+            )
         resolved = self.db.resolve_conflicts_for(int(memory_id))
         audit_reason = f"USER-AUTHORIZED SUPERSEDE: {reason}"
         conflict_id = self.db.record_conflict(

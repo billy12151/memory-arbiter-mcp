@@ -3,6 +3,28 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **Superseded/deleted vectors no longer poison semantic top-k recall** —
+  memory and section recall now uses the vec0 KNN fast path only when every
+  vector is eligible; if an inactive parent exists, it computes exact distance
+  over rows pre-filtered by authoritative `memories.status` before applying
+  LIMIT. Inactive vectors therefore cannot consume all KNN slots, while
+  `include_superseded=true` remains the explicit audit path and deleted rows
+  stay excluded. Doctor now distinguishes safely retained inactive sections
+  from true physical orphans. No duplicate lifecycle state or vec schema
+  change is introduced.
+
+### Added
+
+- **Doctor slow-path visibility** — a new `consistency.inactive_vectors_slowpath`
+  check reports how many inactive (superseded/deleted/orphan) memory/section
+  vectors exist and warns that, while they remain, every KNN query falls back
+  to the exact-distance slow path. Recall correctness is unaffected; this is
+  purely a latency signal with a manual-cleanup hint.
+
 ## [0.9.0] — 2026-08-02
 
 ### Added
