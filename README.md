@@ -187,8 +187,13 @@ record — reserve it for facts the user explicitly verified), event_time
 
 Search via memory_search first; read source files only for detail. When you
 find a contradiction, don't overwrite — if you know which is correct, use
-memory_supersede (retire the wrong one); if unsure, use memory_arbitrate
-(the system decides by timeline + trust level). When a to-do entry is done,
+memory_supersede (retire the wrong one); if unsure, use the conflict workflow
+(`memory_scan_conflict_candidates` → `memory_record_conflict` →
+`memory_list_conflicts`) instead of editing either side. Since v0.9.0,
+`memory_write` / `memory_edit` / `memory_search` may return
+`action_required=judge_conflict_before_use` with a structured judgment
+request — submit it via `memory_submit_conflict_judgment` before using the
+conflicting claim. When a to-do entry is done,
 remove the `todo` tag via `memory_edit(tags_only=true, remove_tags=["todo"])`
 — a low-side-effect update that doesn't write history or bump the version,
 and drops the item from `linked_open_items`. Don't just mention "done" in a
@@ -757,8 +762,13 @@ memory-arbiter setup
 workspace（项目名；v0.7.4：保留元数据——会存储和返回，但**不**过滤 memory_search / memory_recent 结果）、source_ref。
 
 查找先 memory_search，细节读源文件。发现矛盾不覆盖：明确知道哪条对时
-用 memory_supersede（废弃错的），不确定时用 memory_arbitrate（系统按
-时间线和可信度仲裁）。待办处理完成后用 memory_edit(tags_only=true,
+用 memory_supersede（废弃错的）；不确定时走冲突工作流
+（memory_scan_conflict_candidates → memory_record_conflict →
+memory_list_conflicts），不要直接改任何一侧。v0.9.0 起 memory_write /
+memory_edit / memory_search 可能返回
+`action_required=judge_conflict_before_use` 及结构化 judgment request
+——先通过 `memory_submit_conflict_judgment` 提交判定，再使用涉事冲突值。
+待办处理完成后用 memory_edit(tags_only=true,
 remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历史、不
 增加 version、不触发重算 embedding、从 linked_open_items 移除；不要只
 在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
