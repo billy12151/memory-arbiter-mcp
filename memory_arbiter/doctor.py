@@ -928,7 +928,8 @@ def _check_split_index_integrity(conn: sqlite3.Connection, settings: Settings) -
     bad_offset = conn.execute(
         "SELECT s.memory_id, s.section_index, s.start_offset, s.end_offset "
         "FROM memory_sections s JOIN memories m ON m.id=s.memory_id "
-        "WHERE m.split_status='active' AND s.end_offset <= s.start_offset LIMIT 20"
+        "WHERE m.split_status='active' AND m.status='active' "
+        "AND s.end_offset <= s.start_offset LIMIT 20"
     ).fetchall()
     for r in bad_offset:
         issues.append({"memory_id": int(r["memory_id"]),

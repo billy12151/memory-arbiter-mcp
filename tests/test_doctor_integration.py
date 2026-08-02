@@ -525,6 +525,20 @@ class TestSplitIndexIntegrity:
         assert f.status == "pass"
         assert f.evidence["issue_count"] == 0
 
+    def test_superseded_parent_offset_anomaly_ignored(self):
+        """superseded parent with split_status='active' and bad offsets → no warn.
+
+        v0.9.2: inactive parents are audit history; index-integrity only guards
+        active memories' derived index.
+        """
+        conn = _make_split_conn()
+        conn.execute("INSERT INTO memories(id, status, split_status) VALUES (1,'superseded','active')")
+        conn.execute("INSERT INTO memory_sections(id, memory_id, section_index, start_offset, end_offset) VALUES (10,1,0,5,5)")
+        conn.commit()
+        f = _check_split_index_integrity(conn, _settings(Path(".")))
+        assert f.status == "pass"
+        assert f.evidence["issue_count"] == 0
+
 
 class TestSplitLegacyStatuses:
     def test_unknown_legacy_status_reported(self):
