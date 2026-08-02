@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
 
+from .claims_db import StructuredClaimStore
 from .config import Settings
+from .conflict_judgments import ConflictJudgmentStore
 from .degrade import DegradeState
 from .models import MemoryRecord, utc_now_iso
 
@@ -37,6 +39,8 @@ class MemoryDB:
         self.state = DegradeState()
         self._db_available = False
         self._sqlite_vec_loadable = False
+        self._claim_store = StructuredClaimStore(self)
+        self._judgment_store = ConflictJudgmentStore(self)
         self._init_database()
 
     # ------------------------------------------------------------------
@@ -1281,7 +1285,7 @@ class MemoryDB:
             return None
 
     # ------------------------------------------------------------------
-    # v0.9: structured claim derived index
+    # v0.9: structured claim and judgment store delegation
     # ------------------------------------------------------------------
 
     def publish_memory_claims(
@@ -1291,378 +1295,32 @@ class MemoryDB:
         ambiguous_count: int = 0,
         expected_claim_revision: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Atomically replace one memory's derived claims at its current revision."""
-        if not self._db_available or not self.state.sqlite_writable:
-            return {"outcome": "unavailable", "memory_id": int(memory_id)}
-        try:
-            with self.write_transaction() as conn:
-                memory = self._fetch_memory(conn, int(memory_id))
-                if not memory:
-                    return {"outcome": "not_found", "memory_id": int(memory_id)}
-                revision = int(memory.get("claim_revision") or 1)
-                if expected_claim_revision is not None and revision != int(expected_claim_revision):
-                    return {
-                        "outcome": "stale_snapshot", "memory_id": int(memory_id),
-                        "expected_claim_revision": int(expected_claim_revision),
-                        "current_claim_revision": revision,
-                    }
-                if memory.get("status") != "active":
-                    conn.execute("DELETE FROM memory_claims WHERE memory_id=?", (int(memory_id),))
-                    conn.execute(
-                        "UPDATE memories SET claims_indexed_revision=?, claim_ambiguous_count=? WHERE id=?",
-                        (revision, int(ambiguous_count), int(memory_id)),
-                    )
-                    return {
-                        "outcome": "skipped_inactive", "memory_id": int(memory_id),
-                        "claim_revision": revision, "claim_count": 0,
-                    }
-                conn.execute("DELETE FROM memory_claims WHERE memory_id=?", (int(memory_id),))
-                now = utc_now_iso()
-                for claim in claims:
-                    conn.execute(
-                        """
-                        INSERT INTO memory_claims(
-                            memory_id, entity, attribute, scope, value, raw_value,
-                            value_type, extractor_rule, evidence, start_offset,
-                            end_offset, claim_revision, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            int(memory_id), str(claim["entity"]), str(claim["attribute"]),
-                            str(claim.get("scope") or ""), str(claim["value"]),
-                            claim.get("raw_value"), claim.get("value_type"),
-                            claim.get("extractor_rule"), claim.get("evidence"),
-                            claim.get("start_offset"), claim.get("end_offset"),
-                            revision, now,
-                        ),
-                    )
-                conn.execute(
-                    "UPDATE memories SET claims_indexed_revision=?, claim_ambiguous_count=? WHERE id=?",
-                    (revision, int(ambiguous_count), int(memory_id)),
-                )
-                return {
-                    "outcome": "indexed", "memory_id": int(memory_id),
-                    "claim_revision": revision, "claim_count": len(claims),
-                    "ambiguous_key_count": int(ambiguous_count),
-                }
-        except (sqlite3.Error, KeyError, TypeError, ValueError) as exc:
-            return {"outcome": "error", "memory_id": int(memory_id), "error": str(exc)}
+        return self._claim_store.publish_memory_claims(
+            memory_id, claims, ambiguous_count, expected_claim_revision,
+        )
 
     def mark_claim_index_failed(
         self, memory_id: int, expected_claim_revision: Optional[int] = None,
     ) -> None:
-        """Make derived-index failure persistent and doctor-visible."""
-        if not self._db_available or not self.state.sqlite_writable:
-            return
-        try:
-            with self.connection() as conn:
-                if expected_claim_revision is None:
-                    conn.execute(
-                        "UPDATE memories SET claims_indexed_revision=NULL WHERE id=?",
-                        (int(memory_id),),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE memories SET claims_indexed_revision=NULL "
-                        "WHERE id=? AND claim_revision=?",
-                        (int(memory_id), int(expected_claim_revision)),
-                    )
-                conn.commit()
-        except sqlite3.Error:
-            pass
+        self._claim_store.mark_claim_index_failed(memory_id, expected_claim_revision)
 
-    def list_memory_claims(self, memory_id: int, current_only: bool = True) -> list[dict[str, Any]]:
-        if not self._db_available:
-            return []
-        try:
-            with self.connection() as conn:
-                sql = "SELECT mc.* FROM memory_claims mc JOIN memories m ON m.id=mc.memory_id WHERE mc.memory_id=?"
-                if current_only:
-                    sql += " AND mc.claim_revision=m.claim_revision AND m.claims_indexed_revision=m.claim_revision"
-                sql += " ORDER BY mc.start_offset, mc.id"
-                rows = conn.execute(sql, (int(memory_id),)).fetchall()
-                return [row_to_dict(row) for row in rows]
-        except sqlite3.Error:
-            return []
-
-    @staticmethod
-    def _protected_memory(memory: dict[str, Any]) -> bool:
-        return (
-            memory.get("protection_level") == "locked"
-            or memory.get("source_type") == "user_confirmed"
-        )
-
-    @staticmethod
-    def _same_time_window(left: dict[str, Any], right: dict[str, Any]) -> bool:
-        """v0.9 conservative contradiction/evolution split (one-second window)."""
-        left_ts = left.get("event_time") or left.get("ingest_time")
-        right_ts = right.get("event_time") or right.get("ingest_time")
-        if not left_ts and not right_ts:
-            return True
-        if not left_ts or not right_ts:
-            left_ts = left_ts or left.get("ingest_time")
-            right_ts = right_ts or right.get("ingest_time")
-        if not left_ts or not right_ts:
-            return True
-        return str(left_ts)[:19] == str(right_ts)[:19]
+    def list_memory_claims(
+        self, memory_id: int, current_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        return self._claim_store.list_memory_claims(memory_id, current_only)
 
     def find_structured_claim_pairs(self, memory_id: int) -> dict[str, Any]:
-        """Return current contradiction pairs for one memory, aggregated by peer.
+        return self._claim_store.find_structured_claim_pairs(memory_id)
 
-        Different timestamps normally classify as evolution.  A value change
-        involving locked/user_confirmed memory remains a candidate so the
-        protection policy can review it instead of silently treating it stale.
-        """
-        if not self._db_available:
-            return {"pairs": [], "evolution_pairs": 0}
-        try:
-            with self.connection() as conn:
-                target_row = conn.execute(
-                    "SELECT * FROM memories WHERE id=? AND status='active'",
-                    (int(memory_id),),
-                ).fetchone()
-                if not target_row:
-                    return {"pairs": [], "evolution_pairs": 0}
-                target = row_to_dict(target_row)
-                if target.get("claims_indexed_revision") != target.get("claim_revision"):
-                    return {"pairs": [], "evolution_pairs": 0, "stale_index": True}
-                rows = conn.execute(
-                    """
-                    SELECT
-                      mine.entity, mine.attribute, mine.scope AS mine_scope,
-                      mine.value AS mine_value, mine.raw_value AS mine_raw_value,
-                      mine.evidence AS mine_evidence, mine.start_offset AS mine_start_offset,
-                      mine.end_offset AS mine_end_offset, mine.extractor_rule,
-                      peer.memory_id AS peer_id, peer.scope AS peer_scope,
-                      peer.value AS peer_value, peer.raw_value AS peer_raw_value,
-                      peer.evidence AS peer_evidence, peer.start_offset AS peer_start_offset,
-                      peer.end_offset AS peer_end_offset,
-                      pm.version AS peer_version, pm.claim_revision AS peer_claim_revision,
-                      pm.source_type AS peer_source_type,
-                      pm.protection_level AS peer_protection_level,
-                      pm.event_time AS peer_event_time, pm.ingest_time AS peer_ingest_time
-                    FROM memory_claims mine
-                    JOIN memory_claims peer
-                      ON peer.entity=mine.entity AND peer.attribute=mine.attribute
-                     AND peer.memory_id<>mine.memory_id
-                    JOIN memories pm ON pm.id=peer.memory_id
-                    WHERE mine.memory_id=?
-                      AND mine.claim_revision=?
-                      AND mine.value<>peer.value
-                      AND pm.status='active'
-                      AND peer.claim_revision=pm.claim_revision
-                      AND pm.claims_indexed_revision=pm.claim_revision
-                    ORDER BY peer.memory_id, mine.attribute
-                    """,
-                    (int(memory_id), int(target.get("claim_revision") or 1)),
-                ).fetchall()
-        except sqlite3.Error:
-            return {"pairs": [], "evolution_pairs": 0, "error": True}
+    def list_structured_open_conflicts_for_memory(
+        self, memory_id: int,
+    ) -> list[dict[str, Any]]:
+        return self._claim_store.list_structured_open_conflicts_for_memory(memory_id)
 
-        grouped: dict[int, dict[str, Any]] = {}
-        evolution_peers: set[int] = set()
-        for row in rows:
-            mine_scope = str(row["mine_scope"] or "")
-            peer_scope = str(row["peer_scope"] or "")
-            if mine_scope and peer_scope and mine_scope != peer_scope:
-                continue
-            peer = {
-                "id": int(row["peer_id"]),
-                "version": int(row["peer_version"] or 1),
-                "claim_revision": int(row["peer_claim_revision"] or 1),
-                "source_type": row["peer_source_type"],
-                "protection_level": row["peer_protection_level"],
-                "event_time": row["peer_event_time"],
-                "ingest_time": row["peer_ingest_time"],
-            }
-            protected = self._protected_memory(target) or self._protected_memory(peer)
-            contradiction = protected or self._same_time_window(target, peer)
-            if not contradiction:
-                evolution_peers.add(peer["id"])
-                continue
-            entry = grouped.setdefault(peer["id"], {"peer": peer, "claims": []})
-            entry["claims"].append({
-                "entity": row["entity"], "attribute": row["attribute"],
-                "scope": mine_scope or peer_scope,
-                "left_memory_id": int(memory_id), "left_value": row["mine_value"],
-                "left_raw_value": row["mine_raw_value"], "left_evidence": row["mine_evidence"],
-                "left_start_offset": row["mine_start_offset"], "left_end_offset": row["mine_end_offset"],
-                "right_memory_id": peer["id"], "right_value": row["peer_value"],
-                "right_raw_value": row["peer_raw_value"], "right_evidence": row["peer_evidence"],
-                "right_start_offset": row["peer_start_offset"], "right_end_offset": row["peer_end_offset"],
-                "extractor_rule": row["extractor_rule"],
-                "protected_review": protected and not self._same_time_window(target, peer),
-            })
-        pairs: list[dict[str, Any]] = []
-        for peer_id, entry in grouped.items():
-            a, b = sorted((int(memory_id), peer_id))
-            claims = entry["claims"]
-            # Canonicalise claim sides with the pair IDs.
-            if a != int(memory_id):
-                for claim in claims:
-                    for suffix in ("value", "raw_value", "evidence", "start_offset", "end_offset", "memory_id"):
-                        left_key, right_key = f"left_{suffix}", f"right_{suffix}"
-                        claim[left_key], claim[right_key] = claim[right_key], claim[left_key]
-            pairs.append({
-                "left_id": a, "right_id": b,
-                "left_version": int(target.get("version") or 1) if a == int(memory_id) else entry["peer"]["version"],
-                "right_version": entry["peer"]["version"] if b == peer_id else int(target.get("version") or 1),
-                "left_claim_revision": int(target.get("claim_revision") or 1) if a == int(memory_id) else entry["peer"]["claim_revision"],
-                "right_claim_revision": entry["peer"]["claim_revision"] if b == peer_id else int(target.get("claim_revision") or 1),
-                "claims": claims,
-            })
-        return {"pairs": pairs, "evolution_pairs": len(evolution_peers)}
-
-    def list_structured_open_conflicts_for_memory(self, memory_id: int) -> list[dict[str, Any]]:
-        if not self._db_available:
-            return []
-        try:
-            with self.connection() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM conflicts WHERE status='open' "
-                    "AND left_claim_revision IS NOT NULL "
-                    "AND (left_id=? OR right_id=?)",
-                    (int(memory_id), int(memory_id)),
-                ).fetchall()
-                return [row_to_dict(row) for row in rows]
-        except sqlite3.Error:
-            return []
-
-    def build_conflict_judgment_request(self, conflict_id: int) -> Optional[dict[str, Any]]:
-        """Build the evidence/snapshot payload a host LLM must judge."""
-        if not self._db_available:
-            return None
-        try:
-            with self.connection() as conn:
-                row = conn.execute(
-                    "SELECT * FROM conflicts WHERE id=? AND status='open'",
-                    (int(conflict_id),),
-                ).fetchone()
-                if not row:
-                    return None
-                conflict = row_to_dict(row)
-                left = self._fetch_memory(conn, int(conflict["left_id"]))
-                right = self._fetch_memory(conn, int(conflict["right_id"]))
-                if not left or not right:
-                    return None
-                pins = (
-                    conflict.get("left_version"), conflict.get("right_version"),
-                    conflict.get("left_claim_revision"), conflict.get("right_claim_revision"),
-                )
-                if any(value is None for value in pins):
-                    return None
-                if not self._judgment_snapshot_matches(
-                    conflict, left, right,
-                    int(conflict["left_version"]), int(conflict["right_version"]),
-                    int(conflict["left_claim_revision"]),
-                    int(conflict["right_claim_revision"]),
-                ):
-                    return None
-                if (
-                    left.get("claims_indexed_revision") != left.get("claim_revision")
-                    or right.get("claims_indexed_revision") != right.get("claim_revision")
-                ):
-                    return None
-                claim_rows = conn.execute(
-                    """
-                    SELECT l.entity, l.attribute, l.scope,
-                           l.value AS left_value, l.raw_value AS left_raw_value,
-                           l.evidence AS left_evidence, l.start_offset AS left_start_offset,
-                           l.end_offset AS left_end_offset,
-                           r.value AS right_value, r.raw_value AS right_raw_value,
-                           r.evidence AS right_evidence, r.start_offset AS right_start_offset,
-                           r.end_offset AS right_end_offset, l.extractor_rule
-                    FROM memory_claims l JOIN memory_claims r
-                      ON r.entity=l.entity AND r.attribute=l.attribute
-                    WHERE l.memory_id=? AND r.memory_id=?
-                      AND l.claim_revision=? AND r.claim_revision=?
-                      AND l.value<>r.value
-                      AND NOT (l.scope<>'' AND r.scope<>'' AND l.scope<>r.scope)
-                    ORDER BY l.attribute
-                    """,
-                    (
-                        int(conflict["left_id"]), int(conflict["right_id"]),
-                        int(left.get("claim_revision") or 1), int(right.get("claim_revision") or 1),
-                    ),
-                ).fetchall()
-                claims = [row_to_dict(r) for r in claim_rows]
-                if not claims:
-                    return None
-                def memory_evidence(memory: dict[str, Any]) -> dict[str, Any]:
-                    content = str(memory.get("content") or "")
-                    return {
-                        "id": int(memory["id"]), "version": int(memory.get("version") or 1),
-                        "claim_revision": int(memory.get("claim_revision") or 1),
-                        "subject": memory.get("subject"), "source_type": memory.get("source_type"),
-                        "protection_level": memory.get("protection_level"),
-                        "confidence": memory.get("confidence"), "event_time": memory.get("event_time"),
-                        "ingest_time": memory.get("ingest_time"), "source_ref": memory.get("source_ref"),
-                        "content": content if len(content) <= 2000 else None,
-                        "content_truncated": len(content) > 2000,
-                    }
-                return {
-                    "conflict_id": int(conflict["id"]),
-                    "verification_status": conflict.get("judgment_status") or "pending_llm",
-                    "left": memory_evidence(left), "right": memory_evidence(right),
-                    "claims": claims,
-                    "allowed_verdicts": ["contradiction", "evolution", "compatible", "uncertain"],
-                    "allowed_recommendations": ["left", "right", "contextual", "merge", "ask_user", "none"],
-                    "required_tool": "memory_submit_conflict_judgment",
-                }
-        except sqlite3.Error:
-            return None
-
-    @staticmethod
-    def _judgment_snapshot_matches(
-        conflict: dict[str, Any], left: dict[str, Any], right: dict[str, Any],
-        expected_left_version: int, expected_right_version: int,
-        expected_left_claim_revision: int, expected_right_claim_revision: int,
-    ) -> bool:
-        return (
-            int(left.get("version") or 1) == int(expected_left_version)
-            and int(right.get("version") or 1) == int(expected_right_version)
-            and int(left.get("claim_revision") or 1) == int(expected_left_claim_revision)
-            and int(right.get("claim_revision") or 1) == int(expected_right_claim_revision)
-            and conflict.get("left_version") in (None, int(expected_left_version))
-            and conflict.get("right_version") in (None, int(expected_right_version))
-            and conflict.get("left_claim_revision") in (None, int(expected_left_claim_revision))
-            and conflict.get("right_claim_revision") in (None, int(expected_right_claim_revision))
-        )
-
-    @staticmethod
-    def _insert_judgment(
-        conn: sqlite3.Connection,
-        conflict_id: int,
-        verdict: str,
-        recommended_use: str,
-        suggested_winner: Optional[int],
-        confidence_hint: Optional[str],
-        reason: str,
-        judge_type: str,
-        judge_ref: Optional[str],
-        left_version: int,
-        right_version: int,
-        left_claim_revision: int,
-        right_claim_revision: int,
-        supersedes_judgment_id: Optional[int],
-    ) -> int:
-        cur = conn.execute(
-            """
-            INSERT INTO conflict_judgments(
-              conflict_id, verdict, recommended_use, suggested_winner,
-              confidence_hint, reason, judge_type, judge_ref,
-              left_version, right_version, left_claim_revision,
-              right_claim_revision, supersedes_judgment_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(conflict_id), verdict, recommended_use, suggested_winner,
-                confidence_hint, reason, judge_type, judge_ref,
-                int(left_version), int(right_version), int(left_claim_revision),
-                int(right_claim_revision), supersedes_judgment_id, utc_now_iso(),
-            ),
-        )
-        return int(cur.lastrowid)
+    def build_conflict_judgment_request(
+        self, conflict_id: int,
+    ) -> Optional[dict[str, Any]]:
+        return self._judgment_store.build_conflict_judgment_request(conflict_id)
 
     def submit_conflict_judgment(
         self,
@@ -1680,153 +1338,21 @@ class MemoryDB:
         usage_context: str,
         judge_ref: Optional[str] = None,
     ) -> dict[str, Any]:
-        verdicts = {"contradiction", "evolution", "compatible", "uncertain"}
-        recommendations = {"left", "right", "contextual", "merge", "ask_user", "none"}
-        contexts = {"answer", "code", "config", "memory_write", "external_action", "unrelated", "unknown"}
-        if verdict not in verdicts or recommended_use not in recommendations or usage_context not in contexts:
-            return {"outcome": "invalid_input", "conflict_id": int(conflict_id)}
-        if confidence_hint not in {None, "low", "medium", "high"}:
-            return {"outcome": "invalid_input", "conflict_id": int(conflict_id), "error": "invalid confidence_hint"}
-        if not str(reason or "").strip():
-            return {"outcome": "invalid_input", "conflict_id": int(conflict_id), "error": "reason is required"}
-        if not self._db_available or not self.state.sqlite_writable:
-            return {"outcome": "unavailable", "conflict_id": int(conflict_id)}
-        try:
-            with self.write_transaction() as conn:
-                row = conn.execute(
-                    "SELECT * FROM conflicts WHERE id=? AND status='open'",
-                    (int(conflict_id),),
-                ).fetchone()
-                if not row:
-                    return {"outcome": "not_open", "conflict_id": int(conflict_id)}
-                conflict = row_to_dict(row)
-                left = self._fetch_memory(conn, int(conflict["left_id"]))
-                right = self._fetch_memory(conn, int(conflict["right_id"]))
-                if not left or not right:
-                    return {"outcome": "stale_snapshot", "conflict_id": int(conflict_id)}
-                if not self._judgment_snapshot_matches(
-                    conflict, left, right, expected_left_version, expected_right_version,
-                    expected_left_claim_revision, expected_right_claim_revision,
-                ):
-                    conn.execute(
-                        "UPDATE conflicts SET judgment_status='pending_llm', active_judgment_id=NULL WHERE id=?",
-                        (int(conflict_id),),
-                    )
-                    return {"outcome": "stale_snapshot", "conflict_id": int(conflict_id)}
-                if suggested_winner is not None and int(suggested_winner) not in {
-                    int(conflict["left_id"]), int(conflict["right_id"])
-                }:
-                    return {"outcome": "invalid_winner", "conflict_id": int(conflict_id)}
-                expected_winner = (
-                    int(conflict["left_id"]) if recommended_use == "left"
-                    else int(conflict["right_id"]) if recommended_use == "right"
-                    else None
-                )
-                if expected_winner is not None and suggested_winner != expected_winner:
-                    return {
-                        "outcome": "invalid_recommendation", "conflict_id": int(conflict_id),
-                        "error": f"recommended_use={recommended_use} requires suggested_winner={expected_winner}",
-                    }
-                if expected_winner is None and suggested_winner is not None:
-                    return {
-                        "outcome": "invalid_recommendation", "conflict_id": int(conflict_id),
-                        "error": "contextual/merge/ask_user/none must not carry a single winner",
-                    }
-
-                if conflict.get("active_judgment_id") is not None:
-                    active = conn.execute(
-                        "SELECT judge_type FROM conflict_judgments WHERE id=?",
-                        (int(conflict["active_judgment_id"]),),
-                    ).fetchone()
-                    if active and active["judge_type"] in {"human", "policy"}:
-                        return {
-                            "outcome": "higher_priority_judgment_active",
-                            "conflict_id": int(conflict_id),
-                            "judge_type": active["judge_type"],
-                        }
-
-                prior_active = conflict.get("active_judgment_id")
-                llm_id = self._insert_judgment(
-                    conn, int(conflict_id), verdict, recommended_use,
-                    int(suggested_winner) if suggested_winner is not None else None,
-                    confidence_hint, str(reason).strip(), "llm", judge_ref,
-                    expected_left_version, expected_right_version,
-                    expected_left_claim_revision, expected_right_claim_revision,
-                    int(prior_active) if prior_active is not None else None,
-                )
-                active_id = llm_id
-                effective_use = recommended_use
-                effective_winner = int(suggested_winner) if suggested_winner is not None else None
-                effective_reason = str(reason).strip()
-                protected = [self._protected_memory(left), self._protected_memory(right)]
-                protected_count = sum(1 for value in protected if value)
-                high_impact = bool(affects_current_output) and usage_context in {
-                    "code", "config", "memory_write", "external_action", "unknown"
-                }
-                pending_user = (
-                    verdict == "uncertain" or recommended_use in {"merge", "ask_user"}
-                    or confidence_hint in {None, "low"}
-                    or (verdict == "contradiction" and recommended_use == "none")
-                    or high_impact or (protected_count >= 2 and verdict != "compatible")
-                )
-                source = "llm_informed"
-                # Confirmed policy: one protected side wins low-risk use, while
-                # preserving both memories and the LLM judgment history.
-                if verdict == "contradiction" and protected_count == 1 and not high_impact:
-                    effective_winner = int(left["id"] if protected[0] else right["id"])
-                    effective_use = "left" if effective_winner == int(left["id"]) else "right"
-                    effective_reason = "Policy prefers the single locked/user_confirmed side for low-risk use."
-                    active_id = self._insert_judgment(
-                        conn, int(conflict_id), verdict, effective_use, effective_winner,
-                        confidence_hint, effective_reason, "policy", "protected-memory-policy-v1",
-                        expected_left_version, expected_right_version,
-                        expected_left_claim_revision, expected_right_claim_revision, llm_id,
-                    )
-                    source = "policy_informed"
-
-                if verdict in {"evolution", "compatible"} and not pending_user:
-                    status = "resolved"
-                    judgment_status = "llm_assessed"
-                    resolved_at = utc_now_iso()
-                else:
-                    status = "open"
-                    judgment_status = "pending_user" if pending_user else "llm_assessed"
-                    resolved_at = None
-                conn.execute(
-                    """
-                    UPDATE conflicts SET status=?, resolved_at=?, judgment_status=?,
-                      active_judgment_id=?, suggested_winner=?, winner_id=?,
-                      confidence_hint=?, reason=?, source=?, refreshed_at=?
-                    WHERE id=?
-                    """,
-                    (
-                        status, resolved_at, judgment_status, active_id,
-                        effective_winner, effective_winner, confidence_hint,
-                        effective_reason, source, utc_now_iso(), int(conflict_id),
-                    ),
-                )
-                disclosure_required = (
-                    bool(affects_current_output) and usage_context == "answer"
-                    and judgment_status == "llm_assessed"
-                )
-                return {
-                    "outcome": "judged", "conflict_id": int(conflict_id),
-                    "judgment_id": active_id, "judgment_status": judgment_status,
-                    "conflict_status": status, "recommended_use": effective_use,
-                    "suggested_winner": effective_winner,
-                    "disclosure_required": disclosure_required,
-                    "user_action_required": pending_user,
-                    "disclosure": (
-                        f"Used memory #{effective_winner} for this answer: {effective_reason}"
-                        if disclosure_required and effective_winner is not None
-                        else (
-                            f"Used {effective_use} conflict guidance for this answer: {effective_reason}"
-                            if disclosure_required else None
-                        )
-                    ),
-                }
-        except sqlite3.Error as exc:
-            return {"outcome": "error", "conflict_id": int(conflict_id), "error": str(exc)}
+        return self._judgment_store.submit_conflict_judgment(
+            conflict_id=conflict_id,
+            expected_left_version=expected_left_version,
+            expected_right_version=expected_right_version,
+            expected_left_claim_revision=expected_left_claim_revision,
+            expected_right_claim_revision=expected_right_claim_revision,
+            verdict=verdict,
+            recommended_use=recommended_use,
+            suggested_winner=suggested_winner,
+            confidence_hint=confidence_hint,
+            reason=reason,
+            affects_current_output=affects_current_output,
+            usage_context=usage_context,
+            judge_ref=judge_ref,
+        )
 
     def correct_conflict_judgment(
         self,
@@ -1842,82 +1368,24 @@ class MemoryDB:
         expected_right_claim_revision: int,
         judge_ref: Optional[str] = None,
     ) -> dict[str, Any]:
-        verdicts = {"contradiction", "evolution", "compatible", "uncertain"}
-        recommendations = {"left", "right", "contextual", "merge", "ask_user", "none"}
-        if verdict not in verdicts or recommended_use not in recommendations or not str(reason or "").strip():
-            return {"outcome": "invalid_input", "conflict_id": int(conflict_id)}
-        if not self._db_available or not self.state.sqlite_writable:
-            return {"outcome": "unavailable", "conflict_id": int(conflict_id)}
-        try:
-            with self.write_transaction() as conn:
-                row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
-                if not row:
-                    return {"outcome": "not_found", "conflict_id": int(conflict_id)}
-                conflict = row_to_dict(row)
-                if int(conflict.get("active_judgment_id") or 0) != int(expected_judgment_id):
-                    return {"outcome": "stale_judgment", "conflict_id": int(conflict_id)}
-                left = self._fetch_memory(conn, int(conflict["left_id"]))
-                right = self._fetch_memory(conn, int(conflict["right_id"]))
-                if not left or not right or not self._judgment_snapshot_matches(
-                    conflict, left, right, expected_left_version, expected_right_version,
-                    expected_left_claim_revision, expected_right_claim_revision,
-                ):
-                    return {"outcome": "stale_snapshot", "conflict_id": int(conflict_id)}
-                if suggested_winner is not None and int(suggested_winner) not in {
-                    int(conflict["left_id"]), int(conflict["right_id"])
-                }:
-                    return {"outcome": "invalid_winner", "conflict_id": int(conflict_id)}
-                expected_winner = (
-                    int(conflict["left_id"]) if recommended_use == "left"
-                    else int(conflict["right_id"]) if recommended_use == "right"
-                    else None
-                )
-                if expected_winner is not None and suggested_winner != expected_winner:
-                    return {"outcome": "invalid_recommendation", "conflict_id": int(conflict_id)}
-                if expected_winner is None and suggested_winner is not None:
-                    return {"outcome": "invalid_recommendation", "conflict_id": int(conflict_id)}
-                judgment_id = self._insert_judgment(
-                    conn, int(conflict_id), verdict, recommended_use,
-                    int(suggested_winner) if suggested_winner is not None else None,
-                    None, str(reason).strip(), "human", judge_ref or "authorized-human",
-                    expected_left_version, expected_right_version,
-                    expected_left_claim_revision, expected_right_claim_revision,
-                    int(expected_judgment_id),
-                )
-                resolved = verdict in {"evolution", "compatible"}
-                conn.execute(
-                    """
-                    UPDATE conflicts SET status=?, resolved_at=?, judgment_status='human_confirmed',
-                      active_judgment_id=?, suggested_winner=?, winner_id=?,
-                      reason=?, source='human_confirmed', refreshed_at=? WHERE id=?
-                    """,
-                    (
-                        "resolved" if resolved else "open",
-                        utc_now_iso() if resolved else None,
-                        judgment_id, suggested_winner, suggested_winner,
-                        str(reason).strip(), utc_now_iso(), int(conflict_id),
-                    ),
-                )
-                return {
-                    "outcome": "corrected", "conflict_id": int(conflict_id),
-                    "judgment_id": judgment_id, "judgment_status": "human_confirmed",
-                    "conflict_status": "resolved" if resolved else "open",
-                }
-        except sqlite3.Error as exc:
-            return {"outcome": "error", "conflict_id": int(conflict_id), "error": str(exc)}
+        return self._judgment_store.correct_conflict_judgment(
+            conflict_id=conflict_id,
+            verdict=verdict,
+            recommended_use=recommended_use,
+            suggested_winner=suggested_winner,
+            reason=reason,
+            expected_judgment_id=expected_judgment_id,
+            expected_left_version=expected_left_version,
+            expected_right_version=expected_right_version,
+            expected_left_claim_revision=expected_left_claim_revision,
+            expected_right_claim_revision=expected_right_claim_revision,
+            judge_ref=judge_ref,
+        )
 
-    def list_conflict_judgments(self, conflict_id: int) -> list[dict[str, Any]]:
-        if not self._db_available:
-            return []
-        try:
-            with self.connection() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM conflict_judgments WHERE conflict_id=? ORDER BY id",
-                    (int(conflict_id),),
-                ).fetchall()
-                return [row_to_dict(row) for row in rows]
-        except sqlite3.Error:
-            return []
+    def list_conflict_judgments(
+        self, conflict_id: int,
+    ) -> list[dict[str, Any]]:
+        return self._judgment_store.list_conflict_judgments(conflict_id)
 
     def dismissed_pairs_for(self, memory_ids: list[int]) -> set:
         """v0.8.8: canonical ``(a, b)`` pairs (a<b) that are currently dismissed
@@ -2425,141 +1893,19 @@ class MemoryDB:
         clear_fields: Optional[list] = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
-        """v0.9: low-side-effect metadata patch (entity/scope bookkeeping for the
-        structured-claim detector).
-
-        Mirrors ``update_tags_low_side_effect`` but for the ``metadata`` JSON column:
-        merges ``set_fields`` (key→value) and removes ``clear_fields`` (keys) into the
-        existing metadata dict (read-merge-write — does NOT replace the whole JSON, so
-        unrelated keys are preserved). Does NOT write ``memory_history``, does NOT bump
-        ``version``, does NOT touch content/subject/sections/split_status/embedding.
-        Metadata is not FTS-indexed, so there is no FTS resync.
-
-        Uses ``write_transaction()`` (BEGIN IMMEDIATE) so the re-read + protection
-        check + write share the write lock (TOCTOU-safe). Returns the same outcome
-        vocabulary as ``update_tags_low_side_effect``: ``updated`` / ``no_change`` /
-        ``not_found`` / ``not_active`` / ``forbidden`` / ``unavailable`` / ``error``.
-        A ``set_fields`` value of ``None`` or ``""`` is treated as a clear for that key.
-        """
-        if not self._db_available or not self.state.sqlite_writable:
-            return {"outcome": "unavailable", "memory_id": memory_id}
-        try:
-            with self.write_transaction() as conn:
-                current = self._fetch_memory(conn, memory_id)
-                if not current:
-                    return {"outcome": "not_found", "memory_id": memory_id}
-                status = current.get("status")
-                if status != "active":
-                    return {"outcome": "not_active", "memory_id": memory_id, "status": status}
-
-                # Protection check inside the transaction (TOCTOU-safe).
-                protection = current.get("protection_level")
-                source_type = current.get("source_type")
-                if (protection == "locked" or source_type == "user_confirmed") and not authorized:
-                    return {
-                        "outcome": "forbidden",
-                        "memory_id": memory_id,
-                        "protection_level": protection,
-                        "source_type": source_type,
-                    }
-
-                # Read current metadata as a dict.
-                raw_md = current.get("metadata")
-                if isinstance(raw_md, dict):
-                    md = dict(raw_md)
-                elif isinstance(raw_md, str):
-                    try:
-                        parsed = json.loads(raw_md) if raw_md else {}
-                        md = parsed if isinstance(parsed, dict) else {}
-                    except (json.JSONDecodeError, ValueError):
-                        md = {}
-                else:
-                    md = {}
-
-                new_md = dict(md)
-                for k, v in (set_fields or {}).items():
-                    if v is None or v == "":
-                        new_md.pop(k, None)
-                    else:
-                        new_md[k] = v
-                for k in (clear_fields or []):
-                    new_md.pop(k, None)
-
-                if new_md == md:
-                    return {"outcome": "no_change", "memory_id": memory_id, "metadata": md}
-
-                old_entity = _canon_entity(md.get("entity"))
-                new_entity = _canon_entity(new_md.get("entity"))
-                old_scope = _canon_scope(md.get("scope"))
-                new_scope = _canon_scope(new_md.get("scope"))
-                claim_semantics_changed = old_entity != new_entity or old_scope != new_scope
-                conn.execute(
-                    "UPDATE memories SET metadata=?, claim_revision=claim_revision+? WHERE id=?",
-                    (
-                        json.dumps(new_md, ensure_ascii=False),
-                        1 if claim_semantics_changed else 0,
-                        memory_id,
-                    ),
-                )
-                # write_transaction() commits on normal exit; rolls back on raise.
-                return {
-                    "outcome": "updated", "memory_id": memory_id, "metadata": new_md,
-                    "claim_semantics_changed": claim_semantics_changed,
-                }
-        except sqlite3.Error:
-            return {"outcome": "error", "memory_id": memory_id}
+        return self._claim_store.update_metadata_fields_low_side_effect(
+            memory_id=memory_id,
+            set_fields=set_fields,
+            clear_fields=clear_fields,
+            authorized=authorized,
+        )
 
     def list_entities(
         self,
         limit: int = 50,
         include_unassigned: bool = True,
     ) -> dict[str, Any]:
-        """v0.9: read-only aggregation of ``metadata.entity`` across active memories.
-
-        Returns distinct canonical entities with counts + one sample ``memory_id``
-        each (so an incremental backfill agent reuses canonical forms instead of
-        inventing synonyms), plus ``unassigned_count`` and the first ``limit`` active
-        memory ids lacking ``metadata.entity`` (the cursor for "run it little by
-        little"). Entity is canonicalised on read so the list is deduped regardless
-        of how each value was written.
-        """
-        if not self._db_available:
-            return {"entities": [], "distinct_entities": 0, "assigned_count": 0,
-                    "total_active": 0, "unassigned_count": 0, "unassigned_ids": []}
-        counts: dict[str, int] = {}
-        sample: dict[str, int] = {}
-        unassigned: list[int] = []
-        unassigned_count = 0
-        total = 0
-        with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memories WHERE status='active' ORDER BY id"
-            ).fetchall()
-        for row in rows:
-            rec = row_to_dict(row)
-            total += 1
-            md = rec.get("metadata")
-            md = md if isinstance(md, dict) else {}
-            ent = _canon_entity(md.get("entity"))
-            if ent:
-                counts[ent] = counts.get(ent, 0) + 1
-                sample.setdefault(ent, rec["id"])
-            else:
-                unassigned_count += 1
-                if include_unassigned:
-                    unassigned.append(rec["id"])
-        entities = [
-            {"entity": e, "count": counts[e], "sample_memory_id": sample[e]}
-            for e in sorted(counts, key=lambda k: (-counts[k], k))[:limit]
-        ]
-        return {
-            "entities": entities,
-            "distinct_entities": len(counts),
-            "assigned_count": sum(counts.values()),
-            "total_active": total,
-            "unassigned_count": unassigned_count,
-            "unassigned_ids": unassigned[:limit],
-        }
+        return self._claim_store.list_entities(limit, include_unassigned)
 
     def find_metadata_overlap_candidates(
         self,
