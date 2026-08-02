@@ -24,6 +24,7 @@
   },
   "recall_pool_cap": 50,
   "content_like_cap": 30,
+  "structured_claim_mode": "beta_all",
   "split": {
     "_readme": [
       "Section split — advanced retrieval for long structured documents (> threshold chars).",

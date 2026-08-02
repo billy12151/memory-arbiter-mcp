@@ -5,7 +5,7 @@ Three-layer architecture (design doc §5):
      depends only on a read-only sqlite connection + Settings (+ optional
      runtime state / embedder probe). Never on ``MemoryDB``.
   2. ``run_all_checks(conn, settings, deep, runtime_state, embedder_probe)``
-     — orchestration: runs all 19 checks on one ro connection (consistent
+     — orchestration: runs all 25 findings on one ro connection (consistent
      snapshot), with per-check try/except isolation (§9 constraint 4).
   3. Platform entries ``doctor_overview_mcp`` (used by tools.py) and the CLI
      entry (doctor_cli.py) — each owns connection acquisition + the global
@@ -218,6 +218,123 @@ def _check_attention_volume(settings: Settings) -> Finding:
                 "判断刷屏看 search 占比 + by_source_trigger 的来源分布。"),
         evidence={"total": total, "window_days": window, "by_source": by_src,
                   "by_trigger": by_trig, "by_source_trigger": rep["by_source_trigger"]},
+    )
+
+
+def _check_structured_claims(conn: sqlite3.Connection) -> Finding:
+    """v0.9 claim-index consistency + pending judgment observability."""
+    if not _table_exists(conn, "memory_claims") or not _table_exists(conn, "conflict_judgments"):
+        return _na("consistency.structured_claims", "consistency", "v0.9 claim tables do not exist")
+    stale = int(_scalar(
+        conn,
+        "SELECT COUNT(*) FROM memories WHERE status='active' "
+        "AND (claims_indexed_revision IS NULL OR claims_indexed_revision<>claim_revision)",
+    ) or 0)
+    total_claims = int(_scalar(conn, "SELECT COUNT(*) FROM memory_claims") or 0)
+    indexed_memories = int(_scalar(
+        conn,
+        "SELECT COUNT(*) FROM memories WHERE status='active' AND claims_indexed_revision=claim_revision",
+    ) or 0)
+    ambiguous = int(_scalar(
+        conn, "SELECT COALESCE(SUM(claim_ambiguous_count),0) FROM memories WHERE status='active'"
+    ) or 0)
+    missing_entity = int(_scalar(
+        conn,
+        "SELECT COUNT(*) FROM memories WHERE status='active' "
+        "AND COALESCE(TRIM(CASE WHEN json_valid(metadata) "
+        "THEN json_extract(metadata,'$.entity') ELSE NULL END),'')=''",
+    ) or 0)
+    pending_rows = conn.execute(
+        "SELECT judgment_status, COUNT(*) AS c, MIN(created_at) AS oldest "
+        "FROM conflicts WHERE status='open' AND left_claim_revision IS NOT NULL "
+        "GROUP BY judgment_status"
+    ).fetchall()
+    pending = {
+        str(row["judgment_status"] or "pending_llm"): {
+            "count": int(row["c"]), "oldest": row["oldest"],
+        }
+        for row in pending_rows
+    }
+    by_rule = {
+        str(row["extractor_rule"] or "unknown"): int(row["c"])
+        for row in conn.execute(
+            "SELECT extractor_rule, COUNT(*) AS c FROM memory_claims GROUP BY extractor_rule"
+        ).fetchall()
+    }
+    by_attribute = {
+        str(row["attribute"]): int(row["c"])
+        for row in conn.execute(
+            "SELECT attribute, COUNT(*) AS c FROM memory_claims "
+            "GROUP BY attribute ORDER BY c DESC, attribute LIMIT 20"
+        ).fetchall()
+    }
+    outcome_rows = conn.execute(
+        "SELECT c.status, COALESCE(c.judgment_status,'pending_llm') AS judgment_status, "
+        "COALESCE(j.verdict,'unjudged') AS verdict, COUNT(*) AS c "
+        "FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
+        "WHERE c.left_claim_revision IS NOT NULL "
+        "GROUP BY c.status, COALESCE(c.judgment_status,'pending_llm'), "
+        "COALESCE(j.verdict,'unjudged')"
+    ).fetchall()
+    outcomes = [
+        {
+            "status": row["status"], "judgment_status": row["judgment_status"],
+            "verdict": row["verdict"], "count": int(row["c"]),
+        }
+        for row in outcome_rows
+    ]
+    rule_outcomes: dict[str, dict[str, int]] = {}
+    attribute_outcomes: dict[str, dict[str, int]] = {}
+    telemetry_rows = conn.execute(
+        "SELECT c.status, COALESCE(c.judgment_status,'pending_llm') AS judgment_status, "
+        "j.verdict AS verdict, c.structured_details "
+        "FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
+        "WHERE c.left_claim_revision IS NOT NULL AND c.structured_details IS NOT NULL"
+    ).fetchall()
+    for row in telemetry_rows:
+        outcome = (
+            "dismiss" if row["status"] == "not_a_conflict"
+            else str(row["verdict"] or row["judgment_status"] or row["status"])
+        )
+        try:
+            details = json.loads(row["structured_details"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for detail in details if isinstance(details, list) else []:
+            if not isinstance(detail, dict):
+                continue
+            rule = str(detail.get("extractor_rule") or "unknown")
+            attribute = str(detail.get("attribute") or "unknown")
+            rule_outcomes.setdefault(rule, {})[outcome] = (
+                rule_outcomes.setdefault(rule, {}).get(outcome, 0) + 1
+            )
+            attribute_outcomes.setdefault(attribute, {})[outcome] = (
+                attribute_outcomes.setdefault(attribute, {}).get(outcome, 0) + 1
+            )
+    severity = Severity.WARNING if stale else Severity.INFO
+    status = "warn" if stale else "pass"
+    return Finding(
+        check_id="consistency.structured_claims", dimension="consistency",
+        severity=severity, status=status,
+        title=(
+            f"structured claims: {total_claims} claims / {indexed_memories} indexed memories"
+            + (f"，{stale} stale" if stale else "，index current")
+        ),
+        detail=(
+            "stale means claim_revision differs from claims_indexed_revision; old rows are ignored "
+            "until memory_rebuild_claims repairs them. Pending judgment counts remain visible here."
+        ),
+        evidence={
+            "claims": total_claims, "indexed_memories": indexed_memories,
+            "stale_memories": stale, "ambiguous_keys": ambiguous,
+            "metadata_entity_missing": missing_entity, "pending": pending,
+            "by_extractor_rule": by_rule, "by_attribute_top20": by_attribute,
+            "structured_outcomes": outcomes,
+            "outcomes_by_rule": rule_outcomes,
+            "outcomes_by_attribute": attribute_outcomes,
+        },
+        fix_hint=("Run memory_rebuild_claims(dry_run=true), then execute bounded batches."
+                  if stale else ""),
     )
 
 
@@ -1099,7 +1216,7 @@ def run_all_checks(
     runtime_state: Optional[DegradeState] = None,
     embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None,
 ) -> OverviewReport:
-    """Run all 18 checks on one ro connection (consistent snapshot).
+    """Run all 25 findings on one ro connection (consistent snapshot).
 
     Per-check try/except isolation (§9 constraint 4): a single check raising
     does not abort the others — it degrades to one ``status="error"`` finding.
@@ -1168,6 +1285,7 @@ def run_all_checks(
     _run("consistency.section_vec_coverage", lambda: _check_section_vec_coverage(conn), "consistency")
     _run("consistency.history_version_chain",
          lambda: _check_history_version_chain(conn), "consistency")
+    _run("consistency.structured_claims", lambda: _check_structured_claims(conn), "consistency")
 
     # --- capacity (5) ---
     _run("capacity.conflicts_open",
@@ -1236,13 +1354,13 @@ def build_unopenable_report(settings: Settings, exc: Exception) -> OverviewRepor
     if not file_exists:
         title = "找不到数据库文件，doctor 降级为最小报告"
         detail = (f"解析到的 db_path 不存在：{db_path}（{type(exc).__name__}: {exc}）。"
-                  "18 项 check 均未执行。最常见原因：未配置 ~/.config/memory-arbiter/config.json，"
+                  "25 项 check 均未执行。最常见原因：未配置 ~/.config/memory-arbiter/config.json，"
                   "doctor 默认找当前目录下的 memory_arbiter.sqlite3，而你的库在别处。")
         fix_hint = ("用 --db 指定库路径，或确认 ~/.config/memory-arbiter/config.json 的 db_path "
                     "指向你的库（常见位置：~/.local/share/memory-arbiter/memory.sqlite3）。")
     else:
         title = "数据库无法打开，doctor 降级为最小报告"
-        detail = (f"连接失败：{exc}。18 项 check 均未执行。"
+        detail = (f"连接失败：{exc}。25 项 check 均未执行。"
                   "多数 jsonl_backup 是只读文件系统（文件可读仅不可写），mode=ro 能正常打开 → "
                   "若本应能打开却失败，通常是文件损坏/丢失/locked。")
         fix_hint = "检查 DB 文件权限、是否被独占锁定；可从 backup_jsonl 恢复。"

@@ -165,6 +165,11 @@ def test_registry_keeps_memory_split_removes_status_and_get_sections() -> None:
     assert "memory_write" in names
     assert "memory_search" in names
     assert "memory_get" in names
+    assert {
+        "memory_submit_conflict_judgment", "memory_correct_conflict_judgment",
+        "memory_list_conflict_judgments", "memory_set_entity",
+        "memory_list_entities", "memory_rebuild_claims",
+    } <= names
     assert "memory_split_status" not in names, "memory_split_status must be removed (merged into get/doctor)"
     assert "get_sections" not in names, "get_sections must be removed (merged into search/get)"
 

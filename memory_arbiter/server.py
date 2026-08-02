@@ -45,7 +45,7 @@ Avoid re-tagging words already in subject (redundant, no retrieval gain).
 
 v0.5.0: with GGUF embedding + sqlite-vec configured, the vector is stored automatically on write; the response only echoes embedding_stored when vectorization was actually attempted.
 
-Response duplicate/evolution check (v0.8.7): after writing, ALWAYS inspect the response's `attention_required` flag and `write_hints` field. When `attention_required` is true, a prior active memory looks like a near-duplicate or an evolution of what you just wrote — you MUST surface this to the user before treating the write as complete, e.g. "⚠️ 这条可能和已有记忆 #N (<subject>) 重复、或更新了它,是否要 supersede 旧的?" Do not silently ignore `attention_required`. Scope: this is advisory metadata-overlap only (tags ≥0.8 Jaccard + subject ≥0.7 overlap) — it catches duplicates/evolution, NOT semantic contradictions (those come from the conflict scan). v0.8.8: write records the duplicate as a dismissable conflict row; pairs the user dismissed via `resolve_conflict(status='not_a_conflict')` do NOT re-trigger attention (Layer 0)."""
+v0.9 conflict gate: ALWAYS inspect `action_required`, `verification_status`, and `conflict_judgment_requests`. `action_required=judge_conflict_before_use` means deterministic claims collided: before using either value, read both evidence sides and call `memory_submit_conflict_judgment` with the exact snapshot pins. If that returns `user_action_required=true`, ask the user. A submitted LLM judgment records reusable guidance but never edits or supersedes memory. Also inspect advisory `write_hints` for possible duplicate/evolution records; those are separately dismissable. Never silently ignore a top-level `attention_required`."""
         return tools.memory_write(
             content=content,
             agent_id=agent_id,
@@ -80,6 +80,8 @@ include_conflict_signal: default true. When a hit involves open conflicts, attac
 Conflict surfacing (v0.8.8): a direct hit may carry a per-result `conflict_signal` (sources: `open_table` = scan/record-verified; `runtime_metadata_hint` = advisory, unverified). Handle by source:
 - `open_table` (verified): sets a top-level `attention_required` flag + `attention_summary`. Surface it to the user — e.g. "⚠️ 命中的 #N 与 #M 存在已记录冲突,引用前请核实"; they can dismiss it with `memory_resolve_conflict(status='not_a_conflict')` — once dismissed, the pair carries no conflict_signal (Layer 0), so it stops surfacing until one side is edited.
 - `runtime_metadata_hint` (advisory): does NOT set the top-level flag (it re-fires on every retrieval of an overlapping pair, so a must-surface flag would nag). It stays a per-result signal — JUDGE it by content before saying anything: compare the hit's content against `conflict_signal.conflict_peer`'s snippet (or `memory_get` the peer if the snippet is too thin). Only mention it to the user if the two genuinely contradict; if they are merely topically related, silently proceed. This keeps advisory's recall (catching pairs the verified paths missed) without nagging on false positives.
+
+v0.9 structured routing: `structured_claim_candidate` + `pending_llm` is a hard host-LLM gate; run the included judgment request before using the value. `open_table` + `pending_user` requires the user. `conflict_guidance` means a current LLM/policy/human judgment already exists: follow its recommended use without re-prompting, and include its disclosure when `disclosure_required=true`. Any source version/claim-revision change invalidates that guidance and reopens the gate.
 
 Note: tags_filter is AND semantics — every listed tag must be present. Suited to: finding the N most relevant entries, exhaustive queries with filters, and structured listing via empty query + filters.
 
@@ -175,6 +177,101 @@ content_hash). Global vec state lives in memory_status / doctor."""
         return tools.memory_resolve_conflict(conflict_id=conflict_id, reason=reason, status=status)
 
     @app.tool()
+    def memory_submit_conflict_judgment(
+        conflict_id: int,
+        expected_left_version: int,
+        expected_right_version: int,
+        expected_left_claim_revision: int,
+        expected_right_claim_revision: int,
+        verdict: str,
+        recommended_use: str,
+        suggested_winner: Optional[int],
+        confidence_hint: Optional[str],
+        reason: str,
+        affects_current_output: bool,
+        usage_context: str,
+        judge_ref: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Required v0.9 host-LLM receipt for a structured_claim_candidate. Submit only after reading both evidence sides. verdict: contradiction|evolution|compatible|uncertain; recommended_use: left|right|contextual|merge|ask_user|none; usage_context: answer|code|config|memory_write|external_action|unrelated|unknown. Snapshot versions and claim revisions are mandatory CAS pins: stale judgments are rejected. The result may require user action under protected/high-impact policy. This never edits or supersedes a memory."""
+        return tools.memory_submit_conflict_judgment(
+            conflict_id=conflict_id,
+            expected_left_version=expected_left_version,
+            expected_right_version=expected_right_version,
+            expected_left_claim_revision=expected_left_claim_revision,
+            expected_right_claim_revision=expected_right_claim_revision,
+            verdict=verdict,
+            recommended_use=recommended_use,
+            suggested_winner=suggested_winner,
+            confidence_hint=confidence_hint,
+            reason=reason,
+            affects_current_output=affects_current_output,
+            usage_context=usage_context,
+            judge_ref=judge_ref,
+        )
+
+    @app.tool()
+    def memory_correct_conflict_judgment(
+        conflict_id: int,
+        verdict: str,
+        recommended_use: str,
+        suggested_winner: Optional[int],
+        reason: str,
+        expected_judgment_id: int,
+        expected_left_version: int,
+        expected_right_version: int,
+        expected_left_claim_revision: int,
+        expected_right_claim_revision: int,
+        authorized: bool = False,
+        judge_ref: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Append an authorized human correction to a v0.9 conflict judgment. The old LLM/policy judgment remains in append-only history; the new human judgment becomes active. Requires authorized=true and exact active-judgment plus memory/claim snapshot CAS. Never edits either memory."""
+        return tools.memory_correct_conflict_judgment(
+            conflict_id=conflict_id, verdict=verdict,
+            recommended_use=recommended_use, suggested_winner=suggested_winner,
+            reason=reason, expected_judgment_id=expected_judgment_id,
+            expected_left_version=expected_left_version,
+            expected_right_version=expected_right_version,
+            expected_left_claim_revision=expected_left_claim_revision,
+            expected_right_claim_revision=expected_right_claim_revision,
+            authorized=authorized, judge_ref=judge_ref,
+        )
+
+    @app.tool()
+    def memory_list_conflict_judgments(conflict_id: int) -> dict[str, Any]:
+        """List append-only LLM/policy/human judgments for one conflict, oldest first. Read-only."""
+        return tools.memory_list_conflict_judgments(conflict_id=conflict_id)
+
+    @app.tool()
+    def memory_set_entity(
+        memory_id: int,
+        entity: Optional[str] = None,
+        scope: Optional[str] = None,
+        clear: bool = False,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """Set a memory's canonical metadata.entity and optional metadata.scope for v0.9 structured claims. Values are lexically normalized. This does not create content history or bump memory.version, but a semantic entity/scope change increments claim_revision and immediately rebuilds claims. locked/user_confirmed memories require authorized=true."""
+        return tools.memory_set_entity(
+            memory_id=memory_id, entity=entity, scope=scope,
+            clear=clear, authorized=authorized,
+        )
+
+    @app.tool()
+    def memory_list_entities(limit: int = 50, include_unassigned: bool = True) -> dict[str, Any]:
+        """List canonical metadata.entity values across active memories with counts, samples, and a bounded list of unassigned memory ids for incremental backfill. Read-only."""
+        return tools.memory_list_entities(limit=limit, include_unassigned=include_unassigned)
+
+    @app.tool()
+    def memory_rebuild_claims(
+        memory_ids: Optional[list[int]] = None,
+        dry_run: bool = True,
+        batch_size: int = 50,
+    ) -> dict[str, Any]:
+        """Idempotently rebuild v0.9 deterministic claims and reconcile structured conflicts. dry_run=true returns the bounded plan; execution is disabled while structured_claim_mode=off."""
+        return tools.memory_rebuild_claims(
+            memory_ids=memory_ids, dry_run=dry_run, batch_size=batch_size,
+        )
+
+    @app.tool()
     def memory_confirm(memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False) -> dict[str, Any]:
         """Mark a memory as user-confirmed, promoting it to source_type=user_confirmed + protection_level=locked so it cannot be overwritten automatically. Requires authorized=true — promotion to the highest trust/protection tier must be an explicit, human-confirmed action."""
         return tools.memory_confirm(memory_id=memory_id, source_ref=source_ref, confidence=confidence, authorized=authorized)
@@ -223,7 +320,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
         add_tags: Optional[list[str]] = None,
         remove_tags: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        """Edit a memory's content or tags in place. Three modes: new_content for full replacement, old_text+new_text for precise local replacement, or tags_only=true with add_tags/remove_tags to update tags only. tags-only mode writes no memory_history, increments no version, recomputes no embedding, and triggers no re-segmentation (FTS still syncs tags); locked/user_confirmed memories require authorized=true. As of v0.7.6, complete a todo with tags_only=true + remove_tags=["todo"]."""
+        """Edit a memory's content or tags in place. Three modes: new_content for full replacement, old_text+new_text for precise local replacement, or tags_only=true with add_tags/remove_tags to update tags only. tags-only mode writes no memory_history, increments no version, recomputes no embedding, and triggers no re-segmentation (FTS still syncs tags); locked/user_confirmed memories require authorized=true. As of v0.7.6, complete a todo with tags_only=true + remove_tags=["todo"]. v0.9: content edits rebuild structured claims. If the response says action_required=judge_conflict_before_use, complete the returned memory_submit_conflict_judgment request before using either claim; do not silently ignore attention_required."""
         return tools.memory_edit(
             memory_id=memory_id,
             new_content=new_content,

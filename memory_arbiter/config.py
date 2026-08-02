@@ -58,6 +58,8 @@ class Settings:
     section_fulltext_threshold: float = 0.8
     max_sections: int = 50
     max_section_chars: int = 3600
+    # v0.9 structured claims: emergency kill switch; beta_all is the trusted-user default.
+    structured_claim_mode: str = "beta_all"
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -145,6 +147,15 @@ class Settings:
         if embedding_provider and embedding_provider != "gguf":
             config_warnings.append(f"embedding.provider={embedding_provider!r} unsupported; auto-embedding disabled.")
 
+        structured_claim_mode = pick_str(
+            "structured_claim_mode", "MEMORY_ARBITER_STRUCTURED_CLAIM_MODE", "beta_all"
+        ).strip().lower()
+        if structured_claim_mode not in {"off", "beta_all"}:
+            config_warnings.append(
+                f"structured_claim_mode={structured_claim_mode!r} invalid; using beta_all"
+            )
+            structured_claim_mode = "beta_all"
+
         settings = cls(
             db_path=pick_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),
             backup_jsonl=pick_path("backup_jsonl", "MEMORY_ARBITER_BACKUP_JSONL", cwd / "memory_arbiter.backup.jsonl"),
@@ -194,6 +205,7 @@ class Settings:
                 pick_int_field(split_cfg.get("max_section_chars"), "MEMORY_ARBITER_MAX_SECTION_CHARS", 3600, name="split.max_section_chars"),
                 100, 1_000_000, name="split.max_section_chars", warnings=config_warnings,
             ),
+            structured_claim_mode=structured_claim_mode,
         )
         settings.config_warnings = config_warnings
         settings.policy = load_policy(settings.policy_path, config_warnings)

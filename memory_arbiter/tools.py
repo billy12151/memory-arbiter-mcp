@@ -6,8 +6,9 @@ import re
 from typing import Any, Optional, Tuple
 
 from .arbitration import compare_memories
+from .claims import extract_claims
 from .config import Settings
-from .db import MemoryDB
+from .db import MemoryDB, _canon_entity, _canon_scope
 from .embedder import ManagedEmbedder
 from .models import MemoryRecord, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
@@ -124,14 +125,19 @@ class MemoryTools:
                 if split_request is not None:
                     data["split_request"] = split_request
                 embedding_warnings.extend(split_warnings)
-            return self.db.state.response(self._enrich_write_response(data, memory_id, record), extra_warnings=warnings + write_warnings + embedding_warnings)
+            data = self._enrich_write_response(data, memory_id, record)
+            claim_warnings = list(data.pop("_claim_warnings", []))
+            return self.db.state.response(
+                data,
+                extra_warnings=warnings + write_warnings + embedding_warnings + claim_warnings,
+            )
         except Exception as exc:
             return self.db.state.response({"error": str(exc)}, ok=False, extra_warnings=warnings)
 
     def _enrich_write_response(
         self, data: dict[str, Any], memory_id: Optional[int], record: MemoryRecord,
     ) -> dict[str, Any]:
-        """v0.7.6/v0.8.8: post-write enrichment — write_hints + advisory 落表 + Layer 0.
+        """Post-write enrichment: v0.9 structured claims first, then metadata hints.
 
         Never raises; failures are silently swallowed (advisory is best-effort —
         the insert already committed before this runs, so it can never lose the
@@ -143,6 +149,27 @@ class MemoryTools:
         if memory_id is None:
             return data
         try:
+            structured = self._index_and_reconcile_claims(memory_id)
+            data["realtime_conflict_check"] = structured["diagnostic"]
+            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            data["record"] = self.db.get_memory(memory_id) or data.get("record")
+            if structured.get("warnings"):
+                data["_claim_warnings"] = list(structured["warnings"])
+            conflicts = structured.get("conflicts") or []
+            structured_pair_ids = set(structured.get("peer_ids") or [])
+            self._apply_structured_gate(data, structured)
+            if conflicts:
+                first = conflicts[0]
+                data["attention_summary"] = (
+                    f"Structured claim conflict with memory #{first['peer_id']}"
+                    + (f" and {len(conflicts) - 1} more" if len(conflicts) > 1 else "")
+                )
+            elif structured.get("pending_user_conflicts"):
+                pending = structured["pending_user_conflicts"]
+                data["attention_summary"] = (
+                    f"Structured conflict with memory #{pending[0]['peer_id']} requires user confirmation"
+                    + (f" and {len(pending) - 1} more" if len(pending) > 1 else "")
+                )
             hints = self._write_duplicate_hints(memory_id, record)
             if not hints:
                 return data
@@ -152,6 +179,8 @@ class MemoryTools:
             rang = False
             for t in targets:
                 cand_id = int(t["id"])
+                if cand_id in structured_pair_ids:
+                    continue
                 # Layer 0: pair already dismissed → skip. Fail-open: if the check
                 # itself errors, treat as NOT dismissed (ring) — a diagnostic
                 # failure must never silently suppress the duplicate prompt.
@@ -174,7 +203,7 @@ class MemoryTools:
                     right_version=self.db.get_memory_version(cand_id) or 1,
                 )
                 # Ring + log once, for the first non-dismissed target.
-                if not rang:
+                if not rang and not conflicts:
                     rang = True
                     summary = f"Possible duplicate/evolution of memory #{cand_id}"
                     if t.get("subject"):
@@ -188,9 +217,221 @@ class MemoryTools:
                         source=str(t.get("hint_type", "possible_duplicate")),
                         memory_ids=[memory_id, cand_id],
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            data["claim_indexed"] = False
+            data.setdefault("_claim_warnings", []).append(
+                f"structured claim enrichment failed: {type(exc).__name__}: {exc}"
+            )
         return data
+
+    @staticmethod
+    def _structured_conflict_point(claims: list[dict[str, Any]]) -> str:
+        parts = [
+            f"{c['entity']}.{c['attribute']}: {c['left_value']} vs {c['right_value']}"
+            for c in claims[:5]
+        ]
+        if len(claims) > 5:
+            parts.append(f"and {len(claims) - 5} more")
+        return "; ".join(parts)
+
+    @staticmethod
+    def _apply_structured_gate(data: dict[str, Any], structured: dict[str, Any]) -> None:
+        """Promote the current structured state to one unambiguous top-level gate."""
+        pending_llm = structured.get("conflicts") or []
+        pending_user = structured.get("pending_user_conflicts") or []
+        if pending_llm:
+            data.update({
+                "attention_required": True,
+                "action_required": "judge_conflict_before_use",
+                "verification_status": "pending_llm",
+                "conflict_source": "structured_claim_candidate",
+                "conflict_judgment_requests": [
+                    item["judgment_request"] for item in pending_llm
+                ],
+            })
+        elif pending_user:
+            data.update({
+                "attention_required": True,
+                "action_required": "ask_user",
+                "verification_status": "pending_user",
+                "conflict_source": "open_table",
+                "pending_user_conflicts": pending_user,
+            })
+
+    def _index_and_reconcile_claims(self, memory_id: int) -> dict[str, Any]:
+        """Extract, atomically publish, and reconcile structured conflicts."""
+        if self.settings.structured_claim_mode == "off":
+            return {
+                "diagnostic": {"claim_indexed": False, "skipped_reason": "structured_claim_mode_off"},
+                "conflicts": [], "peer_ids": [], "warnings": [],
+            }
+        diagnostics: dict[str, Any] = {}
+        publish: dict[str, Any] = {}
+        # Extraction is intentionally outside the write transaction.  Pin the
+        # publish to claim_revision and retry once so a concurrent edit cannot
+        # publish old text under the new revision.
+        for _attempt in range(2):
+            record = self.db.get_memory(int(memory_id))
+            if not record:
+                return {
+                    "diagnostic": {"claim_indexed": False, "skipped_reason": "memory_not_found"},
+                    "conflicts": [], "peer_ids": [],
+                    "warnings": ["claim indexing skipped: memory not found"],
+                }
+            expected_revision = int(record.get("claim_revision") or 1)
+            if record.get("status") != "active":
+                publish = self.db.publish_memory_claims(
+                    int(memory_id), [], 0, expected_claim_revision=expected_revision,
+                )
+                if publish.get("outcome") == "stale_snapshot":
+                    continue
+                return {
+                    "diagnostic": {
+                        "claim_indexed": publish.get("outcome") == "skipped_inactive",
+                        "skipped_reason": "inactive",
+                    },
+                    "conflicts": [], "peer_ids": [], "warnings": [],
+                }
+            diagnostics = {}
+            try:
+                claims = extract_claims(record, diagnostics)
+                publish = self.db.publish_memory_claims(
+                    int(memory_id), claims,
+                    int(diagnostics.get("ambiguous_key_count") or 0),
+                    expected_claim_revision=expected_revision,
+                )
+            except Exception as exc:
+                self.db.mark_claim_index_failed(
+                    int(memory_id), expected_claim_revision=expected_revision,
+                )
+                return {
+                    "diagnostic": {"claim_indexed": False, "error": str(exc)},
+                    "conflicts": [], "peer_ids": [],
+                    "warnings": [f"claim extraction failed: {type(exc).__name__}: {exc}"],
+                }
+            if publish.get("outcome") == "stale_snapshot":
+                continue
+            break
+        else:
+            return {
+                "diagnostic": {
+                    **diagnostics, "claim_indexed": False,
+                    "skipped_reason": "concurrent_revision_change", "publish": publish,
+                },
+                "conflicts": [], "peer_ids": [],
+                "warnings": ["claim indexing deferred: memory changed during both publish attempts"],
+            }
+        if publish.get("outcome") != "indexed":
+            self.db.mark_claim_index_failed(
+                int(memory_id), expected_claim_revision=expected_revision,
+            )
+            return {
+                "diagnostic": {**diagnostics, "claim_indexed": False, "publish": publish},
+                "conflicts": [], "peer_ids": [],
+                "warnings": [f"claim index publish failed: {publish.get('error') or publish.get('outcome')}"],
+            }
+
+        detection = self.db.find_structured_claim_pairs(int(memory_id))
+        if detection.get("stale_index") or detection.get("error"):
+            return {
+                "diagnostic": {
+                    **diagnostics, "claim_indexed": False,
+                    "skipped_reason": (
+                        "concurrent_revision_change" if detection.get("stale_index")
+                        else "collision_query_failed"
+                    ),
+                    "claim_revision": publish.get("claim_revision"),
+                    "claim_count": publish.get("claim_count", 0),
+                    "mode": self.settings.structured_claim_mode,
+                },
+                "conflicts": [], "peer_ids": [],
+                "warnings": ["claim collision reconciliation deferred; rebuild will retry"],
+            }
+        current_pairs = {
+            (int(pair["left_id"]), int(pair["right_id"])): pair
+            for pair in detection.get("pairs", [])
+        }
+        # Resolve old structured-origin rows that no longer have any current
+        # contradiction keys.  Rows with current keys are refreshed below.
+        for existing in self.db.list_structured_open_conflicts_for_memory(int(memory_id)):
+            key = (int(existing["left_id"]), int(existing["right_id"]))
+            if key not in current_pairs:
+                self.db.resolve_conflict(
+                    int(existing["id"]), reason="claims aligned after reindex", status="resolved",
+                )
+
+        conflicts: list[dict[str, Any]] = []
+        pending_user_conflicts: list[dict[str, Any]] = []
+        peer_ids: list[int] = []
+        for key, pair in current_pairs.items():
+            peer_id = pair["right_id"] if pair["left_id"] == int(memory_id) else pair["left_id"]
+            peer_ids.append(int(peer_id))
+            if self.db.is_pair_dismissed(pair["left_id"], pair["right_id"]):
+                continue
+            if self.db.is_structured_pair_closed_for_snapshot(
+                pair["left_id"], pair["right_id"],
+                pair["left_version"], pair["right_version"],
+                pair["left_claim_revision"], pair["right_claim_revision"],
+            ):
+                continue
+            point = self._structured_conflict_point(pair["claims"])
+            result = self.db.record_conflict_enriched(
+                pair["left_id"], pair["right_id"],
+                conflict_type="contradiction", conflict_point=point,
+                reason="deterministic structured claims share entity/attribute but differ in value",
+                confidence_hint="high", source="structured_claim", status="open",
+                refresh=True,
+                left_version=pair["left_version"], right_version=pair["right_version"],
+                left_claim_revision=pair["left_claim_revision"],
+                right_claim_revision=pair["right_claim_revision"],
+                judgment_status="pending_llm",
+                structured_details=[{
+                    "entity": claim["entity"], "attribute": claim["attribute"],
+                    "scope": claim.get("scope") or "",
+                    "left_value": claim["left_value"], "right_value": claim["right_value"],
+                    "extractor_rule": claim.get("extractor_rule"),
+                } for claim in pair["claims"]],
+            )
+            conflict_id = result.get("conflict_id")
+            if conflict_id is None:
+                continue
+            request = self.db.build_conflict_judgment_request(int(conflict_id))
+            # Existing assessed/human guidance on the exact same snapshot is
+            # not reset by a no-op rebuild and therefore needs no new gate.
+            current_row = next(
+                (row for row in self.db.list_structured_open_conflicts_for_memory(int(memory_id))
+                 if int(row["id"]) == int(conflict_id)),
+                None,
+            )
+            current_status = current_row.get("judgment_status") if current_row else None
+            if request is not None and current_status in {None, "pending_llm"}:
+                conflicts.append({"conflict_id": int(conflict_id), "peer_id": int(peer_id), "judgment_request": request})
+                self.db.log_attention(
+                    trigger="structured_claim", source="candidate_surfaced",
+                    memory_ids=[int(memory_id), int(peer_id)],
+                )
+            elif current_status == "pending_user":
+                pending_user_conflicts.append({
+                    "conflict_id": int(conflict_id), "peer_id": int(peer_id),
+                    "suggested_winner": current_row.get("suggested_winner"),
+                    "reason": current_row.get("reason"),
+                })
+        diagnostic = {
+            **diagnostics,
+            "claim_indexed": True,
+            "claim_revision": publish.get("claim_revision"),
+            "claim_count": publish.get("claim_count", 0),
+            "candidate_count": len(current_pairs),
+            "pending_llm_count": len(conflicts),
+            "pending_user_count": len(pending_user_conflicts),
+            "evolution_pair_count": int(detection.get("evolution_pairs") or 0),
+            "mode": self.settings.structured_claim_mode,
+        }
+        return {
+            "diagnostic": diagnostic, "conflicts": conflicts,
+            "pending_user_conflicts": pending_user_conflicts,
+            "peer_ids": peer_ids, "warnings": [],
+        }
 
     def _write_duplicate_hints(
         self, memory_id: int, record: MemoryRecord,
@@ -329,22 +570,25 @@ class MemoryTools:
             # must-surface flag would nag. It stays a per-result signal for the
             # calling agent to judge by content (see memory_search docstring):
             # surface only if the two genuinely contradict, else silently proceed.
-            ot = seen_sources.get("open_table")
+            ot = seen_sources.get("structured_claim_candidate") or seen_sources.get("open_table")
             if ot is not None:
                 attention_required = True
                 ot_sig = ot.get("conflict_signal") or {}
                 head = f"Search hit #{ot.get('id')}"
                 if ot.get("subject"):
                     head += f" ({ot['subject']})"
-                head += " carries an open_table signal"
+                source_label = ot_sig.get("conflict_source") or "open_table"
+                head += f" carries a {source_label} signal"
                 peer = ot_sig.get("conflict_peer") or {}
                 if isinstance(peer, dict) and peer.get("id") is not None:
                     peer_txt = f"#{peer['id']}"
                     if peer.get("subject"):
                         peer_txt += f" ({peer['subject']})"
                     head += f" vs {peer_txt}"
-                n = sum(1 for x in results
-                        if (x.get("conflict_signal") or {}).get("conflict_source") == "open_table")
+                n = sum(1 for x in results if (
+                    (x.get("conflict_signal") or {}).get("conflict_source") in
+                    {"open_table", "structured_claim_candidate"}
+                ))
                 if n > 1:
                     head += f" and {n - 1} more"
                 attention_summary = head
@@ -367,6 +611,20 @@ class MemoryTools:
         if attention_required:
             response_data["attention_required"] = True
             response_data["attention_summary"] = attention_summary
+            strong_signal = next(
+                (
+                    r.get("conflict_signal") for r in results
+                    if (r.get("conflict_signal") or {}).get("conflict_source")
+                    in {"structured_claim_candidate", "open_table"}
+                ),
+                None,
+            )
+            if strong_signal and strong_signal.get("conflict_source") == "structured_claim_candidate":
+                response_data["action_required"] = "judge_conflict_before_use"
+                response_data["verification_status"] = "pending_llm"
+            elif strong_signal and strong_signal.get("action_required"):
+                response_data["action_required"] = strong_signal.get("action_required")
+                response_data["verification_status"] = strong_signal.get("verification_status")
         return self.db.state.response(
             response_data,
             extra_warnings=extra_warnings + warnings,
@@ -625,7 +883,15 @@ class MemoryTools:
             },
         )
         updated = self.db.get_memory(int(memory_id)) if ok else memory
-        return self.db.state.response({"confirmed": ok, "record": updated})
+        data: dict[str, Any] = {"confirmed": ok, "record": updated}
+        warnings: list[str] = []
+        if ok:
+            structured = self._index_and_reconcile_claims(int(memory_id))
+            data["realtime_conflict_check"] = structured["diagnostic"]
+            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            warnings.extend(structured.get("warnings") or [])
+            self._apply_structured_gate(data, structured)
+        return self.db.state.response(data, extra_warnings=warnings)
 
     def memory_supersede(
         self,
@@ -724,6 +990,7 @@ class MemoryTools:
                 "embedding_configured": self._embedding_configured(),
                 "embedding_auto_query": self.settings.embedding_auto_query,
                 "embedding_auto_write": self.settings.embedding_auto_write,
+                "structured_claim_mode": self.settings.structured_claim_mode,
                 # v0.8: split capability is bound to vec readiness, not a toggle.
                 "split_capability": self._split_capability(vec_state),
                 "vec_index_state": vec_state,
@@ -755,6 +1022,209 @@ class MemoryTools:
             runtime_state=self.db.state,
         )
         return self.db.state.response(report_to_dict(report))
+
+    def memory_set_entity(
+        self,
+        memory_id: int,
+        entity: Optional[str] = None,
+        scope: Optional[str] = None,
+        clear: bool = False,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Set canonical metadata.entity/scope without creating content history."""
+        try:
+            memory_id_int = int(memory_id)
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
+        if not clear and not _canon_entity(entity):
+            return self.db.state.response({"error": "entity is required unless clear=true"}, ok=False)
+        set_fields: dict[str, Any] = {}
+        clear_fields: list[str] = []
+        if clear:
+            clear_fields.append("entity")
+        else:
+            set_fields["entity"] = _canon_entity(entity)
+        if scope is not None:
+            canonical_scope = _canon_scope(scope)
+            if canonical_scope:
+                set_fields["scope"] = canonical_scope
+            else:
+                clear_fields.append("scope")
+        result = self.db.update_metadata_fields_low_side_effect(
+            memory_id_int, set_fields=set_fields, clear_fields=clear_fields,
+            authorized=authorized,
+        )
+        outcome = result.get("outcome")
+        if outcome not in {"updated", "no_change"}:
+            ok = False
+            error = {
+                "forbidden": "authorized=True is required for locked/user_confirmed memory",
+                "not_found": "memory id not found",
+                "not_active": "memory is not active",
+                "unavailable": "database not available",
+            }.get(str(outcome), "entity update failed")
+            return self.db.state.response({"error": error, **result}, ok=ok)
+        warnings: list[str] = []
+        data: dict[str, Any] = {
+            "updated": outcome == "updated", "outcome": outcome,
+            "memory_id": memory_id_int, "metadata": result.get("metadata"),
+        }
+        if result.get("claim_semantics_changed"):
+            structured = self._index_and_reconcile_claims(memory_id_int)
+            data["realtime_conflict_check"] = structured["diagnostic"]
+            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            warnings.extend(structured.get("warnings") or [])
+            self._apply_structured_gate(data, structured)
+        data["record"] = self.db.get_memory(memory_id_int)
+        return self.db.state.response(data, extra_warnings=warnings)
+
+    def memory_list_entities(
+        self, limit: int = 50, include_unassigned: bool = True, **_: Any,
+    ) -> dict[str, Any]:
+        try:
+            limit_int = max(1, min(500, int(limit)))
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "limit must be an integer"}, ok=False)
+        return self.db.state.response(
+            self.db.list_entities(limit=limit_int, include_unassigned=bool(include_unassigned))
+        )
+
+    def memory_rebuild_claims(
+        self,
+        memory_ids: Optional[list[int]] = None,
+        dry_run: bool = True,
+        batch_size: int = 50,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Idempotently rebuild the deterministic claim index."""
+        if self.settings.structured_claim_mode == "off" and not dry_run:
+            return self.db.state.response(
+                {"error": "structured_claim_mode=off; enable beta_all before rebuilding"}, ok=False,
+            )
+        try:
+            batch = max(1, min(500, int(batch_size)))
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "batch_size must be an integer"}, ok=False)
+        if memory_ids is None:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM memories WHERE status='active' "
+                    "AND (claims_indexed_revision IS NULL "
+                    "OR claims_indexed_revision<>claim_revision) "
+                    "ORDER BY id LIMIT ?", (batch,)
+                ).fetchall()
+                ids = [int(row["id"]) for row in rows]
+        else:
+            try:
+                ids = list(dict.fromkeys(int(value) for value in memory_ids))[:batch]
+            except (TypeError, ValueError):
+                return self.db.state.response({"error": "memory_ids must contain integers"}, ok=False)
+        if dry_run:
+            return self.db.state.response({"dry_run": True, "memory_ids": ids, "count": len(ids)})
+        results = []
+        for memory_id in ids:
+            results.append({"memory_id": memory_id, **self._index_and_reconcile_claims(memory_id)})
+        failed = sum(1 for item in results if not item["diagnostic"].get("claim_indexed"))
+        return self.db.state.response({
+            "dry_run": False, "processed": len(results), "failed": failed, "results": results,
+        }, ok=failed == 0)
+
+    def memory_submit_conflict_judgment(
+        self,
+        conflict_id: int,
+        expected_left_version: int,
+        expected_right_version: int,
+        expected_left_claim_revision: int,
+        expected_right_claim_revision: int,
+        verdict: str,
+        recommended_use: str,
+        suggested_winner: Optional[int],
+        confidence_hint: Optional[str],
+        reason: str,
+        affects_current_output: bool,
+        usage_context: str,
+        judge_ref: Optional[str] = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        try:
+            conflict_id_int = int(conflict_id)
+            left_version = int(expected_left_version)
+            right_version = int(expected_right_version)
+            left_revision = int(expected_left_claim_revision)
+            right_revision = int(expected_right_claim_revision)
+            winner = int(suggested_winner) if suggested_winner is not None else None
+        except (TypeError, ValueError):
+            return self.db.state.response(
+                {"error": "conflict id, snapshot pins, and winner must be integers"}, ok=False,
+            )
+        request_before = self.db.build_conflict_judgment_request(conflict_id_int)
+        result = self.db.submit_conflict_judgment(
+            conflict_id_int, left_version, right_version, left_revision, right_revision,
+            verdict, recommended_use, winner,
+            confidence_hint, reason, bool(affects_current_output), usage_context,
+            judge_ref=judge_ref,
+        )
+        if result.get("outcome") == "judged":
+            event = "user_escalated" if result.get("user_action_required") else "llm_assessed"
+            ids = []
+            if request_before:
+                ids = [
+                    int(request_before["left"]["id"]),
+                    int(request_before["right"]["id"]),
+                ]
+            self.db.log_attention(trigger="structured_claim", source=event, memory_ids=ids)
+        return self.db.state.response(result, ok=result.get("outcome") == "judged")
+
+    def memory_correct_conflict_judgment(
+        self,
+        conflict_id: int,
+        verdict: str,
+        recommended_use: str,
+        suggested_winner: Optional[int],
+        reason: str,
+        expected_judgment_id: int,
+        expected_left_version: int,
+        expected_right_version: int,
+        expected_left_claim_revision: int,
+        expected_right_claim_revision: int,
+        authorized: bool = False,
+        judge_ref: Optional[str] = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        if not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required for human judgment correction"}, ok=False,
+            )
+        try:
+            conflict_id_int = int(conflict_id)
+            winner = int(suggested_winner) if suggested_winner is not None else None
+            judgment_id = int(expected_judgment_id)
+            left_version = int(expected_left_version)
+            right_version = int(expected_right_version)
+            left_revision = int(expected_left_claim_revision)
+            right_revision = int(expected_right_claim_revision)
+        except (TypeError, ValueError):
+            return self.db.state.response(
+                {"error": "conflict id, judgment id, snapshot pins, and winner must be integers"},
+                ok=False,
+            )
+        result = self.db.correct_conflict_judgment(
+            conflict_id_int, verdict, recommended_use, winner,
+            reason, judgment_id, left_version, right_version,
+            left_revision, right_revision, judge_ref=judge_ref,
+        )
+        return self.db.state.response(result, ok=result.get("outcome") == "corrected")
+
+    def memory_list_conflict_judgments(self, conflict_id: int, **_: Any) -> dict[str, Any]:
+        try:
+            conflict_id_int = int(conflict_id)
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "conflict_id must be an integer"}, ok=False)
+        rows = self.db.list_conflict_judgments(conflict_id_int)
+        return self.db.state.response({
+            "conflict_id": conflict_id_int, "judgments": rows, "count": len(rows),
+        })
 
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
         summary = self.db.audit_summary()
@@ -812,13 +1282,21 @@ class MemoryTools:
             outcome = result.get("outcome")
             if outcome == "updated":
                 updated_mem = self.db.get_memory(memory_id_int)
-                return self.db.state.response({
+                data = {
                     "edited": True,
                     "tags_only": True,
                     "memory_id": memory_id_int,
                     "tags": result.get("tags"),
                     "record": updated_mem,
-                })
+                }
+                claim_warnings: list[str] = []
+                if result.get("claim_semantics_changed"):
+                    structured = self._index_and_reconcile_claims(memory_id_int)
+                    data["realtime_conflict_check"] = structured["diagnostic"]
+                    data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+                    claim_warnings.extend(structured.get("warnings") or [])
+                    self._apply_structured_gate(data, structured)
+                return self.db.state.response(data, extra_warnings=claim_warnings)
             if outcome == "no_change":
                 return self.db.state.response({
                     "edited": False,
@@ -983,6 +1461,12 @@ class MemoryTools:
         if split_request is not None:
             data["split_request"] = split_request
         embedding_warnings.extend(split_warnings)
+        structured = self._index_and_reconcile_claims(memory_id_int)
+        data["realtime_conflict_check"] = structured["diagnostic"]
+        data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+        embedding_warnings.extend(structured.get("warnings") or [])
+        self._apply_structured_gate(data, structured)
+        data["record"] = self.db.get_memory(memory_id_int)
         return self.db.state.response(
             data,
             extra_warnings=embedding_warnings,
@@ -1096,6 +1580,8 @@ class MemoryTools:
 
             # Batch-fetch open conflicts for all result IDs (one SQL, no N+1).
             conflicts = self.db.list_open_conflicts_for_memory_ids(result_ids)
+            if self.settings.structured_claim_mode == "off":
+                conflicts = [c for c in conflicts if c.get("left_claim_revision") is None]
             # Build memory_id → list of conflicts.
             conflicts_by_mem: dict[int, list[dict[str, Any]]] = {}
             all_peer_ids: set[int] = set()
@@ -1147,7 +1633,18 @@ class MemoryTools:
         confidence_hint > created_at > conflict_id.
         """
         def conflict_sort_key(c: dict[str, Any]) -> tuple:
+            if c.get("judgment_status") == "pending_user":
+                state_priority = 5
+            elif c.get("judgment_status") == "pending_llm":
+                state_priority = 4
+            elif c.get("source") == "metadata_write_hint":
+                state_priority = 1
+            elif c.get("judgment_status") in {"llm_assessed", "human_confirmed"}:
+                state_priority = 3
+            else:
+                state_priority = 4  # verified scan/record conflict
             return (
+                state_priority,
                 self._confidence_rank(c.get("confidence_hint")),
                 str(c.get("created_at", "")),
                 int(c.get("id", 0)),
@@ -1158,16 +1655,45 @@ class MemoryTools:
         peer_summary = summaries.get(peer_id, {})
         src = primary.get("source")
         advisory = (src == "metadata_write_hint")
+        judgment_status = primary.get("judgment_status")
+        structured_origin = primary.get("left_claim_revision") is not None
+        if advisory:
+            conflict_source = "runtime_metadata_hint"
+        elif structured_origin and judgment_status == "pending_llm":
+            conflict_source = "structured_claim_candidate"
+        elif structured_origin and judgment_status in {"llm_assessed", "human_confirmed"}:
+            conflict_source = "conflict_guidance"
+        else:
+            conflict_source = "open_table"
+        judgment_request = None
+        if conflict_source == "structured_claim_candidate":
+            judgment_request = self.db.build_conflict_judgment_request(int(primary["id"]))
         return {
             # v0.8.8: route by row source — write-hint rows are advisory, NOT
             # verified; presenting them as open_table would cry-wolf. (漏洞#1)
-            "conflict_source": "runtime_metadata_hint" if advisory else "open_table",
+            "conflict_source": conflict_source,
             "conflict_id": int(primary["id"]),
             "conflict_type": primary.get("conflict_type"),
             "conflict_point": primary.get("conflict_point"),
             "suggested_winner": primary.get("suggested_winner"),
             "confidence_hint": "low" if advisory else primary.get("confidence_hint"),
             "source": src,
+            "verification_status": judgment_status or ("pending_llm" if structured_origin else "verified"),
+            "action_required": (
+                "judge_conflict_before_use" if conflict_source == "structured_claim_candidate"
+                else ("ask_user" if judgment_status == "pending_user" else None)
+            ),
+            "conflict_judgment_request": judgment_request,
+            "judgment": ({
+                "verdict": primary.get("judgment_verdict"),
+                "recommended_use": primary.get("judgment_recommended_use"),
+                "suggested_winner": primary.get("judgment_suggested_winner"),
+                "confidence_hint": primary.get("judgment_confidence_hint"),
+                "reason": primary.get("judgment_reason"),
+                "judge_type": primary.get("judgment_judge_type"),
+                "judge_ref": primary.get("judgment_judge_ref"),
+                "judged_at": primary.get("judged_at"),
+            } if primary.get("active_judgment_id") is not None else None),
             "open_conflict_count": len(conflicts),
             "conflict_peer": {
                 "id": peer_id,

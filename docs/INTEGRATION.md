@@ -31,6 +31,7 @@ No config file is required for lexical recall. For semantic recall, prefer the c
 | `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | Embedding dimension. **Must match** the model you backfill with (e.g. bge-small-zh=512, bge-base=768). Changing it requires dropping and recreating `memories_vec`. |
 | `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | Max candidates pooled across all recall channels before soft-rerank. Raise to 100–200 when your store exceeds ~100 entries to avoid losing matches at the pool edge. |
 | `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | Max candidates the content-LIKE补漏 channel contributes. Raise if many same-topic memories exist. |
+| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | v0.9 real-time deterministic claim detection. Use `off` only as an emergency kill switch; scheduled scan is unaffected. |
 | `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | inferred as `gguf` only when `embedding.model_path` is set | Only `gguf` is supported in v0.5.0. Without a model path, auto-embedding stays off. |
 | `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` (or legacy `MEMORY_ARBITER_GGUF`) | _(none)_ | Path to the GGUF embedding model for v0.5.0 auto-embedding. |
 | `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | Auto-encode plain-text queries so semantic recall works without explicit `query_embedding`. |
@@ -101,12 +102,14 @@ Detect conflicts at the moment a new memory is written, before it silently diver
 
 ```
 write new knowledge via memory_write(...)
-  → check response for write_hints.possible_supersede_targets
-  → hint present? → memory_search to verify, then memory_supersede the stale one
-  → no hint? → done (low-confidence conflicts will be caught by scheduled scan)
+  → action_required=judge_conflict_before_use?
+      → host LLM reads both evidence sides and calls memory_submit_conflict_judgment
+      → pending_user? ask the user; otherwise use returned guidance for this output
+  → inspect advisory write_hints for duplicate/evolution cleanup
+  → done (periodic semantic scan still catches claims outside the whitelist)
 ```
 
-**v0.7.6**: `memory_write` now synchronously returns `write_hints` when an active memory shares high subject/tags overlap with the just-written record. Two hint types: `possible_duplicate` (likely the same thing) and `possible_evolution_of` (new content is significantly longer — the new one may supersede the candidate). Hints are advisory; they never write to the conflicts table. If a hint fires, the agent can prompt the user or immediately supersede the stale one. Semantic conflicts (where subject/tags don't overlap) are still the domain of the scheduled vector scan — not write-time hints.
+**v0.9**: the server first extracts conservative explicit claims (key/value, table rows, number+unit, semver) and compares records with the same canonical `entity + attribute + scope`. Give important memories `metadata.entity` (and `metadata.scope` when environments differ); subject and then tags are fallbacks. A collision is persisted as `pending_llm` with exact version/claim-revision CAS pins. Submitting a judgment records guidance only—it never edits or supersedes either memory. Uncertain, protected-vs-protected, and high-impact code/config/write/external-action cases become `pending_user`; a later authorized human correction is append-only. Metadata-overlap `write_hints` remain a separate advisory path. Scheduled vector scan remains necessary for semantic conflicts outside the deterministic whitelist.
 
 ### Real-world example — Cross-tool task delegation
 
@@ -177,6 +180,7 @@ Memory Arbiter 是一层 token 优化中间件：用精准检索替代全文加�
 | `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | embedding 维度。**必须和你灌向量用的模型一致**（bge-small-zh=512、bge-base=768）。改维度要重建 `memories_vec` 表。 |
 | `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | 多路召回合并进候选池的上限，之后才走软重排。记忆超过约 100 条时建议调到 100–200，避免边界漏召回。 |
 | `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | content LIKE 补漏路最多贡献的候选数。同主题记忆多时调大。 |
+| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | v0.9 实时确定性 claim 检测。`off` 仅作紧急熔断，不影响定期 scan。 |
 | `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | 仅在设置 `embedding.model_path` 时推断为 `gguf` | v0.5.0 只支持 `gguf`。没有模型路径时，自动向量化保持关闭。 |
 | `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH`（或 legacy `MEMORY_ARBITER_GGUF`） | _(无)_ | GGUF embedding 模型路径，用于 v0.5.0 自动向量化。 |
 | `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | 自动 encode 纯文本查询，不传 `query_embedding` 也能触发语义检索。 |
@@ -247,12 +251,14 @@ Memory Arbiter 是一层 token 优化中间件：用精准检索替代全文加�
 
 ```
 memory_write(...) 写入新知识
-  → 检查响应里的 write_hints.possible_supersede_targets
-  → 有 hint？ → memory_search 核实，然后 memory_supersede 废弃旧的那条
-  → 没有？   → 完成（低置信冲突留给定时扫描）
+  → action_required=judge_conflict_before_use？
+      → 宿主 LLM 阅读两侧证据并调用 memory_submit_conflict_judgment
+      → pending_user？询问用户；否则按返回 guidance 处理本次产出
+  → 再检查 advisory write_hints，处理疑似重复/演进
+  → 完成（白名单之外仍由定期语义 scan 兜底）
 ```
 
-**v0.7.6**：`memory_write` 现在会在写入后同步返回 `write_hints`——当某条 active 记忆与新写入的 subject/tags 高度重叠时触发。两种 hint 类型：`possible_duplicate`（疑似同一条）和 `possible_evolution_of`（新内容明显更长——新的可能要取代旧候选）。hint 仅供参考，绝不写 conflicts 表。命中时 agent 可以提示用户或直接 supersede 旧的那条。语义层面的冲突（subject/tags 不重叠）仍归定时向量扫描管，不是写入时 hint 的职责。
+**v0.9**：server 先抽取保守的显式 claim（key/value、表格行、数字+单位、semver），比较相同规范 `entity + attribute + scope` 的记录。重要记忆建议提供 `metadata.entity`（环境不同时再给 `metadata.scope`）；subject、tag 依次兜底。碰撞以 `pending_llm` 持久化，并携带精确 version/claim-revision CAS。提交判断只记录 guidance，绝不编辑或 supersede 任何记忆。不确定、双保护以及会驱动代码/配置/记忆写入/外部动作的高影响场景转为 `pending_user`；之后的授权人工纠正以追加方式保留完整历史。metadata 重叠 `write_hints` 是另一条 advisory 路径。白名单外的语义冲突仍需定期向量 scan。
 
 **适用时机**：工具学到可能与既有知识矛盾的内容时（配置变更、策略更新、纠正事实）。
 

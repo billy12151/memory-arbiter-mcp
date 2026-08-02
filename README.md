@@ -78,6 +78,7 @@ Using two or more tools adds a shared memory layer: Tool A writes, Tool B search
 - **Smart tag ranking & search filters** (v0.7.3) — tags are scored as discrete labels (token overlap, not substring), so a tag set hitting every query token finally outranks a subject that merely contains one query word. `memory_search` also gains `tags_filter` / `after_time` / `before_time` / `source_type`, plus `has_more` + `total_estimate` so exhaustive queries know whether the page is complete.
 - **Linked open items & conflict signals** (v0.7.4 → v0.7.6) — on a genuine query hit, `memory_search` attaches up to 5 active todos (tagged `todo`) that share meaningful tags with the result set, in a separate `linked_open_items` field — pure read-only, never affects ranking. Every response also carries a `retrieval_mode`. v0.7.6 adds `conflict_signal` on each result: `open_table` (from scan/record-verified conflicts) or `runtime_metadata_hint` (advisory, not LLM-verified). Complete todos with `memory_edit(tags_only=true, remove_tags=["todo"])` — a low-side-effect tag update that doesn't write history, bump version, or re-embed.
 - **Conflict scan** (v0.7.5–v0.7.6) — `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories), then the calling agent runs LLM comparison and persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type` / `suggested_winner` / `source`; v0.7.6 adds `refresh=true` for re-judgement after memory/model changes). Dismiss false positives with `memory_resolve_conflict`. The core package stays headless — no LLM, no network. `doctor` reports scan freshness via `scan_log.jsonl`. v0.7.6: `memory_search` surfaces these conflicts as `conflict_signal` on matching results; `memory_write` returns `write_hints` for possible duplicates/evolution.
+- **Real-time structured conflict gate** (v0.9.0 beta) — writes and edits synchronously extract explicit claims into a separate derived-index table and compare `entity + attribute + scope` values. New collisions return evidence plus a mandatory host-LLM judgment request. The judgment is persisted for future queries but never edits or supersedes memory; high-impact/uncertain cases escalate to the user, and an authorized human correction remains available. Periodic semantic scan stays enabled as the broad-coverage backstop.
 - **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search.
 - **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup. Never crashes, even if optional extensions are missing.
 - **Health diagnostics** — a one-shot `doctor` check grades config integrity, the vector-enablement chain, split, data consistency, and capacity. Each finding carries a severity and a config-specific fix hint; works as an MCP tool (daily) or a standalone CLI (ambulance: runs even when the MCP process is down). Read-only.
@@ -224,8 +225,8 @@ Grouped by use case. For day-to-day agent work, the intended mental model is del
 
 | Tool | Description |
 |---|---|
-| `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks). **Tags matter (v0.7.3)** — they're a ranking + filter signal heavier than content; tag both *query-intent words* (what users will search by) and category/version labels. v0.7.6 may return advisory `write_hints` for likely duplicate/evolution records; these hints do not write the conflicts table. See [Tag scoring & search filters (v0.7.3)](#tag-scoring-search-filters-v073). |
-| `memory_search` | Search memories (FTS5 → LIKE fallback). `limit` is a page size, not a cap — `has_more=true` in the response means more matches exist. v0.7.6 can attach `conflict_signal` to direct hits; `open_table` comes from recorded conflicts, while `runtime_metadata_hint` is advisory only. See [Tag scoring & search filters (v0.7.3)](#tag-scoring-search-filters-v073). |
+| `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks). **Tags matter (v0.7.3)** — they're a ranking + filter signal heavier than content. v0.9 synchronously checks deterministic structured claims; if `action_required=judge_conflict_before_use`, the host LLM must submit the included judgment request before using the claim. Metadata-overlap `write_hints` remain advisory and dismissable. |
+| `memory_search` | Search memories (FTS5 → LIKE fallback). `limit` is a page size, not a cap — `has_more=true` means more matches exist. v0.9 signals are routed by state: pending model/user decisions are loud; persisted `conflict_guidance` is non-blocking and includes the recommended use. |
 | `memory_get` | Get a single memory by ID. Use when you already know the `memory_id` (e.g. from conflict lists, audit results, or previous search results) to quickly fetch full details without re-running a search. v0.8.0 adds `sections` (`none`/`catalog`/`all`, default `catalog`) and `section_ids` (takes precedence over `sections`; any IDs not found are listed in `missing_section_ids`). Read-only. |
 
 **Correction & version management** — edit in place, confirm facts, retire stale records, and audit change history.
@@ -245,6 +246,11 @@ Grouped by use case. For day-to-day agent work, the intended mental model is del
 | `memory_list_conflicts` | List unresolved conflicts. This is the main follow-up entry after `memory_search` reports an `open_table` conflict signal, doctor reports conflict backlog, or a scan task records conflicts. |
 | `memory_compare` | Low-frequency diagnostic tool: compare two memories and return an explanation only. It does not write conflicts. |
 | `memory_arbitrate` | Compatibility/manual arbitration tool. New conflict workflows should prefer `scan_conflict_candidates → record_conflict → list_conflicts → supersede/resolve`; this is not a daily entry point. |
+| `memory_submit_conflict_judgment` | Required host-LLM receipt for a `structured_claim_candidate`. Submits verdict, recommended use, reason, context, and exact version/claim-revision CAS pins. It never edits or supersedes memory. |
+| `memory_correct_conflict_judgment` | Append an authorized human correction and make it active while preserving prior LLM/policy judgments. |
+| `memory_list_conflict_judgments` | Read the append-only judgment history for one conflict. |
+| `memory_set_entity` / `memory_list_entities` | Assign canonical entity/scope metadata without content-history churn, or inspect entity coverage/unassigned memories. |
+| `memory_rebuild_claims` | Dry-run or process a bounded batch of stale/unindexed active memories. Re-run until the dry-run count reaches zero. |
 
 **Long-document section split** (v0.6.0) — paragraph-level retrieval for docs over `split.threshold`. Requires sqlite-vec + GGUF embedding. Most documents are split automatically by `memory_write` (rule-based, when Markdown headings are detected); `memory_split` below is only the agent-side continuation/repair entry, not part of the daily write path.
 
@@ -266,7 +272,7 @@ Grouped by use case. For day-to-day agent work, the intended mental model is del
 | `memory_status` | Show current mode, degradation status, storage paths. v0.8.0 reports `split_capability` (`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`) instead of the old boolean `split_enabled`. |
 | `memory_list_conflicts` | List unresolved conflicts |
 | `memory_audit_summary` | Per-workspace stats overview (counts, oldest/newest, open conflicts, source_type distribution) |
-| `memory_doctor_overview` | Run a read-only health check and return a graded report (18 checks across config / vector chain / split / consistency / capacity). Each finding has a severity and a config-specific `fix_hint`. `deep=true` also loads the GGUF model for a dimension probe. Same engine as the `doctor` CLI below. |
+| `memory_doctor_overview` | Run a read-only health check and return a graded report (25 findings across config / vector chain / split / consistency / capacity). Each finding has a severity and a config-specific `fix_hint`. `deep=true` also loads the GGUF model for a dimension probe. Same engine as the `doctor` CLI below. |
 
 ### Optional: Semantic Recall (v0.5.0)
 
@@ -485,6 +491,12 @@ Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbi
 | `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | **Raise to 100–200 when your store exceeds ~100 entries** — first knob to turn if matches go missing. |
 | `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | Raise if many same-topic memories exist. |
 
+**Real-time structured conflicts** — conservative lexical detection on write/edit; no model or network call inside the server.
+
+| JSON path | Env fallback | Default | What to tune |
+|---|---|---|---|
+| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | `beta_all` enables v0.9 for the trusted beta cohort. Set `off` only as an emergency kill switch; periodic semantic scan is unaffected. |
+
 **Semantic recall** — enables "find by meaning, not just keyword". Requires sqlite-vec + a GGUF model. See [Semantic Recall](#optional-semantic-recall-v050).
 
 | JSON path | Env fallback | Default | What to tune |
@@ -636,6 +648,7 @@ Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回
 - **tag 精排 + 搜索过滤**（v0.7.3）—— tag 按离散标签集评分（token 重叠，不再当句子做整串匹配），tag 精确命中每个 query token 时终于能排到 subject 只是偶然含一个词的记忆之上。`memory_search` 还新增了 `tags_filter` / `after_time` / `before_time` / `source_type`，响应里带 `has_more` + `total_estimate`，让穷举式查询知道这一页是不是已经拿全。
 - **关联待办与冲突信号**（v0.7.4 → v0.7.6）—— 真实命中查询时，`memory_search` 在独立的 `linked_open_items` 字段附最多 5 条与结果集共享 meaningful tag 的 active 待办（带 `todo` tag），纯只读、不影响排序。每次响应还带 `retrieval_mode` 说明结果是怎么来的。v0.7.6 新增 `conflict_signal`：每条结果可能带 `open_table`（scan/record 验证过的结构化冲突）或 `runtime_metadata_hint`（运行时启发式，未经 LLM 验证）。完成待办用 `memory_edit(tags_only=true, remove_tags=["todo"])`——低副作用、不写历史、不增加 version、不重算 embedding。
 - **冲突扫描**（v0.7.5）—— `memory_scan_conflict_candidates` 向量召回候选冲突对（增量：只扫新增 + 最近编辑的记忆），调用方 agent 跑 LLM 比对后用 `memory_record_conflict` 落表（幂等，带 `conflict_type` / `suggested_winner` / `source`）。误报用 `memory_resolve_conflict` 关闭。核心包保持无头——不调 LLM、不联网——扫描只产候选对，判断交给 agent。`doctor` 通过 `scan_log.jsonl` 报告扫描新鲜度（从未扫描或超 15 天会 WARN）。
+- **实时结构化冲突门（v0.9.0 beta）**——写入和编辑会同步抽取显式 claim 到独立派生索引，并比较 `entity + attribute + scope` 的值。新碰撞返回证据与必须执行的宿主 LLM 判断请求；判断会持久化供后续查询使用，但绝不修改或 supersede 记忆。高影响/不确定场景升级给用户，且保留授权人工纠正入口；定期语义 scan 继续作为广覆盖兜底。
 - **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。
 - **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
 - **健康体检** —— 一键 `doctor` 给配置完整性、向量化启用链、分段、数据一致性、容量堆积做分级体检。每条诊断带 severity 和针对当前配置的修复指引；既能作为 MCP 工具（日常）在对话里触发，也能作为独立 CLI（救护车：MCP 进程挂了也能连库诊断）。纯只读。
@@ -777,8 +790,8 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 
 | 工具 | 说明 |
 |---|---|
-| `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定）。**tags 是关键信号（v0.7.3）**——权重高于 content，既影响排序也用于过滤；建议同时打"查询意图词"（用户将来用什么词查）和分类/版本号。v0.7.6 可能返回 advisory `write_hints` 提示疑似重复/演进，但不会写 conflicts 表。详见 [Tag 评分与搜索过滤（v0.7.3）](#tag-评分与搜索过滤v073)。 |
-| `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级）。`limit` 是单页大小不是上限——响应里的 `has_more=true` 表示还有更多结果。v0.7.6 可在 direct 命中上附 `conflict_signal`；`open_table` 来自已记录冲突，`runtime_metadata_hint` 只是运行时启发式提示。详见 [Tag 评分与搜索过滤（v0.7.3）](#tag-评分与搜索过滤v073)。 |
+| `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定）。v0.9 同步检查确定性结构化 claim；若返回 `action_required=judge_conflict_before_use`，宿主 LLM 必须先提交随响应返回的判断请求，再使用该 claim。metadata 重叠 `write_hints` 仍是可 dismiss 的 advisory。 |
+| `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级）。`limit` 是单页大小不是上限。v0.9 按状态路由信号：待模型/用户确认会强提醒；已持久化的 `conflict_guidance` 不阻塞，并携带建议用法。 |
 | `memory_get` | 通过 ID 直接获取单条记忆的完整信息。当已知 `memory_id`（如从冲突列表、审计结果、搜索结果中获取）时，直接用此工具获取记忆详情，无需重新搜索。v0.8.0 新增 `sections`（`none`/`catalog`/`all`，默认 `catalog`）和 `section_ids`（优先于 `sections`；缺失项进 `missing_section_ids`）。只读。 |
 
 **修正与版本管理** —— 原地修改、确认事实、废弃旧记录，并审计改动历史。
@@ -798,6 +811,11 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 | `memory_list_conflicts` | 列出未解决的冲突。通常在 `memory_search` 返回 `open_table` 冲突信号、doctor 报冲突积压、或 scan 任务记录冲突后使用。 |
 | `memory_compare` | 低频诊断工具：比较两条记忆，只返回解释，不写 conflicts 表。 |
 | `memory_arbitrate` | 兼容保留的手动仲裁工具。新冲突工作流优先使用 `scan_conflict_candidates → record_conflict → list_conflicts → supersede/resolve`；本工具不是日常入口。 |
+| `memory_submit_conflict_judgment` | `structured_claim_candidate` 必须执行的宿主 LLM 回执；提交判断、建议用法、理由、用途上下文及精确 version/claim-revision CAS，不修改记忆。 |
+| `memory_correct_conflict_judgment` | 追加一条授权人工纠正并设为 active；旧 LLM/policy 判断仍保留。 |
+| `memory_list_conflict_judgments` | 查看某个冲突的追加式判断历史。 |
+| `memory_set_entity` / `memory_list_entities` | 无内容历史副作用地设置规范 entity/scope，或查看实体覆盖率与未分配记忆。 |
+| `memory_rebuild_claims` | dry-run 或处理一批 stale/unindexed active 记忆；重复运行到 dry-run count 为 0。 |
 
 **长文档分段**（v0.6.0）—— 超过 `split.threshold` 的文档走段落级检索。需 sqlite-vec + GGUF embedding。大多数文档会被 `memory_write` 自动规则分段（检测到 Markdown 标题时）；下面的 `memory_split` 只是 agent 侧的续接/修复入口，不在日常写入路径上。
 
@@ -819,7 +837,7 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 | `memory_status` | 查看运行状态、模式、降级原因。v0.8.0 用 `split_capability`（`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`）替代旧的布尔 `split_enabled`。 |
 | `memory_list_conflicts` | 列出未解决的冲突 |
 | `memory_audit_summary` | 各 workspace 记忆统计概览（条目数、最旧/最新、open 冲突数、来源分布） |
-| `memory_doctor_overview` | 跑一次只读健康体检，返回分级报告（18 项检查，覆盖配置 / 向量链 / 分段 / 一致性 / 容量）。每条诊断带 severity 和针对当前配置的 `fix_hint`。`deep=true` 时额外加载 GGUF 模型做维度探针。与下面的 `doctor` CLI 用同一套引擎。 |
+| `memory_doctor_overview` | 跑一次只读健康体检，返回分级报告（25 项 finding，覆盖配置 / 向量链 / 分段 / 一致性 / 容量）。每条诊断带 severity 和针对当前配置的 `fix_hint`。`deep=true` 时额外加载 GGUF 模型做维度探针。与下面的 `doctor` CLI 用同一套引擎。 |
 
 ### 可选：语义检索（v0.5.0）
 
@@ -1037,6 +1055,12 @@ memory_get(memory_id)                                  ← 需要时取全文
 | `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | **记忆超过约 100 条时调到 100–200**——发现结果里漏了相关记忆，第一个就调它。 |
 | `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | 同主题记忆多时调大。 |
 
+**实时结构化冲突** —— 写入/编辑时做保守字面检测；server 内部不调用模型、不联网。
+
+| JSON 路径 | env 兜底 | 默认值 | 什么时候调 |
+|---|---|---|---|
+| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | `beta_all` 面向当前可信 beta 用户默认全开；`off` 仅作为紧急熔断，不影响定期语义 scan。 |
+
 **语义检索** —— 开启"按意思找，不只靠关键词"。需 sqlite-vec + GGUF 模型。详见 [语义检索](#可选语义检索v050)。
 
 | JSON 路径 | env 兜底 | 默认值 | 什么时候调 |
@@ -1094,7 +1118,7 @@ memory-arbiter doctor --deep       # 额外加载 GGUF 模型做维度探针（�
 memory-arbiter doctor --db PATH    # 诊断另一个 DB（灾祸恢复）
 ```
 
-它跑 **18 项只读检查**，分五个维度，每条带 severity（`info`/`warning`/`critical`）和针对你当前配置的修复指引：
+它跑 **25 项只读 finding**，分五个维度，每条带 severity（`info`/`warning`/`critical`）和针对你当前配置的修复指引：
 
 - **配置完整性** —— 解析告警、写探针结果、降级模式（`jsonl_backup` = 正在静默丢数据 = critical）。
 - **向量化启用链** —— 最高价值的检查。"语义召回到底开没开？"不是布尔值；它走五环链（配置了模型 → `vec.enabled` → 扩展已加载 → 模型可用 → auto 开关），在第一处断裂处短路，明确告诉你哪一环断了、怎么修。专治"我明明配了模型，召回怎么还是不准"（通常是 `vec.enabled=false`）。

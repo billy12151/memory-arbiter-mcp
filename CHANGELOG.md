@@ -3,6 +3,23 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.9.0] — 2026-08-02
+
+### Added
+
+- **Real-time structured conflict detection** — writes and edits now extract conservative deterministic claims (explicit key/value pairs, Markdown tables, number+unit facts, and semantic versions) into the separate `memory_claims` derived-index table. Claims are keyed by canonical `entity + attribute + scope`; code fences, URLs/references, ambiguous same-key values, and common CJK bookkeeping fields are excluded. The existing semantic scan remains the broad-coverage backstop.
+- **Mandatory host-LLM judgment receipt** — a new structured collision is persisted as `pending_llm` and returned with a top-level `attention_required` / `action_required=judge_conflict_before_use` plus evidence and CAS pins. The host model submits its verdict through `memory_submit_conflict_judgment`; the result is stored in append-only `conflict_judgments`. Low-risk assessed conflicts become non-blocking query guidance, while uncertain, protected-vs-protected, and high-impact code/config/write/external-action uses escalate to `pending_user`.
+- **Human correction without rewriting history** — `memory_correct_conflict_judgment` appends an authorized human judgment and makes it active; prior LLM/policy judgments remain auditable. LLM judgment never edits or supersedes either memory.
+- **Entity and backfill operations** — `memory_set_entity`, `memory_list_entities`, and bounded `memory_rebuild_claims` support incremental entity cleanup and existing-library claim backfill. Entity/scope-only changes bump `claim_revision`, not content `version` or content history.
+- **Operational visibility and kill switch** — `memory_status` reports `structured_claim_mode`; doctor reports indexed/stale/ambiguous claims and pending judgment backlog. `structured_claim_mode=beta_all` is the default for the current trusted beta cohort; `off` is the emergency switch.
+
+### Changed
+
+- Search now distinguishes `structured_claim_candidate` (pending LLM receipt, loud), `open_table` / `ask_user` (human decision required, loud), and `conflict_guidance` (already assessed, non-blocking). A source revision change invalidates the active judgment through version + claim-revision CAS and reopens the pair.
+- Schema startup migration adds `memory_claims`, `conflict_judgments`, claim revisions/index state, and conflict judgment state idempotently. Zero extracted claims count as a successful index publication; extraction/storage failure remains doctor-visible and fail-open.
+
+381 tests pass.
+
 ## License policy
 
 Memory Arbiter version 0.8.2 and later are offered under the Apache License 2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
