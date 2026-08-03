@@ -22,7 +22,7 @@ from memory_arbiter.doctor import (
     Finding,
     Severity,
     _check_history_version_chain,
-    _check_inactive_vectors_slowpath,
+    _check_vec_parent_status_sync,
     _check_orphan_sections,
     _check_orphan_vectors,
     _check_section_vec_coverage,
@@ -176,7 +176,7 @@ class TestOrphanVectors:
 
 
 # =====================================================================
-#  inactive_vectors_slowpath — vec0 table + parent status
+#  vec_parent_status_sync — vec0 parent_status vs memories.status (v0.9.4)
 # =====================================================================
 
 def _make_vec_conn() -> sqlite3.Connection:
@@ -186,43 +186,48 @@ def _make_vec_conn() -> sqlite3.Connection:
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
-    conn.execute("CREATE VIRTUAL TABLE memories_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
-    conn.execute("CREATE VIRTUAL TABLE memory_sections_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
+    conn.execute("CREATE VIRTUAL TABLE memories_vec USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[2])")
+    conn.execute("CREATE VIRTUAL TABLE memory_sections_vec USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[2])")
     return conn
 
 
-class TestInactiveVectorsSlowpath:
+class TestVecParentStatusSync:
     def test_table_missing_returns_na(self):
         conn = _make_conn()
-        f = _check_inactive_vectors_slowpath(conn)
+        f = _check_vec_parent_status_sync(conn)
         assert f.status == "n/a"
 
-    def test_all_active_passes_fast_path(self):
+    def test_all_synced_passes(self):
         conn = _make_vec_conn()
-        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'active')")
-        conn.execute("INSERT INTO memories_vec(id, embedding) VALUES (1, '[0.1,0.2]')")
+        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'active'), (2, 'superseded')")
+        conn.execute("INSERT INTO memories_vec(id, parent_status, embedding) VALUES (1, 'active', '[0.1,0.2]'), (2, 'superseded', '[0.3,0.4]')")
+        conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10, 1), (11, 2)")
+        conn.execute("INSERT INTO memory_sections_vec(id, parent_status, embedding) VALUES (10, 'active', '[0.5,0.6]'), (11, 'superseded', '[0.7,0.8]')")
         conn.commit()
-        f = _check_inactive_vectors_slowpath(conn)
+        f = _check_vec_parent_status_sync(conn)
         assert f.status == "pass"
-        assert f.evidence["inactive_memory_vectors"] == 0
-        assert f.evidence["inactive_section_vectors"] == 0
-        assert "快路径" in f.title
+        assert f.severity == Severity.INFO
+        assert f.evidence["memory_vec_parent_status_mismatches"] == 0
+        assert f.evidence["section_vec_parent_status_mismatches"] == 0
+        assert "vec.parent_status" in f.title or "一致" in f.title
 
-    def test_inactive_vectors_reported_with_counts(self):
+    def test_mismatches_reported_with_counts(self):
         conn = _make_vec_conn()
-        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'active'), (2, 'superseded'), (3, 'deleted')")
-        conn.execute("INSERT INTO memories_vec(id, embedding) VALUES (1,'[0.1,0.2]'),(2,'[0.3,0.4]'),(3,'[0.5,0.6]')")
-        conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10, 2)")
-        conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (10, '[0.7,0.8]')")
-        # Physical orphan section vector (parent memory row gone entirely).
-        conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (11, 999)")
-        conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (11, '[0.9,1.0]')")
+        # memory 1 active, vec row claims 'superseded' → mismatch
+        # memory 2 active, vec row claims 'active' → synced (baseline)
+        conn.execute("INSERT INTO memories(id, status) VALUES (1, 'active'), (2, 'active')")
+        conn.execute("INSERT INTO memories_vec(id, parent_status, embedding) VALUES (1, 'superseded', '[0.1,0.2]'), (2, 'active', '[0.3,0.4]')")
+        # section 10 parent=mem 1(active), vec claims 'deleted' → mismatch
+        # section 11 parent=mem 2(active), vec claims 'active' → synced
+        conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10, 1), (11, 2)")
+        conn.execute("INSERT INTO memory_sections_vec(id, parent_status, embedding) VALUES (10, 'deleted', '[0.5,0.6]'), (11, 'active', '[0.7,0.8]')")
         conn.commit()
-        f = _check_inactive_vectors_slowpath(conn)
-        assert f.status == "pass"  # informational; correctness is unaffected
-        assert f.evidence["inactive_memory_vectors"] == 2
-        assert f.evidence["inactive_section_vectors"] == 2
-        assert "慢路径" in f.title
+        f = _check_vec_parent_status_sync(conn)
+        assert f.status == "warn"
+        assert f.severity == Severity.WARNING
+        assert f.evidence["memory_vec_parent_status_mismatches"] == 1
+        assert f.evidence["section_vec_parent_status_mismatches"] == 1
+        assert "不一致" in f.title
 
 
 # =====================================================================

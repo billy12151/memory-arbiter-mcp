@@ -42,6 +42,7 @@ class Settings:
     vec_dim: int = 768
     recall_pool_cap: int = 50
     content_like_cap: int = 30
+    superseded_limit: int = 20
     policy: AgentPolicy = field(default_factory=AgentPolicy)
     embedding_provider: Optional[str] = None
     embedding_model_path: Optional[Path] = None
@@ -169,6 +170,10 @@ class Settings:
             vec_dim=pick_int_field(vec_cfg.get("dim"), "MEMORY_ARBITER_VEC_DIM", 768, name="vec.dim"),
             recall_pool_cap=pick_int_field(cfg.get("recall_pool_cap"), "MEMORY_ARBITER_RECALL_POOL_CAP", 50, name="recall_pool_cap"),
             content_like_cap=pick_int_field(cfg.get("content_like_cap"), "MEMORY_ARBITER_CONTENT_LIKE_CAP", 30, name="content_like_cap"),
+            superseded_limit=clamp_int(
+                pick_int_field(cfg.get("superseded_limit"), "MEMORY_ARBITER_SUPERSEDED_LIMIT", 20, name="superseded_limit"),
+                1, 50, name="superseded_limit", warnings=config_warnings,
+            ),
             embedding_provider=embedding_provider,
             embedding_model_path=Path(str(embedding_model_raw)).expanduser() if embedding_model_raw else None,
             embedding_auto_query=pick_bool_field(

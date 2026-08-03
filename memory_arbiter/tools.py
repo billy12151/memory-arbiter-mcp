@@ -701,7 +701,16 @@ class MemoryTools:
             return None
         return {"possible_supersede_targets": targets}
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
+        if "include_superseded" in _:
+            return self.db.state.response(
+                {
+                    "error": "include_superseded was removed in v0.9.4; use memory_search_expired for superseded history recall",
+                    "results": [],
+                    "count": 0,
+                },
+                ok=False,
+            )
         extra_warnings = list(self._embedder_warnings)
         vec_state = self.db.get_vec_index_state()
         vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
@@ -727,10 +736,10 @@ class MemoryTools:
                         )
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
-        # v0.7.4 (M2): search_memories now returns a SearchOutcome dataclass.
+        # v0.9.4: search_memories now uses status_filter instead of include_superseded
         outcome = search_memories(
             self.db, query, workspace, tags, limit,
-            include_superseded=include_superseded,
+            status_filter="active",  # Default: active only
             debug_ranking=debug_ranking,
             query_embedding=query_embedding,
             tags_filter=tags_filter,
@@ -837,6 +846,107 @@ class MemoryTools:
             elif strong_signal and strong_signal.get("action_required"):
                 response_data["action_required"] = strong_signal.get("action_required")
                 response_data["verification_status"] = strong_signal.get("verification_status")
+        return self.db.state.response(
+            response_data,
+            extra_warnings=extra_warnings + warnings,
+        )
+
+    def memory_search_expired(
+        self,
+        query: str = "",
+        workspace: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        limit: int = 20,
+        debug_ranking: bool = False,
+        query_embedding: Optional[list[float]] = None,
+        tags_filter: Optional[list[str]] = None,
+        after_time: Optional[str] = None,
+        before_time: Optional[str] = None,
+        source_type: Optional[str] = None,
+        include_conflict_signal: bool = True,
+        offset: int = 0,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """v0.9.4: search expired (non-active non-deleted) memories with vec-hybrid recall.
+
+        Searches ONLY non-active, non-deleted memories (superseded +
+        conflicted + pending) for audit/history walkthroughs:
+        - vec channel: ``vec_knn(parent_status_filter="expired")`` with
+          ``parent_status NOT IN ('active','deleted')`` predicate
+        - FTS channel: ``search_memories(status_filter="expired")`` with
+          ``status_clause = "m.status NOT IN ('active','deleted')"``
+
+        ``limit`` controls the per-page cap (default 20, hard cap 50,
+        configurable via ``MEMORY_ARBITER_SUPERSEDED_LIMIT``). ``offset``
+        enables cursor pagination — exact on the empty-query+filters path
+        (SQL OFFSET backed by a precise count), best-effort on the
+        query-recall path (pool windowed to offset+limit).
+
+        Active-query split (§3.5): ``memory_search`` (active only) and
+        ``memory_search_expired`` (expired only) are two independent queries.
+        """
+        extra_warnings: list[str] = list(self._embedder_warnings)
+        vec_state = self.db.get_vec_index_state()
+        vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
+        if vec_disabled and (query_embedding is not None or (query and self.settings.embedding_auto_query)):
+            disabled_reason = (
+                "embedding_space_mismatch"
+                if vec_state.get("state") == "mismatch"
+                else "embedding_migration_failed"
+            )
+            extra_warnings.append(f"vec_disabled={disabled_reason}")
+            query_embedding = None
+        elif query_embedding is None and query and self.settings.embedding_auto_query:
+            embedder, ensure_warnings = self._ensure_embedder()
+            extra_warnings.extend(ensure_warnings)
+            if embedder is not None:
+                try:
+                    er = embedder.embed_text(prefix="", body=query)
+                    if er.embedding:
+                        query_embedding = er.embedding
+                    else:
+                        extra_warnings.append(
+                            f"auto-embedding query failed: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
+                        )
+                except Exception as exc:
+                    extra_warnings.append(f"auto-embedding query failed: {exc}")
+
+        # Apply superseded_limit cap
+        superseded_limit_cap = getattr(self.settings, "superseded_limit", 20)
+        effective_limit = min(max(1, int(limit)), max(1, int(superseded_limit_cap)), 50)
+
+        outcome = search_memories(
+            self.db, query, workspace, tags, effective_limit,
+            status_filter="expired",  # superseded + conflicted + pending (§3.5 split)
+            debug_ranking=debug_ranking,
+            query_embedding=query_embedding,
+            tags_filter=tags_filter,
+            after_time=after_time,
+            before_time=before_time,
+            source_type=source_type,
+            offset=offset,
+        )
+        results = outcome.results
+        warnings = outcome.warnings
+        has_more = outcome.has_more
+        total_estimate = outcome.total_estimate
+        retrieval_mode = outcome.retrieval_mode
+
+        # v0.6.0: attach section enhancement to active-split results
+        results = self._attach_sections(results, query_embedding, extra_warnings)
+
+        # v0.7.6: attach conflict signals
+        if include_conflict_signal and retrieval_mode == "direct" and results:
+            results = self._attach_conflict_signals(results, extra_warnings)
+
+        response_data = {
+            "results": results,
+            "count": len(results),
+            "has_more": has_more,
+            "total_estimate": total_estimate,
+            "retrieval_mode": retrieval_mode,
+            "query_domain": "expired",
+        }
         return self.db.state.response(
             response_data,
             extra_warnings=extra_warnings + warnings,
@@ -971,9 +1081,10 @@ class MemoryTools:
             loser = self.db.get_memory(int(comparison["loser_id"]))
             if loser and loser.get("protection_level") != ProtectionLevel.LOCKED.value and loser.get("source_type") != SourceType.USER_CONFIRMED.value:
                 applied = self.db.update_memory(int(comparison["loser_id"]), {"status": "superseded"})
-                if applied:
-                    # v0.9.2: keep the loser's vectors out of the KNN top-k pool.
-                    self.db.delete_vectors_for_memory(int(comparison["loser_id"]))
+                # v0.9.4: vec parent_status sync happens inside update_memory
+                # (it writes both memories_vec + memory_sections_vec in the
+                # same transaction as the status flip). The redundant
+                # mark_vectors_for_memory call is gone — same value, twice.
         return self.db.state.response({"comparison": comparison, "conflict_id": conflict_id, "applied": applied})
 
     def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
@@ -1086,6 +1197,14 @@ class MemoryTools:
         memory = self.db.get_memory(int(memory_id))
         if not memory:
             return self.db.state.response({"error": "memory id not found"}, ok=False)
+        if memory.get("status") != "active":
+            return self.db.state.response(
+                {
+                    "error": f"memory is not active (status={memory.get('status')}); cannot confirm inactive memory",
+                    "confirmed": False,
+                },
+                ok=False,
+            )
         metadata = dict(memory.get("metadata") or {})
         metadata["confirmed_from"] = source_ref or "manual"
         ok = self.db.update_memory(
@@ -1172,10 +1291,11 @@ class MemoryTools:
                 },
                 ok=False,
             )
-        # v0.9.2: drop the superseded memory's vectors so they stop occupying
-        # vec0 KNN top-k slots (content/FTS kept for audit; vectors are a
-        # derivative and can be recomputed from content if ever needed).
-        _, vec_warnings = self.db.delete_vectors_for_memory(int(memory_id))
+        # v0.9.4: vec parent_status sync happens inside update_memory (it
+        # writes both memories_vec + memory_sections_vec in the same
+        # transaction as the status flip, retaining vectors for audit recall
+        # via memory_search_expired). Content/FTS kept for audit; vectors are
+        # a derivative and can be recomputed from content if ever needed.
         resolved = self.db.resolve_conflicts_for(int(memory_id))
         audit_reason = f"USER-AUTHORIZED SUPERSEDE: {reason}"
         conflict_id = self.db.record_conflict(
@@ -1194,10 +1314,6 @@ class MemoryTools:
             "conflict_id": conflict_id,
             "record": updated,
         }
-        # Surface (non-fatal) vector-cleanup failures so a residual slow-path
-        # vector doesn't go unnoticed; the supersede itself already committed.
-        if vec_warnings:
-            resp["warnings"] = vec_warnings
         return self.db.state.response(resp)
 
     def _split_capability(self, vec_state: dict[str, Any]) -> dict[str, Any]:
@@ -1787,60 +1903,123 @@ class MemoryTools:
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
-        """Delete vec rows whose parent memory is not active (v0.9.2).
+        """Purge orphan vec rows (v0.9.4) and optionally resync parent_status.
 
-        superseded/deleted/orphan vectors keep occupying vec0 KNN top-k slots,
-        forcing every KNN onto the exact-L2 slow path (see doctor
-        ``consistency.inactive_vectors_slowpath``). This tool physically removes
-        them so the vec0 MATCH fast path is restored.
+        v0.9.4: ``_purge_inactive_vectors`` only removes true orphans (vec rows
+        whose parent memory/section row no longer exists in the DB). Superseded
+        vectors are KEPT for ``memory_search_expired`` vec-hybrid recall.
 
-        Scope: only ``memories_vec`` / ``memory_sections_vec`` rows whose parent
-        memory is not active. The memories table (content, FTS) is never touched
-        — audit history stays intact; vectors are a derivative and can be
-        recomputed from content via ``memory_rebuild_embeddings`` if ever needed.
+        Resync mode: if ``parent_status`` mismatches are detected (vec.status !=
+        memories.status), ``dry_run`` reports them; with ``dry_run=False`` +
+        ``authorized=True`` they are repaired in-place via ``_resync_vec_parent_status``.
 
-        ``dry_run=True`` (default) only reports how many rows would be deleted.
-        Actual deletion requires ``dry_run=False`` AND ``authorized=True``.
+        ``dry_run=True`` (default) only reports counts.
+        Actual purge requires ``dry_run=False`` AND ``authorized=True``.
         """
-        counts = self._count_inactive_vectors()
+        mismatches = self._count_vec_parent_status_mismatch()
+        orphan_counts = self._count_orphan_vectors()
         if dry_run:
-            return self.db.state.response(
-                {
-                    "dry_run": True,
-                    "would_delete": counts,
-                    "hint": "re-run with dry_run=False and authorized=True to delete",
-                }
-            )
+            resp = {
+                "dry_run": True,
+                "vec_parent_status_mismatches": mismatches,
+                "orphan_vectors": orphan_counts,
+            }
+            if mismatches.get("memory_vec_mismatch", 0) > 0 or mismatches.get("section_vec_mismatch", 0) > 0:
+                resp["hint"] = "re-run with dry_run=False and authorized=True to purge orphans and resync mismatches"
+            else:
+                resp["hint"] = "re-run with dry_run=False and authorized=True to purge orphans"
+            return self.db.state.response(resp)
         if not authorized:
             return self.db.state.response(
-                {"error": "authorized=True is required to delete inactive vectors", "deleted": 0, "would_delete": counts},
+                {"error": "authorized=True is required to purge inactive vectors",
+                 "orphan_vectors": orphan_counts,
+                 "vec_parent_status_mismatches": mismatches},
                 ok=False,
             )
-        deleted, warnings = self.db.delete_inactive_vectors()
-        resp = {"dry_run": False, "deleted": deleted}
+        # Phase 1: resync parent_status mismatches if any
+        resync_counts = {}
+        if mismatches.get("memory_vec_mismatch", 0) > 0 or mismatches.get("section_vec_mismatch", 0) > 0:
+            resync_counts = self.db._resync_vec_parent_status()
+        # Phase 2: purge orphans
+        purged, warnings = self.db._purge_inactive_vectors()
+        resp = {
+            "dry_run": False,
+            "purged": purged,
+            "resynced": resync_counts,
+        }
         if warnings:
             resp["warnings"] = warnings
         return self.db.state.response(resp, ok=not warnings)
 
-    def _count_inactive_vectors(self) -> dict[str, int]:
-        """Read-only count of inactive vec rows (mirrors doctor slow-path check)."""
+    def _count_orphan_vectors(self) -> dict[str, int]:
+        """Read-only count of truly orphan vec rows (no parent row in DB)."""
         if not self.db._db_available or not self.db.state.sqlite_vec_available:
-            return {"inactive_memory_vectors": 0, "inactive_section_vectors": 0}
+            return {"orphan_memory_vectors": 0, "orphan_section_vectors": 0}
         try:
             with self.db.connection() as conn:
                 mem = conn.execute(
-                    "SELECT COUNT(*) AS c FROM memories_vec v LEFT JOIN memories m ON m.id = v.id "
-                    "WHERE COALESCE(m.status, 'deleted') != 'active'"
+                    "SELECT COUNT(*) AS c FROM memories_vec v "
+                    "WHERE v.id NOT IN (SELECT id FROM memories)"
                 ).fetchone()["c"]
                 sec = conn.execute(
                     "SELECT COUNT(*) AS c FROM memory_sections_vec v "
-                    "LEFT JOIN memory_sections s ON s.id = v.id "
-                    "LEFT JOIN memories m ON m.id = s.memory_id "
-                    "WHERE s.id IS NULL OR COALESCE(m.status, 'deleted') != 'active'"
+                    "WHERE v.id NOT IN (SELECT id FROM memory_sections)"
                 ).fetchone()["c"]
-                return {"inactive_memory_vectors": int(mem), "inactive_section_vectors": int(sec)}
+                return {"orphan_memory_vectors": int(mem), "orphan_section_vectors": int(sec)}
         except Exception:
-            return {"inactive_memory_vectors": 0, "inactive_section_vectors": 0}
+            return {"orphan_memory_vectors": 0, "orphan_section_vectors": 0}
+
+    def _count_vec_parent_status_mismatch(self) -> dict[str, int]:
+        """Delegate to db layer (v0.9.4)."""
+        return self.db._count_vec_parent_status_mismatch() if self.db._db_available and self.db.state.sqlite_vec_available else {}
+
+    def memory_resync_vec_parent_status(
+        self,
+        dry_run: bool = True,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Repair vec.parent_status to match memories.status (v0.9.4, design §3.5 N16).
+
+        Scans memories_vec and memory_sections_vec for rows where
+        ``parent_status != COALESCE(memories.status, 'deleted')`` and updates
+        them in-place. This fixes drift caused by direct DB edits, migration
+        bugs, or failed transactions.
+
+        ``dry_run=True`` (default) only reports how many rows would be updated.
+        Per design §3.5 N16, resync is a **non-destructive UPDATE** (it only
+        aligns ``parent_status`` to the already-existing ``memories.status``;
+        no memory content is rewritten, no vectors are deleted), so it does
+        NOT require ``authorized=True``. The ``authorized`` parameter is kept
+        as a no-op compatibility placeholder so the signature matches the other
+        repair tools (``memory_cleanup_inactive_vectors`` still requires it,
+        because that path also purges orphan rows).
+
+        Returns:
+            dict with keys:
+              - dry_run: bool
+              - mismatches: dict[str, int] with memory_vec_mismatch, section_vec_mismatch
+              - resynced: dict[str, int] (only if dry_run=False) with resynced_memory_vecs, resynced_section_vecs
+              - warnings: list[str] if any errors occurred
+        """
+        mismatches = self._count_vec_parent_status_mismatch()
+        if dry_run:
+            return self.db.state.response(
+                {
+                    "dry_run": True,
+                    "mismatches": mismatches,
+                    "hint": "re-run with dry_run=False to resync mismatched rows (non-destructive; authorized not required)",
+                }
+            )
+        # N16: non-destructive UPDATE — authorized accepted as compat placeholder, not enforced.
+        resync_counts = self.db._resync_vec_parent_status()
+        return self.db.state.response(
+            {
+                "dry_run": False,
+                "mismatches": mismatches,
+                "resynced": resync_counts,
+            }
+        )
 
     # ==================================================================
     #  v0.7.6: Conflict-signal attachment for search results
@@ -3077,14 +3256,22 @@ class MemoryTools:
                     with self.db.write_transaction() as wconn:
                         wconn.execute("DELETE FROM memories_vec WHERE id = ?", (mid,))
                         wconn.execute(
-                            "INSERT INTO memories_vec(id, embedding) VALUES (?, ?)",
-                            (mid, json.dumps(er.embedding)),
+                            "INSERT INTO memories_vec(id, parent_status, embedding) VALUES (?, ?, ?)",
+                            (mid, mem["status"] or "deleted", json.dumps(er.embedding)),
                         )
                         for sid, ser in sec_embeddings:
                             wconn.execute("DELETE FROM memory_sections_vec WHERE id = ?", (sid,))
+                            # v0.9.4: look up parent status via memory_sections JOIN (N17: COALESCE for orphan)
+                            parent_row = wconn.execute(
+                                "SELECT COALESCE(m.status, 'deleted') AS status "
+                                "FROM memory_sections s "
+                                "LEFT JOIN memories m ON m.id = s.memory_id "
+                                "WHERE s.id = ?", (sid,)
+                            ).fetchone()
+                            parent_status = parent_row["status"] if parent_row else "deleted"
                             wconn.execute(
-                                "INSERT INTO memory_sections_vec(id, embedding) VALUES (?, ?)",
-                                (sid, json.dumps(ser.embedding)),
+                                "INSERT INTO memory_sections_vec(id, parent_status, embedding) VALUES (?, ?, ?)",
+                                (sid, parent_status, json.dumps(ser.embedding)),
                             )
                             wconn.execute(
                                 "UPDATE memory_sections SET embedding_truncated = ?, "

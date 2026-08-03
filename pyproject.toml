@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memory-arbiter-mcp"
-version = "0.9.3"
+version = "0.9.4"
 description = "Local MCP memory arbiter with dual timeline conflict handling."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-vec = ["sqlite-vec>=0.1.1"]
+vec = ["sqlite-vec>=0.1.6"]
 test = ["pytest>=8.0.0"]
 
 [project.scripts]

@@ -556,7 +556,7 @@ def _wide_recall(
     tags: Optional[list[str]],
     status_clause_m: str,
     like_status_clause: str,
-    include_superseded: bool = False,
+    status_filter: str = "active",  # "active", "expired", "all"
     pool_cap: int = 50,
     content_like_fallback: bool = True,
     query_embedding: Optional[list[float]] = None,
@@ -697,15 +697,15 @@ def _wide_recall(
         knn_rows = db.vec_knn(
             query_embedding,
             k=max(pool_cap - len(pool), 10),
-            include_superseded=include_superseded,
+            parent_status_filter=status_filter,
         )
         for row in knn_rows:
             # Respect status filtering — vec0 rows are joined from memories,
-            # but we still need to honour the active/superseded gate.
+            # but metadata predicate already filtered at KNN scan time.
+            # v0.9.4: active queries only get parent_status='active' rows;
+            # expired queries get non-active non-deleted; all gets non-deleted.
             status = row.get("status")
             if status == "deleted":
-                continue
-            if status == "superseded" and not include_superseded:
                 continue
             rid = row.get("id")
             if rid is None or rid in pool:
@@ -729,13 +729,11 @@ def _wide_recall(
         sec_rows = db.section_vec_knn(
             query_embedding,
             k=k,
-            include_superseded=include_superseded,
+            parent_status_filter=status_filter,
         )
         for row in sec_rows:
             status = row.get("status")
             if status == "deleted":
-                continue
-            if status == "superseded" and not include_superseded:
                 continue
             # Only split-active memories have meaningful section vectors.
             if row.get("split_status") != "active":
@@ -885,7 +883,7 @@ def search_memories(
     workspace: Optional[str] = None,
     tags: Optional[list[str]] = None,
     limit: int = 10,
-    include_superseded: bool = False,
+    status_filter: str = "active",  # "active", "expired", "all" ("superseded" → "expired")
     debug_ranking: bool = False,
     query_embedding: Optional[list[float]] = None,
     # v0.7.3 additions (design §3.1) — all optional, omit == v0.7.2 behaviour
@@ -893,32 +891,46 @@ def search_memories(
     after_time: Optional[str] = None,
     before_time: Optional[str] = None,
     source_type: Optional[str] = None,
+    offset: int = 0,
 ) -> SearchOutcome:
-    """v0.7.4 (M2): returns a SearchOutcome with retrieval_mode.
+    """v0.9.4: returns a SearchOutcome with retrieval_mode.
 
     has_more/total_estimate give the caller a way to tell exhaustive queries
-    ("all release notes") from complete ones. Pagination itself is not in
-    scope this version (design §3.1 review_1 漏洞 5). retrieval_mode drives
+    ("all release notes") from complete ones. retrieval_mode drives
     linked_open_items triggering (only "direct" is eligible).
+
+    v0.9.4: ``offset`` enables cursor pagination. On the empty-query+filters
+    path it maps to SQL OFFSET (exact, backed by count_filtered_memories). On
+    the query-recall path it widens the candidate pool to cover the offset
+    window — best-effort, since relevance-ranked recall has no exact total and
+    the pool cap bounds the reachable depth (deep pages may return empty).
     """
     warnings: list[str] = []
     if not db.db_available:
         return SearchOutcome([], ["SQLite unavailable; search cannot read JSONL backup in MVP."], False, 0, "unavailable")
     limit = max(1, min(int(limit), 100))
+    offset = max(0, min(int(offset), 10000))
     query = (query or "").strip()
     mode = _get_ranking_mode()
     # v0.3.1: when a query_embedding is supplied but sqlite-vec is not active,
     # warn so the caller knows the semantic channel was silently skipped.
     if query_embedding and not db.state.sqlite_vec_available:
         warnings.append("query_embedding provided but sqlite-vec unavailable; semantic recall skipped.")
-    # Superseded memories are excluded by default: a superseded record is, by
-    # definition, no longer authoritative and only pollutes results (release
-    # chatter, superseded specs, etc.). Audit/history walkthroughs opt back in
-    # via include_superseded=True — and even then the ORDER BY clause below
-    # keeps superseded rows below every active row, so they never drown out
-    # current truth regardless of bm25 score.
-    status_clause = "m.status != 'deleted'" if include_superseded else "(m.status != 'deleted' AND m.status != 'superseded')"
-    like_status_clause = "status != 'deleted'" if include_superseded else "(status != 'deleted' AND status != 'superseded')"
+    # Status filter: active (default), expired (non-active non-deleted), or all.
+    # "superseded" is accepted as a back-compat alias for "expired" (v0.9.4
+    # widened the expired domain from superseded-only to all non-active
+    # non-deleted, covering conflicted/pending for audit recall).
+    if status_filter == "superseded":
+        status_filter = "expired"
+    if status_filter == "active":
+        status_clause = "m.status = 'active'"
+        like_status_clause = "status = 'active'"
+    elif status_filter == "expired":
+        status_clause = "m.status NOT IN ('active','deleted')"
+        like_status_clause = "status NOT IN ('active','deleted')"
+    else:  # "all"
+        status_clause = "m.status != 'deleted'"
+        like_status_clause = "status != 'deleted'"
 
     # === v0.7.3: parse + sanitize filter params (design §3.5 第一步) ===
     after_dt = _parse_time(after_time) if after_time else None
@@ -987,22 +999,30 @@ def search_memories(
     # 的活）。无分页（id=211），靠 has_more + total_estimate。
     if not query and has_filters:
         pool_cap = getattr(db.settings, "recall_pool_cap", 50)
-        rows = db.recall_by_filters(like_status_clause, tags_filter, after_dt, before_dt, source_type, pool_cap)
+        rows = db.recall_by_filters(like_status_clause, tags_filter, after_dt, before_dt, source_type, pool_cap, offset)
         total_estimate = db.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
         )
         if not rows:
             return SearchOutcome([], warnings + ["no memories match the given filters"], False, 0, "empty")
         results = rows[:limit]
-        has_more = total_estimate > len(results)
+        has_more = total_estimate > offset + len(results)
         # No _soft_rerank on this branch (empty query) and recall_by_filters returns
         # bare SELECT * rows, so there are no _-prefixed debug fields to strip.
         return SearchOutcome(results, warnings, has_more, total_estimate, "direct")
 
     # === v0.7.3: pool 组装 + post-filter（design §3.5 第三步） ===
+    # v0.9.4: when paginating (offset > 0), widen the recall pool to cover
+    # the offset window so deep pages are not starved by pool_cap. At offset=0
+    # the original pool_cap is preserved (keeps the pool-saturation / Channel-6
+    # skip semantics intact). Query-recall has no exact total, so offset here
+    # is best-effort (pool cap bounds the reachable depth); the
+    # empty-query+filters branch above is the exact-offset path.
+    base_pool_cap = getattr(db.settings, "recall_pool_cap", 50)
+    pool_cap = max(base_pool_cap, offset + limit) if offset > 0 else base_pool_cap
     pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause,
-                        include_superseded=include_superseded, query_embedding=query_embedding,
-                        pool_cap=getattr(db.settings, "recall_pool_cap", 50),
+                        status_filter=status_filter, query_embedding=query_embedding,
+                        pool_cap=pool_cap,
                         content_like_cap=getattr(db.settings, "content_like_cap", 30))
 
     if has_filters:
@@ -1026,8 +1046,8 @@ def search_memories(
             return SearchOutcome(fb_rows, fb_warnings, False, 0, "recent_fallback")
 
     reranked = _soft_rerank(query, pool)
-    # Slice to limit.
-    reranked = reranked[:limit]
+    # Slice to the requested page window.
+    page = reranked[offset:offset + limit]
 
     # === v0.7.3: has_more / total_estimate（design §3.6 E1） ===
     # E1: 无过滤场景 total_estimate = len(pool)（query 召回数，反映 query
@@ -1039,17 +1059,17 @@ def search_memories(
         )
     else:
         total_estimate = len(pool)
-    # K1: has_more = total > len(reranked)。修了原公式 len==limit and total>limit
+    # K1: has_more = total > offset + len(page). 修了原公式 len==limit and total>limit
     # 在 pool 召回不足时漏报（reranked<limit 但 total>reranked 应判 True）。
-    has_more = total_estimate > len(reranked)
+    has_more = total_estimate > offset + len(page)
 
     # hybrid mode: strip debug fields unless explicitly requested.
     if not debug_ranking:
-        for r in reranked:
+        for r in page:
             for k in list(r.keys()):
                 if k.startswith("_"):
                     r.pop(k, None)
-    return SearchOutcome(reranked, warnings, has_more, total_estimate, "direct")
+    return SearchOutcome(page, warnings, has_more, total_estimate, "direct")
 
 
 def _coerce_tags(raw: Any) -> list[str]:

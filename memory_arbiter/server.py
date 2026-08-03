@@ -63,10 +63,12 @@ v0.9 conflict gate: ALWAYS inspect `action_required`, `verification_status`, and
         )
 
     @app.tool()
-    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, include_superseded: bool = False, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True) -> dict[str, Any]:
+    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True) -> dict[str, Any]:
         """Retrieve memories by relevance. limit is page size (default 10), not a result cap. has_more=true means more unreturned results exist — this version has no pagination; narrow with a more specific query, a larger limit (max 100), or tags_filter.
 
-For project knowledge, past decisions, preferences, or doc-summary questions, search memory before reading source files. Prefer 2-4 core keywords; if nothing hits, retry with synonyms/shorter terms; an empty query or memory_recent lists recent memories. Superseded memories are excluded by default; pass include_superseded=true to audit the history chain. debug_ranking=true returns ranking debug fields.
+v0.9.4: active-query split — ``memory_search`` returns ONLY ``status='active'`` memories. Superseded/deleted memories are excluded at the database level. For superseded history recall use ``memory_search_expired``.
+
+For project knowledge, past decisions, preferences, or doc-summary questions, search memory before reading source files. Prefer 2-4 core keywords; if nothing hits, retry with synonyms/shorter terms; an empty query or memory_recent lists recent memories. debug_ranking=true returns ranking debug fields.
 
 Parameters:
   query: search terms. An empty query still works: with no filters it returns recent memories via fallback; WITH filters (tags_filter / after_time / before_time / source_type) it runs filter-driven recall — e.g. "list all entries with tag X" — ordered by ingest_time (newest first). When mixing ASCII identifiers with CJK terms, separate with spaces (e.g. "v0.7.2 release" not "v0.7.2release"), otherwise mixed tokens take an equality path and may miss.
@@ -86,7 +88,72 @@ v0.9 structured routing: `structured_claim_candidate` + `pending_llm` is a hard 
 Note: tags_filter is AND semantics — every listed tag must be present. Suited to: finding the N most relevant entries, exhaustive queries with filters, and structured listing via empty query + filters.
 
 v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized automatically even without query_embedding; an explicit query_embedding still takes precedence."""
-        return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, include_superseded=include_superseded, debug_ranking=debug_ranking, query_embedding=query_embedding, tags_filter=tags_filter, after_time=after_time, before_time=before_time, source_type=source_type, include_linked_open_items=include_linked_open_items, include_conflict_signal=include_conflict_signal)
+        return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, debug_ranking=debug_ranking, query_embedding=query_embedding, tags_filter=tags_filter, after_time=after_time, before_time=before_time, source_type=source_type, include_linked_open_items=include_linked_open_items, include_conflict_signal=include_conflict_signal)
+
+    @app.tool()
+    def memory_search_expired(
+        query: str = "",
+        workspace: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        limit: int = 20,
+        debug_ranking: bool = False,
+        query_embedding: Optional[list[float]] = None,
+        tags_filter: Optional[list[str]] = None,
+        after_time: Optional[str] = None,
+        before_time: Optional[str] = None,
+        source_type: Optional[str] = None,
+        include_conflict_signal: bool = True,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """v0.9.4: search expired (non-active non-deleted) memories with vec-hybrid recall.
+
+        Searches ONLY non-active, non-deleted memories (superseded + conflicted
+        + pending) for audit/history walkthroughs:
+        - vec channel: ``vec_knn(parent_status_filter="expired")`` with
+          ``parent_status NOT IN ('active','deleted')`` predicate
+        - FTS channel: ``search_memories(status_filter="expired")`` with
+          ``status_clause = "m.status NOT IN ('active','deleted')"``
+
+        ``limit`` controls the per-page cap (default 20, hard cap 50,
+        configurable via ``MEMORY_ARBITER_SUPERSEDED_LIMIT``). ``offset``
+        enables cursor pagination: exact on the empty-query+filters path (SQL
+        OFFSET backed by a precise count), best-effort on the query-recall
+        path (candidate pool windowed to offset+limit; deep pages may return
+        empty since relevance recall has no exact total).
+
+        Active-query split (§3.5): ``memory_search`` (active only) and
+        ``memory_search_expired`` (expired only) are two independent queries.
+        """
+        return tools.memory_search_expired(
+            query=query, workspace=workspace, tags=tags or [], limit=limit,
+            debug_ranking=debug_ranking, query_embedding=query_embedding,
+            tags_filter=tags_filter, after_time=after_time, before_time=before_time,
+            source_type=source_type, include_conflict_signal=include_conflict_signal,
+            offset=offset,
+        )
+
+    @app.tool()
+    def memory_resync_vec_parent_status(
+        dry_run: bool = True,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """v0.9.4: repair vec.parent_status to match memories.status.
+
+        Scans memories_vec and memory_sections_vec for rows where
+        ``parent_status != COALESCE(memories.status, 'deleted')`` and updates
+        them in-place. This fixes drift caused by direct DB edits, migration
+        bugs, or failed transactions.
+
+        ``dry_run=True`` (default) only reports how many rows would be updated.
+        Set ``dry_run=False`` to apply the repair. Per design §3.5 N16 this is a
+        non-destructive UPDATE (it only aligns ``parent_status`` to the existing
+        ``memories.status``; no content rewritten, no vectors deleted), so it does
+        NOT require ``authorized=True`` — that parameter is a no-op compatibility
+        placeholder kept for signature parity with other repair tools.
+        """
+        return tools.memory_resync_vec_parent_status(
+            dry_run=dry_run, authorized=authorized
+        )
 
     @app.tool()
     def memory_get(
@@ -273,7 +340,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
 
     @app.tool()
     def memory_confirm(memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False) -> dict[str, Any]:
-        """Mark a memory as user-confirmed, promoting it to source_type=user_confirmed + protection_level=locked so it cannot be overwritten automatically. Requires authorized=true — promotion to the highest trust/protection tier must be an explicit, human-confirmed action."""
+        """Mark an active memory as user-confirmed, promoting it to source_type=user_confirmed + protection_level=locked so it cannot be overwritten automatically. Requires authorized=true — promotion to the highest trust/protection tier must be an explicit, human-confirmed action. Superseded/deleted memories cannot be confirmed/reactivated; write a new active memory instead."""
         return tools.memory_confirm(memory_id=memory_id, source_ref=source_ref, confidence=confidence, authorized=authorized)
 
     @app.tool()
@@ -358,7 +425,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
         dry_run: bool = True,
         authorized: bool = False,
     ) -> dict[str, Any]:
-        """Delete vec rows whose parent memory is not active (v0.9.2). superseded/deleted/orphan vectors keep occupying vec0 KNN top-k slots, forcing every KNN onto the exact-L2 slow path (see doctor consistency.inactive_vectors_slowpath). This physically removes them to restore the vec0 MATCH fast path. Only touches memories_vec / memory_sections_vec; the memories table (content, FTS, audit history) is never modified — vectors are a derivative and can be recomputed via memory_rebuild_embeddings. dry_run=true (default) only reports counts; actual deletion requires dry_run=false AND authorized=true."""
+        """Purge orphan vec rows and optionally resync parent_status (v0.9.4). Superseded vectors are retained for memory_search_expired; this tool only deletes true orphan vectors whose parent memory/section row no longer exists. dry_run=true reports vec_parent_status_mismatches and orphan_vectors. Actual orphan purge requires dry_run=false AND authorized=true; any detected parent_status drift is resynced first. Only touches memories_vec / memory_sections_vec; memory content and FTS are never modified."""
         return tools.memory_cleanup_inactive_vectors(
             dry_run=dry_run,
             authorized=authorized,

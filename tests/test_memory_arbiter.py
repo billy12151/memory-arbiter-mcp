@@ -305,6 +305,35 @@ def test_confirm_promotes_record(tmp_path: Path) -> None:
     assert confirmed["data"]["record"]["protection_level"] == "locked"
 
 
+def test_confirm_rejects_inactive_memory(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(
+        content="old fact",
+        subject="fact",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    new = tools.memory_write(
+        content="new fact",
+        subject="fact",
+        source_type="agent_generated",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    old_id = old["data"]["id"]
+    assert tools.memory_supersede(
+        memory_id=old_id,
+        reason="replaced",
+        superseded_by=new["data"]["id"],
+        authorized=True,
+    )["ok"] is True
+
+    rejected = tools.memory_confirm(old_id, source_ref="late-user-chat", authorized=True)
+    assert rejected["ok"] is False
+    assert rejected["data"]["confirmed"] is False
+    assert "not active" in rejected["data"]["error"]
+    assert tools.db.get_memory(old_id)["status"] == "superseded"
+
+
 def test_confirm_requires_authorization(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     written = tools.memory_write(content="a fact to confirm", source_type="agent_generated")
@@ -620,12 +649,46 @@ def test_search_excludes_superseded_by_default(tmp_path: Path) -> None:
     assert stale_id not in ids, "superseded record leaked into default search results"
 
 
-def test_search_includes_superseded_when_requested(tmp_path: Path) -> None:
-    """v0.2.6: include_superseded=True returns both, with superseded ranked below.
+def test_search_active_domain_excludes_non_active_non_superseded_statuses(tmp_path: Path) -> None:
+    """v0.9.4: active search means status='active', not merely not-deleted."""
+    tools = make_tools(tmp_path)
+    active = tools.memory_write(
+        content="release-domain active record",
+        subject="release-domain",
+        status="active",
+    )
+    pending = tools.memory_write(
+        content="release-domain pending record",
+        subject="release-domain",
+        status="pending",
+    )
+    conflicted = tools.memory_write(
+        content="release-domain conflicted record",
+        subject="release-domain",
+        status="conflicted",
+    )
 
-    Audit/history walkthroughs need to see the full supersede chain. The flag
-    restores them — but the ORDER BY clause must still sink superseded rows
-    below every active row so history audits don't bury current truth.
+    found = tools.memory_search(query="release-domain")
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert active["data"]["id"] in ids
+    assert pending["data"]["id"] not in ids
+    assert conflicted["data"]["id"] not in ids
+
+    # v0.9.4 点2: expired recall surfaces all non-active non-deleted statuses
+    # (superseded + conflicted + pending), not just superseded. make_tools runs
+    # FTS-only, exercising the expanded NOT IN ('active','deleted') status_clause.
+    expired = tools.memory_search_expired(query="release-domain")
+    expired_ids = [r["id"] for r in expired["data"]["results"]]
+    assert pending["data"]["id"] in expired_ids
+    assert conflicted["data"]["id"] in expired_ids
+    assert active["data"]["id"] not in expired_ids
+
+
+def test_search_includes_superseded_when_requested(tmp_path: Path) -> None:
+    """v0.9.4: memory_search_expired returns superseded records.
+
+    Audit/history walkthroughs need to see the full supersede chain. The
+    ``memory_search_expired`` tool returns only superseded memories.
     """
     tools = make_tools(tmp_path)
     active = tools.memory_write(
@@ -643,12 +706,17 @@ def test_search_includes_superseded_when_requested(tmp_path: Path) -> None:
     active_id, stale_id = active["data"]["id"], stale["data"]["id"]
     tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
 
-    found = tools.memory_search(query="release-spec", workspace="repo-a", include_superseded=True)
+    # memory_search (active only)
+    found = tools.memory_search(query="release-spec", workspace="repo-a")
     ids = [r["id"] for r in found["data"]["results"]]
-    assert active_id in ids, "active record missing under include_superseded=True"
-    assert stale_id in ids, "superseded record not returned under include_superseded=True"
-    # Superseded must rank below active even though both match.
-    assert ids.index(stale_id) > ids.index(active_id), "superseded ranked above active"
+    assert active_id in ids, "active record missing in active search"
+    assert stale_id not in ids, "superseded record leaked into active search results"
+
+    # memory_search_expired (superseded only)
+    expired = tools.memory_search_expired(query="release-spec", workspace="repo-a")
+    expired_ids = [r["id"] for r in expired["data"]["results"]]
+    assert stale_id in expired_ids, "superseded record not returned by memory_search_expired"
+    assert active_id not in expired_ids, "active record leaked into expired search results"
 
 
 def test_supersede_rejects_non_active_replacement(tmp_path: Path) -> None:
@@ -678,13 +746,14 @@ def test_supersede_rejects_non_active_replacement(tmp_path: Path) -> None:
 
 
 def test_superseded_always_ranked_below_active_even_with_higher_score(tmp_path: Path) -> None:
-    """v0.2.6: the soft-demote clause is unconditional, not gated on the filter.
+    """v0.9.4: active/expired query split replaces the soft-demote safety net.
 
-    Even when include_superseded=True lets superseded rows back into the result
-    set, they must rank below active rows regardless of bm25 score. A
-    superseded record that happens to mention the query terms more often than
-    the active record (common: release chatter repeats the codename) must not
-    bubble up. This is the audit-mode safety net.
+    The old soft-demote clause (superseded ranked below active regardless of
+    bm25 score) is superseded by interface isolation: ``memory_search`` only
+    returns active rows, ``memory_search_expired`` only returns superseded
+    rows. A superseded record with a higher bm25 signal therefore never
+    competes with the active record in the same result set — the stronger
+    guarantee the demote clause was approximating.
     """
     tools = make_tools(tmp_path)
     # Active record: short, mentions query term once → lower bm25 signal.
@@ -705,12 +774,19 @@ def test_superseded_always_ranked_below_active_even_with_higher_score(tmp_path: 
     active_id, stale_id = active["data"]["id"], stale["data"]["id"]
     tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
 
-    found = tools.memory_search(query="release", workspace="repo-a", include_superseded=True)
+    # memory_search (active-only): the superseded record must NOT surface,
+    # even though it has the higher bm25 signal.
+    found = tools.memory_search(query="release", workspace="repo-a")
     ids = [r["id"] for r in found["data"]["results"]]
-    assert active_id in ids and stale_id in ids
-    assert ids.index(stale_id) > ids.index(active_id), (
-        "superseded ranked above active despite the demote clause — ORDER BY is broken"
-    )
+    assert active_id in ids, "active record missing from memory_search"
+    assert stale_id not in ids, "superseded record leaked into active-only memory_search"
+
+    # memory_search_expired (superseded-only): the superseded record IS surfaced
+    # for audit, and the active record does NOT leak in.
+    expired = tools.memory_search_expired(query="release", workspace="repo-a")
+    expired_ids = [r["id"] for r in expired["data"]["results"]]
+    assert stale_id in expired_ids, "superseded record not returned by memory_search_expired"
+    assert active_id not in expired_ids, "active record leaked into superseded-only memory_search_expired"
 
 
 # ---- v0.3.1: optional semantic recall (sqlite-vec vec0) -----------------
@@ -2637,10 +2713,12 @@ def test_v080_provenance_is_explicit_not_inferred(tmp_path: Path) -> None:
 
 
 def test_v061_r1_channel6_recall_superseded_with_include_superseded(tmp_path: Path) -> None:
-    """R1: include_superseded=True lets Channel 6 recall a superseded split-active
-    memory. Channel 6's post-filter mirrors Channel 5: superseded rows are only
-    skipped when 'superseded' is in like_status_clause (the default). With
-    include_superseded=True they pass through."""
+    """R1: memory_search_expired recalls a superseded split-active memory.
+
+    Channel 6's post-filter no longer uses include_superseded. Instead,
+    memory_search_expired uses vec_knn(include_superseded=True) to recall
+    superseded memories via their section vectors.
+    """
     tools = _make_channel6_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
@@ -2665,29 +2743,27 @@ def test_v061_r1_channel6_recall_superseded_with_include_superseded(tmp_path: Pa
     default_ids = {r["id"] for r in default_result["data"]["results"]}
     assert target_id not in default_ids, "superseded memory leaked into default search"
 
-    # include_superseded=True → Channel 6 should recall it via section vec.
-    included_result = tools.memory_search(
+    # memory_search_expired should recall it via section vec.
+    expired_result = tools.memory_search_expired(
         query="beta", query_embedding=_keyword_embedding("beta"),
-        include_superseded=True, debug_ranking=True,
+        debug_ranking=True,
     )
-    included_map = {r["id"]: r for r in included_result["data"]["results"]}
-    assert target_id in included_map, (
-        "Channel 6 should recall superseded split-active memory when "
-        "include_superseded=True"
+    expired_map = {r["id"]: r for r in expired_result["data"]["results"]}
+    assert target_id in expired_map, (
+        "Channel 6 should recall superseded split-active memory via "
+        "memory_search_expired"
     )
 
 
 def test_knn_prefilters_inactive_parent_before_top_k(tmp_path: Path) -> None:
     """A closer superseded memory/section cannot consume the default KNN slot.
 
-    v0.9.2 note: supersede now cascade-deletes the loser's vectors, so the
-    default-path guarantee is enforced by deletion rather than by the v0.9.1
-    prefilter alone. include_superseded audit *vector* recall of a superseded
-    memory is intentionally no longer possible (its vectors are gone); audit of
-    the content/FTS is unaffected. The prefilter still guards non-supersede
-    inactive rows (deleted parents, physical orphans) — covered below and by
-    tests/test_v092_vector_cleanup.py.
-    """
+    v0.9.4: supersede now marks vectors as 'superseded' (not cascade-deletes).
+    The metadata predicate ``AND v.parent_status='active'`` pre-filters at
+    KNN scan time. The superseded memory's vectors are still there, but
+    they are only visible via ``memory_search_expired`` which uses
+    ``include_superseded=True`` to query ``parent_status='superseded'``
+    vectors."""
     pytest.importorskip("sqlite_vec")
     tools = _make_channel6_tools(tmp_path)
     tools._embedder = _keyword_embedder()
@@ -2718,8 +2794,8 @@ def test_knn_prefilters_inactive_parent_before_top_k(tmp_path: Path) -> None:
         authorized=True,
     )["ok"] is True
 
-    # The stale memory's (closer) vector is gone, so the default KNN slot goes
-    # to the active memory — never the superseded one.
+    # Default KNN (active only): stale's vector is marked 'superseded',
+    # so the metadata predicate v.parent_status='active' excludes it.
     default_memory_rows = tools.db.vec_knn(_keyword_embedding("alpha"), k=1)
     assert len(default_memory_rows) == 1
     assert default_memory_rows[0]["id"] == active_id
@@ -2730,16 +2806,20 @@ def test_knn_prefilters_inactive_parent_before_top_k(tmp_path: Path) -> None:
     assert len(default_rows) == 1
     assert default_rows[0]["memory_id"] == active_id
 
-    # include_superseded audit vector recall no longer resurfaces the superseded
-    # memory (its vectors were cascade-deleted); only active rows are returned.
-    audit_memory_rows = tools.db.vec_knn(
-        _keyword_embedding("alpha"), k=5, include_superseded=True
+    # memory_search_expired: parent_status_filter="expired" queries non-active
+    # non-deleted vectors, so the stale memory IS returned.
+    expired_memory_rows = tools.db.vec_knn(
+        _keyword_embedding("alpha"), k=5, parent_status_filter="expired"
     )
-    assert all(r["id"] != stale_id for r in audit_memory_rows)
-    audit_rows = tools.db.section_vec_knn(
-        _keyword_embedding("alpha"), k=5, include_superseded=True
+    assert any(r["id"] == stale_id for r in expired_memory_rows), (
+        "superseded memory should be recalled via vec_knn(parent_status_filter=\"expired\")"
     )
-    assert all(r["memory_id"] != stale_id for r in audit_rows)
+    expired_rows = tools.db.section_vec_knn(
+        _keyword_embedding("alpha"), k=5, parent_status_filter="expired"
+    )
+    assert any(r["memory_id"] == stale_id for r in expired_rows), (
+        "superseded section should be recalled via section_vec_knn(parent_status_filter=\"expired\")"
+    )
 
 
 # ---- v0.7.3 change 1: tag scoring unit tests (design §2.6 matrix) ------

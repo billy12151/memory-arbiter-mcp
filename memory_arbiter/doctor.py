@@ -1071,46 +1071,54 @@ def _check_orphan_vectors(conn: sqlite3.Connection) -> Finding:
     )
 
 
-def _check_inactive_vectors_slowpath(conn: sqlite3.Connection) -> Finding:
-    """Report inactive (superseded/deleted/orphan) vectors forcing the exact
-    L2 slow path in vec_knn / section_vec_knn.  Informational only: recall
-    correctness is preserved either way, but every KNN pays a full-table
-    distance scan while any ineligible vector exists."""
+def _check_vec_parent_status_sync(conn: sqlite3.Connection) -> Finding:
+    """Report vec.parent_status vs memories.status mismatches (v0.9.4).
+
+    The vec tables carry a ``parent_status`` TEXT column that should match
+    the parent memory's ``status`` at write time (active/superseded/deleted).
+    When it drifts — e.g. from direct DB edits, migration bugs, or failed
+    transactions — the KNN metadata predicate ``AND v.parent_status = 'active'``
+    may silently exclude valid rows or resurrect invalid ones.
+
+    This check counts mismatches and reports them as a warn-level finding.
+    """
     if not _table_exists(conn, "memories_vec"):
-        return _na("consistency.inactive_vectors_slowpath", "consistency",
+        return _na("consistency.vec_parent_status_sync", "consistency",
                    "memories_vec 表不存在（向量未启用）")
-    mem_inactive = _scalar(conn,
-        "SELECT count(*) FROM memories_vec v LEFT JOIN memories m ON m.id=v.id "
-        "WHERE COALESCE(m.status, 'deleted') != 'active'") or 0
-    sec_inactive = 0
+    mem_mismatch = _scalar(conn,
+        "SELECT COUNT(*) FROM memories_vec v "
+        "JOIN memories m ON m.id=v.id "
+        "WHERE v.parent_status IS NULL "
+        "OR v.parent_status != COALESCE(m.status, 'deleted')") or 0
+    sec_mismatch = 0
     if _table_exists(conn, "memory_sections_vec"):
-        sec_inactive = _scalar(conn,
-            "SELECT count(*) FROM memory_sections_vec v "
-            "LEFT JOIN memory_sections s ON s.id=v.id "
-            "LEFT JOIN memories m ON m.id=s.memory_id "
-            "WHERE COALESCE(m.status, 'deleted') != 'active'") or 0
-    evidence = {"inactive_memory_vectors": mem_inactive,
-                "inactive_section_vectors": sec_inactive}
-    if mem_inactive == 0 and sec_inactive == 0:
+        sec_mismatch = _scalar(conn,
+            "SELECT COUNT(*) FROM memory_sections_vec v "
+            "JOIN memory_sections s ON s.id=v.id "
+            "JOIN memories m ON m.id=s.memory_id "
+            "WHERE v.parent_status IS NULL "
+            "OR v.parent_status != COALESCE(m.status, 'deleted')") or 0
+    evidence = {"memory_vec_parent_status_mismatches": mem_mismatch,
+                "section_vec_parent_status_mismatches": sec_mismatch}
+    if mem_mismatch == 0 and sec_mismatch == 0:
         return Finding(
-            check_id="consistency.inactive_vectors_slowpath", dimension="consistency",
+            check_id="consistency.vec_parent_status_sync", dimension="consistency",
             severity=Severity.INFO, status="pass",
-            title="无 inactive 向量，KNN 走 vec0 快路径",
-            detail="全部向量父记忆均为 active；向量召回使用 vec0 KNN 快路径",
+            title="vec.parent_status 与 memories.status 一致",
+            detail="全部向量的 parent_status 与父记忆 status 同步；KNN metadata 谓词快路径可用",
             evidence=evidence,
         )
     return Finding(
-        check_id="consistency.inactive_vectors_slowpath", dimension="consistency",
-        severity=Severity.INFO, status="pass",
-        title=f"{mem_inactive + sec_inactive} 条 inactive 向量使 KNN 走精确距离慢路径",
-        detail=(f"inactive 向量：memory 级 {mem_inactive} 条、section 级 {sec_inactive} 条"
-                "（父记忆 superseded/deleted 或物理孤儿）。召回正确性不受影响"
-                "（预过滤后计算精确 L2 距离），但每次搜索退化为全量距离扫描，"
-                "库规模增大时延迟会上升。物理删除这些向量可恢复 vec0 快路径。"),
+        check_id="consistency.vec_parent_status_sync", dimension="consistency",
+        severity=Severity.WARNING, status="warn",
+        title=f"{mem_mismatch + sec_mismatch} 条向量的 parent_status 与父记忆不一致",
+        detail=(f"memory_vec 级 {mem_mismatch} 条、section_vec 级 {sec_mismatch} 条 "
+                f"parent_status 与 memories.status 不匹配。KNN metadata 谓词依赖该列，"
+                f"漂移可能导致 active/expired 查询漏召或误召回；请先 resync 再依赖向量召回。"),
         evidence=evidence,
-        fix_hint="运行 memory_cleanup_inactive_vectors（先 dry_run=true 预览，"
-                 "再 dry_run=false + authorized=true 删除）物理清理，恢复 vec0 快路径。"
-                 "只删向量行，不动 memories 正文/FTS（审计历史保留）。",
+        fix_hint="运行 memory_resync_vec_parent_status（先 dry_run=true 预览，再 "
+                 "dry_run=false 修复；resync 为非破坏性 UPDATE，无需 authorized）"
+                 "或 memory_rebuild_embeddings 重建全部向量",
     )
 
 
@@ -1118,9 +1126,9 @@ def _check_section_vec_coverage(conn: sqlite3.Connection) -> Finding:
     if not _table_exists(conn, "memory_sections") or not _table_exists(conn, "memory_sections_vec"):
         return _na("consistency.section_vec_coverage", "consistency",
                    "memory_sections / memory_sections_vec 表不存在")
-    # Only active parents need section vectors — v0.9.2 cascade-deletes vectors
-    # for superseded/deleted memories, so their sections legitimately have none
-    # and must not trigger a false "missing coverage" warning.
+    # Only active parents need section vectors. Inactive parents may legitimately
+    # retain section rows and/or vectors as audit history; their absence must not
+    # trigger a false "missing coverage" warning.
     missing = _scalar(conn,
         "SELECT count(*) FROM memory_sections ms "
         "JOIN memories m ON m.id = ms.memory_id "
@@ -1422,8 +1430,8 @@ def run_all_checks(
          lambda: _check_vec_index_state(conn, link3_passed), "consistency")
     _run("consistency.orphan_sections", lambda: _check_orphan_sections(conn), "consistency")
     _run("consistency.orphan_vectors", lambda: _check_orphan_vectors(conn), "consistency")
-    _run("consistency.inactive_vectors_slowpath",
-         lambda: _check_inactive_vectors_slowpath(conn), "consistency")
+    _run("consistency.vec_parent_status_sync",
+         lambda: _check_vec_parent_status_sync(conn), "consistency")
     _run("consistency.section_vec_coverage", lambda: _check_section_vec_coverage(conn), "consistency")
     _run("consistency.history_version_chain",
          lambda: _check_history_version_chain(conn), "consistency")

@@ -3,6 +3,95 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.9.4] — 2026-08-03
+
+### Added
+
+- **`memory_search_expired` tool** — searches non-active non-deleted memories
+  (superseded + conflicted + pending) with vec-hybrid recall (vec channel with
+  `parent_status` predicate + FTS). Replaces the old `include_superseded=true`
+  parameter on `memory_search`. The query domain is physically isolated from
+  active queries so superseded results never crowd out active ones. Default
+  `limit=20`, hard cap 50, configurable via `MEMORY_ARBITER_SUPERSEDED_LIMIT`.
+  v0.9.4 also adds `offset` cursor pagination: exact on the empty-query +
+  filters path (SQL `OFFSET` + precise `count_filtered_memories`), best-effort
+  on the query-recall path (relevance pool widened to `offset + limit`).
+  `memory_search` deliberately remains unpaginated. Offset clamped to
+  `[0, 10000]`.
+
+- **`memory_resync_vec_parent_status` tool** — repairs `vec.parent_status` to
+  match `memories.status` when drift is detected (direct DB edits, migration
+  bugs, or failed transactions). Uses `dry_run=true` (default) to preview
+  mismatches; actual repair uses `dry_run=false` and does not require
+  `authorized` because it is a non-destructive metadata UPDATE. The doctor
+  `consistency.vec_parent_status_sync` check reports drift and points at this
+  tool.
+
+- **Schema migration: `vec0` metadata `parent_status` column** — idempotent
+  startup migration adds `parent_status TEXT` to `memories_vec` and
+  `memory_sections_vec` (DROP+CREATE+re-insert because vec0 does not support
+  ALTER). Parent status is derived from `memories.status` with `COALESCE(...,
+  'deleted')` for orphan rows. Requires `sqlite-vec>=0.1.6`.
+
+### Changed
+
+- **`memory_search` now returns ONLY active memories** — removes
+  `include_superseded` parameter. Status filter is hard-coded to `status='active'`.
+  For superseded history recall use the new `memory_search_expired`.
+
+- **vec KNN filter generalized to `parent_status_filter`** — `vec_knn` and
+  `section_vec_knn` replace the boolean `include_superseded` with a string
+  enum: `"active"` (`= 'active'`), `"expired"` (`NOT IN ('active','deleted')`,
+  covering superseded + conflicted + pending), `"all"` (`!= 'deleted'`). This
+  aligns the vec channel's domain with FTS semantics: `status_filter="all"`
+  now returns all non-deleted from both channels (previously vec returned
+  active-only, missing semantically-relevant superseded vectors).
+
+- **`memory_search_expired` recall domain expanded** — returns all non-active
+  non-deleted memories, not just `superseded`. This eliminates "dead vectors":
+  conflicted/pending memories had `parent_status` set to those literal statuses
+  by `update_memory`, but were invisible to both active and (old)
+  superseded-only recall. `memory_search` is unchanged (active only).
+
+- **Supersede/arbitrate vec sync consolidated** — vector `parent_status` is
+  synced solely by `update_memory`'s built-in vec synchronization (which writes
+  both `memories_vec` and `memory_sections_vec` in the same transaction as the
+  status flip); the redundant `mark_vectors_for_memory` calls in the
+  `supersede`/`arbitrate` paths are removed. `mark_vectors_for_memory` is
+  retained as a primitive for the future revive path (`mark(id, 'active')`).
+
+- **`memory_cleanup_inactive_vectors` semantics changed** — now performs two
+  phases: (1) resync `parent_status` mismatches via `_resync_vec_parent_status`,
+  (2) purge true orphans (vec rows whose parent memory/section no longer exists).
+  It no longer deletes superseded vectors (they are kept for audit recall).
+
+- **Doctor `consistency.inactive_vectors_slowpath` retired** — replaced by
+  `consistency.vec_parent_status_sync` which reports mismatches between
+  `vec.parent_status` and `memories.status`. The old check assumed inactive
+  vectors were always problematic; the retain-vectors design intentionally
+  keeps superseded vectors for history recall.
+
+- **KNN query optimization (metadata predicate)** — `vec_knn` and
+  `section_vec_knn` now use the `parent_status` metadata predicate on the
+  vec0 MATCH query, eliminating the O(n) exact-distance slow path that was
+  triggered whenever inactive vectors existed.
+
+### Migration Notes
+
+1. **Backup required**: The vec0 schema migration is destructive (DROP+CREATE).
+   Backup `memory.sqlite3` before first startup on v0.9.4.
+2. **sqlite-vec version**: Ensure `sqlite-vec>=0.1.6` (metadata column support).
+3. **API signature change**: `vec_knn` / `section_vec_knn`
+   `include_superseded: bool` → `parent_status_filter: str`. Direct callers
+   must update. Pass `"expired"` where `include_superseded=True` was used;
+   `"active"` is the default (was the `False` behavior).
+4. **`status_filter="superseded"` is aliased to `"expired"`** in
+   `search_memories` for backward compatibility, but new code should use
+   `"expired"` (the broader, accurate domain).
+5. **Behavior reversal**: Old `include_superseded=true` vector recall no longer
+   works (it returned active+superseded mixed). Use `memory_search` (active) or
+   `memory_search_expired` (non-active non-deleted) explicitly.
+
 ## [0.9.3] — 2026-08-03
 
 ### Fixed

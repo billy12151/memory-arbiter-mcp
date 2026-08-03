@@ -429,6 +429,8 @@ class MemoryDB:
                 self.state.mode = "sqlite_vec"
                 self._ensure_vec_table(conn)
                 self._ensure_section_vec_table(conn)
+                # v0.9.4: migrate vec0 tables to include parent_status metadata column
+                self._migrate_vec_parent_status(conn)
             except Exception as exc:  # pragma: no cover
                 self.state.warn(
                     f"sqlite-vec unavailable: {exc}. "
@@ -529,7 +531,7 @@ class MemoryDB:
         try:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec "
-                f"USING vec0(id INTEGER PRIMARY KEY, embedding float[{dim}])"
+                f"USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[{dim}])"
             )
             conn.commit()
         except sqlite3.Error as exc:
@@ -543,7 +545,7 @@ class MemoryDB:
         try:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_sections_vec "
-                f"USING vec0(id INTEGER PRIMARY KEY, embedding float[{dim}])"
+                f"USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[{dim}])"
             )
             conn.commit()
         except sqlite3.Error as exc:
@@ -551,6 +553,123 @@ class MemoryDB:
                 f"memory_sections_vec creation failed (dim={dim}): {exc}. "
                 "Section split will be unavailable."
             )
+
+    def _migrate_vec_parent_status(self, conn: sqlite3.Connection) -> None:
+        """v0.9.4: add parent_status metadata column to vec0 tables (idempotent).
+
+        Detects whether memories_vec / memory_sections_vec carry the
+        ``parent_status`` column.  If both are already present the migration
+        is a no-op.  If absent the table is rebuilt via DROP+CREATE+re-insert
+        (vec0 does not support ALTER ADD COLUMN — the column set is frozen at
+        CREATE).  Parent_status values are derived from ``memories.status``
+        (or ``memory_sections.memory_id`` → ``memories.status``).  Orphan rows
+        (no parent in memories/memory_sections) get ``COALESCE(..., 'deleted')``.
+
+        Requires sqlite-vec >= 0.1.6 for metadata-column filter support.
+        """
+        dim = int(getattr(self.settings, "vec_dim", 768) or 768)
+        mem_has_col = False
+        sec_has_col = False
+        try:
+            # PRAGMA table_info on vec0 virtual tables works for checking columns
+            mem_cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(memories_vec)")}
+            if "parent_status" in mem_cols:
+                mem_has_col = True
+            sec_cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(memory_sections_vec)")}
+            if "parent_status" in sec_cols:
+                sec_has_col = True
+        except sqlite3.Error:
+            pass  # table doesn't exist yet — will be created fresh below
+
+        if not mem_has_col:
+            try:
+                # Backup existing rows (id + raw embedding as returned by vec0).
+                conn.execute("DROP TABLE IF EXISTS _vec_mem_bak")
+                conn.execute("CREATE TABLE _vec_mem_bak(id INTEGER PRIMARY KEY, embedding BLOB)")
+                conn.execute("INSERT INTO _vec_mem_bak SELECT id, embedding FROM memories_vec")
+                conn.execute("DROP TABLE memories_vec")
+                conn.execute(
+                    f"CREATE VIRTUAL TABLE memories_vec "
+                    f"USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[{dim}])"
+                )
+                # Repopulate: get parent status from memories table, with
+                # COALESCE for deleted/orphan rows.  Embedding format: vec0 may
+                # return struct-packed bytes — convert to JSON list for re-insert.
+                raw_rows = conn.execute("SELECT id, embedding FROM _vec_mem_bak").fetchall()
+                for row in raw_rows:
+                    mem_id = int(row["id"])
+                    # Fetch parent status — COALESCE('deleted') for missing memories.
+                    parent_row = conn.execute(
+                        "SELECT status FROM memories WHERE id = ?", (mem_id,)
+                    ).fetchone()
+                    parent_status = parent_row["status"] if parent_row else "deleted"
+                    embedding_raw = row["embedding"]
+                    if isinstance(embedding_raw, bytes):
+                        n = len(embedding_raw) // 4
+                        embedding = json.dumps(list(struct.unpack(f"<{n}f", embedding_raw)))
+                    elif isinstance(embedding_raw, list):
+                        embedding = json.dumps(embedding_raw)
+                    else:
+                        embedding = json.dumps(embedding_raw) if not isinstance(embedding_raw, str) else embedding_raw
+                    conn.execute(
+                        "INSERT INTO memories_vec(id, parent_status, embedding) VALUES (?, ?, ?)",
+                        (mem_id, parent_status, embedding),
+                    )
+                conn.execute("DROP TABLE _vec_mem_bak")
+                # Persist the DROP+CREATE+re-insert.  Python sqlite3's default
+                # isolation level opens an implicit transaction on DML; without
+                # this commit the entire migration is rolled back when the init
+                # connection closes, leaving the vec table on the old (no
+                # parent_status) schema on any pre-existing database.
+                conn.commit()
+            except sqlite3.Error as exc:
+                self.state.warn(
+                    f"memories_vec parent_status migration failed: {exc}. "
+                    "KNN will fall back to post-JOIN filtering."
+                )
+
+        if not sec_has_col:
+            try:
+                conn.execute("DROP TABLE IF EXISTS _vec_sec_bak")
+                conn.execute("CREATE TABLE _vec_sec_bak(id INTEGER PRIMARY KEY, embedding BLOB)")
+                conn.execute("INSERT INTO _vec_sec_bak SELECT id, embedding FROM memory_sections_vec")
+                conn.execute("DROP TABLE memory_sections_vec")
+                conn.execute(
+                    f"CREATE VIRTUAL TABLE memory_sections_vec "
+                    f"USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[{dim}])"
+                )
+                raw_rows = conn.execute("SELECT id, embedding FROM _vec_sec_bak").fetchall()
+                for row in raw_rows:
+                    sec_id = int(row["id"])
+                    # Fetch parent status via memory_sections JOIN (N17: COALESCE for orphan sections)
+                    parent_row = conn.execute(
+                        "SELECT COALESCE(m.status, 'deleted') AS status "
+                        "FROM memory_sections s "
+                        "LEFT JOIN memories m ON m.id = s.memory_id "
+                        "WHERE s.id = ?", (sec_id,)
+                    ).fetchone()
+                    parent_status = parent_row["status"] if parent_row else "deleted"
+                    embedding_raw = row["embedding"]
+                    if isinstance(embedding_raw, bytes):
+                        n = len(embedding_raw) // 4
+                        embedding = json.dumps(list(struct.unpack(f"<{n}f", embedding_raw)))
+                    elif isinstance(embedding_raw, list):
+                        embedding = json.dumps(embedding_raw)
+                    else:
+                        embedding = json.dumps(embedding_raw) if not isinstance(embedding_raw, str) else embedding_raw
+                    conn.execute(
+                        "INSERT INTO memory_sections_vec(id, parent_status, embedding) VALUES (?, ?, ?)",
+                        (sec_id, parent_status, embedding),
+                    )
+                conn.execute("DROP TABLE _vec_sec_bak")
+                # Persist the section-vec migration for the same reason as the
+                # memories_vec branch above (uncommitted DML rolls back on close).
+                conn.commit()
+            except sqlite3.Error as exc:
+                self.state.warn(
+                    f"memory_sections_vec parent_status migration failed: {exc}. "
+                    "KNN will fall back to post-JOIN filtering."
+                )
 
     # ------------------------------------------------------------------
     #  Embedding operations
@@ -566,10 +685,16 @@ class MemoryDB:
             return False, ["embedding is empty (encode failed); not stored."]
         try:
             with self.connection() as conn:
+                # v0.9.4: look up parent status from memories table (N8: COALESCE for deleted)
+                parent_status = conn.execute(
+                    "SELECT COALESCE(status, 'deleted') AS status FROM memories WHERE id = ?",
+                    (int(memory_id),),
+                ).fetchone()
+                parent_status = parent_status["status"] if parent_status else "deleted"
                 conn.execute("DELETE FROM memories_vec WHERE id = ?", (memory_id,))
                 conn.execute(
-                    "INSERT INTO memories_vec(id, embedding) VALUES (?, ?)",
-                    (memory_id, json.dumps(embedding)),
+                    "INSERT INTO memories_vec(id, parent_status, embedding) VALUES (?, ?, ?)",
+                    (memory_id, parent_status, json.dumps(embedding)),
                 )
                 conn.commit()
             return True, []
@@ -591,13 +716,17 @@ class MemoryDB:
             return False, [f"delete_embedding failed: {exc}"]
 
     def delete_vectors_for_memory(self, memory_id: int) -> Tuple[bool, list[str]]:
-        """Delete memory-level AND section-level vec rows for a memory (v0.9.2).
+        """Hard-delete memory-level AND section-level vec rows for a memory (v0.9.2).
 
-        Called when a memory is superseded/deleted so its vectors stop occupying
-        vec0 KNN top-k slots. Without this the KNN permanently degrades to the
-        exact-L2 slow path (see consistency.inactive_vectors_slowpath). The
-        memory's content and FTS rows are kept for audit; vectors are a pure
-        derivative and can always be recomputed from content.
+        Purges vectors from both ``memories_vec`` and ``memory_sections_vec``.
+        v0.9.4: this is now ONLY called for hard-delete paths (e.g. edit-failure
+        rollback, memory_cleanup_history cascade).  For supersede/arbitrate loser
+        paths use ``mark_vectors_for_memory(memory_id, 'superseded')`` instead,
+        which retains vectors with parent_status='superseded' for audit/history
+        recall via ``memory_search_expired``.
+
+        The memory's content and FTS rows are kept for audit; vectors are a
+        pure derivative and can always be recomputed from content.
         """
         warnings: list[str] = []
         if not self._db_available or not self.state.sqlite_writable:
@@ -616,120 +745,238 @@ class MemoryDB:
         except sqlite3.Error as exc:
             return False, [f"delete_vectors_for_memory failed: {exc}"]
 
-    def delete_inactive_vectors(self) -> Tuple[dict[str, int], list[str]]:
-        """Delete vec rows whose parent memory is not active (v0.9.2 cleanup).
+    def mark_vectors_for_memory(self, memory_id: int, new_status: str) -> Tuple[bool, list[str]]:
+        """UPDATE parent_status for a memory's vec rows (v0.9.4).
 
-        Removes superseded/deleted/orphan vectors from both memories_vec and
-        memory_sections_vec, restoring the vec0 MATCH fast path for all KNN.
-        Returns (counts, warnings).
+        Called during supersede/arbitrate: marks vectors as 'superseded' so
+        they remain available for ``memory_search_expired`` vec-hybrid recall
+        but are excluded from active searches (``parent_status='active'``).
+        Unlike ``delete_vectors_for_memory`` this does NOT physically purge
+        rows — it only flips a short text column in-place.
         """
         warnings: list[str] = []
         if not self._db_available or not self.state.sqlite_writable:
-            return {}, ["SQLite write unavailable; inactive vectors not deleted."]
+            return False, ["SQLite write unavailable; vectors not marked."]
         if not self.state.sqlite_vec_available:
-            return {}, ["sqlite-vec unavailable; inactive vectors not deleted."]
+            return False, ["sqlite-vec unavailable; vectors not marked."]
+        try:
+            with self.write_transaction() as conn:
+                conn.execute(
+                    "UPDATE memories_vec SET parent_status = ? WHERE id = ?",
+                    (str(new_status), int(memory_id)),
+                )
+                conn.execute(
+                    "UPDATE memory_sections_vec SET parent_status = ? WHERE id IN "
+                    "(SELECT id FROM memory_sections WHERE memory_id = ?)",
+                    (str(new_status), int(memory_id)),
+                )
+            return True, []
+        except sqlite3.Error as exc:
+            return False, [f"mark_vectors_for_memory failed: {exc}"]
+
+    def _purge_inactive_vectors(self) -> Tuple[dict[str, int], list[str]]:
+        """Physically delete only orphan vec rows (v0.9.4).
+
+        v0.9.2-v0.9.3 deleted ALL inactive-vector rows (superseded + deleted +
+        orphan).  That was too aggressive: superseded vectors should be kept
+        for ``memory_search_expired`` vec-hybrid recall.  This method now only
+        removes true orphans — rows whose parent memory/section row no longer
+        exists — and leaves superseded vectors untouched.
+        """
+        warnings: list[str] = []
+        if not self._db_available or not self.state.sqlite_writable:
+            return {}, ["SQLite write unavailable; orphan vectors not purged."]
+        if not self.state.sqlite_vec_available:
+            return {}, ["sqlite-vec unavailable; orphan vectors not purged."]
         try:
             with self.write_transaction() as conn:
                 mem_cur = conn.execute(
-                    "DELETE FROM memories_vec WHERE id IN "
-                    "(SELECT v.id FROM memories_vec v LEFT JOIN memories m ON m.id = v.id "
-                    "WHERE COALESCE(m.status, 'deleted') != 'active')"
+                    "DELETE FROM memories_vec WHERE id NOT IN "
+                    "(SELECT id FROM memories)"
                 )
                 sec_cur = conn.execute(
-                    "DELETE FROM memory_sections_vec WHERE id IN "
-                    "(SELECT v.id FROM memory_sections_vec v "
-                    "JOIN memory_sections s ON s.id = v.id "
-                    "LEFT JOIN memories m ON m.id = s.memory_id "
-                    "WHERE COALESCE(m.status, 'deleted') != 'active')"
-                )
-                # Physical orphans: a section vec whose section row itself is gone.
-                orph_cur = conn.execute(
                     "DELETE FROM memory_sections_vec WHERE id NOT IN "
                     "(SELECT id FROM memory_sections)"
                 )
             counts = {
-                "deleted_memory_vectors": max(0, mem_cur.rowcount),
-                "deleted_section_vectors": max(0, sec_cur.rowcount) + max(0, orph_cur.rowcount),
+                "purged_memory_orphans": max(0, mem_cur.rowcount),
+                "purged_section_orphans": max(0, sec_cur.rowcount),
             }
             return counts, []
         except sqlite3.Error as exc:
-            return {}, [f"delete_inactive_vectors failed: {exc}"]
+            return {}, [f"_purge_inactive_vectors failed: {exc}"]
+
+    def _count_vec_parent_status_mismatch(self) -> dict[str, int]:
+        """Count rows where vec.parent_status != memories.status (v0.9.4 doctor).
+
+        Uses INNER JOIN, so orphan vec rows (no parent in memories/
+        memory_sections) are NOT counted here — they are handled separately by
+        ``_purge_inactive_vectors``. This keeps the dry_run mismatch count
+        aligned with what ``_resync_vec_parent_status`` can actually repair
+        (resync only touches rows with a joinable parent).
+        """
+        try:
+            with self.connection() as conn:
+                mem_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM memories_vec v "
+                    "JOIN memories m ON m.id = v.id "
+                    "WHERE v.parent_status IS NULL "
+                    "OR v.parent_status != COALESCE(m.status, 'deleted')"
+                ).fetchone()["c"]
+                sec_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM memory_sections_vec v "
+                    "JOIN memory_sections s ON s.id = v.id "
+                    "JOIN memories m ON m.id = s.memory_id "
+                    "WHERE v.parent_status IS NULL "
+                    "OR v.parent_status != COALESCE(m.status, 'deleted')"
+                ).fetchone()["c"]
+            return {"memory_vec_mismatch": max(0, int(mem_count)),
+                    "section_vec_mismatch": max(0, int(sec_count))}
+        except sqlite3.Error:
+            return {}
+
+    def _resync_vec_parent_status(self) -> dict[str, int]:
+        """Repair mismatched vec.parent_status to match memories.status (v0.9.4)."""
+        try:
+            with self.write_transaction() as conn:
+                mem_cur = conn.execute(
+                    "UPDATE memories_vec SET parent_status = COALESCE(m.status, 'deleted') "
+                    "FROM memories m WHERE m.id = memories_vec.id "
+                    "AND (memories_vec.parent_status IS NULL "
+                    "OR memories_vec.parent_status != COALESCE(m.status, 'deleted'))"
+                )
+                sec_cur = conn.execute(
+                    "UPDATE memory_sections_vec SET parent_status = COALESCE(m.status, 'deleted') "
+                    "FROM memory_sections s JOIN memories m ON m.id = s.memory_id "
+                    "WHERE s.id = memory_sections_vec.id "
+                    "AND (memory_sections_vec.parent_status IS NULL "
+                    "OR memory_sections_vec.parent_status != COALESCE(m.status, 'deleted'))"
+                )
+            return {"resynced_memory_vecs": max(0, mem_cur.rowcount),
+                    "resynced_section_vecs": max(0, sec_cur.rowcount)}
+        except sqlite3.Error as exc:
+            return {"error": str(exc)}
 
     def vec_knn(
         self,
         query_embedding: list[float],
         k: int = 10,
-        include_superseded: bool = False,
+        parent_status_filter: str = "active",
     ) -> list[dict[str, Any]]:
+        """v0.9.4: single-stage KNN with metadata-predicate pre-filter.
+
+        ``parent_status_filter`` selects which vec rows compete for top-k:
+          - ``"active"`` (default): only ``parent_status='active'`` rows —
+            active recall (``memory_search``).
+          - ``"expired"``: ``parent_status NOT IN ('active','deleted')`` —
+            superseded + conflicted + pending, for history/audit recall
+            (``memory_search_expired``).
+          - ``"all"``: ``parent_status != 'deleted'`` — every non-deleted row,
+            matching the FTS ``status_filter="all"`` semantics.
+
+        Fallback: if the vec table lacks a ``parent_status`` column (e.g.
+        after a failed migration), falls back to the old two-stage probe +
+        exact-L2 scan with JOIN-based status filter.
+        """
         if not self._db_available or not self.state.sqlite_vec_available:
             return []
+        requested = max(0, int(k))
+        if requested == 0:
+            return []
+        # Build the parent_status predicate from the controlled enum. Values
+        # are whitelisted here (not interpolated from arbitrary caller input),
+        # so SQL interpolation is injection-safe.
+        if parent_status_filter == "expired":
+            parent_predicate = "AND v.parent_status NOT IN ('active','deleted')"
+            eligible = "COALESCE(m.status, 'deleted') NOT IN ('active','deleted')"
+        elif parent_status_filter == "all":
+            parent_predicate = "AND v.parent_status != 'deleted'"
+            eligible = "COALESCE(m.status, 'deleted') != 'deleted'"
+        else:  # "active" (default; unknown values fall back to active-only)
+            parent_predicate = "AND v.parent_status = 'active'"
+            eligible = "COALESCE(m.status, 'deleted') = 'active'"
+        query_json = json.dumps(query_embedding)
         try:
             with self.connection() as conn:
-                eligible = (
-                    "COALESCE(m.status, 'deleted') != 'deleted'"
-                    if include_superseded
-                    else "COALESCE(m.status, 'deleted') = 'active'"
-                )
-                requested = max(0, int(k))
-                if requested == 0:
-                    return []
-                # The BEGIN is load-bearing, not redundant: without an explicit
-                # transaction the eligibility probe and the KNN query would run
-                # on different snapshots, reopening a TOCTOU window where a
-                # concurrent supersede between them revives the top-k pollution
-                # this branch exists to prevent.  No ROLLBACK/COMMIT handling on
-                # the error path is needed — closing the connection discards
-                # the open read transaction.
                 conn.execute("BEGIN")
-                excluded = int(conn.execute(
-                    f"SELECT count(*) AS excluded FROM memories_vec v "
-                    f"LEFT JOIN memories m ON m.id=v.id"
-                    f" WHERE NOT ({eligible})"
-                ).fetchone()["excluded"] or 0)
-                if excluded:
-                    # Joined-table predicates are post-KNN in vec0.  When any
-                    # inactive vector exists, calculate exact L2 distance only
-                    # across eligible parents so no hidden row can occupy k.
+                # Try metadata-predicate fast path
+                try:
                     rows = conn.execute(
-                        f"""
-                        SELECT v.id AS id,
+                        f"""SELECT v.id AS id,
                                vec_distance_L2(v.embedding, ?) AS distance,
-                               m.workspace AS workspace,
-                               m.agent_id AS agent_id, m.status AS status,
-                               m.subject AS subject, m.tags AS tags,
-                               m.content AS content, m.source_type AS source_type,
-                               m.confidence AS confidence,
+                               m.workspace AS workspace, m.agent_id AS agent_id,
+                               m.status AS status, m.subject AS subject,
+                               m.tags AS tags, m.content AS content,
+                               m.source_type AS source_type, m.confidence AS confidence,
                                m.protection_level AS protection_level,
-                               m.event_time AS event_time,
-                               m.ingest_time AS ingest_time,
-                               m.metadata AS metadata,
-                               m.split_status AS split_status
+                               m.event_time AS event_time, m.ingest_time AS ingest_time,
+                               m.metadata AS metadata, m.split_status AS split_status
                         FROM memories_vec v
                         JOIN memories m ON m.id = v.id
-                        WHERE {eligible}
+                        WHERE v.embedding MATCH ? AND k = ?
+                          {parent_predicate}
                         ORDER BY distance
-                        LIMIT ?
                         """,
-                        (json.dumps(query_embedding), requested),
+                        (query_json, query_json, requested),
                     ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                    SELECT v.id AS id, v.distance AS distance, m.workspace AS workspace,
-                           m.agent_id AS agent_id, m.status AS status, m.subject AS subject,
-                           m.tags AS tags, m.content AS content, m.source_type AS source_type,
-                           m.confidence AS confidence, m.protection_level AS protection_level,
-                           m.event_time AS event_time, m.ingest_time AS ingest_time,
-                           m.metadata AS metadata, m.split_status AS split_status
-                    FROM memories_vec v
-                    JOIN memories m ON m.id = v.id
-                    WHERE v.embedding MATCH ? AND k = ?
-                    ORDER BY v.distance
-                    """,
-                        (json.dumps(query_embedding), requested),
-                    ).fetchall()
-                conn.execute("COMMIT")
-                return [dict(row) for row in rows]
+                    conn.execute("COMMIT")
+                    return [dict(row) for row in rows]
+                except sqlite3.OperationalError:
+                    # Fallback: parent_status column missing — use two-stage
+                    # probe + exact-L2 scan (pre-v0.9.4 path). ROLLBACK the
+                    # failed fast-path statement, then re-BEGIN so the probe
+                    # and KNN share one transaction (N6: prevents TOCTOU between
+                    # the excluded-count probe and the KNN scan).
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    conn.execute("BEGIN")
+                    # D3: eligible mirrors the main-path parent_status_filter —
+                    # expired/all/superseded leak the right rows into each
+                    # channel. The old hardcoded "!= 'deleted'" let active rows
+                    # leak into memory_search_expired's vec channel.
+                    excluded = int(conn.execute(
+                        f"SELECT COUNT(*) AS excluded FROM memories_vec v "
+                        f"LEFT JOIN memories m ON m.id=v.id"
+                        f" WHERE NOT ({eligible})"
+                    ).fetchone()["excluded"] or 0)
+                    if excluded:
+                        rows = conn.execute(
+                            f"""SELECT v.id AS id,
+                                vec_distance_L2(v.embedding, ?) AS distance,
+                                m.workspace AS workspace, m.agent_id AS agent_id,
+                                m.status AS status, m.subject AS subject,
+                                m.tags AS tags, m.content AS content,
+                                m.source_type AS source_type, m.confidence AS confidence,
+                                m.protection_level AS protection_level,
+                                m.event_time AS event_time, m.ingest_time AS ingest_time,
+                                m.metadata AS metadata, m.split_status AS split_status
+                            FROM memories_vec v
+                            JOIN memories m ON m.id=v.id
+                            WHERE {eligible}
+                            ORDER BY distance
+                            LIMIT ?""",
+                            (query_json, requested),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            """SELECT v.id AS id, v.distance AS distance,
+                                m.workspace AS workspace, m.agent_id AS agent_id,
+                                m.status AS status, m.subject AS subject,
+                                m.tags AS tags, m.content AS content,
+                                m.source_type AS source_type, m.confidence AS confidence,
+                                m.protection_level AS protection_level,
+                                m.event_time AS event_time, m.ingest_time AS ingest_time,
+                                m.metadata AS metadata, m.split_status AS split_status
+                            FROM memories_vec v
+                            JOIN memories m ON m.id=v.id
+                            WHERE v.embedding MATCH ? AND k = ?
+                            ORDER BY v.distance""",
+                            (query_json, requested),
+                        ).fetchall()
+                    conn.execute("COMMIT")
+                    return [dict(row) for row in rows]
         except sqlite3.Error:
             return []
 
@@ -737,92 +984,137 @@ class MemoryDB:
         self,
         query_embedding: list[float],
         k: int = 10,
-        include_superseded: bool = False,
+        parent_status_filter: str = "active",
     ) -> list[dict[str, Any]]:
-        """v0.6.3 Channel 6: section-level vec KNN recall.
+        """v0.9.4: single-stage section KNN with metadata-predicate pre-filter.
 
-        Returns the k nearest *sections* (not memories), joined to their
-        parent memory's metadata. Unlike ``vec_knn`` this does NOT select
-        ``m.content`` — Channel 6 candidates score via the vec floor and get
-        their content re-fetched by ``_attach_sections`` from
-        ``current_mem_map``, so pulling k full texts here would be wasted I/O
-        (k ≈ need×3, most rows dedup to the same handful of memories).
-        Parent status remains authoritative.  Because predicates on joined
-        tables are applied after vec0 chooses KNN slots, the clean fast path
-        uses vec0 KNN only when every vector is eligible.  If any inactive row
-        exists, exact distance is computed over status-filtered parents before
-        LIMIT.  This prevents recall starvation without duplicating lifecycle
-        state in the section index.
+        ``parent_status_filter`` selects which section-vec rows compete for
+        top-k (same enum as ``vec_knn``): ``"active"`` (default),
+        ``"expired"`` (superseded+conflicted+pending), or ``"all"``
+        (non-deleted).
+
+        Unlike ``vec_knn`` this does NOT select ``m.content`` — Channel 6
+        candidates score via the vec floor and get their content re-fetched
+        by ``_attach_sections`` from ``current_mem_map``.
+
+        Fallback: if the vec table lacks a ``parent_status`` column, falls
+        back to the old two-stage probe + exact-L2 scan with JOIN-based
+        status filter.
         """
         if not self._db_available or not self.state.sqlite_vec_available:
             return []
+        requested = max(0, int(k))
+        if requested == 0:
+            return []
+        # Build the parent_status predicate from the controlled enum (see
+        # vec_knn for the injection-safety rationale).
+        if parent_status_filter == "expired":
+            parent_predicate = "AND v.parent_status NOT IN ('active','deleted')"
+            eligible = "COALESCE(m.status, 'deleted') NOT IN ('active','deleted')"
+        elif parent_status_filter == "all":
+            parent_predicate = "AND v.parent_status != 'deleted'"
+            eligible = "COALESCE(m.status, 'deleted') != 'deleted'"
+        else:  # "active" (default; unknown values fall back to active-only)
+            parent_predicate = "AND v.parent_status = 'active'"
+            eligible = "COALESCE(m.status, 'deleted') = 'active'"
+        query_json = json.dumps(query_embedding)
         try:
             with self.connection() as conn:
-                eligible = (
-                    "COALESCE(m.status, 'deleted') != 'deleted'"
-                    if include_superseded
-                    else "COALESCE(m.status, 'deleted') = 'active'"
-                )
-                requested = max(0, int(k))
-                if requested == 0:
-                    return []
-                # Load-bearing BEGIN — see vec_knn above: keeps the probe and
-                # the KNN query on one snapshot; connection close rolls back.
                 conn.execute("BEGIN")
-                excluded = int(conn.execute(
-                    f"SELECT count(*) AS excluded FROM memory_sections_vec v "
-                    f"LEFT JOIN memory_sections s ON s.id=v.id "
-                    f"LEFT JOIN memories m ON m.id=s.memory_id"
-                    f" WHERE NOT ({eligible})"
-                ).fetchone()["excluded"] or 0)
-                if excluded:
+                # Try metadata-predicate fast path
+                try:
                     rows = conn.execute(
-                        f"""
-                        SELECT s.memory_id AS memory_id,
-                               s.id AS section_id,
-                               vec_distance_L2(v.embedding, ?) AS distance,
-                               s.title AS section_title,
-                               s.title_path AS section_title_path,
-                               m.workspace AS workspace, m.status AS status,
-                               m.subject AS subject, m.tags AS tags,
-                               m.source_type AS source_type,
-                               m.confidence AS confidence,
-                               m.protection_level AS protection_level,
-                               m.event_time AS event_time,
-                               m.ingest_time AS ingest_time,
-                               m.metadata AS metadata,
-                               m.split_status AS split_status
+                        f"""SELECT s.memory_id AS memory_id,
+                            s.id AS section_id,
+                            vec_distance_L2(v.embedding, ?) AS distance,
+                            s.title AS section_title,
+                            s.title_path AS section_title_path,
+                            m.workspace AS workspace, m.status AS status,
+                            m.subject AS subject, m.tags AS tags,
+                            m.source_type AS source_type,
+                            m.confidence AS confidence,
+                            m.protection_level AS protection_level,
+                            m.event_time AS event_time,
+                            m.ingest_time AS ingest_time,
+                            m.metadata AS metadata,
+                            m.split_status AS split_status
                         FROM memory_sections_vec v
                         JOIN memory_sections s ON s.id = v.id
                         JOIN memories m ON m.id = s.memory_id
-                        WHERE {eligible}
+                        WHERE v.embedding MATCH ? AND k = ?
+                          {parent_predicate}
                         ORDER BY distance
-                        LIMIT ?
                         """,
-                        (json.dumps(query_embedding), requested),
+                        (query_json, query_json, requested),
                     ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                    SELECT s.memory_id AS memory_id, s.id AS section_id,
-                           v.distance AS distance,
-                           s.title AS section_title, s.title_path AS section_title_path,
-                           m.workspace AS workspace, m.status AS status,
-                           m.subject AS subject, m.tags AS tags,
-                           m.source_type AS source_type, m.confidence AS confidence,
-                           m.protection_level AS protection_level,
-                           m.event_time AS event_time, m.ingest_time AS ingest_time,
-                           m.metadata AS metadata, m.split_status AS split_status
-                    FROM memory_sections_vec v
-                    JOIN memory_sections s ON s.id = v.id
-                    JOIN memories m ON m.id = s.memory_id
-                    WHERE v.embedding MATCH ? AND k = ?
-                    ORDER BY v.distance
-                    """,
-                        (json.dumps(query_embedding), requested),
-                    ).fetchall()
-                conn.execute("COMMIT")
-                return [dict(row) for row in rows]
+                    conn.execute("COMMIT")
+                    return [dict(row) for row in rows]
+                except sqlite3.OperationalError:
+                    # Fallback: parent_status column missing — use two-stage
+                    # probe + exact-L2 scan (pre-v0.9.4 path). ROLLBACK the
+                    # failed fast-path statement, then re-BEGIN so the probe
+                    # and KNN share one transaction (N6: prevents TOCTOU).
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    conn.execute("BEGIN")
+                    # D3: eligible mirrors the main-path parent_status_filter
+                    # (not the old hardcoded "!= 'deleted'").
+                    excluded = int(conn.execute(
+                        f"SELECT COUNT(*) AS excluded FROM memory_sections_vec v "
+                        f"LEFT JOIN memory_sections s ON s.id=v.id "
+                        f"LEFT JOIN memories m ON m.id=s.memory_id"
+                        f" WHERE NOT ({eligible})"
+                    ).fetchone()["excluded"] or 0)
+                    if excluded:
+                        rows = conn.execute(
+                            f"""SELECT s.memory_id AS memory_id,
+                                s.id AS section_id,
+                                vec_distance_L2(v.embedding, ?) AS distance,
+                                s.title AS section_title,
+                                s.title_path AS section_title_path,
+                                m.workspace AS workspace, m.status AS status,
+                                m.subject AS subject, m.tags AS tags,
+                                m.source_type AS source_type,
+                                m.confidence AS confidence,
+                                m.protection_level AS protection_level,
+                                m.event_time AS event_time,
+                                m.ingest_time AS ingest_time,
+                                m.metadata AS metadata,
+                                m.split_status AS split_status
+                            FROM memory_sections_vec v
+                            JOIN memory_sections s ON s.id=v.id
+                            JOIN memories m ON m.id=s.memory_id
+                            WHERE {eligible}
+                            ORDER BY distance
+                            LIMIT ?""",
+                            (query_json, requested),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            """SELECT s.memory_id AS memory_id,
+                                s.id AS section_id, v.distance AS distance,
+                                s.title AS section_title,
+                                s.title_path AS section_title_path,
+                                m.workspace AS workspace, m.status AS status,
+                                m.subject AS subject, m.tags AS tags,
+                                m.source_type AS source_type,
+                                m.confidence AS confidence,
+                                m.protection_level AS protection_level,
+                                m.event_time AS event_time,
+                                m.ingest_time AS ingest_time,
+                                m.metadata AS metadata,
+                                m.split_status AS split_status
+                            FROM memory_sections_vec v
+                            JOIN memory_sections s ON s.id=v.id
+                            JOIN memories m ON m.id=s.memory_id
+                            WHERE v.embedding MATCH ? AND k = ?
+                            ORDER BY v.distance""",
+                            (query_json, requested),
+                        ).fetchall()
+                    conn.execute("COMMIT")
+                    return [dict(row) for row in rows]
         except sqlite3.Error:
             return []
 
@@ -906,6 +1198,11 @@ class MemoryDB:
                 changed = any(current.get(key) != value for key, value in pairs)
                 if not changed:
                     return True
+                status_changed = any(
+                    key == "status" and current.get(key) != value
+                    for key, value in pairs
+                )
+                new_status = next((value for key, value in pairs if key == "status"), None)
                 # Claim judgments depend not only on extracted text but also on
                 # trust/protection/status.  Changing any of those must invalidate
                 # the old CAS snapshot.  Metadata only participates when its
@@ -933,6 +1230,19 @@ class MemoryDB:
                 ]
                 values.append(int(memory_id))
                 conn.execute(f"UPDATE memories SET {sql} WHERE id = ?", values)
+                if status_changed and self.state.sqlite_vec_available:
+                    try:
+                        conn.execute(
+                            "UPDATE memories_vec SET parent_status = ? WHERE id = ?",
+                            (str(new_status or "deleted"), int(memory_id)),
+                        )
+                        conn.execute(
+                            "UPDATE memory_sections_vec SET parent_status = ? WHERE id IN "
+                            "(SELECT id FROM memory_sections WHERE memory_id = ?)",
+                            (str(new_status or "deleted"), int(memory_id)),
+                        )
+                    except sqlite3.Error:
+                        pass
                 return True
         except sqlite3.Error:
             return False
@@ -1017,6 +1327,7 @@ class MemoryDB:
         before_dt: Optional[datetime],
         source_type: Optional[str],
         limit: int,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """G6 (v0.8.5): filter-driven recall for empty-query + filters in memory_search.
 
@@ -1024,14 +1335,17 @@ class MemoryDB:
         ordered by ingest_time DESC, capped at ``limit`` (pool_cap). Returns
         row_to_dict rows — same shape as _wide_recall pool rows. Enables
         list-by-tag / by-source_type / by-time when query is empty.
+
+        v0.9.4: ``offset`` adds SQL OFFSET for cursor pagination on the
+        exact-count filter path (used by ``memory_search_expired``).
         """
         if not self._db_available:
             return []
         clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
-        sql = f"SELECT * FROM memories WHERE {' AND '.join(clauses)} ORDER BY ingest_time DESC LIMIT ?"
+        sql = f"SELECT * FROM memories WHERE {' AND '.join(clauses)} ORDER BY ingest_time DESC LIMIT ? OFFSET ?"
         with self.connection() as conn:
             try:
-                rows = conn.execute(sql, params + [int(limit)]).fetchall()
+                rows = conn.execute(sql, params + [int(limit), int(offset)]).fetchall()
             except sqlite3.Error:
                 return []
         return [row_to_dict(row) for row in rows]
@@ -2584,9 +2898,17 @@ class MemoryDB:
         conn.execute(
             "DELETE FROM memory_sections_vec WHERE id = ?", (section_id,)
         )
+        # v0.9.4: look up parent status via memory_sections JOIN (N17: COALESCE for orphan)
+        parent_row = conn.execute(
+            "SELECT COALESCE(m.status, 'deleted') AS status "
+            "FROM memory_sections s "
+            "LEFT JOIN memories m ON m.id = s.memory_id "
+            "WHERE s.id = ?", (section_id,)
+        ).fetchone()
+        parent_status = parent_row["status"] if parent_row else "deleted"
         conn.execute(
-            "INSERT INTO memory_sections_vec(id, embedding) VALUES (?, ?)",
-            (section_id, json.dumps(embedding)),
+            "INSERT INTO memory_sections_vec(id, parent_status, embedding) VALUES (?, ?, ?)",
+            (section_id, parent_status, json.dumps(embedding)),
         )
 
     @staticmethod
