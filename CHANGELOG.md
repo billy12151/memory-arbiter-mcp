@@ -3,6 +3,16 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.9.5] — 2026-08-03
+
+### Fixed
+
+- **MCP SDK compatibility** — pins the Python MCP SDK dependency to
+  `mcp>=1.2.0,<2`. `mcp 2.0.0` removed/relocated `mcp.server.fastmcp`, which
+  `memory-arbiter-mcp` uses for its server entry point; without the upper bound,
+  fresh `uvx memory-arbiter-mcp` installs could resolve `mcp 2.0.0` and fail at
+  startup. No memory schema or API behavior changes from v0.9.4.
+
 ## [0.9.4] — 2026-08-03
 
 ### Added
