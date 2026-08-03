@@ -915,6 +915,7 @@ class MemoryDB:
                         JOIN memories m ON m.id = v.id
                         WHERE v.embedding MATCH ? AND k = ?
                           {parent_predicate}
+                          AND {eligible}
                         ORDER BY distance
                         """,
                         (query_json, query_json, requested),
@@ -1043,6 +1044,7 @@ class MemoryDB:
                         JOIN memories m ON m.id = s.memory_id
                         WHERE v.embedding MATCH ? AND k = ?
                           {parent_predicate}
+                          AND {eligible}
                         ORDER BY distance
                         """,
                         (query_json, query_json, requested),

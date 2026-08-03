@@ -224,14 +224,15 @@ relying on it.
 
 ### MCP Tools
 
-Grouped by use case. For day-to-day agent work, the intended mental model is deliberately small: use `memory_write`, `memory_search`, and `memory_get`. The remaining groups are for correction/versioning, conflict workflows, long-doc split, semantic ops, and system status.
+Grouped by use case. For day-to-day agent work, the intended mental model is deliberately small: use `memory_write`, `memory_search`, `memory_search_expired`, and `memory_get`. The remaining groups are for correction/versioning, conflict workflows, long-doc split, semantic ops, and system status.
 
 **Daily read & write** — what most sessions use.
 
 | Tool | Description |
 |---|---|
 | `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks). **Tags matter (v0.7.3)** — they're a ranking + filter signal heavier than content. v0.9 synchronously checks deterministic structured claims; if `action_required=judge_conflict_before_use`, the host LLM must submit the included judgment request before using the claim. Metadata-overlap `write_hints` remain advisory and dismissable. |
-| `memory_search` | Search memories (FTS5 → LIKE fallback). `limit` is a page size, not a cap — `has_more=true` means more matches exist. v0.9 signals are routed by state: pending model/user decisions are loud; persisted `conflict_guidance` is non-blocking and includes the recommended use. |
+| `memory_search` | Search active memories only (FTS5 → LIKE fallback, optional vec recall). `limit` is a page size, not a cap — `has_more=true` means more matches exist. v0.9 signals are routed by state: pending model/user decisions are loud; persisted `conflict_guidance` is non-blocking and includes the recommended use. |
+| `memory_search_expired` | Search expired history/audit records only: non-active, non-deleted memories (`superseded`, `conflicted`, `pending`). Use this for supersede-chain review, old decision lookup, and audit walkthroughs. Supports `limit` + `offset`; response includes `effective_limit`, `next_offset`, and `pagination_precision`. |
 | `memory_get` | Get a single memory by ID. Use when you already know the `memory_id` (e.g. from conflict lists, audit results, or previous search results) to quickly fetch full details without re-running a search. v0.8.0 adds `sections` (`none`/`catalog`/`all`, default `catalog`) and `section_ids` (takes precedence over `sections`; any IDs not found are listed in `missing_section_ids`). Read-only. |
 
 **Correction & version management** — edit in place, confirm facts, retire stale records, and audit change history.
@@ -352,17 +353,18 @@ After configuration, normal `memory_search(query="...")` can generate the query 
 - **Tag scoring is now token-based** (`_score_tags_surface`). The query is split on whitespace, each token matched against the tag set, and the match ratio decides the tier: all tokens matched → `strong`, ≥half → `medium`, some → `weak`. Pure-CJK tokens use prefix/suffix substring (so tag `发版` matches query token `发版历史`); ASCII/mixed tokens use equality (so `v0.7` does *not* match tag `v0.7.0`). A bidirectional normalize strips the `v` prefix on version-like tokens.
 - **Subject scoring is tighter.** `classify_match_level`'s `specific_coverage` threshold moved `0.4 → 0.6`, so a subject that hits only half the query's anchors no longer gets `medium` (the incidental-subject trap that was suppressing tag-precise records).
 - **Tag weights reached parity with subject** (`7/4/1.5 → 10/6/2`, cap `7.0 → 10.0`). Tags are an actively-curated signal — when they say "this is exactly what the query asked for", that should weigh the same as a subject hit, not less.
-- **`limit` is now a page size.** The response carries `has_more: bool` and `total_estimate: int` so the caller can tell an exhaustive query from a complete one. This version does not ship a pagination cursor — when `has_more=true`, refine the query, raise `limit` (cap 100), or add `tags_filter` to narrow.
+- **`limit` is now a page size.** The response carries `has_more: bool` and `total_estimate: int` so the caller can tell an exhaustive query from a complete one. `memory_search` remains unpaginated; `memory_search_expired` supports `limit` + `offset` for history/audit pagination.
 - **New filter params** on `memory_search` (all optional, off = v0.7.2 behaviour):
   - `tags_filter: list[str]` — strict AND, memory must contain *every* listed tag
   - `after_time` / `before_time` — ISO 8601 bounds on `ingest_time` (naive = UTC)
   - `source_type` — one of `user_confirmed` / `agent_generated` / `document_extracted` (the enum also has `unknown` / `pending`, but those are defaults/intermediate states, not values to write deliberately)
 
-**Caveats (accepted this version).**
-- Filters post-filter the query-recalled pool; they do not recall on their own. An empty `query` + `tags_filter` returns empty with a warning — use `memory_recent` + client-side filter for "list everything with tag X".
+**Current caveats.**
+- `memory_search` has no public offset cursor; when `has_more=true`, refine the query, raise `limit` (cap 100), or add `tags_filter` to narrow. Use `memory_search_expired` for paginated history/audit recall.
+- Empty `query` + `tags_filter` / time / `source_type` is handled server-side and ordered by newest `ingest_time`; this is the preferred way to list entries by filter.
 - Opening `tags_filter` disables semantic-vec recall in practice (vec candidates' tags rarely match the literal filter, so post-filter culls them). Hybrid lexical recall still works.
 - Mixed ASCII+CJK tokens (e.g. `v0.7.2发版` written without a space) take the equality path and may miss — **separate them with whitespace** (`"v0.7.2 发版"`).
-- `has_more` can over-report when `pool_cap` (default 50) truncates the recall pool on large libraries; `total_estimate` stays accurate when filters are active (it uses a SQL `COUNT`).
+- Query-recall pagination for `memory_search_expired` is best-effort; empty-query browse/filter paths are exact and report `pagination_precision="exact"`.
 
 **Validation.** A 2000×5-seed synthetic corpus (`scripts/tune_tag_weights.py`) proved `specific_coverage=0.6` is the inflection point. The decisive metric is the A>B pair (TAG_PRECISE should beat SUBJ_INCIDENTAL — the id=206 vs id=105 case that motivated the fix): it goes from **0.520 under the baseline to 1.000** when the subject threshold is tightened to 0.6; 0.5 is too loose, 0.7+ adds nothing. Overall pairwise accuracy on the corpus rises 0.958 → 0.984. On the real production library, dogfooding query `"v0.7.2 发版"` lifted the target memory from rank #13 to #1 with no regression on 6 sample queries.
 
@@ -796,14 +798,15 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 
 ### MCP 工具
 
-按使用场景分组。日常 Agent 心智模型刻意收敛为 `memory_write`、`memory_search`、`memory_get` 三个工具；其余工具用于修正/版本管理、冲突工作流、长文档分段、语义检索运维和系统状态。
+按使用场景分组。日常 Agent 心智模型刻意收敛为 `memory_write`、`memory_search`、`memory_search_expired`、`memory_get` 四个工具；其余工具用于修正/版本管理、冲突工作流、长文档分段、语义检索运维和系统状态。
 
 **日常读写** —— 大多数会话只用到这些。
 
 | 工具 | 说明 |
 |---|---|
 | `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定）。v0.9 同步检查确定性结构化 claim；若返回 `action_required=judge_conflict_before_use`，宿主 LLM 必须先提交随响应返回的判断请求，再使用该 claim。metadata 重叠 `write_hints` 仍是可 dismiss 的 advisory。 |
-| `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级）。`limit` 是单页大小不是上限。v0.9 按状态路由信号：待模型/用户确认会强提醒；已持久化的 `conflict_guidance` 不阻塞，并携带建议用法。 |
+| `memory_search` | 搜索 active 记忆（FTS5 → LIKE 自动降级，可选向量召回）。`limit` 是单页大小不是上限。v0.9 按状态路由信号：待模型/用户确认会强提醒；已持久化的 `conflict_guidance` 不阻塞，并携带建议用法。 |
+| `memory_search_expired` | 只搜索 expired 历史/审计记录：非 active、非 deleted 的记忆（`superseded`、`conflicted`、`pending`）。用于 supersede 链审计、旧决策追溯、历史 walkthrough。支持 `limit` + `offset`，响应带 `effective_limit`、`next_offset`、`pagination_precision`。 |
 | `memory_get` | 通过 ID 直接获取单条记忆的完整信息。当已知 `memory_id`（如从冲突列表、审计结果、搜索结果中获取）时，直接用此工具获取记忆详情，无需重新搜索。v0.8.0 新增 `sections`（`none`/`catalog`/`all`，默认 `catalog`）和 `section_ids`（优先于 `sections`；缺失项进 `missing_section_ids`）。只读。 |
 
 **修正与版本管理** —— 原地修改、确认事实、废弃旧记录，并审计改动历史。
@@ -924,17 +927,18 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 - **tag 评分改为 token 级**（`_score_tags_surface`）。query 按空格切 token，每个 token 去 tag 集合里匹配，命中率决定档位：全部命中 → `strong`、≥半数 → `medium`、有命中 → `weak`。纯 CJK token 走前缀/后缀子串（tag `发版` 能匹配 query token `发版历史`）；ASCII/混合 token 走精确等值（`v0.7` 不会命中 tag `v0.7.0`）。双向归一化会剥掉版本号前面的 `v`。
 - **subject 评分收紧。** `classify_match_level` 的 `specific_coverage` 阈值 `0.4 → 0.6`，subject 只命中 query 一半 anchor 不再拿 `medium`（这正是压制 tag 精确命中记录的"subject 偶然命中"陷阱）。
 - **tag 权重追平 subject**（`7/4/1.5 → 10/6/2`，cap `7.0 → 10.0`）。tag 是主动维护的精确分类——当它说"这正是 query 所问"，权重应该和 subject 命中一样，而不是更低。
-- **`limit` 变成单页大小。** 响应里带 `has_more: bool` 和 `total_estimate: int`，调用方可以区分穷举式查询和已完成查询。本版**不提供翻页游标**——`has_more=true` 时换更精确的 query、放大 `limit`（上限 100）、或加 `tags_filter` 收窄。
+- **`limit` 变成单页大小。** 响应里带 `has_more: bool` 和 `total_estimate: int`，调用方可以区分穷举式查询和已完成查询。`memory_search` 仍不暴露 offset；`memory_search_expired` 支持 `limit` + `offset` 做历史/审计分页。
 - **`memory_search` 新增过滤参数**（全部可选，不传 = v0.7.2 行为）：
   - `tags_filter: list[str]` —— 严格 AND，记忆必须**同时**含所有列出的 tag
   - `after_time` / `before_time` —— ISO 8601，按 `ingest_time` 过滤（naive 当 UTC）
   - `source_type` —— `user_confirmed` / `agent_generated` / `document_extracted` 之一（enum 另有 `unknown` / `pending`，但那两个是默认值/中间态，不应主动写入）
 
-**已知限制（本版接受）。**
-- 过滤只对 query 召回的 pool 做后过滤，本身不召回。空 `query` + `tags_filter` 返回空 + warning——要"列出所有带 X tag 的"用 `memory_recent` + 客户端过滤。
+**当前限制。**
+- `memory_search` 没有公开 offset 游标；`has_more=true` 时换更精确的 query、放大 `limit`（上限 100）、或加 `tags_filter` 收窄。需要翻历史/审计记录时用 `memory_search_expired`。
+- 空 `query` + `tags_filter` / 时间 / `source_type` 已支持服务端过滤，并按 `ingest_time` 新到旧排序；这是“列出所有带 X tag”的推荐路径。
 - 开启 `tags_filter` 时 vec 语义召回实际失效（vec 候选的 tags 通常和字面 filter 无关，会被 post-filter 砍光）。混合字面召回仍正常。
 - ASCII+CJK 混合 token（如 `v0.7.2发版` 不带空格）走等值路径会漏匹配——**用空格分隔**（`"v0.7.2 发版"`）。
-- `has_more` 在 `pool_cap`（默认 50）截断召回 pool 时可能高报；带过滤时 `total_estimate` 仍准确（走 SQL `COUNT`）。
+- `memory_search_expired` 的 query-recall 分页是 best-effort；空 query browse/filter 路径是精确分页，并返回 `pagination_precision="exact"`。
 
 **验证。** 合成数据 2000×5 seed（`scripts/tune_tag_weights.py`）证明 `specific_coverage=0.6` 是临界点。关键指标是 A>B 这一对（TAG_PRECISE 应胜过 SUBJ_INCIDENTAL——即触发本次修复的 id=206 vs id=105 场景）：在 baseline 下只有 **0.520，subject 阈值收紧到 0.6 后达到 1.000**；0.5 太松、0.7+ 无额外收益。总 pairwise 准确率从 0.958 升到 0.984。真生产库 dogfooding query `"v0.7.2 发版"` 把目标记忆从 #13 提到 #1，6 个抽样查询无回归。
 

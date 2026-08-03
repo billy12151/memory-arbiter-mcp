@@ -170,9 +170,33 @@ class TestOrphanVectors:
         conn.execute("INSERT INTO memories_vec(id, embedding) VALUES (99, '[0.3,0.4]')")  # orphan
         conn.commit()
         f = _check_orphan_vectors(conn)
+        assert f.evidence["orphan_vectors"] == 1
+        assert f.evidence["orphan_memory_vectors"] == 1
+        assert f.evidence["orphan_section_vectors"] == 0
+        assert 99 in f.evidence["memory_vector_ids"]
+
+    def test_orphan_section_vector_reported(self):
+        pytest.importorskip("sqlite_vec")
+        import sqlite_vec
+        conn = _make_conn()
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("CREATE VIRTUAL TABLE memories_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
+        conn.execute("CREATE VIRTUAL TABLE memory_sections_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])")
+        conn.execute("INSERT INTO memories(id) VALUES (1)")
+        conn.execute("INSERT INTO memory_sections(id, memory_id) VALUES (10, 1)")
+        conn.execute("INSERT INTO memories_vec(id, embedding) VALUES (1, '[0.1,0.2]')")
+        conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (10, '[0.3,0.4]')")
+        conn.execute("INSERT INTO memory_sections_vec(id, embedding) VALUES (99, '[0.5,0.6]')")
+        conn.commit()
+        f = _check_orphan_vectors(conn)
         assert f.status == "warn"
         assert f.evidence["orphan_vectors"] == 1
-        assert 99 in f.evidence["vector_ids"]
+        assert f.evidence["orphan_memory_vectors"] == 0
+        assert f.evidence["orphan_section_vectors"] == 1
+        assert 99 in f.evidence["section_vector_ids"]
+        assert "memory_cleanup_inactive_vectors" in (f.fix_hint or "")
 
 
 # =====================================================================

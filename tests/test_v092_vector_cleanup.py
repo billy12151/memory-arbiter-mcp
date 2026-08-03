@@ -266,12 +266,17 @@ def test_memory_search_expired_offset_pagination(tmp_path: Path) -> None:
     assert len(p1_ids) == 2
     assert page1["data"]["has_more"] is True
     assert page1["data"]["total_estimate"] == 5
+    assert page1["data"]["offset"] == 0
+    assert page1["data"]["effective_limit"] == 2
+    assert page1["data"]["next_offset"] == 2
+    assert page1["data"]["pagination_precision"] == "exact"
 
     # Page 2: limit=2, offset=2 → next 2, no overlap with page 1.
     page2 = tools.memory_search_expired(query="", tags_filter=["audit"], limit=2, offset=2)
     p2_ids = [r["id"] for r in page2["data"]["results"]]
     assert len(p2_ids) == 2
     assert page2["data"]["has_more"] is True
+    assert page2["data"]["next_offset"] == 4
     assert set(p1_ids).isdisjoint(set(p2_ids)), "offset pages must not overlap"
 
     # Page 3: limit=2, offset=4 → last 1, has_more=False.
@@ -279,9 +284,67 @@ def test_memory_search_expired_offset_pagination(tmp_path: Path) -> None:
     p3_ids = [r["id"] for r in page3["data"]["results"]]
     assert len(p3_ids) == 1
     assert page3["data"]["has_more"] is False
+    assert page3["data"]["next_offset"] is None
+
+    # Out-of-range manual offset preserves the true total for callers.
+    beyond = tools.memory_search_expired(query="", tags_filter=["audit"], limit=2, offset=10)
+    assert beyond["data"]["results"] == []
+    assert beyond["data"]["total_estimate"] == 5
+    assert beyond["data"]["has_more"] is False
+    assert any("offset beyond result set" in w for w in beyond["warnings"])
 
     # Union of all pages covers all 5 superseded memories.
     assert set(p1_ids) | set(p2_ids) | set(p3_ids) == set(ids)
+
+
+def test_memory_search_expired_browse_offset_without_filters(tmp_path: Path) -> None:
+    """Browsing all expired rows with an empty query must honor offset too."""
+    tools = make_vec_tools(tmp_path)
+    ids = []
+    for i in range(5):
+        mid = _write(tools, f"expired browse doc {i}", "audit-browse", event_time=f"2026-01-0{i+1}T00:00:00Z")
+        ids.append(mid)
+        tools.memory_supersede(memory_id=mid, reason="replaced", authorized=True)
+
+    page1 = tools.memory_search_expired(query="", limit=2, offset=0)
+    page2 = tools.memory_search_expired(query="", limit=2, offset=2)
+    p1_ids = [r["id"] for r in page1["data"]["results"]]
+    p2_ids = [r["id"] for r in page2["data"]["results"]]
+
+    assert len(p1_ids) == 2
+    assert len(p2_ids) == 2
+    assert set(p1_ids).isdisjoint(p2_ids)
+    assert page1["data"]["has_more"] is True
+    assert page1["data"]["total_estimate"] == 5
+    assert page2["data"]["has_more"] is True
+    assert page2["data"]["offset"] == 2
+    assert page2["data"]["pagination_precision"] == "exact"
+    assert set(p1_ids + p2_ids).issubset(set(ids))
+
+
+def test_vec_search_defensively_filters_status_drift(tmp_path: Path) -> None:
+    """Current memories.status must still guard domains if vec.parent_status drifts."""
+    tools = make_vec_tools(tmp_path)
+    active = _write(tools, "drift-domain active", "drift-domain")
+    stale = _write(tools, "drift-domain stale", "drift-domain")
+    wrong_expired = _write(tools, "drift-domain wrong-expired", "drift-domain")
+    _embed(tools, active)
+    _embed(tools, stale)
+    _embed(tools, wrong_expired)
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET status='superseded' WHERE id=?", (stale,))
+        conn.execute("UPDATE memories_vec SET parent_status='active' WHERE id=?", (stale,))
+        conn.execute("UPDATE memories_vec SET parent_status='superseded' WHERE id=?", (wrong_expired,))
+
+    active_hits = tools.memory_search(query="semantically close", query_embedding=[0.1, 0.2])
+    active_ids = {r["id"] for r in active_hits["data"]["results"]}
+    assert active in active_ids
+    assert stale not in active_ids
+
+    expired_hits = tools.memory_search_expired(query="semantically close", query_embedding=[0.1, 0.2])
+    expired_ids = {r["id"] for r in expired_hits["data"]["results"]}
+    assert active not in expired_ids
+    assert wrong_expired not in expired_ids
 
 
 # =====================================================================

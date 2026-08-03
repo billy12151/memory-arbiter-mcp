@@ -76,6 +76,24 @@ Versions follow semantic versioning.
   vec0 MATCH query, eliminating the O(n) exact-distance slow path that was
   triggered whenever inactive vectors existed.
 
+### Fixed
+
+- **Expired-search pagination UX** — `memory_search_expired` now honors
+  `offset` on empty-query browse and bm25 paths, returns caller-friendly
+  pagination metadata (`effective_limit`, `next_offset`, clamp/cap flags,
+  `pagination_precision`), and preserves `total_estimate` for out-of-range
+  exact-pagination requests.
+- **Defensive active/expired domain isolation** — vec MATCH queries now pair
+  the vec0 `parent_status` predicate with the current `memories.status` JOIN
+  predicate, preventing stale vec metadata from leaking superseded rows into
+  active recall or active rows into expired recall before resync runs.
+- **Doctor orphan-vector reporting** — `consistency.orphan_vectors` now counts
+  both memory-level and section-level orphan vectors and points to
+  `memory_cleanup_inactive_vectors` for the authorized orphan purge path.
+- **Migration and cleanup wording** — legacy `include_superseded` callers get a
+  clearer migration error; cleanup dry-run hints distinguish non-destructive
+  `memory_resync_vec_parent_status(dry_run=false)` from authorized orphan purge.
+
 ### Migration Notes
 
 1. **Backup required**: The vec0 schema migration is destructive (DROP+CREATE).

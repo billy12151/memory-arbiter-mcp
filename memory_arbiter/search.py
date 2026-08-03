@@ -955,16 +955,14 @@ def search_memories(
     has_filters = bool(tags_filter or after_time or before_time or source_type)
 
     # === bm25 mode: legacy v0.2.6 single-FTS ordering ===
-    # v0.7.3 D2: _search_bm25 doesn't accept the new filter params. Warn if the
-    # caller passed any so the agent knows filtering was silently skipped.
-    if mode == "bm25":
-        if has_filters:
-            warnings.append(
-                "bm25 mode ignores tags_filter/after_time/before_time/source_type; "
-                "switch to hybrid ranking for filter support."
-            )
-        result, bm_warnings = _search_bm25(
+    if mode == "bm25" and has_filters:
+        warnings.append(
+            "bm25 mode falls back to hybrid ranking when tags_filter/after_time/before_time/source_type are set."
+        )
+    if mode == "bm25" and not has_filters:
+        result, bm_warnings, bm_has_more, bm_total = _search_bm25(
             db, query, workspace, tags, limit, status_clause, like_status_clause, warnings, debug_ranking,
+            offset=offset,
         )
         # Infer retrieval_mode for the legacy bm25 path: _search_bm25 internally
         # falls back to _recent_fallback when query has no hit (appending its
@@ -973,14 +971,14 @@ def search_memories(
         # on the prefix constant (not an inline string) keeps this robust to
         # wording tweaks of the warning's tail.
         if not query:
-            bm_mode: RetrievalMode = "recent_browse"
+            bm_mode = "recent_browse"
         elif not result:
             bm_mode = "empty"
         elif any(w.startswith(_NO_DIRECT_MATCH_PREFIX) for w in bm_warnings):
             bm_mode = "recent_fallback"
         else:
             bm_mode = "direct"
-        return SearchOutcome(result, bm_warnings, False, 0, bm_mode)
+        return SearchOutcome(result, bm_warnings, bm_has_more, bm_total, bm_mode)
 
     # === v0.7.3 F1/C1: search.py empty-query shortcut ===
     # 现状是 `if not query: return _recent_fallback(...)`，会让 query 为空时
@@ -989,22 +987,22 @@ def search_memories(
     # 继续往下（wide_recall 内部仍会因 not query 返 []，post-filter 后仍空，
     # 最终走第二步的 "query required for filter-aware recall" 精准 warning）。
     if not query and not has_filters:
-        fb_rows, fb_warnings, _fb_hm, _fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
-        return SearchOutcome(fb_rows, fb_warnings, False, 0, "recent_browse")
+        fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings, offset=offset)
+        return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_browse")
 
     # === G6 (v0.8.5): empty query + filters → filter-driven recall ===
     # query 为空但带了 tags_filter / 时间 / source_type：不再走 wide_recall
     # （它会因 not query 返 []），而是直接按 filter 召回、ingest_time 倒序。
-    # 解锁 list-by-tag / by-source_type / by-time（id=211 risk#9 推迟到 v0.7.4+
-    # 的活）。无分页（id=211），靠 has_more + total_estimate。
+    # 解锁 list-by-tag / by-source_type / by-time。v0.9.4 adds SQL OFFSET for
+    # expired audit pagination.
     if not query and has_filters:
-        pool_cap = getattr(db.settings, "recall_pool_cap", 50)
-        rows = db.recall_by_filters(like_status_clause, tags_filter, after_dt, before_dt, source_type, pool_cap, offset)
+        rows = db.recall_by_filters(like_status_clause, tags_filter, after_dt, before_dt, source_type, limit, offset)
         total_estimate = db.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
         )
         if not rows:
-            return SearchOutcome([], warnings + ["no memories match the given filters"], False, 0, "empty")
+            warning = "offset beyond result set" if total_estimate > 0 and offset >= total_estimate else "no memories match the given filters"
+            return SearchOutcome([], warnings + [warning], False, total_estimate, "empty")
         results = rows[:limit]
         has_more = total_estimate > offset + len(results)
         # No _soft_rerank on this branch (empty query) and recall_by_filters returns
@@ -1012,14 +1010,14 @@ def search_memories(
         return SearchOutcome(results, warnings, has_more, total_estimate, "direct")
 
     # === v0.7.3: pool 组装 + post-filter（design §3.5 第三步） ===
-    # v0.9.4: when paginating (offset > 0), widen the recall pool to cover
-    # the offset window so deep pages are not starved by pool_cap. At offset=0
-    # the original pool_cap is preserved (keeps the pool-saturation / Channel-6
-    # skip semantics intact). Query-recall has no exact total, so offset here
-    # is best-effort (pool cap bounds the reachable depth); the
-    # empty-query+filters branch above is the exact-offset path.
+    # v0.9.4: when paginating (offset > 0), widen the recall pool past the
+    # requested window by one row so has_more can be inferred without a false
+    # negative when the window is exactly full. At offset=0 the original
+    # pool_cap is preserved (keeps the pool-saturation / Channel-6 skip
+    # semantics intact). Query-recall still has no exact total; the empty-query
+    # SQL paths above are the precise pagination paths.
     base_pool_cap = getattr(db.settings, "recall_pool_cap", 50)
-    pool_cap = max(base_pool_cap, offset + limit) if offset > 0 else base_pool_cap
+    pool_cap = max(base_pool_cap, offset + limit + 1) if offset > 0 else base_pool_cap
     pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause,
                         status_filter=status_filter, query_embedding=query_embedding,
                         pool_cap=pool_cap,
@@ -1042,8 +1040,8 @@ def search_memories(
     else:
         # 无过滤：保留 v0.7.2 行为，pool 空走 fallback
         if not pool:
-            fb_rows, fb_warnings, _fb_hm, _fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings)
-            return SearchOutcome(fb_rows, fb_warnings, False, 0, "recent_fallback")
+            fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings, offset=offset)
+            return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_fallback")
 
     reranked = _soft_rerank(query, pool)
     # Slice to the requested page window.
@@ -1280,12 +1278,9 @@ def _search_bm25(
     like_status_clause: str,
     warnings: list[str],
     debug_ranking: bool,
-) -> Tuple[list[dict[str, Any]], list[str]]:
-    """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback.
-
-    v0.7.3: does NOT accept the new filter params; the caller (search_memories)
-    warns the agent before forwarding here when filters were supplied.
-    """
+    offset: int = 0,
+) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
+    """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback."""
     rows = []
     conn = db._new_connection()
     if db.state.fts5_available and query:
@@ -1296,8 +1291,8 @@ def _search_bm25(
             WHERE memories_fts MATCH ? AND {status_clause_m}
         """
         params: list[Any] = [_sanitize_fts_query(query)]
-        sql += " ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ? OFFSET ?"
+        params.extend([limit + 1, offset])
         try:
             rows = conn.execute(sql, params).fetchall()
         except Exception as exc:
@@ -1313,10 +1308,14 @@ def _search_bm25(
         for tag in tags or []:
             clauses.append("tags LIKE ?")
             params.append(f"%{tag}%")
-        params.append(limit)
+        params.extend([limit + 1, offset])
         try:
             rows = conn.execute(
-                f"SELECT *, 0 AS score FROM memories WHERE {' AND '.join(clauses)} ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END, event_time DESC, ingest_time DESC LIMIT ?",
+                f"""SELECT *, 0 AS score FROM memories
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
+                             event_time DESC, ingest_time DESC
+                    LIMIT ? OFFSET ?""",
                 params,
             ).fetchall()
         except Exception as exc:
@@ -1326,17 +1325,18 @@ def _search_bm25(
             warnings.append("Using LIKE/keyword search because sqlite-vec and FTS5 are unavailable.")
     conn.close()
     if query and not rows:
-        # _recent_fallback now returns a 4-tuple (v0.7.3 K4); _search_bm25 itself
-        # stays a 2-tuple — search_memories 补 (False, 0) when forwarding bm25.
-        fb_rows, fb_warnings, _fb_has_more, _fb_total = _recent_fallback(
-            db, workspace, tags, limit, like_status_clause, warnings,
+        fb_rows, fb_warnings, fb_has_more, fb_total = _recent_fallback(
+            db, workspace, tags, limit, like_status_clause, warnings, offset=offset,
         )
-        return fb_rows, fb_warnings
-    out = [row_to_dict(row) for row in rows]
+        return fb_rows, fb_warnings, fb_has_more, fb_total
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    total_estimate = offset + len(page_rows) + (1 if has_more else 0)
+    out = [row_to_dict(row) for row in page_rows]
     if not debug_ranking:
         for r in out:
             r.pop("score", None)
-    return out, warnings
+    return out, warnings, has_more, total_estimate
 
 
 def _recent_fallback(
@@ -1346,6 +1346,7 @@ def _recent_fallback(
     limit: int,
     like_status_clause: str,
     warnings: list[str],
+    offset: int = 0,
 ) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
     """Recent-memory fallback when no direct match found (r4 §4.2 safety net)."""
     clauses = [like_status_clause]
@@ -1353,9 +1354,13 @@ def _recent_fallback(
     for tag in tags or []:
         clauses.append("tags LIKE ?")
         params.append(f"%{tag}%")
-    params.append(limit)
     conn = db._new_connection()
     try:
+        count_row = conn.execute(
+            f"SELECT COUNT(*) AS c FROM memories WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchone()
+        total_estimate = int(count_row["c"] or 0) if count_row else 0
         rows = conn.execute(
             f"""SELECT *, 0 AS score FROM memories
                 WHERE {' AND '.join(clauses)}
@@ -1374,8 +1379,8 @@ def _recent_fallback(
                   confidence DESC,
                   ingest_time DESC,
                   event_time DESC
-                LIMIT ?""",
-            params,
+                LIMIT ? OFFSET ?""",
+            params + [limit, offset],
         ).fetchall()
     finally:
         conn.close()
@@ -1384,6 +1389,5 @@ def _recent_fallback(
             _NO_DIRECT_MATCH_PREFIX
             + ". Returning recent memories from the shared library; refine keywords, try memory_recent, or compare candidates before reading source files."
         )
-    # v0.7.3 K4/E5: fallback path has no has_more semantics — "还有更多匹配"
-    # 不成立（这是"没匹配给你最近的"），写死 (False, 0)。
-    return [row_to_dict(row) for row in rows], warnings, False, 0
+    has_more = total_estimate > offset + len(rows)
+    return [row_to_dict(row) for row in rows], warnings, has_more, total_estimate

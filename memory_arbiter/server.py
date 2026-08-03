@@ -63,8 +63,8 @@ v0.9 conflict gate: ALWAYS inspect `action_required`, `verification_status`, and
         )
 
     @app.tool()
-    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True) -> dict[str, Any]:
-        """Retrieve memories by relevance. limit is page size (default 10), not a result cap. has_more=true means more unreturned results exist — this version has no pagination; narrow with a more specific query, a larger limit (max 100), or tags_filter.
+    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_superseded: Optional[bool] = None) -> dict[str, Any]:
+        """Retrieve active memories by relevance. limit is page size (default 10), not a result cap. has_more=true means more unreturned active results may exist; memory_search has no offset cursor, so narrow with a more specific query, a larger limit (max 100), or tags_filter. For paginated expired/history recall use memory_search_expired.
 
 v0.9.4: active-query split — ``memory_search`` returns ONLY ``status='active'`` memories. Superseded/deleted memories are excluded at the database level. For superseded history recall use ``memory_search_expired``.
 
@@ -88,7 +88,16 @@ v0.9 structured routing: `structured_claim_candidate` + `pending_llm` is a hard 
 Note: tags_filter is AND semantics — every listed tag must be present. Suited to: finding the N most relevant entries, exhaustive queries with filters, and structured listing via empty query + filters.
 
 v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized automatically even without query_embedding; an explicit query_embedding still takes precedence."""
-        return tools.memory_search(query=query, workspace=workspace, tags=tags or [], limit=limit, debug_ranking=debug_ranking, query_embedding=query_embedding, tags_filter=tags_filter, after_time=after_time, before_time=before_time, source_type=source_type, include_linked_open_items=include_linked_open_items, include_conflict_signal=include_conflict_signal)
+        kwargs = dict(
+            query=query, workspace=workspace, tags=tags or [], limit=limit,
+            debug_ranking=debug_ranking, query_embedding=query_embedding,
+            tags_filter=tags_filter, after_time=after_time, before_time=before_time,
+            source_type=source_type, include_linked_open_items=include_linked_open_items,
+            include_conflict_signal=include_conflict_signal,
+        )
+        if include_superseded is not None:
+            kwargs["include_superseded"] = include_superseded
+        return tools.memory_search(**kwargs)
 
     @app.tool()
     def memory_search_expired(
@@ -425,7 +434,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
         dry_run: bool = True,
         authorized: bool = False,
     ) -> dict[str, Any]:
-        """Purge orphan vec rows and optionally resync parent_status (v0.9.4). Superseded vectors are retained for memory_search_expired; this tool only deletes true orphan vectors whose parent memory/section row no longer exists. dry_run=true reports vec_parent_status_mismatches and orphan_vectors. Actual orphan purge requires dry_run=false AND authorized=true; any detected parent_status drift is resynced first. Only touches memories_vec / memory_sections_vec; memory content and FTS are never modified."""
+        """Purge orphan vec rows and optionally resync parent_status (v0.9.4). Superseded vectors are retained for memory_search_expired; this tool only deletes true orphan vectors whose parent memory/section row no longer exists. dry_run=true reports vec_parent_status_mismatches and orphan_vectors. For non-destructive drift repair only, use memory_resync_vec_parent_status(dry_run=false), which does not require authorized. Cleanup execution may purge orphan rows, so it requires dry_run=false AND authorized=true. Only touches memories_vec / memory_sections_vec; memory content and FTS are never modified."""
         return tools.memory_cleanup_inactive_vectors(
             dry_run=dry_run,
             authorized=authorized,

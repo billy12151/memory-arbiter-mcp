@@ -712,7 +712,7 @@ def test_search_includes_superseded_when_requested(tmp_path: Path) -> None:
     assert active_id in ids, "active record missing in active search"
     assert stale_id not in ids, "superseded record leaked into active search results"
 
-    # memory_search_expired (superseded only)
+    # memory_search_expired (expired history: non-active non-deleted)
     expired = tools.memory_search_expired(query="release-spec", workspace="repo-a")
     expired_ids = [r["id"] for r in expired["data"]["results"]]
     assert stale_id in expired_ids, "superseded record not returned by memory_search_expired"
@@ -781,12 +781,12 @@ def test_superseded_always_ranked_below_active_even_with_higher_score(tmp_path: 
     assert active_id in ids, "active record missing from memory_search"
     assert stale_id not in ids, "superseded record leaked into active-only memory_search"
 
-    # memory_search_expired (superseded-only): the superseded record IS surfaced
+    # memory_search_expired (expired history): the superseded record IS surfaced
     # for audit, and the active record does NOT leak in.
     expired = tools.memory_search_expired(query="release", workspace="repo-a")
     expired_ids = [r["id"] for r in expired["data"]["results"]]
     assert stale_id in expired_ids, "superseded record not returned by memory_search_expired"
-    assert active_id not in expired_ids, "active record leaked into superseded-only memory_search_expired"
+    assert active_id not in expired_ids, "active record leaked into memory_search_expired"
 
 
 # ---- v0.3.1: optional semantic recall (sqlite-vec vec0) -----------------
@@ -1409,7 +1409,7 @@ def test_auto_embedding_injects_query_embedding(tmp_path: Path, monkeypatch) -> 
     tools._ensure_embedder = lambda: (_MockManagedEmbedder(lambda text: [0.1, 0.2, 0.3]), [])  # type: ignore[method-assign]
     captured = {}
 
-    def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None, **kwargs):
+    def fake_search_memories(db, query, workspace, tags, limit, status_filter="active", debug_ranking=False, query_embedding=None, **kwargs):
         captured["query_embedding"] = query_embedding
         return SearchOutcome([], [], False, 0, "empty")
 
@@ -1438,7 +1438,7 @@ def test_explicit_embedding_overrides_auto(tmp_path: Path, monkeypatch) -> None:
     tools._ensure_embedder = fail_ensure  # type: ignore[method-assign]
     captured = {}
 
-    def fake_search_memories(db, query, workspace, tags, limit, include_superseded=False, debug_ranking=False, query_embedding=None, **kwargs):
+    def fake_search_memories(db, query, workspace, tags, limit, status_filter="active", debug_ranking=False, query_embedding=None, **kwargs):
         captured["query_embedding"] = query_embedding
         return SearchOutcome([], [], False, 0, "empty")
 
@@ -2712,12 +2712,12 @@ def test_v080_provenance_is_explicit_not_inferred(tmp_path: Path) -> None:
     assert all(s["provenance"] == "agent" for s in agent_sections)
 
 
-def test_v061_r1_channel6_recall_superseded_with_include_superseded(tmp_path: Path) -> None:
+def test_v061_r1_channel6_recall_superseded_with_expired_search(tmp_path: Path) -> None:
     """R1: memory_search_expired recalls a superseded split-active memory.
 
-    Channel 6's post-filter no longer uses include_superseded. Instead,
-    memory_search_expired uses vec_knn(include_superseded=True) to recall
-    superseded memories via their section vectors.
+    Channel 6's post-filter uses the active/expired query split. The
+    memory_search_expired path queries parent_status_filter="expired" so
+    superseded memories remain reachable via their section vectors.
     """
     tools = _make_channel6_tools(tmp_path)
     tools._embedder = _keyword_embedder()
@@ -2762,7 +2762,7 @@ def test_knn_prefilters_inactive_parent_before_top_k(tmp_path: Path) -> None:
     The metadata predicate ``AND v.parent_status='active'`` pre-filters at
     KNN scan time. The superseded memory's vectors are still there, but
     they are only visible via ``memory_search_expired`` which uses
-    ``include_superseded=True`` to query ``parent_status='superseded'``
+    ``parent_status_filter="expired"`` to query non-active non-deleted
     vectors."""
     pytest.importorskip("sqlite_vec")
     tools = _make_channel6_tools(tmp_path)
@@ -3446,18 +3446,42 @@ def test_empty_query_no_filters_goes_fallback(tmp_path: Path) -> None:
     assert any("No direct memory match" in w for w in res["warnings"]) or len(res["data"]["results"]) > 0
 
 
-def test_bm25_mode_warns_on_filter_params(tmp_path: Path, monkeypatch) -> None:
-    # D2：bm25 模式 + 过滤参数 → warning 提示过滤被忽略
+def test_bm25_mode_applies_filter_params(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
-    _write_mem(tools, content="hello", subject="hello", tags=["t"])
+    keep = _write_mem(tools, content="hello keep", subject="hello", tags=["keep"])
+    _write_mem(tools, content="hello drop", subject="hello", tags=["drop"])
     monkeypatch.setenv("MEMORY_ARBITER_RANKING_MODE", "bm25")
     try:
-        res = tools.memory_search(query="hello", tags_filter=["t"])
-        assert any("bm25 mode ignores" in w for w in res["warnings"]), (
-            f"D2: bm25 + tags_filter should warn; got {res['warnings']}"
-        )
-        assert res["data"]["has_more"] is False  # bm25 写死
-        assert res["data"]["total_estimate"] == 0
+        res = tools.memory_search(query="hello", tags_filter=["keep"])
+        ids = {r["id"] for r in res["data"]["results"]}
+        assert ids == {keep}
+        assert any("bm25 mode falls back to hybrid" in w for w in res["warnings"]), res["warnings"]
+        assert res["data"]["has_more"] is False
+        assert res["data"]["total_estimate"] == 1
+    finally:
+        monkeypatch.delenv("MEMORY_ARBITER_RANKING_MODE", raising=False)
+
+
+def test_bm25_mode_expired_search_honors_offset(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path)
+    ids = []
+    for i in range(5):
+        mid = _write_mem(tools, content=f"release expired {i}", subject="release", tags=[])
+        ids.append(mid)
+        assert tools.db.update_memory(mid, {"status": "superseded"}) is True
+    monkeypatch.setenv("MEMORY_ARBITER_RANKING_MODE", "bm25")
+    try:
+        page1 = tools.memory_search_expired(query="release", limit=2, offset=0)
+        page2 = tools.memory_search_expired(query="release", limit=2, offset=2)
+        p1_ids = [r["id"] for r in page1["data"]["results"]]
+        p2_ids = [r["id"] for r in page2["data"]["results"]]
+        assert len(p1_ids) == 2
+        assert len(p2_ids) == 2
+        assert set(p1_ids).isdisjoint(p2_ids)
+        assert page1["data"]["has_more"] is True
+        assert page2["data"]["offset"] == 2
+        assert page2["data"]["next_offset"] == 4
+        assert set(p1_ids + p2_ids).issubset(set(ids))
     finally:
         monkeypatch.delenv("MEMORY_ARBITER_RANKING_MODE", raising=False)
 

@@ -705,7 +705,7 @@ class MemoryTools:
         if "include_superseded" in _:
             return self.db.state.response(
                 {
-                    "error": "include_superseded was removed in v0.9.4; use memory_search_expired for superseded history recall",
+                    "error": "include_superseded was removed in v0.9.4; memory_search is active-only. Use memory_search_expired for expired history/audit recall (non-active non-deleted: superseded, conflicted, pending). The old mixed active+superseded mode is gone.",
                     "results": [],
                     "count": 0,
                 },
@@ -828,6 +828,7 @@ class MemoryTools:
             "retrieval_mode": retrieval_mode,
             # v0.7.4: related active todos, separated from the ranking engine.
             "linked_open_items": linked,
+            "query_domain": "active",
         }
         if attention_required:
             response_data["attention_required"] = True
@@ -911,9 +912,12 @@ class MemoryTools:
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
 
+        limit_requested = int(limit)
+        offset_requested = int(offset)
+        effective_offset = max(0, min(offset_requested, 10000))
         # Apply superseded_limit cap
         superseded_limit_cap = getattr(self.settings, "superseded_limit", 20)
-        effective_limit = min(max(1, int(limit)), max(1, int(superseded_limit_cap)), 50)
+        effective_limit = min(max(1, limit_requested), max(1, int(superseded_limit_cap)), 50)
 
         outcome = search_memories(
             self.db, query, workspace, tags, effective_limit,
@@ -924,7 +928,7 @@ class MemoryTools:
             after_time=after_time,
             before_time=before_time,
             source_type=source_type,
-            offset=offset,
+            offset=effective_offset,
         )
         results = outcome.results
         warnings = outcome.warnings
@@ -939,6 +943,39 @@ class MemoryTools:
         if include_conflict_signal and retrieval_mode == "direct" and results:
             results = self._attach_conflict_signals(results, extra_warnings)
 
+        attention_required = False
+        attention_summary: Optional[str] = None
+        if include_conflict_signal and retrieval_mode == "direct" and results:
+            seen_sources: dict[str, dict[str, Any]] = {}
+            for r in results:
+                sig = r.get("conflict_signal")
+                if not sig:
+                    continue
+                seen_sources.setdefault(str(sig.get("conflict_source", "conflict")), r)
+            ot = seen_sources.get("structured_claim_candidate") or seen_sources.get("open_table")
+            if ot is not None:
+                attention_required = True
+                ot_sig = ot.get("conflict_signal") or {}
+                head = f"Expired search hit #{ot.get('id')}"
+                if ot.get("subject"):
+                    head += f" ({ot['subject']})"
+                source_label = ot_sig.get("conflict_source") or "open_table"
+                head += f" carries a {source_label} signal"
+                peer = ot_sig.get("conflict_peer") or {}
+                if isinstance(peer, dict) and peer.get("id") is not None:
+                    peer_txt = f"#{peer['id']}"
+                    if peer.get("subject"):
+                        peer_txt += f" ({peer['subject']})"
+                    head += f" vs {peer_txt}"
+                n = sum(1 for x in results if (
+                    (x.get("conflict_signal") or {}).get("conflict_source") in
+                    {"structured_claim_candidate", "open_table"}
+                ))
+                if n > 1:
+                    head += f" and {n - 1} more"
+                attention_summary = head
+
+        next_offset = effective_offset + len(results) if has_more else None
         response_data = {
             "results": results,
             "count": len(results),
@@ -946,7 +983,32 @@ class MemoryTools:
             "total_estimate": total_estimate,
             "retrieval_mode": retrieval_mode,
             "query_domain": "expired",
+            "domain_statuses": "non-active non-deleted (superseded, conflicted, pending)",
+            "offset": effective_offset,
+            "limit_requested": limit_requested,
+            "effective_limit": effective_limit,
+            "next_offset": next_offset,
+            "offset_clamped": effective_offset != offset_requested,
+            "limit_capped": effective_limit != limit_requested,
+            "pagination_precision": "exact" if not query else "best_effort",
         }
+        if attention_required:
+            response_data["attention_required"] = True
+            response_data["attention_summary"] = attention_summary
+            strong_signal = next(
+                (
+                    r.get("conflict_signal") for r in results
+                    if (r.get("conflict_signal") or {}).get("conflict_source")
+                    in {"structured_claim_candidate", "open_table"}
+                ),
+                None,
+            )
+            if strong_signal and strong_signal.get("conflict_source") == "structured_claim_candidate":
+                response_data["action_required"] = "judge_conflict_before_use"
+                response_data["verification_status"] = "pending_llm"
+            elif strong_signal and strong_signal.get("action_required"):
+                response_data["action_required"] = strong_signal.get("action_required")
+                response_data["verification_status"] = strong_signal.get("verification_status")
         return self.db.state.response(
             response_data,
             extra_warnings=extra_warnings + warnings,
@@ -1910,11 +1972,13 @@ class MemoryTools:
         vectors are KEPT for ``memory_search_expired`` vec-hybrid recall.
 
         Resync mode: if ``parent_status`` mismatches are detected (vec.status !=
-        memories.status), ``dry_run`` reports them; with ``dry_run=False`` +
-        ``authorized=True`` they are repaired in-place via ``_resync_vec_parent_status``.
+        memories.status), ``dry_run`` reports them. Use
+        ``memory_resync_vec_parent_status(dry_run=False)`` to repair drift
+        without authorization; cleanup execution requires ``authorized=True``
+        because it may purge orphan rows after resync.
 
         ``dry_run=True`` (default) only reports counts.
-        Actual purge requires ``dry_run=False`` AND ``authorized=True``.
+        Actual orphan purge requires ``dry_run=False`` AND ``authorized=True``.
         """
         mismatches = self._count_vec_parent_status_mismatch()
         orphan_counts = self._count_orphan_vectors()
@@ -1925,13 +1989,17 @@ class MemoryTools:
                 "orphan_vectors": orphan_counts,
             }
             if mismatches.get("memory_vec_mismatch", 0) > 0 or mismatches.get("section_vec_mismatch", 0) > 0:
-                resp["hint"] = "re-run with dry_run=False and authorized=True to purge orphans and resync mismatches"
+                resp["hint"] = (
+                    "For non-destructive drift repair, run memory_resync_vec_parent_status(dry_run=False) "
+                    "without authorized. To also purge orphan vector rows, re-run cleanup with "
+                    "dry_run=False and authorized=True."
+                )
             else:
-                resp["hint"] = "re-run with dry_run=False and authorized=True to purge orphans"
+                resp["hint"] = "re-run with dry_run=False and authorized=True to purge orphan vector rows"
             return self.db.state.response(resp)
         if not authorized:
             return self.db.state.response(
-                {"error": "authorized=True is required to purge inactive vectors",
+                {"error": "authorized=True is required to purge orphan vector rows via cleanup",
                  "orphan_vectors": orphan_counts,
                  "vec_parent_status_mismatches": mismatches},
                 ok=False,

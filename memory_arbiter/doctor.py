@@ -1046,28 +1046,44 @@ def _check_orphan_sections(conn: sqlite3.Connection) -> Finding:
 def _check_orphan_vectors(conn: sqlite3.Connection) -> Finding:
     if not _table_exists(conn, "memories_vec"):
         return _na("consistency.orphan_vectors", "consistency", "memories_vec 表不存在（向量未启用）")
-    orphan = _scalar(conn,
+    orphan_mem = _scalar(conn,
         "SELECT count(*) FROM memories_vec v "
         "WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = v.id)") or 0
-    if orphan == 0:
+    orphan_sec = 0
+    if _table_exists(conn, "memory_sections_vec"):
+        orphan_sec = _scalar(conn,
+            "SELECT count(*) FROM memory_sections_vec v "
+            "WHERE NOT EXISTS (SELECT 1 FROM memory_sections s WHERE s.id = v.id)") or 0
+    total = int(orphan_mem) + int(orphan_sec)
+    evidence = {
+        "orphan_memory_vectors": int(orphan_mem),
+        "orphan_section_vectors": int(orphan_sec),
+        "orphan_vectors": total,
+    }
+    if total == 0:
         return Finding(
             check_id="consistency.orphan_vectors", dimension="consistency",
             severity=Severity.INFO, status="pass", title="无孤儿向量",
-            detail="所有向量均指向存在的 memory 行",
-            evidence={"orphan_vectors": 0},
+            detail="所有 memory/section 向量均指向存在的父行",
+            evidence=evidence,
         )
-    ids = [r[0] for r in conn.execute(
+    mem_ids = [r[0] for r in conn.execute(
         "SELECT v.id FROM memories_vec v "
         "WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = v.id) LIMIT 20")]
+    sec_ids: list[int] = []
+    if _table_exists(conn, "memory_sections_vec"):
+        sec_ids = [r[0] for r in conn.execute(
+            "SELECT v.id FROM memory_sections_vec v "
+            "WHERE NOT EXISTS (SELECT 1 FROM memory_sections s WHERE s.id = v.id) LIMIT 20")]
+    evidence.update({"memory_vector_ids": mem_ids, "section_vector_ids": sec_ids})
     return Finding(
         check_id="consistency.orphan_vectors", dimension="consistency",
         severity=Severity.WARNING, status="warn",
-        title=f"存在孤儿向量（{orphan} 条指向已删除 memory 行）",
-        detail=(f"{orphan} 条向量指向已物理消失的 memory（外部改库/写入中断/迁移失败残留）。"
-                "⚠️ 当前无对外工具可清理（可观测但当前不可修，等 v2）。"),
-        evidence={"orphan_vectors": orphan, "vector_ids": ids},
-        fix_hint="无对外工具可清理；如需手动处理：DELETE FROM memories_vec "
-                 "WHERE id NOT IN (SELECT id FROM memories)（请先备份）。已列入 v2 cleanup 候选。",
+        title=f"存在孤儿向量（{total} 条指向已删除父行）",
+        detail=(f"memory_vec 级 {orphan_mem} 条、section_vec 级 {orphan_sec} 条向量指向已物理消失的父行"
+                "（外部改库/写入中断/迁移失败残留）。cleanup 只会清理这些 orphan，不会删除 superseded 向量。"),
+        evidence=evidence,
+        fix_hint="先备份；运行 memory_cleanup_inactive_vectors(dry_run=true) 预览，确认后运行 dry_run=false, authorized=true 清理 orphan vector rows。",
     )
 
 
