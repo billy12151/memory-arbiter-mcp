@@ -42,6 +42,30 @@ Versions follow semantic versioning.
   workspace silently isolates memories. When unsure, use `weak` (never drops,
   only demotes). See the Workspace Isolation section in the README.
 
+### Fixed (pre-release review)
+
+Six strict-isolation defects found by adversarial review before release, all
+fixed in this version:
+- **strict fallback leaked cross-workspace memories** — when a strict search's
+  candidate pool emptied after workspace filtering, `_recent_fallback` was
+  called without `ws_canonical`, returning whole-DB recent memories. strict now
+  returns empty instead of falling back.
+- **bm25 direct hits ignored workspace** — `_search_bm25`'s FTS/LIKE SQL had no
+  workspace predicate; under `RANKING_MODE=bm25` + strict, cross-workspace
+  matches leaked directly.
+- **pool saturation hid same-workspace hits** — `_wide_recall` filled the pool
+  from the whole DB before strict post-filtered, so other-workspace matches
+  could crowd out a real same-workspace hit. Workspace predicates are now pushed
+  down into every recall channel (FTS main/OR, subject/tags LIKE, content LIKE,
+  memory-vec KNN, section-vec KNN).
+- **`linked_open_items` leaked cross-workspace todos** — the side query had no
+  workspace constraint under strict, surfencing other workspaces' todo metadata.
+- **`total_estimate`/`has_more` counted cross-workspace** — non-empty query +
+  filters used a whole-DB count, mismatching the strict-filtered result list.
+- **`attention_summary` pointed at the wrong tool** — the strict new-workspace
+  block told users to call `memory_confirm` (which rejects pending memories);
+  corrected to `memory_activate`.
+
 ## [0.9.6] — 2026-08-04
 
 ### Added

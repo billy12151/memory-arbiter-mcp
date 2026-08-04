@@ -163,7 +163,7 @@ class MemoryTools:
                     "attention_summary": (
                         f"strict isolation: workspace {ws_canonical!r} is new. "
                         "Memory written as pending and excluded from active recall "
-                        "until confirmed via memory_confirm."
+                        "until activated via memory_activate."
                     ),
                 })
             elif isolation == "weak" and ws_is_new:
@@ -919,7 +919,10 @@ class MemoryTools:
         # never on browse/fallback/empty. Failures degrade to [] + warning.
         linked: list[dict[str, Any]] = []
         if include_linked_open_items and retrieval_mode == "direct" and results:
-            linked = _linked_open_items_for_search(self.db, results, extra_warnings)
+            linked = _linked_open_items_for_search(
+                self.db, results, extra_warnings,
+                ws_canonical=ws_canonical if isolation == "strict" else None,
+            )
         response_data = {
             "results": results,
             "count": len(results),

@@ -149,6 +149,107 @@ def test_strict_hard_filter_same_canonical_only(tmp_path):
     assert {m["workspace"] for m in res} == {"projA"}
 
 
+def test_strict_no_leak_when_query_hits_other_workspace(tmp_path):
+    """v0.9.7 regression: searching ws-A for a term that only exists in ws-B
+    must return nothing — NOT fall back to whole-DB recent memories.
+
+    Before the fix, the strict pool post-filter left `pool` empty, so
+    search_memories fell through to _recent_fallback WITHOUT ws_canonical and
+    leaked ws-B's memory into a ws-A search (retrieval_mode=recent_fallback).
+    """
+    tools = make_tools(tmp_path, "strict")
+    a_mid = _write(tools, "alpha deployment notes", "projA")["data"]["id"]
+    b_mid = _write(tools, "beta release notes uniquebeta", "projB")["data"]["id"]
+    tools.memory_activate(memory_id=a_mid, authorized=True)
+    tools.memory_activate(memory_id=b_mid, authorized=True)
+    # 'uniquebeta' exists only in projB; a projA search must stay empty.
+    res = _results(tools.memory_search(query="uniquebeta", workspace="projA", limit=10))
+    assert res == [], f"strict leaked cross-workspace memory: {[m['workspace'] for m in res]}"
+
+
+def test_strict_no_leak_when_query_matches_nothing(tmp_path):
+    """v0.9.7 regression: a query matching nothing in any workspace must not
+    fall back to whole-DB recent memories under strict isolation.
+
+    Before the fix, an empty pool triggered _recent_fallback with
+    ws_canonical=None, returning every workspace's recent memories.
+    """
+    tools = make_tools(tmp_path, "strict")
+    a_mid = _write(tools, "alpha deployment notes", "projA")["data"]["id"]
+    b_mid = _write(tools, "beta release notes", "projB")["data"]["id"]
+    tools.memory_activate(memory_id=a_mid, authorized=True)
+    tools.memory_activate(memory_id=b_mid, authorized=True)
+    res = _results(tools.memory_search(query="nomatchterm_zzz", workspace="projA", limit=10))
+    assert res == [], f"strict leaked cross-workspace memory on no-match: {[m['workspace'] for m in res]}"
+
+
+def test_strict_attention_summary_names_memory_activate(tmp_path):
+    """v0.9.7 regression: the strict new-workspace block response must tell the
+    user to use memory_activate (not memory_confirm, which rejects pending
+    memories as 'not active').
+    """
+    tools = make_tools(tmp_path, "strict")
+    r = _write(tools, "first in new ws", "projA")
+    summary = r["data"].get("attention_summary") or ""
+    assert "memory_activate" in summary, f"attention_summary points at wrong tool: {summary!r}"
+    assert "memory_confirm" not in summary
+
+
+def test_strict_bm25_direct_hits_are_workspace_scoped(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMORY_ARBITER_RANKING_MODE", "bm25")
+    tools = make_tools(tmp_path, "strict")
+    for ws, content in [("projA", "apple alpha"), ("projB", "apple beta")]:
+        mid = _write(tools, content, ws)["data"]["id"]
+        tools.memory_activate(memory_id=mid, authorized=True)
+
+    res = _results(tools.memory_search(query="apple", workspace="projA", limit=10))
+
+    assert [(m["workspace"], m["content"]) for m in res] == [("projA", "apple alpha")]
+
+
+def test_strict_recall_pool_saturation_does_not_hide_same_workspace_hit(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    tools.settings.recall_pool_cap = 50
+    for i in range(60):
+        mid = _write(tools, f"apple shared beta {i:02d}", "projB")["data"]["id"]
+        tools.memory_activate(memory_id=mid, authorized=True)
+    expected_id = _write(tools, "apple shared alpha should be found", "projA")["data"]["id"]
+    tools.memory_activate(memory_id=expected_id, authorized=True)
+
+    res = _results(tools.memory_search(query="apple", workspace="projA", limit=10))
+
+    assert [m["id"] for m in res] == [expected_id]
+    assert {m["workspace"] for m in res} == {"projA"}
+
+
+def test_strict_linked_open_items_are_workspace_scoped(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    main_id = _write(tools, "auth bug main", "projA", tags=["auth"])["data"]["id"]
+    tools.memory_activate(memory_id=main_id, authorized=True)
+    beta_todo_id = _write(tools, "todo in beta", "projB", tags=["todo", "auth"])["data"]["id"]
+    tools.memory_activate(memory_id=beta_todo_id, authorized=True)
+
+    res = tools.memory_search(query="auth", workspace="projA", limit=10)
+
+    assert [(m["id"], m["workspace"]) for m in res["data"]["results"]] == [(main_id, "projA")]
+    assert res["data"]["linked_open_items"] == []
+
+
+def test_strict_filter_counts_are_workspace_scoped(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    alpha_id = _write(tools, "apple alpha", "projA", tags=["fruit"])["data"]["id"]
+    tools.memory_activate(memory_id=alpha_id, authorized=True)
+    for i in range(3):
+        mid = _write(tools, f"banana beta {i}", "projB", tags=["fruit"])["data"]["id"]
+        tools.memory_activate(memory_id=mid, authorized=True)
+
+    res = tools.memory_search(query="apple", workspace="projA", tags_filter=["fruit"], limit=10)
+
+    assert [(m["id"], m["workspace"]) for m in res["data"]["results"]] == [(alpha_id, "projA")]
+    assert res["data"]["total_estimate"] == 1
+    assert res["data"]["has_more"] is False
+
+
 # ── weak: whole-DB recall, soft rerank only ─────────────────────────────────
 
 def test_weak_recall_never_filters(tmp_path):
@@ -193,3 +294,109 @@ def test_alias_no_embedder_exact_match(tmp_path):
     # a different string is a distinct new canonical (no vector merge)
     r3 = db.resolve_workspace_canonical("金营项目", embedder=None)
     assert r3["is_new"] is True
+
+
+# ── v0.9.7 third-round adversarial: channels the first two rounds didn't cover ──
+
+def test_strict_offset_beyond_same_workspace_set_does_not_leak(tmp_path):
+    """strict + offset past the same-ws result window must return empty, not
+    spill cross-workspace memories into the page (pagination boundary).
+
+    Tests the search_memories core directly — the memory_search *tool* does
+    not expose offset (only memory_search_expired does), but search_memories
+    itself supports it, so this guards the slicing + strict-filter interplay."""
+    from memory_arbiter.search import search_memories
+    tools = make_tools(tmp_path, "strict")
+    db = tools.db
+    for i in range(3):
+        mid = _write(tools, f"apple alpha {i}", "projA")["data"]["id"]
+        tools.memory_activate(memory_id=mid, authorized=True)
+    for i in range(5):
+        mid = _write(tools, f"apple beta {i}", "projB")["data"]["id"]
+        tools.memory_activate(memory_id=mid, authorized=True)
+    # offset beyond projA's 3 matches — page must be empty, not projB.
+    outcome = search_memories(
+        db, "apple", "projA", None, 10,
+        status_filter="active", ws_canonical="projA", isolation="strict", offset=3,
+    )
+    ws = {m["workspace"] for m in outcome.results}
+    assert ws == set(), f"offset boundary leaked cross-workspace: {ws}"
+
+
+def test_strict_alias_canonicalization_keeps_distinct_workspaces_separate(tmp_path):
+    """strict + alias resolution (no embedder → exact-string): two distinct
+    workspace strings stay distinct; searching one does not leak the other.
+    Also covers the double-store (raw + canonical) and same-ws 2nd-write not
+    re-blocking."""
+    tools = make_tools(tmp_path, "strict")
+    db = tools.db
+    r1 = _write(tools, "apple alpha one", "projA")
+    r2 = _write(tools, "apple alpha two", "projA")
+    # 1st projA write is a new canonical (blocked as pending); 2nd is not new.
+    assert r1["data"].get("action_required") == "confirm_new_workspace"
+    assert r2["data"].get("action_required") is None
+    tools.memory_activate(memory_id=r1["data"]["id"], authorized=True)
+    r3 = _write(tools, "apple beta three", "projB")
+    tools.memory_activate(memory_id=r3["data"]["id"], authorized=True)
+    # strict search projA returns only projA's memories.
+    res = _results(tools.memory_search(query="apple", workspace="projA", limit=10))
+    assert {m["workspace"] for m in res} == {"projA"}
+    # double-store: raw and canonical agree for exact-string workspaces.
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT workspace, workspace_canonical FROM memories ORDER BY id"
+        ).fetchall()
+    assert all(r["workspace"] == r["workspace_canonical"] for r in rows)
+
+
+def test_weak_linked_open_items_not_over_scoped_by_strict_fix(tmp_path):
+    """weak must keep linked_open_items whole-DB (the weak contract). The
+    strict ws_canonical scoping must NOT leak into weak mode. A cross-workspace
+    todo sharing a tag with the result — but NOT itself matched by the query —
+    must still surface as a linked_open_item under weak."""
+    tools = make_tools(tmp_path, "weak")
+    main_id = _write(tools, "deploy main result notes", "projA", tags=["release", "feature"])["data"]["id"]
+    # projB todo: text does NOT contain "deploy", but shares the "release" tag.
+    beta = _write(tools, "unrelated text zzz", "projB", tags=["todo", "release"])
+    beta_id = beta["data"]["id"]
+    res = tools.memory_search(query="deploy", workspace="projA", limit=10)
+    assert [m["id"] for m in _results(res)] == [main_id], "weak should still filter results by relevance"
+    linked_ids = [li["id"] for li in (res["data"].get("linked_open_items") or [])]
+    assert beta_id in linked_ids, (
+        f"weak linked_open_items missing cross-workspace todo {beta_id}; got {linked_ids}"
+    )
+
+
+try:
+    import sqlite_vec  # type: ignore  # noqa: F401
+    _VEC_AVAILABLE = True
+except Exception:
+    _VEC_AVAILABLE = False
+
+
+@pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not installed")
+def test_strict_vec_knn_excludes_closer_cross_workspace_vector(tmp_path):
+    """Adversarial vector channel: a cross-workspace memory whose vector is
+    CLOSER to the query than the same-workspace hit must still be excluded
+    under strict. Verifies vec_knn's workspace_predicate is wired and its
+    parameter order is correct across all three SQL branches."""
+    tools = make_tools(tmp_path, "strict", vec=True)
+    db = tools.db
+    # query vector [1.0, 0.0]; projA same-ws [0.9, 0.1] (L2~0.14);
+    # projB cross-ws [1.0, 0.0] (L2=0.0, exact match — closer!).
+    a_mid = _write(tools, "alpha same ws", "projA")["data"]["id"]
+    tools.memory_activate(memory_id=a_mid, authorized=True)
+    b_mid = _write(tools, "beta cross ws exact", "projB")["data"]["id"]
+    tools.memory_activate(memory_id=b_mid, authorized=True)
+    db.store_embedding(a_mid, [0.9, 0.1])
+    db.store_embedding(b_mid, [1.0, 0.0])
+    res = tools.memory_search(query="x", workspace="projA", limit=10, query_embedding=[1.0, 0.0])
+    rows = _results(res)
+    assert {r["workspace"] for r in rows} == {"projA"}, (
+        f"vec_knn leaked closer cross-workspace vector: {[r['workspace'] for r in rows]}"
+    )
+    # direct vec_knn call confirms the predicate (not just the search wrapper)
+    knn_a = db.vec_knn([1.0, 0.0], k=10, parent_status_filter="active", ws_canonical="projA")
+    assert all(r.get("workspace") == "projA" for r in knn_a)
+    knn_b = db.vec_knn([1.0, 0.0], k=10, parent_status_filter="active", ws_canonical="projB")
+    assert all(r.get("workspace") == "projB" for r in knn_b)

@@ -584,6 +584,7 @@ def _wide_recall(
     content_like_fallback: bool = True,
     query_embedding: Optional[list[float]] = None,
     content_like_cap: int = 30,
+    ws_canonical: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """v0.3.0 wide recall: merge multiple retrieval channels into a candidate pool.
 
@@ -603,6 +604,13 @@ def _wide_recall(
     if not db.db_available or not query:
         return []
     pool: dict[int, dict[str, Any]] = {}
+    workspace_clause_m = ""
+    workspace_clause = ""
+    workspace_params: list[Any] = []
+    if ws_canonical:
+        workspace_clause_m = " AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
+        workspace_clause = " AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?"
+        workspace_params.append(ws_canonical)
     conn = db._new_connection()
     try:
         # Channel 1+2: FTS main + OR. _sanitize_fts_query already OR-joins CJK
@@ -617,9 +625,9 @@ def _wide_recall(
                     SELECT m.*, bm25(memories_fts) AS score
                     FROM memories_fts
                     JOIN memories m ON memories_fts.rowid = m.id
-                    WHERE memories_fts MATCH ? AND {status_clause_m}
+                    WHERE memories_fts MATCH ? AND {status_clause_m}{workspace_clause_m}
                 """
-                params: list[Any] = [fts_main]
+                params: list[Any] = [fts_main, *workspace_params]
                 sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
                 params.append(per_channel_cap)
                 try:
@@ -637,9 +645,9 @@ def _wide_recall(
                         SELECT m.*, bm25(memories_fts) AS score
                         FROM memories_fts
                         JOIN memories m ON memories_fts.rowid = m.id
-                        WHERE memories_fts MATCH ? AND {status_clause_m}
+                        WHERE memories_fts MATCH ? AND {status_clause_m}{workspace_clause_m}
                     """
-                    params = [fts_or]
+                    params = [fts_or, *workspace_params]
                     sql += f" ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ?"
                     params.append(per_channel_cap)
                     try:
@@ -658,6 +666,9 @@ def _wide_recall(
             for tag in tags or []:
                 clauses.append("tags LIKE ?")
                 params.append(f"%{tag}%")
+            if ws_canonical:
+                clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+                params.extend(workspace_params)
             params.append(pool_cap)
             sql = f"""SELECT *, 0 AS score FROM memories
                       WHERE {' AND '.join(clauses)}
@@ -684,6 +695,9 @@ def _wide_recall(
                 for tag in tags or []:
                     clauses.append("tags LIKE ?")
                     params.append(f"%{tag}%")
+                if ws_canonical:
+                    clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+                    params.extend(workspace_params)
                 params.append(content_like_cap)  # cap content-LIKE gap-fill (configurable via MEMORY_ARBITER_CONTENT_LIKE_CAP)
                 sql = f"""SELECT *, 0 AS score FROM memories
                           WHERE {' AND '.join(clauses)}
@@ -721,6 +735,7 @@ def _wide_recall(
             query_embedding,
             k=max(pool_cap - len(pool), 10),
             parent_status_filter=status_filter,
+            ws_canonical=ws_canonical,
         )
         for row in knn_rows:
             # Respect status filtering — vec0 rows are joined from memories,
@@ -753,6 +768,7 @@ def _wide_recall(
             query_embedding,
             k=k,
             parent_status_filter=status_filter,
+            ws_canonical=ws_canonical,
         )
         for row in sec_rows:
             status = row.get("status")
@@ -989,6 +1005,7 @@ def search_memories(
         result, bm_warnings, bm_has_more, bm_total = _search_bm25(
             db, query, workspace, tags, limit, status_clause, like_status_clause, warnings, debug_ranking,
             offset=offset,
+            ws_canonical=ws_canonical if (isolation == "strict" and ws_canonical) else None,
         )
         # Infer retrieval_mode for the legacy bm25 path: _search_bm25 internally
         # falls back to _recent_fallback when query has no hit (appending its
@@ -1055,7 +1072,8 @@ def search_memories(
     pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause,
                         status_filter=status_filter, query_embedding=query_embedding,
                         pool_cap=pool_cap,
-                        content_like_cap=getattr(db.settings, "content_like_cap", 30))
+                        content_like_cap=getattr(db.settings, "content_like_cap", 30),
+                        ws_canonical=ws_canonical if (isolation == "strict" and ws_canonical) else None)
 
     # v0.9.7: strict isolation — hard-filter the candidate pool to the query's
     # canonical workspace. weak does NOT filter (it only nudges ranking in
@@ -1081,9 +1099,19 @@ def search_memories(
                 empty_reason = "filters too restrictive or no matches; pool was empty after post-filter"
             return SearchOutcome([], warnings + [empty_reason], False, 0, "empty")
     else:
-        # 无过滤：保留 v0.7.2 行为，pool 空走 fallback
+        # 无过滤：保留 v0.7.2 行为，pool 空走 fallback。v0.9.7: strict 下
+        # query 未命中本 ws 时不应回退到「最近记忆」——strict 的语义是
+        # 「搜不到就是搜不到」，最近兜底会让用户以为 query 命中了。故
+        # strict 直接返回空；none/weak 保留全库/同 ws 最近兜底。
         if not pool:
-            fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings, offset=offset)
+            if isolation == "strict" and ws_canonical:
+                return SearchOutcome(
+                    [], warnings + ["no same-workspace match; strict isolation does not fall back to recent memories"],
+                    False, 0, "empty",
+                )
+            fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(
+                db, workspace, tags, limit, like_status_clause, warnings, offset=offset,
+            )
             return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_fallback")
 
     reranked = _soft_rerank(query, pool, ws_canonical=ws_canonical, isolation=isolation)
@@ -1097,6 +1125,7 @@ def search_memories(
     if has_filters:
         total_estimate = db.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
+            ws_canonical=ws_canonical if (isolation == "strict" and ws_canonical) else None,
         )
     else:
         total_estimate = len(pool)
@@ -1146,6 +1175,7 @@ def _linked_open_items_for_search(
     results: list[dict[str, Any]],
     warnings: list[str],
     max_items: int = 5,
+    ws_canonical: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """v0.7.4: attach up to ``max_items`` active todo memories that share
     meaningful tags with the current result set (linked_open_items).
@@ -1202,25 +1232,32 @@ def _linked_open_items_for_search(
 
     try:
         conn = db._new_connection()
+        workspace_clause = ""
+        workspace_params: list[Any] = []
+        if ws_canonical:
+            workspace_clause = "AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
+            workspace_params.append(ws_canonical)
         try:
             # --- L1: EXISTS check for active+todo memories ---
             todo_exists = conn.execute(
                 "SELECT EXISTS ("
                 " SELECT 1 FROM memories m"
-                " WHERE m.status='active'"
+                " WHERE m.status='active' " + workspace_clause +
                 "   AND EXISTS ("
                 "     SELECT 1 FROM json_each("
                 "       CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END"
                 "     ) WHERE json_each.value='todo' AND json_each.type='text'"
                 "   )"
-                ") AS e"
+                ") AS e",
+                workspace_params,
             ).fetchone()["e"]
             if not todo_exists:
                 return []
 
             # --- L2: active_count ---
             active_count = int(conn.execute(
-                "SELECT COUNT(*) AS c FROM memories WHERE status='active'"
+                "SELECT COUNT(*) AS c FROM memories m WHERE m.status='active' " + workspace_clause,
+                workspace_params,
             ).fetchone()["c"])
             if active_count <= 0:
                 return []
@@ -1232,14 +1269,14 @@ def _linked_open_items_for_search(
                 f"""
                 SELECT m.id, m.subject, m.tags, m.ingest_time
                 FROM memories m
-                WHERE m.status='active' {exclude_clause}
+                WHERE m.status='active' {exclude_clause} {workspace_clause}
                   AND EXISTS (
                     SELECT 1 FROM json_each(
                       CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END
                     ) WHERE json_each.value='todo' AND json_each.type='text'
                   )
                 """,
-                list(result_ids),
+                list(result_ids) + workspace_params,
             ).fetchall()
             if not cand_rows:
                 return []
@@ -1247,14 +1284,15 @@ def _linked_open_items_for_search(
             # per-tag df across the active set (json_valid guard ⇒ M4-A silence).
             tag_df: dict[str, int] = {}
             df_rows = conn.execute(
-                """
+                f"""
                 SELECT tag.value AS t, COUNT(DISTINCT m.id) AS df
                 FROM memories m, json_each(
                   CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END
                 ) AS tag
-                WHERE m.status='active' AND tag.type='text'
+                WHERE m.status='active' {workspace_clause} AND tag.type='text'
                 GROUP BY tag.value
-                """
+                """,
+                workspace_params,
             ).fetchall()
             for r in df_rows:
                 tag_df[r["t"]] = int(r["df"])
@@ -1322,18 +1360,26 @@ def _search_bm25(
     warnings: list[str],
     debug_ranking: bool,
     offset: int = 0,
+    ws_canonical: Optional[str] = None,
 ) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
     """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback."""
     rows = []
+    workspace_clause_m = ""
+    workspace_clause = ""
+    workspace_params: list[Any] = []
+    if ws_canonical:
+        workspace_clause_m = " AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
+        workspace_clause = "COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?"
+        workspace_params.append(ws_canonical)
     conn = db._new_connection()
     if db.state.fts5_available and query:
         sql = f"""
             SELECT m.*, bm25(memories_fts) AS score
             FROM memories_fts
             JOIN memories m ON memories_fts.rowid = m.id
-            WHERE memories_fts MATCH ? AND {status_clause_m}
+            WHERE memories_fts MATCH ? AND {status_clause_m}{workspace_clause_m}
         """
-        params: list[Any] = [_sanitize_fts_query(query)]
+        params: list[Any] = [_sanitize_fts_query(query), *workspace_params]
         sql += " ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ? OFFSET ?"
         params.extend([limit + 1, offset])
         try:
@@ -1351,6 +1397,9 @@ def _search_bm25(
         for tag in tags or []:
             clauses.append("tags LIKE ?")
             params.append(f"%{tag}%")
+        if ws_canonical:
+            clauses.append(workspace_clause)
+            params.extend(workspace_params)
         params.extend([limit + 1, offset])
         try:
             rows = conn.execute(
@@ -1368,8 +1417,12 @@ def _search_bm25(
             warnings.append("Using LIKE/keyword search because sqlite-vec and FTS5 are unavailable.")
     conn.close()
     if query and not rows:
+        # v0.9.7: strict 下 query 未命中不应回退到最近记忆（会返回本 ws
+        # 的无关记忆，误导用户以为 query 命中）。none/weak 保留最近兜底。
+        if ws_canonical:
+            return [], warnings, False, 0
         fb_rows, fb_warnings, fb_has_more, fb_total = _recent_fallback(
-            db, workspace, tags, limit, like_status_clause, warnings, offset=offset,
+            db, workspace, tags, limit, like_status_clause, warnings, offset=offset, ws_canonical=ws_canonical,
         )
         return fb_rows, fb_warnings, fb_has_more, fb_total
     has_more = len(rows) > limit

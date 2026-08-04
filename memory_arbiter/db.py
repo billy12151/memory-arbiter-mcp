@@ -1019,6 +1019,7 @@ class MemoryDB:
         query_embedding: list[float],
         k: int = 10,
         parent_status_filter: str = "active",
+        ws_canonical: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """v0.9.4: single-stage KNN with metadata-predicate pre-filter.
 
@@ -1052,6 +1053,11 @@ class MemoryDB:
         else:  # "active" (default; unknown values fall back to active-only)
             parent_predicate = "AND v.parent_status = 'active'"
             eligible = "COALESCE(m.status, 'deleted') = 'active'"
+        workspace_predicate = ""
+        workspace_params: list[Any] = []
+        if ws_canonical:
+            workspace_predicate = "AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
+            workspace_params.append(ws_canonical)
         query_json = json.dumps(query_embedding)
         try:
             with self.connection() as conn:
@@ -1073,9 +1079,10 @@ class MemoryDB:
                         WHERE v.embedding MATCH ? AND k = ?
                           {parent_predicate}
                           AND {eligible}
+                          {workspace_predicate}
                         ORDER BY distance
                         """,
-                        (query_json, query_json, requested),
+                        (query_json, query_json, requested, *workspace_params),
                     ).fetchall()
                     conn.execute("COMMIT")
                     return [dict(row) for row in rows]
@@ -1113,13 +1120,14 @@ class MemoryDB:
                             FROM memories_vec v
                             JOIN memories m ON m.id=v.id
                             WHERE {eligible}
+                              {workspace_predicate}
                             ORDER BY distance
                             LIMIT ?""",
-                            (query_json, requested),
+                            (query_json, *workspace_params, requested),
                         ).fetchall()
                     else:
                         rows = conn.execute(
-                            """SELECT v.id AS id, v.distance AS distance,
+                            f"""SELECT v.id AS id, v.distance AS distance,
                                 m.workspace AS workspace, m.workspace_canonical AS workspace_canonical, m.agent_id AS agent_id,
                                 m.status AS status, m.subject AS subject,
                                 m.tags AS tags, m.content AS content,
@@ -1130,8 +1138,9 @@ class MemoryDB:
                             FROM memories_vec v
                             JOIN memories m ON m.id=v.id
                             WHERE v.embedding MATCH ? AND k = ?
+                              {workspace_predicate}
                             ORDER BY v.distance""",
-                            (query_json, requested),
+                            (query_json, requested, *workspace_params),
                         ).fetchall()
                     conn.execute("COMMIT")
                     return [dict(row) for row in rows]
@@ -1143,6 +1152,7 @@ class MemoryDB:
         query_embedding: list[float],
         k: int = 10,
         parent_status_filter: str = "active",
+        ws_canonical: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """v0.9.4: single-stage section KNN with metadata-predicate pre-filter.
 
@@ -1175,6 +1185,11 @@ class MemoryDB:
         else:  # "active" (default; unknown values fall back to active-only)
             parent_predicate = "AND v.parent_status = 'active'"
             eligible = "COALESCE(m.status, 'deleted') = 'active'"
+        workspace_predicate = ""
+        workspace_params: list[Any] = []
+        if ws_canonical:
+            workspace_predicate = "AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
+            workspace_params.append(ws_canonical)
         query_json = json.dumps(query_embedding)
         try:
             with self.connection() as conn:
@@ -1202,9 +1217,10 @@ class MemoryDB:
                         WHERE v.embedding MATCH ? AND k = ?
                           {parent_predicate}
                           AND {eligible}
+                          {workspace_predicate}
                         ORDER BY distance
                         """,
-                        (query_json, query_json, requested),
+                        (query_json, query_json, requested, *workspace_params),
                     ).fetchall()
                     conn.execute("COMMIT")
                     return [dict(row) for row in rows]
@@ -1246,13 +1262,14 @@ class MemoryDB:
                             JOIN memory_sections s ON s.id=v.id
                             JOIN memories m ON m.id=s.memory_id
                             WHERE {eligible}
+                              {workspace_predicate}
                             ORDER BY distance
                             LIMIT ?""",
-                            (query_json, requested),
+                            (query_json, *workspace_params, requested),
                         ).fetchall()
                     else:
                         rows = conn.execute(
-                            """SELECT s.memory_id AS memory_id,
+                            f"""SELECT s.memory_id AS memory_id,
                                 s.id AS section_id, v.distance AS distance,
                                 s.title AS section_title,
                                 s.title_path AS section_title_path,
@@ -1269,8 +1286,9 @@ class MemoryDB:
                             JOIN memory_sections s ON s.id=v.id
                             JOIN memories m ON m.id=s.memory_id
                             WHERE v.embedding MATCH ? AND k = ?
+                              {workspace_predicate}
                             ORDER BY v.distance""",
-                            (query_json, requested),
+                            (query_json, requested, *workspace_params),
                         ).fetchall()
                     conn.execute("COMMIT")
                     return [dict(row) for row in rows]
