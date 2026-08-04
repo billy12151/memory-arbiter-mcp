@@ -17,6 +17,7 @@ The final gate (§16) requires zero xfails remaining.
 from __future__ import annotations
 
 import hashlib
+import threading
 from pathlib import Path
 
 import pytest
@@ -243,7 +244,7 @@ def test_no_pending_timeout_or_fallback_semantics_in_status_dict(tmp_path: Path)
 # ==================================================================
 
 def test_write_rules_auto_split_for_two_headings(tmp_path: Path) -> None:
-    """§2.2(2): 2 safe headings + vec ready → rules publish, split.mode=rules applied."""
+    """§2.2(2): 2 safe headings + vec ready → rules split is queued, then published."""
     tools = make_vec_tools(tmp_path)
     tools._embedder = _keyword_embedder()
     tools._embedder_loaded = True
@@ -251,15 +252,82 @@ def test_write_rules_auto_split_for_two_headings(tmp_path: Path) -> None:
     content = _content_with_two_headings()
     r = tools.memory_write(content=content, subject="doc")
     assert r["ok"] is True
-    mem = tools.db.get_memory(r["data"]["id"])
-    assert mem["split_status"] == "active"
     sp = r["data"]["split"]
     assert sp["required"] is True
-    assert sp["applied"] is True
-    assert sp["mode"] == "rules"
-    assert sp["status"] == "active"
-    # sections actually published
+    assert sp["applied"] is False
+    assert sp["mode"] == "rules_async"
+    assert sp["reindex_pending"] is True
+    assert sp["section_count_estimated"] == 2
+    assert tools.wait_split_worker_drained(5)
+    mem = tools.db.get_memory(r["data"]["id"])
+    assert mem["split_status"] == "active"
     assert len(tools.db.get_sections_by_memory(mem["id"])) == 2
+
+
+def test_rules_async_status_reports_inflight_reindex(tmp_path: Path, monkeypatch) -> None:
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    entered = threading.Event()
+    release = threading.Event()
+    original_publish = tools._publish_sections
+
+    def blocked_publish(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(tools, "_publish_sections", blocked_publish)
+    r = tools.memory_write(content=_content_with_two_headings(), subject="doc")
+    mid = r["data"]["id"]
+    assert r["data"]["split"]["mode"] == "rules_async"
+    assert entered.wait(5)
+    assert mid in tools.memory_status()["data"]["split_reindex_pending"]
+    release.set()
+    assert tools.wait_split_worker_drained(5)
+    assert tools.db.get_memory(mid)["split_status"] == "active"
+
+
+def test_rules_async_stale_snapshot_does_not_publish_after_edit(tmp_path: Path, monkeypatch) -> None:
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _keyword_embedder()
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    entered = threading.Event()
+    release = threading.Event()
+    original_publish = tools._publish_sections
+
+    def blocked_publish(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(tools, "_publish_sections", blocked_publish)
+    r = tools.memory_write(content=_content_with_two_headings(), subject="doc")
+    mid = r["data"]["id"]
+    assert entered.wait(5)
+    tools.db.edit_memory(mid, "短内容", reason="race")
+    release.set()
+    assert tools.wait_split_worker_drained(5)
+    mem = tools.db.get_memory(mid)
+    assert mem["content"] == "短内容"
+    assert mem["split_status"] is None
+    assert tools.db.get_sections_by_memory(mid) == []
+
+
+def test_rules_async_marks_split_failed_on_embedding_error(tmp_path: Path) -> None:
+    tools = make_vec_tools(tmp_path)
+    tools._embedder = _MockManagedEmbedder(lambda _text: (_ for _ in ()).throw(RuntimeError("boom")))
+    tools._embedder_loaded = True
+    _set_vec_ready(tools)
+    r = tools.memory_write(content=_content_with_two_headings(), subject="doc")
+    mid = r["data"]["id"]
+    assert r["data"]["split"]["mode"] == "rules_async"
+    assert tools.wait_split_worker_drained(5)
+    mem = tools.db.get_memory(mid)
+    assert mem["split_status"] == "failed"
+    assert mem["metadata"]["_split"]["last_split_error"]["stage"] == "embedding"
 
 
 def test_write_returns_split_request_for_unstructured_long_doc(tmp_path: Path) -> None:
@@ -791,16 +859,18 @@ def test_write_candidate_section_too_large_returns_split_request(tmp_path: Path)
 # ---- G4: content edit re-runs the split decision ----------------------------
 
 def test_edit_content_re_splits_via_rules(tmp_path: Path) -> None:
-    """G4: editing content to a rules-publishable doc re-splits synchronously."""
+    """G4: editing content to a rules-publishable doc queues and publishes a split."""
     tools = _vec_tools(tmp_path)
     mid = tools.memory_write(content="短初始内容", subject="doc")["data"]["id"]
     assert tools.db.get_memory(mid)["split_status"] is None
     r = tools.memory_edit(memory_id=mid, new_content=_two_heading_doc())
     assert r["ok"] is True
+    assert r["data"]["split"]["mode"] == "rules_async"
+    assert r["data"]["split"]["applied"] is False
+    assert tools.wait_split_worker_drained(5)
     mem = tools.db.get_memory(mid)
     assert mem["split_status"] == "active"
     assert len(tools.db.get_sections_by_memory(mid)) == 2
-    assert r["data"]["split"]["mode"] == "rules" and r["data"]["split"]["applied"] is True
 
 
 def test_edit_content_to_unstructured_returns_split_request(tmp_path: Path) -> None:

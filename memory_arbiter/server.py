@@ -19,6 +19,7 @@ def build_server() -> Any:
     app = FastMCP("memory-arbiter-mcp")
     tools = MemoryTools(Settings.from_env())
     tools.start_update_monitor()
+    tools.start_split_worker()
 
     @app.tool()
     def memory_write(
