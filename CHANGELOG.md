@@ -3,6 +3,12 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.9.9] — 2026-08-05
+
+### Fixed
+
+- **Doctor update status no longer shows stale cached latest below the installed version** — after upgrading from an older cached PyPI check, `memory-arbiter doctor` could render a confusing line such as `当前版本: 0.9.8` with `最新已知: 0.9.5` while still saying `up_to_date`. The update monitor now floors stale cached `latest_version` to the observed installed version and records `latest_source=installed_version`, so doctor/status output stays internally consistent until the next PyPI refresh.
+
 ## [0.9.8] — 2026-08-05
 
 ### Added

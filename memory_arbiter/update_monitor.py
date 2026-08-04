@@ -275,19 +275,24 @@ class UpdateMonitor:
         return self._now() - notified_at < NOTICE_SUPPRESS
 
     def _observe_installed_version(self, write: bool = True) -> None:
+        changed = False
         seen = self._state.get("installed_version_seen")
-        if seen == self.current_version:
-            return
-        if isinstance(seen, str) and seen:
-            self._state["previous_installed_version"] = seen
-        else:
-            self._state["previous_installed_version"] = None
-        self._state["installed_version_seen"] = self.current_version
+        if seen != self.current_version:
+            if isinstance(seen, str) and seen:
+                self._state["previous_installed_version"] = seen
+            else:
+                self._state["previous_installed_version"] = None
+            self._state["installed_version_seen"] = self.current_version
+            changed = True
         latest = self._state.get("latest_version")
         if isinstance(latest, str) and compare_versions(self.current_version, latest) >= 0:
             self._state["last_update_notified_version"] = None
             self._state["last_update_notified_at"] = None
-        if write:
+            changed = True
+            if compare_versions(self.current_version, latest) > 0:
+                self._state["latest_version"] = self.current_version
+                self._state["latest_source"] = "installed_version"
+        if changed and write:
             self._write_state_locked()
 
     def _load_state(self) -> dict[str, Any]:

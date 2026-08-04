@@ -82,6 +82,33 @@ def test_update_notice_stops_after_current_version_catches_up(tmp_path: Path) ->
     assert state["last_update_notified_version"] is None
 
 
+def test_observed_upgrade_floors_stale_cached_latest_to_current(tmp_path: Path) -> None:
+    state_path = tmp_path / "update_state.json"
+    _write_state(
+        state_path,
+        {
+            "installed_version_seen": "0.9.5",
+            "latest_version": "0.9.5",
+            "latest_checked_at": FIXED_NOW.isoformat(),
+        },
+    )
+    monitor = UpdateMonitor(
+        enabled=True,
+        state_path=state_path,
+        current_version="0.9.8",
+        now_func=lambda: FIXED_NOW,
+    )
+
+    status = monitor.update_status()
+    assert status["status"] == "up_to_date"
+    assert status["latest_version"] == "0.9.8"
+    assert status["latest_source"] == "installed_version"
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["latest_version"] == "0.9.8"
+    assert state["latest_source"] == "installed_version"
+
+
 def test_post_upgrade_doctor_notice_suppressed_until_doctor_runs(tmp_path: Path) -> None:
     state_path = tmp_path / "update_state.json"
     _write_state(state_path, {"installed_version_seen": "0.9.5"})
