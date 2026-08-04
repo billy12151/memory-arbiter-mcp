@@ -184,6 +184,7 @@ class MemoryDB:
                   status TEXT NOT NULL DEFAULT 'active',
                   subject TEXT,
                   metadata TEXT NOT NULL DEFAULT '{}',
+                  workspace_canonical TEXT,
                   created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS conflicts (
@@ -246,12 +247,31 @@ class MemoryDB:
                   key TEXT PRIMARY KEY,
                   value TEXT NOT NULL
                 );
+
+                -- workspace alias canonicalization registry. Each distinct
+                -- canonical workspace name gets one row; memories.workspace stores
+                -- the raw input, memories.workspace_canonical the resolved name.
+                CREATE TABLE IF NOT EXISTS workspace_canonicals (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL UNIQUE,
+                  created_at TEXT NOT NULL
+                );
                 """
         )
         # Idempotent column migrations — probe each individually so
         # partial upgrades and concurrent first-starts are safe.
         self._migrate_add_column(conn, "memories", "version",
                                  "INTEGER NOT NULL DEFAULT 1")
+        # Workspace alias canonicalization: raw input stays in `workspace`,
+        # resolved canonical name lands here (NULL on old rows until backfilled).
+        self._migrate_add_column(conn, "memories", "workspace_canonical",
+                                 "TEXT")
+        # Index created after the column migration so existing DBs (where the
+        # CREATE TABLE above is a no-op) don't reference a not-yet-added column.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_canonical "
+            "ON memories(workspace_canonical, status)"
+        )
         self._migrate_add_column(conn, "memories", "split_status",
                                  "TEXT")
         self._migrate_add_column(conn, "memories", "split_revision",
@@ -429,6 +449,7 @@ class MemoryDB:
                 self.state.mode = "sqlite_vec"
                 self._ensure_vec_table(conn)
                 self._ensure_section_vec_table(conn)
+                self._ensure_workspace_vec_table(conn)
                 # v0.9.4: migrate vec0 tables to include parent_status metadata column
                 self._migrate_vec_parent_status(conn)
             except Exception as exc:  # pragma: no cover
@@ -552,6 +573,27 @@ class MemoryDB:
             self.state.warn(
                 f"memory_sections_vec creation failed (dim={dim}): {exc}. "
                 "Section split will be unavailable."
+            )
+
+    def _ensure_workspace_vec_table(self, conn: sqlite3.Connection) -> None:
+        """Create the workspace-canonical vec0 table for alias resolution.
+
+        One vector per canonical workspace name (id == workspace_canonicals.id).
+        Used by resolve_workspace_canonical to find the nearest existing
+        canonical for a raw workspace string. Failure is non-fatal — alias
+        resolution degrades to exact string match.
+        """
+        dim = int(getattr(self.settings, "vec_dim", 768) or 768)
+        try:
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS workspace_canonicals_vec "
+                f"USING vec0(id INTEGER PRIMARY KEY, embedding float[{dim}])"
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            self.state.warn(
+                f"workspace_canonicals_vec creation failed (dim={dim}): {exc}. "
+                "Workspace alias resolution will fall back to exact match."
             )
 
     def _migrate_vec_parent_status(self, conn: sqlite3.Connection) -> None:
@@ -701,6 +743,121 @@ class MemoryDB:
         except sqlite3.Error as exc:
             warnings.append(f"store_embedding failed: {exc}")
             return False, warnings
+
+    def resolve_workspace_canonical(
+        self,
+        ws_raw: Optional[str],
+        embedder: Any = None,
+        *,
+        match_distance: Optional[float] = None,
+        register_new: bool = True,
+    ) -> dict[str, Any]:
+        """Resolve a raw workspace string to its canonical name (alias merge).
+
+        Strategy (double-store: raw stays in memories.workspace, resolved name
+        goes to memories.workspace_canonical):
+          1. Exact match against workspace_canonicals.name → reuse it.
+          2. If an embedder + sqlite-vec are available, embed the raw string and
+             KNN against workspace_canonicals_vec; if the nearest canonical is
+             within ``match_distance`` reuse it (handles 金营项目 / 金科营销项目).
+          3. Otherwise it is a NEW canonical. When ``register_new`` is True, the
+             raw string is registered as a new canonical (+ its vector); when
+             False (read/query path) nothing is written.
+
+        Returns a dict:
+          {canonical, is_new, matched_by: exact|vector|new|fallback,
+           distance, similar: [{name, distance}, ...]}
+
+        Never raises — degrades to exact string identity so callers can rely on
+        a canonical always coming back (falls back to the raw string itself).
+        """
+        raw = (ws_raw or "").strip()
+        result: dict[str, Any] = {
+            "canonical": raw or "default",
+            "is_new": False,
+            "matched_by": "fallback",
+            "distance": None,
+            "similar": [],
+        }
+        if not raw:
+            result["canonical"] = "default"
+            return result
+        if not self._db_available:
+            return result
+        if match_distance is None:
+            match_distance = float(getattr(self.settings, "workspace_match_distance", 0.25) or 0.25)
+
+        try:
+            with self.connection() as conn:
+                # 1. Exact canonical hit.
+                exact = conn.execute(
+                    "SELECT id, name FROM workspace_canonicals WHERE name = ?",
+                    (raw,),
+                ).fetchone()
+                if exact:
+                    result.update({"canonical": exact["name"], "is_new": False, "matched_by": "exact", "distance": 0.0})
+                    return result
+
+                # 2. Vector nearest-canonical (only when embedding is available).
+                vec_ok = self.state.sqlite_vec_available and embedder is not None
+                embedding = None
+                if vec_ok:
+                    try:
+                        er = embedder.embed_text(prefix="", body=raw)
+                        embedding = list(er.embedding) if er and er.embedding else None
+                    except Exception:
+                        embedding = None
+                if embedding:
+                    try:
+                        query_json = json.dumps(embedding)
+                        # Full-scan cosine (not MATCH/L2): the canonical table is
+                        # tiny (one row per project) and embeddinggemma vectors are
+                        # unnormalized, so cosine is the scale-invariant choice —
+                        # mirrors section_vec_distance_match.
+                        rows = conn.execute(
+                            """SELECT c.name AS name,
+                                      vec_distance_cosine(v.embedding, ?) AS distance
+                               FROM workspace_canonicals_vec v
+                               JOIN workspace_canonicals c ON c.id = v.id
+                               ORDER BY distance
+                               LIMIT 5""",
+                            (query_json,),
+                        ).fetchall()
+                        result["similar"] = [{"name": r["name"], "distance": float(r["distance"])} for r in rows]
+                        if rows and float(rows[0]["distance"]) <= match_distance:
+                            result.update({
+                                "canonical": rows[0]["name"],
+                                "is_new": False,
+                                "matched_by": "vector",
+                                "distance": float(rows[0]["distance"]),
+                            })
+                            return result
+                    except sqlite3.Error:
+                        pass  # vec query failed — fall through to new-canonical path
+
+                # 3. New canonical.
+                result.update({"canonical": raw, "is_new": True, "matched_by": "new"})
+                if register_new and self.state.sqlite_writable:
+                    try:
+                        now = utc_now_iso()
+                        cur = conn.execute(
+                            "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                            (raw, now),
+                        )
+                        row = conn.execute(
+                            "SELECT id FROM workspace_canonicals WHERE name = ?", (raw,)
+                        ).fetchone()
+                        if row and embedding and self.state.sqlite_vec_available:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
+                                (int(row["id"]), json.dumps(embedding)),
+                            )
+                        conn.commit()
+                    except sqlite3.Error:
+                        pass  # registration best-effort; canonical still returned
+                return result
+        except sqlite3.Error:
+            return result
 
     def delete_embedding(self, memory_id: int) -> Tuple[bool, list[str]]:
         if not self._db_available or not self.state.sqlite_writable:
@@ -904,7 +1061,7 @@ class MemoryDB:
                     rows = conn.execute(
                         f"""SELECT v.id AS id,
                                vec_distance_L2(v.embedding, ?) AS distance,
-                               m.workspace AS workspace, m.agent_id AS agent_id,
+                               m.workspace AS workspace, m.workspace_canonical AS workspace_canonical, m.agent_id AS agent_id,
                                m.status AS status, m.subject AS subject,
                                m.tags AS tags, m.content AS content,
                                m.source_type AS source_type, m.confidence AS confidence,
@@ -946,7 +1103,7 @@ class MemoryDB:
                         rows = conn.execute(
                             f"""SELECT v.id AS id,
                                 vec_distance_L2(v.embedding, ?) AS distance,
-                                m.workspace AS workspace, m.agent_id AS agent_id,
+                                m.workspace AS workspace, m.workspace_canonical AS workspace_canonical, m.agent_id AS agent_id,
                                 m.status AS status, m.subject AS subject,
                                 m.tags AS tags, m.content AS content,
                                 m.source_type AS source_type, m.confidence AS confidence,
@@ -963,7 +1120,7 @@ class MemoryDB:
                     else:
                         rows = conn.execute(
                             """SELECT v.id AS id, v.distance AS distance,
-                                m.workspace AS workspace, m.agent_id AS agent_id,
+                                m.workspace AS workspace, m.workspace_canonical AS workspace_canonical, m.agent_id AS agent_id,
                                 m.status AS status, m.subject AS subject,
                                 m.tags AS tags, m.content AS content,
                                 m.source_type AS source_type, m.confidence AS confidence,
@@ -1030,7 +1187,7 @@ class MemoryDB:
                             vec_distance_L2(v.embedding, ?) AS distance,
                             s.title AS section_title,
                             s.title_path AS section_title_path,
-                            m.workspace AS workspace, m.status AS status,
+                            m.workspace AS workspace, m.workspace_canonical AS workspace_canonical, m.status AS status,
                             m.subject AS subject, m.tags AS tags,
                             m.source_type AS source_type,
                             m.confidence AS confidence,
@@ -1076,7 +1233,7 @@ class MemoryDB:
                                 vec_distance_L2(v.embedding, ?) AS distance,
                                 s.title AS section_title,
                                 s.title_path AS section_title_path,
-                                m.workspace AS workspace, m.status AS status,
+                                m.workspace AS workspace, m.workspace_canonical AS workspace_canonical, m.status AS status,
                                 m.subject AS subject, m.tags AS tags,
                                 m.source_type AS source_type,
                                 m.confidence AS confidence,
@@ -1099,7 +1256,7 @@ class MemoryDB:
                                 s.id AS section_id, v.distance AS distance,
                                 s.title AS section_title,
                                 s.title_path AS section_title_path,
-                                m.workspace AS workspace, m.status AS status,
+                                m.workspace AS workspace, m.workspace_canonical AS workspace_canonical, m.status AS status,
                                 m.subject AS subject, m.tags AS tags,
                                 m.source_type AS source_type,
                                 m.confidence AS confidence,
@@ -1124,7 +1281,9 @@ class MemoryDB:
     #  Memory CRUD
     # ------------------------------------------------------------------
 
-    def insert_memory(self, record: MemoryRecord) -> Tuple[Optional[int], list[str]]:
+    def insert_memory(
+        self, record: MemoryRecord, workspace_canonical: Optional[str] = None
+    ) -> Tuple[Optional[int], list[str]]:
         warnings: list[str] = []
         if not record.content:
             raise ValueError("content is required")
@@ -1132,18 +1291,23 @@ class MemoryDB:
             self._append_backup(record)
             warnings.append("SQLite write unavailable; wrote append-only JSONL backup.")
             return None, warnings
+        # Double-store: raw workspace stays in `workspace`; resolved canonical
+        # (from tools-side alias resolution) lands in `workspace_canonical`.
+        # Fall back to the raw workspace so the column is never NULL on new rows.
+        canonical = (workspace_canonical or record.workspace or "").strip() or record.workspace
         with self.connection() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO memories
-                (content, agent_id, workspace, tags, source_type, source_ref, event_time, ingest_time,
-                 confidence, protection_level, status, subject, metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (content, agent_id, workspace, workspace_canonical, tags, source_type, source_ref,
+                 event_time, ingest_time, confidence, protection_level, status, subject, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.content,
                     record.agent_id,
                     record.workspace,
+                    canonical,
                     json.dumps(record.tags, ensure_ascii=False),
                     record.source_type,
                     record.source_ref,
@@ -1303,16 +1467,22 @@ class MemoryDB:
         after_dt: Optional[datetime],
         before_dt: Optional[datetime],
         source_type: Optional[str],
+        ws_canonical: Optional[str] = None,
     ) -> int:
         """v0.7.3: COUNT(*) under the same filters used by search's _passes_filters.
 
         Only called when has_filters=True. Clauses are built by _filter_clauses so the
         SQL count and the SQL recall (recall_by_filters) share one source of truth.
-        Cross-workspace (v0.7.4) — workspace is not filtered.
+        Cross-workspace (v0.7.4) — workspace is not filtered, EXCEPT under strict
+        isolation (v0.9.7) where ``ws_canonical`` scopes the count to one canonical
+        workspace so the total matches the paginated recall.
         """
         if not self._db_available:
             return 0
         clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
+        if ws_canonical:
+            clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+            params.append(ws_canonical)
         sql = f"SELECT COUNT(*) AS c FROM memories WHERE {' AND '.join(clauses)}"
         with self.connection() as conn:
             try:
@@ -1330,6 +1500,7 @@ class MemoryDB:
         source_type: Optional[str],
         limit: int,
         offset: int = 0,
+        ws_canonical: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """G6 (v0.8.5): filter-driven recall for empty-query + filters in memory_search.
 
@@ -1340,10 +1511,15 @@ class MemoryDB:
 
         v0.9.4: ``offset`` adds SQL OFFSET for cursor pagination on the
         exact-count filter path (used by ``memory_search_expired``).
+        v0.9.7: ``ws_canonical`` hard-scopes to one canonical workspace under
+        strict isolation (filters in SQL so pagination and totals stay correct).
         """
         if not self._db_available:
             return []
         clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
+        if ws_canonical:
+            clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+            params.append(ws_canonical)
         sql = f"SELECT * FROM memories WHERE {' AND '.join(clauses)} ORDER BY ingest_time DESC LIMIT ? OFFSET ?"
         with self.connection() as conn:
             try:

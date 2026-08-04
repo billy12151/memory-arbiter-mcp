@@ -3,6 +3,45 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.9.7] — 2026-08-04
+
+### Added
+
+- **Workspace isolation (`none` / `weak` / `strict`)** — the long-reserved
+  `workspace` field can now partition recall, controlled globally by
+  `MEMORY_ARBITER_ISOLATION` (default `none`). The three levels are monotonic —
+  workspace goes from *ineffective* → *affects ranking* → *controls visibility*:
+  - **`none`** (default): workspace is a pure label. Recall ignores it entirely
+    (never filtered, never ranked). Backward-compatible with v0.7.4 behavior.
+  - **`weak`**: recall is always whole-library — workspace never enters a WHERE
+    clause. Passing a workspace only soft-reranks (same-workspace boosted,
+    cross-workspace demoted, nothing dropped). A new workspace emits
+    `write_hints.new_workspace_detected`.
+  - **`strict`**: workspace is mandatory on write (empty → error) and on recall
+    (missing → error). Recall hard-filters to the same canonical workspace. A
+    brand-new workspace on write is blocked as `status=pending` (excluded from
+    active recall) and returns `action_required=confirm_new_workspace`.
+- **`memory_activate` tool** — activates a memory held as `pending` by strict
+  workspace isolation. Clears the new-workspace gate without the trust/lock
+  promotion `memory_confirm` applies. Requires `authorized=true`; rejects
+  non-pending memories.
+- **Workspace alias canonicalization (double-store)** — `memories.workspace`
+  keeps the raw string; the new `memories.workspace_canonical` column holds the
+  resolved name. Names are merged by cosine similarity over a
+  `workspace_canonicals` registry + vector table (e.g. `金营项目` and
+  `金科营销项目` collapse to one canonical). Cutoff is
+  `workspace_match_distance` (env `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE`,
+  default `0.25`). Resolution runs only under `weak`/`strict`; without an
+  embedder it degrades to exact string identity. Old rows get a lazy NULL
+  canonical via idempotent migration — no backfill required.
+
+### Notes
+
+- Default `isolation=none` preserves all prior recall behavior. Enabling
+  `strict` trades recallability for isolation: a wrong or inconsistently-spelled
+  workspace silently isolates memories. When unsure, use `weak` (never drops,
+  only demotes). See the Workspace Isolation section in the README.
+
 ## [0.9.6] — 2026-08-04
 
 ### Added

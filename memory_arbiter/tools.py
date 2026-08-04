@@ -11,7 +11,7 @@ from .claims import extract_claims
 from .config import Settings
 from .db import MemoryDB, _canon_entity, _canon_scope
 from .embedder import ManagedEmbedder
-from .models import MemoryRecord, ProtectionLevel, SourceType
+from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
 from .update_monitor import UpdateMonitor
 from . import __version__
@@ -103,10 +103,76 @@ class MemoryTools:
         if not allowed:
             return self.db.state.response({"written": False}, ok=False, extra_warnings=warnings)
         try:
+            # ── Workspace isolation (strict/weak/none) ──
+            isolation = getattr(self.settings, "isolation", "none")
+            # strict: workspace is mandatory on the write path. Inspect the RAW
+            # payload — MemoryRecord.from_input substitutes "default" for a
+            # missing/empty workspace, which would mask the omission here.
+            if isolation == "strict" and not str(payload.get("workspace") or "").strip():
+                return self.db.state.response(
+                    {
+                        "written": False,
+                        "error": "isolation=strict requires a workspace on every write; "
+                                 "an empty workspace would cause silent recall failure.",
+                    },
+                    ok=False,
+                    extra_warnings=warnings,
+                )
             record = MemoryRecord.from_input(payload, self.settings.defaults())
-            memory_id, write_warnings = self.db.insert_memory(record)
-            data = {"id": memory_id, "backup_only": memory_id is None, "record": {**record.__dict__, "id": memory_id}}
+            ws_raw = record.workspace
+            ws_canonical = ws_raw
+            ws_is_new = False
+            ws_matched_by = "fallback"
+            ws_similar: list[dict[str, Any]] = []
+            # Resolve canonical alias only under weak/strict — in `none` the
+            # workspace is fully ignored (no embedder call, no canonical write),
+            # so we don't perturb the write path or its embedder-call invariants.
+            # Resolution runs even without an embedder: it degrades to exact
+            # string identity (still detects new-vs-existing via the canonical
+            # table), which is what drives strict-block / weak-hint.
             embedding_warnings: list[str] = []
+            if isolation != "none":
+                embedder, ensure_warnings = self._ensure_embedder()
+                embedding_warnings.extend(ensure_warnings)
+                resolved = self.db.resolve_workspace_canonical(
+                    ws_raw, embedder, register_new=True,
+                )
+                ws_canonical = resolved["canonical"]
+                ws_is_new = resolved["is_new"]
+                ws_matched_by = resolved["matched_by"]
+                ws_similar = resolved.get("similar") or []
+            # strict + brand-new canonical → block activation (status=pending)
+            # until the user confirms the workspace name.
+            strict_block = isolation == "strict" and ws_is_new
+            if strict_block:
+                record.status = MemoryStatus.PENDING.value
+            memory_id, write_warnings = self.db.insert_memory(record, ws_canonical)
+            data = {"id": memory_id, "backup_only": memory_id is None, "record": {**record.__dict__, "id": memory_id}}
+            data["workspace_canonical"] = ws_canonical
+            data["workspace_matched_by"] = ws_matched_by
+            if strict_block:
+                data.update({
+                    "attention_required": True,
+                    "action_required": "confirm_new_workspace",
+                    "verification_status": "pending_user",
+                    "workspace_is_new": True,
+                    "pending_workspace": {
+                        "canonical": ws_canonical,
+                        "similar_workspaces": ws_similar,
+                    },
+                    "attention_summary": (
+                        f"strict isolation: workspace {ws_canonical!r} is new. "
+                        "Memory written as pending and excluded from active recall "
+                        "until confirmed via memory_confirm."
+                    ),
+                })
+            elif isolation == "weak" and ws_is_new:
+                hints = data.get("write_hints") or {}
+                hints["new_workspace_detected"] = {
+                    "canonical": ws_canonical,
+                    "similar_workspaces": ws_similar,
+                }
+                data["write_hints"] = hints
             if memory_id is not None and self.settings.embedding_auto_write and self._embedding_configured():
                 data["embedding_stored"] = False
                 embedder, ensure_warnings = self._ensure_embedder()
@@ -748,6 +814,28 @@ class MemoryTools:
                         )
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
+        # v0.9.7: workspace isolation on the read path.
+        isolation = getattr(self.settings, "isolation", "none")
+        ws_canonical = None
+        if isolation != "none" and (workspace or "").strip():
+            embedder, _ = self._ensure_embedder()
+            resolved = self.db.resolve_workspace_canonical(
+                workspace, embedder, register_new=False,
+            )
+            ws_canonical = resolved["canonical"]
+        elif isolation != "none":
+            # weak allows an empty workspace (full-library recall); strict does not.
+            if isolation == "strict":
+                return self.db.state.response(
+                    {
+                        "error": "isolation=strict requires a workspace on every search; "
+                                 "an empty workspace would bypass isolation.",
+                        "results": [],
+                        "count": 0,
+                    },
+                    ok=False,
+                    extra_warnings=extra_warnings,
+                )
         # v0.9.4: search_memories now uses status_filter instead of include_superseded
         outcome = search_memories(
             self.db, query, workspace, tags, limit,
@@ -758,6 +846,8 @@ class MemoryTools:
             after_time=after_time,
             before_time=before_time,
             source_type=source_type,
+            ws_canonical=ws_canonical,
+            isolation=isolation,
         )
         results = outcome.results
         warnings = outcome.warnings
@@ -1305,6 +1395,36 @@ class MemoryTools:
             self._apply_structured_gate(data, structured)
         return self.db.state.response(data, extra_warnings=warnings)
 
+    def memory_activate(
+        self, memory_id: int, authorized: bool = False, **_: Any,
+    ) -> dict[str, Any]:
+        """Activate a pending memory blocked by strict workspace isolation.
+
+        strict isolation writes brand-new workspaces as status=pending (excluded
+        from active recall) until the user confirms the workspace name. This
+        flips it to active — without the trust/protection promotion that
+        memory_confirm applies. Requires authorized=true.
+        """
+        if not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required to activate a pending memory", "activated": False},
+                ok=False,
+            )
+        memory = self.db.get_memory(int(memory_id))
+        if not memory:
+            return self.db.state.response({"error": "memory id not found", "activated": False}, ok=False)
+        if memory.get("status") != MemoryStatus.PENDING.value:
+            return self.db.state.response(
+                {
+                    "error": f"memory is not pending (status={memory.get('status')}); only pending memories can be activated",
+                    "activated": False,
+                },
+                ok=False,
+            )
+        ok = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
+        updated = self.db.get_memory(int(memory_id)) if ok else memory
+        return self.db.state.response({"activated": ok, "record": updated})
+
     def memory_supersede(
         self,
         memory_id: int,
@@ -1423,6 +1543,7 @@ class MemoryTools:
                 "embedding_auto_query": self.settings.embedding_auto_query,
                 "embedding_auto_write": self.settings.embedding_auto_write,
                 "structured_claim_mode": self.settings.structured_claim_mode,
+                "isolation": self.settings.isolation,
                 "update_check": self._update_check_status(),
                 # v0.8: split capability is bound to vec readiness, not a toggle.
                 "split_capability": self._split_capability(vec_state),

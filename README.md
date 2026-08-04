@@ -183,7 +183,9 @@ preferences, knowledge conclusions — goes into memory-arbiter.
 Every write must fill: subject, tags, source_type (one of: `user_confirmed`
 / `agent_generated` / `document_extracted`; `user_confirmed` auto-locks the
 record — reserve it for facts the user explicitly verified), event_time
-(ISO 8601), workspace (project name; v0.7.4: reserved metadata — stored and returned but does **not** filter `memory_search` / `memory_recent` results), source_ref.
+(ISO 8601), workspace (project name; by default `isolation=none` so it is stored
+and returned but does **not** filter `memory_search` — see
+[Workspace Isolation](#workspace-isolation-none--weak--strict)), source_ref.
 
 Search via memory_search first; read source files only for detail. When you
 find a contradiction, don't overwrite — if you know which is correct, use
@@ -252,6 +254,7 @@ Grouped by use case. For day-to-day agent work, the intended mental model is del
 | `memory_edit` | (v0.4.0, v0.7.6) In-place edit a memory's content (full or partial `old_text`→`new_text`), or tags-only via `tags_only=true`+`add_tags`/`remove_tags`. Content edits archive the prior version to a history table and re-sync FTS. Tags-only edits are low-side-effect: no history, no version bump, no re-embedding. `locked`/`user_confirmed` records need `authorized=true`. |
 | `memory_history` | (v0.4.0) View the version chain (historical snapshots) of a memory, newest version first. Read-only. |
 | `memory_confirm` | Promote a memory to user-confirmed and locked. Use when the user explicitly validates a memory as authoritative. |
+| `memory_activate` | Activate a memory held as `pending` by `strict` workspace isolation (new-workspace confirmation gate). Clears the gate without the trust/lock promotion `memory_confirm` applies. `authorized=true` required. |
 | `memory_supersede` | Explicitly retire a memory; bypasses user-confirmed/locked protection (`authorized=true` required). This is the status-change primitive used by conflict workflows, not an automatic edit. |
 | `memory_cleanup_history` | (v0.4.0) Delete historical snapshots from `memory_history` (never touches active records). Per-memory / by-age / full; full cleanup requires `authorized=true`. |
 
@@ -377,6 +380,28 @@ After configuration, normal `memory_search(query="...")` can generate the query 
 - Query-recall pagination for `memory_search_expired` is best-effort; empty-query browse/filter paths are exact and report `pagination_precision="exact"`.
 
 **Validation.** A 2000×5-seed synthetic corpus (`scripts/tune_tag_weights.py`) proved `specific_coverage=0.6` is the inflection point. The decisive metric is the A>B pair (TAG_PRECISE should beat SUBJ_INCIDENTAL — the id=206 vs id=105 case that motivated the fix): it goes from **0.520 under the baseline to 1.000** when the subject threshold is tightened to 0.6; 0.5 is too loose, 0.7+ adds nothing. Overall pairwise accuracy on the corpus rises 0.958 → 0.984. On the real production library, dogfooding query `"v0.7.2 发版"` lifted the target memory from rank #13 to #1 with no regression on 6 sample queries.
+
+### Workspace Isolation: `none` / `weak` / `strict`
+
+By default the `workspace` field is a **pure label** — it is stored and returned but does not affect ranking or visibility. `memory_search` ignores it entirely. If you want memories partitioned by project, set `isolation`:
+
+| Level | Write ws | Search without ws | Search with ws | New workspace |
+|---|---|---|---|---|
+| **`none`** (default) | optional, ignored | full library | **ignored** — full library, no ranking effect | silent |
+| **`weak`** | recommended | full library | **soft rerank** — same-workspace boosted, cross-workspace demoted, nothing dropped | `write_hints.new_workspace_detected` |
+| **`strict`** | **required** (errors if empty) | **errors** (refuses) | **hard filter** — only the same canonical workspace | `action_required=confirm_new_workspace` (written as `pending`, excluded from recall until `memory_activate`) |
+
+The three levels are monotonic: workspace goes from *ineffective* → *affects ranking* → *controls visibility*.
+
+**Alias canonicalization.** Whichever level you pick, workspace names are canonicalized by embedding similarity, so `金营项目` and `金科营销项目` merge into one canonical workspace. The raw string you pass is preserved in `workspace`; the resolved name lands in `workspace_canonical`. The cosine-distance cutoff is `workspace_match_distance` (default `0.25` — ~0.16 merges the synonyms above, ~0.43 keeps unrelated projects distinct).
+
+> **Default is `none`.** Workspace is an optional label; not passing it never breaks recall.
+>
+> **`strict` is not recommended unless necessary.** Once enabled, an Agent that passes the wrong or inconsistently-spelled workspace will cause those memories to be **silently isolated and unrecallable** (silent recall failure — you won't even know they're missing). Alias canonicalization mitigates spelling drift, but it cannot fix a semantically wrong project. **You are trading recallability for isolation.**
+>
+> **When unsure, use `weak`.** Cross-workspace data is never lost — it is only demoted in ranking. This turns the isolation intent into an *observable* ranking preference rather than an *invisible* silent drop.
+
+Configure via env (`MEMORY_ARBITER_ISOLATION=weak`) or config file (`"isolation": "weak"`). Confirm it took effect in `memory_status`. Activating a strict-blocked memory: `memory_activate(memory_id, authorized=true)`.
 
 ### Optional: Long-Document Section Split (v0.6.0)
 
@@ -515,6 +540,13 @@ Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbi
 | JSON path | Env fallback | Default | What to tune |
 |---|---|---|---|
 | `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | `beta_all` enables v0.9 for the trusted beta cohort. Set `off` only as an emergency kill switch; periodic semantic scan is unaffected. |
+
+**Workspace isolation** — whether/how `workspace` partitions recall. See [Workspace Isolation](#workspace-isolation-none--weak--strict).
+
+| JSON path | Env fallback | Default | What to tune |
+|---|---|---|---|
+| `isolation` | `MEMORY_ARBITER_ISOLATION` | `none` | `none` (ws ignored) / `weak` (soft rerank) / `strict` (hard filter). Default `none` is safest — `strict` can cause silent recall failure if the Agent passes a wrong workspace. |
+| `workspace_match_distance` | `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | Cosine cutoff for workspace alias merge. Lower = stricter (fewer merges). |
 
 **Semantic recall** — enables "find by meaning, not just keyword". Requires sqlite-vec + a GGUF model. See [Semantic Recall](#optional-semantic-recall-v050).
 
@@ -773,7 +805,8 @@ memory-arbiter setup
 每次写入必填：subject、tags、source_type（限 `user_confirmed` /
 `agent_generated` / `document_extracted`；其中 `user_confirmed` 会自动
 锁定该条记忆——只用于用户明确确认过的事实）、event_time（ISO 8601）、
-workspace（项目名；v0.7.4：保留元数据——会存储和返回，但**不**过滤 memory_search / memory_recent 结果）、source_ref。
+workspace（项目名；默认 `isolation=none`，会存储和返回但**不**过滤 memory_search / memory_recent——见
+[Workspace 隔离](#workspace-隔离-none--weak--strict)）、source_ref。
 
 查找先 memory_search，细节读源文件。发现矛盾不覆盖：明确知道哪条对时
 用 memory_supersede（废弃错的）；不确定时走冲突工作流
@@ -834,6 +867,7 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 | `memory_edit` | （v0.4.0，v0.7.6）原地编辑记忆正文（整体替换 `new_content` 或局部替换 `old_text`→`new_text`），或通过 `tags_only=true`+`add_tags`/`remove_tags` 仅更新 tags。正文编辑旧版本自动存入历史表并同步 FTS；tags-only 编辑低副作用：不写历史、不增加 version、不重算 embedding。`locked`/`user_confirmed` 记忆需 `authorized=true`。 |
 | `memory_history` | （v0.4.0）查看一条记忆的版本演化轨迹（历史快照，按版本号倒序）。只读。 |
 | `memory_confirm` | 将用户明确确认的记忆提升为 user_confirmed + locked，作为权威事实保护。 |
+| `memory_activate` | 激活被 `strict` workspace 隔离挂起（`pending`）的记忆（新 workspace 确认门）。只清除隔离门，不做 `memory_confirm` 的信任/锁定提升。需 `authorized=true`。 |
 | `memory_supersede` | 显式废弃某条记忆；可突破 user_confirmed/locked 保护（需 `authorized=true`）。这是冲突工作流中的状态变更原语，不是自动编辑。 |
 | `memory_cleanup_history` | （v0.4.0）清理历史表快照（**绝不碰活跃记录**）。支持单条 / 按时间 / 全量；全量清理需 `authorized=true`。 |
 
@@ -959,6 +993,28 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 - `memory_search_expired` 的 query-recall 分页是 best-effort；空 query browse/filter 路径是精确分页，并返回 `pagination_precision="exact"`。
 
 **验证。** 合成数据 2000×5 seed（`scripts/tune_tag_weights.py`）证明 `specific_coverage=0.6` 是临界点。关键指标是 A>B 这一对（TAG_PRECISE 应胜过 SUBJ_INCIDENTAL——即触发本次修复的 id=206 vs id=105 场景）：在 baseline 下只有 **0.520，subject 阈值收紧到 0.6 后达到 1.000**；0.5 太松、0.7+ 无额外收益。总 pairwise 准确率从 0.958 升到 0.984。真生产库 dogfooding query `"v0.7.2 发版"` 把目标记忆从 #13 提到 #1，6 个抽样查询无回归。
+
+### Workspace 隔离： `none` / `weak` / `strict`
+
+默认 `workspace` 字段是**纯标签**——会存储和返回，但不影响排序或可见性，`memory_search` 完全忽略它。若想按项目隔离记忆，设 `isolation`：
+
+| 档位 | 写入 ws | 召回不传 ws | 召回传 ws | 新 workspace |
+|---|---|---|---|---|
+| **`none`**（默认） | 可选，忽略 | 全库 | **忽略**——全库，无排序影响 | 静默 |
+| **`weak`** | 建议传 | 全库 | **软重排**——同 ws 加分、跨 ws 降权、都不丢 | `write_hints.new_workspace_detected` |
+| **`strict`** | **必传**（空则报错） | **报错**（拒绝） | **硬过滤**——仅同 canonical ws | `action_required=confirm_new_workspace`（写为 `pending`，确认前不召回，用 `memory_activate` 激活） |
+
+三档单调递增：workspace 从 *无效* → *影响排序* → *决定可见性*。
+
+**别名归一。** 无论哪一档，workspace 名都按 embedding 相似度归一，所以 `金营项目` 和 `金科营销项目` 会合并成同一个 canonical workspace。你传的原文存在 `workspace`，归一后的名字存在 `workspace_canonical`。余弦距离阈值是 `workspace_match_distance`（默认 `0.25`——约 0.16 合并上述同义词，约 0.43 区分无关项目）。
+
+> **默认是 `none`。** workspace 是可选标签，不传也不影响召回。
+>
+> **`strict` 非必要不建议。** 一旦开启，Agent 传错或拼写不一致的 workspace，会导致相关记忆被**静默隔离、召不回**（记忆沉默——你甚至不知道有记忆没召回）。别名归一能缓解拼写漂移，但修复不了语义上传错项目。**你在用可召回性换隔离性。**
+>
+> **不确定就用 `weak`。** 跨 workspace 数据永不丢失，只降权。这把隔离意图变成*可观测*的排序偏好，而非*不可见*的静默丢失。
+
+通过环境变量（`MEMORY_ARBITER_ISOLATION=weak`）或配置文件（`"isolation": "weak"`）设置。`memory_status` 可回显确认。激活 strict 挂起的记忆：`memory_activate(memory_id, authorized=true)`。
 
 ### 可选：长文分段检索（v0.6.0）
 
@@ -1124,7 +1180,9 @@ memory_get(memory_id)                                  ← 需要时取全文
 |---|---|---|
 | `MEMORY_ARBITER_CLIENT` | `codex` | 每个工具一个标识（`codex`、`claude-code`、`cursor`、`zcode`…）。 |
 | `MEMORY_ARBITER_AGENT_ID` | `default` | 客户端内的 agent 身份。 |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | 记忆记录上的字段。保留元数据（v0.7.4）：会存储和返回，但**不**过滤 memory_search / memory_recent 结果。保留供后续项目级功能使用。 |
+| `MEMORY_ARBITER_WORKSPACE` | `default` | 记忆记录上的字段。默认 `isolation=none` 时为纯标签（存储/返回，不参与排序过滤）；设 `isolation` 后才生效，见 [Workspace 隔离](#workspace-隔离-none--weak--strict)。 |
+| `MEMORY_ARBITER_ISOLATION` | `none` | workspace 隔离档位：`none`（忽略）/ `weak`（软重排）/ `strict`（硬过滤）。默认 `none` 最安全——`strict` 在 Agent 传错 workspace 时会导致记忆沉默。 |
+| `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | workspace 别名归一的余弦距离阈值。越小越严格（合并越少）。 |
 | `MEMORY_ARBITER_CONFIG` | _(无)_ | 可选：指定另一个 JSON 配置文件路径。设置后读取该文件，而不是默认的 `~/.config/memory-arbiter/config.json`；配置文件里的字段仍然优先于其他 env 兜底值。 |
 | `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid`（默认）或 `bm25`（legacy）。无配置文件对应。 |
 | `MEMORY_ARBITER_GGUF` | _(无)_ | 旧版 GGUF 路径兜底；建议改用配置文件里的 `embedding.model_path`。 |

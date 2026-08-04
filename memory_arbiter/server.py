@@ -354,6 +354,11 @@ content_hash). Global vec state lives in memory_status / doctor."""
         return tools.memory_confirm(memory_id=memory_id, source_ref=source_ref, confidence=confidence, authorized=authorized)
 
     @app.tool()
+    def memory_activate(memory_id: int, authorized: bool = False) -> dict[str, Any]:
+        """Activate a memory held as pending by strict workspace isolation. When isolation=strict and a write introduces a brand-new workspace, the memory is written as status=pending (excluded from active recall) and the write response carries action_required=confirm_new_workspace. This tool flips it to active so it becomes recallable. Requires authorized=true. Unlike memory_confirm, this does NOT promote to user_confirmed/locked — it only clears the strict-isolation gate."""
+        return tools.memory_activate(memory_id=memory_id, authorized=authorized)
+
+    @app.tool()
     def memory_supersede(
         memory_id: int,
         reason: str,

@@ -248,6 +248,25 @@ def _recency_bonus(record: dict[str, Any], now: Optional[datetime] = None) -> fl
     return _RECENCY_BONUS_DEFAULT
 
 
+# v0.9.7: workspace soft-weighting (weak isolation). Same magnitude discipline
+# as trust/recency — a small nudge that breaks ties between equally-relevant
+# records, never enough to override a subject/tags hit. Same-workspace gets a
+# small lift; cross-workspace gets a small penalty. Only applies when the
+# caller passes a query workspace AND isolation == "weak".
+_WS_BONUS_SAME = 0.30      # ~5% of a subject-medium hit (6.0), like recency max
+_WS_PENALTY_CROSS = -0.15  # gentler penalty so cross-ws stays reachable
+
+
+def _workspace_bonus(record: dict[str, Any], ws_canonical: Optional[str], isolation: str) -> float:
+    """Soft workspace nudge for weak isolation. 0 outside weak mode."""
+    if isolation != "weak" or not ws_canonical:
+        return 0.0
+    rec_ws = record.get("workspace_canonical") or record.get("workspace") or ""
+    if not rec_ws:
+        return 0.0
+    return _WS_BONUS_SAME if rec_ws == ws_canonical else _WS_PENALTY_CROSS
+
+
 def _score_surface(
     query_anchors: list[Anchor],
     surface_text: str,
@@ -418,6 +437,8 @@ def _score_tags_surface(
 def _soft_rerank(
     query: str,
     candidates: list[dict[str, Any]],
+    ws_canonical: Optional[str] = None,
+    isolation: str = "none",
 ) -> list[dict[str, Any]]:
     """Apply soft-rerank to a wide-recall candidate pool.
 
@@ -497,10 +518,11 @@ def _soft_rerank(
 
         trust = _trust_bonus(rec)
         recency = _recency_bonus(rec)
+        ws_adjust = _workspace_bonus(rec, ws_canonical, isolation)
         # Superseded always sinks below active regardless of score (r4 carries
         # this forward from v0.2.6).
         superseded_sink = 1 if rec.get("status") == "superseded" else 0
-        final_score = relevance + trust + recency - (superseded_sink * 1000.0)
+        final_score = relevance + trust + recency + ws_adjust - (superseded_sink * 1000.0)
 
         # Build debug info (only returned when debug_ranking=True).
         notes: list[str] = []
@@ -536,6 +558,7 @@ def _soft_rerank(
         rec_copy["_content_score"] = content_score
         rec_copy["_recency_bonus"] = recency
         rec_copy["_trust_bonus"] = trust
+        rec_copy["_workspace_bonus"] = ws_adjust
         scored.append((final_score, rec_copy))
 
     # Sort by final_score desc; tiebreak by ingest_time desc (newest first).
@@ -746,6 +769,7 @@ def _wide_recall(
             d = {
                 "id": rid,
                 "workspace": row.get("workspace"),
+                "workspace_canonical": row.get("workspace_canonical"),
                 "status": row.get("status"),
                 "subject": row.get("subject"),
                 "tags": row.get("tags"),
@@ -892,6 +916,8 @@ def search_memories(
     before_time: Optional[str] = None,
     source_type: Optional[str] = None,
     offset: int = 0,
+    ws_canonical: Optional[str] = None,
+    isolation: str = "none",
 ) -> SearchOutcome:
     """v0.9.4: returns a SearchOutcome with retrieval_mode.
 
@@ -987,7 +1013,10 @@ def search_memories(
     # 继续往下（wide_recall 内部仍会因 not query 返 []，post-filter 后仍空，
     # 最终走第二步的 "query required for filter-aware recall" 精准 warning）。
     if not query and not has_filters:
-        fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings, offset=offset)
+        fb_ws = ws_canonical if (isolation == "strict" and ws_canonical) else None
+        fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(
+            db, workspace, tags, limit, like_status_clause, warnings, offset=offset, ws_canonical=fb_ws,
+        )
         return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_browse")
 
     # === G6 (v0.8.5): empty query + filters → filter-driven recall ===
@@ -996,9 +1025,14 @@ def search_memories(
     # 解锁 list-by-tag / by-source_type / by-time。v0.9.4 adds SQL OFFSET for
     # expired audit pagination.
     if not query and has_filters:
-        rows = db.recall_by_filters(like_status_clause, tags_filter, after_dt, before_dt, source_type, limit, offset)
+        strict_ws = ws_canonical if (isolation == "strict" and ws_canonical) else None
+        rows = db.recall_by_filters(
+            like_status_clause, tags_filter, after_dt, before_dt, source_type, limit, offset,
+            ws_canonical=strict_ws,
+        )
         total_estimate = db.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
+            ws_canonical=strict_ws,
         )
         if not rows:
             warning = "offset beyond result set" if total_estimate > 0 and offset >= total_estimate else "no memories match the given filters"
@@ -1023,6 +1057,15 @@ def search_memories(
                         pool_cap=pool_cap,
                         content_like_cap=getattr(db.settings, "content_like_cap", 30))
 
+    # v0.9.7: strict isolation — hard-filter the candidate pool to the query's
+    # canonical workspace. weak does NOT filter (it only nudges ranking in
+    # _soft_rerank); none ignores workspace entirely.
+    if isolation == "strict" and ws_canonical:
+        pool = [
+            r for r in pool
+            if (r.get("workspace_canonical") or r.get("workspace")) == ws_canonical
+        ]
+
     if has_filters:
         pool = [r for r in pool if _passes_filters(r, tags_filter, after_dt, before_dt, source_type)]
         if not pool:
@@ -1043,7 +1086,7 @@ def search_memories(
             fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(db, workspace, tags, limit, like_status_clause, warnings, offset=offset)
             return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_fallback")
 
-    reranked = _soft_rerank(query, pool)
+    reranked = _soft_rerank(query, pool, ws_canonical=ws_canonical, isolation=isolation)
     # Slice to the requested page window.
     page = reranked[offset:offset + limit]
 
@@ -1347,6 +1390,7 @@ def _recent_fallback(
     like_status_clause: str,
     warnings: list[str],
     offset: int = 0,
+    ws_canonical: Optional[str] = None,
 ) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
     """Recent-memory fallback when no direct match found (r4 §4.2 safety net)."""
     clauses = [like_status_clause]
@@ -1354,6 +1398,14 @@ def _recent_fallback(
     for tag in tags or []:
         clauses.append("tags LIKE ?")
         params.append(f"%{tag}%")
+    # strict isolation: filter to the query's canonical workspace INSIDE the SQL
+    # so COUNT and the paginated window agree — a Python post-filter on an
+    # already-paginated page reports a wrong total and can under-fill the page.
+    # Match canonical with a raw fallback for rows written before the column
+    # existed (workspace_canonical NULL → compare against raw workspace).
+    if ws_canonical:
+        clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+        params.append(ws_canonical)
     conn = db._new_connection()
     try:
         count_row = conn.execute(

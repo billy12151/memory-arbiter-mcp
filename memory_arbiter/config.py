@@ -61,6 +61,12 @@ class Settings:
     max_section_chars: int = 3600
     # v0.9 structured claims: emergency kill switch; beta_all is the trusted-user default.
     structured_claim_mode: str = "beta_all"
+    # Workspace isolation level: none (default, ws ignored) | weak (soft rerank) | strict (hard filter).
+    isolation: str = "none"
+    # Cosine-distance cutoff for workspace alias canonicalization (vec KNN).
+    # Lower = stricter. ~0.16 merges 金营项目/金科营销项目; ~0.43 keeps unrelated
+    # projects distinct, so 0.25 cleanly separates synonyms from distinct workspaces.
+    workspace_match_distance: float = 0.25
     update_check_enabled: bool = True
     config_warnings: list[str] = field(default_factory=list)
 
@@ -168,6 +174,15 @@ class Settings:
             )
             structured_claim_mode = "beta_all"
 
+        isolation = pick_str(
+            "isolation", "MEMORY_ARBITER_ISOLATION", "none"
+        ).strip().lower()
+        if isolation not in {"none", "weak", "strict"}:
+            config_warnings.append(
+                f"isolation={isolation!r} invalid; using none"
+            )
+            isolation = "none"
+
         settings = cls(
             db_path=pick_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),
             backup_jsonl=pick_path("backup_jsonl", "MEMORY_ARBITER_BACKUP_JSONL", cwd / "memory_arbiter.backup.jsonl"),
@@ -222,6 +237,11 @@ class Settings:
                 100, 1_000_000, name="split.max_section_chars", warnings=config_warnings,
             ),
             structured_claim_mode=structured_claim_mode,
+            isolation=isolation,
+            workspace_match_distance=clamp_float(
+                pick_float_field(cfg.get("workspace_match_distance"), "MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE", 0.25, name="workspace_match_distance"),
+                0.0, 2.0, name="workspace_match_distance", warnings=config_warnings,
+            ),
             update_check_enabled=update_check_enabled,
         )
         settings.config_warnings = config_warnings

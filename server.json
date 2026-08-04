@@ -21,12 +21,12 @@
     "local",
     "sqlite"
   ],
-  "version": "0.9.6",
+  "version": "0.9.7",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "memory-arbiter-mcp",
-      "version": "0.9.6",
+      "version": "0.9.7",
       "transport": {
         "type": "stdio"
       },
@@ -55,6 +55,11 @@
           "description": "Structured claim real-time detection: beta_all (default) or off",
           "isRequired": false,
           "name": "MEMORY_ARBITER_STRUCTURED_CLAIM_MODE"
+        },
+        {
+          "description": "Workspace isolation level: none (default), weak (soft rerank), or strict (hard filter)",
+          "isRequired": false,
+          "name": "MEMORY_ARBITER_ISOLATION"
         }
       ]
     }
