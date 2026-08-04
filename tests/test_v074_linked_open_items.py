@@ -492,6 +492,7 @@ def test_server_wrapper_passes_include_linked_open_items(tmp_path: Path) -> None
     settings = Settings(
         db_path=tmp_path / "m.sqlite3", backup_jsonl=tmp_path / "b.jsonl",
         client="test", agent_id="tester", workspace="ws", enable_sqlite_vec=False,
+        update_check_enabled=False,
     )
     with patch("memory_arbiter.server.Settings.from_env", return_value=settings):
         app = srv.build_server()

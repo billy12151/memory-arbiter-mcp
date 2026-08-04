@@ -156,8 +156,14 @@ def _content_with_colliding_heading_in_body() -> str:
 #  §2.1 / §6.5 — Registry: which tools exist
 # ==================================================================
 
-def test_registry_keeps_memory_split_removes_status_and_get_sections() -> None:
+def test_registry_keeps_memory_split_removes_status_and_get_sections(tmp_path: Path, monkeypatch) -> None:
     """§2.1(1): registry keeps memory_split; drops memory_split_status + get_sections."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        '{"db_path":"' + str(tmp_path / "registry.sqlite3") + '","update_check":{"enabled":false}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg))
     from memory_arbiter.server import build_server
     app = build_server()
     names = _registered_tool_names(app)

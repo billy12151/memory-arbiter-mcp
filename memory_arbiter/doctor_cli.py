@@ -11,10 +11,11 @@ import argparse
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .config import Settings
 from .doctor import OverviewReport, Severity, doctor_overview_cli, report_to_dict
+from .update_monitor import UpdateMonitor
 
 
 # ANSI color codes (no external dependency; design doc §10.2).
@@ -42,7 +43,7 @@ def _color(text: str, code: str, use_color: bool) -> str:
     return f"{code}{text}{_RESET}" if use_color else text
 
 
-def _render_text(report: OverviewReport, use_color: bool) -> str:
+def _render_text(report: OverviewReport, use_color: bool, update_check: Optional[dict[str, Any]] = None) -> str:
     """Plain-text rendering with optional ANSI color (§10.2)."""
     lines: list[str] = []
     sev = report.overall
@@ -56,6 +57,12 @@ def _render_text(report: OverviewReport, use_color: bool) -> str:
         f"模式: {s.get('mode')}  |  记忆数: {s.get('total_memories')}  |  "
         f"向量生效: {s.get('vec_effective')}  |  分段能力: {s.get('split_capability_available')}"
     )
+    if update_check:
+        latest = update_check.get("latest_version") or "unknown"
+        lines.append(
+            f"更新状态: {update_check.get('status')}  |  当前版本: {update_check.get('current_version')}  |  "
+            f"最新已知: {latest}"
+        )
     lines.append("")
 
     # Group findings by dimension, preserving order.
@@ -104,13 +111,18 @@ def run_cli(argv: list[str]) -> None:
         settings = replace(settings, db_path=db_path)
 
     report = doctor_overview_cli(db_path, settings, deep=args.deep)
+    update_monitor = UpdateMonitor(enabled=settings.update_check_enabled)
+    update_monitor.record_doctor_run()
+    update_check = update_monitor.update_status()
 
     if args.json:
         import json
-        print(json.dumps(report_to_dict(report), ensure_ascii=False, indent=2))
+        data = report_to_dict(report)
+        data["update_check"] = update_check
+        print(json.dumps(data, ensure_ascii=False, indent=2))
     else:
         use_color = sys.stdout.isatty()
-        print(_render_text(report, use_color=use_color))
+        print(_render_text(report, use_color=use_color, update_check=update_check))
 
     # Exit code: non-zero if any critical/warning, for scripting/CI use.
     if report.overall == Severity.CRITICAL:

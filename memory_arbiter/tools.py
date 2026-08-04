@@ -13,6 +13,7 @@ from .db import MemoryDB, _canon_entity, _canon_scope
 from .embedder import ManagedEmbedder
 from .models import MemoryRecord, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
+from .update_monitor import UpdateMonitor
 from . import __version__
 
 
@@ -23,8 +24,19 @@ class MemoryTools:
         self._embedder: Optional[ManagedEmbedder] = None
         self._embedder_loaded = False
         self._embedder_warnings: list[str] = list(self.settings.config_warnings)
+        self._update_monitor: Optional[UpdateMonitor] = None
         # v0.6.0: initialise vec index state on startup
         self._init_vec_state()
+
+    def start_update_monitor(self, monitor: Optional[UpdateMonitor] = None) -> None:
+        if monitor is None and not self.settings.update_check_enabled:
+            return
+        try:
+            self._update_monitor = monitor or UpdateMonitor(enabled=self.settings.update_check_enabled)
+            self.db.state.notice_provider = self._update_monitor.consume_notices
+            self._update_monitor.maybe_start_check_if_due()
+        except Exception:
+            self._update_monitor = None
 
     def _init_vec_state(self) -> None:
         """Initialise _vec_index_meta based on current embedder availability."""
@@ -1386,6 +1398,12 @@ class MemoryTools:
             return {"available": False, "reason": "embedder_unavailable"}
         return {"available": False, "reason": "vec_not_ready"}
 
+    def _update_check_status(self) -> dict[str, Any]:
+        if self._update_monitor is None:
+            status = "disabled" if not self.settings.update_check_enabled else "not_started"
+            return {"enabled": self.settings.update_check_enabled, "status": status, "current_version": __version__}
+        return self._update_monitor.update_status()
+
     def memory_status(self, **_: Any) -> dict[str, Any]:
         vec_state = self.db.get_vec_index_state()
         return self.db.state.response(
@@ -1405,6 +1423,7 @@ class MemoryTools:
                 "embedding_auto_query": self.settings.embedding_auto_query,
                 "embedding_auto_write": self.settings.embedding_auto_write,
                 "structured_claim_mode": self.settings.structured_claim_mode,
+                "update_check": self._update_check_status(),
                 # v0.8: split capability is bound to vec readiness, not a toggle.
                 "split_capability": self._split_capability(vec_state),
                 "vec_index_state": vec_state,
@@ -1435,7 +1454,11 @@ class MemoryTools:
             embedder_probe=self._ensure_embedder,
             runtime_state=self.db.state,
         )
-        return self.db.state.response(report_to_dict(report))
+        if self._update_monitor is not None:
+            self._update_monitor.record_doctor_run()
+        data = report_to_dict(report)
+        data["update_check"] = self._update_check_status()
+        return self.db.state.response(data)
 
     def memory_set_entity(
         self,

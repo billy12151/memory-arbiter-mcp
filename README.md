@@ -207,6 +207,16 @@ explicitly assert "yes, override the `locked` / `user_confirmed` protection"
 — memory-arbiter is a local, single-trust-domain tool, so the gate lives at
 the caller. If you ever run multi-tenant, add caller identity + policy before
 relying on it.
+
+Successful MCP responses may include a top-level `notices` array. It is a
+side channel: `data` is unchanged, and callers that do not understand notices
+can ignore it. v0.9.6 uses notices for low-frequency update discovery: the MCP
+server may run a one-shot background PyPI check when due, cache state in
+`~/.local/share/memory-arbiter/update_state.json`, and tell the user when a new
+version is available or when an upgraded version has not run doctor yet. Notices
+are suppressed for 7 days per version; there is no ack protocol and no automatic
+upgrade. Disable network update checks with `{"update_check":{"enabled":false}}`
+in `~/.config/memory-arbiter/config.json`.
 ```
 
 ### Client Config Locations
@@ -277,10 +287,10 @@ Grouped by use case. For day-to-day agent work, the intended mental model is del
 
 | Tool | Description |
 |---|---|
-| `memory_status` | Show current mode, degradation status, storage paths. v0.8.0 reports `split_capability` (`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`) instead of the old boolean `split_enabled`. |
+| `memory_status` | Show current mode, degradation status, storage paths, cached update-check state, and whether a background update check is enabled. v0.8.0 reports `split_capability` (`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`) instead of the old boolean `split_enabled`. |
 | `memory_list_conflicts` | List unresolved conflicts |
 | `memory_audit_summary` | Per-workspace stats overview (counts, oldest/newest, open conflicts, source_type distribution) |
-| `memory_doctor_overview` | Run a read-only health check and return a graded report (26 findings across config / vector chain / split / consistency / capacity). Each finding has a severity and a config-specific `fix_hint`. `deep=true` also loads the GGUF model for a dimension probe. Same engine as the `doctor` CLI below. |
+| `memory_doctor_overview` | Run a read-only health check and return a graded report (26 findings across config / vector chain / split / consistency / capacity). Each finding has a severity, config-specific `fix_hint`, and lightweight fix metadata (`fix_kind`, `fix_tool`, `requires_authorized`, `risk`) for high-value repair paths. `deep=true` also loads the GGUF model for a dimension probe. Same engine as the `doctor` CLI below. |
 
 ### Optional: Semantic Recall (v0.5.0)
 
@@ -570,7 +580,7 @@ It runs **26 read-only checks** across five dimensions, each with a severity (`i
 - **Split, consistency, capacity** — section-split state, orphaned sections/vectors, vec parent-status drift, version-chain breaks, open-conflict buildup, history bloat, DB size. v0.9.4 replaces the old inactive-vector slow-path check with `consistency.vec_parent_status_sync`, which reports mismatches between vector metadata and parent memory status and points at a non-destructive resync tool.
 - **Section-split detail (v0.8.0)** — when vec is ready, doctor reports six split checks: `split.capability` (vec/embedder available), `split.long_unsplit_backlog` (active long docs still at `split_status=NULL`), `split.failed_count` (with recent error summaries), `split.legacy_declined`, `split.legacy_unknown_status` (legacy `pending`/`fallback_active` surfaced read-only), and `split.index_integrity` (orphaned/overlapping/non-covering offsets, missing section vectors). Backlog/failed/legacy findings return sample memory IDs you can feed straight into `memory_split` for repair.
 
-Exit codes: `0` clean / `1` has warnings / `2` has criticals — usable in scripts and CI. If the DB can't be opened at all, doctor degrades to a single critical report instead of crashing (that's the whole point of an ambulance). The same engine is exposed as the `memory_doctor_overview` MCP tool for in-conversation use; the CLI just trades the MCP runtime state for a slightly less precise static inference (noted in the report).
+Exit codes: `0` clean / `1` has warnings / `2` has criticals — usable in scripts and CI. If the DB can't be opened at all, doctor degrades to a single critical report instead of crashing (that's the whole point of an ambulance). The same engine is exposed as the `memory_doctor_overview` MCP tool for in-conversation use; the CLI just trades the MCP runtime state for a slightly less precise static inference (noted in the report). Doctor never performs a network update check; it only displays cached update state and records that doctor has run for the current installed version, which suppresses post-upgrade doctor reminders.
 
 ### Testing
 
@@ -782,6 +792,14 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 不是强鉴权。它让调用方 agent 显式声明"是的，突破 `locked` /
 `user_confirmed` 保护"——memory-arbiter 是本地、单信任域工具，这道门在
 调用方。若将来多租户使用，需先引入调用方身份 + 策略再依赖它。
+
+成功的 MCP 响应可能带顶层 `notices` 数组。这是旁路信息：`data` 不变，
+不理解 notices 的调用方可以忽略。v0.9.6 用它做低频更新发现：MCP server
+到期时会发起一次 one-shot 后台 PyPI 检查，把状态缓存在
+`~/.local/share/memory-arbiter/update_state.json`，并在发现新版本或升级后尚未
+跑 doctor 时提醒用户。每个版本 7 天内不重复提醒；没有 ack 协议，也不会自动升级。
+如需关闭联网更新检查，在 `~/.config/memory-arbiter/config.json` 中设置
+`{"update_check":{"enabled":false}}`。
 ```
 
 ### 客户端配置位置
@@ -851,10 +869,10 @@ remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历�
 
 | 工具 | 说明 |
 |---|---|
-| `memory_status` | 查看运行状态、模式、降级原因。v0.8.0 用 `split_capability`（`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`）替代旧的布尔 `split_enabled`。 |
+| `memory_status` | 查看运行状态、模式、降级原因、缓存的更新检查状态，以及后台更新检查是否启用。v0.8.0 用 `split_capability`（`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`）替代旧的布尔 `split_enabled`。 |
 | `memory_list_conflicts` | 列出未解决的冲突 |
 | `memory_audit_summary` | 各 workspace 记忆统计概览（条目数、最旧/最新、open 冲突数、来源分布） |
-| `memory_doctor_overview` | 跑一次只读健康体检，返回分级报告（26 项 finding，覆盖配置 / 向量链 / 分段 / 一致性 / 容量）。每条诊断带 severity 和针对当前配置的 `fix_hint`。`deep=true` 时额外加载 GGUF 模型做维度探针。与下面的 `doctor` CLI 用同一套引擎。 |
+| `memory_doctor_overview` | 跑一次只读健康体检，返回分级报告（26 项 finding，覆盖配置 / 向量链 / 分段 / 一致性 / 容量）。每条诊断带 severity、针对当前配置的 `fix_hint`，以及高价值修复路径的轻量机器字段（`fix_kind`、`fix_tool`、`requires_authorized`、`risk`）。`deep=true` 时额外加载 GGUF 模型做维度探针。与下面的 `doctor` CLI 用同一套引擎。 |
 
 ### 可选：语义检索（v0.5.0）
 
@@ -1144,7 +1162,7 @@ memory-arbiter doctor --db PATH    # 诊断另一个 DB（灾祸恢复）
 - **v0.9 实时冲突可观测性** —— structured claim 索引/对账是否同 revision、未完成对账能否 rebuild、写入链路延迟与候选 peer 数，以及已落表冲突的 structured-only / scan-only / both 和 structured 提前量。它提供 ROI 数据，不替代真实 Beta 样本判断。
 - **分段明细（v0.8.0）** —— vec ready 时，doctor 报告六项分段检查：`split.capability`（vec/embedder 可用性）、`split.long_unsplit_backlog`（长内容但仍 `split_status=NULL` 的 active 记录）、`split.failed_count`（带最近错误摘要）、`split.legacy_declined`、`split.legacy_unknown_status`（历史 `pending`/`fallback_active` 只读暴露）、`split.index_integrity`（孤儿/重叠/不连续/不覆盖的 offset、缺失段落向量）。backlog/failed/legacy 类问题会返回样例 memory ID，可直接喂给 `memory_split` 逐条修复。
 
-退出码：`0` 正常 / `1` 有 warning / `2` 有 critical —— 可在脚本和 CI 里用。如果数据库根本打不开，doctor 会降级成单条 critical 报告而不是崩溃（这正是救护车的意义）。同一套引擎也作为 `memory_doctor_overview` MCP 工具暴露，供对话内使用；CLI 只是用静态推断替代了 MCP 运行时状态（精度略低，报告里会标注）。
+退出码：`0` 正常 / `1` 有 warning / `2` 有 critical —— 可在脚本和 CI 里用。如果数据库根本打不开，doctor 会降级成单条 critical 报告而不是崩溃（这正是救护车的意义）。同一套引擎也作为 `memory_doctor_overview` MCP 工具暴露，供对话内使用；CLI 只是用静态推断替代了 MCP 运行时状态（精度略低，报告里会标注）。doctor 不会联网检查更新；它只展示缓存的更新状态，并记录当前安装版本已经跑过 doctor，用于停止升级后 doctor 提醒。
 
 ### 测试
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 @dataclass
@@ -12,6 +12,7 @@ class DegradeState:
     fts5_available: bool = False
     sqlite_writable: bool = True
     jsonl_backup_active: bool = False
+    notice_provider: Optional[Callable[[], list[dict[str, Any]]]] = None
 
     @property
     def degraded(self) -> bool:
@@ -26,10 +27,18 @@ class DegradeState:
         for warning in extra_warnings or []:
             if warning not in warnings:
                 warnings.append(warning)
-        return {
+        resp = {
             "ok": ok,
             "mode": self.mode,
             "warnings": warnings,
             "degraded": bool(warnings) or self.mode != "sqlite_vec",
             "data": data,
         }
+        if ok and self.notice_provider is not None:
+            try:
+                notices = self.notice_provider()
+            except Exception:
+                notices = []
+            if notices:
+                resp["notices"] = notices
+        return resp

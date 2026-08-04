@@ -26,6 +26,7 @@ def _tools(tmp_path: Path) -> MemoryTools:
         agent_id="tester",
         workspace="ws",
         enable_sqlite_vec=False,
+        update_check_enabled=False,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
@@ -452,6 +453,7 @@ def test_server_wrapper_passes_v076_parameters(tmp_path: Path) -> None:
         agent_id="tester",
         workspace="ws",
         enable_sqlite_vec=False,
+        update_check_enabled=False,
     )
     with patch("memory_arbiter.server.Settings.from_env", return_value=settings):
         app = srv.build_server()

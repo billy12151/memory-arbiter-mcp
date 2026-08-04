@@ -24,6 +24,15 @@
   },
   "recall_pool_cap": 50,
   "content_like_cap": 30,
+  "update_check": {
+    "enabled": true
+  },
+  "_update_check_readme": [
+    "Background update discovery. When enabled, the MCP server checks PyPI in a one-shot",
+    "background request when due, caches the result in ~/.local/share/memory-arbiter/update_state.json,",
+    "and may attach a low-frequency top-level notice to successful tool responses.",
+    "Set enabled=false to disable network update checks. Timing defaults are intentionally not configurable."
+  ],
   "structured_claim_mode": "beta_all",
   "_structured_claim_mode_readme": [
     "v0.9 real-time structured conflict detection — a conservative, deterministic,",

@@ -21,6 +21,7 @@ from memory_arbiter.doctor import (
     build_unopenable_report,
     doctor_overview_cli,
     doctor_overview_mcp,
+    report_to_dict,
     run_all_checks,
 )
 from memory_arbiter.tools import MemoryTools
@@ -277,3 +278,51 @@ class TestMCPEntryViaTools:
         ids = {f["check_id"] for f in data["findings"]}
         assert {"split.capability", "split.long_unsplit_backlog",
                 "split.index_integrity"} <= ids
+        assert "update_check" in data
+
+
+class TestDoctorFixMetadata:
+    def test_report_to_dict_adds_high_value_fix_metadata(self):
+        report = OverviewReport(
+            snapshot_ts="2026-08-04T00:00:00+00:00",
+            overall=Severity.WARNING,
+            summary={},
+            findings=[
+                Finding(
+                    check_id="consistency.vec_parent_status_sync",
+                    dimension="consistency",
+                    severity=Severity.WARNING,
+                    status="warn",
+                    title="drift",
+                    detail="",
+                    fix_hint="repair drift",
+                ),
+                Finding(
+                    check_id="consistency.orphan_vectors",
+                    dimension="consistency",
+                    severity=Severity.WARNING,
+                    status="warn",
+                    title="orphans",
+                    detail="",
+                    fix_hint="cleanup",
+                ),
+                Finding(
+                    check_id="config.warnings",
+                    dimension="config",
+                    severity=Severity.WARNING,
+                    status="warn",
+                    title="config",
+                    detail="",
+                    fix_hint="edit config",
+                ),
+            ],
+        )
+
+        findings = report_to_dict(report)["findings"]
+        assert findings[0]["fix_kind"] == "mcp_tool"
+        assert findings[0]["fix_tool"] == "memory_resync_vec_parent_status"
+        assert findings[0]["requires_authorized"] is False
+        assert findings[0]["risk"] == "low"
+        assert findings[1]["fix_tool"] == "memory_cleanup_inactive_vectors"
+        assert findings[1]["requires_authorized"] is True
+        assert findings[2]["fix_kind"] == "manual_config"

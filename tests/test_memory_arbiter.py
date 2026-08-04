@@ -1234,6 +1234,9 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
     monkeypatch.setitem(sys.modules, "mcp.server", fake_server)
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fake_fastmcp)
+    update_cfg = tmp_path / "update-off.json"
+    update_cfg.write_text(json.dumps({"update_check": {"enabled": False}}), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(update_cfg))
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
     monkeypatch.setenv("MEMORY_ARBITER_WORKSPACE", "repo-a")
@@ -1298,6 +1301,30 @@ def test_config_file_overrides_env(tmp_path: Path, monkeypatch) -> None:
     assert settings.embedding_provider == "gguf"
     assert settings.embedding_model_path == tmp_path / "model.gguf"
     assert settings.embedding_auto_query is False
+    assert settings.update_check_enabled is True
+
+
+def test_update_check_config_switch(tmp_path: Path, monkeypatch) -> None:
+    clear_config_env(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"update_check": {"enabled": False}}), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+
+    settings = Settings.from_env()
+
+    assert settings.update_check_enabled is False
+
+
+def test_update_check_bad_config_defaults_enabled(tmp_path: Path, monkeypatch) -> None:
+    clear_config_env(monkeypatch)
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"update_check": {"enabled": "maybe"}}), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+
+    settings = Settings.from_env()
+
+    assert settings.update_check_enabled is True
+    assert any("update_check.enabled" in warning for warning in settings.config_warnings)
 
 
 def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch) -> None:

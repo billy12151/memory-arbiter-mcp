@@ -1595,6 +1595,72 @@ def doctor_overview_cli(db_path: Path, settings: Settings, deep: bool = False) -
         return build_unopenable_report(settings, exc)
 
 
+def _fix_metadata_for(finding: Finding) -> dict[str, Any]:
+    base = {
+        "fix_kind": "none",
+        "fix_tool": None,
+        "requires_authorized": False,
+        "risk": "none",
+    }
+    if finding.status == "pass" and not finding.fix_hint:
+        return base
+    mapping: dict[str, dict[str, Any]] = {
+        "consistency.vec_parent_status_sync": {
+            "fix_kind": "mcp_tool",
+            "fix_tool": "memory_resync_vec_parent_status",
+            "requires_authorized": False,
+            "risk": "low",
+        },
+        "consistency.orphan_vectors": {
+            "fix_kind": "mcp_tool",
+            "fix_tool": "memory_cleanup_inactive_vectors",
+            "requires_authorized": True,
+            "risk": "cleanup",
+        },
+        "consistency.structured_claims": {
+            "fix_kind": "mcp_tool",
+            "fix_tool": "memory_rebuild_claims",
+            "requires_authorized": False,
+            "risk": "medium",
+        },
+        "capacity.history_bloat": {
+            "fix_kind": "mcp_tool",
+            "fix_tool": "memory_cleanup_history",
+            "requires_authorized": False,
+            "risk": "cleanup",
+        },
+        "consistency.vec_index_state": {
+            "fix_kind": "mcp_tool",
+            "fix_tool": "memory_rebuild_embeddings",
+            "requires_authorized": False,
+            "risk": "medium",
+        },
+        "split.long_unsplit_backlog": {
+            "fix_kind": "agent_assisted",
+            "fix_tool": "memory_split",
+            "requires_authorized": False,
+            "risk": "medium",
+        },
+        "split.failed_count": {
+            "fix_kind": "agent_assisted",
+            "fix_tool": "memory_split",
+            "requires_authorized": False,
+            "risk": "medium",
+        },
+    }
+    if finding.check_id in mapping:
+        return mapping[finding.check_id]
+    if finding.check_id.startswith("config."):
+        return {"fix_kind": "manual_config", "fix_tool": None, "requires_authorized": False, "risk": "manual"}
+    if finding.check_id == "vec.link3.extension_loaded":
+        return {"fix_kind": "dependency_install", "fix_tool": None, "requires_authorized": False, "risk": "manual"}
+    if finding.check_id == "vec.link4.model_usable":
+        return {"fix_kind": "model_download", "fix_tool": None, "requires_authorized": False, "risk": "manual"}
+    if finding.fix_hint:
+        return {"fix_kind": "manual_or_none", "fix_tool": None, "requires_authorized": False, "risk": "manual"}
+    return base
+
+
 def report_to_dict(report: OverviewReport) -> dict[str, Any]:
     """Convert OverviewReport to a plain dict for state.response() envelope.
 
@@ -1618,6 +1684,7 @@ def report_to_dict(report: OverviewReport) -> dict[str, Any]:
                 "evidence": f.evidence,
                 "fix_hint": f.fix_hint,
                 "doc_link": f.doc_link,
+                **_fix_metadata_for(f),
             }
             for f in report.findings
         ],

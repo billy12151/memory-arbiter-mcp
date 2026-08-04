@@ -61,6 +61,7 @@ class Settings:
     max_section_chars: int = 3600
     # v0.9 structured claims: emergency kill switch; beta_all is the trusted-user default.
     structured_claim_mode: str = "beta_all"
+    update_check_enabled: bool = True
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -84,6 +85,16 @@ class Settings:
             config_warnings.append(f"split={split_cfg!r} invalid; using env/defaults")
             split_cfg = {}
         split_cfg = {str(k): v for k, v in split_cfg.items() if not str(k).startswith("_")}
+        update_cfg_raw = cfg.get("update_check", {})
+        update_check_enabled = True
+        if isinstance(update_cfg_raw, dict):
+            update_check_enabled = parse_bool_warn(
+                update_cfg_raw.get("enabled", True), True, name="update_check.enabled", warnings=config_warnings
+            )
+        elif update_cfg_raw is not None:
+            update_check_enabled = parse_bool_warn(
+                update_cfg_raw, True, name="update_check", warnings=config_warnings
+            )
         # v0.8: split.enabled and section_zero_match_preview_chars are removed.
         # A residual value in config is warned + ignored (never blocks startup).
         if "enabled" in split_cfg:
@@ -211,6 +222,7 @@ class Settings:
                 100, 1_000_000, name="split.max_section_chars", warnings=config_warnings,
             ),
             structured_claim_mode=structured_claim_mode,
+            update_check_enabled=update_check_enabled,
         )
         settings.config_warnings = config_warnings
         settings.policy = load_policy(settings.policy_path, config_warnings)
