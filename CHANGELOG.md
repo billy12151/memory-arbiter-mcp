@@ -3,6 +3,38 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.9.6] — 2026-08-04
+
+### Added
+
+- **Update discovery & notices (side channel)** — the MCP server now performs
+  a one-shot background PyPI check when due (at most every 24h, retry after 6h
+  on failure) and may attach a top-level `notices` array to successful tool
+  responses. Notices are a side channel: `data` is unchanged, and callers that
+  do not understand them can ignore them. Two notice types: `update_available`
+  (a newer version exists on PyPI) and `post_upgrade_doctor_recommended` (the
+  installed version changed and doctor has not been run on it yet). Each notice
+  is suppressed for 7 days per version; there is no ack protocol and no
+  automatic upgrade. Disable with `{"update_check":{"enabled":false}}` in
+  `~/.config/memory-arbiter/config.json`. State is cached in
+  `~/.local/share/memory-arbiter/update_state.json`. The background check is a
+  daemon thread that exits after one fetch (success/failure/timeout); it is not
+  a persistent worker and is never auto-restarted.
+
+- **Doctor fix metadata (P1)** — each doctor finding now carries lightweight
+  machine-readable repair metadata (`fix_kind`, `fix_tool`,
+  `requires_authorized`, `risk`) for high-value repair paths, instead of only a
+  human-readable `fix_hint`. `fix_kind` values: `mcp_tool`, `agent_assisted`,
+  `manual_config`, `dependency_install`, `model_download`, `manual_or_none`,
+  `none`.
+
+- **`memory_status` update-check state** — `memory_status` now reports cached
+  update-check state (`update_check` object: `enabled`, `status`,
+  `current_version`, `latest_version`, `latest_checked_at`, `cache_stale`,
+  `last_doctor_run_version`, etc.) and whether the background check is enabled.
+  Doctor never performs a network check; it only displays cached state and
+  records that doctor has run for the current installed version.
+
 ## [0.9.5] — 2026-08-03
 
 ### Fixed
