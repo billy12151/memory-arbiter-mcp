@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Tuple
 
@@ -34,6 +35,14 @@ class ManagedEmbedder:
     reserved_tokens: int = 64
     warnings: list[str] = field(default_factory=list)
     last_encode_error: Optional[str] = None
+    # llama-cpp-python's GGUF inference (create_embedding AND tokenize) is not
+    # thread-safe: concurrent calls on one Llama instance deadlock. The async
+    # split worker runs embed on a background thread while the main thread may
+    # embed a search query on the same instance. This lock serialises every
+    # llama-cpp call so the two never overlap. Embed is already CPU-bound and
+    # single-threaded by nature, so serialising costs nothing — it only makes
+    # the existing "one caller at a time" invariant explicit.
+    _embed_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def embed_text(
         self,
@@ -46,64 +55,69 @@ class ManagedEmbedder:
         Counts full prefix+body tokens for diagnostics, then truncates body
         if total exceeds the model context budget.  All memory/query/section
         embedding must go through this method.
+
+        Thread-safety: the whole body runs under ``_embed_lock`` because both
+        ``tokenize`` and ``encode_raw`` hit the underlying ``Llama`` instance,
+        whose GGUF inference is not thread-safe.
         """
-        # Join prefix and body with a newline boundary so tokenizers don't merge
-        # the trailing token of the prefix with the leading token of the body
-        # (e.g. subject "cat" + content "dog" must not become "catdog").  An
-        # empty prefix yields a leading newline only when the body is non-empty,
-        # which models handle identically to the bare body.
-        sep = "\n" if prefix and body else ""
-        full_text = prefix + sep + body
-        original_tokens = len(self.tokenize(full_text))
+        with self._embed_lock:
+            # Join prefix and body with a newline boundary so tokenizers don't merge
+            # the trailing token of the prefix with the leading token of the body
+            # (e.g. subject "cat" + content "dog" must not become "catdog").  An
+            # empty prefix yields a leading newline only when the body is non-empty,
+            # which models handle identically to the bare body.
+            sep = "\n" if prefix and body else ""
+            full_text = prefix + sep + body
+            original_tokens = len(self.tokenize(full_text))
 
-        body_candidate = body
-        if max_body_chars is not None and len(body_candidate) > max_body_chars:
-            body_candidate = body_candidate[:max_body_chars]
+            body_candidate = body
+            if max_body_chars is not None and len(body_candidate) > max_body_chars:
+                body_candidate = body_candidate[:max_body_chars]
 
-        token_budget = self.n_ctx - self.reserved_tokens
-        candidate_tokens = len(self.tokenize(prefix + sep + body_candidate))
+            token_budget = self.n_ctx - self.reserved_tokens
+            candidate_tokens = len(self.tokenize(prefix + sep + body_candidate))
 
-        used_tokens = candidate_tokens
-        if candidate_tokens > token_budget:
-            lo, hi = 0, len(body_candidate)
-            best = ""
-            while lo <= hi:
-                mid = (lo + hi) // 2
-                t = len(self.tokenize(prefix + sep + body_candidate[:mid]))
-                if t <= token_budget:
-                    best = body_candidate[:mid]
-                    used_tokens = t
-                    lo = mid + 1
-                else:
-                    hi = mid - 1
-            body_candidate = best
-            if not best:
-                used_tokens = len(self.tokenize(prefix))
+            used_tokens = candidate_tokens
+            if candidate_tokens > token_budget:
+                lo, hi = 0, len(body_candidate)
+                best = ""
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    t = len(self.tokenize(prefix + sep + body_candidate[:mid]))
+                    if t <= token_budget:
+                        best = body_candidate[:mid]
+                        used_tokens = t
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                body_candidate = best
+                if not best:
+                    used_tokens = len(self.tokenize(prefix))
 
-        final_text = prefix + sep + body_candidate
-        truncated = original_tokens > used_tokens or len(body_candidate) < len(body)
+            final_text = prefix + sep + body_candidate
+            truncated = original_tokens > used_tokens or len(body_candidate) < len(body)
 
-        try:
-            embedding = self.encode_raw(final_text)
-        except Exception as exc:
-            # The model-level failure will likely recur on the bare prefix too.
-            # embed_text is a Never-raises surface: record the error and return a
-            # sentinel result so the caller can surface a warning instead of
-            # propagating an exception up the MCP tool call.
-            self.last_encode_error = str(exc)
+            try:
+                embedding = self.encode_raw(final_text)
+            except Exception as exc:
+                # The model-level failure will likely recur on the bare prefix too.
+                # embed_text is a Never-raises surface: record the error and return a
+                # sentinel result so the caller can surface a warning instead of
+                # propagating an exception up the MCP tool call.
+                self.last_encode_error = str(exc)
+                return EmbedResult(
+                    embedding=[],
+                    truncated=True,
+                    original_tokens=original_tokens,
+                    used_tokens=len(self.tokenize(prefix)),
+                )
+
             return EmbedResult(
-                embedding=[],
-                truncated=True,
+                embedding=embedding,
+                truncated=truncated,
                 original_tokens=original_tokens,
-                used_tokens=len(self.tokenize(prefix)),
+                used_tokens=used_tokens,
             )
-
-        return EmbedResult(
-            embedding=embedding,
-            truncated=truncated,
-            original_tokens=original_tokens,
-            used_tokens=used_tokens,
-        )
 
 
 def compute_model_digest(model_path: str) -> str:

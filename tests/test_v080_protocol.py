@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -328,6 +329,66 @@ def test_rules_async_marks_split_failed_on_embedding_error(tmp_path: Path) -> No
     mem = tools.db.get_memory(mid)
     assert mem["split_status"] == "failed"
     assert mem["metadata"]["_split"]["last_split_error"]["stage"] == "embedding"
+
+
+def test_embed_text_serialises_concurrent_calls_on_one_embedder() -> None:
+    """The async split worker (background thread) and memory_search (main
+    thread) both call embed_text on the same ManagedEmbedder. llama-cpp's GGUF
+    inference is not thread-safe, so embed_text must serialise them via
+    _embed_lock — two concurrent calls must never overlap."""
+    from memory_arbiter.embedder import ManagedEmbedder
+
+    inside = threading.Event()
+    release = threading.Event()
+    overlap = threading.Event()  # set if a 2nd call enters while 1st holds the lock
+    call_order: list[str] = []
+
+    def encode(text: str) -> list[float]:
+        # If another call is already inside, the lock failed to serialise.
+        if inside.is_set():
+            overlap.set()
+        inside.set()
+        call_order.append("enter:" + text[:4])
+        assert release.wait(5)
+        call_order.append("exit:" + text[:4])
+        inside.clear()
+        return [1.0, 0.0]
+
+    emb = ManagedEmbedder(
+        encode_raw=encode,
+        tokenize=lambda _t: [1, 2, 3],
+        model_digest="d",
+        embedding_space_id="s",
+        n_ctx=2048,
+        reserved_tokens=64,
+    )
+
+    results: list[list[float]] = []
+    errors: list[Exception] = []
+
+    def caller(text: str) -> None:
+        try:
+            r = emb.embed_text(prefix="", body=text)
+            results.append(r.embedding)
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=caller, args=("alpha",))
+    t2 = threading.Thread(target=caller, args=("beta",))
+    t1.start()
+    # Wait until t1 is holding the lock inside encode, then start t2.
+    assert inside.wait(5)
+    t2.start()
+    # Give t2 a moment to (wrongly) enter if the lock were missing.
+    time.sleep(0.05)
+    assert not overlap.is_set(), "embed_text let two concurrent calls overlap"
+    release.set()
+    t1.join(5)
+    t2.join(5)
+    assert not errors
+    assert len(results) == 2
+    # Calls did not interleave: each enter is immediately followed by its exit.
+    assert call_order == ["enter:alph", "exit:alph", "enter:beta", "exit:beta"]
 
 
 def test_write_returns_split_request_for_unstructured_long_doc(tmp_path: Path) -> None:

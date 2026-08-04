@@ -1719,6 +1719,7 @@ class MemoryTools:
             self.db, self.settings, deep,
             embedder_probe=self._ensure_embedder,
             runtime_state=self.db.state,
+            inflight_ids=set(self._split_worker.pending_ids()),
         )
         if self._update_monitor is not None:
             self._update_monitor.record_doctor_run()

@@ -7,6 +7,57 @@ Versions follow semantic versioning.
 
 ### Added
 
+- **Async split reindex worker (`SplitReindexWorker`)** — the rules-path
+  section split in `memory_write` / content `memory_edit` moved from
+  synchronous to asynchronous. Previously a long structured document blocked
+  the tool call for ~0.3s × section count (a 14-section doc measured 4.4s of
+  GGUF embedding inside the call, risking the 30s MCP timeout). Write/edit
+  now completes DB write + memory-level embed + claims rebuild and returns
+  immediately (~0.5s); per-section embedding runs on a single background
+  daemon thread serialised via an in-process dict queue (GGUF inference is
+  not thread-safe — parallel embeds deadlock, so a thread pool would still
+  serialise behind a lock with no benefit).
+  - **Response field change**: `split.mode` is now `rules_async` (was
+    `rules`), `applied` is `false` (was `true`), and the block carries
+    `reindex_pending: true` plus `section_count_estimated`. `split_status`
+    stays `NULL` until the background publish lands, then flips to `active`.
+  - **Search degrade is recall-safe**: while `split_status=NULL`,
+    `memory_search` returns the full memory (`content_scope=full_memory`) —
+    section-level precision is temporarily absent but no result is dropped;
+    memory-level vector recall keeps working. Section precision restores
+    automatically once the worker publishes.
+  - **`memory_status`** exposes `split_reindex_pending: [memory_id, …]` —
+    the ids currently queued or being processed, so the host can poll
+    progress.
+  - **Concurrency safety reuses the existing 5-point CAS** in
+    `_publish_sections` (status / content_hash / version / split_status /
+    split_revision checked inside `BEGIN IMMEDIATE`): a stale snapshot from
+    an edit that bumped `split_revision` fails CAS and is safely discarded;
+    the new edit re-enqueues. Cross-process writers are serialised by WAL +
+    `busy_timeout`; a later publisher loses CAS and wastes one embed pass
+    but corrupts nothing.
+  - **Embedder double-checked locking** (`_embedder_lock`) fixes a TOCTOU in
+    `_ensure_embedder` — the worker is the first background thread to call
+    it, so the check-then-`build_embedder` race (which would double-mmap the
+    GGUF) had to be closed first.
+  - **`embed_text` call serialisation** (`ManagedEmbedder._embed_lock`) closes
+    a regression the async worker introduced: while the worker embeds sections
+    on its background thread, a concurrent `memory_search` on the main thread
+    vectorises the query through the *same* `Llama` instance. llama-cpp's
+    GGUF inference (both `create_embedding` and `tokenize`) is not thread-safe
+    — the two overlapping calls could deadlock. The lock wraps the whole
+    `embed_text` body so every llama-cpp call is mutually exclusive. Embed is
+    already single-threaded by nature, so this costs nothing; it only makes
+    the "one caller at a time" invariant explicit. Affects all call sites
+    (write/search/edit/doctor/rebuild) uniformly.
+  - **Startup scan** enqueues up to 100 `split_status IS NULL` long
+    memories on boot, recovering crash-leftover NULL rows and old-library
+    upgrades; the rest self-heal on next edit.
+  - **`memory_doctor_overview`** no longer misreports the async window: the
+    `split.long_unsplit_backlog` check excludes ids currently inflight on
+    the worker, so a memory mid-reindex is not flagged as a backlog needing
+    Agent continuation (which would needlessly race the worker's CAS).
+
 - **Workspace isolation (`none` / `weak` / `strict`)** — the long-reserved
   `workspace` field can now partition recall, controlled globally by
   `MEMORY_ARBITER_ISOLATION` (default `none`). The three levels are monotonic —

@@ -774,9 +774,20 @@ def _check_split_capability(conn: sqlite3.Connection, settings: Settings) -> Fin
     )
 
 
-def _check_split_backlog(conn: sqlite3.Connection, settings: Settings) -> Finding:
+def _check_split_backlog(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    inflight_ids: Optional[set[int]] = None,
+) -> Finding:
     """§6.5: long active memories with split_status IS NULL (awaiting Agent
-    continuation). Only meaningful when vec is ready."""
+    continuation). Only meaningful when vec is ready.
+
+    ``inflight_ids`` are memory_ids currently being processed by the
+    background SplitReindexWorker — their split_status is NULL because the
+    async publish hasn't landed yet, not because they need Agent action.
+    They are excluded from the backlog so the doctor does not misreport a
+    normal async window as a backlog requiring intervention.
+    """
     if _vec_state_from_meta(conn) != "ready":
         return _na("split.long_unsplit_backlog", "split",
                    "vec 未 ready，分段能力不可用，backlog 检查不适用")
@@ -789,23 +800,41 @@ def _check_split_backlog(conn: sqlite3.Connection, settings: Settings) -> Findin
         "AND length(content) >= ? ORDER BY id",
         (threshold,),
     ).fetchall()
-    count = len(rows)
-    sample = [int(r["id"]) for r in rows[:20]]
-    if count == 0:
+    inflight = inflight_ids or set()
+    inflight_excluded = [int(r["id"]) for r in rows if int(r["id"]) in inflight]
+    backlog_rows = [r for r in rows if int(r["id"]) not in inflight]
+    backlog_count = len(backlog_rows)
+    sample = [int(r["id"]) for r in backlog_rows[:20]]
+    inflight_count = len(inflight_excluded)
+
+    if backlog_count == 0:
+        if inflight_count == 0:
+            return Finding(
+                check_id="split.long_unsplit_backlog", dimension="split",
+                severity=Severity.INFO, status="pass",
+                title="无未分段长文 backlog",
+                detail=f"无 active 且 content≥{threshold} 且 split_status IS NULL 的记录",
+                evidence={"backlog_count": 0, "split_threshold": threshold},
+            )
         return Finding(
             check_id="split.long_unsplit_backlog", dimension="split",
             severity=Severity.INFO, status="pass",
-            title="无未分段长文 backlog",
-            detail=f"无 active 且 content≥{threshold} 且 split_status IS NULL 的记录",
-            evidence={"backlog_count": 0, "split_threshold": threshold},
+            title=f"{inflight_count} 条长文正在后台分段中（不计入 backlog）",
+            detail="这些记录已进入 SplitReindexWorker 队列，分段 embed 正在后台进行，"
+                   "完成后 split_status 会异步变 active，无需 Agent 介入。",
+            evidence={"backlog_count": 0, "inflight_count": inflight_count,
+                      "inflight_memory_ids": inflight_excluded,
+                      "split_threshold": threshold},
         )
-    sev = Severity.WARNING if count > 10 else Severity.INFO
+    sev = Severity.WARNING if backlog_count > 10 else Severity.INFO
     return Finding(
         check_id="split.long_unsplit_backlog", dimension="split",
         severity=sev, status="warn" if sev == Severity.WARNING else "pass",
-        title=f"{count} 条长文待分段（split_status=NULL）",
+        title=f"{backlog_count} 条长文待分段（split_status=NULL）",
         detail="这些记录原文已保存但尚未发布 sections；Agent 收到 split_request 后应续接",
-        evidence={"backlog_count": count, "split_threshold": threshold,
+        evidence={"backlog_count": backlog_count,
+                  "inflight_excluded": inflight_count,
+                  "split_threshold": threshold,
                   "sample_memory_ids": sample},
         fix_hint="对 sample_memory_ids 逐条调 memory_split(memory_id) 续接分段",
     )
@@ -1379,6 +1408,7 @@ def run_all_checks(
     deep: bool = False,
     runtime_state: Optional[DegradeState] = None,
     embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None,
+    inflight_ids: Optional[set[int]] = None,
 ) -> OverviewReport:
     """Run all 25 findings on one ro connection (consistent snapshot).
 
@@ -1435,7 +1465,7 @@ def run_all_checks(
 
     # --- split (6) — v0.8 capability/backlog/failed/legacy/integrity ---
     _run("split.capability", lambda: _check_split_capability(conn, settings), "split")
-    _run("split.long_unsplit_backlog", lambda: _check_split_backlog(conn, settings), "split")
+    _run("split.long_unsplit_backlog", lambda: _check_split_backlog(conn, settings, inflight_ids), "split")
     _run("split.failed_count", lambda: _check_split_failed(conn, settings), "split")
     _run("split.legacy_declined", lambda: _check_split_legacy_declined(conn, settings), "split")
     _run("split.legacy_unknown_status", lambda: _check_split_legacy_unknown_status(conn, settings), "split")
@@ -1550,6 +1580,7 @@ def doctor_overview_mcp(
     deep: bool = False,
     embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None,
     runtime_state: Optional[DegradeState] = None,
+    inflight_ids: Optional[set[int]] = None,
 ) -> OverviewReport:
     """MCP platform entry: uses MemoryDB.diagnostic_connection() + global fallback."""
     try:
@@ -1558,6 +1589,7 @@ def doctor_overview_mcp(
                 conn, settings, deep,
                 runtime_state=runtime_state if runtime_state is not None else getattr(db, "state", None),
                 embedder_probe=embedder_probe,
+                inflight_ids=inflight_ids,
             )
     except Exception as exc:
         return build_unopenable_report(settings, exc)
