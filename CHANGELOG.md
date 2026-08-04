@@ -3,7 +3,7 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
-## [0.9.7] — 2026-08-04
+## [0.9.8] — 2026-08-05
 
 ### Added
 
@@ -57,6 +57,10 @@ Versions follow semantic versioning.
     `split.long_unsplit_backlog` check excludes ids currently inflight on
     the worker, so a memory mid-reindex is not flagged as a backlog needing
     Agent continuation (which would needlessly race the worker's CAS).
+
+## [0.9.7] — 2026-08-04
+
+### Added
 
 - **Workspace isolation (`none` / `weak` / `strict`)** — the long-reserved
   `workspace` field can now partition recall, controlled globally by
