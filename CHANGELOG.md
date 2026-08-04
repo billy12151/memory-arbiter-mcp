@@ -35,6 +35,14 @@ Versions follow semantic versioning.
   Doctor never performs a network check; it only displays cached state and
   records that doctor has run for the current installed version.
 
+### Fixed
+
+- **Disabled update_check no longer writes state file** — `_write_state_locked`
+  early-returns when `enabled=False`, covering all write paths (`__init__`
+  version observation, `record_doctor_run`, `consume_notices`, background
+  check). Previously, running the CLI doctor with `update_check` disabled would
+  still create `~/.local/share/memory-arbiter/update_state.json`.
+
 ## [0.9.5] — 2026-08-03
 
 ### Fixed

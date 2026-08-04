@@ -171,6 +171,8 @@ class UpdateMonitor:
             return {"enabled": self.enabled, "status": "unavailable", "current_version": self.current_version}
 
     def record_doctor_run(self) -> None:
+        if not self.enabled:
+            return
         try:
             with self._lock:
                 self._reload_state_locked()
@@ -300,6 +302,8 @@ class UpdateMonitor:
         self._state = self._load_state()
 
     def _write_state_locked(self) -> None:
+        if not self.enabled:
+            return
         try:
             existing = self._load_state()
             if existing:
