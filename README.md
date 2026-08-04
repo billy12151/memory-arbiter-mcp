@@ -451,8 +451,9 @@ memory_write(long_doc)
   → saves content first (always succeeds; split failure never loses the original)
   → if vec ready AND content > split_threshold:
       - ≥2 fenced-code-safe Markdown headings, each ≤ max_section_chars,
-        count ≤ max_sections  →  memory_write rule-splits synchronously,
-        no agent needed (split_status=split)
+        count ≤ max_sections  →  memory_write enqueues a background
+        reindex (mode=rules_async, reindex_pending=true), no agent needed;
+        split_status stays NULL until the worker publishes, then → active
       - otherwise (no heading / single heading / over limit)
         →  returns a full split_request (content + content_hash +
            memory_version + split_status + split_revision + schema)
@@ -482,7 +483,7 @@ memory_get(memory_id)                                  ← fetch full text if ne
 ```
 
 > **Good to know:**
-> - **`memory_write` auto-splits on write.** It detects Markdown headings at write time and rule-splits structured documents synchronously — no agent round-trip. Only unstructured long prose (no heading / single heading / over `max_section_chars` / over `max_sections`) returns a `split_request` for the agent to continue with its own LLM. Don't pre-call `memory_split` on ordinary writes.
+> - **`memory_write` auto-splits on write.** It detects Markdown headings at write time and queues a background reindex for structured documents — no agent round-trip. The call returns immediately with `split.mode=rules_async` and `reindex_pending=true`; section precision lands asynchronously (a few seconds) once the worker finishes embedding. Until then `memory_search` returns the full memory (`content_scope=full_memory`) — recall is preserved, only section precision is briefly absent. Only unstructured long prose (no heading / single heading / over `max_section_chars` / over `max_sections`) returns a `split_request` for the agent to continue with its own LLM. Don't pre-call `memory_split` on ordinary writes.
 > - **Auto-continue silently on `split_request`.** Receiving a `split_request` (with `action_required=memory_split`) is an **internal** signal, not a user step. Read the full `content` it carries, generate section metadata with your own LLM, and publish via `memory_split` — do not surface the prepare/publish/offset protocol to the user.
 > - **Search never degrades.** If the vector index is temporarily unavailable, `memory_search` returns the full memory (`content_scope=full_memory`) — you lose section precision but search keeps working.
 > - **Context-window overflow stays as backlog.** If the full original content exceeds the current agent LLM's context window, do **not** truncate or mechanically chunk it — leave `split_status=NULL` and let `doctor` record it as a `long-unsplit` backlog entry.
@@ -1064,8 +1065,9 @@ memory_write(长文档)
   → 原文先成功保存（一定成功；分段失败不丢原文）
   → 若 vec ready 且内容超过 split_threshold：
       - 有 ≥2 个 fenced-code-safe Markdown 标题，每段 ≤ max_section_chars、
-        数量 ≤ max_sections  →  memory_write 同步规则分段，无需 agent
-        （split_status=split）
+        数量 ≤ max_sections  →  memory_write 入队后台分段（mode=rules_async,
+        reindex_pending=true），无需 agent；split_status 暂为 NULL，
+        worker 发布完成后 → active
       - 否则（无标题 / 单标题 / 超限）
         →  返回完整 split_request（content + content_hash +
            memory_version + split_status + split_revision + schema）
@@ -1094,7 +1096,7 @@ memory_get(memory_id)                                  ← 需要时取全文
 ```
 
 > **值得知道的：**
-> - **`memory_write` 写入时自动分段。** 它在写入时检测 Markdown 标题，对结构化文档同步规则分段——不需要 agent 往返。只有无结构长文（无标题 / 单标题 / 超 `max_section_chars` / 超 `max_sections`）才会返回 `split_request`，让 agent 用自身 LLM 续接。普通写入不要预先调 `memory_split`。
+> - **`memory_write` 写入时自动分段。** 它在写入时检测 Markdown 标题，对结构化文档入队后台分段——不需要 agent 往返。调用立即返回 `split.mode=rules_async` + `reindex_pending=true`；worker 完成 embed 后（数秒）段级精度异步生效。此前 `memory_search` 返回全文（`content_scope=full_memory`）——召回不丢，只是段级精度暂缺。只有无结构长文（无标题 / 单标题 / 超 `max_section_chars` / 超 `max_sections`）才会返回 `split_request`，让 agent 用自身 LLM 续接。普通写入不要预先调 `memory_split`。
 > - **收到 `split_request` 就静默自动续接。** 收到 `split_request`（带 `action_required=memory_split`）是**内部**信号，不是用户操作步骤。用它携带的完整 `content`，结合 agent 自身 LLM 生成段落元数据，再通过 `memory_split` 发布——不要把 prepare/publish/offset 协议暴露给用户。
 > - **检索永不退化。** 如果向量索引临时不可用，`memory_search` 直接返回完整 memory（`content_scope=full_memory`）——丢的是段落精度，但检索照常工作。
 > - **上下文窗口超限就留作 backlog。** 如果完整原文超出当前 agent LLM 的上下文窗口，**不要**截断或机械切块——保持 `split_status=NULL`，由 `doctor` 记录为 `long-unsplit` backlog。

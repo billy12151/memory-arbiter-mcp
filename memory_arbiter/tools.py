@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 from typing import Any, Optional, Tuple
 
@@ -17,14 +18,111 @@ from .update_monitor import UpdateMonitor
 from . import __version__
 
 
+class SplitReindexWorker:
+    def __init__(self, tools: "MemoryTools"):
+        self._tools = tools
+        self._pending: dict[int, dict[str, Any]] = {}
+        self._inflight: set[int] = set()
+        self._cond = threading.Condition()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.RLock()
+
+    def start(self) -> None:
+        self._ensure_thread()
+
+    def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> None:
+        with self._cond:
+            self._pending[int(memory_id)] = snapshot
+            self._cond.notify_all()
+        self._ensure_thread()
+
+    def pending_ids(self) -> list[int]:
+        with self._cond:
+            return sorted(set(self._pending.keys()) | self._inflight)
+
+    def wait_drained(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while self._pending or self._inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
+
+    def _ensure_thread(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run,
+                name="memory-arbiter-split-reindex",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._pending:
+                    self._cond.wait()
+                memory_id = next(iter(self._pending))
+                snapshot = self._pending.pop(memory_id)
+                self._inflight.add(memory_id)
+            try:
+                self._process_one(memory_id, snapshot)
+            except Exception as exc:
+                self._mark_failed_from_snapshot(snapshot, "worker", str(exc))
+            finally:
+                with self._cond:
+                    self._inflight.discard(memory_id)
+                    self._cond.notify_all()
+
+    def _process_one(self, memory_id: int, snapshot: dict[str, Any]) -> None:
+        plan = snapshot.get("plan") or []
+        if not plan:
+            return
+        result = self._tools._publish_sections(
+            memory_id,
+            str(snapshot.get("content") or ""),
+            plan,
+            str(snapshot.get("content_hash") or ""),
+            int(snapshot.get("memory_version") or 1),
+            snapshot.get("split_status"),
+            int(snapshot.get("split_revision") or 0),
+            decision_kind="split",
+            provenance="parser",
+        )
+        if not result.get("ok"):
+            error = (result.get("data") or {}).get("error")
+            if error and error not in {"memory_changed", "split_revision_conflict", "vec_space_changed"}:
+                self._mark_failed_from_snapshot(snapshot, "publish", str(error))
+
+    def _mark_failed_from_snapshot(self, snapshot: dict[str, Any], stage: str, message: str) -> None:
+        try:
+            self._tools._mark_split_failed(
+                int(snapshot.get("memory_id")),
+                str(snapshot.get("content_hash") or ""),
+                int(snapshot.get("memory_version") or 1),
+                int(snapshot.get("split_revision") or 0),
+                snapshot.get("split_status"),
+                stage,
+                message,
+            )
+        except Exception:
+            pass
+
+
 class MemoryTools:
     def __init__(self, settings: Optional[Settings] = None, db: Optional[MemoryDB] = None):
         self.settings = settings or Settings.from_env()
         self.db = db or MemoryDB(self.settings)
         self._embedder: Optional[ManagedEmbedder] = None
         self._embedder_loaded = False
+        self._embedder_lock = threading.Lock()
         self._embedder_warnings: list[str] = list(self.settings.config_warnings)
         self._update_monitor: Optional[UpdateMonitor] = None
+        self._split_worker = SplitReindexWorker(self)
         # v0.6.0: initialise vec index state on startup
         self._init_vec_state()
 
@@ -37,6 +135,46 @@ class MemoryTools:
             self._update_monitor.maybe_start_check_if_due()
         except Exception:
             self._update_monitor = None
+
+    def start_split_worker(self) -> None:
+        self._split_worker.start()
+        self._enqueue_pending_rule_splits(limit=100)
+
+    def _enqueue_pending_rule_splits(self, limit: int = 100) -> None:
+        threshold = getattr(self.settings, "split_threshold", 4000)
+        max_sections = getattr(self.settings, "max_sections", 50)
+        max_section_chars = getattr(self.settings, "max_section_chars", 3600)
+        if self.db.get_vec_index_state().get("state") != "ready":
+            return
+        try:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, content, version, split_status, split_revision "
+                    "FROM memories "
+                    "WHERE status = 'active' AND split_status IS NULL AND length(content) >= ? "
+                    "ORDER BY id LIMIT ?",
+                    (threshold, int(limit)),
+                ).fetchall()
+        except Exception:
+            return
+        for row in rows:
+            content = row["content"] or ""
+            plan, _reason = self._rule_plan_sections(content, max_sections, max_section_chars)
+            if plan is None:
+                continue
+            memory_id = int(row["id"])
+            self._split_worker.enqueue(memory_id, {
+                "memory_id": memory_id,
+                "content": content,
+                "plan": plan,
+                "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "memory_version": int(row["version"] or 1),
+                "split_status": row["split_status"],
+                "split_revision": int(row["split_revision"] or 0),
+            })
+
+    def wait_split_worker_drained(self, timeout: float = 5.0) -> bool:
+        return self._split_worker.wait_drained(timeout)
 
     def _init_vec_state(self) -> None:
         """Initialise _vec_index_meta based on current embedder availability."""
@@ -65,32 +203,35 @@ class MemoryTools:
     def _ensure_embedder(self) -> Tuple[Optional[ManagedEmbedder], list[str]]:
         if self._embedder_loaded:
             return self._embedder, []
-        if not self._embedding_configured():
-            self._embedder_loaded = True  # deterministic config state; safe to cache
-            return None, []
-        if not self.settings.enable_sqlite_vec:
-            warning = "embedding configured but vec.enabled=false; auto-embedding disabled. Set vec.enabled=true to enable."
-            self._embedder_warnings.append(warning)
-            self._embedder_loaded = True  # deterministic config state
-            return None, [warning]
-        from .embedder import build_embedder
+        with self._embedder_lock:
+            if self._embedder_loaded:
+                return self._embedder, []
+            if not self._embedding_configured():
+                self._embedder_loaded = True  # deterministic config state; safe to cache
+                return None, []
+            if not self.settings.enable_sqlite_vec:
+                warning = "embedding configured but vec.enabled=false; auto-embedding disabled. Set vec.enabled=true to enable."
+                self._embedder_warnings.append(warning)
+                self._embedder_loaded = True  # deterministic config state
+                return None, [warning]
+            from .embedder import build_embedder
 
-        assert self.settings.embedding_model_path is not None
-        embedder, warnings = build_embedder(
-            str(self.settings.embedding_model_path),
-            self.settings.vec_dim,
-            n_ctx=getattr(self.settings, "embedding_n_ctx", 2048),
-            reserved_tokens=getattr(self.settings, "embedding_reserved_tokens", 64),
-            max_section_chars=getattr(self.settings, "max_section_chars", 3600),
-        )
-        self._embedder_warnings.extend(warnings)
-        if embedder is None:
-            # Build failed (missing model / dim mismatch / load error). Do NOT cache —
-            # a later retry (e.g. model installed) should still be able to succeed.
-            return None, warnings
-        self._embedder = embedder
-        self._embedder_loaded = True  # cache only on successful build
-        return self._embedder, warnings
+            assert self.settings.embedding_model_path is not None
+            embedder, warnings = build_embedder(
+                str(self.settings.embedding_model_path),
+                self.settings.vec_dim,
+                n_ctx=getattr(self.settings, "embedding_n_ctx", 2048),
+                reserved_tokens=getattr(self.settings, "embedding_reserved_tokens", 64),
+                max_section_chars=getattr(self.settings, "max_section_chars", 3600),
+            )
+            self._embedder_warnings.extend(warnings)
+            if embedder is None:
+                # Build failed (missing model / dim mismatch / load error). Do NOT cache —
+                # a later retry (e.g. model installed) should still be able to succeed.
+                return None, warnings
+            self._embedder = embedder
+            self._embedder_loaded = True  # cache only on successful build
+            return self._embedder, warnings
 
     @staticmethod
     def _embedding_text(record: dict[str, Any]) -> str:
@@ -1548,6 +1689,7 @@ class MemoryTools:
                 "structured_claim_mode": self.settings.structured_claim_mode,
                 "isolation": self.settings.isolation,
                 "update_check": self._update_check_status(),
+                "split_reindex_pending": self._split_worker.pending_ids(),
                 # v0.8: split capability is bound to vec readiness, not a toggle.
                 "split_capability": self._split_capability(vec_state),
                 "vec_index_state": vec_state,
@@ -1577,6 +1719,7 @@ class MemoryTools:
             self.db, self.settings, deep,
             embedder_probe=self._ensure_embedder,
             runtime_state=self.db.state,
+            inflight_ids=set(self._split_worker.pending_ids()),
         )
         if self._update_monitor is not None:
             self._update_monitor.record_doctor_run()
@@ -3093,8 +3236,8 @@ class MemoryTools:
 
           * Below threshold / vec not ready / already active → split.required
             is False (capability reported when vec is off).
-          * Rule plan publishable → publish via the unified helper
-            (provenance='parser'); split_block reports mode='rules', applied.
+          * Rule plan publishable → enqueue background publish via the unified
+            helper (provenance='parser'); split_block reports mode='rules_async'.
           * No publishable plan → return a full split_request for the Agent;
             split_status stays NULL (NOT failed, NOT pending).
           * Rule publish genuinely fails → split_block reports failed; the
@@ -3136,6 +3279,7 @@ class MemoryTools:
         snapshot = {
             "memory_id": memory_id,
             "content": content,
+            "plan": plan,
             "content_hash": content_hash,
             "memory_version": int(mem.get("version") or 1),
             "split_status": mem.get("split_status"),
@@ -3143,25 +3287,12 @@ class MemoryTools:
         }
 
         if plan is not None:
-            # Rules path → publish synchronously (provenance='parser').
-            pub = self._publish_sections(
-                memory_id, content, plan,
-                snapshot["content_hash"], snapshot["memory_version"],
-                snapshot["split_status"], snapshot["split_revision"],
-                decision_kind="split", provenance="parser",
-            )
-            if pub.get("ok"):
-                return ({"required": True, "applied": True, "mode": "rules",
-                         "status": "active", "reason": None,
-                         "action_required": None, "extra_llm_call_required": False,
-                         "section_count": pub["data"].get("section_count")},
-                        None, warnings)
-            # Genuine publish failure: content intact, status failed.
-            after = self.db.get_memory(memory_id)
-            return ({"required": True, "applied": False, "mode": "rules",
-                     "status": after.get("split_status"), "reason": pub["data"].get("error"),
-                     "action_required": None, "extra_llm_call_required": False},
-                    None, warnings + [f"rules publish failed: {pub['data'].get('error')}"])
+            self._split_worker.enqueue(memory_id, snapshot)
+            return ({"required": True, "applied": False, "mode": "rules_async",
+                     "status": mem.get("split_status"), "reason": None,
+                     "action_required": None, "extra_llm_call_required": False,
+                     "reindex_pending": True, "section_count_estimated": len(plan)},
+                    None, warnings)
 
         # No publishable rule plan → hand a full split_request to the Agent.
         split_request = {
