@@ -3,6 +3,17 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.10.0] — 2026-08-05
+
+### Added
+
+- **Read-only local Console MVP (`mema console`)** — starts a localhost-only governance UI with a top language switch, sidebar navigation, bilingual `mema` / `迷码` branding, Overview metrics, open conflict review, conflict detail left/right memory comparison, read-only memory search, doctor findings, and read-only Settings descriptors. The Console defaults to `127.0.0.1:18876`, uses stdlib HTTP + a single embedded HTML/CSS/JS page, and deliberately exposes no write/resolve/supersede/config-save actions.
+- **Config Registry** — a single bilingual descriptor table (`memory_arbiter/config_registry.py`) drives the Settings page labels/descriptions and is the future source of truth for config help text, avoiding doc drift.
+
+### Security
+
+- Console is local-only by default (`127.0.0.1`); non-localhost hosts and forged/empty `Host` headers are rejected. No write, resolve, supersede, confirm, or config-save actions are exposed. Memory content is rendered as escaped text, never `innerHTML`.
+
 ## [0.9.10] — 2026-08-05
 
 ### Added

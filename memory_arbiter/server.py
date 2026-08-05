@@ -512,6 +512,9 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "setup":
         from .setup_cli import run_cli as run_setup
         raise SystemExit(run_setup(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "console":
+        from .console_cli import run_cli as run_console
+        raise SystemExit(run_console(sys.argv[2:]))
     try:
         build_server().run()
     except RuntimeError as exc:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memory-arbiter-mcp"
-version = "0.9.10"
+version = "0.10.0"
 description = "Local MCP memory arbiter with dual timeline conflict handling."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,7 +23,7 @@ test = ["pytest>=8.0.0"]
 memory-arbiter-mcp = "memory_arbiter.server:main"
 memory-arbiter = "memory_arbiter.server:main"
 mema = "memory_arbiter.server:main"
-# Subcommands (no separate console script; dispatched in server.main): doctor, setup
+# Subcommands (no separate console script; dispatched in server.main): doctor, setup, console
 
 [tool.setuptools.packages.find]
 include = ["memory_arbiter*"]
