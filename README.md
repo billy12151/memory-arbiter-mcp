@@ -12,91 +12,136 @@ mcp-name: io.github.billy12151/memory-arbiter-mcp
 
 ## English
 
-A shared memory layer for AI agents. One local SQLite database — every tool you use (Cursor, Claude Code, Codex, ZCode, WorkBuddy, …) searches the same verified facts instead of re-loading markdown files every turn.
+**Memory Arbiter is a trustworthy local fact layer for AI agents.**
 
-```
+It can be used as shared memory, but its real job is fact governance: keeping long-running project context searchable, traceable, source-aware, conflict-aware, and safe to recall.
+
+Shared memory lets every tool see the same data. Memory Arbiter goes further: it helps agents tell which facts are current, user-confirmed, stale, conflicting, superseded, or still waiting for judgment.
+
+```text
 # Instead of dumping 20K tokens of MEMORY.md into every prompt:
 memory_search("auth migration plan")  → 3 laser-relevant entries, ~400 tokens
 ```
 
-**Less noise, sharper output.** Most AI mistakes aren't the model being dumb — they're the model acting on stale, contradictory, or diluted context. Memory Arbiter fixes the input. Same model, better results.
+**Shared memory is the starting point. Fact governance is the moat.**
 
-**Fully local. Zero cloud.** Pure SQLite, no Postgres, no Redis, no API keys. Your data stays on your machine.
+Fully local by default: one SQLite database, no Postgres, no Redis, no hosted memory service, and no server-side LLM calls. Optional semantic recall uses your own local GGUF embedding model; optional update checks can be disabled.
 
-### Why Memory Arbiter?
+### The problem
 
-Your AI client loads `MEMORY.md` + `memory/*.md` into the system prompt **every turn**. As knowledge grows, 5K–20K tokens burn before the model even reads your question — and worse, the model drowns in noise, losing track of what's current, what's confirmed, and what's stale.
+Many memory systems focus on how agents remember. Memory Arbiter focuses on what happens after memory becomes shared.
 
-Memory Arbiter replaces this with a SQLite-backed search: only the relevant entries come back, everything else stays on disk.
+When Claude Code, Cursor, Codex, ZCode, WorkBuddy, OpenClaw, or other tools all write into the same long-term context, forgetting is no longer the only failure mode. The harder failures are:
 
-**Works with one tool. Scales to many.**
+- stale facts mixed with current decisions;
+- AI guesses treated like user-confirmed truth;
+- contradictory conclusions written by different tools;
+- long project histories drowning the few facts that matter;
+- tool switching causing either context loss or repeated context pollution;
+- local memory growing until every prompt starts with thousands of irrelevant tokens.
 
-#### Why it works: fix the context, fix the output
+Memory Arbiter turns those risks into explicit data structures: source labels, confidence, event time, version history, supersede chains, conflict records, structured claim gates, section indexes, workspace boundaries, and doctor diagnostics.
 
-| What pollutes AI context | How it degrades output | How Memory Arbiter fixes it |
+The model still does semantic reasoning. Arbiter keeps the input side cleaner.
+
+### What Memory Arbiter does
+
+| Need | Why ordinary memory is not enough | Memory Arbiter's answer |
 |---|---|---|
-| Key info buried in a 20K-token blob | Model attention is spread thin; it grabs the wrong detail or hallucinates. | `memory_search` returns 3–5 laser-relevant entries. High signal-to-noise. |
-| Stale and current info mixed together | Model follows an outdated constraint. | Dual timeline + conflict arbitration: outdated entries are flagged or superseded. |
-| "The user confirmed this" vs "the AI guessed this" — indistinguishable | Model treats a guess as ground truth. | `source_type` labels + `user_confirmed` lock. The model knows what to trust. |
-| Tool switch = context reset | Each tool re-derives understanding from scratch; errors compound. | Shared memory layer: every tool starts from the same verified facts. |
+| Targeted recall | A flat `MEMORY.md` or large vector blob returns too much context. | `memory_search` returns a small set of relevant, ranked entries instead of loading full files. |
+| Source trust | User-confirmed facts, document extracts, and AI guesses look the same. | `source_type`, `confidence`, `user_confirmed`, and locked records make trust visible. |
+| Time and evolution | Old decisions stay next to new decisions, and the model may follow the stale one. | `event_time`, `ingest_time`, `version`, `memory_history`, and `memory_supersede` preserve the evolution chain. |
+| Conflicts | Two memories can disagree and both still be retrieved. | Conflict scan, conflict records, conflict signals, and explicit resolve/supersede tools make disagreement visible. |
+| Write-time safety | Last-write-wins silently overwrites or piles up contradictory facts. | v0.9 structured claim gates detect deterministic claim collisions and require host-LLM judgment before use. |
+| Long documents | The relevant paragraph is buried inside a 10K+ character memory. | Section split returns the matched sections instead of forcing the model to scan the whole document. |
+| Project boundaries | Global memory can leak facts across unrelated projects. | Workspace isolation supports `none`, `weak`, and `strict` modes with alias canonicalization. |
+| Long-running health | Users only notice memory problems after bad answers. | `doctor` reports config, vector readiness, split health, consistency, capacity, and conflict buildup. |
+| Privacy and ownership | Hosted memory adds another service and another data boundary. | Local SQLite, user-owned files, optional local embeddings, no built-in LLM dependency. |
 
-**Same model. Better context. Better output.** Everything else — token savings, cross-tool sharing, audit trails — flows from this.
+### Daily mental model
 
-Model-agnostic: whether you run GLM, Claude, GPT, or Gemini — the stronger the model, the more sensitive it is to context quality, and the bigger the uplift.
+Most agents only need four tools:
 
-#### Token savings at a glance
+1. **`memory_write`** — store reusable facts with subject, tags, source type, event time, workspace, and source reference.
+2. **`memory_search`** — search active facts before reading source files or asking the user to repeat context.
+3. **`memory_get`** — fetch a known memory by ID, including section catalogs or section bodies.
+4. **`memory_search_expired`** — inspect superseded, conflicted, or pending history when auditing old decisions.
 
-Replacing full-file loading with targeted search is the most visible effect. (These are the same gains that section split compounds on long documents — see below.)
+The rest of the tool surface exists for correction, conflict workflows, section repair, embedding maintenance, and diagnostics.
+
+### How it differs
+
+Memory Arbiter does not compete by saying that other tools cannot share memory. Shared memory is becoming standard. Memory Arbiter focuses on what shared memory needs next.
+
+| Compared with | Memory Arbiter focuses on |
+|---|---|
+| Plain markdown memory | Targeted recall instead of full prompt loading, plus history and conflict state. |
+| Vector memory | Not just similar recall, but source trust, stale/superseded state, and conflict-aware recall. |
+| Graph memory | Not just what is connected, but what is current, trusted, conflicting, or safe to use. |
+| Hosted memory | Local SQLite, caller-owned policy, no hosted database, and no server-side LLM calls. |
+| Generic MCP memory | A fact-governance layer: trust labels, time evolution, structured claim gates, doctor, and repair tools. |
+
+Graph-like signals exist where they help governance: event time, ingest time, entity/scope, conflict edges, supersede chains, sections, and workspace boundaries. Memory Arbiter treats original facts as the primary asset and derived indexes as support structures.
+
+### Token savings are a side effect
+
+The main value is better context quality. Token savings are the most visible effect.
 
 | Scenario | Full-file loading | With Memory Arbiter | Saving |
 |---|---|---|---|
 | Per-turn memory load | 5K–20K tokens in system prompt | 200–800 tokens via `memory_search` | ~80%+ |
-| Conflict detection | LLM compares pairs (N², thousands of tokens) | `memory_compare` returns structured verdict (~200 tokens) | ~90% |
-| Periodic audit | LLM scans entire library (10K+ tokens) | `memory_list_conflicts` + `memory_audit_summary` serve structured candidates | ~70% |
-| Spec handoff (2000 words) | ~3000 tokens loaded into context | ~500 tokens via targeted `memory_search` | ~83% |
+| Conflict detection | LLM compares pairs with large context | Structured candidates + focused judgment | ~90% |
+| Periodic audit | LLM scans the whole library | `memory_list_conflicts` + `memory_audit_summary` | ~70% |
+| Spec handoff | Re-load full spec/design notes | Query the relevant facts and decisions | ~80%+ |
 
-> **What it's not:** memory-arbiter is not an LLM and does not do semantic reasoning — that stays with your AI client. It's a structured storage + retrieval + arbitration layer underneath the model.
+Same model. Better input. Better output.
 
-#### One tool or many: it scales
+### Works with one tool. Scales to many.
 
-Even with a single tool (Cursor, Claude Code, Codex, ZCode, WorkBuddy), Memory Arbiter upgrades your memory from flat markdown to a queryable database: thousands of entries at near-zero retrieval cost, structured conflict detection, source-trust levels, and a full audit trail — instead of manually trimming a growing markdown file.
+With one tool, Memory Arbiter upgrades local memory from flat files into a queryable fact layer with trust labels, history, conflict signals, and diagnostics.
 
-Using two or more tools adds a shared memory layer: Tool A writes, Tool B searches. No file handoff, no copy-paste, no version drift. One database, zero duplication.
+With multiple tools, it also becomes shared memory: Tool A writes, Tool B searches, Tool C audits. No file handoff, no copy-paste, no version drift.
 
-**Real example — a three-tool pipeline** (plan → design → code): OpenClaw writes the spec via `memory_write` → OpenDesign reads it with `memory_search`, produces designs, writes back decisions → ZCode gets spec **and** design decisions in one query. **Zero file handoff across three tools.** A spec+design handoff that used to cost ~5000 tokens of repeated context loading now costs ~800.
+Example pipeline:
 
-> Three concrete usage patterns (per-turn retrieval, scheduled audit, write-time conflict check) and the full cross-tool delegation walkthrough: [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+1. OpenClaw writes a spec with `memory_write`.
+2. OpenDesign reads the spec with `memory_search`, writes back design decisions.
+3. ZCode searches once and gets both the spec and design decisions.
 
-### Features
+Three tools, one local fact layer.
 
-- **Targeted retrieval, not full-file loading** — search returns only the relevant entries, cutting per-turn context from 5K–20K tokens to a few hundred.
-- **Conflict arbitration** — when two entries contradict, a rule-based engine picks the winner (user-confirmed > document-extracted > AI-generated; newer event time wins ties). Every verdict comes with a human-readable explanation.
-- **Trust levels** — "the user confirmed this" and "the AI guessed this" are labeled and ranked differently. User-confirmed facts are locked — no agent can silently overwrite them.
-- **Cross-tool sharing** — one SQLite database, every connected tool reads and writes the same memory. No file handoff, no copy-paste, no version drift.
-- **Version history** — edit a memory in place; the old version is archived, not lost. Full audit trail of who changed what and when.
-- **Long-document section split** — break 10K+ char documents into searchable sections; queries return the matching paragraph, not the whole document.
-- **Smart tag ranking & search filters** (v0.7.3) — tags are scored as discrete labels (token overlap, not substring), so a tag set hitting every query token finally outranks a subject that merely contains one query word. `memory_search` also gains `tags_filter` / `after_time` / `before_time` / `source_type`, plus `has_more` + `total_estimate` so exhaustive queries know whether the page is complete.
-- **Linked open items & conflict signals** (v0.7.4 → v0.7.6) — on a genuine query hit, `memory_search` attaches up to 5 active todos (tagged `todo`) that share meaningful tags with the result set, in a separate `linked_open_items` field — pure read-only, never affects ranking. Every response also carries a `retrieval_mode`. v0.7.6 adds `conflict_signal` on each result: `open_table` (from scan/record-verified conflicts) or `runtime_metadata_hint` (advisory, not LLM-verified). Complete todos with `memory_edit(tags_only=true, remove_tags=["todo"])` — a low-side-effect tag update that doesn't write history, bump version, or re-embed.
-- **Conflict scan** (v0.7.5–v0.7.6) — `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories), then the calling agent runs LLM comparison and persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type` / `suggested_winner` / `source`; v0.7.6 adds `refresh=true` for re-judgement after memory/model changes). Dismiss false positives with `memory_resolve_conflict`. The core package stays headless — no LLM, no network. `doctor` reports scan freshness via `scan_log.jsonl`. v0.7.6: `memory_search` surfaces these conflicts as `conflict_signal` on matching results; `memory_write` returns `write_hints` for possible duplicates/evolution.
-- **Real-time structured conflict gate** (v0.9.0 beta) — writes and edits synchronously extract explicit claims into a separate derived-index table and compare `entity + attribute + scope` values. New collisions return evidence plus a mandatory host-LLM judgment request. The judgment is persisted for future queries but never edits or supersedes memory; high-impact/uncertain cases escalate to the user, and an authorized human correction remains available. Index publication and conflict reconciliation have separate durable revision markers, so a post-index failure remains doctor-visible and rebuildable. Periodic semantic scan stays enabled as the broad-coverage backstop, while per-pair detection timestamps let doctor report structured-only / scan-only / both coverage and real-time lead time.
-- **Semantic recall** (optional) — "find by meaning, not just keyword". Bring your own local embedding model (GGUF). Works alongside keyword search. Since v0.9.4, vec0 stores parent status as metadata and KNN filters by `parent_status` before selecting top-k, so superseded/deleted vectors can no longer crowd out active recall. Superseded vectors are retained for audit/history recall via `memory_search_expired`; `memory_cleanup_inactive_vectors` now resyncs status drift and purges only true orphan vectors.
-- **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup. Never crashes, even if optional extensions are missing.
-- **Health diagnostics** — a one-shot `doctor` check grades config integrity, the vector-enablement chain, split, data consistency, and capacity. Each finding carries a severity and a config-specific fix hint; works as an MCP tool (daily) or a standalone CLI (ambulance: runs even when the MCP process is down). Read-only.
-- **Zero cloud, zero LLM calls** — pure local SQLite. No Postgres, Redis, API keys, or external services.
+For concrete usage patterns and a cross-tool walkthrough, see [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+
+### Core capabilities
+
+- **Targeted retrieval** — return the relevant entries instead of loading full memory files every turn.
+- **Trust levels** — separate user-confirmed facts, document extracts, AI-generated notes, and unknown sources.
+- **Temporal history** — track event time, ingest time, versions, history snapshots, and supersede chains.
+- **Conflict arbitration** — discover, record, inspect, resolve, or supersede contradictory memories.
+- **Structured claim gates** — v0.9 write/edit-time deterministic claim detection with required host-LLM judgment before use.
+- **Long-document section split** — split long memories into searchable sections and return matched paragraphs.
+- **Workspace isolation** — choose `none`, `weak`, or `strict` isolation with workspace alias canonicalization.
+- **Smart tag ranking and filters** — tags act as discrete ranking/filter labels, not weak text fragments.
+- **Semantic recall** — optional local GGUF embeddings for meaning-based recall, while lexical recall remains the default.
+- **Doctor diagnostics** — read-only health checks for config, vector readiness, split, claims, consistency, capacity, and conflicts.
+- **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup, so the server keeps working when optional pieces are unavailable.
+- **Local-first storage** — pure SQLite, no hosted database, no Redis/Postgres requirement, no server-side LLM dependency.
+
+> **What it is not:** Memory Arbiter is not an LLM and does not replace your AI client. It is a structured storage, retrieval, arbitration, and diagnostics layer underneath the model.
 
 ### Quick Start
 
-**Requirements**: Python 3.11+ (3.11, 3.12, or 3.13 — any of them works).
+**Requirements:** Python 3.11+ (3.11, 3.12, or 3.13).
 
 ```bash
 # Clone
 git clone https://github.com/billy12151/memory-arbiter-mcp.git
 cd memory-arbiter-mcp
 
-# Setup — use whichever python3.1x you have (>=3.11).
-python3.11 -m venv .venv        # or: python3.12 / python3.13
+# Setup — use whichever python3.1x you have (>=3.11)
+python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e .                 # installs runtime deps from pyproject.toml
+pip install -e .
 
 # Optional: semantic recall via sqlite-vec
 pip install -e '.[vec]'
@@ -105,35 +150,31 @@ pip install -e '.[vec]'
 memory-arbiter-mcp
 ```
 
-#### Zero-install via `uvx` (recommended for non-Python users)
+#### Zero-install via `uvx`
 
-If you just want to run the server without managing a Python env — install [`uv`](https://docs.astral.sh/uv/) once, then:
+If you just want to run the server without managing a Python environment, install [`uv`](https://docs.astral.sh/uv/) once, then:
 
 ```bash
 uvx --from memory-arbiter-mcp memory-arbiter
 ```
 
-This pulls the published package and launches the `memory-arbiter` entry point. No venv, no `pip install`. The two entry points `memory-arbiter-mcp` and `memory-arbiter` are identical — the examples here use the shorter `memory-arbiter` for `uvx` (fewer keystrokes) and `memory-arbiter-mcp` for the local-venv path (matches the venv binary name). Use either. Note: `uvx` only shortens the **install** step; embedding model and `sqlite-vec` still need separate setup (see [Semantic Recall](#optional-semantic-recall-v050)).
+This pulls the published package and launches the `memory-arbiter` entry point. The two entry points `memory-arbiter-mcp` and `memory-arbiter` are equivalent. `uvx` only shortens the install path; embedding models and sqlite-vec still need separate setup if you want semantic recall.
 
-#### One-shot setup helper (macOS + Windows)
+#### Setup helper
 
-Instead of editing `config.json` by hand, run the bundled setup helper. It writes a working config to `~/.config/memory-arbiter/config.json`, then checks your environment and prints the **exact** commands / download URLs you still need to run:
+Instead of editing `config.json` by hand, run:
 
 ```bash
 memory-arbiter setup
 ```
 
-This is **semi-automatic by design** — setup never calls `pip` or downloads the model itself (so install failures stay your environment's problem, not a setup bug). It only tells you precisely what's missing:
+The helper writes a working config to `~/.config/memory-arbiter/config.json`, checks your environment, and prints the exact commands or download URLs you still need. It does not run `pip` or download models for you.
 
-- `sqlite-vec` / `llama-cpp-python` install commands (with the correct `--extra-index-url` for the CPU prebuilt wheel)
-- HuggingFace + ModelScope (China-friendly mirror) download URLs for the GGUF model
-- A Python-version warning if you're outside the 3.10–3.12 range that prebuilt wheels cover
+Useful flags: `--print-config`, `--no-config`, `--force`.
 
-Flags: `--print-config` (dry-run preview), `--no-config` (checks only), `--force` (overwrite an existing config without backup). After running the suggested commands once, re-run `memory-arbiter setup` to verify. When everything reads `✓`, restart your MCP client — semantic recall activates on the next query.
+### Connect your tool
 
-### Connect Your Tool
-
-Add to your tool's MCP config (see `examples/` for ready-made templates). With a local venv:
+Add Memory Arbiter to your MCP config. With a local virtualenv:
 
 ```json
 {
@@ -149,7 +190,7 @@ Add to your tool's MCP config (see `examples/` for ready-made templates). With a
 }
 ```
 
-Or, zero-install via `uvx` (no local clone needed):
+Or via `uvx`:
 
 ```json
 {
@@ -166,64 +207,39 @@ Or, zero-install via `uvx` (no local clone needed):
 }
 ```
 
-> Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `zcode`, `codex`, `cursor`, `claude-code`). Put shared paths/vector/model settings in `~/.config/memory-arbiter/config.json`; keep per-client identity in the MCP env block. The config file is the recommended home for `db_path` too — it survives client reinstalls. If you are **not** using a config file, fall back to putting `MEMORY_ARBITER_DB_PATH` in each client's env and pointing them at the same SQLite file (config wins when both are set). (GUI tools like OpenDesign inherit the host CLI's config — no separate client name.)
+Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `zcode`, `codex`, `cursor`, `claude-code`, `workbuddy`, ...). Put shared database, vector, and model settings in `~/.config/memory-arbiter/config.json`; keep per-client identity in the MCP env block.
 
-> ⚠️ **New session required**: MCP servers are loaded at session startup. Already-open sessions won't see the new tools. Start a fresh session after configuring.
+> **New session required:** MCP servers are loaded at session startup. Already-open sessions will not see newly added tools.
 
-#### 📋 Agent instruction: what to write where
+#### Agent instruction: what to write where
 
-If your client also keeps local markdown (ZCode's `MEMORY.md`, Codex's `AGENTS.md`, etc.), **paste this rule into your agent's system prompt** so it knows what to write where:
+If your client also keeps local markdown such as `MEMORY.md`, `AGENTS.md`, or tool-specific notes, paste this rule into your agent instructions:
 
-```
-Local md files store only self-use info (rules, tool experience, config notes,
-agent persona). Anything that might be reused by another agent or platform —
-not just project info: requirements, research, decisions, progress, user
-preferences, knowledge conclusions — goes into memory-arbiter.
+```text
+Local markdown files store only self-use information: rules, tool experience,
+config notes, and agent persona. Anything that might be reused by another agent
+or platform — requirements, research, decisions, progress, user preferences,
+knowledge conclusions — goes into memory-arbiter.
 
-Every write must fill: subject, tags, source_type (one of: `user_confirmed`
-/ `agent_generated` / `document_extracted`; `user_confirmed` auto-locks the
-record — reserve it for facts the user explicitly verified), event_time
-(ISO 8601), workspace (project name; by default `isolation=none` so it is stored
-and returned but does **not** filter `memory_search` — see
-[Workspace Isolation](#workspace-isolation-none--weak--strict)), source_ref.
+Every write must fill: subject, tags, source_type (`user_confirmed`,
+`agent_generated`, or `document_extracted`), event_time (ISO 8601), workspace,
+and source_ref. Use `user_confirmed` only for facts the user explicitly verified;
+it auto-locks the record.
 
-Search via memory_search first; read source files only for detail. When you
-find a contradiction, don't overwrite — if you know which is correct, use
-memory_supersede (retire the wrong one); if unsure, use the conflict workflow
-(`memory_scan_conflict_candidates` → `memory_record_conflict` →
-`memory_list_conflicts`) instead of editing either side. Since v0.9.0,
-`memory_write` / `memory_edit` / `memory_search` may return
-`action_required=judge_conflict_before_use` with a structured judgment
-request — submit it via `memory_submit_conflict_judgment` before using the
-conflicting claim. When a to-do entry is done,
-remove the `todo` tag via `memory_edit(tags_only=true, remove_tags=["todo"])`
-— a low-side-effect update that doesn't write history or bump the version,
-and drops the item from `linked_open_items`. Don't just mention "done" in a
-new memory, or the old entry stays in to-do state and misleads future
-searches.
+Search with memory_search first; read source files only for detail. When you find
+a contradiction, do not overwrite. If you know which side is wrong, supersede it.
+If unsure, use the conflict workflow. If a response returns
+action_required=judge_conflict_before_use, submit the included judgment request
+before using the conflicting claim.
 
-The `authorized=true` flag on write tools (`memory_supersede` / `memory_edit`
-/ `memory_cleanup_history`) is a **caller-side
-confirmation gate**, not strong authentication. It lets the calling agent
-explicitly assert "yes, override the `locked` / `user_confirmed` protection"
-— memory-arbiter is a local, single-trust-domain tool, so the gate lives at
-the caller. If you ever run multi-tenant, add caller identity + policy before
-relying on it.
-
-Successful MCP responses may include a top-level `notices` array. It is a
-side channel: `data` is unchanged, and callers that do not understand notices
-can ignore it. v0.9.6 uses notices for low-frequency update discovery: the MCP
-server may run a one-shot background PyPI check when due, cache state in
-`~/.local/share/memory-arbiter/update_state.json`, and tell the user when a new
-version is available or when an upgraded version has not run doctor yet. Notices
-are suppressed for 7 days per version; there is no ack protocol and no automatic
-upgrade. Disable network update checks with `{"update_check":{"enabled":false}}`
-in `~/.config/memory-arbiter/config.json`.
+When a todo is complete, remove the `todo` tag with
+memory_edit(tags_only=true, remove_tags=["todo"]). Do not only write a new
+"done" memory, or the old todo remains active and can mislead future searches.
 ```
 
-### Client Config Locations
+### Client config locations
 
-| Client | Config Location |
+| Client | Config location |
 |---|---|
 | ZCode | `~/.zcode/v2/` MCP config |
 | Codex CLI | `~/.codex/` MCP config |
@@ -232,388 +248,222 @@ in `~/.config/memory-arbiter/config.json`.
 | WorkBuddy | `~/.workbuddy/mcp.json` |
 | OpenClaw | `~/.openclaw/openclaw.json` MCP config |
 
-> **OpenDesign / OpenClaw GUI tools**: these run on top of a host CLI (Codex CLI, Claude Code, etc.) and do **not** have their own MCP config entry. Whatever MCP server the host client has loaded is automatically available — e.g. once Codex CLI configures Memory Arbiter, OpenDesign running on top of Codex can call `memory_search` / `memory_write` natively with no extra setup.
+OpenDesign and OpenClaw GUI tools run on top of a host CLI. They inherit whatever MCP server the host client has loaded.
 
-### MCP Tools
+### MCP tools
 
-Grouped by use case. For day-to-day agent work, the intended mental model is deliberately small: use `memory_write`, `memory_search`, `memory_search_expired`, and `memory_get`. The remaining groups are for correction/versioning, conflict workflows, long-doc split, semantic ops, and system status.
-
-**Daily read & write** — what most sessions use.
+#### Daily read/write
 
 | Tool | Description |
 |---|---|
-| `memory_write` | Write a memory (`source_type=user_confirmed` auto-locks). **Tags matter (v0.7.3)** — they're a ranking + filter signal heavier than content. v0.9 synchronously checks deterministic structured claims; if `action_required=judge_conflict_before_use`, the host LLM must submit the included judgment request before using the claim. Metadata-overlap `write_hints` remain advisory and dismissable. |
-| `memory_search` | Search active memories only (FTS5 → LIKE fallback, optional vec recall). `limit` is a page size, not a cap — `has_more=true` means more matches exist. v0.9 signals are routed by state: pending model/user decisions are loud; persisted `conflict_guidance` is non-blocking and includes the recommended use. |
-| `memory_search_expired` | Search expired history/audit records only: non-active, non-deleted memories (`superseded`, `conflicted`, `pending`). Use this for supersede-chain review, old decision lookup, and audit walkthroughs. Supports `limit` + `offset`; response includes `effective_limit`, `next_offset`, and `pagination_precision`. |
-| `memory_get` | Get a single memory by ID. Use when you already know the `memory_id` (e.g. from conflict lists, audit results, or previous search results) to quickly fetch full details without re-running a search. v0.8.0 adds `sections` (`none`/`catalog`/`all`, default `catalog`) and `section_ids` (takes precedence over `sections`; any IDs not found are listed in `missing_section_ids`). Read-only. |
+| `memory_write` | Write a memory. `source_type=user_confirmed` auto-locks. Tags are ranking/filter signals. v0.9 checks structured claims and may require host-LLM judgment before use. |
+| `memory_search` | Search active memories only. Supports lexical recall, optional vector recall, filters, pagination signals, linked open items, and conflict signals. |
+| `memory_search_expired` | Search non-active, non-deleted history records: `superseded`, `conflicted`, and `pending`. Use for old decisions, supersede-chain review, and audit walkthroughs. |
+| `memory_get` | Fetch a memory by ID. Supports section catalog, all sections, or specific section IDs. |
 
-**Correction & version management** — edit in place, confirm facts, retire stale records, and audit change history.
-
-| Tool | Description |
-|---|---|
-| `memory_edit` | (v0.4.0, v0.7.6) In-place edit a memory's content (full or partial `old_text`→`new_text`), or tags-only via `tags_only=true`+`add_tags`/`remove_tags`. Content edits archive the prior version to a history table and re-sync FTS. Tags-only edits are low-side-effect: no history, no version bump, no re-embedding. `locked`/`user_confirmed` records need `authorized=true`. |
-| `memory_history` | (v0.4.0) View the version chain (historical snapshots) of a memory, newest version first. Read-only. |
-| `memory_confirm` | Promote a memory to user-confirmed and locked. Use when the user explicitly validates a memory as authoritative. |
-| `memory_activate` | Activate a memory held as `pending` by `strict` workspace isolation (new-workspace confirmation gate). Clears the gate without the trust/lock promotion `memory_confirm` applies. `authorized=true` required. |
-| `memory_supersede` | Explicitly retire a memory; bypasses user-confirmed/locked protection (`authorized=true` required). This is the status-change primitive used by conflict workflows, not an automatic edit. |
-| `memory_cleanup_history` | (v0.4.0) Delete historical snapshots from `memory_history` (never touches active records). Per-memory / by-age / full; full cleanup requires `authorized=true`. |
-
-**Conflict workflow & diagnostics** — low-frequency tools used after search/doctor/scan surfaces an issue.
+#### Correction and version management
 
 | Tool | Description |
 |---|---|
-| `memory_list_conflicts` | List unresolved conflicts. This is the main follow-up entry after `memory_search` reports an `open_table` conflict signal, doctor reports conflict backlog, or a scan task records conflicts. |
-| `memory_compare` | Low-frequency diagnostic tool: compare two memories and return an explanation only. It does not write conflicts. |
-| `memory_arbitrate` | Compatibility/manual arbitration tool. New conflict workflows should prefer `scan_conflict_candidates → record_conflict → list_conflicts → supersede/resolve`; this is not a daily entry point. |
-| `memory_submit_conflict_judgment` | Required host-LLM receipt for a `structured_claim_candidate`. Submits verdict, recommended use, reason, context, and exact version/claim-revision CAS pins. It never edits or supersedes memory. |
-| `memory_correct_conflict_judgment` | Append an authorized human correction and make it active while preserving prior LLM/policy judgments. |
-| `memory_list_conflict_judgments` | Read the append-only judgment history for one conflict. |
-| `memory_set_entity` / `memory_list_entities` | Assign canonical entity/scope metadata without content-history churn, or inspect entity coverage/unassigned memories. |
-| `memory_rebuild_claims` | Dry-run or process a bounded batch of stale, unindexed, or indexed-but-unreconciled active memories. Re-run until the dry-run count reaches zero. |
+| `memory_edit` | Edit content in place or update tags only. Content edits archive the prior version; tag-only edits avoid history/version/embedding churn. Locked records require `authorized=true`. |
+| `memory_history` | View historical snapshots of a memory. |
+| `memory_confirm` | Promote a memory to user-confirmed and locked. |
+| `memory_activate` | Activate a strict-workspace `pending` memory. |
+| `memory_supersede` | Retire a memory, optionally bypassing lock protection with `authorized=true`. |
+| `memory_cleanup_history` | Delete history snapshots only; never touches active memories. |
 
-**Long-document section split** (v0.6.0) — paragraph-level retrieval for docs over `split.threshold`. Requires sqlite-vec + GGUF embedding. Most documents are split automatically by `memory_write` (rule-based, when Markdown headings are detected); `memory_split` below is only the agent-side continuation/repair entry, not part of the daily write path.
+#### Conflict workflow and diagnostics
 
 | Tool | Description |
 |---|---|
-| `memory_split` | Agent-side entry for continuing/repairing section split, not a daily write tool. Use it after `memory_write` returns a `split_request` (the agent reads the full content with its own LLM and produces only `title`/`summary`/`anchor_text`/`occurrence_index`/`title_path` metadata, then publishes), to repair historical `NULL`/`failed`/`declined` memories, or to actively rebuild (`split_decision="rebuild"`). Two-phase protocol is preserved: prepare returns full content + snapshot + schema; `split`/`rebuild` publishes. Do **not** pre-call `memory_split` on ordinary writes — `memory_write` already handles rule-based splitting. |
+| `memory_list_conflicts` | List unresolved conflicts. |
+| `memory_compare` | Compare two memories and return an explanation without recording a conflict. |
+| `memory_arbitrate` | Compatibility/manual arbitration entry. New workflows should prefer scan → record → list → resolve/supersede. |
+| `memory_scan_conflict_candidates` | Vector-recall candidate conflict pairs for agent-side judgment. |
+| `memory_record_conflict` | Persist an enriched conflict record. |
+| `memory_resolve_conflict` | Close a conflict as resolved or not-a-conflict. |
+| `memory_submit_conflict_judgment` | Submit required host-LLM judgment for a structured claim collision. |
+| `memory_correct_conflict_judgment` | Append an authorized human correction to a prior judgment. |
+| `memory_list_conflict_judgments` | Read append-only judgment history for one conflict. |
+| `memory_set_entity` / `memory_list_entities` | Set or inspect canonical entity/scope metadata. |
+| `memory_rebuild_claims` | Rebuild deterministic claims and reconcile structured conflicts. |
 
-**Semantic recall ops** — manual embedding control; usually auto-handled once configured.
+#### Long-document section split
 
 | Tool | Description |
 |---|---|
-| `memory_store_embedding` | (optional) Store or replace an embedding manually. v0.5.0+ can also auto-embed writes/searches when configured. |
-| `memory_rebuild_embeddings` | (v0.6.0) Batch-rebuild all embeddings after switching embedding models. Processes memory-level + section-level vectors. No LLM needed. |
-| `memory_resync_vec_parent_status` | (v0.9.4) Non-destructively resync `vec.parent_status` to match `memories.status`. `dry_run=true` reports mismatches; `dry_run=false` applies the UPDATE and does not require `authorized`. |
-| `memory_cleanup_inactive_vectors` | (v0.9.4) Resync status drift, then purge only true orphan vector rows whose parent memory/section row no longer exists. Superseded vectors are retained for `memory_search_expired`. `dry_run=true` reports counts; orphan purge needs `dry_run=false` + `authorized=true`. Never touches memory content/FTS. |
+| `memory_split` | Agent-side continuation/repair entry for long-document section split. Ordinary writes should start with `memory_write`; only continue with `memory_split` when requested or repairing historical records. |
 
-**System status & audit**
+#### Semantic recall operations
 
 | Tool | Description |
 |---|---|
-| `memory_status` | Show current mode, degradation status, storage paths, cached update-check state, and whether a background update check is enabled. v0.8.0 reports `split_capability` (`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`) instead of the old boolean `split_enabled`. |
-| `memory_list_conflicts` | List unresolved conflicts |
-| `memory_audit_summary` | Per-workspace stats overview (counts, oldest/newest, open conflicts, source_type distribution) |
-| `memory_doctor_overview` | Run a read-only health check and return a graded report (26 findings across config / vector chain / split / consistency / capacity). Each finding has a severity, config-specific `fix_hint`, and lightweight fix metadata (`fix_kind`, `fix_tool`, `requires_authorized`, `risk`) for high-value repair paths. `deep=true` also loads the GGUF model for a dimension probe. Same engine as the `doctor` CLI below. |
+| `memory_store_embedding` | Manually store or replace an embedding. Usually auto-handled once configured. |
+| `memory_rebuild_embeddings` | Rebuild vectors after switching embedding models. |
+| `memory_resync_vec_parent_status` | Non-destructively align vector parent status with memory status. |
+| `memory_cleanup_inactive_vectors` | Resync status drift and purge only true orphan vectors. |
 
-### Optional: Semantic Recall (v0.5.0)
+#### System status and audit
 
-By default, memory-arbiter uses **lexical recall** (FTS5 trigram + BM25 + soft-rerank) — no embedding model, no heavy dependencies, fully local. This is enough for most cases.
+| Tool | Description |
+|---|---|
+| `memory_status` | Show runtime mode, storage paths, degradation state, policy config, and vectorization status. |
+| `memory_audit_summary` | Per-workspace counts, oldest/newest entries, open conflicts, and source distribution. |
+| `memory_doctor_overview` | Read-only health check across config, vector chain, split, claims, consistency, capacity, and conflicts. |
 
-For queries where wording differs but meaning is the same ("happy" vs "joyful", "金营平台" vs "金融带货"), you can opt into **semantic recall**. memory-arbiter does **not** bundle an embedding model — you bring your own, so the default install stays lightweight and you keep full control over the model, language, and cost. When configured, normal `memory_write` and `memory_search(query="...")` calls auto-embed; callers do not need to pass `query_embedding` manually.
+### Optional: Semantic Recall
 
-**Setup (4 steps):**
+By default, Memory Arbiter uses lexical recall: FTS5 trigram + BM25 + soft rerank. This is local, lightweight, and enough for many projects.
 
-1. Install sqlite-vec and the GGUF runtime:
-   ```bash
-   pip install memory-arbiter-mcp[vec]
-   pip install llama-cpp-python
-   ```
-2. Choose an embedding model. For automatic embedding in v0.5.0, the built-in runtime supports local GGUF models:
-   - **GGUF (local, recommended)** — works with any GGUF embedding model via `llama-cpp-python`. Reuses models you may already have (e.g. from OpenClaw/llama.cpp). Point the script at the file:
-     `embeddinggemma-300m-qat-Q8_0.gguf` is a good 768-dim default.
-   - **sentence-transformers (local)** — HuggingFace PyTorch models (`bge-small-zh`, `bge-base-en`, etc.):
-     use your own backfill/query script and pass vectors to `memory_store_embedding` / `memory_search(query_embedding=...)`.
-   - **Remote API (OpenAI / Zhipu / Tongyi)** — call the API in your own backfill script, pass vectors to `memory_store_embedding`. memory-arbiter only needs `pip install memory-arbiter-mcp[vec]`; no model runtime on this side.
+For meaning-based recall, enable sqlite-vec and bring your own embedding model. The built-in automatic path supports local GGUF models through `llama-cpp-python`; remote embedding APIs can also be used by your own scripts through `memory_store_embedding`.
 
-   **Embedding Model Quick Reference** (pick one, then match `MEMORY_ARBITER_VEC_DIM` to its dimension):
-
-   | Path | Recommended model | Dim | Source | Best for |
-   |---|---|---|---|---|
-   | GGUF (local) | `embeddinggemma-300m-qat-Q8_0.gguf` | 768 | [HuggingFace](https://huggingface.co/google/embeddinggemma-300m-qat) | Reusing a model you already have; no Python ML stack |
-   | sentence-transformers | `BAAI/bge-small-zh-v1.5` (CN) / `bge-base-en-v1.5` (EN) | 512 / 768 | [HuggingFace](https://huggingface.co/BAAI) | Best quality-to-size ratio; needs PyTorch |
-   | Remote API | `text-embedding-3-small` (OpenAI) / `embedding-3` (Zhipu) | 1536 / 1024 | Provider dashboard | No local compute; per-call cost |
-
-   **End-to-end flow for auto-embedding:** pick GGUF model → put vec/model settings in `~/.config/memory-arbiter/config.json` → restart the MCP server → run `docs/semantic_example.py` once to backfill old memories. New writes and plain-text searches auto-embed after that.
-3. Copy the config template and edit paths:
-   ```bash
-   mkdir -p ~/.config/memory-arbiter
-   # Source checkout:
-   cp examples/memory-arbiter.config.example.json ~/.config/memory-arbiter/config.json
-   # Or pip-installed users:
-   curl -L https://raw.githubusercontent.com/billy12151/memory-arbiter-mcp/main/examples/memory-arbiter.config.example.json \
-     -o ~/.config/memory-arbiter/config.json
-   ```
-   Keep shared paths/vector/model settings here instead of each MCP client's env block. Keep `MEMORY_ARBITER_CLIENT` and `MEMORY_ARBITER_AGENT_ID` in each client's env so tools keep separate identities. `~/.config/memory-arbiter/` is user-owned XDG config, so pip installs and client reinstallers do not overwrite it. The first auto-embedding call lazily loads the model and may be noticeably slower; later calls reuse it.
-4. Backfill embeddings into existing memories, then search normally:
-   ```bash
-   # From a source checkout:
-   python docs/semantic_example.py                 # backfill all active memories
-   python docs/semantic_example.py --query "金营平台营销"   # try a semantic search
-   ```
-   The backfill helper currently ships as a source-tree script. If you installed only from pip, clone the repo or use `memory_store_embedding` from your own script for existing memories. New writes/edits are auto-embedded once the server is configured.
-
-After configuration, normal `memory_search(query="...")` can generate the query vector automatically. Explicit `query_embedding` still works and takes precedence.
-
-**How it ranks:** semantic candidates get a *floor score* just below content matches — they beat content-only noise but never outrank a real subject/tags hit. The arbitration and trust layer is untouched.
-
-**Measured impact (small sample, not a formal benchmark):** on the same 15 golden queries + 18 pairwise constraints used to validate v0.3.0, enabling semantic recall improved Top-3 hit rate and pairwise ordering. The biggest win was pairwise pass rate reaching 100% — every "should-rank-above" constraint held. SQLite-side latency overhead was ~8ms per query; local embedding generation depends on your model/runtime.
-
-| Metric | bm25 (v0.2.6) | hybrid (v0.3.0) | hybrid + semantic (v0.3.1) |
-|---|---|---|---|
-| Top-1 hit rate | 46.7% | 53.3% | 53.3% |
-| Top-3 hit rate | 60.0% | 66.7% | **73.3%** |
-| Pairwise pass rate | 77.8% | 88.9% | **100.0%** |
-
-### Tag scoring & search filters (v0.7.3)
-
-**The problem it solves.** Two pain points in v0.7.2 dogfooding:
-
-1. **Tags were under-rewarded.** A memory whose `tags` precisely contained both query tokens (e.g. `["v0.7.2", "发版"]` for query `"v0.7.2 发版"`) ranked *below* a memory whose `subject` only incidentally contained one of them. The old scorer treated tags like a sentence (contiguous-substring match) — but tags are a discrete label set that almost never concatenates into the exact query string, so tags could never reach the `strong` tier.
-2. **No way to express exhaustive queries.** `limit` was both the page size and the result cap. An agent asking "all release notes" had no way to tell whether the 10 results returned were everything or just the first page.
-
-**What changed.**
-
-- **Tag scoring is now token-based** (`_score_tags_surface`). The query is split on whitespace, each token matched against the tag set, and the match ratio decides the tier: all tokens matched → `strong`, ≥half → `medium`, some → `weak`. Pure-CJK tokens use prefix/suffix substring (so tag `发版` matches query token `发版历史`); ASCII/mixed tokens use equality (so `v0.7` does *not* match tag `v0.7.0`). A bidirectional normalize strips the `v` prefix on version-like tokens.
-- **Subject scoring is tighter.** `classify_match_level`'s `specific_coverage` threshold moved `0.4 → 0.6`, so a subject that hits only half the query's anchors no longer gets `medium` (the incidental-subject trap that was suppressing tag-precise records).
-- **Tag weights reached parity with subject** (`7/4/1.5 → 10/6/2`, cap `7.0 → 10.0`). Tags are an actively-curated signal — when they say "this is exactly what the query asked for", that should weigh the same as a subject hit, not less.
-- **`limit` is now a page size.** The response carries `has_more: bool` and `total_estimate: int` so the caller can tell an exhaustive query from a complete one. `memory_search` remains unpaginated; `memory_search_expired` supports `limit` + `offset` for history/audit pagination.
-- **New filter params** on `memory_search` (all optional, off = v0.7.2 behaviour):
-  - `tags_filter: list[str]` — strict AND, memory must contain *every* listed tag
-  - `after_time` / `before_time` — ISO 8601 bounds on `ingest_time` (naive = UTC)
-  - `source_type` — one of `user_confirmed` / `agent_generated` / `document_extracted` (the enum also has `unknown` / `pending`, but those are defaults/intermediate states, not values to write deliberately)
-
-**Current caveats.**
-- `memory_search` has no public offset cursor; when `has_more=true`, refine the query, raise `limit` (cap 100), or add `tags_filter` to narrow. Use `memory_search_expired` for paginated history/audit recall.
-- Empty `query` + `tags_filter` / time / `source_type` is handled server-side and ordered by newest `ingest_time`; this is the preferred way to list entries by filter.
-- Opening `tags_filter` disables semantic-vec recall in practice (vec candidates' tags rarely match the literal filter, so post-filter culls them). Hybrid lexical recall still works.
-- Mixed ASCII+CJK tokens (e.g. `v0.7.2发版` written without a space) take the equality path and may miss — **separate them with whitespace** (`"v0.7.2 发版"`).
-- Query-recall pagination for `memory_search_expired` is best-effort; empty-query browse/filter paths are exact and report `pagination_precision="exact"`.
-
-**Validation.** A 2000×5-seed synthetic corpus (`scripts/tune_tag_weights.py`) proved `specific_coverage=0.6` is the inflection point. The decisive metric is the A>B pair (TAG_PRECISE should beat SUBJ_INCIDENTAL — the id=206 vs id=105 case that motivated the fix): it goes from **0.520 under the baseline to 1.000** when the subject threshold is tightened to 0.6; 0.5 is too loose, 0.7+ adds nothing. Overall pairwise accuracy on the corpus rises 0.958 → 0.984. On the real production library, dogfooding query `"v0.7.2 发版"` lifted the target memory from rank #13 to #1 with no regression on 6 sample queries.
-
-### Workspace Isolation: `none` / `weak` / `strict`
-
-By default the `workspace` field is a **pure label** — it is stored and returned but does not affect ranking or visibility. `memory_search` ignores it entirely. If you want memories partitioned by project, set `isolation`:
-
-| Level | Write ws | Search without ws | Search with ws | New workspace |
-|---|---|---|---|---|
-| **`none`** (default) | optional, ignored | full library | **ignored** — full library, no ranking effect | silent |
-| **`weak`** | recommended | full library | **soft rerank** — same-workspace boosted, cross-workspace demoted, nothing dropped | `write_hints.new_workspace_detected` |
-| **`strict`** | **required** (errors if empty) | **errors** (refuses) | **hard filter** — only the same canonical workspace | `action_required=confirm_new_workspace` (written as `pending`, excluded from recall until `memory_activate`) |
-
-The three levels are monotonic: workspace goes from *ineffective* → *affects ranking* → *controls visibility*.
-
-**Alias canonicalization.** Whichever level you pick, workspace names are canonicalized by embedding similarity, so `金营项目` and `金科营销项目` merge into one canonical workspace. The raw string you pass is preserved in `workspace`; the resolved name lands in `workspace_canonical`. The cosine-distance cutoff is `workspace_match_distance` (default `0.25` — ~0.16 merges the synonyms above, ~0.43 keeps unrelated projects distinct).
-
-> **Default is `none`.** Workspace is an optional label; not passing it never breaks recall.
->
-> **`strict` is not recommended unless necessary.** Once enabled, an Agent that passes the wrong or inconsistently-spelled workspace will cause those memories to be **silently isolated and unrecallable** (silent recall failure — you won't even know they're missing). Alias canonicalization mitigates spelling drift, but it cannot fix a semantically wrong project. **You are trading recallability for isolation.**
->
-> **When unsure, use `weak`.** Cross-workspace data is never lost — it is only demoted in ranking. This turns the isolation intent into an *observable* ranking preference rather than an *invisible* silent drop.
-
-Configure via env (`MEMORY_ARBITER_ISOLATION=weak`) or config file (`"isolation": "weak"`). Confirm it took effect in `memory_status`. Activating a strict-blocked memory: `memory_activate(memory_id, authorized=true)`.
-
-### Optional: Long-Document Section Split (v0.6.0)
-
-**The problem it solves.** A long document — say a 12000-char design spec or a 4000-char API manual — is stored as one memory. When you search for a specific detail inside it, two things go wrong:
-
-1. **The search can't find the right paragraph.** A memory's semantic vector is built from only the first ~3600 characters of its text. Anything past that — the later chapters, the appendix, the fine print — is invisible to semantic search. Ask about something that only appears in the second half, and the search either misses it entirely or returns the whole document with a vague "this might be relevant".
-2. **You get the whole document back.** Even when the search *does* find the right document, it returns all 12000 characters. Your model then has to scan the entire thing to find the 800 characters that actually answer your question — wasting context and attention.
-
-**What section split does.** It breaks a long document into titled sections (like chapters), and gives each section its own search vector. Now when you ask a question, the search can point straight to the right section — and return just that paragraph instead of the whole document.
-
-Think of it as adding a table of contents that search can jump to, instead of always returning the entire book.
-
-**The payoff (measured on this project's own docs — small sample, your mileage may vary):**
-
-We ran 17 queries against 8 long documents (4500–12200 chars), each asking about a specific detail — 10 of them about content that sits past the 3600-char point the old search couldn't see at all. Reproduce with `python scripts/benchmark_section_recall.py` (read-only, runs against your real DB).
-
-*It finds the right paragraph, not just the right document:*
-
-| Metric | Without split | With split |
-|---|---|---|
-| Correct **paragraph** located (top-1) | — (impossible) | **94%** |
-| Correct paragraph located (top-3) | — | **100%** |
-| Search finds the document at all | 71% | — |
-
-Without split, even when the document was found, it came back as a fuzzy "distance 14–19" match — search was guessing. With split, the correct paragraph matched at distance 0.23–0.41 — search was confident.
-
-*It returns less text, so your model reads more efficiently:*
-
-| Metric | Without split (full text) | With split (just the matched section) |
-|---|---|---|
-| Avg text returned per query | ~7350 chars | ~2630 chars |
-| **Total across 17 queries** | 124,980 chars | 44,675 chars |
-| **Reduction** | | **64%** |
-
-For a 12000-char document both wins stack: the model is pointed to the right ~800-char paragraph *and* never has to scan the other 11000.
-
-**Prerequisites (all required):**
-1. Semantic recall configured — sqlite-vec + GGUF embedding (see above). Section split is bound to vec readiness: vec ready ⇒ splittable. (v0.8.0 removed the old `split.enabled` switch.)
-2. An external LLM to generate section titles and boundaries (only needed for documents without Markdown headings — see below)
-
-> Just switched embedding models? Run `memory_rebuild_embeddings` first — section split stays offline until all vectors match the new model. Check `split_capability` via `memory_status` (`reason: vec_ready` means splittable).
-
-**How it works:**
-
+```bash
+pip install memory-arbiter-mcp[vec]
+pip install llama-cpp-python
 ```
-memory_write(long_doc)
-  → saves content first (always succeeds; split failure never loses the original)
-  → if vec ready AND content > split_threshold:
-      - ≥2 fenced-code-safe Markdown headings, each ≤ max_section_chars,
-        count ≤ max_sections  →  memory_write enqueues a background
-        reindex (mode=rules_async, reindex_pending=true), no agent needed;
-        split_status stays NULL until the worker publishes, then → active
-      - otherwise (no heading / single heading / over limit)
-        →  returns a full split_request (content + content_hash +
-           memory_version + split_status + split_revision + schema)
-        →  Agent reads the full content with its own LLM and produces ONLY
-           title / summary / anchor_text / occurrence_index / title_path
-           metadata, then calls memory_split(memory_id, split_decision="split",
-           sections=[...]) to publish
 
-memory_split(memory_id, split_decision="split", sections=[...])  ← publish
-  → arbiter computes section boundaries from occurrence_index (not LLM guesses)
-  → generates per-section embeddings (all must succeed)
-  → saves sections + vectors
-  → (also used to repair historical NULL/failed/declined memories, or to
-     actively rebuild via split_decision="rebuild")
+Recommended local model: `embeddinggemma-300m-qat-Q8_0.gguf` (768 dimensions). Configure it in `~/.config/memory-arbiter/config.json`, restart the MCP server, then backfill existing memories with `docs/semantic_example.py` if you are using a source checkout.
+
+Semantic candidates receive a floor score below strong subject/tag matches. They help find meaning-equivalent memories without letting fuzzy vector matches override precise labels.
+
+### Tag scoring and filters
+
+Tags are treated as discrete labels, not as a sentence. A memory tagged `v0.7.2` and `release` should outrank a subject that only incidentally contains one query word.
+
+`memory_search` supports:
+
+- `tags_filter`: strict AND over tags;
+- `after_time` / `before_time`: ingest-time bounds;
+- `source_type`: source filter;
+- `has_more` and `total_estimate`: signals that results may continue.
+
+Use whitespace between mixed ASCII/CJK tokens, such as `"v0.7.2 发版"`, so token matching works as intended.
+
+### Workspace isolation: `none` / `weak` / `strict`
+
+By default, `workspace` is a stored label and does not filter recall. If you need project isolation, set `isolation`.
+
+| Level | Write workspace | Search without workspace | Search with workspace | New workspace |
+|---|---|---|---|---|
+| `none` (default) | optional | full library | ignored | silent |
+| `weak` | recommended | full library | same workspace boosted, cross-workspace demoted | `write_hints.new_workspace_detected` |
+| `strict` | required | error | hard filter to canonical workspace | written as `pending` until `memory_activate` |
+
+Use `weak` when unsure. `strict` trades recallability for isolation: a wrong workspace can make memories silently unrecallable.
+
+Workspace aliases are canonicalized by embedding similarity. The default cosine cutoff is `0.25`.
+
+### Optional: Long-document Section Split
+
+Long memories create two problems: search may miss the relevant paragraph, and even successful recall may return the whole document.
+
+Section split breaks long documents into searchable sections. Queries can return only the matched sections while preserving the original memory.
+
+```text
+memory_write(long_doc)
+  → saves original content first
+  → if vec ready and content > split.threshold:
+      - Markdown headings that fit limits → async rule-based split
+      - otherwise → split_request for agent-side continuation
 
 memory_search("query")
-  → for split documents: section matching finds the relevant paragraphs
-  → partial hit → returns full matched-section text
-     (top-level content = concatenation of matched sections,
-      content_scope=matched_sections, each matched_sections entry carries
-      the full section body)
-  → coverage met OR zero-match → returns the full memory (content_scope=full_memory)
-  → no content_omitted / preview truncation semantics anymore
+  → matched sections when section search is confident
+  → full memory when section coverage is high or no section match is available
 
-memory_get(memory_id, sections=..., section_ids=[...])  ← fetch catalog/all/specific sections
-memory_get(memory_id)                                  ← fetch full text if needed
+memory_get(memory_id, sections="catalog" | "all")
+  → inspect or fetch section bodies
 ```
 
-> **Good to know:**
-> - **`memory_write` auto-splits on write.** It detects Markdown headings at write time and queues a background reindex for structured documents — no agent round-trip. The call returns immediately with `split.mode=rules_async` and `reindex_pending=true`; section precision lands asynchronously (a few seconds) once the worker finishes embedding. Until then `memory_search` returns the full memory (`content_scope=full_memory`) — recall is preserved, only section precision is briefly absent. Only unstructured long prose (no heading / single heading / over `max_section_chars` / over `max_sections`) returns a `split_request` for the agent to continue with its own LLM. Don't pre-call `memory_split` on ordinary writes.
-> - **Auto-continue silently on `split_request`.** Receiving a `split_request` (with `action_required=memory_split`) is an **internal** signal, not a user step. Read the full `content` it carries, generate section metadata with your own LLM, and publish via `memory_split` — do not surface the prepare/publish/offset protocol to the user.
-> - **Search never degrades.** If the vector index is temporarily unavailable, `memory_search` returns the full memory (`content_scope=full_memory`) — you lose section precision but search keeps working.
-> - **Context-window overflow stays as backlog.** If the full original content exceeds the current agent LLM's context window, do **not** truncate or mechanically chunk it — leave `split_status=NULL` and let `doctor` record it as a `long-unsplit` backlog entry.
-> - **Edit clears sections.** A content `memory_edit` clears the old derived section index and resets split status, then re-runs rule-based splitting on the new content.
-> - **Re-calibrate after switching models.** `section_vec_distance_threshold` (default 0.42) is calibrated on embeddinggemma-300m. If you switch embedding models, run `scripts/calibrate_section_threshold.py` and update it — a wrong threshold means no filtering. After switching, also run `memory_rebuild_embeddings` to rebuild all vectors.
-
-**Configuration:** all split settings live in the `config.json` `split` section — see [Configuration](#configuration) for the full table. (v0.8.0: the `split.enabled` switch and `section_zero_match_preview_chars` were removed; split capability is now bound to vec readiness.) Here's a complete example:
-
-```json
-{
-  "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
-  "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
-  "vec": { "enabled": true, "dim": 768 },
-  "embedding": {
-    "provider": "gguf",
-    "model_path": "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
-    "auto_query": true,
-    "auto_write": true
-  },
-  "split": {
-    "threshold": 4000,
-    "section_vec_distance_threshold": 0.42,
-    "section_fulltext_threshold": 0.8,
-    "max_sections": 50,
-    "max_section_chars": 3600
-  }
-}
-```
-
-**When it's on:** there is no on/off switch anymore — split is on whenever vec is ready (v0.8.0 bound it to vec readiness). If your memories are mostly short notes, code snippets, or conversation summaries, they stay under `split.threshold` and are never split, so you pay nothing. Section split pays off for long structured documents (design specs, API manuals, research notes). Structured docs split at `memory_write` time (rule-based, no LLM); only documents without detectable Markdown headings need an agent LLM call.
+Section split is bound to vector readiness. There is no separate on/off switch in v0.8.0+. Short notes stay unsplit and pay no cost.
 
 ### Configuration
 
-Configuration can come from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbiter/config.json`, then environment variables/defaults. **Durable vector/model settings belong in the config file** so they survive MCP client reinstall/migration; each row below shows the JSON path and its env fallback (config file wins when both are set). Environment variables are still useful for simple client identity and CI overrides. Full explanations in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+Configuration is read from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbiter/config.json`, then environment variables/defaults. Durable database, vector, and model settings belong in the config file; per-client identity usually belongs in the MCP env block.
 
-**Config file fields** (`~/.config/memory-arbiter/config.json`) — grouped by what they control.
+#### Storage and access
 
-**Storage & access** — where data lives; set once.
-
-| JSON path | Env fallback | Default | What to tune |
+| JSON path | Env fallback | Default | Use |
 |---|---|---|---|
-| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | Shared path for cross-tool memory. |
-| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | Append-only JSONL backup, used only when SQLite is read-only. |
-| `policy_path` | `MEMORY_ARBITER_POLICY` | _(none)_ | Path to a JSON policy file (per-client enable/disable, agent allow/deny). |
+| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | Shared SQLite path. |
+| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | Append-only backup when SQLite is read-only. |
+| `policy_path` | `MEMORY_ARBITER_POLICY` | none | Optional JSON policy file. |
 
-**Search tuning** — knobs to turn when results feel off. `recall_pool_cap` is the first one to try.
+#### Search tuning
 
-| JSON path | Env fallback | Default | What to tune |
+| JSON path | Env fallback | Default | Use |
 |---|---|---|---|
-| `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | **Raise to 100–200 when your store exceeds ~100 entries** — first knob to turn if matches go missing. |
-| `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | Raise if many same-topic memories exist. |
+| `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | Raise to 100–200 when stores exceed ~100 entries. |
+| `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | Raise when many same-topic memories exist. |
 
-**Real-time structured conflicts** — conservative lexical detection on write/edit; no model or network call inside the server.
+#### Structured conflicts
 
-| JSON path | Env fallback | Default | What to tune |
+| JSON path | Env fallback | Default | Use |
 |---|---|---|---|
-| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | `beta_all` enables v0.9 for the trusted beta cohort. Set `off` only as an emergency kill switch; periodic semantic scan is unaffected. |
+| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | Set `off` only as an emergency kill switch. |
 
-**Workspace isolation** — whether/how `workspace` partitions recall. See [Workspace Isolation](#workspace-isolation-none--weak--strict).
+#### Workspace isolation
 
-| JSON path | Env fallback | Default | What to tune |
+| JSON path | Env fallback | Default | Use |
 |---|---|---|---|
-| `isolation` | `MEMORY_ARBITER_ISOLATION` | `none` | `none` (ws ignored) / `weak` (soft rerank) / `strict` (hard filter). Default `none` is safest — `strict` can cause silent recall failure if the Agent passes a wrong workspace. |
-| `workspace_match_distance` | `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | Cosine cutoff for workspace alias merge. Lower = stricter (fewer merges). |
+| `isolation` | `MEMORY_ARBITER_ISOLATION` | `none` | `none`, `weak`, or `strict`. |
+| `workspace_match_distance` | `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | Cosine cutoff for workspace alias merge. |
 
-**Semantic recall** — enables "find by meaning, not just keyword". Requires sqlite-vec + a GGUF model. See [Semantic Recall](#optional-semantic-recall-v050).
+#### Semantic recall
 
-| JSON path | Env fallback | Default | What to tune |
+| JSON path | Env fallback | Default | Use |
 |---|---|---|---|
-| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | Set `true` to enable semantic recall (requires `pip install memory-arbiter-mcp[vec]`). |
-| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | Must match your embedding model. Changing it requires dropping and recreating `memories_vec`. |
-| `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | inferred as `gguf` only when `embedding.model_path` is set | Only `gguf` is supported in v0.5.0. Without a model path, auto-embedding stays off. |
-| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` (or legacy `MEMORY_ARBITER_GGUF`) | _(none)_ | Path to the GGUF embedding model. |
-| `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | Auto-encode plain-text queries for semantic recall. |
-| `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | Auto-embed new writes/edits so they enter semantic recall immediately. |
+| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | Enable sqlite-vec semantic recall. |
+| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | Must match the embedding model. |
+| `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | inferred from model path | `gguf` for built-in local auto-embedding. |
+| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` | none | GGUF embedding model path. |
+| `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | Auto-encode plain-text queries. |
+| `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | Auto-embed writes/edits. |
 
-**Long-document split** — paragraph-level retrieval for long docs. Bound to vec readiness (no on/off switch in v0.8.0). See [Section Split](#optional-long-document-section-split-v060).
+#### Long-document split
 
-| JSON path | Env fallback | Default | What to tune |
+| JSON path | Env fallback | Default | Use |
 |---|---|---|---|
-| `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | Min char count to trigger section split. |
-| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | Section Vec cosine distance cutoff. Calibrated on embeddinggemma-300m; re-calibrate if you switch models. |
-| `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | Return full text when ≥X% of sections match. |
-| `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory (min 2). |
-| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Char limit for section embedding input; v0.8.0 also rejects publish with `section_too_large` if a section slice exceeds it (hard gate). |
+| `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | Minimum character count to trigger split. |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | Section vector cutoff; recalibrate if switching models. |
+| `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | Return full text when enough sections match. |
+| `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | Max sections per memory. |
+| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | Max characters per section slice. |
 
-**Environment variables** — keep per-client identity in each MCP client's env block. Some fields also have config-file equivalents, but config wins; use env here when the value must differ by client/session.
+#### Per-client environment
 
-| Variable | Default | What to tune |
+| Variable | Default | Use |
 |---|---|---|
-| `MEMORY_ARBITER_CLIENT` | `codex` | Per-tool identity (`codex`, `claude-code`, `cursor`, `zcode`, `workbuddy`, ...). |
-| `MEMORY_ARBITER_AGENT_ID` | `default` | Agent identity within a client. |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | Record field on each memory. Reserved metadata (v0.7.4): stored and returned but does **not** filter `memory_search` / `memory_recent` results. Kept for future project-level features. |
-| `MEMORY_ARBITER_CONFIG` | _(none)_ | Optional path to an alternate JSON config file. If set, memory-arbiter reads that file instead of the default `~/.config/memory-arbiter/config.json`; file values still override other env fallbacks. |
-| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid` (default) or `bm25` (legacy). No config-file equivalent. |
-| `MEMORY_ARBITER_GGUF` | _(none)_ | Legacy GGUF path fallback; prefer `embedding.model_path` in the config file. |
+| `MEMORY_ARBITER_CLIENT` | `codex` | Tool identity. |
+| `MEMORY_ARBITER_AGENT_ID` | `default` | Agent identity inside the client. |
+| `MEMORY_ARBITER_WORKSPACE` | `default` | Workspace label; isolation only applies when configured. |
+| `MEMORY_ARBITER_CONFIG` | none | Alternate JSON config path. |
+| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid` or legacy `bm25`. |
+| `MEMORY_ARBITER_GGUF` | none | Legacy GGUF path fallback; prefer config file. |
 
-### Data Migration
+### Data migration
 
-Moving to a new machine? Just copy the SQLite file:
+Moving to a new machine is just copying the SQLite database and reinstalling the package:
 
 ```bash
-# On the old machine: copy the database to the new one (via scp, USB, etc.)
 scp ~/.local/share/memory-arbiter/memory.sqlite3 newmachine:~/.local/share/memory-arbiter/
 
-# On the new machine: reinstall the project (don't copy .venv — rebuild it)
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-### Doctor: Health Diagnostics (CLI ambulance)
+### Doctor: health diagnostics
 
-When something feels off — "search stopped working", "did my model switch break recall?", "is the DB silently losing writes?" — run the built-in doctor. It's the ambulance entry: a standalone CLI that opens its own read-only connection, so it works even when the MCP process is down or the DB is read-only.
+When search feels wrong, embeddings may be misconfigured, or the database might be degraded, run:
 
 ```bash
-memory-arbiter doctor              # colored text report (auto-disables color when piped)
-memory-arbiter doctor --json       # machine-readable, same shape as the MCP tool's data
-memory-arbiter doctor --deep       # also load the GGUF model for a dimension probe (seconds)
-memory-arbiter doctor --db PATH    # diagnose a different DB (disaster recovery)
+memory-arbiter doctor
+memory-arbiter doctor --json
+memory-arbiter doctor --deep
+memory-arbiter doctor --db PATH
 ```
 
-It runs **26 read-only checks** across five dimensions, each with a severity (`info`/`warning`/`critical`) and a fix hint tailored to your current config:
-
-- **Config integrity** — parse warnings, write-probe result, degradation mode (`jsonl_backup` = silently losing data = critical).
-- **Vector-enablement chain** — the highest-value check. "Is semantic recall actually on?" is not a boolean; it walks five links (model configured → `vec.enabled` → extension loaded → model usable → auto flags) and short-circuits at the first break, telling you exactly which link is down and how to fix it. Catches the classic "I configured a model but recall still doesn't work" case (usually `vec.enabled=false`).
-- **Split, consistency, capacity** — section-split state, orphaned sections/vectors, vec parent-status drift, version-chain breaks, open-conflict buildup, history bloat, DB size. v0.9.4 replaces the old inactive-vector slow-path check with `consistency.vec_parent_status_sync`, which reports mismatches between vector metadata and parent memory status and points at a non-destructive resync tool.
-- **Section-split detail (v0.8.0)** — when vec is ready, doctor reports six split checks: `split.capability` (vec/embedder available), `split.long_unsplit_backlog` (active long docs still at `split_status=NULL`), `split.failed_count` (with recent error summaries), `split.legacy_declined`, `split.legacy_unknown_status` (legacy `pending`/`fallback_active` surfaced read-only), and `split.index_integrity` (orphaned/overlapping/non-covering offsets, missing section vectors). Backlog/failed/legacy findings return sample memory IDs you can feed straight into `memory_split` for repair.
-
-Exit codes: `0` clean / `1` has warnings / `2` has criticals — usable in scripts and CI. If the DB can't be opened at all, doctor degrades to a single critical report instead of crashing (that's the whole point of an ambulance). The same engine is exposed as the `memory_doctor_overview` MCP tool for in-conversation use; the CLI just trades the MCP runtime state for a slightly less precise static inference (noted in the report). Doctor never performs a network update check; it only displays cached update state and records that doctor has run for the current installed version, which suppresses post-upgrade doctor reminders.
+Doctor is read-only and runs outside the MCP server, so it can diagnose even when the MCP process is down. It checks config integrity, vector enablement, split state, claim indexing, data consistency, capacity, conflict backlog, and update-check state. Exit codes are script-friendly: `0` clean, `1` warnings, `2` critical findings.
 
 ### Testing
 
@@ -626,7 +476,7 @@ python3.11 -m pytest
 
 Apache License 2.0. Copyright (c) 2026 张志维 (billy12151).
 
-Memory Arbiter version 0.8.2 and later are offered under Apache-2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT (including 0.8.0 and 0.8.1). Versions before 0.8.2 were released under MIT.
+Memory Arbiter version 0.8.2 and later are offered under Apache-2.0 going forward. Prior MIT grants remain valid for copies previously distributed under MIT, including 0.8.0 and 0.8.1. Versions before 0.8.2 were released under MIT.
 
 ---
 
@@ -634,130 +484,169 @@ Memory Arbiter version 0.8.2 and later are offered under Apache-2.0 going forwar
 
 ## 中文
 
-AI Agent 的共享记忆层。一个本地 SQLite 数据库——你用的每个工具（Cursor、Claude Code、Codex、ZCode、WorkBuddy……）搜索同一套已验证的事实，而不是每轮对话重新加载 markdown 文件。
+**memory-arbiter 是 AI Agent 的本地可信事实层。**
 
-```
+它可以作为共享记忆层使用，但真正价值不是“把记忆放到同一个地方”，而是事实治理：让长期项目上下文变得可检索、可追溯、可信度可区分、冲突可发现，并且可以安全召回。
+
+共享记忆让每个工具都能看到同一份数据。memory-arbiter 进一步帮助 agent 判断：哪些事实是当前的，哪些是用户确认的，哪些已经过期，哪些互相矛盾，哪些已被废弃，哪些还需要裁决。
+
+```text
 # 不用每轮把 2 万 token 的 MEMORY.md 塞进 prompt：
 memory_search("认证迁移方案")  → 3 条精准结果，约 400 token
 ```
 
-**噪声少了，输出更准。** AI 出错，大部分时候不是模型笨，而是它拿到的输入是过时的、自相矛盾的、或者关键信息被噪声淹没了。memory-arbiter 修的是输入端。同一个模型，结果更好。
+**共享记忆只是起点，事实治理才是护城河。**
 
-**完全本地，零云依赖。** 纯 SQLite，不需要 Postgres、Redis、API key。数据留在你机器上。
+默认完全本地：一个 SQLite 数据库，不需要 Postgres、Redis、托管 memory 服务，也不在 server 内调用大模型。可选语义召回使用你自己的本地 GGUF embedding 模型；可选更新检查可以关闭。
 
-### 为什么需要 Memory Arbiter？
+### 它解决什么问题
 
-你的 AI 客户端每轮对话都把 `MEMORY.md` + `memory/*.md` 整个塞进 system prompt。记忆越多，token 消耗越大——模型还没读你的问题，5K–20K token 的上下文已经烧掉了。更要命的是，模型淹没在噪声里，分不清什么是最新的、什么是用户确认的、什么是过时的。
+很多 memory 工具解决的是“怎么让 agent 记住”。memory-arbiter 关注的是共享之后更难的问题。
 
-Memory Arbiter 用 SQLite 检索替代全文加载：只有相关的条目返回，其余的留在磁盘上。
+当 Claude Code、Cursor、Codex、ZCode、WorkBuddy、OpenClaw 或其他工具都能写入同一份长期上下文时，真正的风险不再只是“忘记”，而是：
 
-**一个工具就能用。多个工具更香。**
+- 旧事实和新决策混在一起；
+- AI 猜测被当成用户确认事实；
+- 不同工具写入互相矛盾的结论；
+- 长期项目历史越来越长，真正相关的事实被噪音淹没；
+- 切换工具时，不是上下文丢失，就是重复加载、重复污染；
+- 本地记忆增长到每轮 prompt 都先消耗几千到几万无关 token。
 
-#### 为什么有效：修好上下文，输出自然变好
+memory-arbiter 把这些风险变成显式的数据结构：来源标签、可信度、事实时间、写入时间、版本历史、废弃链、冲突记录、结构化 claim 门禁、分段索引、workspace 边界和 doctor 体检。
 
-| 污染 AI 上下文的问题 | 导致的执行偏差 | memory-arbiter 怎么修 |
+模型仍然负责语义理解。arbiter 负责把输入侧变干净。
+
+### memory-arbiter 做什么
+
+| 需求 | 普通记忆为什么不够 | memory-arbiter 的回答 |
 |---|---|---|
-| 关键信息埋在 20K token 的大段文本里 | 模型注意力分散，抓错重点或直接编造 | `memory_search` 只返回 3–5 条高度相关的结果，信噪比拉满 |
-| 旧信息和新信息混在一起 | 模型照着过时的约束去执行 | 双时间轴 + 冲突仲裁，过时条目被标记或淘汰 |
-| "用户确认的"和"AI 猜的"分不清 | 模型把猜测当事实用 | `source_type` 标记来源，`user_confirmed` 自动锁定，模型知道该信什么 |
-| 换个工具上下文就丢了 | 每个工具重新理解一遍，理解偏差累积 | 共享记忆层，所有工具从同一套已验证的事实出发 |
+| 精准召回 | 扁平 `MEMORY.md` 或大块向量记忆容易返回过多上下文。 | `memory_search` 只返回少量相关、排序后的条目，而不是加载全文。 |
+| 来源可信度 | 用户确认、文档提取、AI 猜测看起来一样。 | `source_type`、`confidence`、`user_confirmed` 和 locked 记录让可信度可见。 |
+| 时间演进 | 旧决策和新决策并存，模型可能跟着旧口径走。 | `event_time`、`ingest_time`、`version`、`memory_history`、`memory_supersede` 保留演进链。 |
+| 冲突处理 | 两条记忆可以互相矛盾，却同时被召回。 | 冲突扫描、冲突记录、冲突信号、resolve/supersede 工具让矛盾可见、可处理。 |
+| 写入安全 | last-write-wins 会静默覆盖，或继续堆积矛盾事实。 | v0.9 结构化 claim 门禁检测确定性事实碰撞，使用前要求宿主 LLM 判断。 |
+| 长文档 | 相关段落埋在 10K+ 字符的长记忆里。 | 分段索引返回命中段落，而不是让模型扫整篇文档。 |
+| 项目边界 | 全局记忆容易把无关项目事实串在一起。 | workspace 隔离支持 `none`、`weak`、`strict` 三档，并做别名归一。 |
+| 长期健康 | 用户往往等到回答变差才发现记忆库有问题。 | `doctor` 检查配置、向量链、分段、claims、一致性、容量和冲突积压。 |
+| 隐私和所有权 | 托管 memory 又引入一个服务和数据边界。 | 本地 SQLite、用户自有文件、可选本地 embedding、无内置 LLM 依赖。 |
 
-**同一个模型，上下文对了，输出就准了。** 其他一切——省 token、跨工具共享、审计追溯——都是这个核心的自然延伸。
+### 日常心智模型
 
-模型无关：不管你用 GLM、Claude、GPT 还是 Gemini——模型越强，对上下文质量越敏感，提升越大。
+大多数 agent 只需要四个工具：
 
-#### Token 节省一览
+1. **`memory_write`** —— 写入可复用事实，并填 subject、tags、source_type、event_time、workspace、source_ref。
+2. **`memory_search`** —— 读源文件或让用户重复上下文之前，先搜索活跃事实。
+3. **`memory_get`** —— 已知 ID 时直接取详情，也可取分段 catalog 或分段正文。
+4. **`memory_search_expired`** —— 审计旧决策时搜索 superseded、conflicted、pending 等历史记录。
 
-用精准检索替代全文加载，是最直观的效果。（长文档分段的收益在这个基础上进一步叠加，见下文。）
+其他工具用于修正、冲突处理、分段修复、向量运维和诊断。
 
-| 场景 | 全文加载 | 用 memory-arbiter | 节省 |
+### 和其他 memory 的区别
+
+memory-arbiter 不靠“别人不能共享，我们能共享”来做差异化。shared memory 正在成为标准能力。memory-arbiter 关注的是 shared memory 之后更深一层的问题。
+
+| 对比对象 | memory-arbiter 关注什么 |
+|---|---|
+| 普通 markdown memory | 不全文加载 prompt，而是精准召回，并保留历史和冲突状态。 |
+| 向量 memory | 不只找相似内容，还要知道来源可信度、过期状态、废弃状态和冲突状态。 |
+| 图 memory | 不只知道什么和什么有关，还要知道什么是当前的、可信的、冲突的、可安全使用的。 |
+| 托管 memory | 本地 SQLite、调用方自有策略、无托管数据库、无 server 侧 LLM 调用。 |
+| 通用 MCP memory | 事实治理层：可信度标签、时间演进、结构化 claim 门禁、doctor 和修复工具。 |
+
+memory-arbiter 有轻量图关系信号：事实时间、写入时间、entity/scope、冲突边、废弃链、分段和 workspace 边界。但它不把产品定位成重型图数据库；原文事实是主资产，派生索引用来辅助治理。
+
+### 省 token 是副作用
+
+核心价值是上下文质量更高。省 token 是最直观的结果。
+
+| 场景 | 全文加载 | 使用 memory-arbiter | 节省 |
 |---|---|---|---|
 | 每轮记忆加载 | system prompt 塞 5K–20K tokens | `memory_search` 返回 200–800 tokens | ~80%+ |
-| 冲突检测 | LLM 逐条比对（N²，数千 tokens） | `memory_compare` 返回结构化裁决（~200 tokens） | ~90% |
-| 定期审查 | LLM 扫全库（万级 tokens） | `memory_list_conflicts` + `memory_audit_summary` 出结构化候选 | ~70% |
-| 规格交接（2000 字） | 加载进 context ~3000 tokens | 精准 `memory_search` ~500 tokens | ~83% |
+| 冲突检测 | LLM 带大上下文逐条比较 | 结构化候选 + 聚焦判断 | ~90% |
+| 定期审查 | LLM 扫全库 | `memory_list_conflicts` + `memory_audit_summary` | ~70% |
+| 规格交接 | 重复加载完整规格/设计记录 | 查询相关事实和决策 | ~80%+ |
 
-> **它不是什么：** memory-arbiter 不是 LLM，不做语义推理——那交给你的 AI 客户端。它是模型下面的一层结构化存储 + 检索 + 仲裁。
+同一个模型，输入更干净，输出更准。
 
-#### 一个工具或多个工具：都能扩展
+### 一个工具能用，多个工具更有价值
 
-即使只用一个工具（Cursor、Claude Code、Codex、ZCode、WorkBuddy），memory-arbiter 也把你的记忆从扁平 markdown 升级成可查询的数据库：几千条记忆、检索成本接近零、结构化冲突检测、来源可信度分层、完整审计追溯——不用再手动精简越来越大的 markdown 文件。
+只用一个工具时，memory-arbiter 把本地记忆从扁平文件升级成带可信度、历史、冲突信号和诊断的可查询事实层。
 
-同时用两个或更多工具时，再加一层共享记忆：工具 A 写、工具 B 搜。零文件传递、零复制粘贴、零版本混乱。一个数据库，零重复。
+多个工具一起用时，它同时成为共享记忆：工具 A 写，工具 B 搜，工具 C 审计。零文件传递，零复制粘贴，零版本漂移。
 
-**真实案例 —— 三工具管线**（规划 → 设计 → 编码）：OpenClaw 调 `memory_write` 写入规格 → OpenDesign 调 `memory_search("项目")` 拿到上下文、做设计、写回决策 → ZCode 一次查询拿到规格**和**设计决策。**三个工具之间零文件传递。** 一份规格+设计交接，传统重复加载上下文约 ~5000 tokens，现在精准检索约 ~800 tokens。
+示例管线：
 
-> 三种典型用法（每轮按需检索、定时审查、写入时冲突检测）和完整的跨工具委派步骤见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
+1. OpenClaw 用 `memory_write` 写入规格。
+2. OpenDesign 用 `memory_search` 读取规格，并写回设计决策。
+3. ZCode 一次搜索拿到规格和设计决策。
+
+三个工具，一层本地事实层。
+
+完整跨工具示例见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
 
 ### 核心能力
 
-- **精准检索，不加载全文** —— 搜索只返回相关条目，每轮上下文从 5K–20K token 降到几百 token。
-- **冲突仲裁** —— 两条记忆矛盾时，规则引擎裁定胜者（用户确认 > 文档提取 > AI 生成；时间相同时取更新的事件）。每个裁决附带人能看懂的理由。
-- **可信度分层** —— "用户确认的"和"AI 猜的"有不同标签和权重。用户确认的事实自动锁定，任何 agent 不能偷偷覆盖。
-- **跨工具共享** —— 一个 SQLite 数据库，所有接入的工具读写同一份记忆。零文件传递、零复制粘贴、零版本混乱。
-- **版本历史** —— 原地编辑记忆，旧版本自动归档不丢失。谁改了什么、什么时候改的，完整可追溯。
-- **长文档分段** —— 把万字文档拆成可搜索的段落，查询只返回命中的那段，不返回整篇。
-- **tag 精排 + 搜索过滤**（v0.7.3）—— tag 按离散标签集评分（token 重叠，不再当句子做整串匹配），tag 精确命中每个 query token 时终于能排到 subject 只是偶然含一个词的记忆之上。`memory_search` 还新增了 `tags_filter` / `after_time` / `before_time` / `source_type`，响应里带 `has_more` + `total_estimate`，让穷举式查询知道这一页是不是已经拿全。
-- **关联待办与冲突信号**（v0.7.4 → v0.7.6）—— 真实命中查询时，`memory_search` 在独立的 `linked_open_items` 字段附最多 5 条与结果集共享 meaningful tag 的 active 待办（带 `todo` tag），纯只读、不影响排序。每次响应还带 `retrieval_mode` 说明结果是怎么来的。v0.7.6 新增 `conflict_signal`：每条结果可能带 `open_table`（scan/record 验证过的结构化冲突）或 `runtime_metadata_hint`（运行时启发式，未经 LLM 验证）。完成待办用 `memory_edit(tags_only=true, remove_tags=["todo"])`——低副作用、不写历史、不增加 version、不重算 embedding。
-- **冲突扫描**（v0.7.5）—— `memory_scan_conflict_candidates` 向量召回候选冲突对（增量：只扫新增 + 最近编辑的记忆），调用方 agent 跑 LLM 比对后用 `memory_record_conflict` 落表（幂等，带 `conflict_type` / `suggested_winner` / `source`）。误报用 `memory_resolve_conflict` 关闭。核心包保持无头——不调 LLM、不联网——扫描只产候选对，判断交给 agent。`doctor` 通过 `scan_log.jsonl` 报告扫描新鲜度（从未扫描或超 15 天会 WARN）。
-- **实时结构化冲突门（v0.9.0 beta）**——写入和编辑会同步抽取显式 claim 到独立派生索引，并比较 `entity + attribute + scope` 的值。新碰撞返回证据与必须执行的宿主 LLM 判断请求；判断会持久化供后续查询使用，但绝不修改或 supersede 记忆。高影响/不确定场景升级给用户，且保留授权人工纠正入口。索引发布与冲突对账分别持久化 revision，发布后的故障仍可由 doctor 发现和 rebuild 修复；定期语义 scan 继续作为广覆盖兜底，doctor 可根据双通道时间戳统计 structured-only / scan-only / both 与实时提前量。
-- **语义检索**（可选）—— "按意思找，不只靠关键词"。自带本地 embedding 模型（GGUF），和关键词检索并存。v0.9.4 起 vec0 写入父状态元数据，KNN 在选 top-k 前按 `parent_status` 过滤，因此 superseded/deleted 向量不会挤掉 active 召回。superseded 向量会保留，用 `memory_search_expired` 做审计/历史召回；`memory_cleanup_inactive_vectors` 现在负责 resync 状态漂移并只清理真正的孤儿向量。
-- **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份。即使缺少可选扩展也不会崩。
-- **健康体检** —— 一键 `doctor` 给配置完整性、向量化启用链、分段、数据一致性、容量堆积做分级体检。每条诊断带 severity 和针对当前配置的修复指引；既能作为 MCP 工具（日常）在对话里触发，也能作为独立 CLI（救护车：MCP 进程挂了也能连库诊断）。纯只读。
-- **鉴权门**（v0.8.5）—— `memory_arbitrate` / `memory_confirm` / `memory_supersede` 要求 `authorized=true` 才执行破坏性或提权操作，防止 LLM 绕过信任模型自动覆盖用户确认的记忆；传入旧参数 `apply` 返回显式迁移错误而非静默失效。
-- **按标签/时间/来源列出记忆**（v0.8.5）—— `memory_search(query="", tags_filter=["todo"])` 直接按过滤条件从库召回并 `ingest_time` 倒序，而非仅对关键词搜索结果做后过滤，解锁 list-by-tag / by-source_type / by-time 场景（此前空 query + filter 是死路径）。
-- **零云依赖、零大模型调用** —— 纯本地 SQLite，不需要 Postgres、Redis、API key 或外部服务。
+- **精准召回** —— 返回相关条目，而不是每轮加载完整 memory 文件。
+- **可信度分层** —— 区分用户确认、文档提取、AI 生成和未知来源。
+- **时间历史** —— 跟踪事实时间、写入时间、版本、历史快照和废弃链。
+- **冲突仲裁** —— 发现、记录、查看、关闭或废弃矛盾记忆。
+- **结构化 claim 门禁** —— v0.9 在写入/编辑时检测确定性 claim 冲突，使用前要求宿主 LLM 判断。
+- **长文档分段** —— 把长记忆拆成可搜索段落，返回命中段而不是整篇。
+- **workspace 隔离** —— 支持 `none`、`weak`、`strict` 三档和别名归一。
+- **tag 精排与过滤** —— tag 是离散标签信号，不是弱文本片段。
+- **语义召回** —— 可选本地 GGUF embedding；默认仍是轻量字面检索。
+- **doctor 体检** —— 只读检查配置、向量链、分段、claims、一致性、容量和冲突。
+- **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份，缺可选组件也继续工作。
+- **本地优先** —— 纯 SQLite，无托管数据库，无 Redis/Postgres 要求，无 server 侧 LLM 依赖。
+
+> **它不是什么：** memory-arbiter 不是 LLM，也不替代你的 AI 客户端。它是模型下面的一层结构化存储、检索、仲裁和诊断工具。
 
 ### 快速开始
 
-**要求**：Python 3.11+（3.11、3.12、3.13 均可）。
+**要求：** Python 3.11+（3.11、3.12、3.13 均可）。
 
 ```bash
 # 克隆
 git clone https://github.com/billy12151/memory-arbiter-mcp.git
 cd memory-arbiter-mcp
 
-# 安装 —— 用你机器上任意一个 3.11 及以上的 python 即可
-python3.11 -m venv .venv        # 也可：python3.12 / python3.13
+# 安装 —— 用任意 Python 3.11+
+python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e .                 # 从 pyproject.toml 安装运行时依赖
+pip install -e .
 
-# 可选：启用语义召回增强（sqlite-vec）
+# 可选：启用 sqlite-vec 语义召回
 pip install -e '.[vec]'
 
 # 启动
 memory-arbiter-mcp
 ```
 
-#### 用 `uvx` 零安装启动（推荐非 Python 用户）
+#### 用 `uvx` 零安装启动
 
-只想跑起来、不想管 Python 环境——装一次 [`uv`](https://docs.astral.sh/uv/)，然后：
+只想跑起来、不想管理 Python 环境时，先安装 [`uv`](https://docs.astral.sh/uv/)，然后：
 
 ```bash
 uvx --from memory-arbiter-mcp memory-arbiter
 ```
 
-这会拉取已发布的包并启动 `memory-arbiter` 入口。无需 venv、无需 `pip install`。两个入口 `memory-arbiter-mcp` 和 `memory-arbiter` 完全等价——下面的示例在 `uvx` 路径用短的 `memory-arbiter`（少打几个字），在本地 venv 路径用 `memory-arbiter-mcp`（和 venv 里的二进制名一致）。用哪个都行。注意：`uvx` 只省掉**安装**这一步，embedding 模型和 `sqlite-vec` 仍需单独配置（见 [语义检索](#可选语义检索v050)）。
+这会拉取已发布包并启动 `memory-arbiter` 入口。`memory-arbiter-mcp` 和 `memory-arbiter` 两个入口等价。`uvx` 只省安装步骤；如果要启用语义召回，embedding 模型和 sqlite-vec 仍需单独配置。
 
-#### 一键配置助手（macOS + Windows 通用）
+#### 配置助手
 
-不想手编 `config.json`？跑内置的配置助手。它会把一份可用配置写到 `~/.config/memory-arbiter/config.json`，然后检测你的环境，并打印你**还需要执行**的精确命令和下载链接：
+不想手写 `config.json` 时运行：
 
 ```bash
 memory-arbiter setup
 ```
 
-**设计上是半自动的**——setup 绝不替你调 `pip`、绝不替你下模型（这样依赖装失败、模型下不动就还是你环境的问题，不会变成 setup 的 bug）。它只负责告诉你缺什么：
+它会把可用配置写到 `~/.config/memory-arbiter/config.json`，检查环境，并打印你还需要执行的命令或模型下载链接。它不会替你运行 `pip` 或下载模型。
 
-- `sqlite-vec` / `llama-cpp-python` 的安装命令（CPU 预构建 wheel 要带正确的 `--extra-index-url`）
-- GGUF 模型的 HuggingFace + ModelScope（国内镜像）下载链接
-- Python 版本提示：若不在预构建 wheel 覆盖的 3.10–3.12 范围内会给出说明
-
-参数：`--print-config`（只预览不写盘）、`--no-config`（只跑自检）、`--force`（已有 config 时直接覆盖不备份）。照提示跑完命令后，再跑一次 `memory-arbiter setup` 验证。当所有项都显示 `✓` 时，重启 MCP 客户端，语义召回下次查询即生效。
+常用参数：`--print-config`、`--no-config`、`--force`。
 
 ### 接入工具
 
-在你的工具的 MCP 配置中加入（完整示例见 `examples/` 目录）。用本地 venv：
+把 memory-arbiter 加进 MCP 配置。本地 venv 方式：
 
 ```json
 {
@@ -773,7 +662,7 @@ memory-arbiter setup
 }
 ```
 
-或用 `uvx` 零安装（无需本地 clone）：
+或使用 `uvx`：
 
 ```json
 {
@@ -790,439 +679,259 @@ memory-arbiter setup
 }
 ```
 
-> 每个工具改一下 `MEMORY_ARBITER_CLIENT` 标识（`openclaw`、`zcode`、`codex`、`cursor`、`claude-code`）。共享路径、向量、模型配置放 `~/.config/memory-arbiter/config.json`；每客户端身份放 MCP env 段。`db_path` 也建议放配置文件——客户端重装不会丢。**不**用配置文件时，再把 `MEMORY_ARBITER_DB_PATH` 放到每个客户端 env 并指向同一个 SQLite 文件（两者都设时配置文件优先）。（OpenDesign 这类 GUI 工具继承宿主 CLI 的配置，不需要单独的 client 名称。）
+每个工具设置不同的 `MEMORY_ARBITER_CLIENT`（如 `openclaw`、`zcode`、`codex`、`cursor`、`claude-code`、`workbuddy`）。共享数据库、向量、模型配置放 `~/.config/memory-arbiter/config.json`；每客户端身份放 MCP env 段。
 
-> ⚠️ **需要新建会话**：MCP Server 在客户端启动时加载，已经打开的会话不会识别新添加的 Server。配置好后请新建一个会话。
+> **需要新建会话：** MCP server 在会话启动时加载。已经打开的会话不会看到新加的工具。
 
-#### 📋 Agent 指令：什么该写到哪里
+#### Agent 指令：什么写到哪里
 
-如果你的客户端同时维护本地 markdown（ZCode 的 `MEMORY.md`、Codex 的 `AGENTS.md` 等），**把下面这段贴进你 agent 的系统指令**，让它知道什么该写到哪里：
+如果你的客户端也维护本地 markdown，例如 `MEMORY.md`、`AGENTS.md` 或工具自己的笔记，把下面这段贴进 agent 指令：
 
-```
-本地 md 只存自用信息（规则/经验/配置/角色）。凡是有可能被其他 agent
-或平台复用的信息（不只是项目信息——需求、调研、决策、进展、用户偏好、
-知识结论等），一律写入 memory-arbiter。
+```text
+本地 markdown 只存自用信息：规则、工具经验、配置说明、agent persona。
+凡是可能被其他 agent 或平台复用的信息——需求、调研、决策、进展、
+用户偏好、知识结论——都写入 memory-arbiter。
 
-每次写入必填：subject、tags、source_type（限 `user_confirmed` /
-`agent_generated` / `document_extracted`；其中 `user_confirmed` 会自动
-锁定该条记忆——只用于用户明确确认过的事实）、event_time（ISO 8601）、
-workspace（项目名；默认 `isolation=none`，会存储和返回但**不**过滤 memory_search / memory_recent——见
-[Workspace 隔离](#workspace-隔离-none--weak--strict)）、source_ref。
+每次写入必填：subject、tags、source_type（user_confirmed、agent_generated、
+document_extracted）、event_time（ISO 8601）、workspace、source_ref。
+user_confirmed 只用于用户明确确认过的事实；它会自动锁定记录。
 
-查找先 memory_search，细节读源文件。发现矛盾不覆盖：明确知道哪条对时
-用 memory_supersede（废弃错的）；不确定时走冲突工作流
-（memory_scan_conflict_candidates → memory_record_conflict →
-memory_list_conflicts），不要直接改任何一侧。v0.9.0 起 memory_write /
-memory_edit / memory_search 可能返回
-`action_required=judge_conflict_before_use` 及结构化 judgment request
-——先通过 `memory_submit_conflict_judgment` 提交判定，再使用涉事冲突值。
-待办处理完成后用 memory_edit(tags_only=true,
-remove_tags=["todo"])（v0.7.6）移除 todo tag——低副作用、不写历史、不
-增加 version、不触发重算 embedding、从 linked_open_items 移除；不要只
-在新记忆里提及，否则旧条目仍呈待办状态会误导检索。
+先 memory_search，再读源文件补细节。发现矛盾不要覆盖；明确知道哪边错，
+就 supersede 错的；不确定就走冲突工作流。如果响应返回
+action_required=judge_conflict_before_use，先提交随响应返回的 judgment request，
+再使用冲突 claim。
 
-写工具上的 `authorized=true`（`memory_supersede` / `memory_edit` /
-`memory_cleanup_history`）是**调用方确认门**，
-不是强鉴权。它让调用方 agent 显式声明"是的，突破 `locked` /
-`user_confirmed` 保护"——memory-arbiter 是本地、单信任域工具，这道门在
-调用方。若将来多租户使用，需先引入调用方身份 + 策略再依赖它。
-
-成功的 MCP 响应可能带顶层 `notices` 数组。这是旁路信息：`data` 不变，
-不理解 notices 的调用方可以忽略。v0.9.6 用它做低频更新发现：MCP server
-到期时会发起一次 one-shot 后台 PyPI 检查，把状态缓存在
-`~/.local/share/memory-arbiter/update_state.json`，并在发现新版本或升级后尚未
-跑 doctor 时提醒用户。每个版本 7 天内不重复提醒；没有 ack 协议，也不会自动升级。
-如需关闭联网更新检查，在 `~/.config/memory-arbiter/config.json` 中设置
-`{"update_check":{"enabled":false}}`。
+待办完成后，用 memory_edit(tags_only=true, remove_tags=["todo"]) 移除 todo tag。
+不要只写一条新的“已完成”记忆，否则旧 todo 仍保持 active，会误导后续检索。
 ```
 
 ### 客户端配置位置
 
-| 客户端 | 配置文件位置 |
+| 客户端 | 配置位置 |
 |---|---|
-| ZCode | `~/.zcode/v2/` 下 MCP 配置 |
-| Codex CLI | `~/.codex/` 下 MCP 配置 |
+| ZCode | `~/.zcode/v2/` MCP 配置 |
+| Codex CLI | `~/.codex/` MCP 配置 |
 | Claude Code | 项目根目录 `.mcp.json` |
 | Cursor | `~/.cursor/mcp.json` |
+| WorkBuddy | `~/.workbuddy/mcp.json` |
 | OpenClaw | `~/.openclaw/openclaw.json` MCP 配置 |
 
-> **OpenDesign / OpenClaw GUI 类工具**：这类工具寄宿在底层 CLI（Codex CLI、Claude Code 等）之上，**没有自己的 MCP 配置入口**。宿主客户端加载了哪个 MCP Server，GUI 工具就天然能用——例如 Codex CLI 配好了 memory-arbiter，跑在 Codex 上的 OpenDesign 就能直接调用 `memory_search` / `memory_write`，无需额外设置。
+OpenDesign 和 OpenClaw GUI 工具运行在宿主 CLI 之上，会继承宿主客户端已经加载的 MCP server。
 
 ### MCP 工具
 
-按使用场景分组。日常 Agent 心智模型刻意收敛为 `memory_write`、`memory_search`、`memory_search_expired`、`memory_get` 四个工具；其余工具用于修正/版本管理、冲突工作流、长文档分段、语义检索运维和系统状态。
-
-**日常读写** —— 大多数会话只用到这些。
+#### 日常读写
 
 | 工具 | 说明 |
 |---|---|
-| `memory_write` | 写入记忆（`source_type=user_confirmed` 自动锁定）。v0.9 同步检查确定性结构化 claim；若返回 `action_required=judge_conflict_before_use`，宿主 LLM 必须先提交随响应返回的判断请求，再使用该 claim。metadata 重叠 `write_hints` 仍是可 dismiss 的 advisory。 |
-| `memory_search` | 搜索 active 记忆（FTS5 → LIKE 自动降级，可选向量召回）。`limit` 是单页大小不是上限。v0.9 按状态路由信号：待模型/用户确认会强提醒；已持久化的 `conflict_guidance` 不阻塞，并携带建议用法。 |
-| `memory_search_expired` | 只搜索 expired 历史/审计记录：非 active、非 deleted 的记忆（`superseded`、`conflicted`、`pending`）。用于 supersede 链审计、旧决策追溯、历史 walkthrough。支持 `limit` + `offset`，响应带 `effective_limit`、`next_offset`、`pagination_precision`。 |
-| `memory_get` | 通过 ID 直接获取单条记忆的完整信息。当已知 `memory_id`（如从冲突列表、审计结果、搜索结果中获取）时，直接用此工具获取记忆详情，无需重新搜索。v0.8.0 新增 `sections`（`none`/`catalog`/`all`，默认 `catalog`）和 `section_ids`（优先于 `sections`；缺失项进 `missing_section_ids`）。只读。 |
+| `memory_write` | 写入记忆。`source_type=user_confirmed` 自动锁定。tags 是排序/过滤信号。v0.9 会检查结构化 claims，必要时要求宿主 LLM 先判断再使用。 |
+| `memory_search` | 只搜索 active 记忆。支持字面召回、可选向量召回、过滤、分页信号、关联待办和冲突信号。 |
+| `memory_search_expired` | 搜索非 active、非 deleted 的历史记录：`superseded`、`conflicted`、`pending`。用于旧决策、废弃链和审计。 |
+| `memory_get` | 按 ID 获取记忆。支持 section catalog、全部 sections 或指定 section IDs。 |
 
-**修正与版本管理** —— 原地修改、确认事实、废弃旧记录，并审计改动历史。
-
-| 工具 | 说明 |
-|---|---|
-| `memory_edit` | （v0.4.0，v0.7.6）原地编辑记忆正文（整体替换 `new_content` 或局部替换 `old_text`→`new_text`），或通过 `tags_only=true`+`add_tags`/`remove_tags` 仅更新 tags。正文编辑旧版本自动存入历史表并同步 FTS；tags-only 编辑低副作用：不写历史、不增加 version、不重算 embedding。`locked`/`user_confirmed` 记忆需 `authorized=true`。 |
-| `memory_history` | （v0.4.0）查看一条记忆的版本演化轨迹（历史快照，按版本号倒序）。只读。 |
-| `memory_confirm` | 将用户明确确认的记忆提升为 user_confirmed + locked，作为权威事实保护。 |
-| `memory_activate` | 激活被 `strict` workspace 隔离挂起（`pending`）的记忆（新 workspace 确认门）。只清除隔离门，不做 `memory_confirm` 的信任/锁定提升。需 `authorized=true`。 |
-| `memory_supersede` | 显式废弃某条记忆；可突破 user_confirmed/locked 保护（需 `authorized=true`）。这是冲突工作流中的状态变更原语，不是自动编辑。 |
-| `memory_cleanup_history` | （v0.4.0）清理历史表快照（**绝不碰活跃记录**）。支持单条 / 按时间 / 全量；全量清理需 `authorized=true`。 |
-
-**冲突工作流与诊断** —— search / doctor / scan 暴露问题后的低频工具。
+#### 修正与版本管理
 
 | 工具 | 说明 |
 |---|---|
-| `memory_list_conflicts` | 列出未解决的冲突。通常在 `memory_search` 返回 `open_table` 冲突信号、doctor 报冲突积压、或 scan 任务记录冲突后使用。 |
-| `memory_compare` | 低频诊断工具：比较两条记忆，只返回解释，不写 conflicts 表。 |
-| `memory_arbitrate` | 兼容保留的手动仲裁工具。新冲突工作流优先使用 `scan_conflict_candidates → record_conflict → list_conflicts → supersede/resolve`；本工具不是日常入口。 |
-| `memory_submit_conflict_judgment` | `structured_claim_candidate` 必须执行的宿主 LLM 回执；提交判断、建议用法、理由、用途上下文及精确 version/claim-revision CAS，不修改记忆。 |
-| `memory_correct_conflict_judgment` | 追加一条授权人工纠正并设为 active；旧 LLM/policy 判断仍保留。 |
-| `memory_list_conflict_judgments` | 查看某个冲突的追加式判断历史。 |
-| `memory_set_entity` / `memory_list_entities` | 无内容历史副作用地设置规范 entity/scope，或查看实体覆盖率与未分配记忆。 |
-| `memory_rebuild_claims` | dry-run 或处理一批 stale、unindexed、或已索引但未完成冲突对账的 active 记忆；重复运行到 dry-run count 为 0。 |
+| `memory_edit` | 原地编辑正文或只更新 tags。正文编辑会归档旧版本；tags-only 不写历史、不加版本、不重算 embedding。locked 记录需要 `authorized=true`。 |
+| `memory_history` | 查看记忆历史快照。 |
+| `memory_confirm` | 提升为用户确认并锁定。 |
+| `memory_activate` | 激活 strict-workspace 下的 `pending` 记忆。 |
+| `memory_supersede` | 废弃记忆，可用 `authorized=true` 突破锁保护。 |
+| `memory_cleanup_history` | 只删除历史快照，绝不碰 active 记忆。 |
 
-**长文档分段**（v0.6.0）—— 超过 `split.threshold` 的文档走段落级检索。需 sqlite-vec + GGUF embedding。大多数文档会被 `memory_write` 自动规则分段（检测到 Markdown 标题时）；下面的 `memory_split` 只是 agent 侧的续接/修复入口，不在日常写入路径上。
+#### 冲突工作流与诊断
 
 | 工具 | 说明 |
 |---|---|
-| `memory_split` | Agent 侧续接/修复分段入口，不是日常写入工具。在 `memory_write` 返回 `split_request` 后使用（agent 用自身 LLM 读全文，只产出 `title`/`summary`/`anchor_text`/`occurrence_index`/`title_path` 元数据后发布）、用于修复历史 `NULL`/`failed`/`declined` 记忆、或主动 rebuild（`split_decision="rebuild"`）。两阶段协议保留：prepare 返回全文 + snapshot + schema；`split`/`rebuild` 发布。普通写入**不要**预先调 `memory_split`——`memory_write` 已处理规则分段。 |
+| `memory_list_conflicts` | 列出未解决冲突。 |
+| `memory_compare` | 比较两条记忆，只返回解释，不记录冲突。 |
+| `memory_arbitrate` | 兼容保留的手动仲裁入口。新流程优先 scan → record → list → resolve/supersede。 |
+| `memory_scan_conflict_candidates` | 向量召回候选冲突对，供 agent 判断。 |
+| `memory_record_conflict` | 持久化带 enrichment 的冲突记录。 |
+| `memory_resolve_conflict` | 关闭冲突为 resolved 或 not-a-conflict。 |
+| `memory_submit_conflict_judgment` | 为结构化 claim 碰撞提交必需的宿主 LLM 判断。 |
+| `memory_correct_conflict_judgment` | 追加授权人工纠正。 |
+| `memory_list_conflict_judgments` | 查看单个冲突的追加式判断历史。 |
+| `memory_set_entity` / `memory_list_entities` | 设置或查看规范 entity/scope。 |
+| `memory_rebuild_claims` | 重建确定性 claims 并对账结构化冲突。 |
 
-**语义检索运维** —— 手动控制向量；配置好后通常自动处理。
+#### 长文档分段
 
 | 工具 | 说明 |
 |---|---|
-| `memory_store_embedding` | （可选）手动存入或替换某条记忆的语义向量。v0.5.0+ 配置后也可自动为写入/查询生成向量。 |
-| `memory_rebuild_embeddings` | （v0.6.0）切换 embedding 模型后批量重建所有向量（memory 级 + section 级）。不需要 LLM，只重算向量。 |
-| `memory_resync_vec_parent_status` |（v0.9.4）非破坏性地将 `vec.parent_status` 与 `memories.status` 重新同步。`dry_run=true` 报告 mismatch；`dry_run=false` 执行 UPDATE，不要求 `authorized`。 |
-| `memory_cleanup_inactive_vectors` |（v0.9.4）先 resync 状态漂移，再只清理父 memory/section 行已不存在的真实孤儿向量。superseded 向量保留给 `memory_search_expired`。`dry_run=true` 只报数量；孤儿清理需 `dry_run=false` + `authorized=true`。绝不碰记忆正文/FTS。 |
+| `memory_split` | 长文档分段的 agent 侧续接/修复入口。普通写入从 `memory_write` 开始；只有收到请求或修复历史记录时才调用。 |
 
-**系统状态与审计**
+#### 语义召回运维
 
 | 工具 | 说明 |
 |---|---|
-| `memory_status` | 查看运行状态、模式、降级原因、缓存的更新检查状态，以及后台更新检查是否启用。v0.8.0 用 `split_capability`（`{available, reason: vec_ready/vec_not_ready/embedder_unavailable}`）替代旧的布尔 `split_enabled`。 |
-| `memory_list_conflicts` | 列出未解决的冲突 |
-| `memory_audit_summary` | 各 workspace 记忆统计概览（条目数、最旧/最新、open 冲突数、来源分布） |
-| `memory_doctor_overview` | 跑一次只读健康体检，返回分级报告（26 项 finding，覆盖配置 / 向量链 / 分段 / 一致性 / 容量）。每条诊断带 severity、针对当前配置的 `fix_hint`，以及高价值修复路径的轻量机器字段（`fix_kind`、`fix_tool`、`requires_authorized`、`risk`）。`deep=true` 时额外加载 GGUF 模型做维度探针。与下面的 `doctor` CLI 用同一套引擎。 |
+| `memory_store_embedding` | 手动写入或替换 embedding。配置完成后通常自动处理。 |
+| `memory_rebuild_embeddings` | 切换 embedding 模型后重建向量。 |
+| `memory_resync_vec_parent_status` | 非破坏性同步向量父状态和 memory 状态。 |
+| `memory_cleanup_inactive_vectors` | 修复状态漂移并只清理真实孤儿向量。 |
 
-### 可选：语义检索（v0.5.0）
+#### 系统状态与审计
 
-默认情况下，memory-arbiter 用的是**字面检索**（FTS5 trigram + BM25 + 软重排）——不依赖 embedding 模型、不引入重依赖、完全本地。绝大多数场景这就够了。
+| 工具 | 说明 |
+|---|---|
+| `memory_status` | 查看运行模式、存储路径、降级状态、策略配置和向量化状态。 |
+| `memory_audit_summary` | 各 workspace 统计、最旧/最新条目、open 冲突数和来源分布。 |
+| `memory_doctor_overview` | 只读健康体检，覆盖配置、向量链、分段、claims、一致性、容量和冲突。 |
 
-对于"措辞不同但语义相同"的查询（比如搜"快乐"想命中"开心"、搜"金融带货"想命中"金营平台"），你可以**可选开启语义检索**。memory-arbiter **不内置** embedding 模型——你自己带模型，这样默认安装保持轻量，模型选择、语言、成本完全由你掌控。配置完成后，普通 `memory_write` 和 `memory_search(query="...")` 会自动向量化，调用方不用手动传 `query_embedding`。
+### 可选：语义召回
 
-**四步开启：**
+默认使用字面召回：FTS5 trigram + BM25 + 软重排。它完全本地、轻量，对很多项目已经够用。
 
-1. 安装 sqlite-vec 和 GGUF 运行时：
-   ```bash
-   pip install memory-arbiter-mcp[vec]
-   pip install llama-cpp-python
-   ```
-2. 选一个 embedding 模型。v0.5.0 的自动向量化内置支持本地 GGUF：
-   - **GGUF（本地，推荐）**——通过 `llama-cpp-python` 跑任意 GGUF embedding 模型。能复用你已有的模型（比如 OpenClaw/llama.cpp 用的）。把脚本指到模型文件：
-     `embeddinggemma-300m-qat-Q8_0.gguf` 是一个 768 维的默认选择。
-   - **sentence-transformers（本地）**——HuggingFace PyTorch 模型（`bge-small-zh`、`bge-base-en` 等）：
-     用你自己的 backfill/query 脚本，把向量传给 `memory_store_embedding` / `memory_search(query_embedding=...)`。
-   - **远程 API（OpenAI / 智谱 / 通义）**——在你自己的灌向量脚本里调 API，把向量传给 `memory_store_embedding`。memory-arbiter 这侧只需 `pip install memory-arbiter-mcp[vec]`，不跑任何模型。
+需要“按意思找”时，启用 sqlite-vec 并自带 embedding 模型。内置自动路径支持通过 `llama-cpp-python` 使用本地 GGUF；远程 embedding API 也可以由你自己的脚本调用，再通过 `memory_store_embedding` 写入。
 
-   **向量模型速查表**（任选一个，然后把 `MEMORY_ARBITER_VEC_DIM` 设成它的维度）：
+```bash
+pip install memory-arbiter-mcp[vec]
+pip install llama-cpp-python
+```
 
-   | 方式 | 推荐模型 | 维度 | 来源 | 适用场景 |
-   |---|---|---|---|---|
-   | GGUF（本地） | `embeddinggemma-300m-qat-Q8_0.gguf` | 768 | [HuggingFace](https://huggingface.co/google/embeddinggemma-300m-qat) | 复用已有模型；不想搭 Python ML 环境 |
-   | sentence-transformers | `BAAI/bge-small-zh-v1.5`（中）/ `bge-base-en-v1.5`（英） | 512 / 768 | [HuggingFace](https://huggingface.co/BAAI) | 性价比最高；需要 PyTorch |
-   | 远程 API | `text-embedding-3-small`（OpenAI）/ `embedding-3`（智谱） | 1536 / 1024 | 各平台控制台 | 不想本地算力；按调用计费 |
+推荐本地模型：`embeddinggemma-300m-qat-Q8_0.gguf`（768 维）。把它配置到 `~/.config/memory-arbiter/config.json`，重启 MCP server；源码 checkout 用户可以用 `docs/semantic_example.py` 给旧记忆补向量。
 
-   **自动向量化完整流程一句话**：选 GGUF 模型 → 把 vec/model 配置写到 `~/.config/memory-arbiter/config.json` → 重启 MCP server → 跑一次 `docs/semantic_example.py` 给旧记忆补向量。之后新写入和普通文本查询会自动向量化。
-3. 复制配置模板并修改路径：
-   ```bash
-   mkdir -p ~/.config/memory-arbiter
-   # 源码 checkout：
-   cp examples/memory-arbiter.config.example.json ~/.config/memory-arbiter/config.json
-   # 或 pip 安装用户：
-   curl -L https://raw.githubusercontent.com/billy12151/memory-arbiter-mcp/main/examples/memory-arbiter.config.example.json \
-     -o ~/.config/memory-arbiter/config.json
-   ```
-   共享路径、向量、模型配置建议放这里，不放每个 MCP 客户端的 env 段。`MEMORY_ARBITER_CLIENT`、`MEMORY_ARBITER_AGENT_ID` 仍放各客户端 env，避免所有工具被全局 config 覆盖成同一个身份。`~/.config/memory-arbiter/` 是用户自己的 XDG 配置目录，pip 安装和客户端重装不会覆盖。第一次自动向量化会懒加载模型，可能明显慢一次；后续复用已加载模型。
-4. 给现有记忆补向量，然后正常搜索：
-   ```bash
-   # 从源码 checkout 运行：
-   python docs/semantic_example.py                 # 给所有活跃记忆补向量
-   python docs/semantic_example.py --query "金营平台营销"   # 试一次语义检索
-   ```
-   backfill 辅助脚本目前是源码树脚本。只通过 pip 安装的用户，可以 clone 仓库后运行脚本，或用自己的脚本调用 `memory_store_embedding` 给旧记忆补向量。服务配置好后，新写入/编辑会自动写向量。
+语义候选会拿到低于强标题/tag 命中的保底分。它帮助召回语义相近内容，但不会让模糊向量结果压过精确标签。
 
-配置完成后，普通 `memory_search(query="...")` 可以自动生成查询向量。显式 `query_embedding` 仍然支持，并且优先级更高。
+### Tag 评分与过滤
 
-**排序规则**：语义召回的候选会给一个*保底分*（略低于正文命中分）——它能压过"正文顺带提及"的噪音，但永远不会盖过真正的标题/标签命中。仲裁和可信度分层逻辑完全不动。
+tag 被当作离散标签，而不是一句普通文本。带有 `v0.7.2` 和 `release` tag 的记忆，应该胜过 subject 只是偶然含一个 query 词的记录。
 
-**实测效果（小样本，非正式 benchmark）**：在 v0.3.0 验证用的同一套 15 条黄金查询 + 18 条 pairwise 约束上，开启语义检索后 Top-3 命中率和排序质量进一步提升。最大的亮点是 pairwise 通过率冲到 100%——所有"该排前面的都排在前面了"。SQLite 侧查询延迟约多 8ms；本地 embedding 生成耗时取决于模型和运行时。
+`memory_search` 支持：
 
-| 指标 | bm25 (v0.2.6) | hybrid (v0.3.0) | hybrid + 语义 (v0.3.1) |
-|---|---|---|---|
-| Top-1 命中率 | 46.7% | 53.3% | 53.3% |
-| Top-3 命中率 | 60.0% | 66.7% | **73.3%** |
-| Pairwise 通过率 | 77.8% | 88.9% | **100.0%** |
+- `tags_filter`：严格 AND；
+- `after_time` / `before_time`：按 ingest_time 过滤；
+- `source_type`：按来源过滤；
+- `has_more` 和 `total_estimate`：提示结果是否还有更多。
 
-### Tag 评分与搜索过滤（v0.7.3）
+中英混合或版本号+CJK 查询建议用空格分词，例如 `"v0.7.2 发版"`。
 
-**解决的问题。** v0.7.2 dogfooding 暴露了两个痛点：
+### Workspace 隔离：`none` / `weak` / `strict`
 
-1. **tag 信号被系统性低估。** 一条 tags 精确含 query 两个 token 的记忆（如 query `"v0.7.2 发版"` 命中 tags `["v0.7.2", "发版"]`），排序竟然输给一条 subject 只是偶然含其中一个词的记忆。原因是旧评分器把 tags 当句子做整串 substring 匹配——但 tags 天然是离散标签集合，几乎永远拼不成 query 整串，结果 tags 永远到不了 `strong` 档。
-2. **没法表达穷举式查询。** `limit` 同时是"单页大小"和"结果上限"。agent 问"所有发版记录"拿到 10 条后，没法判断这是全部还是只是第一页。
+默认 `workspace` 只是存储标签，不过滤召回。需要项目隔离时设置 `isolation`。
 
-**做了什么改动。**
-
-- **tag 评分改为 token 级**（`_score_tags_surface`）。query 按空格切 token，每个 token 去 tag 集合里匹配，命中率决定档位：全部命中 → `strong`、≥半数 → `medium`、有命中 → `weak`。纯 CJK token 走前缀/后缀子串（tag `发版` 能匹配 query token `发版历史`）；ASCII/混合 token 走精确等值（`v0.7` 不会命中 tag `v0.7.0`）。双向归一化会剥掉版本号前面的 `v`。
-- **subject 评分收紧。** `classify_match_level` 的 `specific_coverage` 阈值 `0.4 → 0.6`，subject 只命中 query 一半 anchor 不再拿 `medium`（这正是压制 tag 精确命中记录的"subject 偶然命中"陷阱）。
-- **tag 权重追平 subject**（`7/4/1.5 → 10/6/2`，cap `7.0 → 10.0`）。tag 是主动维护的精确分类——当它说"这正是 query 所问"，权重应该和 subject 命中一样，而不是更低。
-- **`limit` 变成单页大小。** 响应里带 `has_more: bool` 和 `total_estimate: int`，调用方可以区分穷举式查询和已完成查询。`memory_search` 仍不暴露 offset；`memory_search_expired` 支持 `limit` + `offset` 做历史/审计分页。
-- **`memory_search` 新增过滤参数**（全部可选，不传 = v0.7.2 行为）：
-  - `tags_filter: list[str]` —— 严格 AND，记忆必须**同时**含所有列出的 tag
-  - `after_time` / `before_time` —— ISO 8601，按 `ingest_time` 过滤（naive 当 UTC）
-  - `source_type` —— `user_confirmed` / `agent_generated` / `document_extracted` 之一（enum 另有 `unknown` / `pending`，但那两个是默认值/中间态，不应主动写入）
-
-**当前限制。**
-- `memory_search` 没有公开 offset 游标；`has_more=true` 时换更精确的 query、放大 `limit`（上限 100）、或加 `tags_filter` 收窄。需要翻历史/审计记录时用 `memory_search_expired`。
-- 空 `query` + `tags_filter` / 时间 / `source_type` 已支持服务端过滤，并按 `ingest_time` 新到旧排序；这是“列出所有带 X tag”的推荐路径。
-- 开启 `tags_filter` 时 vec 语义召回实际失效（vec 候选的 tags 通常和字面 filter 无关，会被 post-filter 砍光）。混合字面召回仍正常。
-- ASCII+CJK 混合 token（如 `v0.7.2发版` 不带空格）走等值路径会漏匹配——**用空格分隔**（`"v0.7.2 发版"`）。
-- `memory_search_expired` 的 query-recall 分页是 best-effort；空 query browse/filter 路径是精确分页，并返回 `pagination_precision="exact"`。
-
-**验证。** 合成数据 2000×5 seed（`scripts/tune_tag_weights.py`）证明 `specific_coverage=0.6` 是临界点。关键指标是 A>B 这一对（TAG_PRECISE 应胜过 SUBJ_INCIDENTAL——即触发本次修复的 id=206 vs id=105 场景）：在 baseline 下只有 **0.520，subject 阈值收紧到 0.6 后达到 1.000**；0.5 太松、0.7+ 无额外收益。总 pairwise 准确率从 0.958 升到 0.984。真生产库 dogfooding query `"v0.7.2 发版"` 把目标记忆从 #13 提到 #1，6 个抽样查询无回归。
-
-### Workspace 隔离： `none` / `weak` / `strict`
-
-默认 `workspace` 字段是**纯标签**——会存储和返回，但不影响排序或可见性，`memory_search` 完全忽略它。若想按项目隔离记忆，设 `isolation`：
-
-| 档位 | 写入 ws | 召回不传 ws | 召回传 ws | 新 workspace |
+| 档位 | 写入 workspace | 不传 workspace 搜索 | 传 workspace 搜索 | 新 workspace |
 |---|---|---|---|---|
-| **`none`**（默认） | 可选，忽略 | 全库 | **忽略**——全库，无排序影响 | 静默 |
-| **`weak`** | 建议传 | 全库 | **软重排**——同 ws 加分、跨 ws 降权、都不丢 | `write_hints.new_workspace_detected` |
-| **`strict`** | **必传**（空则报错） | **报错**（拒绝） | **硬过滤**——仅同 canonical ws | `action_required=confirm_new_workspace`（写为 `pending`，确认前不召回，用 `memory_activate` 激活） |
+| `none`（默认） | 可选 | 全库 | 忽略 | 静默 |
+| `weak` | 建议 | 全库 | 同 workspace 加权、跨 workspace 降权 | `write_hints.new_workspace_detected` |
+| `strict` | 必填 | 报错 | 硬过滤到 canonical workspace | 写为 `pending`，直到 `memory_activate` |
 
-三档单调递增：workspace 从 *无效* → *影响排序* → *决定可见性*。
+不确定时用 `weak`。`strict` 是用召回性换隔离性：workspace 传错会让记忆静默不可召回。
 
-**别名归一。** 无论哪一档，workspace 名都按 embedding 相似度归一，所以 `金营项目` 和 `金科营销项目` 会合并成同一个 canonical workspace。你传的原文存在 `workspace`，归一后的名字存在 `workspace_canonical`。余弦距离阈值是 `workspace_match_distance`（默认 `0.25`——约 0.16 合并上述同义词，约 0.43 区分无关项目）。
+workspace 别名通过 embedding 相似度归一，默认余弦阈值是 `0.25`。
 
-> **默认是 `none`。** workspace 是可选标签，不传也不影响召回。
->
-> **`strict` 非必要不建议。** 一旦开启，Agent 传错或拼写不一致的 workspace，会导致相关记忆被**静默隔离、召不回**（记忆沉默——你甚至不知道有记忆没召回）。别名归一能缓解拼写漂移，但修复不了语义上传错项目。**你在用可召回性换隔离性。**
->
-> **不确定就用 `weak`。** 跨 workspace 数据永不丢失，只降权。这把隔离意图变成*可观测*的排序偏好，而非*不可见*的静默丢失。
+### 可选：长文档分段
 
-通过环境变量（`MEMORY_ARBITER_ISOLATION=weak`）或配置文件（`"isolation": "weak"`）设置。`memory_status` 可回显确认。激活 strict 挂起的记忆：`memory_activate(memory_id, authorized=true)`。
+长记忆有两个问题：搜索可能找不到相关段落；即使找到了，也可能把整篇文档都返回给模型。
 
-### 可选：长文分段检索（v0.6.0）
+分段会把长文拆成可检索 section。查询可以只返回命中段，同时保留原始完整记忆。
 
-**它解决什么问题。** 一篇长文档——比如 12000 字的设计方案、4000 字的接口手册——作为一条记忆存进去后，你要找里面的某个具体细节时，有两个问题：
+```text
+memory_write(long_doc)
+  → 先保存原文
+  → vec ready 且内容 > split.threshold 时：
+      - Markdown 标题符合限制 → 后台规则分段
+      - 否则 → 返回 split_request 给 agent 续接
 
-1. **搜不到对的段落。** 一条记忆的语义向量只从前 ~3600 个字符生成。超过这个位置的内容——后面的章节、附录、补充说明——语义检索根本"看不见"。问一个只在后半段出现的东西，检索要么完全漏掉，要么含糊地返回整篇文档说"这个可能有关系"。
-2. **整篇文档都塞给你。** 就算检索确实找到了对的文档，它返回的是全部 12000 个字符。你的模型得把整篇扫一遍，才能找到真正回答问题的那 800 字——浪费上下文、分散注意力。
+memory_search("query")
+  → section 匹配有把握时返回命中段
+  → 覆盖率高或没有 section 匹配时返回完整 memory
 
-**分段做了什么。** 它把长文档拆成带标题的段落（像书的章节），每个段落有自己的检索向量。这样你提问时，检索能直接指到对的那一段，并且只返回那一段，而不是整篇文档。
-
-可以理解为给文档加了一张目录，检索能直接跳到对应章节，而不用每次都把整本书搬出来。
-
-**实测收益（在本项目自己的文档上测的——样本小，仅供参考）：**
-
-我们跑了 17 个查询，对象是 8 篇长文档（4500–12200 字），每个查询都问一个具体细节——其中 10 个问的是旧检索根本看不见的 3600 字之后的内容。用 `python scripts/benchmark_section_recall.py` 可复现（只读，在你的真实库上跑）。
-
-*找得到对的段落，而不只是对的文章：*
-
-| 指标 | 不分段 | 分段后 |
-|---|---|---|
-| 定位到**正确段落**（top-1） | —（做不到） | **94%** |
-| 定位到正确段落（top-3） | — | **100%** |
-| 能找到这篇文章 | 71% | — |
-
-不分段时，即使找到了文档，匹配距离也是 14–19（检索在"猜"）。分段后，正确段落的匹配距离是 0.23–0.41（检索很有把握）。
-
-*返回更少的文字，模型读得更高效：*
-
-| 指标 | 不分段（返回全文） | 分段后（只返回命中的段落） |
-|---|---|---|
-| 每次查询平均返回 | ~7350 字 | ~2630 字 |
-| **17 次查询合计** | 124,980 字 | 44,675 字 |
-| **减少** | | **64%** |
-
-对一篇 12000 字的文档，两个收益叠加：模型既被指到了对的那 ~800 字，又不用扫其余的 11000 字。
-
-**前置条件（全部满足才能生效）：**
-1. 已配置语义检索——sqlite-vec + GGUF embedding（见上方）。分段能力绑定 vec readiness：vec ready 即可分段。（v0.8.0 移除了旧的 `split.enabled` 开关。）
-2. 有外部 LLM 可用于生成段落标题和边界（仅无 Markdown 标题的文档需要，见下）
-
-> 刚换了 embedding 模型？先跑 `memory_rebuild_embeddings`——在所有向量和新模型匹配之前，分段功能保持离线。用 `memory_status` 的 `split_capability` 查看（`reason: vec_ready` 表示可分段）。
-
-**工作流程：**
-
-```
-memory_write(长文档)
-  → 原文先成功保存（一定成功；分段失败不丢原文）
-  → 若 vec ready 且内容超过 split_threshold：
-      - 有 ≥2 个 fenced-code-safe Markdown 标题，每段 ≤ max_section_chars、
-        数量 ≤ max_sections  →  memory_write 入队后台分段（mode=rules_async,
-        reindex_pending=true），无需 agent；split_status 暂为 NULL，
-        worker 发布完成后 → active
-      - 否则（无标题 / 单标题 / 超限）
-        →  返回完整 split_request（content + content_hash +
-           memory_version + split_status + split_revision + schema）
-        →  Agent 用自身 LLM 读全文，只产出
-           title / summary / anchor_text / occurrence_index / title_path
-           元数据，再调 memory_split(memory_id, split_decision="split",
-           sections=[...]) 发布
-
-memory_split(memory_id, split_decision="split", sections=[...])  ← 发布
-  → arbiter 根据 occurrence_index 精确计算段落边界（不信 LLM 的猜测）
-  → 生成每段向量（必须全部成功）
-  → 保存段落 + 向量
-  →（也用于修复历史 NULL/failed/declined 记忆，或通过
-     split_decision="rebuild" 主动重建）
-
-memory_search("查询")
-  → 对已分段的文档：段落匹配找出相关段落
-  → partial 命中 → 返回完整命中段正文
-     （顶层 content = 命中段拼接，content_scope=matched_sections，
-      matched_sections 每项含完整 section 正文）
-  → 覆盖率达标或 zero-match → 返回完整 memory（content_scope=full_memory）
-  → 不再有 content_omitted / preview 截断语义
-
-memory_get(memory_id, sections=..., section_ids=[...])  ← 取 catalog/all/指定段落
-memory_get(memory_id)                                  ← 需要时取全文
+memory_get(memory_id, sections="catalog" | "all")
+  → 查看或获取 section 正文
 ```
 
-> **值得知道的：**
-> - **`memory_write` 写入时自动分段。** 它在写入时检测 Markdown 标题，对结构化文档入队后台分段——不需要 agent 往返。调用立即返回 `split.mode=rules_async` + `reindex_pending=true`；worker 完成 embed 后（数秒）段级精度异步生效。此前 `memory_search` 返回全文（`content_scope=full_memory`）——召回不丢，只是段级精度暂缺。只有无结构长文（无标题 / 单标题 / 超 `max_section_chars` / 超 `max_sections`）才会返回 `split_request`，让 agent 用自身 LLM 续接。普通写入不要预先调 `memory_split`。
-> - **收到 `split_request` 就静默自动续接。** 收到 `split_request`（带 `action_required=memory_split`）是**内部**信号，不是用户操作步骤。用它携带的完整 `content`，结合 agent 自身 LLM 生成段落元数据，再通过 `memory_split` 发布——不要把 prepare/publish/offset 协议暴露给用户。
-> - **检索永不退化。** 如果向量索引临时不可用，`memory_search` 直接返回完整 memory（`content_scope=full_memory`）——丢的是段落精度，但检索照常工作。
-> - **上下文窗口超限就留作 backlog。** 如果完整原文超出当前 agent LLM 的上下文窗口，**不要**截断或机械切块——保持 `split_status=NULL`，由 `doctor` 记录为 `long-unsplit` backlog。
-> - **编辑会清空段落。** 对 content 跑 `memory_edit` 会清空旧的派生段落索引并重置分段状态，然后对新内容重跑规则分段。
-> - **换模型后重新校准。** `section_vec_distance_threshold`（默认 0.42）基于 embeddinggemma-300m 校准。换 embedding 模型后，跑 `scripts/calibrate_section_threshold.py` 更新阈值——阈值不对等于没过滤。换模型后也要跑 `memory_rebuild_embeddings` 重建所有向量。
-
-**配置：** 分段的所有设置都在 `config.json` 的 `split` 段——完整表格见 [配置](#配置)。（v0.8.0：移除了 `split.enabled` 开关和 `section_zero_match_preview_chars`；分段能力绑定 vec readiness。）这里给一个完整示例：
-
-```json
-{
-  "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
-  "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
-  "vec": { "enabled": true, "dim": 768 },
-  "embedding": {
-    "provider": "gguf",
-    "model_path": "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
-    "auto_query": true,
-    "auto_write": true
-  },
-  "split": {
-    "threshold": 4000,
-    "section_vec_distance_threshold": 0.42,
-    "section_fulltext_threshold": 0.8,
-    "max_sections": 50,
-    "max_section_chars": 3600
-  }
-}
-```
-
-**什么时候算开：** 不再有开关了——只要 vec ready 就算开（v0.8.0 起绑定 vec readiness）。如果你的记忆大部分是短笔记、代码片段、对话摘要，它们不会超过 `split.threshold`，永远不会被分段，零成本。分段对长结构化文档（设计方案、接口手册、调研笔记）才有收益。结构化文档在 `memory_write` 时规则分段（不调 LLM）；只有无可检测 Markdown 标题的文档才需要 agent LLM 调用。
+分段能力绑定向量 readiness。v0.8.0 起没有单独开关。短笔记不会触发分段，也不会产生额外成本。
 
 ### 配置
 
-配置读取顺序：`MEMORY_ARBITER_CONFIG` 指定文件 → `~/.config/memory-arbiter/config.json` → 环境变量/default。**耐久的向量和模型配置建议放配置文件**，避免 MCP 客户端重装/迁移时丢失；下面每行同时给出 JSON 路径和对应的 env 兜底（两者都设时配置文件优先）。环境变量仍适合简单 client 标识和 CI 覆盖。完整说明见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
+配置读取顺序：`MEMORY_ARBITER_CONFIG` → `~/.config/memory-arbiter/config.json` → 环境变量/default。数据库、向量、模型等耐久配置建议放配置文件；每客户端身份通常放 MCP env 段。
 
-**配置文件字段**（`~/.config/memory-arbiter/config.json`）——按用途分组。
+#### 存储与访问
 
-**存储与访问** —— 数据放哪；设一次就好。
-
-| JSON 路径 | env 兜底 | 默认值 | 什么时候调 |
+| JSON 路径 | env 兜底 | 默认值 | 用途 |
 |---|---|---|---|
-| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | 跨工具共享记忆时设成同一路径。 |
-| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | 追加式 JSONL 备份，仅在 SQLite 只读时启用。 |
-| `policy_path` | `MEMORY_ARBITER_POLICY` | _(无)_ | 策略 JSON 文件路径，可按客户端开关、按 agent 允许/拒绝。 |
+| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | 共享 SQLite 路径。 |
+| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | SQLite 只读时的追加备份。 |
+| `policy_path` | `MEMORY_ARBITER_POLICY` | 无 | 可选策略 JSON。 |
 
-**检索调优** —— 结果感觉不准时调的旋钮。`recall_pool_cap` 是第一个该试的。
+#### 检索调优
 
-| JSON 路径 | env 兜底 | 默认值 | 什么时候调 |
+| JSON 路径 | env 兜底 | 默认值 | 用途 |
 |---|---|---|---|
-| `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | **记忆超过约 100 条时调到 100–200**——发现结果里漏了相关记忆，第一个就调它。 |
-| `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | 同主题记忆多时调大。 |
+| `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | 记忆超过约 100 条后可调到 100–200。 |
+| `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | 同主题记忆很多时调大。 |
 
-**实时结构化冲突** —— 写入/编辑时做保守字面检测；server 内部不调用模型、不联网。
+#### 结构化冲突
 
-| JSON 路径 | env 兜底 | 默认值 | 什么时候调 |
+| JSON 路径 | env 兜底 | 默认值 | 用途 |
 |---|---|---|---|
-| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | `beta_all` 面向当前可信 beta 用户默认全开；`off` 仅作为紧急熔断，不影响定期语义 scan。 |
+| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | 仅紧急熔断时设为 `off`。 |
 
-**语义检索** —— 开启"按意思找，不只靠关键词"。需 sqlite-vec + GGUF 模型。详见 [语义检索](#可选语义检索v050)。
+#### Workspace 隔离
 
-| JSON 路径 | env 兜底 | 默认值 | 什么时候调 |
+| JSON 路径 | env 兜底 | 默认值 | 用途 |
 |---|---|---|---|
-| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | 设 `true` 开启语义检索（需 `pip install memory-arbiter-mcp[vec]`）。 |
-| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | 必须和你的 embedding 模型一致。改维度要重建 `memories_vec` 表。 |
-| `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | 仅在设置 `embedding.model_path` 时推断为 `gguf` | v0.5.0 只支持 `gguf`。没有模型路径时，自动向量化保持关闭。 |
-| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH`（或 legacy `MEMORY_ARBITER_GGUF`） | _(无)_ | GGUF embedding 模型路径。 |
-| `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | 自动 encode 纯文本查询触发语义检索。 |
-| `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | 新写入/编辑自动灌向量，立即进语义召回。 |
+| `isolation` | `MEMORY_ARBITER_ISOLATION` | `none` | `none`、`weak` 或 `strict`。 |
+| `workspace_match_distance` | `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | workspace 别名合并的余弦阈值。 |
 
-**长文分段** —— 长文档的段落级检索。绑定 vec readiness（v0.8.0 起无开关）。详见 [长文分段](#可选长文分段检索v060)。
+#### 语义召回
 
-| JSON 路径 | env 兜底 | 默认值 | 什么时候调 |
+| JSON 路径 | env 兜底 | 默认值 | 用途 |
+|---|---|---|---|
+| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | 启用 sqlite-vec 语义召回。 |
+| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | 必须和 embedding 模型一致。 |
+| `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | 从模型路径推断 | 内置本地自动 embedding 使用 `gguf`。 |
+| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` | 无 | GGUF embedding 模型路径。 |
+| `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | 自动向量化纯文本查询。 |
+| `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | 写入/编辑时自动灌向量。 |
+
+#### 长文档分段
+
+| JSON 路径 | env 兜底 | 默认值 | 用途 |
 |---|---|---|---|
 | `split.threshold` | `MEMORY_ARBITER_SPLIT_THRESHOLD` | `4000` | 触发分段的最小字符数。 |
-| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | section Vec 余弦距离上限。基于 embeddinggemma-300m 校准，换模型需重校准。 |
-| `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比达到此值时返回全文。 |
-| `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大段数（最小 2）。 |
-| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 段落 embedding 输入字符上限；v0.8.0 起同时也是发布硬门——任一段落切片超限会以 `section_too_large` 拒绝发布。 |
+| `split.section_vec_distance_threshold` | `MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD` | `0.42` | section 向量距离阈值；换模型需重校准。 |
+| `split.section_fulltext_threshold` | `MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD` | `0.8` | 命中段落占比达到多少时返回全文。 |
+| `split.max_sections` | `MEMORY_ARBITER_MAX_SECTIONS` | `50` | 每条记忆最大 section 数。 |
+| `split.max_section_chars` | `MEMORY_ARBITER_MAX_SECTION_CHARS` | `3600` | 每个 section 切片最大字符数。 |
 
-**环境变量**——每客户端身份建议放在各自 MCP env 段。部分字段也有配置文件对应项，但 config 优先；当某个值必须按客户端/会话变化时再放 env。
+#### 每客户端环境变量
 
-| 变量 | 默认值 | 什么时候调 |
+| 变量 | 默认值 | 用途 |
 |---|---|---|
-| `MEMORY_ARBITER_CLIENT` | `codex` | 每个工具一个标识（`codex`、`claude-code`、`cursor`、`zcode`…）。 |
-| `MEMORY_ARBITER_AGENT_ID` | `default` | 客户端内的 agent 身份。 |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | 记忆记录上的字段。默认 `isolation=none` 时为纯标签（存储/返回，不参与排序过滤）；设 `isolation` 后才生效，见 [Workspace 隔离](#workspace-隔离-none--weak--strict)。 |
-| `MEMORY_ARBITER_ISOLATION` | `none` | workspace 隔离档位：`none`（忽略）/ `weak`（软重排）/ `strict`（硬过滤）。默认 `none` 最安全——`strict` 在 Agent 传错 workspace 时会导致记忆沉默。 |
-| `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | workspace 别名归一的余弦距离阈值。越小越严格（合并越少）。 |
-| `MEMORY_ARBITER_CONFIG` | _(无)_ | 可选：指定另一个 JSON 配置文件路径。设置后读取该文件，而不是默认的 `~/.config/memory-arbiter/config.json`；配置文件里的字段仍然优先于其他 env 兜底值。 |
-| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid`（默认）或 `bm25`（legacy）。无配置文件对应。 |
-| `MEMORY_ARBITER_GGUF` | _(无)_ | 旧版 GGUF 路径兜底；建议改用配置文件里的 `embedding.model_path`。 |
+| `MEMORY_ARBITER_CLIENT` | `codex` | 工具身份。 |
+| `MEMORY_ARBITER_AGENT_ID` | `default` | 客户端内 agent 身份。 |
+| `MEMORY_ARBITER_WORKSPACE` | `default` | workspace 标签；只有配置 isolation 后才影响召回。 |
+| `MEMORY_ARBITER_CONFIG` | 无 | 指定另一个 JSON 配置文件。 |
+| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid` 或 legacy `bm25`。 |
+| `MEMORY_ARBITER_GGUF` | 无 | 旧 GGUF 路径兜底；建议改用配置文件。 |
 
 ### 数据迁移
 
-换电脑只需拷贝一个文件：
+换机器只需要复制 SQLite 数据库并重新安装包：
 
 ```bash
-# 旧机器：把数据库拷到新机器（scp / U 盘等方式均可）
 scp ~/.local/share/memory-arbiter/memory.sqlite3 新机器:~/.local/share/memory-arbiter/
 
-# 新机器：重新安装项目（.venv 不要拷贝，新机器上重建）
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-### Doctor：健康体检（CLI 救护车）
+### Doctor：健康体检
 
-感觉不对劲——"搜索突然不好用了"、"换模型是不是把召回弄坏了"、"数据库是不是在静默丢写入？"——跑一下内置的 doctor。它是救护车入口：一个独立 CLI，自己开只读连接，所以即使 MCP 进程挂了、或数据库只读，也能诊断。
+当搜索不对、embedding 可能配置错、或数据库疑似降级时运行：
 
 ```bash
-memory-arbiter doctor              # 彩色文本报告（管道/重定向时自动关颜色）
-memory-arbiter doctor --json       # 机器可读，结构与 MCP 工具的 data 一致
-memory-arbiter doctor --deep       # 额外加载 GGUF 模型做维度探针（秒级）
-memory-arbiter doctor --db PATH    # 诊断另一个 DB（灾祸恢复）
+memory-arbiter doctor
+memory-arbiter doctor --json
+memory-arbiter doctor --deep
+memory-arbiter doctor --db PATH
 ```
 
-它跑 **26 项只读 finding**，分五个维度，每条带 severity（`info`/`warning`/`critical`）和针对你当前配置的修复指引：
-
-- **配置完整性** —— 解析告警、写探针结果、降级模式（`jsonl_backup` = 正在静默丢数据 = critical）。
-- **向量化启用链** —— 最高价值的检查。"语义召回到底开没开？"不是布尔值；它走五环链（配置了模型 → `vec.enabled` → 扩展已加载 → 模型可用 → auto 开关），在第一处断裂处短路，明确告诉你哪一环断了、怎么修。专治"我明明配了模型，召回怎么还是不准"（通常是 `vec.enabled=false`）。
-- **分段、一致性、容量** —— 分段状态、孤儿分段/向量、vec 父状态漂移、版本链断链、open 冲突堆积、历史快照膨胀、DB 容量。v0.9.4 用 `consistency.vec_parent_status_sync` 替代旧的 inactive-vector slow-path 检查，报告向量元数据与父记忆状态不一致，并指向非破坏性 resync 工具。
-- **v0.9 实时冲突可观测性** —— structured claim 索引/对账是否同 revision、未完成对账能否 rebuild、写入链路延迟与候选 peer 数，以及已落表冲突的 structured-only / scan-only / both 和 structured 提前量。它提供 ROI 数据，不替代真实 Beta 样本判断。
-- **分段明细（v0.8.0）** —— vec ready 时，doctor 报告六项分段检查：`split.capability`（vec/embedder 可用性）、`split.long_unsplit_backlog`（长内容但仍 `split_status=NULL` 的 active 记录）、`split.failed_count`（带最近错误摘要）、`split.legacy_declined`、`split.legacy_unknown_status`（历史 `pending`/`fallback_active` 只读暴露）、`split.index_integrity`（孤儿/重叠/不连续/不覆盖的 offset、缺失段落向量）。backlog/failed/legacy 类问题会返回样例 memory ID，可直接喂给 `memory_split` 逐条修复。
-
-退出码：`0` 正常 / `1` 有 warning / `2` 有 critical —— 可在脚本和 CI 里用。如果数据库根本打不开，doctor 会降级成单条 critical 报告而不是崩溃（这正是救护车的意义）。同一套引擎也作为 `memory_doctor_overview` MCP 工具暴露，供对话内使用；CLI 只是用静态推断替代了 MCP 运行时状态（精度略低，报告里会标注）。doctor 不会联网检查更新；它只展示缓存的更新状态，并记录当前安装版本已经跑过 doctor，用于停止升级后 doctor 提醒。
+doctor 只读，并且在 MCP server 外运行，所以 MCP 进程挂了也能诊断。它检查配置完整性、向量启用链、分段状态、claim 索引、数据一致性、容量、冲突积压和更新检查状态。退出码适合脚本：`0` 正常，`1` 有 warning，`2` 有 critical。
 
 ### 测试
 
@@ -1235,4 +944,4 @@ python3.11 -m pytest
 
 Apache License 2.0。版权所有 (c) 2026 张志维 (billy12151)。
 
-Memory Arbiter 0.8.2 及后续版本从现在起按 Apache-2.0 授权；此前已经按 MIT 分发的副本，其既有 MIT 授权继续有效（含 0.8.0 与 0.8.1）。0.8.2 之前版本按 MIT 发布。
+Memory Arbiter 0.8.2 及后续版本从现在起按 Apache-2.0 授权；此前已经按 MIT 分发的副本，其既有 MIT 授权继续有效，包括 0.8.0 和 0.8.1。0.8.2 之前版本按 MIT 发布。
