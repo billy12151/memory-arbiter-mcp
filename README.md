@@ -14,6 +14,8 @@ mcp-name: io.github.billy12151/memory-arbiter-mcp
 
 **Memory Arbiter is a trustworthy local fact layer for AI agents.**
 
+Chinese name: **迷码**. Short name / CLI alias: **mema**.
+
 It can be used as shared memory, but its real job is fact governance: keeping long-running project context searchable, traceable, source-aware, conflict-aware, and safe to recall.
 
 Shared memory lets every tool see the same data. Memory Arbiter goes further: it helps agents tell which facts are current, user-confirmed, stale, conflicting, superseded, or still waiting for judgment.
@@ -146,8 +148,12 @@ pip install -e .
 # Optional: semantic recall via sqlite-vec
 pip install -e '.[vec]'
 
-# Run
-memory-arbiter-mcp
+# Run (short alias)
+mema
+
+# Compatible long names still work:
+# memory-arbiter
+# memory-arbiter-mcp
 ```
 
 #### Zero-install via `uvx`
@@ -155,17 +161,17 @@ memory-arbiter-mcp
 If you just want to run the server without managing a Python environment, install [`uv`](https://docs.astral.sh/uv/) once, then:
 
 ```bash
-uvx --from memory-arbiter-mcp memory-arbiter
+uvx --from memory-arbiter-mcp mema
 ```
 
-This pulls the published package and launches the `memory-arbiter` entry point. The two entry points `memory-arbiter-mcp` and `memory-arbiter` are equivalent. `uvx` only shortens the install path; embedding models and sqlite-vec still need separate setup if you want semantic recall.
+This pulls the published package and launches the `mema` entry point. `mema` is the short alias for Memory Arbiter; `memory-arbiter-mcp` and `memory-arbiter` remain compatible long names. `uvx` only shortens the install path; embedding models and sqlite-vec still need separate setup if you want semantic recall.
 
 #### Setup helper
 
 Instead of editing `config.json` by hand, run:
 
 ```bash
-memory-arbiter setup
+mema setup
 ```
 
 The helper writes a working config to `~/.config/memory-arbiter/config.json`, checks your environment, and prints the exact commands or download URLs you still need. It does not run `pip` or download models for you.
@@ -225,6 +231,13 @@ Every write must fill: subject, tags, source_type (`user_confirmed`,
 `agent_generated`, or `document_extracted`), event_time (ISO 8601), workspace,
 and source_ref. Use `user_confirmed` only for facts the user explicitly verified;
 it auto-locks the record.
+
+`mema` is the short name for Memory Arbiter. In Chinese contexts, it can also be
+called **迷码**. Treat user phrases such as "search mema", "check mema", "write
+this to mema", "remember this in mema", "mema 查记忆", "迷码查一下", or "写到迷码"
+as requests to use memory-arbiter tools, not as references to a local file. Map
+search/read requests to `memory_search` or `memory_get`; map save or remember
+requests to `memory_write` with the required metadata.
 
 Search with memory_search first; read source files only for detail. When you find
 a contradiction, do not overwrite. If you know which side is wrong, supersede it.
@@ -457,10 +470,10 @@ pip install -e .
 When search feels wrong, embeddings may be misconfigured, or the database might be degraded, run:
 
 ```bash
-memory-arbiter doctor
-memory-arbiter doctor --json
-memory-arbiter doctor --deep
-memory-arbiter doctor --db PATH
+mema doctor
+mema doctor --json
+mema doctor --deep
+mema doctor --db PATH
 ```
 
 Doctor is read-only and runs outside the MCP server, so it can diagnose even when the MCP process is down. It checks config integrity, vector enablement, split state, claim indexing, data consistency, capacity, conflict backlog, and update-check state. Exit codes are script-friendly: `0` clean, `1` warnings, `2` critical findings.
@@ -484,7 +497,7 @@ Memory Arbiter version 0.8.2 and later are offered under Apache-2.0 going forwar
 
 ## 中文
 
-**memory-arbiter 是 AI Agent 的本地可信事实层。**
+**memory-arbiter 是 AI Agent 的本地可信事实层。中文名：迷码。短称 / CLI alias：mema。**
 
 它可以作为共享记忆层使用，但真正价值不是“把记忆放到同一个地方”，而是事实治理：让长期项目上下文变得可检索、可追溯、可信度可区分、冲突可发现，并且可以安全召回。
 
@@ -618,8 +631,12 @@ pip install -e .
 # 可选：启用 sqlite-vec 语义召回
 pip install -e '.[vec]'
 
-# 启动
-memory-arbiter-mcp
+# 启动（短命令）
+mema
+
+# 兼容长命令仍可用：
+# memory-arbiter
+# memory-arbiter-mcp
 ```
 
 #### 用 `uvx` 零安装启动
@@ -627,17 +644,17 @@ memory-arbiter-mcp
 只想跑起来、不想管理 Python 环境时，先安装 [`uv`](https://docs.astral.sh/uv/)，然后：
 
 ```bash
-uvx --from memory-arbiter-mcp memory-arbiter
+uvx --from memory-arbiter-mcp mema
 ```
 
-这会拉取已发布包并启动 `memory-arbiter` 入口。`memory-arbiter-mcp` 和 `memory-arbiter` 两个入口等价。`uvx` 只省安装步骤；如果要启用语义召回，embedding 模型和 sqlite-vec 仍需单独配置。
+这会拉取已发布包并启动 `mema` 入口。`mema` 是 Memory Arbiter / 迷码的短命令；`memory-arbiter-mcp` 和 `memory-arbiter` 仍作为兼容长命令保留。`uvx` 只省安装步骤；如果要启用语义召回，embedding 模型和 sqlite-vec 仍需单独配置。
 
 #### 配置助手
 
 不想手写 `config.json` 时运行：
 
 ```bash
-memory-arbiter setup
+mema setup
 ```
 
 它会把可用配置写到 `~/.config/memory-arbiter/config.json`，检查环境，并打印你还需要执行的命令或模型下载链接。它不会替你运行 `pip` 或下载模型。
@@ -695,6 +712,12 @@ memory-arbiter setup
 每次写入必填：subject、tags、source_type（user_confirmed、agent_generated、
 document_extracted）、event_time（ISO 8601）、workspace、source_ref。
 user_confirmed 只用于用户明确确认过的事实；它会自动锁定记录。
+
+`mema` 是 memory-arbiter 的短称，中文语境也可叫 **迷码**。用户说“mema 查记忆”、
+“查一下 mema”、“迷码查一下”、“写到 mema”、“写到迷码”、“mema 记一下”、
+“remember this in mema”等，都应理解为使用 memory-arbiter 工具，而不是引用
+某个本地文件。查询/读取类请求映射到 `memory_search` 或 `memory_get`；保存/记一下
+类请求映射到 `memory_write`，并补齐必需 metadata。
 
 先 memory_search，再读源文件补细节。发现矛盾不要覆盖；明确知道哪边错，
 就 supersede 错的；不确定就走冲突工作流。如果响应返回
@@ -925,10 +948,10 @@ pip install -e .
 当搜索不对、embedding 可能配置错、或数据库疑似降级时运行：
 
 ```bash
-memory-arbiter doctor
-memory-arbiter doctor --json
-memory-arbiter doctor --deep
-memory-arbiter doctor --db PATH
+mema doctor
+mema doctor --json
+mema doctor --deep
+mema doctor --db PATH
 ```
 
 doctor 只读，并且在 MCP server 外运行，所以 MCP 进程挂了也能诊断。它检查配置完整性、向量启用链、分段状态、claim 索引、数据一致性、容量、冲突积压和更新检查状态。退出码适合脚本：`0` 正常，`1` 有 warning，`2` 有 critical。

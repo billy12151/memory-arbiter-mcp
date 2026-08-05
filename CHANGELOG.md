@@ -3,6 +3,17 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.9.10] — 2026-08-05
+
+### Added
+
+- **`mema` short command / 迷码中文名** — the PyPI console scripts now include `mema` as a short alias for `memory-arbiter` / `memory-arbiter-mcp`. README usage examples now prefer `mema setup`, `mema doctor`, and `uvx --from memory-arbiter-mcp mema`, while the long entry points remain compatible.
+
+### Changed
+
+- **README repositioned around fact governance** — the project is now described as a trustworthy local fact layer for AI agents, not merely a shared memory layer. The README leads with trust, freshness, conflicts, history, structured claim gates, section recall, workspace isolation, and doctor diagnostics before installation/API details.
+- **MCP SDK dependency capped below 2.0** — `requirements.txt` now matches `pyproject.toml` with `mcp>=1.2.0,<2`, because the current server uses `from mcp.server.fastmcp import FastMCP`, which is not available in `mcp 2.x`.
+
 ## [0.9.9] — 2026-08-05
 
 ### Fixed
