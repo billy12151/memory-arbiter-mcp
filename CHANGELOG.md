@@ -3,6 +3,21 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.10.2] — 2026-08-06
+
+### Added
+
+- **Resolution guidance schema for conflict judgments** — `memory_submit_conflict_judgment` and `memory_correct_conflict_judgment` now accept optional `resolution_kind` (`partial_update`, `merge`, `contextual_keep_both`, `near_duplicate`, `full_replacement`, `not_a_conflict`) and `conflict_scope` (`field`, `section`, `record`, `whole_memory`, `unknown`). The values are stored append-only on `conflict_judgments` and projected onto `conflicts` for current guidance.
+- **Machine-readable resolution actions** — judgment responses, `memory_list_conflicts`, and search `conflict_signal` guidance now expose `recommended_resolution_action` and `supersede_candidate`. Partial update/merge maps to `update_or_merge`; contextual guidance maps to `use_contextual_guidance`; near-duplicate/full-replacement maps to `supersede_old_memory` as a suggestion only.
+- **Console read-only resolution guidance** — `mema console` now displays resolution chips and guidance callouts on conflict list/detail views. It remains read-only and does not expose resolve/edit/supersede actions.
+
+### Changed
+
+- **Partial conflicts are guarded against whole-memory winner misuse** — Arbiter still does not classify semantics itself; the host LLM submits the classification, and Arbiter validates that partial update/merge cannot carry a single winner, field/section conflicts cannot be full replacements, and supersede candidates require record/whole-memory scope plus an explicit winner.
+- **Search can surface resolved guidance** — active search results can now attach reusable resolved `evolution`/`compatible` guidance when the exact memory snapshot still matches the stored CAS pins, without hiding active memories.
+- **Scan terminal-pair filtering is now unified** — vector conflict scan skips `not_a_conflict` dismissals and manually resolved pinned pairs in addition to resolved evolution/compatible judgments, and reopens them when version/claim pins change.
+- **Resolution-action classification is a single source of truth** — the `recommended_resolution_action` / `supersede_candidate` mapping now lives on `ConflictJudgmentStore` (`resolution_action` / `is_supersede_candidate`) and the duplicate copies in `tools.py` / `console_api.py` were removed. The superseded `MemoryDB.resolved_guidance_pairs_for` helper (subsumed by `pairs_closed_for_scan` in v0.10.1) was deleted. Internal refactor only; no API, behavior, or stored-data change.
+
 ## [0.10.1] — 2026-08-06
 
 ### Fixed

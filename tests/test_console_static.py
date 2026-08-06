@@ -12,6 +12,12 @@ def test_console_static_has_sidebar_language_and_branding() -> None:
     assert "#/settings" in INDEX_HTML
     assert "loadMemories().catch" in INDEX_HTML
     assert "catch(e)" in INDEX_HTML
+def test_console_static_shows_resolution_guidance_without_write_actions() -> None:
+    assert "resolutionLabel" in INDEX_HTML
+    assert "resolutionActionText" in INDEX_HTML
+    assert "Partial update" in INDEX_HTML
+    assert "完整替代" in INDEX_HTML
+    assert "user authorization is still required" in INDEX_HTML
 
 
 def test_console_static_does_not_offer_write_actions() -> None:

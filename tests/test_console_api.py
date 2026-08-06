@@ -70,6 +70,33 @@ def test_conflict_detail_returns_left_and_right(tmp_path: Path) -> None:
     assert detail["winner_side"] == "right"
 
 
+def test_conflict_detail_exposes_resolution_guidance(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    left = api.tools.memory_write(
+        content="old full rule", subject="Old", workspace="console-ws",
+    )["data"]["id"]
+    right = api.tools.memory_write(
+        content="new full rule", subject="New", workspace="console-ws",
+    )["data"]["id"]
+    conflict = api.tools.memory_record_conflict(
+        left_id=left, right_id=right, reason="full replacement",
+        conflict_type="evolution", suggested_winner=right,
+    )["data"]
+    with api.tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE conflicts SET resolution_kind='full_replacement', "
+            "conflict_scope='whole_memory' WHERE id=?",
+            (conflict["conflict_id"],),
+        )
+
+    detail = api.conflict_detail(conflict["conflict_id"])
+
+    assert detail["conflict"]["resolution_kind"] == "full_replacement"
+    assert detail["conflict"]["conflict_scope"] == "whole_memory"
+    assert detail["conflict"]["recommended_resolution_action"] == "supersede_old_memory"
+    assert detail["conflict"]["supersede_candidate"] is True
+
+
 def test_memories_expired_invalid_offset_defaults_to_zero(tmp_path: Path) -> None:
     api = _api(tmp_path)
     result = api.memories(status="expired", offset="abc")

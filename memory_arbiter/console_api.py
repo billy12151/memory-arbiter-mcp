@@ -8,6 +8,7 @@ from typing import Any, Optional
 from . import __version__
 from .config import Settings, _find_config_file
 from .config_registry import CONFIG_DESCRIPTORS, grouped_descriptors
+from .conflict_judgments import ConflictJudgmentStore
 from .tools import MemoryTools
 
 
@@ -105,6 +106,11 @@ class ConsoleAPI:
         conflict = self._get_conflict_row(conflict_id)
         if not conflict:
             return {"error": f"conflict id {conflict_id} not found", "_http_status": 404}
+        resolution_kind = conflict.get("resolution_kind") or conflict.get("judgment_resolution_kind")
+        conflict["resolution_kind"] = resolution_kind
+        conflict["conflict_scope"] = conflict.get("conflict_scope") or conflict.get("judgment_conflict_scope")
+        conflict["recommended_resolution_action"] = ConflictJudgmentStore.resolution_action(resolution_kind)
+        conflict["supersede_candidate"] = ConflictJudgmentStore.is_supersede_candidate(resolution_kind)
         left = self._memory_or_error(conflict.get("left_id"), sections="all")
         right = self._memory_or_error(conflict.get("right_id"), sections="all")
         judgments = self._payload(self.tools.memory_list_conflict_judgments(conflict_id)).get("judgments", [])
@@ -130,7 +136,8 @@ class ConsoleAPI:
             "j.suggested_winner AS judgment_suggested_winner, "
             "j.confidence_hint AS judgment_confidence_hint, "
             "j.reason AS judgment_reason, j.judge_type AS judgment_judge_type, "
-            "j.judge_ref AS judgment_judge_ref, j.created_at AS judged_at "
+            "j.judge_ref AS judgment_judge_ref, j.resolution_kind AS judgment_resolution_kind, "
+            "j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
             "FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
             "WHERE c.id=?"
         )

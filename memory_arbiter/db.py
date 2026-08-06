@@ -378,6 +378,10 @@ class MemoryDB:
                 "ON conflict_judgments(conflict_id, created_at)"
             )
             self._migrate_add_column(conn, "conflicts", "active_judgment_id", "INTEGER")
+            self._migrate_add_column(conn, "conflicts", "resolution_kind", "TEXT")
+            self._migrate_add_column(conn, "conflicts", "conflict_scope", "TEXT")
+            self._migrate_add_column(conn, "conflict_judgments", "resolution_kind", "TEXT")
+            self._migrate_add_column(conn, "conflict_judgments", "conflict_scope", "TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conflicts_judgment_status "
                 "ON conflicts(status, judgment_status)"
@@ -1594,7 +1598,8 @@ class MemoryDB:
                 "j.suggested_winner AS judgment_suggested_winner, "
                 "j.confidence_hint AS judgment_confidence_hint, "
                 "j.reason AS judgment_reason, j.judge_type AS judgment_judge_type, "
-                "j.judge_ref AS judgment_judge_ref, j.created_at AS judged_at "
+                "j.judge_ref AS judgment_judge_ref, j.resolution_kind AS judgment_resolution_kind, "
+                "j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
                 "FROM conflicts c LEFT JOIN conflict_judgments j "
                 "ON j.id=c.active_judgment_id "
             )
@@ -1644,15 +1649,23 @@ class MemoryDB:
                         f"j.suggested_winner AS judgment_suggested_winner, "
                         f"j.confidence_hint AS judgment_confidence_hint, "
                         f"j.reason AS judgment_reason, j.judge_type AS judgment_judge_type, "
-                        f"j.judge_ref AS judgment_judge_ref, j.created_at AS judged_at "
+                        f"j.judge_ref AS judgment_judge_ref, j.resolution_kind AS judgment_resolution_kind, "
+                        f"j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
                         f"FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
-                        f"WHERE c.status='open' "
-                        f"AND (c.left_id IN ({ph}) OR c.right_id IN ({ph})) "
-                        f"AND (c.left_claim_revision IS NULL OR ("
+                        f"WHERE ("
+                        f"(c.status='open' AND (c.left_claim_revision IS NULL OR ("
                         f"c.left_claim_revision=(SELECT claim_revision FROM memories WHERE id=c.left_id) AND "
                         f"c.right_claim_revision=(SELECT claim_revision FROM memories WHERE id=c.right_id) AND "
                         f"c.left_version=(SELECT version FROM memories WHERE id=c.left_id) AND "
-                        f"c.right_version=(SELECT version FROM memories WHERE id=c.right_id)))",
+                        f"c.right_version=(SELECT version FROM memories WHERE id=c.right_id)))) "
+                        f"OR (c.status='resolved' AND c.active_judgment_id IS NOT NULL "
+                        f"AND j.verdict IN ('evolution','compatible') "
+                        f"AND c.left_version IS NOT NULL AND c.right_version IS NOT NULL "
+                        f"AND c.left_version=(SELECT version FROM memories WHERE id=c.left_id) "
+                        f"AND c.right_version=(SELECT version FROM memories WHERE id=c.right_id) "
+                        f"AND (c.left_claim_revision IS NULL OR c.left_claim_revision=(SELECT claim_revision FROM memories WHERE id=c.left_id)) "
+                        f"AND (c.right_claim_revision IS NULL OR c.right_claim_revision=(SELECT claim_revision FROM memories WHERE id=c.right_id)))"
+                        f") AND (c.left_id IN ({ph}) OR c.right_id IN ({ph}))",
                         (*chunk, *chunk),
                     ).fetchall()
                     results.extend(row_to_dict(r) for r in rows)
@@ -1840,6 +1853,8 @@ class MemoryDB:
                         (judgment_status if judgment_status is not None else existing_row.get("judgment_status"))
                     )
                     active_judgment_id = None if reset_judgment else existing_row.get("active_judgment_id")
+                    effective_resolution_kind = None if reset_judgment else existing_row.get("resolution_kind")
+                    effective_conflict_scope = None if reset_judgment else existing_row.get("conflict_scope")
                     effective_reason = (
                         existing_row.get("reason")
                         if preserve_judgment_projection else reason
@@ -1864,6 +1879,7 @@ class MemoryDB:
                             source=?, left_version=?, right_version=?,
                             left_claim_revision=?, right_claim_revision=?,
                             judgment_status=?, active_judgment_id=?,
+                            resolution_kind=?, conflict_scope=?,
                             structured_details=COALESCE(?, structured_details),
                             scan_prompt_version=?, scan_model=?,
                             structured_detected_at=?, scan_detected_at=?, refreshed_at=?
@@ -1875,6 +1891,7 @@ class MemoryDB:
                             effective_source, effective_left_version, effective_right_version,
                             effective_left_claim_revision, effective_right_claim_revision,
                             effective_judgment_status, active_judgment_id,
+                            effective_resolution_kind, effective_conflict_scope,
                             (json.dumps(structured_details, ensure_ascii=False)
                              if structured_details is not None else None),
                             scan_prompt_version, scan_model,
@@ -2015,13 +2032,12 @@ class MemoryDB:
         except sqlite3.Error:
             return False
 
-    def resolved_guidance_pairs_for(self, memory_ids: list[int]) -> set[tuple[int, int]]:
-        """Pairs with reusable resolved evolution/compatible guidance.
+    def pairs_closed_for_scan(self, memory_ids: list[int]) -> set[tuple[int, int]]:
+        """Terminal conflict pairs that vector scan should not re-ring on.
 
-        Vector scan is a recall layer, not a judgment layer.  If the exact same
-        memory snapshot already has terminal evolution/compatible guidance, the
-        scanner should not re-ring on it; any content or claim change invalidates
-        the snapshot pins and makes the pair eligible again.
+        This is the scan-facing close gate.  It combines explicit false-positive
+        dismissals with resolved guidance for the same memory snapshot.  Version
+        and claim-revision pins decide when a pair naturally reopens.
         """
         if not memory_ids or not self._db_available:
             return set()
@@ -2033,17 +2049,33 @@ class MemoryDB:
             with self.connection() as conn:
                 ph = ",".join("?" * len(ids))
                 rows = conn.execute(
-                    "SELECT c.left_id, c.right_id FROM conflicts c "
-                    "JOIN conflict_judgments j ON j.id = c.active_judgment_id "
-                    "WHERE c.status='resolved' "
-                    "AND j.verdict IN ('evolution','compatible') "
-                    f"AND (c.left_id IN ({ph}) OR c.right_id IN ({ph})) "
-                    "AND c.left_version IS NOT NULL "
-                    "AND c.right_version IS NOT NULL "
-                    "AND c.left_version = (SELECT version FROM memories WHERE id=c.left_id) "
-                    "AND c.right_version = (SELECT version FROM memories WHERE id=c.right_id) "
-                    "AND (c.left_claim_revision IS NULL OR c.left_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.left_id)) "
-                    "AND (c.right_claim_revision IS NULL OR c.right_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.right_id))",
+                    """
+                    SELECT c.left_id, c.right_id FROM conflicts c
+                    LEFT JOIN conflict_judgments j ON j.id = c.active_judgment_id
+                    WHERE (c.left_id IN ({ph}) OR c.right_id IN ({ph}))
+                    AND (
+                      (
+                        c.status='not_a_conflict'
+                        AND (c.left_version IS NULL OR c.left_version = (SELECT version FROM memories WHERE id=c.left_id))
+                        AND (c.right_version IS NULL OR c.right_version = (SELECT version FROM memories WHERE id=c.right_id))
+                        AND (c.left_claim_revision IS NULL OR c.left_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.left_id))
+                        AND (c.right_claim_revision IS NULL OR c.right_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.right_id))
+                      )
+                      OR (
+                        c.status='resolved'
+                        AND c.left_version IS NOT NULL
+                        AND c.right_version IS NOT NULL
+                        AND c.left_version = (SELECT version FROM memories WHERE id=c.left_id)
+                        AND c.right_version = (SELECT version FROM memories WHERE id=c.right_id)
+                        AND (c.left_claim_revision IS NULL OR c.left_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.left_id))
+                        AND (c.right_claim_revision IS NULL OR c.right_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.right_id))
+                        AND (
+                          j.verdict IN ('evolution','compatible')
+                          OR c.active_judgment_id IS NULL
+                        )
+                      )
+                    )
+                    """.format(ph=ph),
                     (*ids, *ids),
                 ).fetchall()
                 for r in rows:
@@ -2179,6 +2211,8 @@ class MemoryDB:
         affects_current_output: bool,
         usage_context: str,
         judge_ref: Optional[str] = None,
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
     ) -> dict[str, Any]:
         return self._judgment_store.submit_conflict_judgment(
             conflict_id=conflict_id,
@@ -2194,6 +2228,8 @@ class MemoryDB:
             affects_current_output=affects_current_output,
             usage_context=usage_context,
             judge_ref=judge_ref,
+            resolution_kind=resolution_kind,
+            conflict_scope=conflict_scope,
         )
 
     def correct_conflict_judgment(
@@ -2209,6 +2245,8 @@ class MemoryDB:
         expected_left_claim_revision: int,
         expected_right_claim_revision: int,
         judge_ref: Optional[str] = None,
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
     ) -> dict[str, Any]:
         return self._judgment_store.correct_conflict_judgment(
             conflict_id=conflict_id,
@@ -2222,6 +2260,8 @@ class MemoryDB:
             expected_left_claim_revision=expected_left_claim_revision,
             expected_right_claim_revision=expected_right_claim_revision,
             judge_ref=judge_ref,
+            resolution_kind=resolution_kind,
+            conflict_scope=conflict_scope,
         )
 
     def list_conflict_judgments(
@@ -2532,9 +2572,9 @@ class MemoryDB:
         # materialise candidate dicts (now that all meta is present) + ws filter.
         resolved: list[dict[str, Any]] = []
         candidate_ids = sorted({mid for a, b, _dist in candidates for mid in (a, b)})
-        closed_guidance_pairs = self.resolved_guidance_pairs_for(candidate_ids)
+        closed_pairs = self.pairs_closed_for_scan(candidate_ids)
         for a, b, dist in candidates:
-            if (a, b) in closed_guidance_pairs:
+            if (a, b) in closed_pairs:
                 continue
             ws_a = id_meta.get(a, {}).get("workspace")
             ws_b = id_meta.get(b, {}).get("workspace")

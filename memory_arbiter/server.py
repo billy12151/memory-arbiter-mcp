@@ -269,8 +269,10 @@ content_hash). Global vec state lives in memory_status / doctor."""
         affects_current_output: bool,
         usage_context: str,
         judge_ref: Optional[str] = None,
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Required v0.9 host-LLM receipt for a structured_claim_candidate. Submit only after reading both evidence sides. verdict: contradiction|evolution|compatible|uncertain; recommended_use: left|right|contextual|merge|ask_user|none; usage_context: answer|code|config|memory_write|external_action|unrelated|unknown. Snapshot versions and claim revisions are mandatory CAS pins: stale judgments are rejected. The result may require user action under protected/high-impact policy. This never edits or supersedes a memory."""
+        """Required host-LLM receipt for a structured_claim_candidate. Submit only after reading both evidence sides. verdict: contradiction|evolution|compatible|uncertain; recommended_use: left|right|contextual|merge|ask_user|none; resolution_kind: partial_update|merge|contextual_keep_both|near_duplicate|full_replacement|not_a_conflict; conflict_scope: field|section|record|whole_memory|unknown. Snapshot versions and claim revisions are mandatory CAS pins: stale judgments are rejected. Partial update/merge must not carry a single winner; near-duplicate/full-replacement may only suggest supersede and never edits or supersedes a memory."""
         return tools.memory_submit_conflict_judgment(
             conflict_id=conflict_id,
             expected_left_version=expected_left_version,
@@ -285,6 +287,8 @@ content_hash). Global vec state lives in memory_status / doctor."""
             affects_current_output=affects_current_output,
             usage_context=usage_context,
             judge_ref=judge_ref,
+            resolution_kind=resolution_kind,
+            conflict_scope=conflict_scope,
         )
 
     @app.tool()
@@ -301,8 +305,10 @@ content_hash). Global vec state lives in memory_status / doctor."""
         expected_right_claim_revision: int,
         authorized: bool = False,
         judge_ref: Optional[str] = None,
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Append an authorized human correction to a v0.9 conflict judgment. The old LLM/policy judgment remains in append-only history; the new human judgment becomes active. Requires authorized=true and exact active-judgment plus memory/claim snapshot CAS. Never edits either memory."""
+        """Append an authorized human correction to a conflict judgment. The old LLM/policy judgment remains in append-only history; the new human judgment becomes active. Supports resolution_kind/conflict_scope so humans can correct partial-update vs full-replacement guidance. Requires authorized=true and exact active-judgment plus memory/claim snapshot CAS. Never edits either memory."""
         return tools.memory_correct_conflict_judgment(
             conflict_id=conflict_id, verdict=verdict,
             recommended_use=recommended_use, suggested_winner=suggested_winner,
@@ -312,6 +318,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
             expected_left_claim_revision=expected_left_claim_revision,
             expected_right_claim_revision=expected_right_claim_revision,
             authorized=authorized, judge_ref=judge_ref,
+            resolution_kind=resolution_kind, conflict_scope=conflict_scope,
         )
 
     @app.tool()

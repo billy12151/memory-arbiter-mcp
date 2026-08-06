@@ -9,6 +9,7 @@ from typing import Any, Optional, Tuple
 
 from .arbitration import compare_memories
 from .claims import extract_claims
+from .conflict_judgments import ConflictJudgmentStore
 from .config import Settings
 from .db import MemoryDB, _canon_entity, _canon_scope
 from .embedder import ManagedEmbedder
@@ -1395,8 +1396,37 @@ class MemoryTools:
                 # mark_vectors_for_memory call is gone — same value, twice.
         return self.db.state.response({"comparison": comparison, "conflict_id": conflict_id, "applied": applied})
 
+    def _with_resolution_guidance(self, conflict: dict[str, Any]) -> dict[str, Any]:
+        resolution_kind = conflict.get("resolution_kind") or conflict.get("judgment_resolution_kind")
+        conflict_scope = conflict.get("conflict_scope") or conflict.get("judgment_conflict_scope")
+        enriched = dict(conflict)
+        enriched["resolution_kind"] = resolution_kind
+        enriched["conflict_scope"] = conflict_scope
+        enriched["recommended_resolution_action"] = ConflictJudgmentStore.resolution_action(resolution_kind)
+        enriched["supersede_candidate"] = ConflictJudgmentStore.is_supersede_candidate(resolution_kind)
+        if conflict.get("active_judgment_id") is not None:
+            enriched["active_judgment"] = {
+                "id": conflict.get("active_judgment_id"),
+                "verdict": conflict.get("judgment_verdict"),
+                "recommended_use": conflict.get("judgment_recommended_use"),
+                "suggested_winner": conflict.get("judgment_suggested_winner"),
+                "confidence_hint": conflict.get("judgment_confidence_hint"),
+                "reason": conflict.get("judgment_reason"),
+                "resolution_kind": resolution_kind,
+                "conflict_scope": conflict_scope,
+                "recommended_resolution_action": enriched["recommended_resolution_action"],
+                "supersede_candidate": enriched["supersede_candidate"],
+                "judge_type": conflict.get("judgment_judge_type"),
+                "judge_ref": conflict.get("judgment_judge_ref"),
+                "judged_at": conflict.get("judged_at"),
+            }
+        return enriched
+
     def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
-        conflicts = self.db.list_conflicts(status=status, limit=int(limit), source=source)
+        conflicts = [
+            self._with_resolution_guidance(c)
+            for c in self.db.list_conflicts(status=status, limit=int(limit), source=source)
+        ]
         return self.db.state.response({"conflicts": conflicts, "count": len(conflicts)})
 
     def memory_scan_conflict_candidates(
@@ -1858,6 +1888,8 @@ class MemoryTools:
         affects_current_output: bool,
         usage_context: str,
         judge_ref: Optional[str] = None,
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
         **_: Any,
     ) -> dict[str, Any]:
         try:
@@ -1877,6 +1909,8 @@ class MemoryTools:
             verdict, recommended_use, winner,
             confidence_hint, reason, bool(affects_current_output), usage_context,
             judge_ref=judge_ref,
+            resolution_kind=resolution_kind,
+            conflict_scope=conflict_scope,
         )
         if result.get("outcome") == "judged":
             event = "user_escalated" if result.get("user_action_required") else "llm_assessed"
@@ -1903,6 +1937,8 @@ class MemoryTools:
         expected_right_claim_revision: int,
         authorized: bool = False,
         judge_ref: Optional[str] = None,
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
         **_: Any,
     ) -> dict[str, Any]:
         if not authorized:
@@ -1926,6 +1962,8 @@ class MemoryTools:
             conflict_id_int, verdict, recommended_use, winner,
             reason, judgment_id, left_version, right_version,
             left_revision, right_revision, judge_ref=judge_ref,
+            resolution_kind=resolution_kind,
+            conflict_scope=conflict_scope,
         )
         return self.db.state.response(result, ok=result.get("outcome") == "corrected")
 
@@ -2510,21 +2548,33 @@ class MemoryTools:
             conflict_source = "runtime_metadata_hint"
         elif structured_origin and judgment_status == "pending_llm":
             conflict_source = "structured_claim_candidate"
-        elif structured_origin and judgment_status in {"llm_assessed", "human_confirmed"}:
+        elif (
+            primary.get("status") == "resolved"
+            and primary.get("active_judgment_id") is not None
+        ) or (structured_origin and judgment_status in {"llm_assessed", "human_confirmed"}):
             conflict_source = "conflict_guidance"
         else:
             conflict_source = "open_table"
         judgment_request = None
         if conflict_source == "structured_claim_candidate":
             judgment_request = self.db.build_conflict_judgment_request(int(primary["id"]))
+        resolution_kind = primary.get("resolution_kind") or primary.get("judgment_resolution_kind")
+        conflict_scope = primary.get("conflict_scope") or primary.get("judgment_conflict_scope")
+        recommended_resolution_action = ConflictJudgmentStore.resolution_action(resolution_kind)
+        supersede_candidate = ConflictJudgmentStore.is_supersede_candidate(resolution_kind)
         return {
             # v0.8.8: route by row source — write-hint rows are advisory, NOT
             # verified; presenting them as open_table would cry-wolf. (漏洞#1)
             "conflict_source": conflict_source,
             "conflict_id": int(primary["id"]),
+            "conflict_status": primary.get("status"),
             "conflict_type": primary.get("conflict_type"),
             "conflict_point": primary.get("conflict_point"),
             "suggested_winner": primary.get("suggested_winner"),
+            "resolution_kind": resolution_kind,
+            "conflict_scope": conflict_scope,
+            "recommended_resolution_action": recommended_resolution_action,
+            "supersede_candidate": supersede_candidate,
             "confidence_hint": "low" if advisory else primary.get("confidence_hint"),
             "source": src,
             "verification_status": judgment_status or ("pending_llm" if structured_origin else "verified"),
@@ -2539,11 +2589,16 @@ class MemoryTools:
                 "suggested_winner": primary.get("judgment_suggested_winner"),
                 "confidence_hint": primary.get("judgment_confidence_hint"),
                 "reason": primary.get("judgment_reason"),
+                "resolution_kind": resolution_kind,
+                "conflict_scope": conflict_scope,
+                "recommended_resolution_action": recommended_resolution_action,
+                "supersede_candidate": supersede_candidate,
                 "judge_type": primary.get("judgment_judge_type"),
                 "judge_ref": primary.get("judgment_judge_ref"),
                 "judged_at": primary.get("judged_at"),
             } if primary.get("active_judgment_id") is not None else None),
-            "open_conflict_count": len(conflicts),
+            "related_conflict_count": len(conflicts),
+            "open_conflict_count": sum(1 for c in conflicts if c.get("status") == "open"),
             "conflict_peer": {
                 "id": peer_id,
                 "subject": peer_summary.get("subject"),

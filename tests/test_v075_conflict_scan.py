@@ -197,7 +197,90 @@ def test_scan_skips_resolved_compatible_snapshot(tmp_path: Path) -> None:
     b = _write(tools, content="v13 DA includes five states", subject="da-new", workspace="ws")
     tools.memory_store_embedding(memory_id=a, embedding=[0.8, 0.2, 0.0, 0.0])
     tools.memory_store_embedding(memory_id=b, embedding=[0.81, 0.19, 0.0, 0.0])
+    before = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    before_pairs = {frozenset({c["left_id"], c["right_id"]}) for c in before["data"]["candidates"]}
+    assert frozenset({a, b}) in before_pairs
+
     _insert_resolved_guidance(tools, a, b, verdict="compatible")
+
+    result = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    pairs = {frozenset({c["left_id"], c["right_id"]}) for c in result["data"]["candidates"]}
+    assert frozenset({a, b}) not in pairs
+
+
+def test_scan_skips_not_a_conflict_dismissal(tmp_path: Path) -> None:
+    if not _VEC_AVAILABLE:
+        pytest.skip("sqlite-vec not installed")
+    tools = _tools(tmp_path, vec=True, dim=4)
+    a = _write(tools, content="same topic false positive", subject="fp-old", workspace="ws")
+    b = _write(tools, content="same topic but compatible", subject="fp-new", workspace="ws")
+    tools.memory_store_embedding(memory_id=a, embedding=[0.9, 0.1, 0.0, 0.0])
+    tools.memory_store_embedding(memory_id=b, embedding=[0.91, 0.09, 0.0, 0.0])
+    recorded = tools.memory_record_conflict(
+        left_id=a, right_id=b, reason="false positive",
+        left_version=1, right_version=1,
+    )["data"]
+    tools.memory_resolve_conflict(
+        conflict_id=recorded["conflict_id"], status="not_a_conflict",
+        reason="not a conflict",
+    )
+
+    result = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    pairs = {frozenset({c["left_id"], c["right_id"]}) for c in result["data"]["candidates"]}
+    assert frozenset({a, b}) not in pairs
+
+
+def test_scan_reopens_not_a_conflict_after_version_change(tmp_path: Path) -> None:
+    if not _VEC_AVAILABLE:
+        pytest.skip("sqlite-vec not installed")
+    tools = _tools(tmp_path, vec=True, dim=4)
+    a = _write(tools, content="dismissed old", subject="dismiss-old", workspace="ws")
+    b = _write(tools, content="dismissed new", subject="dismiss-new", workspace="ws")
+    tools.memory_store_embedding(memory_id=a, embedding=[0.9, 0.1, 0.0, 0.0])
+    tools.memory_store_embedding(memory_id=b, embedding=[0.91, 0.09, 0.0, 0.0])
+    recorded = tools.memory_record_conflict(
+        left_id=a, right_id=b, reason="false positive",
+        left_version=1, right_version=1,
+    )["data"]
+    tools.memory_resolve_conflict(
+        conflict_id=recorded["conflict_id"], status="not_a_conflict",
+        reason="not a conflict",
+    )
+    assert tools.db.pairs_closed_for_scan([a, b]) == {(a, b)}
+
+    edited = tools.memory_edit(memory_id=b, new_content="dismissed new edited")
+    assert edited["ok"] is True
+    tools.memory_store_embedding(memory_id=b, embedding=[0.91, 0.09, 0.0, 0.0])
+
+    result = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    pairs = {frozenset({c["left_id"], c["right_id"]}) for c in result["data"]["candidates"]}
+    assert frozenset({a, b}) in pairs
+
+
+def test_scan_skips_manual_resolved_snapshot_without_judgment(tmp_path: Path) -> None:
+    if not _VEC_AVAILABLE:
+        pytest.skip("sqlite-vec not installed")
+    tools = _tools(tmp_path, vec=True, dim=4)
+    a = _write(tools, content="manually resolved old", subject="manual-old", workspace="ws")
+    b = _write(tools, content="manually resolved new", subject="manual-new", workspace="ws")
+    tools.memory_store_embedding(memory_id=a, embedding=[0.9, 0.1, 0.0, 0.0])
+    tools.memory_store_embedding(memory_id=b, embedding=[0.91, 0.09, 0.0, 0.0])
+    recorded = tools.memory_record_conflict(
+        left_id=a, right_id=b, reason="manual close",
+        left_version=1, right_version=1,
+    )["data"]
+    tools.memory_resolve_conflict(
+        conflict_id=recorded["conflict_id"], status="resolved",
+        reason="manual close",
+    )
 
     result = tools.memory_scan_conflict_candidates(
         max_distance=5.0, top_k=5, incremental=False,
@@ -338,19 +421,19 @@ def test_record_conflict_idempotent(tmp_path: Path) -> None:
     assert tools.memory_list_conflicts()["data"]["count"] == 1
 
 
-def test_resolved_guidance_pairs_match_exact_snapshot_only(tmp_path: Path) -> None:
+def test_closed_pairs_match_exact_snapshot_only(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
     a = _write(tools, content="old policy", subject="policy-old")
     b = _write(tools, content="new policy", subject="policy-new")
     _insert_resolved_guidance(tools, a, b, verdict="evolution")
 
-    assert tools.db.resolved_guidance_pairs_for([a]) == {(a, b)}
-    assert tools.db.resolved_guidance_pairs_for([b]) == {(a, b)}
+    assert tools.db.pairs_closed_for_scan([a]) == {(a, b)}
+    assert tools.db.pairs_closed_for_scan([b]) == {(a, b)}
 
     edited = tools.memory_edit(memory_id=a, new_content="old policy edited")
     assert edited["ok"] is True
 
-    assert tools.db.resolved_guidance_pairs_for([a, b]) == set()
+    assert tools.db.pairs_closed_for_scan([a, b]) == set()
 
 
 # ──────────────────────────────────────────────────────────────────────────

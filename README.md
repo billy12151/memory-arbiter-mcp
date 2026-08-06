@@ -314,7 +314,7 @@ OpenDesign and OpenClaw GUI tools run on top of a host CLI. They inherit whateve
 | `memory_scan_conflict_candidates` | Vector-recall candidate conflict pairs for agent-side judgment. |
 | `memory_record_conflict` | Persist an enriched conflict record. |
 | `memory_resolve_conflict` | Close a conflict as resolved or not-a-conflict. |
-| `memory_submit_conflict_judgment` | Submit required host-LLM judgment for a structured claim collision. |
+| `memory_submit_conflict_judgment` | Submit required host-LLM judgment for a structured claim collision, including optional resolution_kind/conflict_scope guidance so partial updates are not mistaken for whole-memory supersede. |
 | `memory_correct_conflict_judgment` | Append an authorized human correction to a prior judgment. |
 | `memory_list_conflict_judgments` | Read append-only judgment history for one conflict. |
 | `memory_set_entity` / `memory_list_entities` | Set or inspect canonical entity/scope metadata. |
@@ -811,7 +811,7 @@ OpenDesign 和 OpenClaw GUI 工具运行在宿主 CLI 之上，会继承宿主�
 | `memory_scan_conflict_candidates` | 向量召回候选冲突对，供 agent 判断。 |
 | `memory_record_conflict` | 持久化带 enrichment 的冲突记录。 |
 | `memory_resolve_conflict` | 关闭冲突为 resolved 或 not-a-conflict。 |
-| `memory_submit_conflict_judgment` | 为结构化 claim 碰撞提交必需的宿主 LLM 判断。 |
+| `memory_submit_conflict_judgment` | 为结构化 claim 碰撞提交必需的宿主 LLM 判断，可附带 resolution_kind/conflict_scope，避免把局部更新误判成整条过期。 |
 | `memory_correct_conflict_judgment` | 追加授权人工纠正。 |
 | `memory_list_conflict_judgments` | 查看单个冲突的追加式判断历史。 |
 | `memory_set_entity` / `memory_list_entities` | 设置或查看规范 entity/scope。 |

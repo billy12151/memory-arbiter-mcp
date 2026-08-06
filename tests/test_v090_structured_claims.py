@@ -92,8 +92,12 @@ def test_v090_schema_migrates_legacy_database(tmp_path: Path) -> None:
         assert {
             "left_claim_revision", "right_claim_revision", "judgment_status",
             "active_judgment_id", "structured_details", "structured_detected_at",
-            "scan_detected_at",
+            "scan_detected_at", "resolution_kind", "conflict_scope",
         } <= conflict_columns
+        judgment_columns = {
+            row["name"] for row in migrated.execute("PRAGMA table_info(conflict_judgments)")
+        }
+        assert {"resolution_kind", "conflict_scope"} <= judgment_columns
         assert migrated.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_claims'"
         ).fetchone()
@@ -365,6 +369,157 @@ def test_llm_assessed_guidance_is_non_blocking_and_auditable(tmp_path: Path) -> 
     docket = tools.memory_list_conflicts()["data"]["conflicts"][0]
     assert docket["judgment_recommended_use"] == "right"
     assert docket["judgment_judge_type"] == "llm"
+
+
+def test_resolution_fields_classify_partial_update_without_supersede(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+    _write_claim(tools, "4", attribute="state_count")
+    result = _write_claim(tools, "5", attribute="state_count")
+    request = result["data"]["conflict_judgment_requests"][0]
+
+    judged = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"],
+        expected_left_version=1, expected_right_version=1,
+        expected_left_claim_revision=1, expected_right_claim_revision=1,
+        verdict="evolution", recommended_use="merge", suggested_winner=None,
+        confidence_hint="high", reason="only the state_count field evolved",
+        affects_current_output=False, usage_context="unrelated",
+        resolution_kind="partial_update", conflict_scope="field",
+    )
+
+    assert judged["data"]["judgment_status"] == "pending_user"
+    assert judged["data"]["user_action_required"] is True
+    assert judged["data"]["recommended_resolution_action"] == "update_or_merge"
+    assert judged["data"]["supersede_candidate"] is False
+    docket = tools.memory_list_conflicts()["data"]["conflicts"][0]
+    assert docket["resolution_kind"] == "partial_update"
+    assert docket["conflict_scope"] == "field"
+    assert docket["active_judgment"]["recommended_resolution_action"] == "update_or_merge"
+
+
+def test_resolution_fields_allow_full_replacement_suggestion(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+    _write_claim(tools, "old", attribute="routing")
+    result = _write_claim(tools, "new", attribute="routing")
+    request = result["data"]["conflict_judgment_requests"][0]
+
+    judged = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"],
+        expected_left_version=1, expected_right_version=1,
+        expected_left_claim_revision=1, expected_right_claim_revision=1,
+        verdict="evolution", recommended_use="right",
+        suggested_winner=request["right"]["id"], confidence_hint="high",
+        reason="new memory fully replaces the old routing rule",
+        affects_current_output=False, usage_context="unrelated",
+        resolution_kind="full_replacement", conflict_scope="whole_memory",
+    )
+
+    assert judged["data"]["conflict_status"] == "open"
+    assert judged["data"]["judgment_status"] == "pending_user"
+    assert judged["data"]["user_action_required"] is True
+    assert judged["data"]["recommended_resolution_action"] == "supersede_old_memory"
+    assert judged["data"]["supersede_candidate"] is True
+    searched = tools.memory_search(query="routing")
+    signals = [r.get("conflict_signal") for r in searched["data"]["results"] if r.get("conflict_signal")]
+    assert any(s["action_required"] == "ask_user" for s in signals)
+    guidance = next(s for s in signals if s["action_required"] == "ask_user")
+    assert guidance["conflict_status"] == "open"
+    assert guidance["resolution_kind"] == "full_replacement"
+    assert guidance["supersede_candidate"] is True
+
+
+def test_stale_snapshot_clears_active_resolution_projection(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+    _write_claim(tools, "old", attribute="routing")
+    result = _write_claim(tools, "new", attribute="routing")
+    request = result["data"]["conflict_judgment_requests"][0]
+    judged = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"],
+        expected_left_version=1, expected_right_version=1,
+        expected_left_claim_revision=1, expected_right_claim_revision=1,
+        verdict="contradiction", recommended_use="right",
+        suggested_winner=request["right"]["id"], confidence_hint="high",
+        reason="initial full replacement guidance",
+        affects_current_output=False, usage_context="unrelated",
+        resolution_kind="full_replacement", conflict_scope="whole_memory",
+    )
+    assert judged["data"]["supersede_candidate"] is True
+    assert tools.db.edit_memory(request["right"]["id"], "routing: newer") is not None
+
+    stale = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"],
+        expected_left_version=1, expected_right_version=1,
+        expected_left_claim_revision=1, expected_right_claim_revision=1,
+        verdict="contradiction", recommended_use="right",
+        suggested_winner=request["right"]["id"], confidence_hint="high",
+        reason="stale repeat",
+        affects_current_output=False, usage_context="unrelated",
+        resolution_kind="full_replacement", conflict_scope="whole_memory",
+    )
+    assert stale["data"]["outcome"] == "stale_snapshot"
+    conflict = tools.memory_list_conflicts()["data"]["conflicts"][0]
+    assert conflict["active_judgment_id"] is None
+    assert conflict["resolution_kind"] is None
+    assert conflict["supersede_candidate"] is False
+    assert conflict["suggested_winner"] is None
+
+
+def test_resolution_validation_rejects_inconsistent_combinations(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+    _write_claim(tools, "4", attribute="state_count")
+    result = _write_claim(tools, "5", attribute="state_count")
+    request = result["data"]["conflict_judgment_requests"][0]
+
+    partial_winner = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"],
+        expected_left_version=1, expected_right_version=1,
+        expected_left_claim_revision=1, expected_right_claim_revision=1,
+        verdict="evolution", recommended_use="right",
+        suggested_winner=request["right"]["id"], confidence_hint="high",
+        reason="invalid partial winner",
+        affects_current_output=False, usage_context="unrelated",
+        resolution_kind="partial_update", conflict_scope="field",
+    )
+    assert partial_winner["ok"] is False
+    assert partial_winner["data"]["outcome"] == "invalid_recommendation"
+
+    field_replacement = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"],
+        expected_left_version=1, expected_right_version=1,
+        expected_left_claim_revision=1, expected_right_claim_revision=1,
+        verdict="evolution", recommended_use="right",
+        suggested_winner=request["right"]["id"], confidence_hint="high",
+        reason="invalid field replacement",
+        affects_current_output=False, usage_context="unrelated",
+        resolution_kind="full_replacement", conflict_scope="field",
+    )
+    assert field_replacement["ok"] is False
+    assert field_replacement["data"]["outcome"] == "invalid_resolution_scope"
+
+    partial_none = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"],
+        expected_left_version=1, expected_right_version=1,
+        expected_left_claim_revision=1, expected_right_claim_revision=1,
+        verdict="evolution", recommended_use="none", suggested_winner=None,
+        confidence_hint="high", reason="invalid partial none",
+        affects_current_output=False, usage_context="unrelated",
+        resolution_kind="partial_update", conflict_scope="field",
+    )
+    assert partial_none["ok"] is False
+    assert partial_none["data"]["outcome"] == "invalid_recommendation"
+
+    false_positive_winner = tools.memory_submit_conflict_judgment(
+        conflict_id=request["conflict_id"],
+        expected_left_version=1, expected_right_version=1,
+        expected_left_claim_revision=1, expected_right_claim_revision=1,
+        verdict="compatible", recommended_use="right",
+        suggested_winner=request["right"]["id"], confidence_hint="high",
+        reason="invalid not-a-conflict winner",
+        affects_current_output=False, usage_context="unrelated",
+        resolution_kind="not_a_conflict", conflict_scope="record",
+    )
+    assert false_positive_winner["ok"] is False
+    assert false_positive_winner["data"]["outcome"] == "invalid_recommendation"
 
 
 def test_pending_candidate_reappears_loudly_on_search(tmp_path: Path) -> None:

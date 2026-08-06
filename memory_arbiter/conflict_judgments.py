@@ -19,8 +19,103 @@ if TYPE_CHECKING:
 class ConflictJudgmentStore:
     """Judgment persistence backed by MemoryDB's transaction factory."""
 
+    RESOLUTION_KINDS = {
+        "partial_update", "merge", "contextual_keep_both",
+        "near_duplicate", "full_replacement", "not_a_conflict",
+    }
+    CONFLICT_SCOPES = {"field", "section", "record", "whole_memory", "unknown"}
+    PARTIAL_KINDS = {"partial_update", "merge"}
+    SUPERSEDE_KINDS = {"near_duplicate", "full_replacement"}
+
     def __init__(self, db: "MemoryDB"):
         self._db = db
+
+    @classmethod
+    def resolution_action(cls, resolution_kind: Optional[str]) -> str:
+        """Map a resolution_kind to the machine-readable resolution action.
+
+        Single source of truth — tools/console call this instead of keeping
+        their own copy, so a new resolution_kind only needs updating here.
+        """
+        if resolution_kind in cls.PARTIAL_KINDS:
+            return "update_or_merge"
+        if resolution_kind == "contextual_keep_both":
+            return "use_contextual_guidance"
+        if resolution_kind in cls.SUPERSEDE_KINDS:
+            return "supersede_old_memory"
+        if resolution_kind == "not_a_conflict":
+            return "none"
+        return "unknown"
+
+    @classmethod
+    def is_supersede_candidate(cls, resolution_kind: Optional[str]) -> bool:
+        """True only for near_duplicate/full_replacement (suggestion-only)."""
+        return resolution_kind in cls.SUPERSEDE_KINDS
+
+    @classmethod
+    def _validate_resolution(
+        cls,
+        *,
+        resolution_kind: Optional[str],
+        conflict_scope: Optional[str],
+        recommended_use: str,
+        suggested_winner: Optional[int],
+        conflict_id: int,
+    ) -> Optional[dict[str, Any]]:
+        if resolution_kind is not None and resolution_kind not in cls.RESOLUTION_KINDS:
+            return {
+                "outcome": "invalid_resolution_kind",
+                "conflict_id": int(conflict_id),
+                "error": "invalid resolution_kind",
+            }
+        if conflict_scope is not None and conflict_scope not in cls.CONFLICT_SCOPES:
+            return {
+                "outcome": "invalid_conflict_scope",
+                "conflict_id": int(conflict_id),
+                "error": "invalid conflict_scope",
+            }
+        if conflict_scope in {"field", "section"} and resolution_kind in cls.SUPERSEDE_KINDS:
+            return {
+                "outcome": "invalid_resolution_scope",
+                "conflict_id": int(conflict_id),
+                "error": "field/section conflicts cannot be near_duplicate/full_replacement",
+            }
+        if resolution_kind in cls.PARTIAL_KINDS and recommended_use not in {"merge", "contextual", "ask_user"}:
+            return {
+                "outcome": "invalid_recommendation",
+                "conflict_id": int(conflict_id),
+                "error": "partial_update/merge requires recommended_use=merge|contextual|ask_user",
+            }
+        if resolution_kind == "contextual_keep_both" and (
+            recommended_use != "contextual" or suggested_winner is not None
+        ):
+            return {
+                "outcome": "invalid_recommendation",
+                "conflict_id": int(conflict_id),
+                "error": "contextual_keep_both requires recommended_use=contextual and no winner",
+            }
+        if resolution_kind == "not_a_conflict" and (
+            recommended_use != "none" or suggested_winner is not None
+        ):
+            return {
+                "outcome": "invalid_recommendation",
+                "conflict_id": int(conflict_id),
+                "error": "not_a_conflict requires recommended_use=none and no winner",
+            }
+        if resolution_kind in cls.SUPERSEDE_KINDS:
+            if recommended_use not in {"left", "right"} or suggested_winner is None:
+                return {
+                    "outcome": "invalid_recommendation",
+                    "conflict_id": int(conflict_id),
+                    "error": "near_duplicate/full_replacement requires left/right winner",
+                }
+            if conflict_scope not in {"record", "whole_memory"}:
+                return {
+                    "outcome": "invalid_resolution_scope",
+                    "conflict_id": int(conflict_id),
+                    "error": "near_duplicate/full_replacement requires record or whole_memory scope",
+                }
+        return None
 
     def build_conflict_judgment_request(
         self, conflict_id: int,
@@ -137,6 +232,12 @@ class ConflictJudgmentStore:
             "allowed_recommendations": [
                 "left", "right", "contextual", "merge", "ask_user", "none",
             ],
+            "allowed_resolution_kinds": sorted(self.RESOLUTION_KINDS),
+            "allowed_conflict_scopes": sorted(self.CONFLICT_SCOPES),
+            "resolution_guidance": (
+                "LLM/host agent must classify resolution_kind/conflict_scope. "
+                "Arbiter validates consistency but never auto-edits or supersedes."
+            ),
             "required_tool": "memory_submit_conflict_judgment",
         }
 
@@ -177,6 +278,8 @@ class ConflictJudgmentStore:
         left_claim_revision: int,
         right_claim_revision: int,
         supersedes_judgment_id: Optional[int],
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
     ) -> int:
         cur = conn.execute(
             """
@@ -184,14 +287,16 @@ class ConflictJudgmentStore:
               conflict_id, verdict, recommended_use, suggested_winner,
               confidence_hint, reason, judge_type, judge_ref,
               left_version, right_version, left_claim_revision,
-              right_claim_revision, supersedes_judgment_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              right_claim_revision, supersedes_judgment_id,
+              resolution_kind, conflict_scope, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(conflict_id), verdict, recommended_use, suggested_winner,
                 confidence_hint, reason, judge_type, judge_ref,
                 int(left_version), int(right_version), int(left_claim_revision),
-                int(right_claim_revision), supersedes_judgment_id, utc_now_iso(),
+                int(right_claim_revision), supersedes_judgment_id,
+                resolution_kind, conflict_scope, utc_now_iso(),
             ),
         )
         return int(cur.lastrowid)
@@ -211,6 +316,8 @@ class ConflictJudgmentStore:
         affects_current_output: bool,
         usage_context: str,
         judge_ref: Optional[str] = None,
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
     ) -> dict[str, Any]:
         verdicts = {"contradiction", "evolution", "compatible", "uncertain"}
         recommendations = {"left", "right", "contextual", "merge", "ask_user", "none"}
@@ -234,6 +341,15 @@ class ConflictJudgmentStore:
                 "outcome": "invalid_input", "conflict_id": int(conflict_id),
                 "error": "reason is required",
             }
+        resolution_error = self._validate_resolution(
+            resolution_kind=resolution_kind,
+            conflict_scope=conflict_scope,
+            recommended_use=recommended_use,
+            suggested_winner=suggested_winner,
+            conflict_id=int(conflict_id),
+        )
+        if resolution_error is not None:
+            return resolution_error
         db = self._db
         if not db._db_available or not db.state.sqlite_writable:
             return {"outcome": "unavailable", "conflict_id": int(conflict_id)}
@@ -267,7 +383,10 @@ class ConflictJudgmentStore:
                 ):
                     conn.execute(
                         "UPDATE conflicts SET judgment_status='pending_llm', "
-                        "active_judgment_id=NULL WHERE id=?",
+                        "active_judgment_id=NULL, suggested_winner=NULL, "
+                        "winner_id=NULL, confidence_hint=NULL, source='structured_claim', "
+                        "reason='Structured claim snapshot changed; pending new judgment', "
+                        "resolution_kind=NULL, conflict_scope=NULL WHERE id=?",
                         (int(conflict_id),),
                     )
                     return {"outcome": "stale_snapshot", "conflict_id": int(conflict_id)}
@@ -321,6 +440,8 @@ class ConflictJudgmentStore:
                     expected_left_version, expected_right_version,
                     expected_left_claim_revision, expected_right_claim_revision,
                     int(prior_active) if prior_active is not None else None,
+                    resolution_kind=resolution_kind,
+                    conflict_scope=conflict_scope,
                 )
                 active_id = llm_id
                 effective_use = recommended_use
@@ -338,6 +459,8 @@ class ConflictJudgmentStore:
                 pending_user = (
                     verdict == "uncertain"
                     or recommended_use in {"merge", "ask_user"}
+                    or resolution_kind in self.PARTIAL_KINDS
+                    or resolution_kind in self.SUPERSEDE_KINDS
                     or confidence_hint in {None, "low"}
                     or (verdict == "contradiction" and recommended_use == "none")
                     or high_impact
@@ -348,6 +471,8 @@ class ConflictJudgmentStore:
                     verdict == "contradiction"
                     and protected_count == 1
                     and not high_impact
+                    and resolution_kind not in self.PARTIAL_KINDS
+                    and recommended_use not in {"merge", "ask_user"}
                 ):
                     effective_winner = int(
                         left["id"] if protected[0] else right["id"]
@@ -368,6 +493,8 @@ class ConflictJudgmentStore:
                         expected_left_version, expected_right_version,
                         expected_left_claim_revision,
                         expected_right_claim_revision, llm_id,
+                        resolution_kind=resolution_kind,
+                        conflict_scope=conflict_scope,
                     )
                     source = "policy_informed"
 
@@ -385,13 +512,15 @@ class ConflictJudgmentStore:
                     """
                     UPDATE conflicts SET status=?, resolved_at=?, judgment_status=?,
                       active_judgment_id=?, suggested_winner=?, winner_id=?,
-                      confidence_hint=?, reason=?, source=?, refreshed_at=?
+                      confidence_hint=?, reason=?, source=?, refreshed_at=?,
+                      resolution_kind=?, conflict_scope=?
                     WHERE id=?
                     """,
                     (
                         status, resolved_at, judgment_status, active_id,
                         effective_winner, effective_winner, confidence_hint,
-                        effective_reason, source, utc_now_iso(), int(conflict_id),
+                        effective_reason, source, utc_now_iso(),
+                        resolution_kind, conflict_scope, int(conflict_id),
                     ),
                 )
                 disclosure_required = (
@@ -407,6 +536,10 @@ class ConflictJudgmentStore:
                     "conflict_status": status,
                     "recommended_use": effective_use,
                     "suggested_winner": effective_winner,
+                    "resolution_kind": resolution_kind,
+                    "conflict_scope": conflict_scope,
+                    "recommended_resolution_action": self.resolution_action(resolution_kind),
+                    "supersede_candidate": self.is_supersede_candidate(resolution_kind),
                     "disclosure_required": disclosure_required,
                     "user_action_required": pending_user,
                     "disclosure": (
@@ -439,6 +572,8 @@ class ConflictJudgmentStore:
         expected_left_claim_revision: int,
         expected_right_claim_revision: int,
         judge_ref: Optional[str] = None,
+        resolution_kind: Optional[str] = None,
+        conflict_scope: Optional[str] = None,
     ) -> dict[str, Any]:
         verdicts = {"contradiction", "evolution", "compatible", "uncertain"}
         recommendations = {"left", "right", "contextual", "merge", "ask_user", "none"}
@@ -448,6 +583,15 @@ class ConflictJudgmentStore:
             or not str(reason or "").strip()
         ):
             return {"outcome": "invalid_input", "conflict_id": int(conflict_id)}
+        resolution_error = self._validate_resolution(
+            resolution_kind=resolution_kind,
+            conflict_scope=conflict_scope,
+            recommended_use=recommended_use,
+            suggested_winner=suggested_winner,
+            conflict_id=int(conflict_id),
+        )
+        if resolution_error is not None:
+            return resolution_error
         db = self._db
         if not db._db_available or not db.state.sqlite_writable:
             return {"outcome": "unavailable", "conflict_id": int(conflict_id)}
@@ -519,6 +663,8 @@ class ConflictJudgmentStore:
                     expected_left_version, expected_right_version,
                     expected_left_claim_revision, expected_right_claim_revision,
                     int(expected_judgment_id),
+                    resolution_kind=resolution_kind,
+                    conflict_scope=conflict_scope,
                 )
                 resolved = verdict in {"evolution", "compatible"}
                 conn.execute(
@@ -526,13 +672,15 @@ class ConflictJudgmentStore:
                     UPDATE conflicts SET status=?, resolved_at=?,
                       judgment_status='human_confirmed',
                       active_judgment_id=?, suggested_winner=?, winner_id=?,
-                      reason=?, source='human_confirmed', refreshed_at=? WHERE id=?
+                      reason=?, source='human_confirmed', refreshed_at=?,
+                      resolution_kind=?, conflict_scope=? WHERE id=?
                     """,
                     (
                         "resolved" if resolved else "open",
                         utc_now_iso() if resolved else None,
                         judgment_id, suggested_winner, suggested_winner,
-                        str(reason).strip(), utc_now_iso(), int(conflict_id),
+                        str(reason).strip(), utc_now_iso(),
+                        resolution_kind, conflict_scope, int(conflict_id),
                     ),
                 )
                 return {
@@ -541,6 +689,10 @@ class ConflictJudgmentStore:
                     "judgment_id": judgment_id,
                     "judgment_status": "human_confirmed",
                     "conflict_status": "resolved" if resolved else "open",
+                    "resolution_kind": resolution_kind,
+                    "conflict_scope": conflict_scope,
+                    "recommended_resolution_action": self.resolution_action(resolution_kind),
+                    "supersede_candidate": self.is_supersede_candidate(resolution_kind),
                 }
         except sqlite3.Error as exc:
             return {
