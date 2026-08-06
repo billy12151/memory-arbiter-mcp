@@ -1629,6 +1629,13 @@ class MemoryDB:
 
         Returns row_to_dict rows. Single SQL per chunk (no N+1). DB-unavailable
         or empty input → [].
+
+        Note (v0.10.2): the resolved branch surfaces reusable *guidance* only
+        for evolution/compatible verdicts with a live active judgment. This is
+        narrower than ``pairs_closed_for_scan``'s close gate by design:
+        search must not re-litigate a pair as guidance, whereas scan deliberately
+        keeps contradiction-resolved pairs ringable for a second look. Do not
+        align the two queries without resolving that intent first.
         """
         if not memory_ids or not self._db_available:
             return []
@@ -2038,6 +2045,16 @@ class MemoryDB:
         This is the scan-facing close gate.  It combines explicit false-positive
         dismissals with resolved guidance for the same memory snapshot.  Version
         and claim-revision pins decide when a pair naturally reopens.
+
+        Note (v0.10.2): this is intentionally wider than the resolved-guidance
+        branch in ``list_open_conflicts_for_memory_ids``.  Scan closes any
+        resolved pair whose verdict is evolution/compatible *or* that has no
+        active judgment (manual close).  A resolved pair carrying a
+        contradiction verdict is deliberately left ringable so a contested
+        close can be re-examined; search never surfaces such a pair as
+        guidance.  Mirroring the two queries would either re-litigate settled
+        evolution/compatible pairs or silence contested ones — keep them
+        asymmetric unless that trade-off is revisited.
         """
         if not memory_ids or not self._db_available:
             return set()
