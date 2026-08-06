@@ -3,6 +3,16 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.10.1] — 2026-08-06
+
+### Fixed
+
+- **Conflict scan no longer re-rings already judged evolution/compatible pairs** — vector `memory_scan_conflict_candidates` now skips pairs whose exact memory snapshot already has resolved `evolution` or `compatible` guidance. The close is CAS-pinned by memory `version` and, when present, `claim_revision`, so editing either side naturally reopens the pair for scanning.
+
+### Changed
+
+- **`evolution` no longer implies whole-memory supersede** — tool descriptions now define it as same-topic change over time. Partial evolution should be handled with update/merge/contextual guidance; only near-duplicate or full-replacement cases should become supersede suggestions.
+
 ## [0.10.0] — 2026-08-05
 
 ### Added

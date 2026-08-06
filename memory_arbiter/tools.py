@@ -1453,8 +1453,8 @@ class MemoryTools:
         after a memory version or model change. The ``source`` field (e.g.
         ``"llm_informed"``) records whether the suggestion came from an LLM
         that read the content or from a metadata heuristic. ``conflict_type``
-        can be ``contradiction``, ``evolution`` (stale_active_memory — should
-        supersede but both still active), or other.
+        can be ``contradiction``, ``evolution`` (same-topic change over time;
+        not necessarily a whole-memory supersede), or other.
         """
         result = self.db.record_conflict_enriched(
             int(left_id), int(right_id),

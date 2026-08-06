@@ -107,6 +107,132 @@ def test_scan_finds_close_pair(tmp_path: Path) -> None:
     assert c["workspace"] == "ws"
 
 
+def _insert_resolved_guidance(
+    tools: MemoryTools,
+    left_id: int,
+    right_id: int,
+    *,
+    verdict: str = "evolution",
+) -> int:
+    a, b = sorted((left_id, right_id))
+    with tools.db.write_transaction() as conn:
+        left = conn.execute(
+            "SELECT version, claim_revision FROM memories WHERE id=?", (a,),
+        ).fetchone()
+        right = conn.execute(
+            "SELECT version, claim_revision FROM memories WHERE id=?", (b,),
+        ).fetchone()
+        conflict = conn.execute(
+            """
+            INSERT INTO conflicts(
+                left_id, right_id, subject, status, reason, winner_id,
+                created_at, resolved_at, conflict_type, conflict_point,
+                suggested_winner, confidence_hint, source, left_version,
+                right_version, left_claim_revision, right_claim_revision,
+                judgment_status
+            ) VALUES (?, ?, ?, 'resolved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                a, b, "scan guidance", "already judged", b,
+                "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                verdict, "same topic", b, "high", "llm_informed",
+                int(left["version"]), int(right["version"]),
+                int(left["claim_revision"]), int(right["claim_revision"]),
+                "llm_assessed",
+            ),
+        )
+        conflict_id = int(conflict.lastrowid)
+        judgment = conn.execute(
+            """
+            INSERT INTO conflict_judgments(
+                conflict_id, verdict, recommended_use, suggested_winner,
+                confidence_hint, reason, judge_type, judge_ref, left_version,
+                right_version, left_claim_revision, right_claim_revision,
+                created_at
+            ) VALUES (?, ?, 'right', ?, 'high', ?, 'llm', 'test', ?, ?, ?, ?, ?)
+            """,
+            (
+                conflict_id, verdict, b, "already judged",
+                int(left["version"]), int(right["version"]),
+                int(left["claim_revision"]), int(right["claim_revision"]),
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.execute(
+            "UPDATE conflicts SET active_judgment_id=? WHERE id=?",
+            (int(judgment.lastrowid), conflict_id),
+        )
+        return conflict_id
+
+
+def test_scan_skips_resolved_evolution_snapshot(tmp_path: Path) -> None:
+    if not _VEC_AVAILABLE:
+        pytest.skip("sqlite-vec not installed")
+    tools = _tools(tmp_path, vec=True, dim=4)
+    a = _write(tools, content="Obsidian writes memory", subject="obsidian-old", workspace="ws")
+    b = _write(tools, content="Obsidian no longer writes memory", subject="obsidian-new", workspace="ws")
+    tools.memory_store_embedding(memory_id=a, embedding=[0.9, 0.1, 0.0, 0.0])
+    tools.memory_store_embedding(memory_id=b, embedding=[0.91, 0.09, 0.0, 0.0])
+
+    before = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    before_pairs = {frozenset({c["left_id"], c["right_id"]}) for c in before["data"]["candidates"]}
+    assert frozenset({a, b}) in before_pairs
+
+    _insert_resolved_guidance(tools, a, b, verdict="evolution")
+
+    after = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    after_pairs = {frozenset({c["left_id"], c["right_id"]}) for c in after["data"]["candidates"]}
+    assert frozenset({a, b}) not in after_pairs
+
+
+def test_scan_skips_resolved_compatible_snapshot(tmp_path: Path) -> None:
+    if not _VEC_AVAILABLE:
+        pytest.skip("sqlite-vec not installed")
+    tools = _tools(tmp_path, vec=True, dim=4)
+    a = _write(tools, content="v13 DA includes four states", subject="da-old", workspace="ws")
+    b = _write(tools, content="v13 DA includes five states", subject="da-new", workspace="ws")
+    tools.memory_store_embedding(memory_id=a, embedding=[0.8, 0.2, 0.0, 0.0])
+    tools.memory_store_embedding(memory_id=b, embedding=[0.81, 0.19, 0.0, 0.0])
+    _insert_resolved_guidance(tools, a, b, verdict="compatible")
+
+    result = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    pairs = {frozenset({c["left_id"], c["right_id"]}) for c in result["data"]["candidates"]}
+    assert frozenset({a, b}) not in pairs
+
+
+def test_scan_reopens_resolved_guidance_after_version_change(tmp_path: Path) -> None:
+    if not _VEC_AVAILABLE:
+        pytest.skip("sqlite-vec not installed")
+    tools = _tools(tmp_path, vec=True, dim=4)
+    a = _write(tools, content="old routing rule", subject="routing-old", workspace="ws")
+    b = _write(tools, content="new routing rule", subject="routing-new", workspace="ws")
+    tools.memory_store_embedding(memory_id=a, embedding=[0.9, 0.1, 0.0, 0.0])
+    tools.memory_store_embedding(memory_id=b, embedding=[0.91, 0.09, 0.0, 0.0])
+    _insert_resolved_guidance(tools, a, b, verdict="evolution")
+
+    suppressed = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    suppressed_pairs = {frozenset({c["left_id"], c["right_id"]}) for c in suppressed["data"]["candidates"]}
+    assert frozenset({a, b}) not in suppressed_pairs
+
+    edited = tools.memory_edit(memory_id=a, new_content="old routing rule edited")
+    assert edited["ok"] is True
+    tools.memory_store_embedding(memory_id=a, embedding=[0.9, 0.1, 0.0, 0.0])
+
+    reopened = tools.memory_scan_conflict_candidates(
+        max_distance=5.0, top_k=5, incremental=False,
+    )
+    reopened_pairs = {frozenset({c["left_id"], c["right_id"]}) for c in reopened["data"]["candidates"]}
+    assert frozenset({a, b}) in reopened_pairs
+
+
 def test_scan_same_workspace_filter(tmp_path: Path) -> None:
     """Close embeddings but different workspaces -> pair filtered out."""
     if not _VEC_AVAILABLE:
@@ -210,6 +336,21 @@ def test_record_conflict_idempotent(tmp_path: Path) -> None:
     assert r1["data"]["outcome"] == "inserted"
     assert r2["data"]["outcome"] == "deduped"
     assert tools.memory_list_conflicts()["data"]["count"] == 1
+
+
+def test_resolved_guidance_pairs_match_exact_snapshot_only(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+    a = _write(tools, content="old policy", subject="policy-old")
+    b = _write(tools, content="new policy", subject="policy-new")
+    _insert_resolved_guidance(tools, a, b, verdict="evolution")
+
+    assert tools.db.resolved_guidance_pairs_for([a]) == {(a, b)}
+    assert tools.db.resolved_guidance_pairs_for([b]) == {(a, b)}
+
+    edited = tools.memory_edit(memory_id=a, new_content="old policy edited")
+    assert edited["ok"] is True
+
+    assert tools.db.resolved_guidance_pairs_for([a, b]) == set()
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -2015,6 +2015,44 @@ class MemoryDB:
         except sqlite3.Error:
             return False
 
+    def resolved_guidance_pairs_for(self, memory_ids: list[int]) -> set[tuple[int, int]]:
+        """Pairs with reusable resolved evolution/compatible guidance.
+
+        Vector scan is a recall layer, not a judgment layer.  If the exact same
+        memory snapshot already has terminal evolution/compatible guidance, the
+        scanner should not re-ring on it; any content or claim change invalidates
+        the snapshot pins and makes the pair eligible again.
+        """
+        if not memory_ids or not self._db_available:
+            return set()
+        ids = sorted(set(int(i) for i in memory_ids if i is not None))
+        if not ids:
+            return set()
+        out: set[tuple[int, int]] = set()
+        try:
+            with self.connection() as conn:
+                ph = ",".join("?" * len(ids))
+                rows = conn.execute(
+                    "SELECT c.left_id, c.right_id FROM conflicts c "
+                    "JOIN conflict_judgments j ON j.id = c.active_judgment_id "
+                    "WHERE c.status='resolved' "
+                    "AND j.verdict IN ('evolution','compatible') "
+                    f"AND (c.left_id IN ({ph}) OR c.right_id IN ({ph})) "
+                    "AND c.left_version IS NOT NULL "
+                    "AND c.right_version IS NOT NULL "
+                    "AND c.left_version = (SELECT version FROM memories WHERE id=c.left_id) "
+                    "AND c.right_version = (SELECT version FROM memories WHERE id=c.right_id) "
+                    "AND (c.left_claim_revision IS NULL OR c.left_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.left_id)) "
+                    "AND (c.right_claim_revision IS NULL OR c.right_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.right_id))",
+                    (*ids, *ids),
+                ).fetchall()
+                for r in rows:
+                    a, b = int(r["left_id"]), int(r["right_id"])
+                    out.add((min(a, b), max(a, b)))
+        except sqlite3.Error:
+            return set()
+        return out
+
     def purge_stale_dismissals(self) -> int:
         """v0.8.8: delete ``not_a_conflict`` rows whose pinned versions no longer
         match the memories' current versions (a side was edited after dismissal).
@@ -2493,7 +2531,11 @@ class MemoryDB:
 
         # materialise candidate dicts (now that all meta is present) + ws filter.
         resolved: list[dict[str, Any]] = []
+        candidate_ids = sorted({mid for a, b, _dist in candidates for mid in (a, b)})
+        closed_guidance_pairs = self.resolved_guidance_pairs_for(candidate_ids)
         for a, b, dist in candidates:
+            if (a, b) in closed_guidance_pairs:
+                continue
             ws_a = id_meta.get(a, {}).get("workspace")
             ws_b = id_meta.get(b, {}).get("workspace")
             if ws_a is None or ws_b is None:
