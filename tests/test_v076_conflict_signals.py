@@ -454,6 +454,7 @@ def test_server_wrapper_passes_v076_parameters(tmp_path: Path) -> None:
         workspace="ws",
         enable_sqlite_vec=False,
         update_check_enabled=False,
+        tool_profile="legacy_full",
     )
     with patch("memory_arbiter.server.Settings.from_env", return_value=settings):
         app = srv.build_server()

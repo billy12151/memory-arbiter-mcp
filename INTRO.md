@@ -136,7 +136,7 @@ MCP Server 在客户端启动时加载。**已经打开的会话不会自动识�
 2. 确认客户端已加载 `memory-arbiter` MCP Server
 3. 在新会话中正常使用
 
-如果工具列表里看不到 `memory_search`、`memory_write` 等，大概率就是当前会话启动时还没配置好 MCP，**新建一个会话**即可。
+如果工具列表里看不到 `memory`、`memory_review`、`memory_govern`、`memory_repair` 四个产品工具，大概率就是当前会话启动时还没配置好 MCP，**新建一个会话**即可。
 
 ---
 
@@ -174,48 +174,42 @@ pip install -e .
 
 ## 支持的 MCP 工具
 
-按使用场景分组（完整说明见 README）。日常 Agent 心智模型刻意收敛为 `memory_write` / `memory_search` / `memory_get` 三个，其余用于修正/版本管理、冲突工作流、长文分段、语义检索运维和系统状态。
+v0.11 起默认 MCP 工具面改为任务型接口。新客户端默认只看到 4 个产品工具：
 
-**日常读写** —— 大多数会话只用到这些。
+| 产品工具 | 用途 |
+|---|---|
+| `memory` | 日常操作：`remember` 写新事实、`find` 搜活跃事实、`read` 按 ID 取记忆、`update` 更新已有 current 记忆、`judge` 提交冲突判断、`status` 看运行状态。不确定字段时用 `action=help`。 |
+| `memory_review` | 只读审计：overview / doctor / conflicts / conflict_detail / judgments / history / expired / audit / entities。 |
+| `memory_govern` | 用户授权治理：整条记忆过期（retire）、关闭冲突（resolve_conflict）、确认记忆（confirm）、纠正 judgment（correct_judgment）。不要用于普通更新。 |
+| `memory_repair` | 维护修复：分段（split）、重建 claims/embeddings、清理（cleanup_history/cleanup_vectors）、向量状态同步（resync_vectors）、entity 回灌（set_entity）、pending 激活（activate_pending）。优先 dry-run。 |
+
+产品工具内部复用了原来的低层工具实现，但默认不再把它们的 schema 暴露给 Agent。需要旧低层工具面时，设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`（或 `full`）即可同时暴露：
+
+**低层工具（仅在 `legacy_full` 下暴露）**
 
 | 工具 | 用途 |
 |---|---|
 | `memory_write` | 写入一条记忆（`source_type=user_confirmed` 自动锁定） |
 | `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级），支持 tags/时间/来源过滤 |
-| `memory_get` | 按 ID 取单条记忆，可取分段目录 / 全文 / 指定段落（v0.8.0） |
+| `memory_get` | 按 ID 取单条记忆，可取分段目录 / 全文 / 指定段落 |
 | `memory_recent` | 列出最近记忆，关键词不确定时浏览库存 |
-
-**修正与版本管理**
-
-| 工具 | 用途 |
-|---|---|
-| `memory_edit` | 原地编辑正文或仅改 tags（`tags_only=true` 低副作用，不写历史/不加版本） |
+| `memory_edit` | 原地编辑正文或仅改 tags（`tags_only=true` 低副作用） |
 | `memory_history` | 查看一条记忆的版本演化轨迹 |
 | `memory_confirm` | 提升为 `user_confirmed` + `locked` 权威事实 |
 | `memory_supersede` | 显式废弃一条记忆，可突破锁定（需 `authorized=true`） |
 | `memory_cleanup_history` | 清理历史快照（**绝不碰活跃记录**） |
-
-**冲突工作流** —— search / doctor / scan 暴露问题后的低频工具。
-
-| 工具 | 用途 |
-|---|---|
 | `memory_scan_conflict_candidates` | 向量召回候选冲突对（无 LLM，增量扫描） |
 | `memory_record_conflict` | 落表冲突裁决（幂等，带 `refresh=true` 重判） |
 | `memory_resolve_conflict` | 关闭单条误报冲突 |
 | `memory_list_conflicts` | 列出未解决冲突 |
 | `memory_compare` | 比较两条记忆，只返回解释，不落记录 |
-| `memory_arbitrate` | 兼容保留的手动仲裁（新流程优先用上面三件套） |
-
-**长文分段 / 语义检索运维 / 系统状态**
-
-| 工具 | 用途 |
-|---|---|
-| `memory_split` | Agent 侧续接 / 修复分段（v0.8.0 内部入口，不是日常写入工具） |
+| `memory_arbitrate` | 兼容保留的手动仲裁 |
+| `memory_split` | Agent 侧续接 / 修复分段 |
 | `memory_store_embedding` | 手动存 / 替换某条记忆的向量 |
 | `memory_rebuild_embeddings` | 切换 embedding 模型后批量重建全部向量 |
-| `memory_status` | 运行状态、模式、`split_capability`（替代旧的 `split_enabled`） |
+| `memory_status` | 运行状态、模式、`split_capability` |
 | `memory_audit_summary` | 各 workspace 记忆统计概览（纯 SQL 聚合） |
-| `memory_doctor_overview` | 只读健康体检（18 项检查，覆盖配置/向量链/分段/一致性/容量） |
+| `memory_doctor_overview` | 只读健康体检（覆盖配置/向量链/分段/一致性/容量） |
 
 ---
 

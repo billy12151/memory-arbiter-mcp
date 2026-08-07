@@ -392,6 +392,20 @@ CONFIG_DESCRIPTORS: list[dict[str, Any]] = [
         "editable": False,
         "restart_required": True,
     },
+    {
+        "path": "tool_profile",
+        "type": "str",
+        "default": "product",
+        "env": "MEMORY_ARBITER_TOOL_PROFILE",
+        "group": "client_identity",
+        "label_en": "MCP tool profile",
+        "label_zh": "MCP 工具面模式",
+        "desc_en": "Default product exposes four task-oriented tools; legacy_full/full also expose low-level compatibility tools.",
+        "desc_zh": "默认 product 只暴露四个任务型工具；legacy_full/full 会额外暴露低层兼容工具。",
+        "risk": "caution",
+        "editable": False,
+        "restart_required": True,
+    },
 ]
 
 

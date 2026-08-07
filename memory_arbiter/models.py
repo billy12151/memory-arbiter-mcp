@@ -70,11 +70,16 @@ class MemoryRecord:
         if source_type == SourceType.USER_CONFIRMED.value:
             protection = ProtectionLevel.LOCKED.value
             status = MemoryStatus.ACTIVE.value
+        # tags must be a list; a string like "todo" would otherwise be split
+        # into ['t','o','d','o'] by list(). Coerce non-list values to [] so a
+        # malformed payload cannot silently corrupt the tag index.
+        raw_tags = payload.get("tags")
+        tags = list(raw_tags) if isinstance(raw_tags, (list, tuple)) else []
         return cls(
             content=str(payload["content"]).strip(),
             agent_id=str(payload.get("agent_id") or defaults.get("agent_id") or "default"),
             workspace=str(payload.get("workspace") or defaults.get("workspace") or "default"),
-            tags=list(payload.get("tags") or []),
+            tags=tags,
             source_type=str(source_type),
             source_ref=payload.get("source_ref"),
             event_time=normalize_iso(payload.get("event_time")),

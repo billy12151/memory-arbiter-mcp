@@ -158,8 +158,8 @@ def _content_with_colliding_heading_in_body() -> str:
 #  §2.1 / §6.5 — Registry: which tools exist
 # ==================================================================
 
-def test_registry_keeps_memory_split_removes_status_and_get_sections(tmp_path: Path, monkeypatch) -> None:
-    """§2.1(1): registry keeps memory_split; drops memory_split_status + get_sections."""
+def test_registry_defaults_to_product_tool_surface(tmp_path: Path, monkeypatch) -> None:
+    """v0.11: default MCP registry exposes task-oriented product tools only."""
     cfg = tmp_path / "config.json"
     cfg.write_text(
         '{"db_path":"' + str(tmp_path / "registry.sqlite3") + '","update_check":{"enabled":false}}',
@@ -169,7 +169,21 @@ def test_registry_keeps_memory_split_removes_status_and_get_sections(tmp_path: P
     from memory_arbiter.server import build_server
     app = build_server()
     names = _registered_tool_names(app)
-    assert "memory_split" in names, "memory_split must be retained (Agent continuation/repair)"
+    assert names == {"memory", "memory_review", "memory_govern", "memory_repair"}
+
+
+def test_registry_legacy_full_keeps_low_level_tools(tmp_path: Path, monkeypatch) -> None:
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        '{"db_path":"' + str(tmp_path / "registry.sqlite3") + '","update_check":{"enabled":false},"tool_profile":"legacy_full"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg))
+    from memory_arbiter.server import build_server
+    app = build_server()
+    names = _registered_tool_names(app)
+    assert {"memory", "memory_review", "memory_govern", "memory_repair"} <= names
+    assert "memory_split" in names
     assert "memory_write" in names
     assert "memory_search" in names
     assert "memory_get" in names
@@ -178,8 +192,8 @@ def test_registry_keeps_memory_split_removes_status_and_get_sections(tmp_path: P
         "memory_list_conflict_judgments", "memory_set_entity",
         "memory_list_entities", "memory_rebuild_claims",
     } <= names
-    assert "memory_split_status" not in names, "memory_split_status must be removed (merged into get/doctor)"
-    assert "get_sections" not in names, "get_sections must be removed (merged into search/get)"
+    assert "memory_split_status" not in names
+    assert "get_sections" not in names
 
 
 def _registered_tool_names(app) -> set[str]:

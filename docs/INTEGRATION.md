@@ -10,6 +10,8 @@
 
 Memory Arbiter is a token-optimization middleware: it replaces full-file memory loading with precise retrieval. This document describes three typical usage patterns and one real-world cross-tool delegation example.
 
+> **v0.11 product-tool surface**: the default MCP surface is now four task-oriented tools — `memory`, `memory_review`, `memory_govern`, `memory_repair`. The low-level tool names used in the examples below (`memory_search`, `memory_write`, `memory_list_conflicts`, …) are still available by setting `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`, and are also reachable through the product tools (e.g. `memory(action="find")` forwards to `memory_search`).
+
 ### Configuration
 
 Configuration is read in this order:
@@ -58,7 +60,7 @@ The default in most AI clients is to load the entire `MEMORY.md` (+ `memory/*.md
 
 ```
 user asks a question
-  → memory_search(question keywords)      # 3–5 relevant entries, 200–800 tokens
+  → memory(action="find", data={"query": question keywords})   # 3–5 relevant entries, 200–800 tokens
   → answer with just those memories
 ```
 
@@ -159,6 +161,8 @@ Step 4  ZCode writes the result with memory_write when done
 
 Memory Arbiter 是一层 token 优化中间件：用精准检索替代全文加载。本文档介绍三种典型使用模式和一个真实的跨工具委派案例。
 
+> **v0.11 产品工具面**：默认 MCP 工具面改为四个任务型工具 —— `memory`、`memory_review`、`memory_govern`、`memory_repair`。下文示例中的低层工具名（`memory_search`、`memory_write`、`memory_list_conflicts` 等）仍可通过设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` 暴露，也可通过产品工具访问（如 `memory(action="find")` 转发到 `memory_search`）。
+
 ### 配置
 
 配置读取顺序：
@@ -207,7 +211,7 @@ Memory Arbiter 是一层 token 优化中间件：用精准检索替代全文加�
 
 ```
 用户提问
-  → memory_search(提问关键词)        # 命中 3–5 条相关记忆，200–800 tokens
+  → memory(action="find", data={"query": 提问关键词})   # 命中 3–5 条相关记忆，200–800 tokens
   → 只带这些记忆回答
 ```
 

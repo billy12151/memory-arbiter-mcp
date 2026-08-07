@@ -3,6 +3,27 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.11.0] — 2026-08-07
+
+### Changed
+
+- **Default MCP surface is now task-oriented** — new clients see four product tools by default: `memory`, `memory_review`, `memory_govern`, and `memory_repair`. This replaces the previous default surface of many low-level tools, reducing always-loaded MCP schema/token overhead and making the daily agent path easier to choose.
+- **Low-level tools are internal by default** — existing `MemoryTools` implementations remain in the codebase and are reused by the product tools, but low-level MCP tools such as `memory_write`, `memory_search`, `memory_supersede`, `memory_rebuild_claims`, and scan/record helpers are no longer registered by default.
+- **Advanced compatibility profile** — set `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`) to expose the legacy low-level MCP tool surface alongside the new product tools.
+
+### Added
+
+- **Progressive tool help** — product tools support `help` actions/views/tasks and validation errors return command-specific hints so detailed low-level parameter guidance is loaded only when needed, not in every MCP tool schema.
+- **Judgment constraints in help** — `memory(action="help")` and `memory_govern(action="help")` now expose `judge_constraints`: the allowed `verdict`, `recommended_use`, `usage_context`, `confidence_hint`, `resolution_kind`, and `conflict_scope` values plus their cross-field rules, so an agent can fill a `judge` / `correct_judgment` request correctly on the first try instead of iterating against `invalid_*` outcomes.
+
+### Fixed
+
+- **Missing-id forwards no longer raise** — `memory(action="read"|"update")`, `memory_govern(action="retire"|"confirm"|"correct_judgment"|"resolve_conflict")`, and `memory_repair(task="split"|"set_entity"|"activate_pending")` previously forwarded an empty payload to a method with a required positional id and raised `TypeError`. They now return `ok=false` with an error and help, matching the rest of the bad-input contract. `cleanup_history` with no `memory_id` is unchanged (it is a valid full-cleanup request gated by `authorized`).
+- **Bad secondary int args no longer raise** — loosely-typed values like `memory(action="find", data={"limit": "abc"})`, `memory_govern(retire, superseded_by="xyz")`, `memory_review(conflicts/expired, limit="abc")`, and `memory_repair(cleanup_history, older_than_days="abc")` raised `ValueError` from an unguarded `int()` inside the low-level method. All product forwards now run through a wrapper that turns stray `TypeError`/`ValueError` into `ok=false` errors. Numeric strings (`"5"`) still coerce and succeed, matching common MCP-client JSON.
+- **Judgment field ordering** — `memory_govern(correct_judgment)` previously reported a non-integer `conflict_id` before checking other required fields, forcing an agent to fix fields one at a time. The required-fields check now runs first; `judge` and `correct_judgment` also coerce `conflict_id` explicitly so a non-numeric id gets a clear `conflict_id must be an integer` error instead of an obscure `invalid_input` deep in the submit path.
+- **Non-dict `data` rejected** — product tools previously coerced a non-dict `data` argument (string/list/int) to `{}` via `_payload_dict`, so `memory(action="remember", data="x")` silently wrote an empty record. They now return `ok=false` with `data must be a JSON object`.
+- **Non-list `tags` no longer split into characters** — `MemoryRecord.from_input` did `list(payload.get("tags") or [])`, so `tags="todo"` became `['t','o','d','o']` and silently corrupted the tag index. Non-list/tuple tags now coerce to `[]`.
+
 ## [0.10.3] — 2026-08-07
 
 ### Added

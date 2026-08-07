@@ -22,7 +22,7 @@ Shared memory lets every tool see the same data. Memory Arbiter goes further: it
 
 ```text
 # Instead of dumping 20K tokens of MEMORY.md into every prompt:
-memory_search("auth migration plan")  → 3 laser-relevant entries, ~400 tokens
+memory(action="find", data={"query": "auth migration plan"})  → 3 laser-relevant entries, ~400 tokens
 ```
 
 **Shared memory is the starting point. Fact governance is the moat.**
@@ -50,9 +50,9 @@ The model still does semantic reasoning. Arbiter keeps the input side cleaner.
 
 | Need | Why ordinary memory is not enough | Memory Arbiter's answer |
 |---|---|---|
-| Targeted recall | A flat `MEMORY.md` or large vector blob returns too much context. | `memory_search` returns a small set of relevant, ranked entries instead of loading full files. |
+| Targeted recall | A flat `MEMORY.md` or large vector blob returns too much context. | `memory(action="find")` returns a small set of relevant, ranked entries instead of loading full files. |
 | Source trust | User-confirmed facts, document extracts, and AI guesses look the same. | `source_type`, `confidence`, `user_confirmed`, and locked records make trust visible. |
-| Time and evolution | Old decisions stay next to new decisions, and the model may follow the stale one. | `event_time`, `ingest_time`, `version`, `memory_history`, and `memory_supersede` preserve the evolution chain. |
+| Time and evolution | Old decisions stay next to new decisions, and the model may follow the stale one. | `event_time`, `ingest_time`, `version`, history (`memory_review`), and supersede (`memory_govern`) preserve the evolution chain. |
 | Conflicts | Two memories can disagree and both still be retrieved. | Conflict scan, conflict records, conflict signals, and explicit resolve/supersede tools make disagreement visible. |
 | Write-time safety | Last-write-wins silently overwrites or piles up contradictory facts. | v0.9 structured claim gates detect deterministic claim collisions and require host-LLM judgment before use. |
 | Long documents | The relevant paragraph is buried inside a 10K+ character memory. | Section split returns the matched sections instead of forcing the model to scan the whole document. |
@@ -62,14 +62,14 @@ The model still does semantic reasoning. Arbiter keeps the input side cleaner.
 
 ### Daily mental model
 
-Most agents only need four tools:
+Most agents only need four product tools (the default MCP surface):
 
-1. **`memory_write`** — store reusable facts with subject, tags, source type, event time, workspace, and source reference.
-2. **`memory_search`** — search active facts before reading source files or asking the user to repeat context.
-3. **`memory_get`** — fetch a known memory by ID, including section catalogs or section bodies.
-4. **`memory_search_expired`** — inspect superseded, conflicted, or pending history when auditing old decisions.
+1. **`memory`** — daily operations: `remember` new facts, `find` active facts, `read` a memory by ID, `update` an existing current memory, `judge` conflicts, and `status`. Call `action=help` for field examples.
+2. **`memory_review`** — read-only inspection: overview, doctor, conflicts, conflict detail, judgments, history, expired memories, audit, and entities.
+3. **`memory_govern`** — explicit user-authorized governance: retire a whole memory, resolve a conflict, confirm a memory, or correct a judgment. Not for ordinary updates.
+4. **`memory_repair`** — maintenance: section split, rebuild claims/embeddings, cleanup, vector resync, entity backfill, and pending activation. Prefer dry-run first.
 
-The rest of the tool surface exists for correction, conflict workflows, section repair, embedding maintenance, and diagnostics.
+Low-level tool implementations remain in the codebase and are reused by the product tools, but their schemas are not exposed by default. Set `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`) to expose them alongside the product tools.
 
 ### How it differs
 
@@ -91,9 +91,9 @@ The main value is better context quality. Token savings are the most visible eff
 
 | Scenario | Full-file loading | With Memory Arbiter | Saving |
 |---|---|---|---|
-| Per-turn memory load | 5K–20K tokens in system prompt | 200–800 tokens via `memory_search` | ~80%+ |
+| Per-turn memory load | 5K–20K tokens in system prompt | 200–800 tokens via `memory(action="find")` | ~80%+ |
 | Conflict detection | LLM compares pairs with large context | Structured candidates + focused judgment | ~90% |
-| Periodic audit | LLM scans the whole library | `memory_list_conflicts` + `memory_audit_summary` | ~70% |
+| Periodic audit | LLM scans the whole library | `memory_review(conflicts)` + `memory_review(audit)` | ~70% |
 | Spec handoff | Re-load full spec/design notes | Query the relevant facts and decisions | ~80%+ |
 
 Same model. Better input. Better output.
@@ -106,8 +106,8 @@ With multiple tools, it also becomes shared memory: Tool A writes, Tool B search
 
 Example pipeline:
 
-1. OpenClaw writes a spec with `memory_write`.
-2. OpenDesign reads the spec with `memory_search`, writes back design decisions.
+1. OpenClaw writes a spec with `memory(action="remember")`.
+2. OpenDesign reads the spec with `memory(action="find")`, writes back design decisions.
 3. ZCode searches once and gets both the spec and design decisions.
 
 Three tools, one local fact layer.
@@ -257,18 +257,21 @@ it auto-locks the record.
 called **迷码**. Treat user phrases such as "search mema", "check mema", "write
 this to mema", "remember this in mema", "mema 查记忆", "迷码查一下", or "写到迷码"
 as requests to use memory-arbiter tools, not as references to a local file. Map
-search/read requests to `memory_search` or `memory_get`; map save or remember
-requests to `memory_write` with the required metadata.
+search/read/update/save requests through the task-oriented `memory` tool:
+`action=find`, `action=read`, `action=update`, or `action=remember`.
 
-Search with memory_search first; read source files only for detail. When you find
-a contradiction, do not overwrite. If you know which side is wrong, supersede it.
-If unsure, use the conflict workflow. If a response returns
-action_required=judge_conflict_before_use, submit the included judgment request
-before using the conflicting claim.
+Use `memory(action="find")` before reading source files. When the user says a new
+source-of-truth document replaces an older current document, find/read the
+existing memory and call `memory(action="update")`; do not create a second active
+current memory. Only use `memory_govern(action="retire")` when the user explicitly
+asks to retire a whole memory. If a response returns
+action_required=judge_conflict_before_use, call `memory(action="judge")` with the
+included snapshot pins before using the conflicting claim.
 
 When a todo is complete, remove the `todo` tag with
-memory_edit(tags_only=true, remove_tags=["todo"]). Do not only write a new
-"done" memory, or the old todo remains active and can mislead future searches.
+`memory(action="update", data={"memory_id": id, "tags_only": true,
+"remove_tags": ["todo"]})`. Do not only write a new "done" memory, or the old
+todo remains active and can mislead future searches.
 ```
 
 ### Client config locations
@@ -286,70 +289,24 @@ OpenDesign and OpenClaw GUI tools run on top of a host CLI. They inherit whateve
 
 ### MCP tools
 
-#### Daily read/write
+v0.11.0 introduces a task-oriented default MCP surface. New clients see four product tools instead of the legacy low-level tool list:
 
 | Tool | Description |
 |---|---|
-| `memory_write` | Write a memory. `source_type=user_confirmed` auto-locks. Tags are ranking/filter signals. v0.9 checks structured claims and may require host-LLM judgment before use. |
-| `memory_search` | Search active memories only. Supports lexical recall, optional vector recall, filters, pagination signals, linked open items, and conflict signals. |
-| `memory_search_expired` | Search non-active, non-deleted history records: `superseded`, `conflicted`, and `pending`. Use for old decisions, supersede-chain review, and audit walkthroughs. |
-| `memory_get` | Fetch a memory by ID. Supports section catalog, all sections, or specific section IDs. |
+| `memory` | Daily memory operations: remember, find, read, update, submit conflict judgment, and status. Use `action=help` for command-specific fields. |
+| `memory_review` | Read-only inspection: overview, doctor, conflicts, conflict detail, judgments, history, expired memories, audit, and entities. |
+| `memory_govern` | Explicit user-authorized governance: retire a whole memory, resolve a conflict, confirm a memory, or correct a judgment. Do not use for ordinary updates. |
+| `memory_repair` | Maintenance and repair: split, rebuild claims/embeddings, cleanup, vector resync, entity backfill, and pending activation. Prefer dry-run first. |
 
-#### Correction and version management
+Low-level tool implementations remain inside Memory Arbiter and are reused by the product tools, but their schemas are not exposed by default. This keeps ordinary Agent context smaller and makes the daily path easier to choose.
 
-| Tool | Description |
-|---|---|
-| `memory_edit` | Edit content in place or update tags only. Content edits archive the prior version; tag-only edits avoid history/version/embedding churn. Locked records require `authorized=true`. |
-| `memory_history` | View historical snapshots of a memory. |
-| `memory_confirm` | Promote a memory to user-confirmed and locked. |
-| `memory_activate` | Activate a strict-workspace `pending` memory. |
-| `memory_supersede` | Retire a memory, optionally bypassing lock protection with `authorized=true`. |
-| `memory_cleanup_history` | Delete history snapshots only; never touches active memories. |
-
-#### Conflict workflow and diagnostics
-
-| Tool | Description |
-|---|---|
-| `memory_list_conflicts` | List unresolved conflicts. |
-| `memory_compare` | Compare two memories and return an explanation without recording a conflict. |
-| `memory_arbitrate` | Compatibility/manual arbitration entry. New workflows should prefer scan → record → list → resolve/supersede. |
-| `memory_scan_conflict_candidates` | Vector-recall candidate conflict pairs for agent-side judgment. |
-| `memory_record_conflict` | Persist an enriched conflict record. |
-| `memory_resolve_conflict` | Close a conflict as resolved or not-a-conflict. |
-| `memory_submit_conflict_judgment` | Submit required host-LLM judgment for a structured claim collision, including optional resolution_kind/conflict_scope guidance so partial updates are not mistaken for whole-memory supersede. |
-| `memory_correct_conflict_judgment` | Append an authorized human correction to a prior judgment. |
-| `memory_list_conflict_judgments` | Read append-only judgment history for one conflict. |
-| `memory_set_entity` / `memory_list_entities` | Set or inspect canonical entity/scope metadata. |
-| `memory_rebuild_claims` | Rebuild deterministic claims and reconcile structured conflicts. |
-
-#### Long-document section split
-
-| Tool | Description |
-|---|---|
-| `memory_split` | Agent-side continuation/repair entry for long-document section split. Ordinary writes should start with `memory_write`; only continue with `memory_split` when requested or repairing historical records. |
-
-#### Semantic recall operations
-
-| Tool | Description |
-|---|---|
-| `memory_store_embedding` | Manually store or replace an embedding. Usually auto-handled once configured. |
-| `memory_rebuild_embeddings` | Rebuild vectors after switching embedding models. |
-| `memory_resync_vec_parent_status` | Non-destructively align vector parent status with memory status. |
-| `memory_cleanup_inactive_vectors` | Resync status drift and purge only true orphan vectors. |
-
-#### System status and audit
-
-| Tool | Description |
-|---|---|
-| `memory_status` | Show runtime mode, storage paths, degradation state, policy config, and vectorization status. |
-| `memory_audit_summary` | Per-workspace counts, oldest/newest entries, open conflicts, and source distribution. |
-| `memory_doctor_overview` | Read-only health check across config, vector chain, split, claims, consistency, capacity, and conflicts. |
+Advanced compatibility: set `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`) to expose the legacy low-level MCP tool surface alongside the product tools.
 
 ### Optional: Semantic Recall
 
 By default, Memory Arbiter uses lexical recall: FTS5 trigram + BM25 + soft rerank. This is local, lightweight, and enough for many projects.
 
-For meaning-based recall, enable sqlite-vec and bring your own embedding model. The built-in automatic path supports local GGUF models through `llama-cpp-python`; remote embedding APIs can also be used by your own scripts through `memory_store_embedding`.
+For meaning-based recall, enable sqlite-vec and bring your own embedding model. The built-in automatic path supports local GGUF models through `llama-cpp-python`; remote embedding APIs can also be used by your own scripts through `memory_repair(task="resync_vectors")` (or the legacy `memory_store_embedding` under `legacy_full`).
 
 ```bash
 pip install memory-arbiter-mcp[vec]
@@ -364,7 +321,7 @@ Semantic candidates receive a floor score below strong subject/tag matches. They
 
 Tags are treated as discrete labels, not as a sentence. A memory tagged `v0.7.2` and `release` should outrank a subject that only incidentally contains one query word.
 
-`memory_search` supports:
+`memory(action="find")` supports (forwarded to the low-level search):
 
 - `tags_filter`: strict AND over tags;
 - `after_time` / `before_time`: ingest-time bounds;
@@ -381,7 +338,7 @@ By default, `workspace` is a stored label and does not filter recall. If you nee
 |---|---|---|---|---|
 | `none` (default) | optional | full library | ignored | silent |
 | `weak` | recommended | full library | same workspace boosted, cross-workspace demoted | `write_hints.new_workspace_detected` |
-| `strict` | required | error | hard filter to canonical workspace | written as `pending` until `memory_activate` |
+| `strict` | required | error | hard filter to canonical workspace | written as `pending` until `memory_repair(task="activate_pending")` |
 
 Use `weak` when unsure. `strict` trades recallability for isolation: a wrong workspace can make memories silently unrecallable.
 
@@ -394,17 +351,17 @@ Long memories create two problems: search may miss the relevant paragraph, and e
 Section split breaks long documents into searchable sections. Queries can return only the matched sections while preserving the original memory.
 
 ```text
-memory_write(long_doc)
+memory(action="remember", data={"content": long_doc})
   → saves original content first
   → if vec ready and content > split.threshold:
       - Markdown headings that fit limits → async rule-based split
       - otherwise → split_request for agent-side continuation
 
-memory_search("query")
+memory(action="find", data={"query": "query"})
   → matched sections when section search is confident
   → full memory when section coverage is high or no section match is available
 
-memory_get(memory_id, sections="catalog" | "all")
+memory(action="read", data={"memory_id": id, "sections": "catalog" | "all"})
   → inspect or fetch section bodies
 ```
 
@@ -526,7 +483,7 @@ Memory Arbiter version 0.8.2 and later are offered under Apache-2.0 going forwar
 
 ```text
 # 不用每轮把 2 万 token 的 MEMORY.md 塞进 prompt：
-memory_search("认证迁移方案")  → 3 条精准结果，约 400 token
+memory(action="find", data={"query": "认证迁移方案"})  → 3 条精准结果，约 400 token
 ```
 
 **共享记忆只是起点，事实治理才是护城河。**
@@ -554,9 +511,9 @@ memory-arbiter 把这些风险变成显式的数据结构：来源标签、可�
 
 | 需求 | 普通记忆为什么不够 | memory-arbiter 的回答 |
 |---|---|---|
-| 精准召回 | 扁平 `MEMORY.md` 或大块向量记忆容易返回过多上下文。 | `memory_search` 只返回少量相关、排序后的条目，而不是加载全文。 |
+| 精准召回 | 扁平 `MEMORY.md` 或大块向量记忆容易返回过多上下文。 | `memory(action="find")` 只返回少量相关、排序后的条目，而不是加载全文。 |
 | 来源可信度 | 用户确认、文档提取、AI 猜测看起来一样。 | `source_type`、`confidence`、`user_confirmed` 和 locked 记录让可信度可见。 |
-| 时间演进 | 旧决策和新决策并存，模型可能跟着旧口径走。 | `event_time`、`ingest_time`、`version`、`memory_history`、`memory_supersede` 保留演进链。 |
+| 时间演进 | 旧决策和新决策并存，模型可能跟着旧口径走。 | `event_time`、`ingest_time`、`version`、history（`memory_review`）、supersede（`memory_govern`）保留演进链。 |
 | 冲突处理 | 两条记忆可以互相矛盾，却同时被召回。 | 冲突扫描、冲突记录、冲突信号、resolve/supersede 工具让矛盾可见、可处理。 |
 | 写入安全 | last-write-wins 会静默覆盖，或继续堆积矛盾事实。 | v0.9 结构化 claim 门禁检测确定性事实碰撞，使用前要求宿主 LLM 判断。 |
 | 长文档 | 相关段落埋在 10K+ 字符的长记忆里。 | 分段索引返回命中段落，而不是让模型扫整篇文档。 |
@@ -566,14 +523,14 @@ memory-arbiter 把这些风险变成显式的数据结构：来源标签、可�
 
 ### 日常心智模型
 
-大多数 agent 只需要四个工具：
+大多数 agent 只需要四个产品工具（默认 MCP 工具面）：
 
-1. **`memory_write`** —— 写入可复用事实，并填 subject、tags、source_type、event_time、workspace、source_ref。
-2. **`memory_search`** —— 读源文件或让用户重复上下文之前，先搜索活跃事实。
-3. **`memory_get`** —— 已知 ID 时直接取详情，也可取分段 catalog 或分段正文。
-4. **`memory_search_expired`** —— 审计旧决策时搜索 superseded、conflicted、pending 等历史记录。
+1. **`memory`** —— 日常操作：`remember` 写新事实、`find` 搜活跃事实、`read` 按 ID 取记忆、`update` 更新已有 current 记忆、`judge` 提交冲突判断、`status` 看运行状态。不确定字段时用 `action=help`。
+2. **`memory_review`** —— 只读审计：overview、doctor、conflicts、conflict_detail、judgments、history、expired、audit、entities。
+3. **`memory_govern`** —— 用户授权治理：整条记忆过期、关闭冲突、确认记忆、纠正 judgment。不要用于普通更新。
+4. **`memory_repair`** —— 维护修复：分段、重建 claims/embeddings、清理、向量状态同步、entity 回灌、pending 激活。优先 dry-run。
 
-其他工具用于修正、冲突处理、分段修复、向量运维和诊断。
+低层工具实现仍保留在代码库内并由产品工具复用，但默认不暴露它们的 schema。设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`（或 `full`）可同时暴露低层工具。
 
 ### 和其他 memory 的区别
 
@@ -595,9 +552,9 @@ memory-arbiter 有轻量图关系信号：事实时间、写入时间、entity/s
 
 | 场景 | 全文加载 | 使用 memory-arbiter | 节省 |
 |---|---|---|---|
-| 每轮记忆加载 | system prompt 塞 5K–20K tokens | `memory_search` 返回 200–800 tokens | ~80%+ |
+| 每轮记忆加载 | system prompt 塞 5K–20K tokens | `memory(action="find")` 返回 200–800 tokens | ~80%+ |
 | 冲突检测 | LLM 带大上下文逐条比较 | 结构化候选 + 聚焦判断 | ~90% |
-| 定期审查 | LLM 扫全库 | `memory_list_conflicts` + `memory_audit_summary` | ~70% |
+| 定期审查 | LLM 扫全库 | `memory_review(conflicts)` + `memory_review(audit)` | ~70% |
 | 规格交接 | 重复加载完整规格/设计记录 | 查询相关事实和决策 | ~80%+ |
 
 同一个模型，输入更干净，输出更准。
@@ -610,8 +567,8 @@ memory-arbiter 有轻量图关系信号：事实时间、写入时间、entity/s
 
 示例管线：
 
-1. OpenClaw 用 `memory_write` 写入规格。
-2. OpenDesign 用 `memory_search` 读取规格，并写回设计决策。
+1. OpenClaw 用 `memory(action="remember")` 写入规格。
+2. OpenDesign 用 `memory(action="find")` 读取规格，并写回设计决策。
 3. ZCode 一次搜索拿到规格和设计决策。
 
 三个工具，一层本地事实层。
@@ -758,16 +715,18 @@ user_confirmed 只用于用户明确确认过的事实；它会自动锁定记�
 `mema` 是 memory-arbiter 的短称，中文语境也可叫 **迷码**。用户说“mema 查记忆”、
 “查一下 mema”、“迷码查一下”、“写到 mema”、“写到迷码”、“mema 记一下”、
 “remember this in mema”等，都应理解为使用 memory-arbiter 工具，而不是引用
-某个本地文件。查询/读取类请求映射到 `memory_search` 或 `memory_get`；保存/记一下
-类请求映射到 `memory_write`，并补齐必需 metadata。
+某个本地文件。查询/读取/更新/保存请求统一走任务型 `memory` 工具：
+`action=find`、`action=read`、`action=update`、`action=remember`。
 
-先 memory_search，再读源文件补细节。发现矛盾不要覆盖；明确知道哪边错，
-就 supersede 错的；不确定就走冲突工作流。如果响应返回
-action_required=judge_conflict_before_use，先提交随响应返回的 judgment request，
-再使用冲突 claim。
+先 `memory(action="find")`，再读源文件补细节。用户说“以后以新文档为准”或
+“替换当前文档”时，先 find/read 找到已有 current 记忆，再 `memory(action="update")`；
+不要新增第二条 active current 记忆。只有用户明确要求“整条旧记忆过期/废弃”时，
+才使用 `memory_govern(action="retire")`。如果响应返回
+action_required=judge_conflict_before_use，用 `memory(action="judge")` 提交随响应返回的
+snapshot pins 后，再使用冲突 claim。
 
-待办完成后，用 memory_edit(tags_only=true, remove_tags=["todo"]) 移除 todo tag。
-不要只写一条新的“已完成”记忆，否则旧 todo 仍保持 active，会误导后续检索。
+待办完成后，用 `memory(action="update", data={"memory_id": id, "tags_only": true,
+"remove_tags": ["todo"]})` 移除 todo tag。不要只写一条新的“已完成”记忆，否则旧 todo 仍保持 active，会误导后续检索。
 ```
 
 ### 客户端配置位置
@@ -785,70 +744,24 @@ OpenDesign 和 OpenClaw GUI 工具运行在宿主 CLI 之上，会继承宿主�
 
 ### MCP 工具
 
-#### 日常读写
+v0.11.0 起默认 MCP 工具面改为任务型接口。新客户端默认只看到 4 个产品工具，而不是原来的低层工具长列表：
 
 | 工具 | 说明 |
 |---|---|
-| `memory_write` | 写入记忆。`source_type=user_confirmed` 自动锁定。tags 是排序/过滤信号。v0.9 会检查结构化 claims，必要时要求宿主 LLM 先判断再使用。 |
-| `memory_search` | 只搜索 active 记忆。支持字面召回、可选向量召回、过滤、分页信号、关联待办和冲突信号。 |
-| `memory_search_expired` | 搜索非 active、非 deleted 的历史记录：`superseded`、`conflicted`、`pending`。用于旧决策、废弃链和审计。 |
-| `memory_get` | 按 ID 获取记忆。支持 section catalog、全部 sections 或指定 section IDs。 |
+| `memory` | 日常记忆操作：remember、find、read、update、judge、status。需要参数示例时用 `action=help`。 |
+| `memory_review` | 只读审计：overview、doctor、conflicts、conflict_detail、judgments、history、expired、audit、entities。 |
+| `memory_govern` | 用户授权治理：整条记忆过期、关闭冲突、确认记忆、纠正 judgment。不要用于普通更新。 |
+| `memory_repair` | 维护修复：分段、重建 claims/embeddings、清理、向量状态同步、entity 回灌、pending 激活。优先 dry-run。 |
 
-#### 修正与版本管理
+低层工具实现仍保留在 Memory Arbiter 内部，并由上述产品工具复用，但默认不再把它们的 schema 暴露给 Agent。这样可以减少常驻 MCP 工具 token，也让日常路径更容易选择。
 
-| 工具 | 说明 |
-|---|---|
-| `memory_edit` | 原地编辑正文或只更新 tags。正文编辑会归档旧版本；tags-only 不写历史、不加版本、不重算 embedding。locked 记录需要 `authorized=true`。 |
-| `memory_history` | 查看记忆历史快照。 |
-| `memory_confirm` | 提升为用户确认并锁定。 |
-| `memory_activate` | 激活 strict-workspace 下的 `pending` 记忆。 |
-| `memory_supersede` | 废弃记忆，可用 `authorized=true` 突破锁保护。 |
-| `memory_cleanup_history` | 只删除历史快照，绝不碰 active 记忆。 |
-
-#### 冲突工作流与诊断
-
-| 工具 | 说明 |
-|---|---|
-| `memory_list_conflicts` | 列出未解决冲突。 |
-| `memory_compare` | 比较两条记忆，只返回解释，不记录冲突。 |
-| `memory_arbitrate` | 兼容保留的手动仲裁入口。新流程优先 scan → record → list → resolve/supersede。 |
-| `memory_scan_conflict_candidates` | 向量召回候选冲突对，供 agent 判断。 |
-| `memory_record_conflict` | 持久化带 enrichment 的冲突记录。 |
-| `memory_resolve_conflict` | 关闭冲突为 resolved 或 not-a-conflict。 |
-| `memory_submit_conflict_judgment` | 为结构化 claim 碰撞提交必需的宿主 LLM 判断，可附带 resolution_kind/conflict_scope，避免把局部更新误判成整条过期。 |
-| `memory_correct_conflict_judgment` | 追加授权人工纠正。 |
-| `memory_list_conflict_judgments` | 查看单个冲突的追加式判断历史。 |
-| `memory_set_entity` / `memory_list_entities` | 设置或查看规范 entity/scope。 |
-| `memory_rebuild_claims` | 重建确定性 claims 并对账结构化冲突。 |
-
-#### 长文档分段
-
-| 工具 | 说明 |
-|---|---|
-| `memory_split` | 长文档分段的 agent 侧续接/修复入口。普通写入从 `memory_write` 开始；只有收到请求或修复历史记录时才调用。 |
-
-#### 语义召回运维
-
-| 工具 | 说明 |
-|---|---|
-| `memory_store_embedding` | 手动写入或替换 embedding。配置完成后通常自动处理。 |
-| `memory_rebuild_embeddings` | 切换 embedding 模型后重建向量。 |
-| `memory_resync_vec_parent_status` | 非破坏性同步向量父状态和 memory 状态。 |
-| `memory_cleanup_inactive_vectors` | 修复状态漂移并只清理真实孤儿向量。 |
-
-#### 系统状态与审计
-
-| 工具 | 说明 |
-|---|---|
-| `memory_status` | 查看运行模式、存储路径、降级状态、策略配置和向量化状态。 |
-| `memory_audit_summary` | 各 workspace 统计、最旧/最新条目、open 冲突数和来源分布。 |
-| `memory_doctor_overview` | 只读健康体检，覆盖配置、向量链、分段、claims、一致性、容量和冲突。 |
+高级兼容：设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`（或 `full`）可同时暴露旧的低层 MCP 工具面。
 
 ### 可选：语义召回
 
 默认使用字面召回：FTS5 trigram + BM25 + 软重排。它完全本地、轻量，对很多项目已经够用。
 
-需要“按意思找”时，启用 sqlite-vec 并自带 embedding 模型。内置自动路径支持通过 `llama-cpp-python` 使用本地 GGUF；远程 embedding API 也可以由你自己的脚本调用，再通过 `memory_store_embedding` 写入。
+需要“按意思找”时，启用 sqlite-vec 并自带 embedding 模型。内置自动路径支持通过 `llama-cpp-python` 使用本地 GGUF；远程 embedding API 也可以由你自己的脚本调用，再通过 `memory_repair(task="resync_vectors")` 写入（或在 `legacy_full` 下用 `memory_store_embedding`）。
 
 ```bash
 pip install memory-arbiter-mcp[vec]
@@ -863,7 +776,7 @@ pip install llama-cpp-python
 
 tag 被当作离散标签，而不是一句普通文本。带有 `v0.7.2` 和 `release` tag 的记忆，应该胜过 subject 只是偶然含一个 query 词的记录。
 
-`memory_search` 支持：
+`memory(action="find")` 支持（转发到低层 search）：
 
 - `tags_filter`：严格 AND；
 - `after_time` / `before_time`：按 ingest_time 过滤；
@@ -880,7 +793,7 @@ tag 被当作离散标签，而不是一句普通文本。带有 `v0.7.2` 和 `r
 |---|---|---|---|---|
 | `none`（默认） | 可选 | 全库 | 忽略 | 静默 |
 | `weak` | 建议 | 全库 | 同 workspace 加权、跨 workspace 降权 | `write_hints.new_workspace_detected` |
-| `strict` | 必填 | 报错 | 硬过滤到 canonical workspace | 写为 `pending`，直到 `memory_activate` |
+| `strict` | 必填 | 报错 | 硬过滤到 canonical workspace | 写为 `pending`，直到 `memory_repair(task="activate_pending")` |
 
 不确定时用 `weak`。`strict` 是用召回性换隔离性：workspace 传错会让记忆静默不可召回。
 
@@ -893,17 +806,17 @@ workspace 别名通过 embedding 相似度归一，默认余弦阈值是 `0.25`�
 分段会把长文拆成可检索 section。查询可以只返回命中段，同时保留原始完整记忆。
 
 ```text
-memory_write(long_doc)
+memory(action="remember", data={"content": long_doc})
   → 先保存原文
   → vec ready 且内容 > split.threshold 时：
       - Markdown 标题符合限制 → 后台规则分段
       - 否则 → 返回 split_request 给 agent 续接
 
-memory_search("query")
+memory(action="find", data={"query": "query"})
   → section 匹配有把握时返回命中段
   → 覆盖率高或没有 section 匹配时返回完整 memory
 
-memory_get(memory_id, sections="catalog" | "all")
+memory(action="read", data={"memory_id": id, "sections": "catalog" | "all"})
   → 查看或获取 section 正文
 ```
 

@@ -20,8 +20,66 @@ def build_server() -> Any:
     tools = MemoryTools(Settings.from_env())
     tools.start_update_monitor()
     tools.start_split_worker()
+    legacy_enabled = tools.settings.tool_profile in {"full", "legacy_full"}
+
+    def legacy_tool():
+        if legacy_enabled:
+            return app.tool()
+
+        def decorator(func):
+            return func
+
+        return decorator
 
     @app.tool()
+    def memory(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Daily Memory Arbiter tool. Use action=remember/find/read/update/judge/status/help.
+
+        Use remember for new reusable facts, find for active recall, read for a
+        memory by id, update for an existing current/canonical memory, judge for
+        required conflict-judgment receipts, and status for runtime health. If a
+        user says a new document replaces the current source of truth, find/read
+        the existing memory and update it; do not create a duplicate active
+        memory or retire it unless the user explicitly asks for whole-memory
+        retirement. If unsure about fields, call action=help.
+        """
+        return tools.memory(action=action, data=data or {})
+
+    @app.tool()
+    def memory_review(view: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Read-only Memory Arbiter inspection. Use view=overview/doctor/conflicts/conflict_detail/judgments/history/expired/audit/entities/help.
+
+        This tool never changes memory state. Use it when the user asks to
+        inspect health, conflicts, conflict details, judgment history, memory
+        history, expired memories, audit summaries, or entity coverage. If
+        unsure about fields, call view=help.
+        """
+        return tools.memory_review(view=view, data=data or {})
+
+    @app.tool()
+    def memory_govern(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """User-authorized Memory Arbiter governance. Use action=retire/resolve_conflict/confirm/correct_judgment/help.
+
+        Use only for explicit governance decisions. Do not use retire for
+        ordinary updates, partial conflicts, or source-of-truth replacement;
+        use memory(action="update") instead. Retire is only for whole-memory
+        retirement after explicit user authorization. If unsure about fields,
+        call action=help.
+        """
+        return tools.memory_govern(action=action, data=data or {})
+
+    @app.tool()
+    def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Memory Arbiter maintenance and repair. Use task=split/rebuild_claims/rebuild_embeddings/cleanup_history/cleanup_vectors/resync_vectors/set_entity/activate_pending/help.
+
+        Prefer dry_run first where available. Cleanup, activation, and protected-memory
+        metadata changes still require authorized=true when the underlying operation
+        requires it. This is for maintenance, not fact governance; use memory_govern
+        for user-authorized fact decisions. If unsure about fields, call task=help.
+        """
+        return tools.memory_repair(task=task, data=data or {})
+
+    @legacy_tool()
     def memory_write(
         content: str,
         agent_id: Optional[str] = None,
@@ -64,7 +122,7 @@ v0.9 conflict gate: ALWAYS inspect `action_required`, `verification_status`, and
             metadata=metadata or {},
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_superseded: Optional[bool] = None) -> dict[str, Any]:
         """Retrieve active memories by relevance. limit is page size (default 10), not a result cap. has_more=true means more unreturned active results may exist; memory_search has no offset cursor, so narrow with a more specific query, a larger limit (max 100), or tags_filter. For paginated expired/history recall use memory_search_expired.
 
@@ -101,7 +159,7 @@ v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized aut
             kwargs["include_superseded"] = include_superseded
         return tools.memory_search(**kwargs)
 
-    @app.tool()
+    @legacy_tool()
     def memory_search_expired(
         query: str = "",
         workspace: Optional[str] = None,
@@ -143,7 +201,7 @@ v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized aut
             offset=offset,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_resync_vec_parent_status(
         dry_run: bool = True,
         authorized: bool = False,
@@ -166,7 +224,7 @@ v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized aut
             dry_run=dry_run, authorized=authorized
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_get(
         memory_id: int,
         sections: str = "catalog",
@@ -184,32 +242,32 @@ Returns a split sub-object (status / legacy_status / revision / section_count /
 content_hash). Global vec state lives in memory_status / doctor."""
         return tools.memory_get(memory_id=memory_id, sections=sections, section_ids=section_ids)
 
-    @app.tool()
+    @legacy_tool()
     def memory_store_embedding(memory_id: int, embedding: list[float]) -> dict[str, Any]:
         """Manually store or replace the semantic vector for a memory. With v0.5.0 GGUF embedding configured, new writes and ordinary queries vectorize automatically; this tool still suits backfill, non-GGUF models, remote APIs, or custom vector pipelines. The vector dimension must match vec.dim."""
         return tools.memory_store_embedding(memory_id=memory_id, embedding=embedding)
 
-    @app.tool()
+    @legacy_tool()
     def memory_recent(workspace: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
         """List recent memories (no keyword filtering). As of v0.7.4, workspace is reserved metadata — results span the whole DB and are no longer filtered by workspace; the parameter is kept only for interface stability. Use when keywords are uncertain, memory_search returns nothing, or you want to browse the store before deciding whether to read source files."""
         return tools.memory_recent(workspace=workspace, limit=limit)
 
-    @app.tool()
+    @legacy_tool()
     def memory_compare(left_id: int, right_id: int) -> dict[str, Any]:
         """Low-frequency diagnostic tool: compare two memories by rule priority (protection -> event_time -> source_type -> confidence -> ingest_time) and return an explainable comparison reason; it records no conflict. For daily conflict discovery, rely on memory_search's conflict_signal (open_table / runtime_metadata_hint) or the scan_conflict_candidates -> record_conflict workflow."""
         return tools.memory_compare(left_id=left_id, right_id=right_id)
 
-    @app.tool()
+    @legacy_tool()
     def memory_arbitrate(left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, apply: Optional[bool] = None) -> dict[str, Any]:
         """Legacy manual arbitration tool. mark_conflict=true uses the legacy record_conflict path (without v0.7.5 enrichment fields). With authorized=true, the non-protected loser is automatically marked superseded; authorized defaults to false, so only the comparison is returned unless a human has confirmed. The new conflict workflow (scan_conflict_candidates -> record_conflict -> list_conflicts -> supersede/resolve) is preferred for daily use; this tool is not the main entry point. The old `apply` parameter was renamed to `authorized` in v0.8.5; passing `apply` now returns an explicit migration error instead of being silently ignored."""
         return tools.memory_arbitrate(left_id=left_id, right_id=right_id, mark_conflict=mark_conflict, authorized=authorized, apply=apply)
 
-    @app.tool()
+    @legacy_tool()
     def memory_list_conflicts(status: str = "open", limit: int = 50) -> dict[str, Any]:
         """List memory conflict records; by default only open ones are returned."""
         return tools.memory_list_conflicts(status=status, limit=limit)
 
-    @app.tool()
+    @legacy_tool()
     def memory_scan_conflict_candidates(
         workspace: Optional[str] = None,
         top_k: int = 8,
@@ -223,7 +281,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
             max_distance=max_distance, incremental=incremental,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_record_conflict(
         left_id: int,
         right_id: int,
@@ -249,12 +307,12 @@ content_hash). Global vec state lives in memory_status / doctor."""
             scan_prompt_version=scan_prompt_version, scan_model=scan_model,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_resolve_conflict(conflict_id: int, reason: str = "", status: str = "resolved") -> dict[str, Any]:
         """Close a single open conflict by conflict_id. ``status``: 'resolved' (default) or 'not_a_conflict' (v0.8.8 — the pair was a false positive; write/search then skip it via Layer 0 until a version change). Unlike memory_supersede's resolve_conflicts_for (which closes all conflicts involving a memory), this tool closes only the specified one."""
         return tools.memory_resolve_conflict(conflict_id=conflict_id, reason=reason, status=status)
 
-    @app.tool()
+    @legacy_tool()
     def memory_submit_conflict_judgment(
         conflict_id: int,
         expected_left_version: int,
@@ -291,7 +349,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
             conflict_scope=conflict_scope,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_correct_conflict_judgment(
         conflict_id: int,
         verdict: str,
@@ -321,12 +379,12 @@ content_hash). Global vec state lives in memory_status / doctor."""
             resolution_kind=resolution_kind, conflict_scope=conflict_scope,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_list_conflict_judgments(conflict_id: int) -> dict[str, Any]:
         """List append-only LLM/policy/human judgments for one conflict, oldest first. Read-only."""
         return tools.memory_list_conflict_judgments(conflict_id=conflict_id)
 
-    @app.tool()
+    @legacy_tool()
     def memory_set_entity(
         memory_id: int,
         entity: Optional[str] = None,
@@ -340,12 +398,12 @@ content_hash). Global vec state lives in memory_status / doctor."""
             clear=clear, authorized=authorized,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_list_entities(limit: int = 50, include_unassigned: bool = True) -> dict[str, Any]:
         """List canonical metadata.entity values across active memories with counts, samples, and a bounded list of unassigned memory ids for incremental backfill. Read-only."""
         return tools.memory_list_entities(limit=limit, include_unassigned=include_unassigned)
 
-    @app.tool()
+    @legacy_tool()
     def memory_rebuild_claims(
         memory_ids: Optional[list[int]] = None,
         dry_run: bool = True,
@@ -356,17 +414,17 @@ content_hash). Global vec state lives in memory_status / doctor."""
             memory_ids=memory_ids, dry_run=dry_run, batch_size=batch_size,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_confirm(memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False) -> dict[str, Any]:
         """Mark an active memory as user-confirmed, promoting it to source_type=user_confirmed + protection_level=locked so it cannot be overwritten automatically. Requires authorized=true — promotion to the highest trust/protection tier must be an explicit, human-confirmed action. Superseded/deleted memories cannot be confirmed/reactivated; write a new active memory instead."""
         return tools.memory_confirm(memory_id=memory_id, source_ref=source_ref, confidence=confidence, authorized=authorized)
 
-    @app.tool()
+    @legacy_tool()
     def memory_activate(memory_id: int, authorized: bool = False) -> dict[str, Any]:
         """Activate a memory held as pending by strict workspace isolation. When isolation=strict and a write introduces a brand-new workspace, the memory is written as status=pending (excluded from active recall) and the write response carries action_required=confirm_new_workspace. This tool flips it to active so it becomes recallable. Requires authorized=true. Unlike memory_confirm, this does NOT promote to user_confirmed/locked — it only clears the strict-isolation gate."""
         return tools.memory_activate(memory_id=memory_id, authorized=authorized)
 
-    @app.tool()
+    @legacy_tool()
     def memory_supersede(
         memory_id: int,
         reason: str,
@@ -381,22 +439,22 @@ content_hash). Global vec state lives in memory_status / doctor."""
             authorized=authorized,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_status() -> dict[str, Any]:
         """Show memory-arbiter runtime status: database path, degradation mode, client identity, policy config, config-parse warnings, and whether auto-embedding is configured."""
         return tools.memory_status()
 
-    @app.tool()
+    @legacy_tool()
     def memory_audit_summary() -> dict[str, Any]:
         """Return a per-workspace memory statistics overview: entry counts, oldest/newest entry times, open-conflict count, and source_type distribution. Pure SQL aggregation, no semantic judgment — use it to quickly decide whether a deeper review is needed."""
         return tools.memory_audit_summary()
 
-    @app.tool()
+    @legacy_tool()
     def memory_doctor_overview(deep: bool = False) -> dict[str, Any]:
         """Run a health check on memory-arbiter and return a graded diagnostic report (read-only). Covers config integrity, the vectorization enablement chain, section splitting, data consistency, and capacity buildup. Each finding carries a severity and a fix_hint tailored to the current config. With deep=true, it additionally loads the GGUF model for a dimension probe (seconds of overhead)."""
         return tools.memory_doctor_overview(deep=deep)
 
-    @app.tool()
+    @legacy_tool()
     def memory_edit(
         memory_id: int,
         new_content: Optional[str] = None,
@@ -425,12 +483,12 @@ content_hash). Global vec state lives in memory_status / doctor."""
             remove_tags=remove_tags,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_history(memory_id: int) -> dict[str, Any]:
         """View a memory's version history (snapshots from the memory_history table, ordered by version descending). Read-only, touches no tables. Pairs with memory_edit: every pre-edit snapshot is stored here and can be manually restored if needed."""
         return tools.memory_history(memory_id=memory_id)
 
-    @app.tool()
+    @legacy_tool()
     def memory_cleanup_history(
         memory_id: Optional[int] = None,
         older_than_days: Optional[int] = None,
@@ -443,7 +501,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
             authorized=authorized,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_cleanup_inactive_vectors(
         dry_run: bool = True,
         authorized: bool = False,
@@ -461,7 +519,7 @@ content_hash). Global vec state lives in memory_status / doctor."""
     #  NULL/failed/declined records, and active-memory rebuild. Do not pre-call for
     #  ordinary writes.
 
-    @app.tool()
+    @legacy_tool()
     def memory_split(
         memory_id: int,
         split_decision: Optional[str] = None,
@@ -495,7 +553,7 @@ The publish stage provenance is fixed to "agent" (the rules path runs internally
             sections=sections,
         )
 
-    @app.tool()
+    @legacy_tool()
     def memory_rebuild_embeddings(
         memory_ids: Optional[list[int]] = None,
         dry_run: bool = True,

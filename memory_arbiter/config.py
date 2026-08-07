@@ -68,6 +68,7 @@ class Settings:
     # projects distinct, so 0.25 cleanly separates synonyms from distinct workspaces.
     workspace_match_distance: float = 0.25
     update_check_enabled: bool = True
+    tool_profile: str = "product"
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -183,6 +184,15 @@ class Settings:
             )
             isolation = "none"
 
+        tool_profile = pick_str(
+            "tool_profile", "MEMORY_ARBITER_TOOL_PROFILE", "product"
+        ).strip().lower()
+        if tool_profile not in {"product", "full", "legacy_full"}:
+            config_warnings.append(
+                f"tool_profile={tool_profile!r} invalid; using product"
+            )
+            tool_profile = "product"
+
         settings = cls(
             db_path=pick_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),
             backup_jsonl=pick_path("backup_jsonl", "MEMORY_ARBITER_BACKUP_JSONL", cwd / "memory_arbiter.backup.jsonl"),
@@ -243,6 +253,7 @@ class Settings:
                 0.0, 2.0, name="workspace_match_distance", warnings=config_warnings,
             ),
             update_check_enabled=update_check_enabled,
+            tool_profile=tool_profile,
         )
         settings.config_warnings = config_warnings
         settings.policy = load_policy(settings.policy_path, config_warnings)
