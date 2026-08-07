@@ -20,6 +20,7 @@ def build_server() -> Any:
     tools = MemoryTools(Settings.from_env())
     tools.start_update_monitor()
     tools.start_split_worker()
+    tools.start_semantic_worker()
     legacy_enabled = tools.settings.tool_profile in {"full", "legacy_full"}
 
     def legacy_tool():
@@ -70,7 +71,7 @@ def build_server() -> Any:
 
     @app.tool()
     def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Memory Arbiter maintenance and repair. Use task=split/rebuild_claims/rebuild_embeddings/cleanup_history/cleanup_vectors/resync_vectors/set_entity/activate_pending/help.
+        """Memory Arbiter maintenance and repair. Use task=split/rebuild_claims/rebuild_embeddings/cleanup_history/cleanup_vectors/resync_vectors/set_entity/activate_pending/semantic_control/notice/help.
 
         Prefer dry_run first where available. Cleanup, activation, and protected-memory
         metadata changes still require authorized=true when the underlying operation
@@ -254,32 +255,18 @@ content_hash). Global vec state lives in memory_status / doctor."""
 
     @legacy_tool()
     def memory_compare(left_id: int, right_id: int) -> dict[str, Any]:
-        """Low-frequency diagnostic tool: compare two memories by rule priority (protection -> event_time -> source_type -> confidence -> ingest_time) and return an explainable comparison reason; it records no conflict. For daily conflict discovery, rely on memory_search's conflict_signal (open_table / runtime_metadata_hint) or the scan_conflict_candidates -> record_conflict workflow."""
+        """Low-frequency diagnostic tool: compare two memories by rule priority (protection -> event_time -> source_type -> confidence -> ingest_time) and return an explainable comparison reason; it records no conflict. For daily conflict visibility, rely on memory_search conflict_signal, scheduled LLM scan, or semantic_conflict write-time notices when enabled; the old vector conflict candidate scan has been removed."""
         return tools.memory_compare(left_id=left_id, right_id=right_id)
 
     @legacy_tool()
     def memory_arbitrate(left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, apply: Optional[bool] = None) -> dict[str, Any]:
-        """Legacy manual arbitration tool. mark_conflict=true uses the legacy record_conflict path (without v0.7.5 enrichment fields). With authorized=true, the non-protected loser is automatically marked superseded; authorized defaults to false, so only the comparison is returned unless a human has confirmed. The new conflict workflow (scan_conflict_candidates -> record_conflict -> list_conflicts -> supersede/resolve) is preferred for daily use; this tool is not the main entry point. The old `apply` parameter was renamed to `authorized` in v0.8.5; passing `apply` now returns an explicit migration error instead of being silently ignored."""
+        """Legacy manual arbitration tool. mark_conflict=true uses the legacy record_conflict path (without v0.7.5 enrichment fields). With authorized=true, the non-protected loser is automatically marked superseded; authorized defaults to false, so only the comparison is returned unless a human has confirmed. For daily conflict handling prefer scheduled LLM scan, semantic_conflict write-time notices, and list_conflicts -> resolve/supersede; this tool is not the main entry point. The old `apply` parameter was renamed to `authorized` in v0.8.5; passing `apply` now returns an explicit migration error instead of being silently ignored."""
         return tools.memory_arbitrate(left_id=left_id, right_id=right_id, mark_conflict=mark_conflict, authorized=authorized, apply=apply)
 
     @legacy_tool()
     def memory_list_conflicts(status: str = "open", limit: int = 50) -> dict[str, Any]:
         """List memory conflict records; by default only open ones are returned."""
         return tools.memory_list_conflicts(status=status, limit=limit)
-
-    @legacy_tool()
-    def memory_scan_conflict_candidates(
-        workspace: Optional[str] = None,
-        top_k: int = 8,
-        max_pairs: int = 200,
-        max_distance: float = 12.0,
-        incremental: bool = True,
-    ) -> dict[str, Any]:
-        """Vector-recall candidate conflict pairs (no LLM). Incremental scan (only newly added + recently edited memories), pair dedup, same-workspace filter, distance cutoff. Each memory's embedding runs top-K nearest neighbors; pairs are canonicalized (left<right). When sqlite-vec is unavailable, returns scanned=False with a hint (a config state, not an error). After receiving candidate pairs, the agent should run an LLM comparison on each pair, then persist the verdict via memory_record_conflict. Note: this tool is designed for the agent-side scheduled/manual scan loop; it is not meant to be called from ordinary conversation."""
-        return tools.memory_scan_conflict_candidates(
-            workspace=workspace, top_k=top_k, max_pairs=max_pairs,
-            max_distance=max_distance, incremental=incremental,
-        )
 
     @legacy_tool()
     def memory_record_conflict(

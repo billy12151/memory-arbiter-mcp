@@ -1,7 +1,29 @@
 # Changelog
 
-All notable changes to memory-arbiter-mcp are documented here.
+All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
+
+## [0.12.0] — 2026-08-08
+
+### Added
+
+- **Write-time semantic conflict detection (off by default)** — new `semantic_conflict` module runs a local Qwen2.5-0.5B candidate signal after writes, gated by pair-text evidence (`medium` by default for balanced recall, `strong` for lower-noise/higher-confidence). Pipeline: metadata-overlap coarse recall → 0.5B pair classification → pair-text gate → `semantic_notices` row. The small model is only a recall signal; the gate has veto power, so a duplicate/compatible pair never produces a notice even when the model says candidate. The model is not bundled with the default package; install the `semantic-local` extra and point it at a GGUF file.
+- **`semantic_notices` table and `memory_repair` notice/semantic_control tasks** — notices are viewable and dismissible via `memory_repair(task="notice", ...)`; runtime control (pause/resume/enable/disable/unload/status) via `memory_repair(task="semantic_control", ...)`. `memory_status` exposes a `semantic_conflict` diagnostics block.
+- **`SemanticConflictWorker`** — single-threaded async worker (`max_concurrency` reserved to 1; configured values are clamped) with a per-pair budget floor (`min_pair_budget_ms`, default 1000) so the deadline gates *between* pairs and never starts an inference it cannot afford. `on_write=off` avoids spinning up the thread or preloading the model for a queue that stays empty.
+
+### Removed
+
+- **Legacy vector conflict-candidate scan** — the `memory_scan_conflict_candidates` MCP tool and the underlying `scan_conflict_candidates` / `pairs_closed_for_scan` / `purge_stale_dismissals` / `_bulk_backfill_meta` / `_scan_log_append` db methods are removed. The old KNN candidate scanner is no longer a conflict path; `embedding`/`sqlite-vec` remain for semantic recall, section recall, and workspace aliasing, but no longer feed a conflict scanner. `memory_doctor` no longer warns on a missing/stale `scan_log.jsonl` (the writer is gone); it reports open conflicts from the `conflicts` table and treats the legacy log as INFO context.
+
+### Fixed
+
+- **Semantic signal JSON no longer truncated on nested objects** — `model_signal_from_text` used a non-greedy `{.*?}` regex that stopped at the first `}`, so a model reply with a nested JSON value (e.g. `{"reason_code": "value_diff", "parsed": {...}}`) was rejected as `invalid_json` and the candidate was silently dropped on a high-recall path. JSON is now extracted by brace-balanced scanning that respects string literals, returning the first complete top-level object.
+- **`todo_done` pair detection is direction-agnostic** — the gate previously fired only when the left text said "待办/todo" and the right said "已完成". Because the caller may pass new/old memories in either order, a new "done" write against an old "todo" peer was missed, and an unrelated todo/done pair could falsely pair. It now accepts both orientations and requires shared content tokens, so unrelated statements no longer couple.
+- **Semantic worker error/progress writes are now lock-guarded** — `SemanticConflictWorker._last_error` and `_processed` were written from the job thread outside the condition lock while `status()` read them inside it, a benign-but-sloppy race. `_run` now updates both under `_cond`, and external timeout errors go through a new `set_error()` method instead of reaching into the private attribute from `_process_semantic_conflict_job`.
+- **Per-pair budget guard prevents worker stalls near the deadline** — the job deadline could only be checked *between* pairs, so when the remaining budget was a few milliseconds the loop would still launch another non-interruptible model inference and overrun. A new `semantic_conflict.min_pair_budget_ms` floor (default 1000) makes the job stop early with a clear `last_error` instead, and `semantic_control status` now exposes `min_pair_budget_ms`, `last_pair_duration_ms`, and a `job_deadline_behavior` note explaining that a single stuck in-flight call still requires process-level isolation.
+- **Worker `last_error` cleared on successful job** — once any job errored, `SemanticConflictWorker.status()["last_error"]` stayed populated forever even if every subsequent job succeeded, leaving a stale error in `memory_status`. A clean run now clears the prior transient error.
+- **Doctor no longer warns on the deprecated scan_log** — `_check_conflicts_open` used to emit a WARNING when `scan_log.jsonl` had no `completed` entry or was stale, but the writer was removed with the legacy vector scan, so vec-enabled installs permanently saw a WARN pointing at a deprecated feature. The check now reports from the `conflicts` table and treats the legacy scan_log as INFO context only.
+- **Version comment aligned** — a leftover "removed in v0.12" comment referenced an unreleased version; corrected to avoid the unreleased-version mismatch with the `[Unreleased]` changelog.
 
 ## [0.11.0] — 2026-08-07
 

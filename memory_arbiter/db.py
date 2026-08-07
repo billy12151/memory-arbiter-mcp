@@ -200,6 +200,31 @@ class MemoryDB:
                   FOREIGN KEY(left_id) REFERENCES memories(id),
                   FOREIGN KEY(right_id) REFERENCES memories(id)
                 );
+                CREATE TABLE IF NOT EXISTS semantic_notices (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  created_at TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'open',
+                  severity TEXT NOT NULL,
+                  source TEXT NOT NULL,
+                  memory_id INTEGER NOT NULL,
+                  peer_id INTEGER,
+                  conflict_id INTEGER,
+                  notice_type TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  message TEXT NOT NULL,
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  dedupe_key TEXT,
+                  left_version INTEGER,
+                  right_version INTEGER,
+                  left_claim_revision INTEGER,
+                  right_claim_revision INTEGER,
+                  delivered_at TEXT,
+                  dismissed_at TEXT,
+                  resolved_at TEXT,
+                  FOREIGN KEY(memory_id) REFERENCES memories(id),
+                  FOREIGN KEY(peer_id) REFERENCES memories(id),
+                  FOREIGN KEY(conflict_id) REFERENCES conflicts(id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(workspace, agent_id, status);
                 CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(workspace, subject);
                 CREATE INDEX IF NOT EXISTS idx_memories_event ON memories(event_time, ingest_time);
@@ -208,6 +233,8 @@ class MemoryDB:
                 CREATE INDEX IF NOT EXISTS idx_conflicts_status_left ON conflicts(status, left_id);
                 CREATE INDEX IF NOT EXISTS idx_conflicts_status_right ON conflicts(status, right_id);
                 CREATE INDEX IF NOT EXISTS idx_conflicts_status_created ON conflicts(status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_semantic_notices_status_created ON semantic_notices(status, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_notices_dedupe ON semantic_notices(dedupe_key) WHERE dedupe_key IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS memory_history (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   memory_id INTEGER NOT NULL,
@@ -1631,11 +1658,9 @@ class MemoryDB:
         or empty input → [].
 
         Note (v0.10.2): the resolved branch surfaces reusable *guidance* only
-        for evolution/compatible verdicts with a live active judgment. This is
-        narrower than ``pairs_closed_for_scan``'s close gate by design:
-        search must not re-litigate a pair as guidance, whereas scan deliberately
-        keeps contradiction-resolved pairs ringable for a second look. Do not
-        align the two queries without resolving that intent first.
+        for evolution/compatible verdicts with a live active judgment.
+        Search must not re-litigate a pair as guidance; a contradiction-resolved
+        pair is left ringable for a second look.
         """
         if not memory_ids or not self._db_available:
             return []
@@ -2039,103 +2064,6 @@ class MemoryDB:
         except sqlite3.Error:
             return False
 
-    def pairs_closed_for_scan(self, memory_ids: list[int]) -> set[tuple[int, int]]:
-        """Terminal conflict pairs that vector scan should not re-ring on.
-
-        This is the scan-facing close gate.  It combines explicit false-positive
-        dismissals with resolved guidance for the same memory snapshot.  Version
-        and claim-revision pins decide when a pair naturally reopens.
-
-        Note (v0.10.2): this is intentionally wider than the resolved-guidance
-        branch in ``list_open_conflicts_for_memory_ids``.  Scan closes any
-        resolved pair whose verdict is evolution/compatible *or* that has no
-        active judgment (manual close).  A resolved pair carrying a
-        contradiction verdict is deliberately left ringable so a contested
-        close can be re-examined; search never surfaces such a pair as
-        guidance.  Mirroring the two queries would either re-litigate settled
-        evolution/compatible pairs or silence contested ones — keep them
-        asymmetric unless that trade-off is revisited.
-        """
-        if not memory_ids or not self._db_available:
-            return set()
-        ids = sorted(set(int(i) for i in memory_ids if i is not None))
-        if not ids:
-            return set()
-        out: set[tuple[int, int]] = set()
-        try:
-            with self.connection() as conn:
-                ph = ",".join("?" * len(ids))
-                rows = conn.execute(
-                    """
-                    SELECT c.left_id, c.right_id FROM conflicts c
-                    LEFT JOIN conflict_judgments j ON j.id = c.active_judgment_id
-                    WHERE (c.left_id IN ({ph}) OR c.right_id IN ({ph}))
-                    AND (
-                      (
-                        c.status='not_a_conflict'
-                        AND (c.left_version IS NULL OR c.left_version = (SELECT version FROM memories WHERE id=c.left_id))
-                        AND (c.right_version IS NULL OR c.right_version = (SELECT version FROM memories WHERE id=c.right_id))
-                        AND (c.left_claim_revision IS NULL OR c.left_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.left_id))
-                        AND (c.right_claim_revision IS NULL OR c.right_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.right_id))
-                      )
-                      OR (
-                        c.status='resolved'
-                        AND c.left_version IS NOT NULL
-                        AND c.right_version IS NOT NULL
-                        AND c.left_version = (SELECT version FROM memories WHERE id=c.left_id)
-                        AND c.right_version = (SELECT version FROM memories WHERE id=c.right_id)
-                        AND (c.left_claim_revision IS NULL OR c.left_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.left_id))
-                        AND (c.right_claim_revision IS NULL OR c.right_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.right_id))
-                        AND (
-                          j.verdict IN ('evolution','compatible')
-                          OR c.active_judgment_id IS NULL
-                        )
-                      )
-                    )
-                    """.format(ph=ph),
-                    (*ids, *ids),
-                ).fetchall()
-                for r in rows:
-                    a, b = int(r["left_id"]), int(r["right_id"])
-                    out.add((min(a, b), max(a, b)))
-        except sqlite3.Error:
-            return set()
-        return out
-
-    def purge_stale_dismissals(self) -> int:
-        """v0.8.8: delete ``not_a_conflict`` rows whose pinned versions no longer
-        match the memories' current versions (a side was edited after dismissal).
-        Called by scan. Garbage collection only — functional re-enable is already
-        handled by ``is_pair_dismissed``'s version CAS at check time. Best-effort.
-
-        Symmetry note (v0.8.8 review): the read path (``is_pair_dismissed`` /
-        ``dismissed_pairs_for``) treats a NULL version pin as a *valid* dismissal
-        (``IS NULL OR =``). This GC must agree, so a row is reclaimed ONLY when a
-        pin is non-NULL AND differs from the memory's current version
-        (``IS NOT NULL AND <>`` — a NULL pin is left alone). A NULL pin can't be
-        invalidated by version CAS alone; ``_enrich_write_response`` avoids
-        creating NULL pins by defaulting missing versions to 1 (``or 1``).
-        """
-        if not self._db_available or not self.state.sqlite_writable:
-            return 0
-        try:
-            with self.connection() as conn:
-                cur = conn.execute(
-                    "DELETE FROM conflicts WHERE status='not_a_conflict' AND ( "
-                    "(left_version IS NOT NULL AND left_version <> "
-                    "(SELECT version FROM memories WHERE id=conflicts.left_id)) "
-                    "OR (right_version IS NOT NULL AND right_version <> "
-                    "(SELECT version FROM memories WHERE id=conflicts.right_id)) "
-                    "OR (left_claim_revision IS NOT NULL AND left_claim_revision <> "
-                    "(SELECT claim_revision FROM memories WHERE id=conflicts.left_id)) "
-                    "OR (right_claim_revision IS NOT NULL AND right_claim_revision <> "
-                    "(SELECT claim_revision FROM memories WHERE id=conflicts.right_id)) )"
-                )
-                conn.commit()
-                return cur.rowcount
-        except sqlite3.Error:
-            return 0
-
     def get_memory_version(self, memory_id: int) -> Optional[int]:
         """v0.8.8: current version of a memory (for conflict-row version pinning)."""
         if not self._db_available:
@@ -2352,6 +2280,171 @@ class MemoryDB:
         except sqlite3.Error:
             return None
 
+
+    # ------------------------------------------------------------------
+    #  Semantic write-time notices
+    # ------------------------------------------------------------------
+
+    def record_semantic_notice(
+        self,
+        *,
+        memory_id: int,
+        peer_id: Optional[int],
+        severity: str,
+        notice_type: str,
+        title: str,
+        message: str,
+        payload: dict[str, Any],
+        dedupe_key: Optional[str] = None,
+        conflict_id: Optional[int] = None,
+        left_version: Optional[int] = None,
+        right_version: Optional[int] = None,
+        left_claim_revision: Optional[int] = None,
+        right_claim_revision: Optional[int] = None,
+        source: str = "semantic_write_gate",
+    ) -> dict[str, Any]:
+        if not self._db_available or not self.state.sqlite_writable:
+            return {"outcome": "unavailable"}
+        now = utc_now_iso()
+        with self.write_transaction() as conn:
+            try:
+                cur = conn.execute(
+                    """
+                    INSERT INTO semantic_notices(
+                        created_at, status, severity, source, memory_id, peer_id,
+                        conflict_id, notice_type, title, message, payload, dedupe_key,
+                        left_version, right_version, left_claim_revision, right_claim_revision
+                    ) VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        now, str(severity or "normal"), str(source or "semantic_write_gate"),
+                        int(memory_id), int(peer_id) if peer_id is not None else None,
+                        int(conflict_id) if conflict_id is not None else None,
+                        str(notice_type or "semantic_candidate"), str(title or "Semantic notice"),
+                        str(message or ""), json.dumps(payload or {}, ensure_ascii=False),
+                        dedupe_key, left_version, right_version,
+                        left_claim_revision, right_claim_revision,
+                    ),
+                )
+                return {"outcome": "created", "notice_id": int(cur.lastrowid)}
+            except sqlite3.IntegrityError:
+                # A dedupe_key collision is the only benign IntegrityError here;
+                # anything else (FK violation, etc.) is a real write failure
+                # and must not be masked as "deduped". The failed INSERT leaves
+                # nothing to commit, so returning (rather than re-raising) is safe
+                # and keeps the worker from crashing on a bad notice.
+                if not dedupe_key:
+                    return {"outcome": "error", "reason": "integrity_constraint"}
+                row = conn.execute(
+                    "SELECT id FROM semantic_notices WHERE dedupe_key=?",
+                    (dedupe_key,),
+                ).fetchone()
+                if row is None:
+                    # Constraint fired but not on our dedupe_key (e.g. FK);
+                    # do not claim a dedupe that didn't happen.
+                    return {"outcome": "error", "reason": "integrity_constraint"}
+                return {"outcome": "deduped", "notice_id": int(row["id"])}
+
+    def list_semantic_notices(self, status: str = "open", limit: int = 10) -> list[dict[str, Any]]:
+        if not self._db_available:
+            return []
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM semantic_notices WHERE status=? ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (str(status or "open"), max(1, min(100, int(limit)))),
+                ).fetchall()
+            notices = [row_to_dict(row) for row in rows]
+            for notice in notices:
+                try:
+                    notice["payload"] = json.loads(notice.get("payload") or "{}")
+                except Exception:
+                    notice["payload"] = {}
+            return notices
+        except Exception:
+            return []
+
+    def semantic_notice_counts(self) -> dict[str, int]:
+        if not self._db_available:
+            return {}
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    "SELECT status, COUNT(*) AS count FROM semantic_notices GROUP BY status"
+                ).fetchall()
+            return {str(row["status"]): int(row["count"] or 0) for row in rows}
+        except Exception:
+            return {}
+
+
+    def is_semantic_pair_closed(
+        self,
+        left_id: int,
+        right_id: int,
+        left_version: Optional[int] = None,
+        right_version: Optional[int] = None,
+        notice_type: str = "semantic_pair",
+    ) -> bool:
+        if not self._db_available:
+            return False
+        a, b = sorted([int(left_id), int(right_id)])
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM semantic_notices
+                    WHERE status IN ('dismissed','resolved')
+                      AND notice_type=?
+                      AND ((memory_id=? AND peer_id=?) OR (memory_id=? AND peer_id=?))
+                    """,
+                    (notice_type, a, b, b, a),
+                ).fetchall()
+            for row in rows:
+                notice = row_to_dict(row)
+                lv = notice.get("left_version")
+                rv = notice.get("right_version")
+                if left_version is None or right_version is None:
+                    if lv is not None and rv is not None:
+                        return True
+                    continue
+                if lv is None or rv is None:
+                    continue
+                if notice.get("memory_id") == left_id:
+                    if lv == left_version and rv == right_version:
+                        return True
+                else:
+                    if lv == right_version and rv == left_version:
+                        return True
+        except Exception:
+            return False
+        return False
+
+    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "") -> dict[str, Any]:
+        if not self._db_available or not self.state.sqlite_writable:
+            return {"outcome": "unavailable"}
+        status = str(status or "").strip().lower()
+        if status not in {"open", "delivered", "dismissed", "resolved", "stale"}:
+            return {"outcome": "invalid_status"}
+        column = {
+            "delivered": "delivered_at",
+            "dismissed": "dismissed_at",
+            "resolved": "resolved_at",
+            "stale": "resolved_at",
+        }.get(status)
+        now = utc_now_iso()
+        with self.write_transaction() as conn:
+            if column:
+                cur = conn.execute(
+                    f"UPDATE semantic_notices SET status=?, {column}=? WHERE id=?",
+                    (status, now, int(notice_id)),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE semantic_notices SET status=? WHERE id=?",
+                    (status, int(notice_id)),
+                )
+        return {"outcome": "updated" if cur.rowcount else "not_found", "reason": reason}
+
     # ------------------------------------------------------------------
     #  v0.7.5: scan_log.jsonl (diagnostic layer for conflict scan + doctor)
     # ------------------------------------------------------------------
@@ -2373,9 +2466,10 @@ class MemoryDB:
     def log_attention(self, *, trigger: str, source: str, memory_ids: list) -> None:
         """Append one attention event (v0.8.8). Best-effort diagnostic layer.
 
-        Same append discipline as ``_scan_log_append`` ("a" mode, single
-        write, POSIX < PIPE_BUF atomicity). Never raises — a failed
-        diagnostic write must not break the write/search that triggered it.
+        Uses ``"a"`` mode + a single ``write`` so concurrent calls don't
+        corrupt each other's lines under POSIX (< PIPE_BUF atomicity).
+        Never raises — a failed diagnostic write must not break the
+        write/search that triggered it.
         """
         try:
             entry = {
@@ -2390,26 +2484,13 @@ class MemoryDB:
         except (OSError, ValueError, TypeError):
             pass
 
-    def _scan_log_append(self, entry: dict[str, Any]) -> None:
-        """Append one JSONL line to scan_log. Best-effort (diagnostic layer).
-
-        Uses ``"a"`` mode + a single ``write`` so concurrent scans don't
-        corrupt each other's lines under POSIX (< PIPE_BUF atomicity).
-        Never raises — a failed diagnostic write must not break the scan.
-        """
-        try:
-            line = json.dumps(entry, ensure_ascii=False) + "\n"
-            with open(self.scan_log_path, "a", encoding="utf-8") as fh:
-                fh.write(line)
-        except OSError:
-            pass
-
     def _scan_log_last_completed(self) -> Optional[dict[str, Any]]:
         """Read the last ``status=completed`` entry from scan_log.
 
         Tolerant: missing file -> None; corrupted lines skipped; if no
-        ``completed`` line exists, returns None. Doctor and the scan tool
-        both key off this for the incremental watermark.
+        ``completed`` line exists, returns None. Read only for legacy scan
+        diagnostics; no writer remains, so a None result is the expected
+        steady state, not a defect.
         """
         path = self.scan_log_path
         if not path.exists():
@@ -2432,248 +2513,13 @@ class MemoryDB:
         return last_completed
 
     # ------------------------------------------------------------------
-    #  v0.7.5: conflict candidate scan (id=243 path-B, tool-side, no LLM)
-    # ------------------------------------------------------------------
+    #  Legacy vector conflict candidate scan was removed.
+    #
+    #  Embedding/sqlite-vec remains available for semantic recall, section
+    #  recall, and workspace aliasing.  The old KNN conflict-candidate
+    #  scanner and its tuning parameters are intentionally not kept here; the
+    #  legacy MCP tool is no longer registered.
 
-    def scan_conflict_candidates(
-        self,
-        workspace: Optional[str] = None,
-        top_k: int = 8,
-        max_pairs: int = 200,
-        max_distance: float = 12.0,
-        incremental: bool = True,
-    ) -> dict[str, Any]:
-        """Vector-recall candidate conflict pairs (no LLM, no writes to memories).
-
-        Returns a dict with ``candidates`` (list of pairs with distance/tags/
-        excerpts), ``checked_pairs``, ``truncated``, ``max_memory_id``, and
-        ``scan_log_written``. When sqlite-vec is unavailable, returns a normal
-        (non-error) ``scanned=False`` result with a hint — this is a config
-        state, not an exception.
-        """
-        if not self._db_available:
-            return {"scanned": False, "reason": "db_unavailable",
-                    "hint": "SQLite unavailable; conflict scan cannot run."}
-        # v0.8.8: GC stale advisory dismissals (rows whose pinned versions no
-        # longer match — a side was edited). Functional re-enable is already
-        # handled by is_pair_dismissed's version CAS; this just reclaims dead rows.
-        self.purge_stale_dismissals()
-        if not self.state.sqlite_vec_available:
-            return {"scanned": False, "reason": "sqlite_vec_unavailable",
-                    "hint": "向量未启用，冲突扫描不可用。请先配置 sqlite-vec embedding。"}
-
-        t0 = time.time()
-        # Record the scan *start* (not end) so edits during/after this scan
-        # are caught next time. Catch uses >= against this baseline; because
-        # utc_now_iso has second-level precision, using the end time + strict >
-        # would miss same-second edits. Re-processing is idempotent
-        # (record_conflict dedupes), so a little overlap is harmless.
-        scan_start_iso = utc_now_iso()
-
-        # --- determine incremental watermark + last scan time ---
-        watermark = 0
-        last_scan_time: Optional[str] = None
-        if incremental:
-            last = self._scan_log_last_completed()
-            if last:
-                watermark = int(last.get("max_memory_id") or 0)
-                last_scan_time = last.get("scan_time")
-
-        # --- pick memories to scan: new (id > watermark) + edited since last scan ---
-        with self.connection() as conn:
-            if workspace:
-                new_rows = conn.execute(
-                    "SELECT id, workspace, subject, tags, content FROM memories "
-                    "WHERE status='active' AND id > ? AND workspace=? "
-                    "ORDER BY id",
-                    (watermark, workspace),
-                ).fetchall()
-            else:
-                new_rows = conn.execute(
-                    "SELECT id, workspace, subject, tags, content FROM memories "
-                    "WHERE status='active' AND id > ? ORDER BY id",
-                    (watermark,),
-                ).fetchall()
-            scan_ids = {int(r["id"]) for r in new_rows}
-            edited_rows: list = []
-            if last_scan_time:
-                edited_rows = conn.execute(
-                    "SELECT DISTINCT h.memory_id FROM memory_history h "
-                    "WHERE h.changed_at >= ?",
-                    (last_scan_time,),
-                ).fetchall()
-                for er in edited_rows:
-                    mid = int(er["memory_id"])
-                    if mid not in scan_ids:
-                        scan_ids.add(mid)
-
-        if not scan_ids:
-            self._scan_log_append({
-                "scan_time": scan_start_iso,
-                "duration_sec": round(time.time() - t0, 4),
-                "workspace": workspace,
-                "status": "completed",
-                "max_memory_id": watermark,
-                "checked_pairs": 0,
-                "truncated": False,
-            })
-            return {"scanned": True, "candidates": [], "checked_pairs": 0,
-                    "truncated": False, "max_memory_id": watermark,
-                    "scan_log_written": True, "reason": "no_new_or_edited"}
-
-        # --- cache: id -> (workspace, subject, tags, excerpt) ---
-        # Seed from new_rows (already fetched); edited-only memories need a
-        # status check — a memory edited then superseded must not be scanned.
-        id_meta: dict[int, dict[str, Any]] = {}
-        max_seen_id = watermark
-        for r in new_rows:
-            mid = int(r["id"])
-            content = r["content"] or ""
-            id_meta[mid] = {
-                "workspace": r["workspace"],
-                "subject": r["subject"] or f"memory #{mid}",
-                "tags": _coerce_tags_db(r["tags"]),
-                "excerpt": content[:200],
-            }
-            if mid > max_seen_id:
-                max_seen_id = mid
-        # backfill meta for edited-only memories not in new_rows;
-        # drop non-active (edited-then-superseded) from the scan set.
-        edited_only = [int(er["memory_id"]) for er in edited_rows
-                       if int(er["memory_id"]) not in id_meta]
-        if edited_only:
-            self._bulk_backfill_meta(id_meta, edited_only)
-            # prune: a memory edited but now superseded/deleted must not scan.
-            scan_ids = {mid for mid in scan_ids
-                        if mid not in edited_only or mid in id_meta}
-
-        # --- recall top-K neighbours for each scan memory ---
-        seen_pairs: set[tuple[int, int]] = set()
-        candidates: list[dict[str, Any]] = []
-        # collect neighbour ids whose meta we still need (non-scan side).
-        missing_meta_ids: set[int] = set()
-
-        for mid in sorted(scan_ids):
-            if mid not in id_meta:
-                # pruned (edited-then-superseded) — skip.
-                continue
-            emb = self.get_embedding(mid)
-            if emb is None:
-                continue
-            neighbours = self.vec_knn(emb, k=top_k)
-            for nb in neighbours:
-                nb_id = int(nb["id"])
-                if nb_id == mid:
-                    continue
-                # canonicalise pair
-                a, b = sorted((mid, nb_id))
-                key = (a, b)
-                if key in seen_pairs:
-                    continue
-                seen_pairs.add(key)
-                dist = float(nb["distance"])
-                if dist > max_distance:
-                    continue
-                # defer meta fetch for the non-scan neighbour; collect first,
-                # bulk-fetch after the loop to avoid N+1 queries.
-                if a not in id_meta:
-                    missing_meta_ids.add(a)
-                if b not in id_meta:
-                    missing_meta_ids.add(b)
-                candidates.append((a, b, dist))
-
-        # bulk-fetch all missing neighbour meta in one query.
-        if missing_meta_ids:
-            self._bulk_backfill_meta(id_meta, list(missing_meta_ids))
-
-        # materialise candidate dicts (now that all meta is present) + ws filter.
-        resolved: list[dict[str, Any]] = []
-        candidate_ids = sorted({mid for a, b, _dist in candidates for mid in (a, b)})
-        closed_pairs = self.pairs_closed_for_scan(candidate_ids)
-        for a, b, dist in candidates:
-            if (a, b) in closed_pairs:
-                continue
-            ws_a = id_meta.get(a, {}).get("workspace")
-            ws_b = id_meta.get(b, {}).get("workspace")
-            if ws_a is None or ws_b is None:
-                # neighbour memory vanished (deleted between KNN and fetch).
-                continue
-            if ws_a != ws_b:
-                continue
-            resolved.append({
-                "left_id": a, "right_id": b,
-                "left_subject": id_meta.get(a, {}).get("subject", f"memory #{a}"),
-                "right_subject": id_meta.get(b, {}).get("subject", f"memory #{b}"),
-                "left_tags": id_meta.get(a, {}).get("tags", []),
-                "right_tags": id_meta.get(b, {}).get("tags", []),
-                "left_excerpt": id_meta.get(a, {}).get("excerpt", ""),
-                "right_excerpt": id_meta.get(b, {}).get("excerpt", ""),
-                "distance": dist,
-                "workspace": ws_a,
-            })
-
-        checked_pairs = len(resolved)
-        resolved.sort(key=lambda c: c["distance"])
-        truncated = False
-        if len(resolved) > max_pairs:
-            resolved = resolved[:max_pairs]
-            truncated = True
-
-        new_max = max(max_seen_id, watermark)
-        self._scan_log_append({
-            "scan_time": scan_start_iso,
-            "duration_sec": round(time.time() - t0, 4),
-            "workspace": workspace,
-            "status": "completed",
-            "max_memory_id": new_max,
-            "checked_pairs": checked_pairs,
-            "truncated": truncated,
-        })
-        return {
-            "scanned": True,
-            "candidates": resolved,
-            "checked_pairs": checked_pairs,
-            "truncated": truncated,
-            "max_memory_id": new_max,
-            "scan_log_written": True,
-        }
-
-    def _bulk_backfill_meta(
-        self, id_meta: dict[int, dict[str, Any]], ids: list[int]
-    ) -> None:
-        """Bulk-fetch subject/workspace/tags/excerpt for ids missing from ``id_meta``.
-
-        Only active memories are loaded; superseded/deleted ids are simply
-        absent from the result (caller treats absence as "pruned"). One query
-        instead of N (avoids the N+1 the per-pair backfill caused).
-        """
-        missing = [i for i in ids if i not in id_meta]
-        if not missing:
-            return
-        # SQLite has a variable limit (999 by default); chunk to be safe.
-        try:
-            with self.connection() as conn:
-                for chunk_start in range(0, len(missing), 500):
-                    chunk = missing[chunk_start:chunk_start + 500]
-                    placeholders = ",".join("?" * len(chunk))
-                    rows = conn.execute(
-                        f"SELECT id, workspace, subject, tags, content, status "
-                        f"FROM memories WHERE id IN ({placeholders})",
-                        chunk,
-                    ).fetchall()
-                    for r in rows:
-                        if r["status"] != "active":
-                            continue
-                        content = r["content"] or ""
-                        mid = int(r["id"])
-                        id_meta[mid] = {
-                            "workspace": r["workspace"],
-                            "subject": r["subject"] or f"memory #{mid}",
-                            "tags": _coerce_tags_db(r["tags"]),
-                            "excerpt": content[:200],
-                        }
-        except sqlite3.Error:
-            pass
 
     # ------------------------------------------------------------------
     #  Edit / History

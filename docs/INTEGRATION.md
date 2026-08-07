@@ -84,7 +84,12 @@ scheduled trigger
 
 `memory_audit_summary` is the cheapest entry point — pure SQL aggregation, no semantic work. Use it to decide whether a deeper, model-assisted review is worth it.
 
-**v0.7.5–v0.7.6 conflict scan**: `memory_scan_conflict_candidates` vector-recalls candidate conflict pairs (incremental: only new + recently edited memories). It returns pairs with distance/excerpt/tags — no LLM, no writes. The calling agent runs LLM comparison on each pair, then persists the verdict with `memory_record_conflict` (idempotent, carries `conflict_type`/`suggested_winner`/`source`). If an open conflict already exists but the memory version or scan model changed since it was recorded, re-run LLM and persist with `memory_record_conflict(refresh=true)` to update the enrichment fields in place. Dismiss false positives with `memory_resolve_conflict`. `memory_doctor_overview` reports scan freshness via `scan_log.jsonl` (warns if never scanned or stale > 15 days).
+**Conflict discovery**: there are two conflict-candidate sources, and they compose rather than compete.
+
+- **Write-time semantic notices (automated).** Enable `semantic_conflict` to run a local Qwen2.5-0.5B candidate signal plus pair-text gates (`medium` by default, `strong` for low-noise) after each write. Candidates that pass the gate become rows in `semantic_notices`, viewable and dismissible via `memory_repair(task="notice", ...)`. This is the only automated, always-on candidate source; it is intentionally high-recall and gated, not a final verdict.
+- **Manual / scheduled LLM review (on demand).** An agent can still compare two memories with `memory_compare`, persist a verdict with `memory_record_conflict` (`refresh=true` updates enrichment in place when versions/models changed), and close false positives with `memory_resolve_conflict`. There is no longer an automated vector scanner feeding this loop: the legacy `memory_scan_conflict_candidates` vector-candidate workflow has been removed. Build scheduled review on `memory_search` conflict signals and `memory_list_conflicts`, not on the removed scanner.
+
+`embedding`/`sqlite-vec` still powers semantic recall, section recall, and workspace alias support; it is no longer a conflict-candidate path.
 
 **v0.7.6 consuming conflict signals**: when `memory_search` returns a result with a `conflict_signal` field, read `conflict_source` to decide:
 - `open_table`: the conflict is scan/record-verified. Mention to the user "this memory has an unresolved conflict" and optionally guide them to `memory_list_conflicts` for details. Use `suggested_winner`/`confidence_hint` to decide who to trust.
@@ -235,7 +240,12 @@ Memory Arbiter 是一层 token 优化中间件：用精准检索替代全文加�
 
 `memory_audit_summary` 是最廉价的入口——纯 SQL 聚合，不做任何语义判断。用它决定是否值得做一次需要模型介入的深入审查。
 
-**v0.7.5–v0.7.6 冲突扫描**：`memory_scan_conflict_candidates` 向量召回候选冲突对（增量：只扫新增 + 最近编辑的记忆），返回带 distance/excerpt/tags 的候选对——无 LLM、不写库。调用方 agent 对每对跑 LLM 比对后，用 `memory_record_conflict` 落表（幂等，带 `conflict_type`/`suggested_winner`/`source`）。如果同一对已有 open 冲突、但之后记忆版本或扫描模型变了，重跑 LLM 后用 `memory_record_conflict(refresh=true)` 原地更新富化字段。误报用 `memory_resolve_conflict` 关闭。`memory_doctor_overview` 通过 `scan_log.jsonl` 报告扫描新鲜度（从未扫描或超过 15 天会 WARN）。
+**冲突发现**：有两个冲突候选来源，二者互补而非互斥。
+
+- **写入时语义 notice（自动）**。启用 `semantic_conflict` 后，每次写入运行本地 Qwen2.5-0.5B 候选信号 + pair 文本 gate（默认 `medium`，低打扰可用 `strong`）。通过 gate 的候选落进 `semantic_notices`，用 `memory_repair(task="notice", ...)` 查看/关闭。这是当前**唯一的自动、常驻候选来源**；设计上是高召回 + 门控，不是最终裁决。
+- **手动 / 定时 LLM 审查（按需）**。agent 仍可用 `memory_compare` 比对两条记忆、用 `memory_record_conflict` 落表（`refresh=true` 可在版本/模型变化后原地更新富化字段）、用 `memory_resolve_conflict` 关闭误报。但这条循环**不再有自动向量扫描器喂数据**：旧的 `memory_scan_conflict_candidates` 向量候选流程已移除。定时审查应基于 `memory_search` 的 conflict_signal 和 `memory_list_conflicts`，而不是已移除的 scanner。
+
+`embedding`/`sqlite-vec` 仍用于语义召回、分段召回和 workspace alias，但不再是冲突候选路径。
 
 **v0.7.6 消费冲突信号**：当 `memory_search` 返回结果带 `conflict_signal` 字段时，按 `conflict_source` 决定怎么处理：
 - `open_table`：经 scan/record 验证过的冲突。可以提示用户"这条记忆有未解决冲突"，并引导到 `memory_list_conflicts` 看详情；用 `suggested_winner`/`confidence_hint` 判断该信哪一边。

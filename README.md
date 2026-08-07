@@ -302,6 +302,21 @@ Low-level tool implementations remain inside Memory Arbiter and are reused by th
 
 Advanced compatibility: set `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`) to expose the legacy low-level MCP tool surface alongside the product tools.
 
+
+#### Optional: write-time semantic conflict check
+
+Memory Arbiter can optionally run a local Qwen2.5-0.5B model after writes to produce **semantic conflict notices** — lightweight, reviewable hints that a new memory may semantically conflict with an existing one. The model is only a candidate signal, never the final judge: whether a candidate becomes a visible notice is decided by pair-text gates (`medium` by default for balanced recall; `strong` for lower-noise, higher-confidence notices).
+
+Pipeline: metadata-overlap coarse recall (subject + tags) → 0.5B pair classification → pair-text gate → `semantic_notices` row. Notices are viewed and dismissed via `memory_repair(task="notice", ...)`, and runtime control is via `memory_repair(task="semantic_control", ...)`. This is currently the only automated conflict-candidate source: the legacy vector conflict-candidate scan has been removed from the tool surface. `embedding`/`sqlite-vec` remain supported for semantic recall, section recall, and workspace aliasing, but no longer feed a conflict scanner.
+
+The model is **not bundled** with the default PyPI/uvx package. Install the local runtime extra and point it at a GGUF file:
+
+```bash
+pip install "memory-arbiter-mcp[semantic-local]"   # pulls llama-cpp-python
+```
+
+Then set `semantic_conflict.model_path` (or `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH`) and enable `semantic_conflict.enabled`. The feature is off by default. Processing is local-only; no memory content leaves the machine unless a remote backend is explicitly configured in a future version.
+
 ### Optional: Semantic Recall
 
 By default, Memory Arbiter uses lexical recall: FTS5 trigram + BM25 + soft rerank. This is local, lightweight, and enough for many projects.
@@ -756,6 +771,20 @@ v0.11.0 起默认 MCP 工具面改为任务型接口。新客户端默认只看�
 低层工具实现仍保留在 Memory Arbiter 内部，并由上述产品工具复用，但默认不再把它们的 schema 暴露给 Agent。这样可以减少常驻 MCP 工具 token，也让日常路径更容易选择。
 
 高级兼容：设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`（或 `full`）可同时暴露旧的低层 MCP 工具面。
+
+#### 可选：写入时语义冲突检测
+
+memory-arbiter 可以可选地在写入后运行本地 Qwen2.5-0.5B 模型，生成**语义冲突 notice**——一种可审阅的轻量提示，表示新写入的记忆可能与某条已有记忆在语义上冲突。模型只做候选信号，不做最终裁决；是否变成可见 notice 由 pair 文本 gate 决定（默认 `medium` 平衡召回，`strong` 更低打扰、更高置信）。
+
+链路：metadata-overlap 粗召回（subject + tags）→ 0.5B pair 分类 → pair 文本 gate → `semantic_notices` 行。notice 通过 `memory_repair(task="notice", ...)` 查看/关闭，运行时控制走 `memory_repair(task="semantic_control", ...)`。这是当前**唯一的自动冲突候选来源**：旧的向量冲突候选 scan 已从工具面移除。`embedding`/`sqlite-vec` 仍用于语义召回、分段召回和 workspace alias，但不再喂给任何冲突扫描器。
+
+模型**不随默认 PyPI/uvx 包内置**。安装本地运行 extra 并指向一个 GGUF 文件：
+
+```bash
+pip install "memory-arbiter-mcp[semantic-local]"   # 拉取 llama-cpp-python
+```
+
+再设置 `semantic_conflict.model_path`（或 `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH`）并开启 `semantic_conflict.enabled`。该功能默认关闭。处理完全本地，除非未来版本显式配置远程后端，否则记忆内容不会离开本机。
 
 ### 可选：语义召回
 

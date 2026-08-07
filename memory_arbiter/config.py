@@ -69,6 +69,22 @@ class Settings:
     workspace_match_distance: float = 0.25
     update_check_enabled: bool = True
     tool_profile: str = "product"
+    semantic_conflict_enabled: bool = False
+    semantic_conflict_backend: str = "local_gguf"
+    semantic_conflict_model_path: Optional[Path] = None
+    semantic_conflict_pair_text_gate: str = "medium"
+    semantic_conflict_on_write: str = "async"
+    semantic_conflict_max_concurrency: int = 1
+    semantic_conflict_queue_max_size: int = 100
+    semantic_conflict_candidate_limit: int = 30
+    semantic_conflict_pair_limit: int = 10
+    semantic_conflict_n_ctx: int = 1024
+    semantic_conflict_n_threads: int = 4
+    semantic_conflict_n_batch: int = 128
+    semantic_conflict_resident: bool = True
+    semantic_conflict_preload: bool = False
+    semantic_conflict_job_timeout_ms: int = 5000
+    semantic_conflict_min_pair_budget_ms: int = 1000
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -92,6 +108,11 @@ class Settings:
             config_warnings.append(f"split={split_cfg!r} invalid; using env/defaults")
             split_cfg = {}
         split_cfg = {str(k): v for k, v in split_cfg.items() if not str(k).startswith("_")}
+        semantic_cfg = cfg.get("semantic_conflict") or {}
+        if not isinstance(semantic_cfg, dict):
+            config_warnings.append(f"semantic_conflict={semantic_cfg!r} invalid; using env/defaults")
+            semantic_cfg = {}
+        semantic_cfg = {str(k): v for k, v in semantic_cfg.items() if not str(k).startswith("_")}
         update_cfg_raw = cfg.get("update_check", {})
         update_check_enabled = True
         if isinstance(update_cfg_raw, dict):
@@ -193,6 +214,44 @@ class Settings:
             )
             tool_profile = "product"
 
+        semantic_backend = str(
+            semantic_cfg.get("backend")
+            or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_BACKEND")
+            or "local_gguf"
+        ).strip().lower()
+        if semantic_backend not in {"local_gguf"}:
+            config_warnings.append(
+                f"semantic_conflict.backend={semantic_backend!r} unsupported; using local_gguf"
+            )
+            semantic_backend = "local_gguf"
+        semantic_gate = str(
+            semantic_cfg.get("pair_text_gate")
+            or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE")
+            or "medium"
+        ).strip().lower()
+        if semantic_gate not in {"medium", "strong"}:
+            config_warnings.append(
+                f"semantic_conflict.pair_text_gate={semantic_gate!r} invalid; using medium"
+            )
+            semantic_gate = "medium"
+        semantic_on_write = str(
+            semantic_cfg.get("on_write")
+            or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_ON_WRITE")
+            or "async"
+        ).strip().lower()
+        if semantic_on_write not in {"async", "off"}:
+            config_warnings.append(
+                f"semantic_conflict.on_write={semantic_on_write!r} invalid; using async"
+            )
+            semantic_on_write = "async"
+        semantic_model_raw = (
+            semantic_cfg.get("model_path")
+            or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH")
+        )
+
+        if semantic_cfg.get("max_concurrency") not in (None, 1, "1") or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_MAX_CONCURRENCY") not in (None, "1"):
+            config_warnings.append("semantic_conflict.max_concurrency is reserved in this version; MVP semantic worker uses max_concurrency=1")
+
         settings = cls(
             db_path=pick_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),
             backup_jsonl=pick_path("backup_jsonl", "MEMORY_ARBITER_BACKUP_JSONL", cwd / "memory_arbiter.backup.jsonl"),
@@ -254,6 +313,52 @@ class Settings:
             ),
             update_check_enabled=update_check_enabled,
             tool_profile=tool_profile,
+            semantic_conflict_enabled=pick_bool_field(
+                semantic_cfg.get("enabled"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED", "false", name="semantic_conflict.enabled", default_bool=False
+            ),
+            semantic_conflict_backend=semantic_backend,
+            semantic_conflict_model_path=Path(str(semantic_model_raw)).expanduser() if semantic_model_raw else None,
+            semantic_conflict_pair_text_gate=semantic_gate,
+            semantic_conflict_on_write=semantic_on_write,
+            semantic_conflict_max_concurrency=1,
+            semantic_conflict_queue_max_size=clamp_int(
+                pick_int_field(semantic_cfg.get("queue_max_size"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_QUEUE_MAX_SIZE", 100, name="semantic_conflict.queue_max_size"),
+                1, 10000, name="semantic_conflict.queue_max_size", warnings=config_warnings,
+            ),
+            semantic_conflict_candidate_limit=clamp_int(
+                pick_int_field(semantic_cfg.get("candidate_limit"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_CANDIDATE_LIMIT", 30, name="semantic_conflict.candidate_limit"),
+                1, 500, name="semantic_conflict.candidate_limit", warnings=config_warnings,
+            ),
+            semantic_conflict_pair_limit=clamp_int(
+                pick_int_field(semantic_cfg.get("pair_limit"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_PAIR_LIMIT", 10, name="semantic_conflict.pair_limit"),
+                1, 100, name="semantic_conflict.pair_limit", warnings=config_warnings,
+            ),
+            semantic_conflict_n_ctx=clamp_int(
+                pick_int_field(semantic_cfg.get("n_ctx"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_N_CTX", 1024, name="semantic_conflict.n_ctx"),
+                128, 8192, name="semantic_conflict.n_ctx", warnings=config_warnings,
+            ),
+            semantic_conflict_n_threads=clamp_int(
+                pick_int_field(semantic_cfg.get("n_threads"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_N_THREADS", 4, name="semantic_conflict.n_threads"),
+                1, 64, name="semantic_conflict.n_threads", warnings=config_warnings,
+            ),
+            semantic_conflict_n_batch=clamp_int(
+                pick_int_field(semantic_cfg.get("n_batch"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_N_BATCH", 128, name="semantic_conflict.n_batch"),
+                1, 2048, name="semantic_conflict.n_batch", warnings=config_warnings,
+            ),
+            semantic_conflict_resident=pick_bool_field(
+                semantic_cfg.get("resident"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_RESIDENT", "true", name="semantic_conflict.resident", default_bool=True
+            ),
+            semantic_conflict_preload=pick_bool_field(
+                semantic_cfg.get("preload"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_PRELOAD", "false", name="semantic_conflict.preload", default_bool=False
+            ),
+            semantic_conflict_job_timeout_ms=clamp_int(
+                pick_int_field(semantic_cfg.get("job_timeout_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_JOB_TIMEOUT_MS", 5000, name="semantic_conflict.job_timeout_ms"),
+                100, 600000, name="semantic_conflict.job_timeout_ms", warnings=config_warnings,
+            ),
+            semantic_conflict_min_pair_budget_ms=clamp_int(
+                pick_int_field(semantic_cfg.get("min_pair_budget_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_MIN_PAIR_BUDGET_MS", 1000, name="semantic_conflict.min_pair_budget_ms"),
+                50, 300000, name="semantic_conflict.min_pair_budget_ms", warnings=config_warnings,
+            ),
         )
         settings.config_warnings = config_warnings
         settings.policy = load_policy(settings.policy_path, config_warnings)

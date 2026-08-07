@@ -1249,96 +1249,59 @@ def _check_conflicts_open(
     settings: Settings,
     runtime_state: Optional[DegradeState] = None,
 ) -> Finding:
-    """Three-state sentinel for conflict scan freshness (v0.7.5, id=243).
+    """Report open conflict rows from the ``conflicts`` table.
 
-    The old implementation just counted open rows in the conflicts table — but
-    ``count = 0`` is ambiguous (could mean "no conflicts" *or* "never scanned").
-    Once scan becomes the primary source of conflicts, a bare table count
-    systematically false-negatives. The correct signal for "has a scan run?"
-    comes from scan_log, not from the table scan writes to.
+    Historically this check also warned when ``scan_log.jsonl`` showed that the
+    vector conflict-candidate scan had never run or was stale. That scan path
+    has been removed (the legacy KNN candidate scanner is deprecated), so a
+    missing/stale scan_log is no longer a defect and is reported at most as
+    INFO context, never as a WARNING. The active conflict-candidate sources are
+    scheduled LLM review and the optional write-time ``semantic_conflict`` path.
     """
     if not _table_exists(conn, "conflicts"):
         return _na("capacity.conflicts_open", "capacity", "conflicts 表不存在")
 
-    # Gate 1: vector not available -> scan can't run, report INFO (not WARN).
-    vec_ok = (runtime_state.sqlite_vec_available if runtime_state else False)
-    if not vec_ok:
-        # Fall back to table count for legacy reporting when vec is off.
-        row = conn.execute(
-            "SELECT count(*) AS c, min(created_at) AS oldest "
-            "FROM conflicts WHERE status='open'"
-        ).fetchone()
-        count = row["c"] if row else 0
-        oldest = row["oldest"] if row else None
-        if count == 0:
-            return Finding(
-                check_id="capacity.conflicts_open", dimension="capacity",
-                severity=Severity.INFO, status="pass",
-                title="无 open 冲突（向量未启用，扫描不可用）",
-                detail="向量未启用，冲突扫描不可用；仅统计已有冲突",
-                evidence={"open_count": 0, "vec_available": False},
-            )
-        sev = Severity.WARNING if count > 20 else Severity.INFO
-        return Finding(
-            check_id="capacity.conflicts_open", dimension="capacity",
-            severity=sev, status="warn" if sev == Severity.WARNING else "pass",
-            title=f"{count} 条 open 冲突未仲裁" + (f"，最老 {oldest}" if oldest else ""),
-            detail=f"open_count={count}, oldest={oldest}, vec_available=False",
-            evidence={"open_count": count, "oldest": oldest, "vec_available": False,
-                      "by_source": _open_conflicts_by_source(conn)},
-            fix_hint="建议 memory_list_conflicts 处理" if count > 20 else "",
-        )
-
-    # Gate 2: read scan_log last completed entry (file-system, best-effort).
-    scan_log_path = settings.db_path.parent / "scan_log.jsonl"
-    last_scan = _read_scan_log_last_completed(scan_log_path)
-
-    if last_scan is None:
-        return Finding(
-            check_id="capacity.conflicts_open", dimension="capacity",
-            severity=Severity.WARNING, status="warn",
-            title="从未运行冲突扫描",
-            detail="scan_log.jsonl 无 status=completed 记录；conflicts 表可能未反映全库矛盾",
-            evidence={"scanned": False, "reason": "no_completed_scan"},
-            fix_hint="建议运行 memory_scan_conflict_candidates 进行冲突扫描",
-        )
-
-    # Gate 3: staleness check (warn if > 15 days).
-    scan_time = last_scan.get("scan_time")
-    days_ago = _days_since_iso(scan_time) if scan_time else None
-    if days_ago is not None and days_ago > 15:
-        return Finding(
-            check_id="capacity.conflicts_open", dimension="capacity",
-            severity=Severity.WARNING, status="warn",
-            title=f"上次冲突扫描在 {days_ago} 天前",
-            detail=f"last_scan={scan_time}, days_ago={days_ago}",
-            evidence={"scanned": True, "last_scan_time": scan_time, "days_ago": days_ago},
-            fix_hint=f"建议重新运行 memory_scan_conflict_candidates（上次扫描距今 {days_ago} 天）",
-        )
-
-    # Gate 4: scan is fresh — report open count.
     row = conn.execute(
         "SELECT count(*) AS c, min(created_at) AS oldest "
         "FROM conflicts WHERE status='open'"
     ).fetchone()
     count = row["c"] if row else 0
     oldest = row["oldest"] if row else None
+    vec_ok = (runtime_state.sqlite_vec_available if runtime_state else False)
+
+    # scan_log is legacy diagnostic only now (no writer remains). Surface it
+    # as context, never as a WARNING pointing at a deprecated feature.
+    scan_log_path = settings.db_path.parent / "scan_log.jsonl"
+    last_scan = _read_scan_log_last_completed(scan_log_path)
+    scan_note = None
+    if last_scan:
+        scan_time = last_scan.get("scan_time")
+        days_ago = _days_since_iso(scan_time) if scan_time else None
+        if days_ago is not None:
+            scan_note = f"legacy scan_log last={scan_time} ({days_ago}d ago, deprecated path)"
+
+    detail_parts = [f"open_count={count}, oldest={oldest}, vec_available={vec_ok}"]
+    if scan_note:
+        detail_parts.append(scan_note)
+    detail = ", ".join(detail_parts)
+
     if count == 0:
         return Finding(
             check_id="capacity.conflicts_open", dimension="capacity",
             severity=Severity.INFO, status="pass",
-            title="无 open 冲突（扫描新鲜）",
-            detail=f"last_scan={scan_time}, days_ago={days_ago}, open_count=0",
-            evidence={"open_count": 0, "last_scan_time": scan_time, "days_ago": days_ago},
+            title="无 open 冲突",
+            detail=detail,
+            evidence={"open_count": 0, "vec_available": vec_ok,
+                      "last_scan_time": (last_scan or {}).get("scan_time")},
         )
     sev = Severity.WARNING if count > 20 else Severity.INFO
     return Finding(
         check_id="capacity.conflicts_open", dimension="capacity", severity=sev,
         status="warn" if sev == Severity.WARNING else "pass",
         title=f"{count} 条 open 冲突未仲裁" + (f"，最老 {oldest}" if oldest else ""),
-        detail=f"open_count={count}, oldest={oldest}, last_scan={scan_time}",
-        evidence={"open_count": count, "oldest": oldest,
-                  "last_scan_time": scan_time, "days_ago": days_ago,
+        detail=detail,
+        evidence={"open_count": count, "oldest": oldest, "vec_available": vec_ok,
+                  "last_scan_time": (last_scan or {}).get("scan_time"),
                   "by_source": _open_conflicts_by_source(conn)},
         fix_hint="建议 memory_list_conflicts 处理" if count > 20 else "",
     )

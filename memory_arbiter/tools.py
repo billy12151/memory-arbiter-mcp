@@ -15,6 +15,13 @@ from .db import MemoryDB, _canon_entity, _canon_scope
 from .embedder import ManagedEmbedder
 from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
+from .semantic_conflict import (
+    LocalGGUFSemanticBackend,
+    SemanticBackend,
+    ModelSignal,
+    notice_dedupe_key,
+    pair_text_gate,
+)
 from .update_monitor import UpdateMonitor
 from . import __version__
 
@@ -114,6 +121,159 @@ class SplitReindexWorker:
             pass
 
 
+class SemanticConflictWorker:
+    def __init__(self, tools: "MemoryTools"):
+        self._tools = tools
+        self._pending: dict[int, dict[str, Any]] = {}
+        self._inflight: set[int] = set()
+        self._cond = threading.Condition()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.RLock()
+        self._paused = False
+        self._runtime_disabled = False
+        self._last_error: Optional[str] = None
+        self._error_seq = 0
+        self._processed = 0
+
+    def start(self) -> None:
+        if not self._tools.settings.semantic_conflict_enabled:
+            return
+        # When on_write is "off", writes never enqueue (see _enqueue_semantic_conflict_check),
+        # so spinning up the worker thread and preloading the model would just burn
+        # resources for a queue that stays empty. Treat "off" like config-disabled here;
+        # resume()/enable_runtime() can still revive the worker if the caller flips
+        # on_write at runtime later and re-enqueues.
+        if getattr(self._tools.settings, "semantic_conflict_on_write", "async") == "off":
+            return
+        self._ensure_thread()
+        if self._tools.settings.semantic_conflict_preload:
+            threading.Thread(
+                target=self._preload_backend,
+                name="memory-arbiter-semantic-preload",
+                daemon=True,
+            ).start()
+
+    def _preload_backend(self) -> None:
+        try:
+            backend = self._tools._ensure_semantic_backend()
+            if backend is not None:
+                backend.load()
+        except Exception as exc:
+            self.set_error(str(exc))
+
+    def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        if not self._tools.settings.semantic_conflict_enabled:
+            return {"status": "disabled"}
+        if self._runtime_disabled:
+            return {"status": "runtime_disabled"}
+        if self._paused:
+            return {"status": "paused"}
+        with self._cond:
+            max_size = int(getattr(self._tools.settings, "semantic_conflict_queue_max_size", 100))
+            if len(self._pending) >= max_size and int(memory_id) not in self._pending:
+                return {"status": "queue_full"}
+            self._pending[int(memory_id)] = snapshot
+            self._cond.notify_all()
+        self._ensure_thread()
+        return {"status": "queued"}
+
+    def status(self) -> dict[str, Any]:
+        with self._cond:
+            if not self._tools.settings.semantic_conflict_enabled:
+                state = "config_disabled"
+            elif getattr(self._tools.settings, "semantic_conflict_on_write", "async") == "off":
+                # enabled but on_write=off: writes never enqueue and start() does
+                # not spin up the thread, so report disabled rather than "running".
+                state = "on_write_off"
+            elif self._runtime_disabled:
+                state = "disabled"
+            elif self._paused:
+                state = "paused"
+            else:
+                state = "running"
+            return {
+                "runtime_state": state,
+                "queue_depth": len(self._pending),
+                "inflight": sorted(self._inflight),
+                "processed": self._processed,
+                "last_error": self._last_error,
+            }
+
+    def pause(self) -> None:
+        with self._cond:
+            self._paused = True
+
+    def disable_runtime(self) -> None:
+        with self._cond:
+            self._runtime_disabled = True
+            self._paused = True
+
+    def enable_runtime(self) -> None:
+        with self._cond:
+            self._runtime_disabled = False
+            self._paused = False
+            self._cond.notify_all()
+
+    def resume(self) -> None:
+        with self._cond:
+            if self._runtime_disabled:
+                return
+            self._paused = False
+            self._cond.notify_all()
+        self._ensure_thread()
+
+    def set_error(self, message: str) -> None:
+        # All other reads/writes of _last_error happen under _cond (status() and
+        # the _run finally branch). Route external writers through the same lock
+        # instead of reaching into the private attribute from the caller.
+        with self._cond:
+            self._last_error = str(message) if message is not None else None
+            self._error_seq += 1
+
+    def _ensure_thread(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run, name="memory-arbiter-semantic-conflict", daemon=True,
+            )
+            self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._pending or self._paused:
+                    self._cond.wait()
+                memory_id = next(iter(self._pending))
+                snapshot = self._pending.pop(memory_id)
+                self._inflight.add(memory_id)
+            error_message: Optional[str] = None
+            with self._cond:
+                error_seq_before = self._error_seq
+            try:
+                self._tools._process_semantic_conflict_job(memory_id, snapshot)
+            except Exception as exc:
+                error_message = str(exc)
+            finally:
+                with self._cond:
+                    self._inflight.discard(memory_id)
+                    if error_message is not None:
+                        self._last_error = error_message
+                        self._error_seq += 1
+                    else:
+                        # A clean run clears a prior transient error so a stale
+                        # last_error does not linger forever in worker status --
+                        # UNLESS this same job recorded its own diagnostic via
+                        # set_error (timeout / min-pair-budget early stop) and
+                        # then returned normally. In that case _error_seq moved
+                        # while the job ran, so we must preserve the message the
+                        # job just set instead of clobbering it to None.
+                        if self._error_seq == error_seq_before:
+                            self._last_error = None
+                        self._processed += 1
+                    self._cond.notify_all()
+
+
 class MemoryTools:
     def __init__(self, settings: Optional[Settings] = None, db: Optional[MemoryDB] = None):
         self.settings = settings or Settings.from_env()
@@ -124,6 +284,10 @@ class MemoryTools:
         self._embedder_warnings: list[str] = list(self.settings.config_warnings)
         self._update_monitor: Optional[UpdateMonitor] = None
         self._split_worker = SplitReindexWorker(self)
+        self._semantic_backend: Optional[SemanticBackend] = None
+        self._semantic_backend_lock = threading.Lock()
+        self._semantic_worker = SemanticConflictWorker(self)
+        self._last_pair_duration_ms: Optional[int] = None
         # v0.6.0: initialise vec index state on startup
         self._init_vec_state()
 
@@ -140,6 +304,9 @@ class MemoryTools:
     def start_split_worker(self) -> None:
         self._split_worker.start()
         self._enqueue_pending_rule_splits(limit=100)
+
+    def start_semantic_worker(self) -> None:
+        self._semantic_worker.start()
 
     def _enqueue_pending_rule_splits(self, limit: int = 100) -> None:
         threshold = getattr(self.settings, "split_threshold", 4000)
@@ -262,11 +429,13 @@ class MemoryTools:
             },
             "memory_repair": {
                 "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-                "tasks": ["split", "rebuild_claims", "rebuild_embeddings", "cleanup_history", "cleanup_vectors", "resync_vectors", "set_entity", "activate_pending", "help"],
+                "tasks": ["split", "rebuild_claims", "rebuild_embeddings", "cleanup_history", "cleanup_vectors", "resync_vectors", "set_entity", "activate_pending", "semantic_control", "notice", "help"],
                 "examples": {
                     "rebuild_claims": {"task": "rebuild_claims", "data": {"dry_run": True, "memory_ids": [123]}},
                     "cleanup_vectors": {"task": "cleanup_vectors", "data": {"dry_run": True}},
                     "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
+                    "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
+                    "notice": {"task": "notice", "data": {"action": "list", "limit": 5}},
                 },
             },
         }
@@ -560,6 +729,23 @@ class MemoryTools:
             if invalid_id is not None:
                 return invalid_id
             return self._forward("memory_repair", task, self.memory_activate, **payload)
+        if task == "semantic_control":
+            return self.db.state.response(self._semantic_control(str(payload.get("action") or "status")))
+        if task == "notice":
+            action = str(payload.get("action") or "list").strip().lower()
+            if action == "list":
+                try:
+                    notice_limit = int(payload.get("limit") or 10)
+                except (TypeError, ValueError):
+                    notice_limit = 10
+                return self.db.state.response({"notices": self.db.list_semantic_notices(limit=notice_limit)})
+            if action in {"dismiss", "resolve"}:
+                invalid_id = self._coerce_product_id("memory_repair", payload, "notice_id", task)
+                if invalid_id is not None:
+                    return invalid_id
+                status = "dismissed" if action == "dismiss" else "resolved"
+                result = self.db.update_semantic_notice_status(int(payload["notice_id"]), status, str(payload.get("reason") or ""))
+                return self.db.state.response(result, ok=result.get("outcome") == "updated")
         return self._invalid_product_call("memory_repair", f"unknown task: {task}", task)
 
     def _embedding_configured(self) -> bool:
@@ -603,6 +789,238 @@ class MemoryTools:
         subject = record.get("subject") or ""
         content = record.get("content") or ""
         return f"{subject}\n{content}".strip()
+
+    def _semantic_configured(self) -> bool:
+        return (
+            bool(getattr(self.settings, "semantic_conflict_enabled", False))
+            and getattr(self.settings, "semantic_conflict_backend", "local_gguf") == "local_gguf"
+            and getattr(self.settings, "semantic_conflict_model_path", None) is not None
+        )
+
+    def _ensure_semantic_backend(self) -> Optional[SemanticBackend]:
+        if not self._semantic_configured():
+            return None
+        with self._semantic_backend_lock:
+            if self._semantic_backend is not None:
+                return self._semantic_backend
+            assert self.settings.semantic_conflict_model_path is not None
+            self._semantic_backend = LocalGGUFSemanticBackend(
+                self.settings.semantic_conflict_model_path,
+                n_ctx=self.settings.semantic_conflict_n_ctx,
+                n_threads=self.settings.semantic_conflict_n_threads,
+                n_batch=self.settings.semantic_conflict_n_batch,
+            )
+            return self._semantic_backend
+
+    def _semantic_status(self) -> dict[str, Any]:
+        backend_status = (
+            self._semantic_backend.status()
+            if self._semantic_backend is not None else
+            {
+                "backend": getattr(self.settings, "semantic_conflict_backend", "local_gguf"),
+                "model_path": str(getattr(self.settings, "semantic_conflict_model_path", None) or ""),
+                "model_exists": bool(
+                    getattr(self.settings, "semantic_conflict_model_path", None)
+                    and self.settings.semantic_conflict_model_path.exists()
+                ),
+                "model_state": "unloaded",
+                "last_error": None,
+            }
+        )
+        return {
+            "enabled": bool(getattr(self.settings, "semantic_conflict_enabled", False)),
+            "configured": self._semantic_configured(),
+            "on_write": getattr(self.settings, "semantic_conflict_on_write", "async"),
+            "pair_text_gate": getattr(self.settings, "semantic_conflict_pair_text_gate", "medium"),
+            "resident": bool(getattr(self.settings, "semantic_conflict_resident", True)),
+            "max_concurrency": 1,
+            "max_concurrency_note": "reserved; MVP semantic worker is single-threaded (configured values are clamped to 1)",
+            "job_timeout_ms": int(getattr(self.settings, "semantic_conflict_job_timeout_ms", 5000)),
+            "min_pair_budget_ms": int(getattr(self.settings, "semantic_conflict_min_pair_budget_ms", 1000)),
+            "last_pair_duration_ms": self._last_pair_duration_ms,
+            "job_deadline_behavior": (
+                "The deadline gates BETWEEN pairs only. A model call (synchronous C inference) "
+                "cannot be interrupted mid-call; when remaining budget drops below "
+                "min_pair_budget_ms the job stops early instead of starting another inference. "
+                "A single stuck call still stalls the worker until process-level isolation lands."
+            ),
+            "worker": self._semantic_worker.status(),
+            "backend": backend_status,
+            "notices": self.db.semantic_notice_counts(),
+        }
+
+    def _semantic_control(self, action: str) -> dict[str, Any]:
+        action = str(action or "status").strip().lower()
+        if action == "status":
+            return self._semantic_status()
+        if action == "pause":
+            self._semantic_worker.pause()
+            return {"outcome": "paused", "semantic_conflict": self._semantic_status()}
+        if action == "resume":
+            worker_state = self._semantic_worker.status().get("runtime_state")
+            if worker_state == "disabled":
+                return {
+                    "outcome": "runtime_disabled_use_enable",
+                    "semantic_conflict": self._semantic_status(),
+                }
+            self._semantic_worker.resume()
+            return {"outcome": "resumed", "semantic_conflict": self._semantic_status()}
+        if action == "enable":
+            self._semantic_worker.enable_runtime()
+            return {"outcome": "enabled", "semantic_conflict": self._semantic_status()}
+        if action == "unload":
+            if self._semantic_backend is not None:
+                self._semantic_backend.unload()
+            return {"outcome": "unloaded", "semantic_conflict": self._semantic_status()}
+        if action == "disable":
+            self._semantic_worker.disable_runtime()
+            if self._semantic_backend is not None:
+                self._semantic_backend.unload()
+            return {
+                "outcome": "runtime_disabled",
+                "note": "This disables the current runtime only; set semantic_conflict.enabled=false in config to persist it.",
+                "semantic_conflict": self._semantic_status(),
+            }
+        return {"outcome": "invalid_action", "valid_actions": ["status", "pause", "resume", "enable", "unload", "disable"]}
+
+    def _enqueue_semantic_conflict_check(self, memory_id: Optional[int], record: Any) -> dict[str, Any]:
+        if memory_id is None:
+            return {"status": "skipped", "reason": "backup_only"}
+        if not getattr(self.settings, "semantic_conflict_enabled", False):
+            return {"status": "disabled"}
+        if getattr(self.settings, "semantic_conflict_on_write", "async") == "off":
+            return {"status": "off"}
+        stored = self.db.get_memory(int(memory_id)) or {}
+        content = (record.get("content") if isinstance(record, dict) else getattr(record, "content", None))
+        if content is None:
+            content = stored.get("content") or ""
+        snapshot = {
+            "memory_id": int(memory_id),
+            "version": int(stored.get("version") or self.db.get_memory_version(int(memory_id)) or 1),
+            "claim_revision": int(stored.get("claim_revision") or 1),
+            "content_hash": hashlib.sha256(str(content or "").encode("utf-8")).hexdigest(),
+        }
+        return self._semantic_worker.enqueue(int(memory_id), snapshot)
+
+    def _semantic_candidate_memories(self, memory_id: int, record: dict[str, Any]) -> list[dict[str, Any]]:
+        tags = record.get("tags") or []
+        if isinstance(tags, str):
+            try:
+                parsed = json.loads(tags)
+                tags = parsed if isinstance(parsed, list) else []
+            except Exception:
+                tags = []
+        candidates = self.db.find_metadata_overlap_candidates(
+            subject=record.get("subject"),
+            tags=[str(t) for t in tags if isinstance(t, str)],
+            exclude_id=int(memory_id),
+            limit=int(getattr(self.settings, "semantic_conflict_candidate_limit", 30)),
+        )
+        return candidates[: int(getattr(self.settings, "semantic_conflict_pair_limit", 10))]
+
+    def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> None:
+        if not self._semantic_configured():
+            return
+        record = self.db.get_memory(int(memory_id))
+        if not record or record.get("status") != "active":
+            return
+        if int(record.get("version") or 1) != int(snapshot.get("version") or 1):
+            return
+        if int(record.get("claim_revision") or 1) != int(snapshot.get("claim_revision") or 1):
+            return
+        content_hash = hashlib.sha256((record.get("content") or "").encode("utf-8")).hexdigest()
+        if content_hash != snapshot.get("content_hash"):
+            return
+        backend = self._ensure_semantic_backend()
+        if backend is None:
+            return
+        timeout_ms = float(getattr(self.settings, "semantic_conflict_job_timeout_ms", 5000))
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        # The model call is a synchronous, non-interruptible C call; the
+        # deadline can only gate *between* pairs, not abort one in flight.
+        # Reserve a floor so we never start a fresh inference with only a few
+        # ms left (which would blow the budget and stall the worker). 1s is a
+        # conservative lower bound for a 0.5B local model on a single short pair.
+        min_pair_budget = float(getattr(self.settings, "semantic_conflict_min_pair_budget_ms", 1000)) / 1000.0
+        isolation = getattr(self.settings, "isolation", "none")
+        for peer in self._semantic_candidate_memories(memory_id, record):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._semantic_worker.set_error("semantic conflict job timed out before next pair")
+                return
+            if remaining < min_pair_budget:
+                # Not enough budget to safely start another inference; stop
+                # cleanly so the worker loop stays responsive instead of
+                # launching a call that may overrun and stall it.
+                self._semantic_worker.set_error(
+                    f"semantic conflict job stopped early: remaining budget {remaining:.2f}s below {min_pair_budget:.2f}s floor"
+                )
+                return
+            peer_record = self.db.get_memory(int(peer["id"]))
+            if not peer_record or peer_record.get("status") != "active":
+                continue
+            if isolation != "none":
+                left_ws = record.get("workspace_canonical") or record.get("workspace")
+                right_ws = peer_record.get("workspace_canonical") or peer_record.get("workspace")
+                if left_ws and right_ws and left_ws != right_ws:
+                    continue
+            left_version = self.db.get_memory_version(int(memory_id)) or 1
+            right_version = self.db.get_memory_version(int(peer_record["id"])) or 1
+            try:
+                if self.db.is_pair_dismissed(int(memory_id), int(peer_record["id"])):
+                    continue
+                if self.db.is_semantic_pair_closed(int(memory_id), int(peer_record["id"]), left_version, right_version):
+                    continue
+            except Exception:
+                pass
+            call_start = time.monotonic()
+            signal = backend.classify_pair(record, peer_record)
+            self._last_pair_duration_ms = int((time.monotonic() - call_start) * 1000)
+            if not getattr(self.settings, "semantic_conflict_resident", True) and self._semantic_backend is not None:
+                self._semantic_backend.unload()
+            if not signal.candidate:
+                continue
+            gate = pair_text_gate(
+                f"subject: {record.get('subject') or ''}\ntags: {', '.join(record.get('tags') or []) if isinstance(record.get('tags'), list) else ''}\ncontent: {record.get('content') or ''}",
+                f"subject: {peer_record.get('subject') or ''}\ntags: {', '.join(peer_record.get('tags') or []) if isinstance(peer_record.get('tags'), list) else ''}\ncontent: {peer_record.get('content') or ''}",
+                mode=getattr(self.settings, "semantic_conflict_pair_text_gate", "medium"),
+            )
+            if not gate.passed:
+                continue
+            dedupe = notice_dedupe_key(
+                int(memory_id), int(peer_record["id"]), left_version, right_version, "semantic_pair"
+            )
+            title = f"Possible semantic memory conflict with #{peer_record['id']}"
+            message = "; ".join(gate.reasons) or signal.candidate_type
+            self.db.record_semantic_notice(
+                memory_id=int(memory_id),
+                peer_id=int(peer_record["id"]),
+                severity=gate.severity,
+                notice_type="semantic_pair",
+                title=title,
+                message=message,
+                payload={
+                    "model_signal": {
+                        "candidate_type": signal.candidate_type,
+                        "confidence": signal.confidence,
+                        "parsed": signal.parsed,
+                        "error": signal.error,
+                    },
+                    "gate": {
+                        "mode": gate.mode,
+                        "severity": gate.severity,
+                        "reasons": gate.reasons,
+                        "evidence": gate.evidence.__dict__,
+                    },
+                    "left": {"id": int(memory_id), "subject": record.get("subject")},
+                    "right": {"id": int(peer_record["id"]), "subject": peer_record.get("subject")},
+                },
+                dedupe_key=dedupe,
+                left_version=left_version,
+                right_version=right_version,
+                left_claim_revision=int(record.get("claim_revision") or 1),
+                right_claim_revision=int(peer_record.get("claim_revision") or 1),
+            )
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         allowed, warnings = self._allowed(payload.get("agent_id"), payload.get("client"))
@@ -712,6 +1130,8 @@ class MemoryTools:
                     data["split_request"] = split_request
                 embedding_warnings.extend(split_warnings)
             data = self._enrich_write_response(data, memory_id, record)
+            if memory_id is not None:
+                data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(memory_id, record)
             claim_warnings = list(data.pop("_claim_warnings", []))
             return self.db.state.response(
                 data,
@@ -1793,34 +2213,6 @@ class MemoryTools:
         ]
         return self.db.state.response({"conflicts": conflicts, "count": len(conflicts)})
 
-    def memory_scan_conflict_candidates(
-        self,
-        workspace: Optional[str] = None,
-        top_k: int = 8,
-        max_pairs: int = 200,
-        max_distance: float = 12.0,
-        incremental: bool = True,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """v0.7.5 (id=243): vector-recall candidate conflict pairs (no LLM).
-
-        Returns up to ``max_pairs`` candidate pairs ranked by vector distance.
-        Pairs are canonicalised (left<right), filtered to same workspace, and
-        truncated. Writes a ``scan_log.jsonl`` entry for doctor freshness
-        tracking. When sqlite-vec is unavailable, returns a normal
-        ``scanned=False`` with a hint (config state, not an error). The agent
-        is expected to run LLM comparison on each pair, then call
-        ``memory_record_conflict`` to persist the verdict.
-        """
-        result = self.db.scan_conflict_candidates(
-            workspace=workspace,
-            top_k=int(top_k),
-            max_pairs=int(max_pairs),
-            max_distance=float(max_distance),
-            incremental=bool(incremental),
-        )
-        return self.db.state.response(result)
-
     def memory_record_conflict(
         self,
         left_id: int,
@@ -1961,7 +2353,10 @@ class MemoryTools:
             )
         ok = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
         updated = self.db.get_memory(int(memory_id)) if ok else memory
-        return self.db.state.response({"activated": ok, "record": updated})
+        data = {"activated": ok, "record": updated}
+        if ok:
+            data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), updated or {})
+        return self.db.state.response(data)
 
     def memory_supersede(
         self,
@@ -2094,6 +2489,7 @@ class MemoryTools:
                 # v0.8: split capability is bound to vec readiness, not a toggle.
                 "split_capability": self._split_capability(vec_state),
                 "vec_index_state": vec_state,
+                "semantic_conflict": self._semantic_status(),
                 "policy": {
                     "client_defaults": self.settings.policy.client_defaults,
                     "default_enabled": self.settings.policy.default_enabled,
@@ -2421,6 +2817,12 @@ class MemoryTools:
                     )
                     claim_warnings.extend(structured.get("warnings") or [])
                     self._apply_structured_gate(data, structured)
+                    data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(memory_id_int, updated_mem or {})
+                else:
+                    data["semantic_conflict_check"] = {
+                        "status": "skipped",
+                        "reason": "tags_only_no_semantic_change",
+                    }
                 return self.db.state.response(data, extra_warnings=claim_warnings)
             if outcome == "no_change":
                 return self.db.state.response({
@@ -2595,6 +2997,7 @@ class MemoryTools:
         embedding_warnings.extend(structured.get("warnings") or [])
         self._apply_structured_gate(data, structured)
         data["record"] = self.db.get_memory(memory_id_int)
+        data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(memory_id_int, data["record"] or {})
         return self.db.state.response(
             data,
             extra_warnings=embedding_warnings,
