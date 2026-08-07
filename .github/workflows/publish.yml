@@ -4,6 +4,16 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_ref:
+        description: "Tag, branch, or SHA to build (for example: v0.10.3)"
+        required: true
+        default: "v0.10.3"
+      publish:
+        description: "Publish the built distributions to PyPI"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,6 +25,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_ref || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,7 +57,7 @@ jobs:
     name: Publish distribution to PyPI
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
     permissions:
       id-token: write
       contents: read
