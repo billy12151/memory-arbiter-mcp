@@ -33,6 +33,8 @@ def test_overview_returns_counts_and_brand(tmp_path: Path) -> None:
     assert overview["brand"]["zh"] == "迷码"
     assert overview["counts"]["total"] == 1
     assert overview["counts"]["active"] == 1
+    assert overview["support"]["repo_url"] == "https://github.com/billy12151/memory-arbiter-mcp"
+    assert overview["support"]["new_issue_url"].endswith("/issues/new")
 
 
 def test_conflict_detail_returns_left_and_right(tmp_path: Path) -> None:

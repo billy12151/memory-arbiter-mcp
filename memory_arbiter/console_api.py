@@ -12,6 +12,10 @@ from .conflict_judgments import ConflictJudgmentStore
 from .tools import MemoryTools
 
 
+SUPPORT_REPO_URL = "https://github.com/billy12151/memory-arbiter-mcp"
+SUPPORT_NEW_ISSUE_URL = f"{SUPPORT_REPO_URL}/issues/new"
+
+
 class ConsoleAPI:
     """Read-only data adapter for the local Console HTTP server."""
 
@@ -74,6 +78,10 @@ class ConsoleAPI:
             "last_scan": last_scan,
             "config_warnings": status.get("config_warnings") or [],
             "update_check": status.get("update_check"),
+            "support": {
+                "repo_url": SUPPORT_REPO_URL,
+                "new_issue_url": SUPPORT_NEW_ISSUE_URL,
+            },
             "status": status,
         }
 

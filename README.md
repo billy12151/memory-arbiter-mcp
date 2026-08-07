@@ -195,6 +195,8 @@ mema console --port 18877    # use a different port when 18876 is busy
 
 The Console listens on `127.0.0.1` by default and is local-only in this version. It is a visibility and review surface, not a memory editor: Overview, Conflicts, Conflict Detail, Memories, Doctor, and Settings are read-only. The UI switches between English (`mema Console`) and Chinese (`迷码 Console`); the CLI remains English-only and uses the `mema` alias.
 
+The Support Panel offers GitHub Star, feature request, UX feedback, and bug report shortcuts through prefilled public issue links. It does not upload memory content automatically, does not store GitHub tokens, and does not call GitHub APIs.
+
 Useful boundary: do not expose the Console port publicly. It can display memory content from your local database.
 
 ### Connect your tool
@@ -696,6 +698,8 @@ mema console --port 18877    # 18876 被占用时换一个端口
 ```
 
 Console 默认监听 `127.0.0.1`，当前版本仅限本地。它是可见性与审计入口，不是记忆编辑器：总览、冲突列表、冲突详情、记忆查看、体检、设置页都只读。UI 可在英文（`mema Console`）和中文（`迷码 Console`）间切换；CLI 仍只使用英文 `mema` alias。
+
+支持面板提供 GitHub 点星、提需求、体验反馈和反馈问题入口，通过预填公开 issue 链接跳转。Console 不会自动上传记忆内容，不保存 GitHub token，也不调用 GitHub API。
 
 边界提醒：不要把 Console 端口暴露到公网。页面会展示本地数据库里的记忆内容。
 

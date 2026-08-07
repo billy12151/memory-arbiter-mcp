@@ -3,6 +3,16 @@
 All notable changes to memory-arbiter-mcp are documented here.
 Versions follow semantic versioning.
 
+## [0.10.3] — 2026-08-07
+
+### Added
+
+- **Console Support Panel** — `mema console` now includes a Support card and top-bar shortcuts for GitHub Star, feature requests, and bug reports. Star opens the project repository; feedback opens a Console form that generates a prefilled public GitHub issue URL.
+
+### Security
+
+- The Support Panel does not use GitHub OAuth, does not store tokens, does not call GitHub APIs, and does not write to the local memory database. It only opens GitHub after an explicit user click. Prefilled issues include only coarse diagnostics by default (version, route, doctor status, open-conflict count), never memory content, conflict content, or local database paths unless the user manually types them into the form.
+
 ## [0.10.2] — 2026-08-06
 
 ### Added
