@@ -1197,6 +1197,18 @@ class MemoryDB:
                     "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
                     (fwd_key,),
                 ).fetchone()
+                if fwd_key == new_key:
+                    # Case/whitespace-only rename (e.g. 'Foo'->'foo'): the alias
+                    # KEY is unchanged, so there is nothing to forward and the
+                    # normal DELETE-self-alias/forwarding logic would wrongly
+                    # destroy the existing row. Only refresh the display-name
+                    # (canonical column) on rows that pointed at the old name.
+                    conn.execute(
+                        "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
+                        "WHERE canonical = ?",
+                        (new, now, old),
+                    )
+                    return updated, []
                 # Repoint OTHER aliases that targeted `old` to `new` (rename = the
                 # canonical formerly-called-`old` IS now `new`, so both confirmed
                 # and rejected references follow). Exclude the forwarding key

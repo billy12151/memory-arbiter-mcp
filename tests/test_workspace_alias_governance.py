@@ -582,6 +582,22 @@ def test_migrate_rejected_survives_real_vector_path(tmp_path):
     assert "Main" in (resolved.get("rejected_canonicals") or [])
 
 
+def test_case_only_rename_preserves_forwarding_alias(tmp_path):
+    # rename('Foo'→'foo'): distinct under Python != but same normalized key.
+    # The forwarding alias must survive (canonical refreshed to 'foo'), not be
+    # destroyed by the self-alias DELETE — otherwise 'Foo' re-splits.
+    t = make_tools(tmp_path)
+    t.db.resolve_workspace_canonical("Foo", None, register_new=True)
+    t.memory_govern("accept_workspace_alias", {"alias": "Foo", "canonical": "Foo"})
+    r = t.memory_govern("rename_workspace_canonical", {"old": "Foo", "new": "foo"})
+    assert r["ok"] is True
+    row = t.db.get_workspace_alias("Foo")
+    assert row is not None and row["status"] == "confirmed" and row["canonical"] == "foo"
+    resolved = t.db.resolve_workspace_canonical("Foo", None, register_new=False)
+    assert resolved["is_new"] is False
+    assert resolved["matched_by"] == "confirmed_alias"
+
+
 
 
 
