@@ -455,6 +455,133 @@ def test_qwen_related_relation_does_not_silent_merge(tmp_path):
     assert r["data"]["workspace_decision"] == "ASK"
 
 
+# ── round-7 redesign: migrate/rename × rejected structural invariants ────────
+
+def test_migrate_deletes_phantom_source_canonical(tmp_path):
+    # migrate subsumes from_ws into to_ws; the from_ws canonical row must be
+    # gone so a later raw-from_ws write doesn't exact-match a phantom.
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
+    with t.db.connection() as c:
+        names = [r["name"] for r in c.execute("SELECT name FROM workspace_canonicals")]
+    assert "Sub2" not in names, f"phantom source canonical survived: {names}"
+    assert "Main" in names
+
+
+def test_migrate_no_self_alias_when_rejection_uses_to_key(tmp_path):
+    # reject(Main, Sub2) then migrate(Sub2 → Main) must not leave a
+    # "Main is not Main" self-alias row.
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_govern("reject_workspace_alias", {"alias": "Main", "canonical": "Sub2"})
+    t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
+    row = t.db.get_workspace_alias("Main")
+    if row is not None:
+        assert row["canonical"] != "Main", f"self-alias survived: {row}"
+
+
+def test_rename_no_self_alias_when_rejection_uses_new_key(tmp_path):
+    # Symmetric to migrate self-alias test — for rename.
+    t = make_tools(tmp_path)
+    t.db.resolve_workspace_canonical("OldName", None, register_new=True)
+    t.memory_govern("reject_workspace_alias", {"alias": "NewName", "canonical": "OldName"})
+    t.memory_govern("rename_workspace_canonical", {"old": "OldName", "new": "NewName"})
+    row = t.db.get_workspace_alias("NewName")
+    if row is not None:
+        assert row["canonical"] != "NewName"
+
+
+def test_migrate_forwarding_event_records_true_prior_snapshot(tmp_path):
+    # When the forwarding key was rejected, the guard fires and the audit event
+    # must record the REAL prior canonical/status (not a repoint-mutated value).
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    # forwarding-key rejection: normalize("Sub2") rejected against "Sub2" is
+    # degenerate; use a rejection keyed on Sub2 pointing at some other canonical.
+    t.memory_govern("reject_workspace_alias", {"alias": "Sub2", "canonical": "Other"})
+    t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
+    # rejection preserved (not silently confirmed)
+    row = t.db.get_workspace_alias("Sub2")
+    assert row["status"] == "rejected"
+    events = [e for e in t.db.list_workspace_alias_events("Sub2") if e["action"] == "migrate"]
+    assert events, "no migrate event recorded"
+    ev = events[0]
+    assert ev["old_status"] == "rejected" and ev["new_status"] == "rejected"
+
+
+def test_chained_migrate_with_rejection_stays_consistent(tmp_path):
+    # migrate A→B then B→C, with a rejection on an unrelated key targeting A.
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="A", source_type="agent_generated")
+    t.memory_govern("reject_workspace_alias", {"alias": "foo", "canonical": "A"})
+    t.memory_govern("migrate_workspace", {"from": "A", "to": "B"})
+    t.memory_govern("migrate_workspace", {"from": "B", "to": "C"})
+    # the foo rejection followed the chain to C
+    row = t.db.get_workspace_alias("foo")
+    assert row["status"] == "rejected" and row["canonical"] == "C"
+    # A and B are gone as canonicals; only C survives
+    with t.db.connection() as c:
+        names = [r["name"] for r in c.execute("SELECT name FROM workspace_canonicals")]
+    assert "A" not in names and "B" not in names and "C" in names
+
+
+def test_rename_repoints_confirmed_forwarding_row(tmp_path):
+    # A confirmed alias keyed on normalize(old) pointing at old must be
+    # repointed to new (not stranded on the deleted old canonical).
+    t = make_tools(tmp_path)
+    t.db.resolve_workspace_canonical("old", None, register_new=True)
+    # confirmed alias whose key normalizes to 'old' and targets 'old' is
+    # degenerate; instead: confirmed alias 'OLD' (key 'old') → 'old'.
+    t.memory_govern("accept_workspace_alias", {"alias": "OLD", "canonical": "old"})
+    t.memory_govern("rename_workspace_canonical", {"old": "old", "new": "new"})
+    row = t.db.get_workspace_alias("OLD")
+    assert row["status"] == "confirmed" and row["canonical"] == "new"
+
+
+def test_migrate_rejected_survives_real_vector_path(tmp_path):
+    # The gap that hid the rejection-reversal class for 5 rounds: tests ran with
+    # vec off, so the KNN filter was never exercised. Here we use the real
+    # resolver KNN with a controlled embedder and assert a rejection made before
+    # a migrate is NOT silently reversed via the vector path afterward.
+    from types import SimpleNamespace
+    from memory_arbiter.config import Settings
+    from memory_arbiter.db import MemoryDB
+    from memory_arbiter.tools import MemoryTools
+
+    vecs = {"Sub2": [1.0, 0.0], "Main": [0.0, 1.0], "foo": [0.999, 0.001]}
+
+    class FakeEmbedder:
+        def embed_text(self, prefix="", body=""):
+            v = vecs.get(body, [0.5, 0.5])
+            return SimpleNamespace(embedding=v, truncated=False,
+                                   used_tokens=1, original_tokens=1)
+
+    settings = Settings(
+        db_path=tmp_path / "e2e.sqlite3", backup_jsonl=tmp_path / "e2e.jsonl",
+        client="codex", agent_id="a", workspace="default",
+        enable_sqlite_vec=True, vec_dim=2, isolation="weak",
+    )
+    db = MemoryDB(settings)
+    if not db.state.sqlite_vec_available:
+        import pytest
+        pytest.skip("sqlite-vec unavailable")
+    emb = FakeEmbedder()
+    # register Sub2 as a canonical with a vec row
+    db.resolve_workspace_canonical("Sub2", emb, register_new=True)
+    # user rejects: foo is NOT Sub2
+    db.upsert_workspace_alias("foo", "Sub2", status="rejected", action="reject")
+    # migrate Sub2 -> Main (rejection must follow to Main)
+    db.migrate_workspace("Sub2", "Main", embedder=emb)
+    # now resolve 'foo' with the real vector path: Main is near foo, but the
+    # rejection (now foo↛Main) must suppress the auto-merge.
+    resolved = db.resolve_workspace_canonical("foo", emb, register_new=False)
+    assert resolved["matched_by"] != "vector" or resolved["canonical"] != "Main", (
+        f"rejection silently reversed via vector path: {resolved}"
+    )
+    assert "Main" in (resolved.get("rejected_canonicals") or [])
+
+
 
 
 

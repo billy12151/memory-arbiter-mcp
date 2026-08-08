@@ -1188,31 +1188,35 @@ class MemoryDB:
                         "UPDATE workspace_canonicals SET name = ? WHERE name = ?",
                         (new, old),
                     )
-                # Repoint EVERY alias that targeted `old` (confirmed AND rejected)
-                # to `new`. rename means the canonical formerly-called-`old` IS
-                # now `new` — the same workspace under a new name — so a rejection
-                # "foo is not `old`" must follow to "foo is not `new`", exactly as
-                # a confirmation would. Leaving a rejected row stranded on the
-                # renamed-away/deleted `old` name silently disables the resolver's
-                # rejected filter (KNN never returns the dead name), letting a
-                # later write auto-merge foo→new and reversing the user's decision.
-                conn.execute(
-                    "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
-                    "WHERE canonical = ?",
-                    (new, now, old),
-                )
-                # Insert a forwarding alias normalize(old) -> new so a later write
-                # with the OLD raw workspace string resolves to `new` instead of
-                # re-registering `old` as a fresh canonical (re-splitting the
-                # workspace). But NEVER clobber an existing user decision on this
-                # key: a rejected row must stay rejected (silently flipping it to
-                # confirmed would reverse the user's choice); a confirmed row that
-                # already targets a different canonical is left alone too.
+                # Snapshot the forwarding-alias decision BEFORE the blanket
+                # repoint, so the guard below reasons about real prior state and
+                # not a row the repoint has already moved to `new`.
                 fwd_key = _normalize_alias_key(old)
+                new_key = _normalize_alias_key(new)
                 prior = conn.execute(
                     "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
                     (fwd_key,),
                 ).fetchone()
+                # Repoint OTHER aliases that targeted `old` to `new` (rename = the
+                # canonical formerly-called-`old` IS now `new`, so both confirmed
+                # and rejected references follow). Exclude the forwarding key
+                # (handled below) and any row that would become a self-alias
+                # ("new is not new"); delete the self-aliasing rows.
+                conn.execute(
+                    "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
+                    "WHERE canonical = ? AND alias_workspace != ? AND alias_workspace != ?",
+                    (new, now, old, fwd_key, new_key),
+                )
+                conn.execute(
+                    "DELETE FROM workspace_aliases WHERE canonical = ? AND alias_workspace = ?",
+                    (old, new_key),
+                )
+                # Insert a forwarding alias normalize(old) -> new so a later write
+                # with the OLD raw workspace string resolves to `new` instead of
+                # re-registering `old` as a fresh canonical (re-splitting the
+                # workspace). NEVER clobber an existing user decision on this key:
+                # a rejected row stays rejected; a confirmed row's prior snapshot
+                # is recorded truthfully.
                 if prior is None:
                     conn.execute(
                         """INSERT INTO workspace_aliases
@@ -1228,9 +1232,14 @@ class MemoryDB:
                         (fwd_key, old, new, judge_type, reason, now),
                     )
                 elif prior["status"] != "rejected":
-                    # Existing confirmed alias for this key: keep it authoritative
-                    # only if the repoint UPDATE above already moved it to `new`.
-                    # Record the true prior snapshot for audit.
+                    # Existing confirmed alias on this key: repoint it to `new`
+                    # (the repoint UPDATE above excluded fwd_key, so do it here)
+                    # and record the true prior snapshot for audit.
+                    conn.execute(
+                        "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
+                        "WHERE alias_workspace = ?",
+                        (new, now, fwd_key),
+                    )
                     conn.execute(
                         """INSERT INTO workspace_alias_events
                              (alias_workspace, old_canonical, new_canonical,
@@ -1289,15 +1298,25 @@ class MemoryDB:
             # alias together, so a crash can't leave memories relocated with no
             # alias (which would let the next write re-split the workspace).
             with self.write_transaction() as conn:
+                # (1) Snapshot the forwarding-alias decision BEFORE any UPDATE,
+                #     so the rejection guard reasons about real prior state, not
+                #     a row a later blanket repoint has already mutated.
+                fwd_prev = conn.execute(
+                    "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
+                    (alias_key,),
+                ).fetchone()
+                fwd_prev_canonical = fwd_prev["canonical"] if fwd_prev else None
+                fwd_prev_status = fwd_prev["status"] if fwd_prev else None
+
+                # (2) Move the memories.
                 cur = conn.execute(
                     "UPDATE memories SET workspace_canonical = ? "
                     "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
                     (to_ws, from_ws),
                 )
                 updated = cur.rowcount or 0
-                # Register the destination canonical (+ vec) so the resolver's
-                # exact/KNN steps can see it instead of treating a later write to
-                # `to_ws` as brand-new (spurious strict-pending / fuzzy re-split).
+
+                # (3) Register the destination canonical (+ vec).
                 conn.execute(
                     "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
                     (to_ws, now),
@@ -1314,31 +1333,51 @@ class MemoryDB:
                             )
                         except sqlite3.Error:
                             pass
-                # Repoint EVERY alias that pointed at `from_ws` (confirmed AND
-                # rejected) to `to_ws`. migrate subsumes `from_ws` into `to_ws`,
-                # so a rejection "foo is not from_ws" must follow to "foo is not
-                # to_ws" — otherwise the rejected row is left stranded on a
-                # name the resolver never returns from KNN, silently disabling
-                # the rejected filter and letting foo auto-merge into to_ws.
+
+                # (4) Delete the phantom `from_ws` canonical + its vec row.
+                #     migrate subsumes from_ws into to_ws; leaving from_ws in the
+                #     registry lets a later raw-from_ws write exact-match it and
+                #     re-split. The forwarding alias (step 6) preserves resolution.
+                from_row = conn.execute(
+                    "SELECT id FROM workspace_canonicals WHERE name = ?", (from_ws,)
+                ).fetchone()
+                if from_row is not None:
+                    if self.state.sqlite_vec_available:
+                        try:
+                            conn.execute(
+                                "DELETE FROM workspace_canonicals_vec WHERE id = ?",
+                                (int(from_row["id"]),),
+                            )
+                        except sqlite3.Error:
+                            pass
+                    conn.execute("DELETE FROM workspace_canonicals WHERE name = ?", (from_ws,))
+
+                # (5) Repoint OTHER aliases that targeted `from_ws` to `to_ws`.
+                #     Exclude the forwarding key (handled in step 6) and any row
+                #     that would become a self-alias (alias_workspace == the
+                #     normalized target), which is meaningless ("to is not to").
+                #     Delete the self-aliasing rows outright.
+                to_key = _normalize_alias_key(to_ws)
                 conn.execute(
                     "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
-                    "WHERE canonical = ?",
-                    (to_ws, now, from_ws),
+                    "WHERE canonical = ? AND alias_workspace != ? AND alias_workspace != ?",
+                    (to_ws, now, from_ws, alias_key, to_key),
                 )
-                prev = conn.execute(
-                    "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
-                    (alias_key,),
-                ).fetchone()
-                old_canonical = prev["canonical"] if prev else None
-                old_status = prev["status"] if prev else None
-                # Don't silently reverse a user rejection of this key.
-                if prev is not None and old_status == "rejected":
+                conn.execute(
+                    "DELETE FROM workspace_aliases WHERE canonical = ? AND alias_workspace = ?",
+                    (from_ws, to_key),
+                )
+
+                # (6) Forwarding decision for normalize(from_ws), using the
+                #     pre-UPDATE snapshot. A prior rejection is preserved (never
+                #     silently confirmed); otherwise forward from_ws -> to_ws.
+                if fwd_prev is not None and fwd_prev_status == "rejected":
                     conn.execute(
                         """INSERT INTO workspace_alias_events
                              (alias_workspace, old_canonical, new_canonical,
                               old_status, new_status, action, judge_type, reason, created_at)
                            VALUES (?, ?, ?, 'rejected', 'rejected', 'migrate', ?, ?, ?)""",
-                        (alias_key, old_canonical, old_canonical, judge_type,
+                        (alias_key, fwd_prev_canonical, fwd_prev_canonical, judge_type,
                          (reason or "") + " [forwarding-alias skipped: key is user-rejected]", now),
                     )
                 else:
@@ -1357,7 +1396,7 @@ class MemoryDB:
                              (alias_workspace, old_canonical, new_canonical,
                               old_status, new_status, action, judge_type, reason, created_at)
                            VALUES (?, ?, ?, ?, 'confirmed', 'migrate', ?, ?, ?)""",
-                        (alias_key, old_canonical, to_ws, old_status, judge_type, reason, now),
+                        (alias_key, fwd_prev_canonical, to_ws, fwd_prev_status, judge_type, reason, now),
                     )
             return updated, []
         except sqlite3.Error as exc:
