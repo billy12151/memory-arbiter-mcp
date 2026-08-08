@@ -138,11 +138,22 @@ def test_memories_rejects_unknown_status(tmp_path: Path) -> None:
     assert result["_http_status"] == 400
 
 
-def test_memories_rejects_offset_for_active(tmp_path: Path) -> None:
+def test_memories_supports_offset_for_empty_query_browse(tmp_path: Path) -> None:
+    """Empty query + offset now paginates the recency browse (was a 400 error
+    when browse went through memory_search, which didn't support offset)."""
     api = _api(tmp_path)
-    result = api.memories(status="active", offset=30)
-    assert "error" in result
-    assert result["_http_status"] == 400
+    # write enough memories to have a second page
+    for i in range(5):
+        api.tools.memory_write(
+            content=f"memory {i}", workspace="w", source_type="agent_generated")
+    page1 = api.memories(status="active", limit=2, offset=0)
+    assert "error" not in page1
+    assert len(page1["items"]) == 2
+    page2 = api.memories(status="active", limit=2, offset=2)
+    assert "error" not in page2
+    assert len(page2["items"]) == 2
+    # pages don't overlap
+    assert {m["id"] for m in page1["items"]}.isdisjoint({m["id"] for m in page2["items"]})
 
 
 def test_settings_view_exposes_isolation(tmp_path: Path) -> None:
