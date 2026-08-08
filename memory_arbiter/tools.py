@@ -527,6 +527,25 @@ class MemoryTools:
         payload[name] = coerced
         return None
 
+    def _require_ws_strings(
+        self, payload: dict[str, Any], names: tuple[str, ...], surface: str, topic: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Reject non-string workspace fields with a structured error.
+
+        Loosely-typed MCP JSON can pass a list/dict/int; str()-coercing those
+        would silently store a garbage canonical like "['x']". A workspace name
+        must be a genuine string — anything else is a client error.
+        """
+        for name in names:
+            val = payload.get(name)
+            if val is not None and not isinstance(val, str):
+                return self._invalid_product_call(
+                    surface,
+                    f"{name} must be a string workspace name, got {type(val).__name__}",
+                    topic,
+                )
+        return None
+
     def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         """Task-oriented daily memory tool: remember/find/read/update/judge/status.
 
@@ -698,18 +717,30 @@ class MemoryTools:
         if action == "accept_workspace_alias":
             if not payload.get("alias") or not payload.get("canonical"):
                 return self._invalid_product_call("memory_govern", "accept_workspace_alias requires alias and canonical", action)
+            bad = self._require_ws_strings(payload, ("alias", "canonical"), "memory_govern", action)
+            if bad is not None:
+                return bad
             return self._forward("memory_govern", action, self.memory_accept_workspace_alias, **payload)
         if action == "reject_workspace_alias":
             if not payload.get("alias") or not payload.get("canonical"):
                 return self._invalid_product_call("memory_govern", "reject_workspace_alias requires alias and canonical", action)
+            bad = self._require_ws_strings(payload, ("alias", "canonical"), "memory_govern", action)
+            if bad is not None:
+                return bad
             return self._forward("memory_govern", action, self.memory_reject_workspace_alias, **payload)
         if action == "rename_workspace_canonical":
             if not payload.get("old") or not payload.get("new"):
                 return self._invalid_product_call("memory_govern", "rename_workspace_canonical requires old and new", action)
+            bad = self._require_ws_strings(payload, ("old", "new"), "memory_govern", action)
+            if bad is not None:
+                return bad
             return self._forward("memory_govern", action, self.memory_rename_workspace_canonical, **payload)
         if action == "migrate_workspace":
             if not payload.get("from") or not payload.get("to"):
                 return self._invalid_product_call("memory_govern", "migrate_workspace requires from and to", action)
+            bad = self._require_ws_strings(payload, ("from", "to"), "memory_govern", action)
+            if bad is not None:
+                return bad
             return self._forward("memory_govern", action, self.memory_migrate_workspace, **payload)
         if action == "confirm_pending_workspace":
             invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
@@ -717,6 +748,9 @@ class MemoryTools:
                 return invalid_id
             if not payload.get("canonical"):
                 return self._invalid_product_call("memory_govern", "confirm_pending_workspace requires memory_id and canonical", action)
+            bad = self._require_ws_strings(payload, ("canonical",), "memory_govern", action)
+            if bad is not None:
+                return bad
             return self._forward("memory_govern", action, self.memory_confirm_pending_workspace, **payload)
         return self._invalid_product_call("memory_govern", f"unknown action: {action}", action)
 
@@ -2514,14 +2548,19 @@ class MemoryTools:
             source="user", action="accept", judge_type="user", reason=reason,
         )
         warnings.extend(alias_warnings)
-        # Point the memory at the confirmed canonical, then activate if pending.
-        self.db.update_memory(int(memory_id), {"workspace_canonical": canonical})
+        # Point the memory at the confirmed canonical. update_memory's whitelist
+        # doesn't include workspace_canonical (it would bypass claim_revision
+        # semantics), so use the dedicated helper.
+        canonical_set, canonical_warnings = self.db.set_memory_workspace_canonical(
+            int(memory_id), canonical,
+        )
+        warnings.extend(canonical_warnings)
         activated = False
         if memory.get("status") == MemoryStatus.PENDING.value:
             activated = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
         updated = self.db.get_memory(int(memory_id))
         data = {
-            "confirmed": ok_alias,
+            "confirmed": ok_alias and canonical_set,
             "activated": activated,
             "canonical": canonical,
             "record": updated,

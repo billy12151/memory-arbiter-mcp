@@ -196,3 +196,44 @@ def test_migrate_records_alias_in_same_call(tmp_path):
     events = t.db.list_workspace_alias_events("Sub2")
     assert any(e["action"] == "migrate" for e in events)
 
+
+# ── round-2 review: confirm_pending actually writes the canonical column ──────
+
+def test_confirm_pending_actually_sets_canonical_column(tmp_path):
+    t = make_tools(tmp_path, isolation="strict")
+    w = t.memory_write(content="g", workspace="金营二期", source_type="agent_generated")
+    mid = w["data"]["id"]
+    r = t.memory_govern("confirm_pending_workspace", {"memory_id": mid, "canonical": "金营项目"})
+    assert r["ok"] is True and r["data"]["confirmed"] is True
+    # the column must actually be written (update_memory whitelist used to drop it)
+    assert t.db.get_memory(mid)["workspace_canonical"] == "金营项目"
+
+
+# ── round-2 review: non-string workspace fields → structured error, not garbage
+
+def test_nonstring_workspace_rejected_not_stringified(tmp_path):
+    t = make_tools(tmp_path)
+    r = t.memory_govern("accept_workspace_alias", {"alias": "realproj", "canonical": ["x"]})
+    assert r["ok"] is False  # rejected, not stored as "['x']"
+    # nothing got written under the garbage canonical
+    resolved = t.db.resolve_workspace_canonical("realproj", None, register_new=False)
+    assert resolved["matched_by"] != "confirmed_alias"
+
+    r2 = t.memory_govern("migrate_workspace", {"from": "SubProj", "to": ["Main"]})
+    assert r2["ok"] is False
+
+
+# ── round-2 review: rename inserts forwarding alias, no re-split ──────────────
+
+def test_rename_inserts_forwarding_alias_no_resplit(tmp_path):
+    t = make_tools(tmp_path)
+    t.db.resolve_workspace_canonical("Foo", None, register_new=True)
+    t.memory_govern("rename_workspace_canonical", {"old": "Foo", "new": "Bar"})
+    # re-submitting the OLD raw workspace must resolve to the new canonical,
+    # not re-register "Foo" as a fresh split canonical.
+    resolved = t.db.resolve_workspace_canonical("Foo", None, register_new=True)
+    assert resolved["canonical"] == "Bar"
+    assert resolved["matched_by"] == "confirmed_alias"
+    assert resolved["is_new"] is False
+
+

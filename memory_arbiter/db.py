@@ -1155,11 +1155,25 @@ class MemoryDB:
                     "UPDATE workspace_aliases SET canonical = ?, updated_at = ? WHERE canonical = ?",
                     (new, now, old),
                 )
+                # Insert a forwarding alias normalize(old) -> new so a later write
+                # with the OLD raw workspace string resolves to `new` instead of
+                # re-registering `old` as a fresh canonical (re-splitting the
+                # workspace). Mirrors migrate_workspace's guard.
+                conn.execute(
+                    """INSERT INTO workspace_aliases
+                         (alias_workspace, canonical, relation, status, source, updated_at)
+                       VALUES (?, ?, 'alias', 'confirmed', 'user', ?)
+                       ON CONFLICT(alias_workspace) DO UPDATE SET
+                         canonical=excluded.canonical, relation=excluded.relation,
+                         status=excluded.status, source=excluded.source,
+                         updated_at=excluded.updated_at""",
+                    (_normalize_alias_key(old), new, now),
+                )
                 conn.execute(
                     """INSERT INTO workspace_alias_events
                          (alias_workspace, old_canonical, new_canonical,
                           old_status, new_status, action, judge_type, reason, created_at)
-                       VALUES (?, ?, ?, NULL, NULL, 'rename', ?, ?, ?)""",
+                       VALUES (?, ?, ?, NULL, 'confirmed', 'rename', ?, ?, ?)""",
                     (_normalize_alias_key(old), old, new, judge_type, reason, now),
                 )
             return updated, []
@@ -1222,11 +1236,38 @@ class MemoryDB:
         except sqlite3.Error as exc:
             return 0, [f"migrate_workspace failed: {exc}"]
 
-    def delete_embedding(self, memory_id: int) -> Tuple[bool, list[str]]:
+    def set_memory_workspace_canonical(
+        self, memory_id: int, canonical: str
+    ) -> Tuple[bool, list[str]]:
+        """Directly set a memory's workspace_canonical column.
+
+        update_memory() intentionally whitelists only trust/status/metadata
+        fields (and bumps claim_revision on those), so it silently drops a
+        workspace_canonical write. This helper writes the column directly and
+        registers the canonical in workspace_canonicals so the resolver sees it.
+        """
         if not self._db_available or not self.state.sqlite_writable:
-            return False, ["SQLite write unavailable; embedding not deleted."]
-        if not self.state.sqlite_vec_available:
-            return False, ["sqlite-vec unavailable; embedding not deleted."]
+            return False, ["SQLite write unavailable; workspace_canonical not set."]
+        canonical = _coerce_ws(canonical)
+        if not canonical:
+            return False, ["canonical must be a non-empty workspace string."]
+        try:
+            with self.write_transaction() as conn:
+                cur = conn.execute(
+                    "UPDATE memories SET workspace_canonical = ? WHERE id = ?",
+                    (canonical, int(memory_id)),
+                )
+                if (cur.rowcount or 0) == 0:
+                    return False, ["memory id not found."]
+                conn.execute(
+                    "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                    (canonical, utc_now_iso()),
+                )
+            return True, []
+        except sqlite3.Error as exc:
+            return False, [f"set_memory_workspace_canonical failed: {exc}"]
+
+    def delete_embedding(self, memory_id: int) -> Tuple[bool, list[str]]:
         try:
             with self.connection() as conn:
                 conn.execute("DELETE FROM memories_vec WHERE id = ?", (memory_id,))
