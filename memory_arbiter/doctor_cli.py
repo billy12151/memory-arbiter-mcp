@@ -70,7 +70,7 @@ def _render_text(report: OverviewReport, use_color: bool, update_check: Optional
     for f in report.findings:
         dims.setdefault(f.dimension, []).append(f)
 
-    dim_order = ["config", "vector", "split", "consistency", "capacity"]
+    dim_order = ["config", "vector", "semantic", "split", "consistency", "capacity"]
     for dim in dim_order:
         items = dims.get(dim)
         if not items:

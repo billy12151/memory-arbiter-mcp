@@ -367,7 +367,7 @@ class TestSemanticChainShortCircuit:
         assert chain["semantic.link1.model_path"].status == "pass"
         assert chain["semantic.link2.enabled"].status == "pass"
         assert chain["semantic.link3.model_usable"].status == "fail"
-        assert chain["semantic.link3.model_usable"].severity == Severity.CRITICAL
+        assert chain["semantic.link3.model_usable"].severity == Severity.WARNING
         assert chain["semantic.link4.on_write"].status == "n/a"
 
     def test_link4_fail_when_on_write_off(self, tmp_path):

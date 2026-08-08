@@ -419,26 +419,39 @@ def _check_structured_claims(conn: sqlite3.Connection) -> Finding:
     )
 
 
+def _shallow_gguf_probe(model_path: Optional[Path]) -> tuple[bool, list[str]]:
+    """Shallow GGUF model-usability probe without loading the model.
+
+    Returns (usable, warnings). Checks file existence + llama_cpp importability.
+    Shared by the vector chain (link4) and the semantic chain (link3) so the
+    two don't duplicate the same import/exist logic for different settings
+    fields.
+    """
+    warnings: list[str] = []
+    if not model_path:
+        return False, []
+    try:
+        from llama_cpp import Llama  # noqa: F401
+    except ImportError:
+        warnings.append("llama-cpp-python not installed")
+        return False, warnings
+    if not os.path.exists(str(model_path)):
+        warnings.append(f"GGUF model not found: {model_path}")
+        return False, warnings
+    return True, warnings
+
+
 def _embedder_shallow_probe(settings: Settings) -> tuple[Optional[Any], list[str]]:
-    """Shallow model-usability probe without loading the GGUF (design doc §7).
+    """Shallow embedding-model probe (vector chain link4).
 
     Returns (probe_result, warnings). ``probe_result`` is a lightweight dict
     describing availability, or None if not usable. Used by both the link4
     shallow path and as the CLI default.
     """
-    warnings: list[str] = []
-    model_path = settings.embedding_model_path
-    if not model_path:
-        return None, []
-    try:
-        from llama_cpp import Llama  # noqa: F401
-    except ImportError:
-        warnings.append("llama-cpp-python not installed")
+    usable, warnings = _shallow_gguf_probe(settings.embedding_model_path)
+    if not usable:
         return None, warnings
-    if not os.path.exists(str(model_path)):
-        warnings.append(f"GGUF model not found: {model_path}")
-        return None, warnings
-    return {"model_path": str(model_path), "shallow": True}, warnings
+    return {"model_path": str(settings.embedding_model_path), "shallow": True}, warnings
 
 
 # =====================================================================
@@ -650,27 +663,6 @@ def _check_vector_chain(
 #  Mirrors the vector chain: walk links 1→4; first break classifies.
 # =====================================================================
 
-def _semantic_shallow_probe(settings: Settings) -> tuple[bool, list[str]]:
-    """Shallow model-usability probe for the semantic-conflict GGUF.
-
-    Returns (usable, warnings). Does not load the model — only checks
-    file existence + llama_cpp importability.
-    """
-    warnings: list[str] = []
-    model_path = getattr(settings, "semantic_conflict_model_path", None)
-    if not model_path:
-        return False, []
-    try:
-        from llama_cpp import Llama  # noqa: F401
-    except ImportError:
-        warnings.append("llama-cpp-python not installed")
-        return False, warnings
-    if not os.path.exists(str(model_path)):
-        warnings.append(f"semantic conflict model not found: {model_path}")
-        return False, warnings
-    return True, warnings
-
-
 def _check_semantic_chain(settings: Settings) -> list[Finding]:
     """Semantic conflict / Qwen enablement chain (mirrors _check_vector_chain).
 
@@ -709,14 +701,17 @@ def _check_semantic_chain(settings: Settings) -> list[Finding]:
     # Link 2: enabled flag
     enabled = bool(getattr(settings, "semantic_conflict_enabled", False))
     if not enabled:
+        # Distinguish: model_path set + auto-enable should have turned it on,
+        # so an explicit false is an intentional user override.
         findings.append(Finding(
             check_id="semantic.link2.enabled", dimension=dim, severity=Severity.WARNING,
             status="fail",
             title="model_path 已配置但 enabled=false（语义冲突检测被显式关闭）",
-            detail="semantic_conflict.model_path 已设，但 enabled=false。模型不会加载，"
-                   "worker 不会启动。配置 model_path 后默认自动开启；若为刻意关闭可忽略。",
+            detail="semantic_conflict.model_path 已设，但 enabled=false。配置 model_path 后"
+                   "默认自动开启；当前为显式关闭（config.json enabled=false 或 env "
+                   "MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED=false）。若为刻意关闭可忽略。",
             evidence={"enabled": False, "model_path": str(model_path)},
-            fix_hint='如需开启：config.json 设 "semantic_conflict":{"enabled":true}',
+            fix_hint='如需开启：config.json 设 "semantic_conflict":{"enabled":true} 或移除 env 变量',
         ))
         findings += [_na(
             f"semantic.link{i}.{'model_usable' if i == 3 else 'on_write'}",
@@ -731,10 +726,10 @@ def _check_semantic_chain(settings: Settings) -> list[Finding]:
     ))
 
     # Link 3: model file exists (shallow probe)
-    usable, probe_warnings = _semantic_shallow_probe(settings)
+    usable, probe_warnings = _shallow_gguf_probe(model_path)
     if not usable:
         findings.append(Finding(
-            check_id="semantic.link3.model_usable", dimension=dim, severity=Severity.CRITICAL,
+            check_id="semantic.link3.model_usable", dimension=dim, severity=Severity.WARNING,
             status="fail",
             title="semantic 模型不可用（文件不存在 / llama-cpp 未安装）",
             detail="; ".join(probe_warnings) or "shallow 探针失败",
@@ -1491,37 +1486,40 @@ def _check_db_size(conn: sqlite3.Connection) -> Finding:
 def _check_workspace_alias_health(conn: sqlite3.Connection, settings: Settings) -> Finding:
     """Report workspace alias governance state (v0.13, design 636/637).
 
-    Counts confirmed/rejected aliases and strict-blocked pending workspaces.
-    A growing pending count means strict isolation is blocking new workspaces
-    that the user hasn't confirmed yet.
+    Counts confirmed/rejected aliases. Separately reports strict-blocked
+    pending memories when isolation=strict, since that's the actionable
+    queue the user needs to clear.
     """
+    # The table is created by MemoryDB.__init__ DDL, so it always exists on
+    # any DB that has been opened by mema. The _table_exists guard is kept as
+    # a defensive check for externally-created / corrupted DBs.
     if not _table_exists(conn, "workspace_aliases"):
         return _na("capacity.workspace_alias_health", "capacity",
-                   "workspace_aliases 表不存在（v0.13 前的库）")
+                   "workspace_aliases 表不存在（DB 未被 mema 初始化）")
     confirmed = int(_scalar(conn,
         "SELECT COUNT(*) FROM workspace_aliases WHERE status='confirmed'") or 0)
     rejected = int(_scalar(conn,
         "SELECT COUNT(*) FROM workspace_aliases WHERE status='rejected'") or 0)
-    # Pending workspaces: memories with status=pending (strict-blocked new ws).
-    # The only writer of status=pending is the strict-isolation write path.
-    pending_count = int(_scalar(conn,
-        "SELECT COUNT(*) FROM memories WHERE status='pending'") or 0)
     isolation = getattr(settings, "isolation", "none")
 
+    # Pending memories are a strict-isolation concept (new workspace blocked
+    # until confirmed). Report them only under strict so the count isn't
+    # confused with alias health under none/weak.
+    pending_count = 0
+    if isolation == "strict" and _table_exists(conn, "memories"):
+        pending_count = int(_scalar(conn,
+            "SELECT COUNT(*) FROM memories WHERE status='pending'") or 0)
+
     if pending_count > 0:
-        sev = Severity.WARNING if isolation == "strict" else Severity.INFO
-        status = "warn" if isolation == "strict" else "pass"
+        sev = Severity.WARNING
+        status = "warn"
         title = f"workspace alias: {confirmed} confirmed / {rejected} rejected，{pending_count} pending"
         detail = (
             "strict 隔离下新 workspace 的写入会被 pending 直到用户确认。"
+            "pending 是隔离行为，不是 alias 治理缺陷。"
             "用 memory_govern confirm_pending_workspace 或 memory_activate 激活。"
-            if isolation == "strict"
-            else f"有 {pending_count} 条 pending 记忆（可能来自 strict 隔离切换前残留）。"
         )
-        fix_hint = (
-            "memory_govern confirm_pending_workspace 逐条确认"
-            if isolation == "strict" else ""
-        )
+        fix_hint = "memory_govern confirm_pending_workspace 逐条确认"
     else:
         sev = Severity.INFO
         status = "pass"
