@@ -529,15 +529,21 @@ class MemoryTools:
 
     @staticmethod
     def _is_truthy(value: Any) -> bool:
-        """Robust truthiness for loosely-typed JSON flags.
+        """Robust truthiness for a loosely-typed JSON authorization flag.
 
-        A JSON client may send the *string* "false"/"0"/"no" for a boolean
-        override; bool("false") is True in Python, which would silently grant an
-        authorized override. Treat common false-ish strings as False.
+        A JSON client may send the *string* "false" for a boolean; bool("false")
+        is True in Python, which would silently grant an override. For an
+        authorization flag the safe default is an ALLOW-LIST: only genuine
+        booleans and explicit true-tokens grant it. Any other string
+        ("false", "null", "maybe", "") → False.
         """
+        if isinstance(value, bool):
+            return value
         if isinstance(value, str):
-            return value.strip().lower() not in {"", "false", "0", "no", "off", "none"}
-        return bool(value)
+            return value.strip().lower() in {"true", "1", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return value != 0
+        return False
 
     def _require_ws_strings(
         self, payload: dict[str, Any], names: tuple[str, ...], surface: str, topic: Optional[str] = None,

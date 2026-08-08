@@ -361,17 +361,60 @@ def test_string_false_authorized_does_not_bypass_rejection_guard(tmp_path):
     assert t.db.get_workspace_alias("a")["status"] == "rejected"
 
 
-def test_rename_preserves_rejected_row_targeting_old(tmp_path):
-    # A user rejection "foo is NOT an alias of old" must not be silently
-    # rewritten into "foo is NOT an alias of new" by a rename of `old`.
+def test_unrecognized_authorized_string_does_not_override(tmp_path):
+    # An authorization flag uses an allow-list: only true/1/yes/on grant it.
+    # "null"/"maybe"/"" must NOT be treated as an override.
+    t = make_tools(tmp_path)
+    t.memory_govern("accept_workspace_alias", {"alias": "a", "canonical": "c1"})
+    t.memory_govern("reject_workspace_alias", {"alias": "a", "canonical": "c1"})
+    for bad in ("null", "maybe", "", "0", "no"):
+        r = t.memory_govern("accept_workspace_alias",
+                            {"alias": "a", "canonical": "c2", "authorized": bad})
+        assert r["ok"] is False, f"authorized={bad!r} wrongly granted override"
+    # genuine true tokens work
+    r = t.memory_govern("accept_workspace_alias",
+                        {"alias": "a", "canonical": "c2", "authorized": "true"})
+    assert r["ok"] is True
+
+
+def test_rename_repoints_rejected_alias_targeting_old(tmp_path):
+    # rename(old→new) means the canonical formerly-called-`old` IS now `new`.
+    # A rejection "foo is not old" must FOLLOW to "foo is not new" — otherwise
+    # the rejected row is stranded on a name the resolver never returns from
+    # KNN, and a later write auto-merges foo→new via the vector path,
+    # silently reversing the user's decision.
     t = make_tools(tmp_path)
     t.db.resolve_workspace_canonical("old", None, register_new=True)
     t.memory_govern("reject_workspace_alias", {"alias": "foo", "canonical": "old"})
     t.memory_govern("rename_workspace_canonical", {"old": "old", "new": "new"})
     row = t.db.get_workspace_alias("foo")
-    # rejection still targets the original canonical name, not the renamed target
+    # rejection now targets the renamed canonical, still status=rejected
     assert row["status"] == "rejected"
-    assert row["canonical"] == "old"
+    assert row["canonical"] == "new"
+    # and the resolver's rejected filter correctly suppresses `new` for `foo`
+    resolved = t.db.resolve_workspace_canonical("foo", None, register_new=False)
+    assert "new" in (resolved.get("rejected_canonicals") or [])
+
+
+def test_merge_rename_repoints_rejected_alias(tmp_path):
+    # rename's MERGE branch (new already exists → old canonical row deleted)
+    # must also carry the rejection to `new`, not strand it on the deleted `old`.
+    t = make_tools(tmp_path)
+    t.db.resolve_workspace_canonical("old", None, register_new=True)
+    t.db.resolve_workspace_canonical("new", None, register_new=True)
+    t.memory_govern("reject_workspace_alias", {"alias": "foo", "canonical": "old"})
+    t.memory_govern("rename_workspace_canonical", {"old": "old", "new": "new"})
+    row = t.db.get_workspace_alias("foo")
+    assert row["status"] == "rejected" and row["canonical"] == "new"
+
+
+def test_migrate_repoints_rejected_alias(tmp_path):
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_govern("reject_workspace_alias", {"alias": "foo", "canonical": "Sub2"})
+    t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
+    row = t.db.get_workspace_alias("foo")
+    assert row["status"] == "rejected" and row["canonical"] == "Main"
 
 
 def test_resolver_similar_excludes_rejected(tmp_path):

@@ -1188,13 +1188,17 @@ class MemoryDB:
                         "UPDATE workspace_canonicals SET name = ? WHERE name = ?",
                         (new, old),
                     )
-                # Repoint CONFIRMED aliases that targeted `old` so the resolver
-                # never hands out the renamed-away canonical. REJECTED rows are
-                # left alone: "foo is not an alias of old" does not imply "foo
-                # is not an alias of new" — that's a fact the user never asserted.
+                # Repoint EVERY alias that targeted `old` (confirmed AND rejected)
+                # to `new`. rename means the canonical formerly-called-`old` IS
+                # now `new` — the same workspace under a new name — so a rejection
+                # "foo is not `old`" must follow to "foo is not `new`", exactly as
+                # a confirmation would. Leaving a rejected row stranded on the
+                # renamed-away/deleted `old` name silently disables the resolver's
+                # rejected filter (KNN never returns the dead name), letting a
+                # later write auto-merge foo→new and reversing the user's decision.
                 conn.execute(
                     "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
-                    "WHERE canonical = ? AND status = 'confirmed'",
+                    "WHERE canonical = ?",
                     (new, now, old),
                 )
                 # Insert a forwarding alias normalize(old) -> new so a later write
@@ -1310,12 +1314,15 @@ class MemoryDB:
                             )
                         except sqlite3.Error:
                             pass
-                # Repoint CONFIRMED aliases that pointed at `from_ws` so chained
-                # migrations don't leave stale forwarding targets. Rejected rows
-                # are preserved (a rejection of from_ws is not a rejection of to_ws).
+                # Repoint EVERY alias that pointed at `from_ws` (confirmed AND
+                # rejected) to `to_ws`. migrate subsumes `from_ws` into `to_ws`,
+                # so a rejection "foo is not from_ws" must follow to "foo is not
+                # to_ws" — otherwise the rejected row is left stranded on a
+                # name the resolver never returns from KNN, silently disabling
+                # the rejected filter and letting foo auto-merge into to_ws.
                 conn.execute(
                     "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
-                    "WHERE canonical = ? AND status = 'confirmed'",
+                    "WHERE canonical = ?",
                     (to_ws, now, from_ws),
                 )
                 prev = conn.execute(
