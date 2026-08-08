@@ -6,6 +6,7 @@ test_doctor_integration.py with real sqlite — this file does NOT exercise SQL.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -370,10 +371,16 @@ class TestSemanticChainShortCircuit:
         assert chain["semantic.link3.model_usable"].severity == Severity.WARNING
         assert chain["semantic.link4.on_write"].status == "n/a"
 
-    def test_link4_fail_when_on_write_off(self, tmp_path):
+    def test_link4_fail_when_on_write_off(self, tmp_path, monkeypatch):
         """All links pass except on_write=off → link4 warn."""
         gguf = tmp_path / "qwen.gguf"
         gguf.write_bytes(b"\x00")
+        # CI may lack llama_cpp; the probe's job here is to confirm the file
+        # exists, not to actually load a model. Bypass the import check.
+        monkeypatch.setattr(
+            "memory_arbiter.doctor._shallow_gguf_probe",
+            lambda mp: (True, []) if mp and os.path.exists(str(mp)) else (False, ["not found"]),
+        )
         s = _settings(tmp_path,
                       semantic_conflict_model_path=gguf,
                       semantic_conflict_enabled=True,
@@ -386,10 +393,14 @@ class TestSemanticChainShortCircuit:
         assert chain["semantic.link4.on_write"].status == "fail"
         assert chain["semantic.link4.on_write"].severity == Severity.WARNING
 
-    def test_all_links_pass(self, tmp_path):
+    def test_all_links_pass(self, tmp_path, monkeypatch):
         """All 4 links pass when model file exists + enabled + on_write=async."""
         gguf = tmp_path / "qwen.gguf"
         gguf.write_bytes(b"\x00")
+        monkeypatch.setattr(
+            "memory_arbiter.doctor._shallow_gguf_probe",
+            lambda mp: (True, []) if mp and os.path.exists(str(mp)) else (False, ["not found"]),
+        )
         s = _settings(tmp_path,
                       semantic_conflict_model_path=gguf,
                       semantic_conflict_enabled=True,
