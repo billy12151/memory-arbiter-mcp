@@ -20,6 +20,19 @@ from .models import MemoryRecord, utc_now_iso
 _BUSY_TIMEOUT_MS = 5000
 
 
+def _normalize_alias_key(ws: Optional[str]) -> str:
+    """Normalize a workspace string into a stable alias-governance key.
+
+    Case-folded + whitespace-collapsed so "金营项目 " and "金营项目" map to the
+    same alias row. This is only the governance lookup key; the display
+    canonical is stored verbatim in workspace_aliases.canonical.
+    """
+    s = (ws or "").strip()
+    if not s:
+        return ""
+    return " ".join(s.split()).casefold()
+
+
 class MemoryDB:
     """SQLite-backed memory store with per-operation connections.
 
@@ -283,6 +296,38 @@ class MemoryDB:
                   name TEXT NOT NULL UNIQUE,
                   created_at TEXT NOT NULL
                 );
+
+                -- Workspace alias governance (v0.13, design 637). Deliberately
+                -- NOT the conflict_judgments CAS design: alias governance is
+                -- human-triggered, low-concurrency, single-key (one
+                -- alias_workspace -> one canonical), so a current-state table +
+                -- append-only event log + UNIQUE + single transaction is enough.
+                -- Concurrency safety comes from the UNIQUE constraint + txn, not
+                -- from a version/CAS column.
+                CREATE TABLE IF NOT EXISTS workspace_aliases (
+                  alias_workspace TEXT NOT NULL,
+                  canonical TEXT NOT NULL,
+                  relation TEXT NOT NULL,   -- alias|typo|same_project|same_family|related|unrelated|uncertain
+                  status TEXT NOT NULL,     -- confirmed|rejected
+                  source TEXT NOT NULL,     -- user|agent|rule|qwen
+                  updated_at TEXT NOT NULL,
+                  UNIQUE(alias_workspace)
+                );
+                -- Append-only audit trail. Never UPDATE/DELETE these rows.
+                CREATE TABLE IF NOT EXISTS workspace_alias_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  alias_workspace TEXT NOT NULL,
+                  old_canonical TEXT,
+                  new_canonical TEXT,
+                  old_status TEXT,
+                  new_status TEXT,
+                  action TEXT NOT NULL,     -- accept|reject|rename|migrate|correct
+                  judge_type TEXT NOT NULL, -- user|agent|rule|qwen
+                  reason TEXT,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_ws_alias_events
+                  ON workspace_alias_events(alias_workspace, created_at);
                 """
         )
         # Idempotent column migrations — probe each individually so
@@ -809,6 +854,7 @@ class MemoryDB:
             "matched_by": "fallback",
             "distance": None,
             "similar": [],
+            "rejected_canonicals": [],
         }
         if not raw:
             result["canonical"] = "default"
@@ -820,6 +866,33 @@ class MemoryDB:
 
         try:
             with self.connection() as conn:
+                # 0. Confirmed/rejected alias governance (design 637 / 636 §1,8).
+                #    A confirmed alias short-circuits everything (no vector, no
+                #    Qwen). Rejected pairs are recorded so downstream candidate
+                #    ranking can filter them out and suppress repeat prompts.
+                alias_key = _normalize_alias_key(raw)
+                try:
+                    arow = conn.execute(
+                        "SELECT canonical, status FROM workspace_aliases "
+                        "WHERE alias_workspace = ?",
+                        (alias_key,),
+                    ).fetchone()
+                except sqlite3.Error:
+                    arow = None
+                if arow is not None:
+                    if str(arow["status"]) == "confirmed":
+                        result.update({
+                            "canonical": arow["canonical"],
+                            "is_new": False,
+                            "matched_by": "confirmed_alias",
+                            "distance": 0.0,
+                        })
+                        return result
+                    if str(arow["status"]) == "rejected":
+                        # Do not auto-merge to this canonical; remember it so the
+                        # vector/candidate stages skip the rejected pair.
+                        result["rejected_canonicals"] = [arow["canonical"]]
+
                 # 1. Exact canonical hit.
                 exact = conn.execute(
                     "SELECT id, name FROM workspace_canonicals WHERE name = ?",
@@ -855,12 +928,20 @@ class MemoryDB:
                             (query_json,),
                         ).fetchall()
                         result["similar"] = [{"name": r["name"], "distance": float(r["distance"])} for r in rows]
-                        if rows and float(rows[0]["distance"]) <= match_distance:
+                        # Skip any canonical the user has explicitly rejected for
+                        # this alias (636 §4): the nearest non-rejected candidate
+                        # within threshold wins.
+                        rejected = set(result.get("rejected_canonicals") or [])
+                        best = next(
+                            (r for r in rows if r["name"] not in rejected),
+                            None,
+                        )
+                        if best is not None and float(best["distance"]) <= match_distance:
                             result.update({
-                                "canonical": rows[0]["name"],
+                                "canonical": best["name"],
                                 "is_new": False,
                                 "matched_by": "vector",
-                                "distance": float(rows[0]["distance"]),
+                                "distance": float(best["distance"]),
                             })
                             return result
                     except sqlite3.Error:
@@ -889,6 +970,186 @@ class MemoryDB:
                 return result
         except sqlite3.Error:
             return result
+
+    # ------------------------------------------------------------------
+    #  Workspace alias governance (design 637). Current-state table +
+    #  append-only event log + UNIQUE + single transaction. NO CAS.
+    # ------------------------------------------------------------------
+    def upsert_workspace_alias(
+        self,
+        alias: str,
+        canonical: str,
+        *,
+        relation: str = "alias",
+        status: str = "confirmed",
+        source: str = "user",
+        action: str = "accept",
+        judge_type: str = "user",
+        reason: Optional[str] = None,
+    ) -> Tuple[bool, list[str]]:
+        """Upsert the current alias state AND append an audit event in one txn.
+
+        Consistency comes from the UNIQUE(alias_workspace) constraint + the
+        transaction, not from a version/CAS column (637). A concurrent writer
+        that loses the race hits UNIQUE and is expected to retry; the state
+        machine converges naturally.
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return False, ["SQLite write unavailable; workspace alias not written."]
+        alias_key = _normalize_alias_key(alias)
+        if not alias_key:
+            return False, ["alias must be a non-empty workspace string."]
+        canonical = (canonical or "").strip()
+        if not canonical:
+            return False, ["canonical must be a non-empty workspace string."]
+        if status not in {"confirmed", "rejected"}:
+            return False, [f"status={status!r} invalid; expected confirmed|rejected."]
+        now = utc_now_iso()
+        try:
+            with self.connection() as conn:
+                prev = conn.execute(
+                    "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
+                    (alias_key,),
+                ).fetchone()
+                old_canonical = prev["canonical"] if prev else None
+                old_status = prev["status"] if prev else None
+                conn.execute(
+                    """INSERT INTO workspace_aliases
+                         (alias_workspace, canonical, relation, status, source, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(alias_workspace) DO UPDATE SET
+                         canonical=excluded.canonical,
+                         relation=excluded.relation,
+                         status=excluded.status,
+                         source=excluded.source,
+                         updated_at=excluded.updated_at""",
+                    (alias_key, canonical, relation, status, source, now),
+                )
+                conn.execute(
+                    """INSERT INTO workspace_alias_events
+                         (alias_workspace, old_canonical, new_canonical,
+                          old_status, new_status, action, judge_type, reason, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (alias_key, old_canonical, canonical, old_status, status,
+                     action, judge_type, reason, now),
+                )
+                conn.commit()
+            return True, []
+        except sqlite3.Error as exc:
+            return False, [f"upsert_workspace_alias failed: {exc}"]
+
+    def get_workspace_alias(self, alias: str) -> Optional[dict[str, Any]]:
+        """O(1) current-state lookup used by the resolver."""
+        if not self._db_available:
+            return None
+        alias_key = _normalize_alias_key(alias)
+        if not alias_key:
+            return None
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT alias_workspace, canonical, relation, status, source, updated_at "
+                    "FROM workspace_aliases WHERE alias_workspace = ?",
+                    (alias_key,),
+                ).fetchone()
+                return dict(row) if row else None
+        except sqlite3.Error:
+            return None
+
+    def list_workspace_alias_events(
+        self, alias: Optional[str] = None, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Read the append-only audit trail (optionally filtered by alias)."""
+        if not self._db_available:
+            return []
+        try:
+            with self.connection() as conn:
+                if alias:
+                    rows = conn.execute(
+                        "SELECT * FROM workspace_alias_events WHERE alias_workspace = ? "
+                        "ORDER BY created_at DESC, id DESC LIMIT ?",
+                        (_normalize_alias_key(alias), int(limit)),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM workspace_alias_events "
+                        "ORDER BY created_at DESC, id DESC LIMIT ?",
+                        (int(limit),),
+                    ).fetchall()
+                return [dict(r) for r in rows]
+        except sqlite3.Error:
+            return []
+
+    def rename_workspace_canonical(
+        self, old: str, new: str, *, judge_type: str = "user", reason: Optional[str] = None
+    ) -> Tuple[int, list[str]]:
+        """Rename a canonical everywhere: memories + canonicals table + audit.
+
+        Returns (rows_updated, warnings). Best-effort on the vec table (kept in
+        sync via workspace_canonicals.id, untouched here).
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return 0, ["SQLite write unavailable; rename skipped."]
+        old = (old or "").strip()
+        new = (new or "").strip()
+        if not old or not new:
+            return 0, ["rename requires non-empty old and new canonical."]
+        now = utc_now_iso()
+        try:
+            with self.connection() as conn:
+                cur = conn.execute(
+                    "UPDATE memories SET workspace_canonical = ? "
+                    "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
+                    (new, old),
+                )
+                updated = cur.rowcount or 0
+                conn.execute(
+                    "UPDATE OR IGNORE workspace_canonicals SET name = ? WHERE name = ?",
+                    (new, old),
+                )
+                conn.execute(
+                    """INSERT INTO workspace_alias_events
+                         (alias_workspace, old_canonical, new_canonical,
+                          old_status, new_status, action, judge_type, reason, created_at)
+                       VALUES (?, ?, ?, NULL, NULL, 'rename', ?, ?, ?)""",
+                    (_normalize_alias_key(old), old, new, judge_type, reason, now),
+                )
+                conn.commit()
+            return updated, []
+        except sqlite3.Error as exc:
+            return 0, [f"rename_workspace_canonical failed: {exc}"]
+
+    def migrate_workspace(
+        self, from_ws: str, to_ws: str, *, judge_type: str = "user", reason: Optional[str] = None
+    ) -> Tuple[int, list[str]]:
+        """Bulk-move memories from one canonical to another (no canonical rename).
+
+        Also records a confirmed alias from_ws -> to_ws so future writes resolve
+        directly. Returns (rows_updated, warnings).
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return 0, ["SQLite write unavailable; migrate skipped."]
+        from_ws = (from_ws or "").strip()
+        to_ws = (to_ws or "").strip()
+        if not from_ws or not to_ws:
+            return 0, ["migrate requires non-empty from and to workspace."]
+        try:
+            with self.connection() as conn:
+                cur = conn.execute(
+                    "UPDATE memories SET workspace_canonical = ? "
+                    "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
+                    (to_ws, from_ws),
+                )
+                updated = cur.rowcount or 0
+                conn.commit()
+        except sqlite3.Error as exc:
+            return 0, [f"migrate_workspace failed: {exc}"]
+        # Record the alias so subsequent writes short-circuit (own txn).
+        ok, warns = self.upsert_workspace_alias(
+            from_ws, to_ws, relation="alias", status="confirmed",
+            source="user", action="migrate", judge_type=judge_type, reason=reason,
+        )
+        return updated, warns if not ok else []
 
     def delete_embedding(self, memory_id: int) -> Tuple[bool, list[str]]:
         if not self._db_available or not self.state.sqlite_writable:
