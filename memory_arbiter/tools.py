@@ -840,6 +840,26 @@ class MemoryTools:
             )
             return self._semantic_backend
 
+    def _suggest_workspace_candidate(
+        self, ws_raw: str, evidence: dict[str, Any], similar: list[dict[str, Any]],
+    ) -> Any:
+        """Ask the local model to suggest a workspace normalization candidate.
+
+        Returns a WorkspaceCandidateSignal, or None if no backend is configured
+        (caller then falls back to ASK). Never raises — the backend degrades to
+        an uncertain signal on any error (636 §6: suggester only, never arbiter).
+        """
+        backend = self._ensure_semantic_backend()
+        if backend is None or not hasattr(backend, "suggest_workspace_candidate"):
+            return None
+        candidates = [s["name"] for s in (similar or []) if s.get("name")][:5]
+        if not candidates:
+            return None
+        try:
+            return backend.suggest_workspace_candidate(ws_raw, evidence, candidates)
+        except Exception:
+            return None
+
     def _semantic_status(self) -> dict[str, Any]:
         backend_status = (
             self._semantic_backend.status()
@@ -1084,6 +1104,7 @@ class MemoryTools:
             # table), which is what drives strict-block / weak-hint.
             embedding_warnings: list[str] = []
             ws_rule_decision: Optional[dict[str, Any]] = None
+            ws_candidate_suggestion: Any = None
             if isolation != "none":
                 embedder, ensure_warnings = self._ensure_embedder()
                 embedding_warnings.extend(ensure_warnings)
@@ -1104,6 +1125,28 @@ class MemoryTools:
                     ws_canonical = (ws_raw or "").strip() or ws_canonical
                     ws_is_new = True
                     ws_matched_by = "rule_keep"
+                elif ws_rule_decision["decision"] is None:
+                    # Rules undecided → model layer suggests a candidate (636 §6).
+                    # The model is a *suggester*: it can promote a weak-mode merge
+                    # but can never override confirmed/rejected/strict policy.
+                    cand_sig = self._suggest_workspace_candidate(ws_raw, evidence, ws_similar)
+                    ws_candidate_suggestion = cand_sig
+                    if (
+                        cand_sig is not None
+                        and cand_sig.candidate
+                        and isolation == "weak"
+                        and (cand_sig.confidence or 0.0) >= 0.85
+                        and cand_sig.candidate not in (resolved.get("rejected_canonicals") or [])
+                    ):
+                        # High-confidence weak-mode silent merge.
+                        ws_canonical = cand_sig.candidate
+                        ws_is_new = False
+                        ws_matched_by = "qwen"
+                        ws_rule_decision = {"decision": "AUTO", "reason": "qwen_high_conf", "canonical": ws_canonical}
+                    else:
+                        # Mid/low confidence, or strict: don't silently merge.
+                        # weak → write active + surface hint; strict → pending.
+                        ws_rule_decision = {"decision": "ASK", "reason": "qwen_low_conf", "canonical": None}
             # strict + brand-new canonical → block activation (status=pending)
             # until the user confirms the workspace name.
             strict_block = isolation == "strict" and ws_is_new
@@ -1142,6 +1185,13 @@ class MemoryTools:
             if ws_rule_decision is not None:
                 data["workspace_decision"] = ws_rule_decision["decision"]
                 data["workspace_decision_reason"] = ws_rule_decision["reason"]
+                if ws_candidate_suggestion is not None and ws_candidate_suggestion.candidate:
+                    data["workspace_candidate"] = {
+                        "candidate": ws_candidate_suggestion.candidate,
+                        "relation": ws_candidate_suggestion.relation,
+                        "confidence": ws_candidate_suggestion.confidence,
+                        "evidence": ws_candidate_suggestion.evidence,
+                    }
                 if ws_rule_decision["decision"] == "ASK" and not strict_block:
                     hints = data.get("write_hints") or {}
                     hints["workspace_review"] = {

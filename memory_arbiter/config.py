@@ -204,6 +204,16 @@ class Settings:
                 f"isolation={isolation!r} invalid; using none"
             )
             isolation = "none"
+        if isolation == "strict":
+            # 636 §9: strict decides visibility, so unconfirmed workspace
+            # aliases silently hide memories. Nudge the operator to govern
+            # workspaces (accept/reject/pending) before relying on strict.
+            config_warnings.append(
+                "isolation=strict: confirm workspace aliases via "
+                "memory_govern (accept/reject_workspace_alias, "
+                "confirm_pending_workspace) so new/aliased workspaces are not "
+                "silently excluded from recall."
+            )
 
         tool_profile = pick_str(
             "tool_profile", "MEMORY_ARBITER_TOOL_PROFILE", "product"

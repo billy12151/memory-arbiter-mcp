@@ -53,6 +53,26 @@ reason_code 只能是 value_diff, replacement, todo_resolved, duplicate, compati
 注意：如果 reason_code 是 value_diff/replacement/todo_resolved/uncertain_same_slot，should_surface 必须是 true。"""
 
 
+_WORKSPACE_PROMPT = """你是 mema 的 workspace 归一候选建议器，只输出 JSON，不要解释。
+输入是一个新记忆的 workspace 原文 + 短证据(标题/关键句) + 若干候选 workspace。
+任务：判断该 workspace 是否应归一到某个候选，只做建议，不做最终裁决。
+字段：candidate(建议归一到的候选名，或 null)，relation(alias|typo|same_project|same_family|related|unrelated|uncertain)，confidence(0..1)，evidence(一句话理由)。
+规则：同一项目不同写法/错别字/中英名互指 → alias/typo，高 confidence。
+同客户不同子域(售后/运维/培训/回访)、仅主题相关 → related/same_family，中低 confidence。
+明显无关 → unrelated，candidate=null。
+拿不准 → uncertain，candidate=null，低 confidence。"""
+
+
+@dataclass
+class WorkspaceCandidateSignal:
+    candidate: Optional[str]
+    relation: str
+    confidence: Optional[float]
+    evidence: str
+    raw: str = ""
+    error: Optional[str] = None
+
+
 @dataclass
 class PairEvidence:
     common_tokens: list[str]
@@ -301,6 +321,44 @@ def model_signal_from_text(raw: str) -> ModelSignal:
     return ModelSignal(should, reason or "unknown", confidence, raw or "", parsed)
 
 
+_WS_RELATIONS = {"alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain"}
+
+
+def workspace_candidate_from_text(raw: str, candidates: list[str]) -> "WorkspaceCandidateSignal":
+    """Parse a workspace-suggester JSON blob into a WorkspaceCandidateSignal.
+
+    Guards the candidate against hallucination: a suggested candidate that is
+    not in the provided list is dropped (candidate=None, relation=uncertain).
+    """
+    snippet = _extract_first_json_object(raw or "")
+    if not snippet:
+        return WorkspaceCandidateSignal(None, "uncertain", None, raw or "", raw or "", "missing_json")
+    try:
+        parsed = json.loads(snippet)
+    except (ValueError, TypeError) as exc:
+        return WorkspaceCandidateSignal(None, "uncertain", None, raw or "", raw or "", str(exc))
+    if not isinstance(parsed, dict):
+        return WorkspaceCandidateSignal(None, "uncertain", None, raw or "", raw or "", "not_object")
+
+    candidate = parsed.get("candidate")
+    candidate = str(candidate).strip() if candidate else None
+    # Anti-hallucination: only accept a candidate the caller actually offered.
+    if candidate and candidates and candidate not in candidates:
+        candidate = None
+    relation = str(parsed.get("relation") or "uncertain").strip().lower()
+    if relation not in _WS_RELATIONS:
+        relation = "uncertain"
+    if candidate is None and relation in {"alias", "typo", "same_project"}:
+        relation = "uncertain"
+    conf_raw = parsed.get("confidence")
+    try:
+        confidence = float(conf_raw) if conf_raw is not None else None
+    except (TypeError, ValueError):
+        confidence = None
+    evidence = str(parsed.get("evidence") or "").strip()
+    return WorkspaceCandidateSignal(candidate, relation, confidence, evidence, raw or "", None)
+
+
 class LocalGGUFSemanticBackend:
     def __init__(self, model_path: Path, *, n_ctx: int = 1024, n_threads: int = 4, n_batch: int = 128):
         self.model_path = Path(model_path).expanduser()
@@ -363,6 +421,42 @@ class LocalGGUFSemanticBackend:
         with self._lock:
             self._llm = None
             self._loaded_at = None
+
+    def suggest_workspace_candidate(
+        self,
+        ws_raw: str,
+        evidence: dict[str, Any],
+        candidates: list[str],
+    ) -> "WorkspaceCandidateSignal":
+        """Suggest whether ws_raw should normalize to one of `candidates`.
+
+        A *suggester*, never the arbiter (636 §6): the caller decides how to use
+        this given isolation + rule vetoes. Degrades to a safe uncertain/no-op on
+        any backend error — never raises.
+        """
+        try:
+            llm = self._ensure_llm()
+            title = str(evidence.get("title") or "")
+            keys = " / ".join(evidence.get("key_sentences") or [])[:300]
+            cand_str = ", ".join(candidates) if candidates else "(无)"
+            text = (
+                f"workspace原文: {ws_raw}\n标题: {title}\n关键句: {keys}\n候选: {cand_str}"
+            )
+            out = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": _WORKSPACE_PROMPT},
+                    {"role": "user", "content": f"输入:\n{text}\n输出:"},
+                ],
+                max_tokens=120,
+                temperature=0.0,
+                top_p=0.9,
+                stop=["\n\n", "</s>"],
+            )
+            raw = out["choices"][0]["message"]["content"]
+            return workspace_candidate_from_text(raw, candidates)
+        except Exception as exc:
+            self._last_error = str(exc)
+            return WorkspaceCandidateSignal(None, "uncertain", None, "", "", str(exc))
 
     def status(self) -> dict[str, Any]:
         return {

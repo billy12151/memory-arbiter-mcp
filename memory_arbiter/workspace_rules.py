@@ -157,9 +157,14 @@ def rule_decision(
                 return {"decision": "ASK", "reason": "candidate_near_tie", "canonical": None}
         return {"decision": "AUTO", "reason": "vector_strong", "canonical": resolved.get("canonical")}
 
-    # New canonical, specific name, no candidate matched: keep it as-is (its own
-    # workspace). Not ASK — a distinct specific project is the common case.
+    # New canonical, specific name.
     if matched_by == "new" and quality == "specific":
+        # If there are near-miss candidates (vector found something, just below
+        # the merge threshold), rules can't confidently keep them separate —
+        # defer to the model layer (636 §6). With no candidates at all it's a
+        # genuinely new distinct workspace → AUTO.
+        if similar:
+            return {"decision": None, "reason": "near_miss_candidates", "canonical": None}
         return {"decision": "AUTO", "reason": "new_specific_canonical", "canonical": resolved.get("canonical")}
 
     # Rules can't decide → let the model layer (phase C) suggest.
