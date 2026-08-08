@@ -355,6 +355,10 @@ def workspace_candidate_from_text(raw: str, candidates: list[str]) -> "Workspace
         confidence = float(conf_raw) if conf_raw is not None else None
     except (TypeError, ValueError):
         confidence = None
+    # Clamp a hallucinated out-of-range confidence into [0,1] so downstream
+    # threshold gates can't be tricked by an inflated value like 5.0.
+    if confidence is not None:
+        confidence = max(0.0, min(1.0, confidence))
     evidence = str(parsed.get("evidence") or "").strip()
     return WorkspaceCandidateSignal(candidate, relation, confidence, evidence, raw or "", None)
 

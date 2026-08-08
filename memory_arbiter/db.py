@@ -876,7 +876,10 @@ class MemoryDB:
         if not self._db_available:
             return result
         if match_distance is None:
-            match_distance = float(getattr(self.settings, "workspace_match_distance", 0.25) or 0.25)
+            # Explicit None check (not truthy fallback): 0.0 is a legitimate
+            # "exact-vector-only" setting and must not be swallowed to 0.25.
+            configured = getattr(self.settings, "workspace_match_distance", None)
+            match_distance = float(0.25 if configured is None else configured)
 
         try:
             with self.connection() as conn:
@@ -941,11 +944,16 @@ class MemoryDB:
                                LIMIT 5""",
                             (query_json,),
                         ).fetchall()
-                        result["similar"] = [{"name": r["name"], "distance": float(r["distance"])} for r in rows]
                         # Skip any canonical the user has explicitly rejected for
                         # this alias (636 §4): the nearest non-rejected candidate
-                        # within threshold wins.
+                        # within threshold wins. Also drop rejected names from the
+                        # returned `similar` list so downstream write-hints never
+                        # re-surface a pair the user already rejected.
                         rejected = set(result.get("rejected_canonicals") or [])
+                        result["similar"] = [
+                            {"name": r["name"], "distance": float(r["distance"])}
+                            for r in rows if r["name"] not in rejected
+                        ]
                         best = next(
                             (r for r in rows if r["name"] not in rejected),
                             None,
@@ -1071,6 +1079,17 @@ class MemoryDB:
                     (alias_key, old_canonical, canonical, old_status, status,
                      action, judge_type, reason, now),
                 )
+                # Register the target canonical for confirmed aliases so the
+                # resolver's confirmed-alias short-circuit never returns a name
+                # that has no row in workspace_canonicals (which would silently
+                # disable KNN fuzzy-merge and let a later near-miss re-split).
+                # Rejected aliases don't register — a rejection doesn't create
+                # a workspace, it only records that this key is NOT that name.
+                if status == "confirmed":
+                    conn.execute(
+                        "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                        (canonical, now),
+                    )
             return True, []
         except sqlite3.Error as exc:
             return False, [f"upsert_workspace_alias failed: {exc}"]
@@ -1169,10 +1188,13 @@ class MemoryDB:
                         "UPDATE workspace_canonicals SET name = ? WHERE name = ?",
                         (new, old),
                     )
-                # Repoint any confirmed/rejected aliases that targeted `old` so
-                # the resolver never hands out the renamed-away canonical.
+                # Repoint CONFIRMED aliases that targeted `old` so the resolver
+                # never hands out the renamed-away canonical. REJECTED rows are
+                # left alone: "foo is not an alias of old" does not imply "foo
+                # is not an alias of new" — that's a fact the user never asserted.
                 conn.execute(
-                    "UPDATE workspace_aliases SET canonical = ?, updated_at = ? WHERE canonical = ?",
+                    "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
+                    "WHERE canonical = ? AND status = 'confirmed'",
                     (new, now, old),
                 )
                 # Insert a forwarding alias normalize(old) -> new so a later write
@@ -1288,10 +1310,12 @@ class MemoryDB:
                             )
                         except sqlite3.Error:
                             pass
-                # Repoint any aliases that pointed at `from_ws` so chained
-                # migrations don't leave stale forwarding targets.
+                # Repoint CONFIRMED aliases that pointed at `from_ws` so chained
+                # migrations don't leave stale forwarding targets. Rejected rows
+                # are preserved (a rejection of from_ws is not a rejection of to_ws).
                 conn.execute(
-                    "UPDATE workspace_aliases SET canonical = ?, updated_at = ? WHERE canonical = ?",
+                    "UPDATE workspace_aliases SET canonical = ?, updated_at = ? "
+                    "WHERE canonical = ? AND status = 'confirmed'",
                     (to_ws, now, from_ws),
                 )
                 prev = conn.execute(

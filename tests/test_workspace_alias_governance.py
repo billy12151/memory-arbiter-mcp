@@ -335,5 +335,83 @@ def test_confirm_pending_refuses_rejected_alias(tmp_path):
     assert t.db.get_workspace_alias("项目")["status"] == "confirmed"
 
 
+# ── full-review round: canonical registration & rejection integrity ─────────
+
+def test_accept_alias_registers_target_canonical(tmp_path):
+    # A confirmed alias must ensure its target canonical is registered so the
+    # resolver's KNN can fuzzy-merge later near-misses. Otherwise a near-string
+    # falls through to a fresh sibling canonical, defeating the alias intent.
+    t = make_tools(tmp_path)
+    r = t.memory_govern("accept_workspace_alias", {"alias": "foo", "canonical": "Bar"})
+    assert r["ok"] is True
+    with t.db.connection() as c:
+        names = [row["name"] for row in c.execute("SELECT name FROM workspace_canonicals")]
+    assert "Bar" in names
+
+
+def test_string_false_authorized_does_not_bypass_rejection_guard(tmp_path):
+    # bool("false") is True in Python — a client sending the JSON string
+    # "false" for authorized must NOT be treated as a truthy override.
+    t = make_tools(tmp_path)
+    t.memory_govern("accept_workspace_alias", {"alias": "a", "canonical": "c1"})
+    t.memory_govern("reject_workspace_alias", {"alias": "a", "canonical": "c1"})
+    r = t.memory_govern("accept_workspace_alias",
+                        {"alias": "a", "canonical": "c2", "authorized": "false"})
+    assert r["ok"] is False  # not overridden
+    assert t.db.get_workspace_alias("a")["status"] == "rejected"
+
+
+def test_rename_preserves_rejected_row_targeting_old(tmp_path):
+    # A user rejection "foo is NOT an alias of old" must not be silently
+    # rewritten into "foo is NOT an alias of new" by a rename of `old`.
+    t = make_tools(tmp_path)
+    t.db.resolve_workspace_canonical("old", None, register_new=True)
+    t.memory_govern("reject_workspace_alias", {"alias": "foo", "canonical": "old"})
+    t.memory_govern("rename_workspace_canonical", {"old": "old", "new": "new"})
+    row = t.db.get_workspace_alias("foo")
+    # rejection still targets the original canonical name, not the renamed target
+    assert row["status"] == "rejected"
+    assert row["canonical"] == "old"
+
+
+def test_resolver_similar_excludes_rejected(tmp_path):
+    # Downstream write-hints must never re-surface a rejected pair. The
+    # resolver's `similar` list must be filtered.
+    from memory_arbiter.config import Settings
+    from memory_arbiter.db import MemoryDB
+    # This test doesn't need vec — the filter runs even when vec is off.
+    t = make_tools(tmp_path)
+    t.memory_govern("reject_workspace_alias", {"alias": "queried", "canonical": "SomeProj"})
+    resolved = t.db.resolve_workspace_canonical("queried", None, register_new=False)
+    names = [s.get("name") for s in resolved.get("similar", [])]
+    assert "SomeProj" not in names
+
+
+def test_qwen_related_relation_does_not_silent_merge(tmp_path):
+    # Weak-mode Qwen merge must gate on relation ∈ {alias,typo,same_project}.
+    # A high-confidence 'related' or 'unrelated' must NOT silently merge.
+    from memory_arbiter.semantic_conflict import WorkspaceCandidateSignal
+
+    class StubBackend:
+        def __init__(self, sig): self._sig = sig
+        def suggest_workspace_candidate(self, ws, ev, cs): return self._sig
+
+    t = make_tools(tmp_path, isolation="weak")
+
+    def fake_resolve(ws_raw, embedder=None, *, match_distance=None, register_new=True):
+        return {"canonical": ws_raw, "is_new": True, "matched_by": "new",
+                "distance": None, "similar": [{"name": "金营项目", "distance": 0.4}],
+                "rejected_canonicals": []}
+    t.db.resolve_workspace_canonical = fake_resolve  # type: ignore
+    t._ensure_semantic_backend = lambda: StubBackend(  # type: ignore
+        WorkspaceCandidateSignal("金营项目", "related", 0.95, "topical only")
+    )
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated")
+    # NOT merged — related@0.95 is not identity-grade
+    assert r["data"]["workspace_canonical"] != "金营项目"
+    assert r["data"]["workspace_decision"] == "ASK"
+
+
+
 
 

@@ -44,6 +44,13 @@ def test_parse_unknown_relation_normalized():
     assert sig.relation == "uncertain"
 
 
+def test_parse_clamps_out_of_range_confidence():
+    hi = workspace_candidate_from_text('{"candidate":"a","relation":"alias","confidence":5.0}', ["a"])
+    assert hi.confidence == 1.0
+    lo = workspace_candidate_from_text('{"candidate":"a","relation":"alias","confidence":-3}', ["a"])
+    assert lo.confidence == 0.0
+
+
 # ── per-isolation policy (stub backend) ──────────────────────────────────────
 
 class _StubBackend:

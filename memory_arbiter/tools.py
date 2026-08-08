@@ -527,6 +527,18 @@ class MemoryTools:
         payload[name] = coerced
         return None
 
+    @staticmethod
+    def _is_truthy(value: Any) -> bool:
+        """Robust truthiness for loosely-typed JSON flags.
+
+        A JSON client may send the *string* "false"/"0"/"no" for a boolean
+        override; bool("false") is True in Python, which would silently grant an
+        authorized override. Treat common false-ish strings as False.
+        """
+        if isinstance(value, str):
+            return value.strip().lower() not in {"", "false", "0", "no", "off", "none"}
+        return bool(value)
+
     def _require_ws_strings(
         self, payload: dict[str, Any], names: tuple[str, ...], surface: str, topic: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
@@ -1159,6 +1171,10 @@ class MemoryTools:
                     ws_canonical = (ws_raw or "").strip() or ws_canonical
                     ws_is_new = True
                     ws_matched_by = "rule_keep"
+                    # Register the kept-separate workspace as its own canonical
+                    # so a later write with the same raw string doesn't fall
+                    # through to "new" and re-run this KEEP decision every time.
+                    self.db.resolve_workspace_canonical(ws_canonical, embedder, register_new=True)
                 elif ws_rule_decision["decision"] is None:
                     # Rules undecided → model layer suggests a candidate (636 §6).
                     # The model is a *suggester*: it can promote a weak-mode merge
@@ -1168,11 +1184,14 @@ class MemoryTools:
                     if (
                         cand_sig is not None
                         and cand_sig.candidate
+                        and cand_sig.relation in {"alias", "typo", "same_project"}
                         and isolation == "weak"
                         and (cand_sig.confidence or 0.0) >= 0.85
                         and cand_sig.candidate not in (resolved.get("rejected_canonicals") or [])
                     ):
-                        # High-confidence weak-mode silent merge.
+                        # High-confidence weak-mode silent merge — only for
+                        # identity-grade relations. related/same_family/unrelated/
+                        # uncertain are NOT the same workspace even at high conf.
                         ws_canonical = cand_sig.candidate
                         ws_is_new = False
                         ws_matched_by = "qwen"
@@ -2481,7 +2500,7 @@ class MemoryTools:
         ok, warnings = self.db.upsert_workspace_alias(
             alias, canonical, relation=str(relation or "alias"), status="confirmed",
             source=str(source or "user"), action="accept", judge_type="user",
-            reason=reason, force=bool(authorized),
+            reason=reason, force=self._is_truthy(authorized),
         )
         return self.db.state.response(
             {"accepted": ok, "alias": alias, "canonical": canonical, "status": "confirmed"},
@@ -2557,7 +2576,7 @@ class MemoryTools:
         ok_alias, alias_warnings = self.db.upsert_workspace_alias(
             raw_ws, canonical, relation="alias", status="confirmed",
             source="user", action="accept", judge_type="user", reason=reason,
-            force=bool(authorized),
+            force=self._is_truthy(authorized),
         )
         warnings.extend(alias_warnings)
         # Point the memory at the confirmed canonical. update_memory's whitelist
