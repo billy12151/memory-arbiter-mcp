@@ -138,3 +138,61 @@ def test_confirm_pending_workspace_activates_and_aliases(tmp_path):
     # raw workspace now confirmed-aliased to canonical
     resolved = t.db.resolve_workspace_canonical("BrandNew", None, register_new=False)
     assert resolved["matched_by"] == "confirmed_alias"
+
+
+# ── review hardening: non-string inputs must not crash (tools.py 698/2474/2499)
+
+def test_nonstring_alias_returns_structured_error_not_crash(tmp_path):
+    t = make_tools(tmp_path)
+    # int / list / dict must degrade to a structured ok=False, never AttributeError
+    for bad in (5, ["x"], {"a": 1}):
+        r = t.memory_govern("accept_workspace_alias", {"alias": bad, "canonical": "c"})
+        assert isinstance(r, dict)  # did not raise
+        r2 = t.memory_govern("reject_workspace_alias", {"alias": "a", "canonical": bad})
+        assert isinstance(r2, dict)
+
+
+def test_nonstring_rename_migrate_do_not_crash(tmp_path):
+    t = make_tools(tmp_path)
+    assert isinstance(t.memory_govern("rename_workspace_canonical", {"old": {"a": 1}, "new": "p"}), dict)
+    assert isinstance(t.memory_govern("migrate_workspace", {"from": ["x"], "to": "p"}), dict)
+    assert isinstance(t.memory_govern("confirm_pending_workspace", {"memory_id": 1, "canonical": ["p"]}), dict)
+
+
+# ── review hardening: rename into an existing canonical must merge, not orphan
+
+def test_rename_into_existing_canonical_merges(tmp_path):
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="OldName", source_type="agent_generated")
+    t.memory_write(content="b", workspace="NewName", source_type="agent_generated")
+    r = t.memory_govern("rename_workspace_canonical", {"old": "OldName", "new": "NewName"})
+    assert r["ok"] is True
+    # old canonical row must be gone (merged), not silently left behind
+    with t.db.connection() as conn:
+        rows = [row["name"] for row in conn.execute("SELECT name FROM workspace_canonicals")]
+    assert "OldName" not in rows
+    assert "NewName" in rows
+
+
+def test_rename_repoints_confirmed_alias(tmp_path):
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="OldName", source_type="agent_generated")
+    t.memory_govern("accept_workspace_alias", {"alias": "jinying", "canonical": "OldName"})
+    t.memory_govern("rename_workspace_canonical", {"old": "OldName", "new": "NewName"})
+    # alias must now resolve to the renamed canonical, not the dead old name
+    resolved = t.db.resolve_workspace_canonical("jinying", None, register_new=False)
+    assert resolved["canonical"] == "NewName"
+
+
+# ── review hardening: migrate records alias atomically (same call)
+
+def test_migrate_records_alias_in_same_call(tmp_path):
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
+    # alias present immediately (no separate-transaction gap)
+    cur = t.db.get_workspace_alias("Sub2")
+    assert cur is not None and cur["canonical"] == "Main" and cur["status"] == "confirmed"
+    events = t.db.list_workspace_alias_events("Sub2")
+    assert any(e["action"] == "migrate" for e in events)
+

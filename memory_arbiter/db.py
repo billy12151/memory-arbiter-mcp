@@ -25,12 +25,26 @@ def _normalize_alias_key(ws: Optional[str]) -> str:
 
     Case-folded + whitespace-collapsed so "金营项目 " and "金营项目" map to the
     same alias row. This is only the governance lookup key; the display
-    canonical is stored verbatim in workspace_aliases.canonical.
+    canonical is stored verbatim in workspace_aliases.canonical. Non-string
+    inputs (loosely-typed MCP JSON) are coerced to str rather than crashing.
     """
-    s = (ws or "").strip()
+    if ws is None:
+        return ""
+    s = ws.strip() if isinstance(ws, str) else str(ws).strip()
     if not s:
         return ""
     return " ".join(s.split()).casefold()
+
+
+def _coerce_ws(ws: Any) -> str:
+    """Coerce a possibly-non-string workspace value to a trimmed str.
+
+    MCP clients send loosely-typed JSON; alias/canonical may arrive as int/
+    list/dict. Coerce rather than raise AttributeError on ``.strip()``.
+    """
+    if ws is None:
+        return ""
+    return ws.strip() if isinstance(ws, str) else str(ws).strip()
 
 
 class MemoryDB:
@@ -999,14 +1013,18 @@ class MemoryDB:
         alias_key = _normalize_alias_key(alias)
         if not alias_key:
             return False, ["alias must be a non-empty workspace string."]
-        canonical = (canonical or "").strip()
+        canonical = _coerce_ws(canonical)
         if not canonical:
             return False, ["canonical must be a non-empty workspace string."]
         if status not in {"confirmed", "rejected"}:
             return False, [f"status={status!r} invalid; expected confirmed|rejected."]
         now = utc_now_iso()
         try:
-            with self.connection() as conn:
+            # write_transaction (BEGIN IMMEDIATE) so the read-then-write of the
+            # predecessor state is serialized: concurrent writers block here
+            # instead of both reading the same old_canonical and writing an
+            # event log whose predecessor snapshot can't reconstruct the chain.
+            with self.write_transaction() as conn:
                 prev = conn.execute(
                     "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
                     (alias_key,),
@@ -1033,7 +1051,6 @@ class MemoryDB:
                     (alias_key, old_canonical, canonical, old_status, status,
                      action, judge_type, reason, now),
                 )
-                conn.commit()
             return True, []
         except sqlite3.Error as exc:
             return False, [f"upsert_workspace_alias failed: {exc}"]
@@ -1090,22 +1107,53 @@ class MemoryDB:
         """
         if not self._db_available or not self.state.sqlite_writable:
             return 0, ["SQLite write unavailable; rename skipped."]
-        old = (old or "").strip()
-        new = (new or "").strip()
+        old = _coerce_ws(old)
+        new = _coerce_ws(new)
         if not old or not new:
             return 0, ["rename requires non-empty old and new canonical."]
+        if old == new:
+            return 0, []
         now = utc_now_iso()
         try:
-            with self.connection() as conn:
+            with self.write_transaction() as conn:
                 cur = conn.execute(
                     "UPDATE memories SET workspace_canonical = ? "
                     "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
                     (new, old),
                 )
                 updated = cur.rowcount or 0
+                # If `new` already exists, a plain rename would hit UNIQUE(name)
+                # and (with OR IGNORE) silently orphan `old`. Instead merge: drop
+                # the old row so the surviving `new` canonical is authoritative.
+                new_exists = conn.execute(
+                    "SELECT 1 FROM workspace_canonicals WHERE name = ?", (new,)
+                ).fetchone()
+                if new_exists:
+                    old_row = conn.execute(
+                        "SELECT id FROM workspace_canonicals WHERE name = ?", (old,)
+                    ).fetchone()
+                    if old_row is not None:
+                        if self.state.sqlite_vec_available:
+                            try:
+                                conn.execute(
+                                    "DELETE FROM workspace_canonicals_vec WHERE id = ?",
+                                    (int(old_row["id"]),),
+                                )
+                            except sqlite3.Error:
+                                pass  # vec table may be absent; canonical delete still proceeds
+                        conn.execute(
+                            "DELETE FROM workspace_canonicals WHERE name = ?", (old,)
+                        )
+                else:
+                    conn.execute(
+                        "UPDATE workspace_canonicals SET name = ? WHERE name = ?",
+                        (new, old),
+                    )
+                # Repoint any confirmed/rejected aliases that targeted `old` so
+                # the resolver never hands out the renamed-away canonical.
                 conn.execute(
-                    "UPDATE OR IGNORE workspace_canonicals SET name = ? WHERE name = ?",
-                    (new, old),
+                    "UPDATE workspace_aliases SET canonical = ?, updated_at = ? WHERE canonical = ?",
+                    (new, now, old),
                 )
                 conn.execute(
                     """INSERT INTO workspace_alias_events
@@ -1114,7 +1162,6 @@ class MemoryDB:
                        VALUES (?, ?, ?, NULL, NULL, 'rename', ?, ?, ?)""",
                     (_normalize_alias_key(old), old, new, judge_type, reason, now),
                 )
-                conn.commit()
             return updated, []
         except sqlite3.Error as exc:
             return 0, [f"rename_workspace_canonical failed: {exc}"]
@@ -1129,27 +1176,51 @@ class MemoryDB:
         """
         if not self._db_available or not self.state.sqlite_writable:
             return 0, ["SQLite write unavailable; migrate skipped."]
-        from_ws = (from_ws or "").strip()
-        to_ws = (to_ws or "").strip()
+        from_ws = _coerce_ws(from_ws)
+        to_ws = _coerce_ws(to_ws)
         if not from_ws or not to_ws:
             return 0, ["migrate requires non-empty from and to workspace."]
+        if from_ws == to_ws:
+            return 0, []
+        alias_key = _normalize_alias_key(from_ws)
+        now = utc_now_iso()
         try:
-            with self.connection() as conn:
+            # Single transaction: move the memories AND record the confirming
+            # alias together, so a crash can't leave memories relocated with no
+            # alias (which would let the next write re-split the workspace).
+            with self.write_transaction() as conn:
                 cur = conn.execute(
                     "UPDATE memories SET workspace_canonical = ? "
                     "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
                     (to_ws, from_ws),
                 )
                 updated = cur.rowcount or 0
-                conn.commit()
+                prev = conn.execute(
+                    "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
+                    (alias_key,),
+                ).fetchone()
+                old_canonical = prev["canonical"] if prev else None
+                old_status = prev["status"] if prev else None
+                conn.execute(
+                    """INSERT INTO workspace_aliases
+                         (alias_workspace, canonical, relation, status, source, updated_at)
+                       VALUES (?, ?, 'alias', 'confirmed', 'user', ?)
+                       ON CONFLICT(alias_workspace) DO UPDATE SET
+                         canonical=excluded.canonical, relation=excluded.relation,
+                         status=excluded.status, source=excluded.source,
+                         updated_at=excluded.updated_at""",
+                    (alias_key, to_ws, now),
+                )
+                conn.execute(
+                    """INSERT INTO workspace_alias_events
+                         (alias_workspace, old_canonical, new_canonical,
+                          old_status, new_status, action, judge_type, reason, created_at)
+                       VALUES (?, ?, ?, ?, 'confirmed', 'migrate', ?, ?, ?)""",
+                    (alias_key, old_canonical, to_ws, old_status, judge_type, reason, now),
+                )
+            return updated, []
         except sqlite3.Error as exc:
             return 0, [f"migrate_workspace failed: {exc}"]
-        # Record the alias so subsequent writes short-circuit (own txn).
-        ok, warns = self.upsert_workspace_alias(
-            from_ws, to_ws, relation="alias", status="confirmed",
-            source="user", action="migrate", judge_type=judge_type, reason=reason,
-        )
-        return updated, warns if not ok else []
 
     def delete_embedding(self, memory_id: int) -> Tuple[bool, list[str]]:
         if not self._db_available or not self.state.sqlite_writable:

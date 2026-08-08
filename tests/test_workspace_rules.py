@@ -89,6 +89,48 @@ def test_decision_auto_new_specific():
     assert d["decision"] == "AUTO" and d["reason"] == "new_specific_canonical"
 
 
+# ── review regression: rejected candidate at similar[1] must NOT block a valid
+#    merge into the resolver's chosen non-rejected canonical (workspace_rules:143)
+
+def test_rejected_at_similar0_does_not_block_valid_chosen_canonical():
+    # resolver skipped rejected ProjectC (similar[0]) and chose ProjectD.
+    resolved = {
+        "matched_by": "vector", "canonical": "ProjectD",
+        "rejected_canonicals": ["ProjectC"],
+        "similar": [{"name": "ProjectC", "distance": 0.10},
+                    {"name": "ProjectD", "distance": 0.20}],
+    }
+    d = wr.rule_decision("aliasX", resolved)
+    # must merge into the valid ProjectD, NOT keep-separate on the rejected pair
+    assert d["decision"] == "AUTO"
+    assert d["canonical"] == "ProjectD"
+
+
+def test_rejected_at_similar1_does_not_trigger_spurious_near_tie():
+    # ProjectD is the clean winner; rejected ProjectC sits at similar[1].
+    resolved = {
+        "matched_by": "vector", "canonical": "ProjectD",
+        "rejected_canonicals": ["ProjectC"],
+        "similar": [{"name": "ProjectD", "distance": 0.20},
+                    {"name": "ProjectC", "distance": 0.22}],
+    }
+    d = wr.rule_decision("ProjectDvariant", resolved)
+    # only one non-rejected candidate → no tie → AUTO, not a re-prompt
+    assert d["decision"] == "AUTO"
+    assert d["reason"] == "vector_strong"
+
+
+def test_chosen_canonical_equal_to_rejected_keeps_separate():
+    # defensive: if the chosen canonical itself is a rejected name (via a
+    # non-confirmed/non-exact path), keep apart rather than merge.
+    resolved = {
+        "matched_by": "fallback", "canonical": "ProjectC",
+        "rejected_canonicals": ["ProjectC"], "similar": [],
+    }
+    d = wr.rule_decision("ProjectC", resolved)
+    assert d["decision"] == "KEEP" and d["reason"] == "rejected_pair"
+
+
 # ── integration: write path surfaces decision ───────────────────────────────
 
 def make_tools(tmp_path: Path, isolation: str = "weak") -> MemoryTools:

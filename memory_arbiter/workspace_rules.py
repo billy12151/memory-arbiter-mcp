@@ -137,10 +137,18 @@ def rule_decision(
     if matched_by == "vector" and any(cue in hint_text for cue in KEEP_CUES):
         return {"decision": "KEEP", "reason": "reference_material", "canonical": ws_raw}
 
-    # KEEP: explicitly rejected pair — the nearest candidate is a rejected one.
+    # Rejected candidates the resolver already discarded. `similar` is the raw
+    # (unfiltered) top-k; filter it so neither the KEEP check nor the near-tie
+    # check reasons about a pair the user explicitly rejected.
     rejected = set(resolved.get("rejected_canonicals") or [])
     similar = resolved.get("similar") or []
-    if similar and similar[0].get("name") in rejected:
+    non_rejected = [s for s in similar if s.get("name") not in rejected]
+
+    # KEEP: the resolver's chosen canonical is itself a rejected pair. The
+    # resolver skips rejected candidates on the vector path, so this only bites
+    # when the chosen canonical *equals* a rejected name (e.g. an exact/confirmed
+    # path that a later rejection should override) — keep the memory separate.
+    if resolved.get("canonical") in rejected:
         return {"decision": "KEEP", "reason": "rejected_pair", "canonical": ws_raw}
 
     # ASK: no usable workspace signal.
@@ -149,10 +157,10 @@ def rule_decision(
 
     # A vector hit landed within threshold (resolver already applied it).
     if matched_by == "vector":
-        # Near-tie between top-2 candidates → ambiguous, ask.
-        if len(similar) >= 2:
-            d0 = float(similar[0].get("distance") or 1.0)
-            d1 = float(similar[1].get("distance") or 1.0)
+        # Near-tie between the top-2 *non-rejected* candidates → ambiguous, ask.
+        if len(non_rejected) >= 2:
+            d0 = float(non_rejected[0].get("distance") or 1.0)
+            d1 = float(non_rejected[1].get("distance") or 1.0)
             if abs(d1 - d0) < 0.05:
                 return {"decision": "ASK", "reason": "candidate_near_tie", "canonical": None}
         return {"decision": "AUTO", "reason": "vector_strong", "canonical": resolved.get("canonical")}
@@ -162,8 +170,8 @@ def rule_decision(
         # If there are near-miss candidates (vector found something, just below
         # the merge threshold), rules can't confidently keep them separate —
         # defer to the model layer (636 §6). With no candidates at all it's a
-        # genuinely new distinct workspace → AUTO.
-        if similar:
+        # genuinely new distinct workspace → AUTO. Rejected candidates don't count.
+        if non_rejected:
             return {"decision": None, "reason": "near_miss_candidates", "canonical": None}
         return {"decision": "AUTO", "reason": "new_specific_canonical", "canonical": resolved.get("canonical")}
 
