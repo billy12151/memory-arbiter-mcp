@@ -1158,24 +1158,52 @@ class MemoryDB:
                 # Insert a forwarding alias normalize(old) -> new so a later write
                 # with the OLD raw workspace string resolves to `new` instead of
                 # re-registering `old` as a fresh canonical (re-splitting the
-                # workspace). Mirrors migrate_workspace's guard.
-                conn.execute(
-                    """INSERT INTO workspace_aliases
-                         (alias_workspace, canonical, relation, status, source, updated_at)
-                       VALUES (?, ?, 'alias', 'confirmed', 'user', ?)
-                       ON CONFLICT(alias_workspace) DO UPDATE SET
-                         canonical=excluded.canonical, relation=excluded.relation,
-                         status=excluded.status, source=excluded.source,
-                         updated_at=excluded.updated_at""",
-                    (_normalize_alias_key(old), new, now),
-                )
-                conn.execute(
-                    """INSERT INTO workspace_alias_events
-                         (alias_workspace, old_canonical, new_canonical,
-                          old_status, new_status, action, judge_type, reason, created_at)
-                       VALUES (?, ?, ?, NULL, 'confirmed', 'rename', ?, ?, ?)""",
-                    (_normalize_alias_key(old), old, new, judge_type, reason, now),
-                )
+                # workspace). But NEVER clobber an existing user decision on this
+                # key: a rejected row must stay rejected (silently flipping it to
+                # confirmed would reverse the user's choice); a confirmed row that
+                # already targets a different canonical is left alone too.
+                fwd_key = _normalize_alias_key(old)
+                prior = conn.execute(
+                    "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
+                    (fwd_key,),
+                ).fetchone()
+                if prior is None:
+                    conn.execute(
+                        """INSERT INTO workspace_aliases
+                             (alias_workspace, canonical, relation, status, source, updated_at)
+                           VALUES (?, ?, 'alias', 'confirmed', 'user', ?)""",
+                        (fwd_key, new, now),
+                    )
+                    conn.execute(
+                        """INSERT INTO workspace_alias_events
+                             (alias_workspace, old_canonical, new_canonical,
+                              old_status, new_status, action, judge_type, reason, created_at)
+                           VALUES (?, ?, ?, NULL, 'confirmed', 'rename', ?, ?, ?)""",
+                        (fwd_key, old, new, judge_type, reason, now),
+                    )
+                elif prior["status"] != "rejected":
+                    # Existing confirmed alias for this key: keep it authoritative
+                    # only if the repoint UPDATE above already moved it to `new`.
+                    # Record the true prior snapshot for audit.
+                    conn.execute(
+                        """INSERT INTO workspace_alias_events
+                             (alias_workspace, old_canonical, new_canonical,
+                              old_status, new_status, action, judge_type, reason, created_at)
+                           VALUES (?, ?, ?, ?, ?, 'rename', ?, ?, ?)""",
+                        (fwd_key, prior["canonical"], new, prior["status"], prior["status"],
+                         judge_type, reason, now),
+                    )
+                else:
+                    # prior is a rejection — preserve it, record that rename left
+                    # it untouched so the audit trail explains the no-op.
+                    conn.execute(
+                        """INSERT INTO workspace_alias_events
+                             (alias_workspace, old_canonical, new_canonical,
+                              old_status, new_status, action, judge_type, reason, created_at)
+                           VALUES (?, ?, ?, 'rejected', 'rejected', 'rename', ?, ?, ?)""",
+                        (fwd_key, prior["canonical"], prior["canonical"], judge_type,
+                         (reason or "") + " [forwarding-alias skipped: key is user-rejected]", now),
+                    )
             return updated, []
         except sqlite3.Error as exc:
             return 0, [f"rename_workspace_canonical failed: {exc}"]
@@ -1237,20 +1265,31 @@ class MemoryDB:
             return 0, [f"migrate_workspace failed: {exc}"]
 
     def set_memory_workspace_canonical(
-        self, memory_id: int, canonical: str
+        self, memory_id: int, canonical: str, embedder: Any = None
     ) -> Tuple[bool, list[str]]:
         """Directly set a memory's workspace_canonical column.
 
         update_memory() intentionally whitelists only trust/status/metadata
         fields (and bumps claim_revision on those), so it silently drops a
         workspace_canonical write. This helper writes the column directly and
-        registers the canonical in workspace_canonicals so the resolver sees it.
+        registers the canonical in workspace_canonicals — AND its vector row when
+        an embedder + sqlite-vec are available — so the resolver's KNN can later
+        fuzzy-match this canonical instead of re-splitting it into a sibling.
         """
         if not self._db_available or not self.state.sqlite_writable:
             return False, ["SQLite write unavailable; workspace_canonical not set."]
         canonical = _coerce_ws(canonical)
         if not canonical:
             return False, ["canonical must be a non-empty workspace string."]
+        # Compute the canonical embedding OUTSIDE the write txn (embedder calls
+        # can be slow / must not hold the write lock).
+        embedding = None
+        if embedder is not None and self.state.sqlite_vec_available:
+            try:
+                er = embedder.embed_text(prefix="", body=canonical)
+                embedding = list(er.embedding) if er and er.embedding else None
+            except Exception:
+                embedding = None
         try:
             with self.write_transaction() as conn:
                 cur = conn.execute(
@@ -1263,6 +1302,18 @@ class MemoryDB:
                     "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
                     (canonical, utc_now_iso()),
                 )
+                if embedding is not None:
+                    row = conn.execute(
+                        "SELECT id FROM workspace_canonicals WHERE name = ?", (canonical,)
+                    ).fetchone()
+                    if row is not None:
+                        try:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
+                                (int(row["id"]), json.dumps(embedding)),
+                            )
+                        except sqlite3.Error:
+                            pass  # vec table may be absent; canonical row still written
             return True, []
         except sqlite3.Error as exc:
             return False, [f"set_memory_workspace_canonical failed: {exc}"]

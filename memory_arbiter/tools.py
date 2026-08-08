@@ -2550,24 +2550,32 @@ class MemoryTools:
         warnings.extend(alias_warnings)
         # Point the memory at the confirmed canonical. update_memory's whitelist
         # doesn't include workspace_canonical (it would bypass claim_revision
-        # semantics), so use the dedicated helper.
+        # semantics), so use the dedicated helper. Pass the embedder so the
+        # canonical also gets its vec row (else strict-isolation KNN re-splits).
+        embedder, ensure_warnings = self._ensure_embedder()
+        warnings.extend(ensure_warnings)
         canonical_set, canonical_warnings = self.db.set_memory_workspace_canonical(
-            int(memory_id), canonical,
+            int(memory_id), canonical, embedder,
         )
         warnings.extend(canonical_warnings)
+        # Do NOT activate a pending memory if the canonical write failed — that
+        # would leave the memory active while still pointing at the raw pending
+        # workspace, defeating the point of confirmation.
         activated = False
-        if memory.get("status") == MemoryStatus.PENDING.value:
+        if canonical_set and memory.get("status") == MemoryStatus.PENDING.value:
             activated = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
         updated = self.db.get_memory(int(memory_id))
+        confirmed_all = ok_alias and canonical_set
         data = {
-            "confirmed": ok_alias and canonical_set,
+            "confirmed": confirmed_all,
             "activated": activated,
             "canonical": canonical,
             "record": updated,
         }
         if activated:
             data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), updated or {})
-        return self.db.state.response(data, ok=ok_alias, extra_warnings=warnings)
+        # Response ok reflects the FULL operation, not just the alias step.
+        return self.db.state.response(data, ok=confirmed_all, extra_warnings=warnings)
 
     def memory_activate(
         self, memory_id: int, authorized: bool = False, **_: Any,

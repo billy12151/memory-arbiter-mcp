@@ -237,3 +237,45 @@ def test_rename_inserts_forwarding_alias_no_resplit(tmp_path):
     assert resolved["is_new"] is False
 
 
+# ── round-3 review: rename must not clobber a rejected alias with the same key
+
+def test_rename_preserves_rejected_alias(tmp_path):
+    t = make_tools(tmp_path)
+    # Register canonicals so the rejected alias targets a real one.
+    t.db.resolve_workspace_canonical("Foo", None, register_new=True)
+    t.db.resolve_workspace_canonical("BarBaz", None, register_new=True)
+    # User explicitly rejects: "Foo is NOT BarBaz"
+    r = t.memory_govern("reject_workspace_alias", {"alias": "Foo", "canonical": "BarBaz"})
+    assert r["ok"] is True
+    # Now admin renames the canonical Foo -> NewFoo. The rejection concerns a
+    # DIFFERENT canonical (BarBaz) and must survive — silently flipping it to
+    # confirmed=NewFoo would reverse the user's decision.
+    t.memory_govern("rename_workspace_canonical", {"old": "Foo", "new": "NewFoo"})
+    row = t.db.get_workspace_alias("Foo")
+    assert row is not None
+    assert row["status"] == "rejected", f"rejection was silently flipped: {row}"
+    assert row["canonical"] == "BarBaz"
+
+
+def test_rename_chain_forwards_correctly(tmp_path):
+    # Foo -> Bar -> Baz : the Foo forwarding alias must chain to Baz, not stay at Bar.
+    t = make_tools(tmp_path)
+    t.db.resolve_workspace_canonical("Foo", None, register_new=True)
+    t.memory_govern("rename_workspace_canonical", {"old": "Foo", "new": "Bar"})
+    t.memory_govern("rename_workspace_canonical", {"old": "Bar", "new": "Baz"})
+    resolved = t.db.resolve_workspace_canonical("Foo", None, register_new=False)
+    assert resolved["canonical"] == "Baz"
+    assert resolved["matched_by"] == "confirmed_alias"
+
+
+# ── round-3 review: confirm_pending must NOT activate on canonical-write failure
+
+def test_confirm_pending_fails_cleanly_on_missing_memory(tmp_path):
+    t = make_tools(tmp_path, isolation="strict")
+    # No such memory id → early ok=False, memory never activated.
+    r = t.memory_govern("confirm_pending_workspace", {"memory_id": 9999, "canonical": "X"})
+    assert r["ok"] is False
+    assert not r["data"].get("activated")
+
+
+
