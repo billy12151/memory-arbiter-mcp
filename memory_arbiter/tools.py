@@ -24,6 +24,7 @@ from .semantic_conflict import (
 )
 from .update_monitor import UpdateMonitor
 from . import __version__
+from . import workspace_rules
 
 
 class SplitReindexWorker:
@@ -420,10 +421,14 @@ class MemoryTools:
             },
             "memory_govern": {
                 "description": "Explicit user-authorized governance. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
-                "actions": ["retire", "resolve_conflict", "confirm", "correct_judgment", "help"],
+                "actions": ["retire", "resolve_conflict", "confirm", "correct_judgment", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"],
                 "examples": {
                     "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
                     "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "status": "not_a_conflict", "reason": "User confirmed this is not a conflict."}},
+                    "accept_workspace_alias": {"action": "accept_workspace_alias", "data": {"alias": "金营二期", "canonical": "金营项目", "reason": "User confirmed these are the same project."}},
+                    "reject_workspace_alias": {"action": "reject_workspace_alias", "data": {"alias": "金营培训", "canonical": "金营项目", "reason": "User confirmed these are distinct workspaces."}},
+                    "migrate_workspace": {"action": "migrate_workspace", "data": {"from": "金营二期", "to": "金营项目", "reason": "Merge subprojects."}},
+                    "confirm_pending_workspace": {"action": "confirm_pending_workspace", "data": {"memory_id": 123, "canonical": "金营项目"}},
                 },
                 "safety_note": "Retire only whole memories after explicit user authorization. For partial updates or current-document replacement, update the existing memory instead.",
             },
@@ -520,6 +525,43 @@ class MemoryTools:
         if isinstance(coerced, dict):
             return coerced
         payload[name] = coerced
+        return None
+
+    @staticmethod
+    def _is_truthy(value: Any) -> bool:
+        """Robust truthiness for a loosely-typed JSON authorization flag.
+
+        A JSON client may send the *string* "false" for a boolean; bool("false")
+        is True in Python, which would silently grant an override. For an
+        authorization flag the safe default is an ALLOW-LIST: only genuine
+        booleans and explicit true-tokens grant it. Any other string
+        ("false", "null", "maybe", "") → False.
+        """
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return value != 0
+        return False
+
+    def _require_ws_strings(
+        self, payload: dict[str, Any], names: tuple[str, ...], surface: str, topic: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Reject non-string workspace fields with a structured error.
+
+        Loosely-typed MCP JSON can pass a list/dict/int; str()-coercing those
+        would silently store a garbage canonical like "['x']". A workspace name
+        must be a genuine string — anything else is a client error.
+        """
+        for name in names:
+            val = payload.get(name)
+            if val is not None and not isinstance(val, str):
+                return self._invalid_product_call(
+                    surface,
+                    f"{name} must be a string workspace name, got {type(val).__name__}",
+                    topic,
+                )
         return None
 
     def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
@@ -690,6 +732,44 @@ class MemoryTools:
             if invalid_id is not None:
                 return invalid_id
             return self._forward("memory_govern", action, self.memory_correct_conflict_judgment, **payload)
+        if action == "accept_workspace_alias":
+            if not payload.get("alias") or not payload.get("canonical"):
+                return self._invalid_product_call("memory_govern", "accept_workspace_alias requires alias and canonical", action)
+            bad = self._require_ws_strings(payload, ("alias", "canonical"), "memory_govern", action)
+            if bad is not None:
+                return bad
+            return self._forward("memory_govern", action, self.memory_accept_workspace_alias, **payload)
+        if action == "reject_workspace_alias":
+            if not payload.get("alias") or not payload.get("canonical"):
+                return self._invalid_product_call("memory_govern", "reject_workspace_alias requires alias and canonical", action)
+            bad = self._require_ws_strings(payload, ("alias", "canonical"), "memory_govern", action)
+            if bad is not None:
+                return bad
+            return self._forward("memory_govern", action, self.memory_reject_workspace_alias, **payload)
+        if action == "rename_workspace_canonical":
+            if not payload.get("old") or not payload.get("new"):
+                return self._invalid_product_call("memory_govern", "rename_workspace_canonical requires old and new", action)
+            bad = self._require_ws_strings(payload, ("old", "new"), "memory_govern", action)
+            if bad is not None:
+                return bad
+            return self._forward("memory_govern", action, self.memory_rename_workspace_canonical, **payload)
+        if action == "migrate_workspace":
+            if not payload.get("from") or not payload.get("to"):
+                return self._invalid_product_call("memory_govern", "migrate_workspace requires from and to", action)
+            bad = self._require_ws_strings(payload, ("from", "to"), "memory_govern", action)
+            if bad is not None:
+                return bad
+            return self._forward("memory_govern", action, self.memory_migrate_workspace, **payload)
+        if action == "confirm_pending_workspace":
+            invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
+            if invalid_id is not None:
+                return invalid_id
+            if not payload.get("canonical"):
+                return self._invalid_product_call("memory_govern", "confirm_pending_workspace requires memory_id and canonical", action)
+            bad = self._require_ws_strings(payload, ("canonical",), "memory_govern", action)
+            if bad is not None:
+                return bad
+            return self._forward("memory_govern", action, self.memory_confirm_pending_workspace, **payload)
         return self._invalid_product_call("memory_govern", f"unknown action: {action}", action)
 
     def memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
@@ -811,6 +891,26 @@ class MemoryTools:
                 n_batch=self.settings.semantic_conflict_n_batch,
             )
             return self._semantic_backend
+
+    def _suggest_workspace_candidate(
+        self, ws_raw: str, evidence: dict[str, Any], similar: list[dict[str, Any]],
+    ) -> Any:
+        """Ask the local model to suggest a workspace normalization candidate.
+
+        Returns a WorkspaceCandidateSignal, or None if no backend is configured
+        (caller then falls back to ASK). Never raises — the backend degrades to
+        an uncertain signal on any error (636 §6: suggester only, never arbiter).
+        """
+        backend = self._ensure_semantic_backend()
+        if backend is None or not hasattr(backend, "suggest_workspace_candidate"):
+            return None
+        candidates = [s["name"] for s in (similar or []) if s.get("name")][:5]
+        if not candidates:
+            return None
+        try:
+            return backend.suggest_workspace_candidate(ws_raw, evidence, candidates)
+        except Exception:
+            return None
 
     def _semantic_status(self) -> dict[str, Any]:
         backend_status = (
@@ -1055,6 +1155,8 @@ class MemoryTools:
             # string identity (still detects new-vs-existing via the canonical
             # table), which is what drives strict-block / weak-hint.
             embedding_warnings: list[str] = []
+            ws_rule_decision: Optional[dict[str, Any]] = None
+            ws_candidate_suggestion: Any = None
             if isolation != "none":
                 embedder, ensure_warnings = self._ensure_embedder()
                 embedding_warnings.extend(ensure_warnings)
@@ -1065,6 +1167,45 @@ class MemoryTools:
                 ws_is_new = resolved["is_new"]
                 ws_matched_by = resolved["matched_by"]
                 ws_similar = resolved.get("similar") or []
+                # Rule-first decision layer (636 §5): vector produced candidates;
+                # rules decide AUTO/KEEP/ASK. KEEP overrides a vector merge back
+                # to the raw workspace; ASK is surfaced as a hint below.
+                evidence = workspace_rules.extract_evidence(record)
+                ws_rule_decision = workspace_rules.rule_decision(ws_raw, resolved, evidence)
+                if ws_rule_decision["decision"] == "KEEP" and ws_matched_by == "vector":
+                    # Undo the vector merge: keep this memory in its own workspace.
+                    ws_canonical = (ws_raw or "").strip() or ws_canonical
+                    ws_is_new = True
+                    ws_matched_by = "rule_keep"
+                    # Register the kept-separate workspace as its own canonical
+                    # so a later write with the same raw string doesn't fall
+                    # through to "new" and re-run this KEEP decision every time.
+                    self.db.resolve_workspace_canonical(ws_canonical, embedder, register_new=True)
+                elif ws_rule_decision["decision"] is None:
+                    # Rules undecided → model layer suggests a candidate (636 §6).
+                    # The model is a *suggester*: it can promote a weak-mode merge
+                    # but can never override confirmed/rejected/strict policy.
+                    cand_sig = self._suggest_workspace_candidate(ws_raw, evidence, ws_similar)
+                    ws_candidate_suggestion = cand_sig
+                    if (
+                        cand_sig is not None
+                        and cand_sig.candidate
+                        and cand_sig.relation in {"alias", "typo", "same_project"}
+                        and isolation == "weak"
+                        and (cand_sig.confidence or 0.0) >= 0.85
+                        and cand_sig.candidate not in (resolved.get("rejected_canonicals") or [])
+                    ):
+                        # High-confidence weak-mode silent merge — only for
+                        # identity-grade relations. related/same_family/unrelated/
+                        # uncertain are NOT the same workspace even at high conf.
+                        ws_canonical = cand_sig.candidate
+                        ws_is_new = False
+                        ws_matched_by = "qwen"
+                        ws_rule_decision = {"decision": "AUTO", "reason": "qwen_high_conf", "canonical": ws_canonical}
+                    else:
+                        # Mid/low confidence, or strict: don't silently merge.
+                        # weak → write active + surface hint; strict → pending.
+                        ws_rule_decision = {"decision": "ASK", "reason": "qwen_low_conf", "canonical": None}
             # strict + brand-new canonical → block activation (status=pending)
             # until the user confirms the workspace name.
             strict_block = isolation == "strict" and ws_is_new
@@ -1097,6 +1238,28 @@ class MemoryTools:
                     "similar_workspaces": ws_similar,
                 }
                 data["write_hints"] = hints
+            # Surface the rule decision. ASK → the write succeeds (weak keeps it
+            # active) but the agent/user is nudged to confirm the workspace via
+            # memory_govern accept/reject_workspace_alias (636 §5,8).
+            if ws_rule_decision is not None:
+                data["workspace_decision"] = ws_rule_decision["decision"]
+                data["workspace_decision_reason"] = ws_rule_decision["reason"]
+                if ws_candidate_suggestion is not None and ws_candidate_suggestion.candidate:
+                    data["workspace_candidate"] = {
+                        "candidate": ws_candidate_suggestion.candidate,
+                        "relation": ws_candidate_suggestion.relation,
+                        "confidence": ws_candidate_suggestion.confidence,
+                        "evidence": ws_candidate_suggestion.evidence,
+                    }
+                if ws_rule_decision["decision"] == "ASK" and not strict_block:
+                    hints = data.get("write_hints") or {}
+                    hints["workspace_review"] = {
+                        "raw": ws_raw,
+                        "reason": ws_rule_decision["reason"],
+                        "similar_workspaces": ws_similar,
+                        "how_to_confirm": "memory_govern accept_workspace_alias / reject_workspace_alias",
+                    }
+                    data["write_hints"] = hints
             if memory_id is not None and self.settings.embedding_auto_write and self._embedding_configured():
                 data["embedding_stored"] = False
                 embedder, ensure_warnings = self._ensure_embedder()
@@ -2324,6 +2487,132 @@ class MemoryTools:
             warnings.extend(structured.get("warnings") or [])
             self._apply_structured_gate(data, structured)
         return self.db.state.response(data, extra_warnings=warnings)
+
+    # ------------------------------------------------------------------
+    #  Workspace alias governance (design 636 §8 / 637). User-authorized
+    #  accept/reject/rename/migrate/confirm-pending.
+    # ------------------------------------------------------------------
+    def memory_accept_workspace_alias(
+        self, alias: str, canonical: str, relation: str = "alias",
+        reason: Optional[str] = None, source: str = "user",
+        authorized: bool = False, **_: Any,
+    ) -> dict[str, Any]:
+        """Confirm that `alias` is the same workspace as `canonical`.
+
+        Future writes/queries with `alias` resolve straight to `canonical` — no
+        vector/Qwen round-trip, no repeat prompt (636 §8). If the pair was
+        previously rejected, pass authorized=true to deliberately reverse it.
+        """
+        ok, warnings = self.db.upsert_workspace_alias(
+            alias, canonical, relation=str(relation or "alias"), status="confirmed",
+            source=str(source or "user"), action="accept", judge_type="user",
+            reason=reason, force=self._is_truthy(authorized),
+        )
+        return self.db.state.response(
+            {"accepted": ok, "alias": alias, "canonical": canonical, "status": "confirmed"},
+            ok=ok, extra_warnings=warnings,
+        )
+
+    def memory_reject_workspace_alias(
+        self, alias: str, canonical: str, reason: Optional[str] = None,
+        source: str = "user", **_: Any,
+    ) -> dict[str, Any]:
+        """Record that `alias` is NOT `canonical`.
+
+        Suppresses this pair in future candidate ranking so it stops being
+        proposed (636 §4,8).
+        """
+        ok, warnings = self.db.upsert_workspace_alias(
+            alias, canonical, relation="unrelated", status="rejected",
+            source=str(source or "user"), action="reject", judge_type="user",
+            reason=reason,
+        )
+        return self.db.state.response(
+            {"rejected": ok, "alias": alias, "canonical": canonical, "status": "rejected"},
+            ok=ok, extra_warnings=warnings,
+        )
+
+    def memory_rename_workspace_canonical(
+        self, old: str, new: str, reason: Optional[str] = None, **_: Any,
+    ) -> dict[str, Any]:
+        """Rename a canonical workspace everywhere (memories + registry + audit)."""
+        updated, warnings = self.db.rename_workspace_canonical(old, new, judge_type="user", reason=reason)
+        return self.db.state.response(
+            {"renamed": True, "old": old, "new": new, "memories_updated": updated},
+            ok=not warnings, extra_warnings=warnings,
+        )
+
+    def memory_migrate_workspace(
+        self, reason: Optional[str] = None, **payload: Any,
+    ) -> dict[str, Any]:
+        """Bulk-move memories from one workspace to another; record the alias.
+
+        `from`/`to` are reserved words so they arrive via **payload.
+        """
+        from_ws = str(payload.get("from") or "")
+        to_ws = str(payload.get("to") or "")
+        embedder, ensure_warnings = self._ensure_embedder()
+        updated, warnings = self.db.migrate_workspace(
+            from_ws, to_ws, judge_type="user", reason=reason, embedder=embedder,
+        )
+        # Only migrate's own warnings gate ok; embedder-init warnings (e.g. vec
+        # disabled) are informational and flow through extra_warnings.
+        return self.db.state.response(
+            {"migrated": True, "from": from_ws, "to": to_ws, "memories_updated": updated},
+            ok=not warnings, extra_warnings=list(ensure_warnings) + list(warnings),
+        )
+
+    def memory_confirm_pending_workspace(
+        self, memory_id: int, canonical: str, reason: Optional[str] = None,
+        authorized: bool = False, **_: Any,
+    ) -> dict[str, Any]:
+        """Confirm a strict-blocked pending memory's workspace and activate it.
+
+        Records a confirmed alias (raw workspace -> canonical), sets the
+        memory's canonical, and flips status pending -> active. If the raw
+        workspace was previously rejected as an alias of `canonical`, this call
+        fails (ok=False) unless authorized=true — a rejection is a user
+        decision and must not be silently reversed by a confirm-pending flow.
+        """
+        memory = self.db.get_memory(int(memory_id))
+        if not memory:
+            return self.db.state.response({"error": "memory id not found", "confirmed": False}, ok=False)
+        raw_ws = memory.get("workspace") or ""
+        warnings: list[str] = []
+        ok_alias, alias_warnings = self.db.upsert_workspace_alias(
+            raw_ws, canonical, relation="alias", status="confirmed",
+            source="user", action="accept", judge_type="user", reason=reason,
+            force=self._is_truthy(authorized),
+        )
+        warnings.extend(alias_warnings)
+        # Point the memory at the confirmed canonical. update_memory's whitelist
+        # doesn't include workspace_canonical (it would bypass claim_revision
+        # semantics), so use the dedicated helper. Pass the embedder so the
+        # canonical also gets its vec row (else strict-isolation KNN re-splits).
+        embedder, ensure_warnings = self._ensure_embedder()
+        warnings.extend(ensure_warnings)
+        canonical_set, canonical_warnings = self.db.set_memory_workspace_canonical(
+            int(memory_id), canonical, embedder,
+        )
+        warnings.extend(canonical_warnings)
+        # Do NOT activate a pending memory if the canonical write failed — that
+        # would leave the memory active while still pointing at the raw pending
+        # workspace, defeating the point of confirmation.
+        activated = False
+        if canonical_set and memory.get("status") == MemoryStatus.PENDING.value:
+            activated = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
+        updated = self.db.get_memory(int(memory_id))
+        confirmed_all = ok_alias and canonical_set
+        data = {
+            "confirmed": confirmed_all,
+            "activated": activated,
+            "canonical": canonical,
+            "record": updated,
+        }
+        if activated:
+            data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), updated or {})
+        # Response ok reflects the FULL operation, not just the alias step.
+        return self.db.state.response(data, ok=confirmed_all, extra_warnings=warnings)
 
     def memory_activate(
         self, memory_id: int, authorized: bool = False, **_: Any,

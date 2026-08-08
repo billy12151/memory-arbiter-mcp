@@ -326,3 +326,108 @@ class TestDoctorFixMetadata:
         assert findings[1]["fix_tool"] == "memory_cleanup_inactive_vectors"
         assert findings[1]["requires_authorized"] is True
         assert findings[2]["fix_kind"] == "manual_config"
+
+
+# ---------------------------------------------------------------------
+#  Semantic conflict / Qwen chain (mirrors TestVectorChainShortCircuit)
+# ---------------------------------------------------------------------
+
+class TestSemanticChainShortCircuit:
+    def test_link1_na_when_no_model_path(self, tmp_path):
+        """No model_path → all 4 links n/a (semantic conflict not configured)."""
+        s = _settings(tmp_path)  # no semantic_conflict_model_path
+        report = _run(tmp_path, s)
+        chain = {f.check_id: f for f in report.findings if f.dimension == "semantic"}
+        assert "semantic.link1.model_path" in chain
+        assert chain["semantic.link1.model_path"].status == "n/a"
+        for lid in ("semantic.link2.enabled", "semantic.link3.model_usable",
+                    "semantic.link4.on_write"):
+            assert chain[lid].status == "n/a", f"{lid} should be n/a"
+
+    def test_link2_fail_when_model_set_but_explicit_disabled(self, tmp_path):
+        """model_path set + enabled=false → link2 fail, 3-4 n/a."""
+        s = _settings(tmp_path,
+                      semantic_conflict_model_path=tmp_path / "qwen.gguf",
+                      semantic_conflict_enabled=False)
+        report = _run(tmp_path, s)
+        chain = {f.check_id: f for f in report.findings if f.dimension == "semantic"}
+        assert chain["semantic.link1.model_path"].status == "pass"
+        assert chain["semantic.link2.enabled"].status == "fail"
+        assert chain["semantic.link2.enabled"].severity == Severity.WARNING
+        assert chain["semantic.link3.model_usable"].status == "n/a"
+        assert chain["semantic.link4.on_write"].status == "n/a"
+
+    def test_link3_fail_when_model_file_missing(self, tmp_path):
+        """model_path set + enabled=true (auto) but file doesn't exist → link3 critical."""
+        s = _settings(tmp_path,
+                      semantic_conflict_model_path=tmp_path / "nonexistent.gguf",
+                      semantic_conflict_enabled=True)
+        report = _run(tmp_path, s)
+        chain = {f.check_id: f for f in report.findings if f.dimension == "semantic"}
+        assert chain["semantic.link1.model_path"].status == "pass"
+        assert chain["semantic.link2.enabled"].status == "pass"
+        assert chain["semantic.link3.model_usable"].status == "fail"
+        assert chain["semantic.link3.model_usable"].severity == Severity.WARNING
+        assert chain["semantic.link4.on_write"].status == "n/a"
+
+    def test_link4_fail_when_on_write_off(self, tmp_path):
+        """All links pass except on_write=off → link4 warn."""
+        gguf = tmp_path / "qwen.gguf"
+        gguf.write_bytes(b"\x00")
+        s = _settings(tmp_path,
+                      semantic_conflict_model_path=gguf,
+                      semantic_conflict_enabled=True,
+                      semantic_conflict_on_write="off")
+        report = _run(tmp_path, s)
+        chain = {f.check_id: f for f in report.findings if f.dimension == "semantic"}
+        assert chain["semantic.link1.model_path"].status == "pass"
+        assert chain["semantic.link2.enabled"].status == "pass"
+        assert chain["semantic.link3.model_usable"].status == "pass"
+        assert chain["semantic.link4.on_write"].status == "fail"
+        assert chain["semantic.link4.on_write"].severity == Severity.WARNING
+
+    def test_all_links_pass(self, tmp_path):
+        """All 4 links pass when model file exists + enabled + on_write=async."""
+        gguf = tmp_path / "qwen.gguf"
+        gguf.write_bytes(b"\x00")
+        s = _settings(tmp_path,
+                      semantic_conflict_model_path=gguf,
+                      semantic_conflict_enabled=True,
+                      semantic_conflict_on_write="async")
+        report = _run(tmp_path, s)
+        chain = {f.check_id: f for f in report.findings if f.dimension == "semantic"}
+        for lid in ("semantic.link1.model_path", "semantic.link2.enabled",
+                    "semantic.link3.model_usable", "semantic.link4.on_write"):
+            assert chain[lid].status == "pass", f"{lid} should pass, got {chain[lid].status}"
+
+
+# ---------------------------------------------------------------------
+#  Workspace alias health
+# ---------------------------------------------------------------------
+
+class TestWorkspaceAliasHealth:
+    def test_pass_with_empty_aliases(self, tmp_path):
+        """v0.13 DB with no aliases → pass, 0 confirmed/rejected."""
+        s = _settings(tmp_path)
+        report = _run(tmp_path, s)
+        finding = [f for f in report.findings
+                   if f.check_id == "capacity.workspace_alias_health"][0]
+        assert finding.status == "pass"
+        assert finding.evidence["confirmed_aliases"] == 0
+        assert finding.evidence["rejected_pairs"] == 0
+
+    def test_warn_when_pending_memories_under_strict(self, tmp_path):
+        """strict isolation + pending memories → warn."""
+        s = _settings(tmp_path, isolation="strict")
+        db = MemoryDB(s)
+        # Insert a pending memory (simulating strict-blocked new workspace)
+        from memory_arbiter.models import MemoryRecord, MemoryStatus
+        record = MemoryRecord(content="pending test", agent_id="a",
+                              workspace="newproj", status=MemoryStatus.PENDING.value)
+        db.insert_memory(record, "newproj")
+        report = _run(tmp_path, s)
+        finding = [f for f in report.findings
+                   if f.check_id == "capacity.workspace_alias_health"][0]
+        assert finding.status == "warn"
+        assert finding.evidence["pending_memories"] == 1
+        assert finding.evidence["isolation"] == "strict"

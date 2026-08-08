@@ -204,6 +204,16 @@ class Settings:
                 f"isolation={isolation!r} invalid; using none"
             )
             isolation = "none"
+        if isolation == "strict":
+            # 636 §9: strict decides visibility, so unconfirmed workspace
+            # aliases silently hide memories. Nudge the operator to govern
+            # workspaces (accept/reject/pending) before relying on strict.
+            config_warnings.append(
+                "isolation=strict: confirm workspace aliases via "
+                "memory_govern (accept/reject_workspace_alias, "
+                "confirm_pending_workspace) so new/aliased workspaces are not "
+                "silently excluded from recall."
+            )
 
         tool_profile = pick_str(
             "tool_profile", "MEMORY_ARBITER_TOOL_PROFILE", "product"
@@ -248,6 +258,21 @@ class Settings:
             semantic_cfg.get("model_path")
             or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH")
         )
+
+        # model_path configured but enabled not explicitly set → auto-enable.
+        # One intent shouldn't need two knobs; the user expressed intent by
+        # pointing at a model. Explicit enabled=false still wins (pick_bool_field
+        # honours a non-None cfg_val / a set env var over the default).
+        _semantic_auto_enable = bool(semantic_model_raw)
+        if (
+            _semantic_auto_enable
+            and semantic_cfg.get("enabled") is None
+            and not os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED")
+        ):
+            config_warnings.append(
+                "semantic_conflict.enabled not set; model_path configured → "
+                "auto-enabled. Set enabled=false to disable."
+            )
 
         if semantic_cfg.get("max_concurrency") not in (None, 1, "1") or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_MAX_CONCURRENCY") not in (None, "1"):
             config_warnings.append("semantic_conflict.max_concurrency is reserved in this version; MVP semantic worker uses max_concurrency=1")
@@ -314,7 +339,9 @@ class Settings:
             update_check_enabled=update_check_enabled,
             tool_profile=tool_profile,
             semantic_conflict_enabled=pick_bool_field(
-                semantic_cfg.get("enabled"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED", "false", name="semantic_conflict.enabled", default_bool=False
+                semantic_cfg.get("enabled"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED",
+                "true" if _semantic_auto_enable else "false",
+                name="semantic_conflict.enabled", default_bool=_semantic_auto_enable,
             ),
             semantic_conflict_backend=semantic_backend,
             semantic_conflict_model_path=Path(str(semantic_model_raw)).expanduser() if semantic_model_raw else None,

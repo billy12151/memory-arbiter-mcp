@@ -175,6 +175,14 @@ class ConsoleAPI:
         page_size = self._limit(limit, 30, 100)
         page_offset = self._offset(offset)
         if normalized_status == "active":
+            # Empty query + no filters → browse by recency (not memory_search,
+            # whose _recent_fallback uses a multi-level
+            # status→protection→source_type→confidence→time sort that buries
+            # recent memories behind locked/user_confirmed ones). Direct
+            # ORDER BY ingest_time DESC gives the user what they expect when
+            # browsing the memories page: newest first, paginated.
+            if not query and not tag_filter and not workspace and not source_type:
+                return self._recent_browse(page_size, page_offset)
             if page_offset:
                 return {"error": "offset is not supported for active search; narrow with a more specific query or tags_filter", "_http_status": 400}
             response = self.tools.memory_search(
@@ -205,6 +213,46 @@ class ConsoleAPI:
             "status": normalized_status,
             "query_domain": data.get("query_domain"),
             "warnings": response.get("warnings", []) if isinstance(response, dict) else [],
+        }
+
+    def _recent_browse(self, limit: int, offset: int) -> dict[str, Any]:
+        """Browse active memories by recency (newest first), paginated.
+
+        Bypasses memory_search so the memories page shows the actual newest
+        memories instead of a relevance/safety-net sort that buries recent
+        agent_generated memories behind locked/user_confirmed ones.
+        """
+        db = self.tools.db
+        if not db.db_available:
+            return {"items": [], "count": 0, "has_more": False, "status": "active"}
+        # strict isolation requires a workspace on every recall — browsing
+        # without one would leak cross-workspace memories. Reject the same way
+        # memory_search does, so the console surfaces the error rather than
+        # silently bypassing isolation.
+        isolation = getattr(self.tools.settings, "isolation", "none")
+        if isolation == "strict":
+            return {"error": "isolation=strict requires a workspace to browse memories; "
+                             "add a workspace filter or switch to search.",
+                    "_http_status": 400}
+        try:
+            with db.connection() as conn:
+                total = int(conn.execute(
+                    "SELECT COUNT(*) FROM memories WHERE status='active'"
+                ).fetchone()[0] or 0)
+                rows = conn.execute(
+                    "SELECT * FROM memories WHERE status='active' "
+                    "ORDER BY ingest_time DESC, id DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            return {"error": f"browse failed: {exc}", "_http_status": 500}
+        items = [dict(r) for r in rows]
+        has_more = total > offset + len(items)
+        return {
+            "items": items,
+            "count": total,
+            "has_more": has_more,
+            "status": "active",
         }
 
     def memory_detail(self, memory_id: int, sections: str = "catalog") -> dict[str, Any]:

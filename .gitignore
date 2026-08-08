@@ -42,3 +42,4 @@ htmlcov/
 # IDE session artifacts
 .workbuddy/
 .zcode/
+.claude/tmp/

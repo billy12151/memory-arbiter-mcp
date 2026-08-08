@@ -36,6 +36,9 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade pip build twine
 
+      - name: Verify version sync (server.json vs __version__)
+        run: python scripts/sync_version.py --check
+
       - name: Run tests
         run: |
           python -m pip install -e '.[test]'

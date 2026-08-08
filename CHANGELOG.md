@@ -3,6 +3,42 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.12.1] — 2026-08-08
+
+Workspace-alias governance + hardening on top of the existing workspace
+canonicalization. Additive tool actions and internal tables only; no breaking
+changes to existing behavior.
+
+### Added
+
+- **Workspace alias governance** — `memory_govern` gains `accept_workspace_alias`,
+  `reject_workspace_alias`, `rename_workspace_canonical`, `migrate_workspace`, and
+  `confirm_pending_workspace`. Backed by two new tables: `workspace_aliases`
+  (current state) and `workspace_alias_events` (append-only audit); UNIQUE +
+  single-transaction, no CAS. A user rejection is never silently reversed by any
+  path — reversal requires an explicit `authorized=true`.
+- **Rule-first workspace decision layer** (`workspace_rules.py`) — vector distance
+  produces candidates; rules (`classify_workspace_quality` / `extract_evidence` /
+  `rule_decision` → AUTO/KEEP/ASK/None) decide. Confirmed/rejected aliases and the
+  three isolation modes retain veto power.
+- **Local-model workspace candidate suggester** — reuses the existing GGUF backend
+  to suggest normalization candidates; weak-mode silent merge only for
+  identity-grade relations at high confidence; strict never silent-merges; the
+  model never overrides confirmed/rejected/strict.
+- **Doctor semantic/Qwen enablement chain** and a workspace-alias health check.
+
+### Fixed
+
+- Console memories page (empty query) now browses by recency instead of the
+  multi-level safety-net sort that buried recent memories.
+- `migrate_workspace`/`rename_workspace_canonical` keep the canonical registry and
+  alias table consistent under rejection, case-only rename, and chained ops (no
+  phantom canonical, no stranded/self-referential alias, forwarding preserved).
+- Loosely-typed MCP JSON (non-string workspace values, string `"false"`
+  authorization flags) is rejected with a structured error rather than crashing or
+  silently granting an override.
+- Model-supplied confidence is clamped to `[0,1]`.
+
 ## [0.12.0] — 2026-08-08
 
 ### Added
