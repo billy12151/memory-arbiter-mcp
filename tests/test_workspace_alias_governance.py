@@ -83,18 +83,31 @@ def test_unknown_govern_action(tmp_path):
 
 def test_events_are_appended_not_overwritten(tmp_path):
     t = make_tools(tmp_path)
+    # Two confirmed writes to the same key (no rejection in between) → 2 events,
+    # append-only, current state = last write.
     t.memory_govern("accept_workspace_alias", {"alias": "a", "canonical": "c1"})
-    t.memory_govern("reject_workspace_alias", {"alias": "a", "canonical": "c1"})
     t.memory_govern("accept_workspace_alias", {"alias": "a", "canonical": "c2"})
     events = t.db.list_workspace_alias_events("a")
-    # three governance actions → three events, current state = last write
-    assert len(events) == 3
-    actions = [e["action"] for e in events]
-    assert set(actions) == {"accept", "reject"}
+    assert len(events) == 2
     cur = t.db.get_workspace_alias("a")
     assert cur["canonical"] == "c2" and cur["status"] == "confirmed"
-    # earlier event still records the old snapshot
+    # earlier event still records the old snapshot (append-only, not overwritten)
     assert any(e["new_canonical"] == "c1" for e in events)
+
+
+def test_accept_after_reject_refused_without_authorization(tmp_path):
+    # A prior rejection must not be silently reversed by a later accept.
+    t = make_tools(tmp_path)
+    t.memory_govern("accept_workspace_alias", {"alias": "a", "canonical": "c1"})
+    t.memory_govern("reject_workspace_alias", {"alias": "a", "canonical": "c1"})
+    r = t.memory_govern("accept_workspace_alias", {"alias": "a", "canonical": "c2"})
+    assert r["ok"] is False  # refused — a is rejected
+    assert t.db.get_workspace_alias("a")["status"] == "rejected"
+    # explicit authorized override reverses it deliberately
+    r2 = t.memory_govern("accept_workspace_alias", {"alias": "a", "canonical": "c2", "authorized": True})
+    assert r2["ok"] is True
+    cur = t.db.get_workspace_alias("a")
+    assert cur["status"] == "confirmed" and cur["canonical"] == "c2"
 
 
 # ── rename ───────────────────────────────────────────────────────────────────
@@ -276,6 +289,51 @@ def test_confirm_pending_fails_cleanly_on_missing_memory(tmp_path):
     r = t.memory_govern("confirm_pending_workspace", {"memory_id": 9999, "canonical": "X"})
     assert r["ok"] is False
     assert not r["data"].get("activated")
+
+
+# ── round-4 review: migrate registers to_ws + repoints aliases ───────────────
+
+def test_migrate_registers_destination_canonical(tmp_path):
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="A", source_type="agent_generated")
+    t.memory_govern("migrate_workspace", {"from": "A", "to": "NewProj"})
+    # destination must be a registered canonical, not a phantom
+    with t.db.connection() as conn:
+        names = [r["name"] for r in conn.execute("SELECT name FROM workspace_canonicals")]
+    assert "NewProj" in names
+    # a later write to the destination is NOT treated as brand-new
+    resolved = t.db.resolve_workspace_canonical("NewProj", None, register_new=False)
+    assert resolved["is_new"] is False
+
+
+def test_migrate_repoints_existing_alias(tmp_path):
+    t = make_tools(tmp_path)
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_govern("accept_workspace_alias", {"alias": "X", "canonical": "Sub2"})
+    t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
+    # alias X must now forward to Main, not dangle at the migrated-away Sub2
+    resolved = t.db.resolve_workspace_canonical("X", None, register_new=False)
+    assert resolved["canonical"] == "Main"
+
+
+# ── round-4 review: confirm_pending must not silently reverse a rejection ─────
+
+def test_confirm_pending_refuses_rejected_alias(tmp_path):
+    t = make_tools(tmp_path, isolation="strict")
+    t.db.resolve_workspace_canonical("金科营销项目", None, register_new=True)
+    # user rejects 项目 == 金科营销项目
+    t.memory_govern("reject_workspace_alias", {"alias": "项目", "canonical": "金科营销项目"})
+    w = t.memory_write(content="x", workspace="项目", source_type="agent_generated")
+    mid = w["data"]["id"]
+    r = t.memory_govern("confirm_pending_workspace", {"memory_id": mid, "canonical": "金科营销项目"})
+    assert r["ok"] is False  # refused — rejection not silently reversed
+    assert t.db.get_workspace_alias("项目")["status"] == "rejected"
+    # authorized override succeeds
+    r2 = t.memory_govern("confirm_pending_workspace",
+                         {"memory_id": mid, "canonical": "金科营销项目", "authorized": True})
+    assert r2["ok"] is True
+    assert t.db.get_workspace_alias("项目")["status"] == "confirmed"
+
 
 
 

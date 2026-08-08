@@ -2469,17 +2469,19 @@ class MemoryTools:
     # ------------------------------------------------------------------
     def memory_accept_workspace_alias(
         self, alias: str, canonical: str, relation: str = "alias",
-        reason: Optional[str] = None, source: str = "user", **_: Any,
+        reason: Optional[str] = None, source: str = "user",
+        authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         """Confirm that `alias` is the same workspace as `canonical`.
 
         Future writes/queries with `alias` resolve straight to `canonical` — no
-        vector/Qwen round-trip, no repeat prompt (636 §8).
+        vector/Qwen round-trip, no repeat prompt (636 §8). If the pair was
+        previously rejected, pass authorized=true to deliberately reverse it.
         """
         ok, warnings = self.db.upsert_workspace_alias(
             alias, canonical, relation=str(relation or "alias"), status="confirmed",
             source=str(source or "user"), action="accept", judge_type="user",
-            reason=reason,
+            reason=reason, force=bool(authorized),
         )
         return self.db.state.response(
             {"accepted": ok, "alias": alias, "canonical": canonical, "status": "confirmed"},
@@ -2524,19 +2526,28 @@ class MemoryTools:
         """
         from_ws = str(payload.get("from") or "")
         to_ws = str(payload.get("to") or "")
-        updated, warnings = self.db.migrate_workspace(from_ws, to_ws, judge_type="user", reason=reason)
+        embedder, ensure_warnings = self._ensure_embedder()
+        updated, warnings = self.db.migrate_workspace(
+            from_ws, to_ws, judge_type="user", reason=reason, embedder=embedder,
+        )
+        # Only migrate's own warnings gate ok; embedder-init warnings (e.g. vec
+        # disabled) are informational and flow through extra_warnings.
         return self.db.state.response(
             {"migrated": True, "from": from_ws, "to": to_ws, "memories_updated": updated},
-            ok=not warnings, extra_warnings=warnings,
+            ok=not warnings, extra_warnings=list(ensure_warnings) + list(warnings),
         )
 
     def memory_confirm_pending_workspace(
-        self, memory_id: int, canonical: str, reason: Optional[str] = None, **_: Any,
+        self, memory_id: int, canonical: str, reason: Optional[str] = None,
+        authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         """Confirm a strict-blocked pending memory's workspace and activate it.
 
         Records a confirmed alias (raw workspace -> canonical), sets the
-        memory's canonical, and flips status pending -> active.
+        memory's canonical, and flips status pending -> active. If the raw
+        workspace was previously rejected as an alias of `canonical`, this call
+        fails (ok=False) unless authorized=true — a rejection is a user
+        decision and must not be silently reversed by a confirm-pending flow.
         """
         memory = self.db.get_memory(int(memory_id))
         if not memory:
@@ -2546,6 +2557,7 @@ class MemoryTools:
         ok_alias, alias_warnings = self.db.upsert_workspace_alias(
             raw_ws, canonical, relation="alias", status="confirmed",
             source="user", action="accept", judge_type="user", reason=reason,
+            force=bool(authorized),
         )
         warnings.extend(alias_warnings)
         # Point the memory at the confirmed canonical. update_memory's whitelist

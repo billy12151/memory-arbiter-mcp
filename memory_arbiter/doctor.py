@@ -646,6 +646,133 @@ def _check_vector_chain(
 
 
 # =====================================================================
+#  Semantic conflict / Qwen enablement chain (design 636 §6) — 4 links
+#  Mirrors the vector chain: walk links 1→4; first break classifies.
+# =====================================================================
+
+def _semantic_shallow_probe(settings: Settings) -> tuple[bool, list[str]]:
+    """Shallow model-usability probe for the semantic-conflict GGUF.
+
+    Returns (usable, warnings). Does not load the model — only checks
+    file existence + llama_cpp importability.
+    """
+    warnings: list[str] = []
+    model_path = getattr(settings, "semantic_conflict_model_path", None)
+    if not model_path:
+        return False, []
+    try:
+        from llama_cpp import Llama  # noqa: F401
+    except ImportError:
+        warnings.append("llama-cpp-python not installed")
+        return False, warnings
+    if not os.path.exists(str(model_path)):
+        warnings.append(f"semantic conflict model not found: {model_path}")
+        return False, warnings
+    return True, warnings
+
+
+def _check_semantic_chain(settings: Settings) -> list[Finding]:
+    """Semantic conflict / Qwen enablement chain (mirrors _check_vector_chain).
+
+    Walks 4 links; first break classifies, rest n/a:
+      1. model_path configured
+      2. enabled flag (auto-derived from model_path, explicit false wins)
+      3. model file exists (shallow probe)
+      4. on_write active (not "off")
+    """
+    dim = "semantic"
+    findings: list[Finding] = []
+
+    # Link 1: model_path configured
+    model_path = getattr(settings, "semantic_conflict_model_path", None)
+    if not model_path:
+        findings.append(Finding(
+            check_id="semantic.link1.model_path", dimension=dim, severity=Severity.INFO,
+            status="n/a",
+            title="未配置 semantic_conflict 模型（语义冲突检测未启用，属正常可选）",
+            detail="semantic_conflict.model_path 未设置。写入时语义冲突检测和 "
+                   "workspace 归一候选建议均不运行。",
+            evidence={"model_path": None},
+        ))
+        findings += [_na(
+            f"semantic.link{i}.{'enabled' if i == 2 else 'model_usable' if i == 3 else 'on_write'}",
+            dim, "前序链环未通过，本环不适用",
+        ) for i in range(2, 5)]
+        return findings
+    findings.append(Finding(
+        check_id="semantic.link1.model_path", dimension=dim, severity=Severity.INFO,
+        status="pass", title="已配置 semantic_conflict 模型",
+        detail=f"model_path={model_path}",
+        evidence={"model_path": str(model_path)},
+    ))
+
+    # Link 2: enabled flag
+    enabled = bool(getattr(settings, "semantic_conflict_enabled", False))
+    if not enabled:
+        findings.append(Finding(
+            check_id="semantic.link2.enabled", dimension=dim, severity=Severity.WARNING,
+            status="fail",
+            title="model_path 已配置但 enabled=false（语义冲突检测被显式关闭）",
+            detail="semantic_conflict.model_path 已设，但 enabled=false。模型不会加载，"
+                   "worker 不会启动。配置 model_path 后默认自动开启；若为刻意关闭可忽略。",
+            evidence={"enabled": False, "model_path": str(model_path)},
+            fix_hint='如需开启：config.json 设 "semantic_conflict":{"enabled":true}',
+        ))
+        findings += [_na(
+            f"semantic.link{i}.{'model_usable' if i == 3 else 'on_write'}",
+            dim, "前序链环未通过，本环不适用",
+        ) for i in range(3, 5)]
+        return findings
+    findings.append(Finding(
+        check_id="semantic.link2.enabled", dimension=dim, severity=Severity.INFO,
+        status="pass", title="semantic_conflict.enabled=true",
+        detail="语义冲突检测开关已打开（配置 model_path 后自动开启或显式设为 true）",
+        evidence={"enabled": True},
+    ))
+
+    # Link 3: model file exists (shallow probe)
+    usable, probe_warnings = _semantic_shallow_probe(settings)
+    if not usable:
+        findings.append(Finding(
+            check_id="semantic.link3.model_usable", dimension=dim, severity=Severity.CRITICAL,
+            status="fail",
+            title="semantic 模型不可用（文件不存在 / llama-cpp 未安装）",
+            detail="; ".join(probe_warnings) or "shallow 探针失败",
+            evidence={"model_path": str(model_path), "warnings": probe_warnings},
+            fix_hint="检查 model_path 是否指向真实存在的 GGUF 文件；确保 llama-cpp-python 已安装",
+        ))
+        findings.append(_na("semantic.link4.on_write", dim, "前序链环未通过，本环不适用"))
+        return findings
+    findings.append(Finding(
+        check_id="semantic.link3.model_usable", dimension=dim, severity=Severity.INFO,
+        status="pass", title="semantic 模型文件可用",
+        detail=f"model_path={model_path}（shallow 探针通过）",
+        evidence={"model_path": str(model_path), "probe": "shallow"},
+    ))
+
+    # Link 4: on_write active
+    on_write = str(getattr(settings, "semantic_conflict_on_write", "async"))
+    if on_write == "off":
+        findings.append(Finding(
+            check_id="semantic.link4.on_write", dimension=dim, severity=Severity.WARNING,
+            status="fail",
+            title="enabled=true 但 on_write=off（worker 不会处理写入）",
+            detail="semantic_conflict.on_write=off：worker 线程不启动，写入不会入队。"
+                   "相当于配置了模型但实际不运行检测。",
+            evidence={"on_write": "off"},
+            fix_hint='config.json 设 "semantic_conflict":{"on_write":"async"}',
+        ))
+    else:
+        findings.append(Finding(
+            check_id="semantic.link4.on_write", dimension=dim, severity=Severity.INFO,
+            status="pass", title=f"on_write={on_write}（worker 会处理写入）",
+            detail=f"semantic_conflict.on_write={on_write}",
+            evidence={"on_write": on_write},
+        ))
+    return findings
+
+
+# =====================================================================
 #  Config checks (design doc §9.A) — 3 items
 # =====================================================================
 
@@ -1361,6 +1488,62 @@ def _check_db_size(conn: sqlite3.Connection) -> Finding:
     )
 
 
+def _check_workspace_alias_health(conn: sqlite3.Connection, settings: Settings) -> Finding:
+    """Report workspace alias governance state (v0.13, design 636/637).
+
+    Counts confirmed/rejected aliases and strict-blocked pending workspaces.
+    A growing pending count means strict isolation is blocking new workspaces
+    that the user hasn't confirmed yet.
+    """
+    if not _table_exists(conn, "workspace_aliases"):
+        return _na("capacity.workspace_alias_health", "capacity",
+                   "workspace_aliases 表不存在（v0.13 前的库）")
+    confirmed = int(_scalar(conn,
+        "SELECT COUNT(*) FROM workspace_aliases WHERE status='confirmed'") or 0)
+    rejected = int(_scalar(conn,
+        "SELECT COUNT(*) FROM workspace_aliases WHERE status='rejected'") or 0)
+    # Pending workspaces: memories with status=pending (strict-blocked new ws).
+    # The only writer of status=pending is the strict-isolation write path.
+    pending_count = int(_scalar(conn,
+        "SELECT COUNT(*) FROM memories WHERE status='pending'") or 0)
+    isolation = getattr(settings, "isolation", "none")
+
+    if pending_count > 0:
+        sev = Severity.WARNING if isolation == "strict" else Severity.INFO
+        status = "warn" if isolation == "strict" else "pass"
+        title = f"workspace alias: {confirmed} confirmed / {rejected} rejected，{pending_count} pending"
+        detail = (
+            "strict 隔离下新 workspace 的写入会被 pending 直到用户确认。"
+            "用 memory_govern confirm_pending_workspace 或 memory_activate 激活。"
+            if isolation == "strict"
+            else f"有 {pending_count} 条 pending 记忆（可能来自 strict 隔离切换前残留）。"
+        )
+        fix_hint = (
+            "memory_govern confirm_pending_workspace 逐条确认"
+            if isolation == "strict" else ""
+        )
+    else:
+        sev = Severity.INFO
+        status = "pass"
+        title = f"workspace alias: {confirmed} confirmed / {rejected} rejected"
+        detail = "无 pending workspace 记忆" + (
+            f"；isolation={isolation}" if isolation != "none" else ""
+        )
+        fix_hint = ""
+
+    return Finding(
+        check_id="capacity.workspace_alias_health", dimension="capacity",
+        severity=sev, status=status, title=title, detail=detail,
+        evidence={
+            "confirmed_aliases": confirmed,
+            "rejected_pairs": rejected,
+            "pending_memories": pending_count,
+            "isolation": isolation,
+        },
+        fix_hint=fix_hint,
+    )
+
+
 # =====================================================================
 #  Orchestration (design doc §5 layer 2, §9 constraint 4)
 # =====================================================================
@@ -1373,7 +1556,7 @@ def run_all_checks(
     embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None,
     inflight_ids: Optional[set[int]] = None,
 ) -> OverviewReport:
-    """Run all 25 findings on one ro connection (consistent snapshot).
+    """Run all findings on one ro connection (consistent snapshot).
 
     Per-check try/except isolation (§9 constraint 4): a single check raising
     does not abort the others — it degrades to one ``status="error"`` finding.
@@ -1426,6 +1609,12 @@ def run_all_checks(
         f.check_id == "vec.link3.extension_loaded" and f.status == "pass" for f in findings
     )
 
+    # --- semantic conflict / Qwen chain (4) ---
+    def _semantic_chain() -> Finding:
+        findings.extend(_check_semantic_chain(settings))
+        return None
+    _run("semantic.chain", _semantic_chain, "semantic")
+
     # --- split (6) — v0.8 capability/backlog/failed/legacy/integrity ---
     _run("split.capability", lambda: _check_split_capability(conn, settings), "split")
     _run("split.long_unsplit_backlog", lambda: _check_split_backlog(conn, settings, inflight_ids), "split")
@@ -1453,6 +1642,8 @@ def run_all_checks(
     _run("capacity.history_bloat", lambda: _check_history_bloat(conn), "capacity")
     _run("capacity.db_size", lambda: _check_db_size(conn), "capacity")
     _run("capacity.attention_volume", lambda: _check_attention_volume(settings), "capacity")
+    _run("capacity.workspace_alias_health",
+         lambda: _check_workspace_alias_health(conn, settings), "capacity")
 
     overall = _max_severity(findings)
     vec_pass_count = sum(1 for f in findings if f.dimension == "vector" and f.status == "pass")
@@ -1647,6 +1838,11 @@ def _fix_metadata_for(finding: Finding) -> dict[str, Any]:
         return mapping[finding.check_id]
     if finding.check_id.startswith("config."):
         return {"fix_kind": "manual_config", "fix_tool": None, "requires_authorized": False, "risk": "manual"}
+    if finding.check_id.startswith("semantic."):
+        return {"fix_kind": "manual_config", "fix_tool": None, "requires_authorized": False, "risk": "manual"}
+    if finding.check_id == "capacity.workspace_alias_health":
+        return {"fix_kind": "mcp_tool", "fix_tool": "memory_govern",
+                "requires_authorized": True, "risk": "low"}
     if finding.check_id == "vec.link3.extension_loaded":
         return {"fix_kind": "dependency_install", "fix_tool": None, "requires_authorized": False, "risk": "manual"}
     if finding.check_id == "vec.link4.model_usable":

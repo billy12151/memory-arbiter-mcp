@@ -70,6 +70,37 @@ def test_semantic_config_defaults_and_env(monkeypatch, tmp_path: Path):
     assert settings.semantic_conflict_model_path == tmp_path / "qwen.gguf"
 
 
+def test_semantic_auto_enabled_when_model_path_set(monkeypatch, tmp_path: Path):
+    """model_path configured but enabled not explicitly set → auto-enable."""
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(config_path))
+    monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "m.sqlite3"))
+    monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "m.jsonl"))
+    monkeypatch.delenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED", raising=False)
+    monkeypatch.setenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH", str(tmp_path / "qwen.gguf"))
+    settings = Settings.from_env()
+    assert settings.semantic_conflict_enabled is True
+    assert any("auto-enabled" in w for w in settings.config_warnings)
+
+
+def test_semantic_explicit_false_overrides_auto_enable(monkeypatch, tmp_path: Path):
+    """model_path set + enabled=false explicitly → still disabled."""
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        '{"semantic_conflict": {"model_path": "'
+        + str(tmp_path / "qwen.gguf").replace("\\", "\\\\")
+        + '", "enabled": false}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(config_path))
+    monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "m.sqlite3"))
+    monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "m.jsonl"))
+    monkeypatch.delenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED", raising=False)
+    settings = Settings.from_env()
+    assert settings.semantic_conflict_enabled is False
+
+
 def _tools(tmp_path: Path) -> MemoryTools:
     settings = Settings(
         db_path=tmp_path / "m.sqlite3",
