@@ -24,6 +24,7 @@ from .semantic_conflict import (
 )
 from .update_monitor import UpdateMonitor
 from . import __version__
+from . import workspace_rules
 
 
 class SplitReindexWorker:
@@ -1082,6 +1083,7 @@ class MemoryTools:
             # string identity (still detects new-vs-existing via the canonical
             # table), which is what drives strict-block / weak-hint.
             embedding_warnings: list[str] = []
+            ws_rule_decision: Optional[dict[str, Any]] = None
             if isolation != "none":
                 embedder, ensure_warnings = self._ensure_embedder()
                 embedding_warnings.extend(ensure_warnings)
@@ -1092,6 +1094,16 @@ class MemoryTools:
                 ws_is_new = resolved["is_new"]
                 ws_matched_by = resolved["matched_by"]
                 ws_similar = resolved.get("similar") or []
+                # Rule-first decision layer (636 §5): vector produced candidates;
+                # rules decide AUTO/KEEP/ASK. KEEP overrides a vector merge back
+                # to the raw workspace; ASK is surfaced as a hint below.
+                evidence = workspace_rules.extract_evidence(record)
+                ws_rule_decision = workspace_rules.rule_decision(ws_raw, resolved, evidence)
+                if ws_rule_decision["decision"] == "KEEP" and ws_matched_by == "vector":
+                    # Undo the vector merge: keep this memory in its own workspace.
+                    ws_canonical = (ws_raw or "").strip() or ws_canonical
+                    ws_is_new = True
+                    ws_matched_by = "rule_keep"
             # strict + brand-new canonical → block activation (status=pending)
             # until the user confirms the workspace name.
             strict_block = isolation == "strict" and ws_is_new
@@ -1124,6 +1136,21 @@ class MemoryTools:
                     "similar_workspaces": ws_similar,
                 }
                 data["write_hints"] = hints
+            # Surface the rule decision. ASK → the write succeeds (weak keeps it
+            # active) but the agent/user is nudged to confirm the workspace via
+            # memory_govern accept/reject_workspace_alias (636 §5,8).
+            if ws_rule_decision is not None:
+                data["workspace_decision"] = ws_rule_decision["decision"]
+                data["workspace_decision_reason"] = ws_rule_decision["reason"]
+                if ws_rule_decision["decision"] == "ASK" and not strict_block:
+                    hints = data.get("write_hints") or {}
+                    hints["workspace_review"] = {
+                        "raw": ws_raw,
+                        "reason": ws_rule_decision["reason"],
+                        "similar_workspaces": ws_similar,
+                        "how_to_confirm": "memory_govern accept_workspace_alias / reject_workspace_alias",
+                    }
+                    data["write_hints"] = hints
             if memory_id is not None and self.settings.embedding_auto_write and self._embedding_configured():
                 data["embedding_stored"] = False
                 embedder, ensure_warnings = self._ensure_embedder()
