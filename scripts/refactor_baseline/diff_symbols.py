@@ -33,7 +33,13 @@ _ADDR_RE = re.compile(r" at 0x[0-9a-fA-F]+")
 def _norm_sig(sig):
     if not isinstance(sig, str):
         return sig
-    return _ADDR_RE.sub(" at 0xADDR", sig)
+    sig = _ADDR_RE.sub(" at 0xADDR", sig)
+    # The release version is intentionally bumped late in the release flow;
+    # UpdateMonitor's default current_version comes from memory_arbiter.__version__,
+    # so normalise version-string defaults to avoid treating the release bump as
+    # a refactor signature drift.
+    sig = re.sub(r"current_version: 'str' = '0\.\d+\.\d+'", "current_version: 'str' = 'VERSION'", sig)
+    return sig
 
 DEFAULT_ALLOWED_MODULE_MOVES = {
     # db.py -> db/ package stores

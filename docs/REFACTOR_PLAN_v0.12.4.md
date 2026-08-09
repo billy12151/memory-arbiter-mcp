@@ -317,7 +317,7 @@ Hardening 轨不得与“纯移动”提交混在一起。每个修复项需要�
 | 版本 | 主题 | 范围 |
 |---|---|---|
 | v0.12.4 | 结构收口 + 兼容层治理 + 入口 hardening | 当前已拆结构对齐文档；`db/__init__.py`、`search/__init__.py` 区分 public API 与 compatibility-only private exports；legacy import smoke；内部代码不再新增/依赖 compatibility re-export；行为测试改新路径、兼容测试专测旧路径；scripts/docs/examples 只修 import；H1/H2/H3/H4/H8-a/H8-c/H9/H10：authorized、config、tags、metadata、numeric、policy 基础语义与 mutating gate。**v0.12.4 保留兼容层作为迁移安全网，不删除旧 import/private re-export** |
-| v0.12.5（仅必要时） | 一致性 + 隔离 + lifecycle hardening + 兼容层择干净 | H5/H6/H7/H8-b/H8-d：edit 事务内重检、confirm pending workspace 原子化、supersede 原子化、strict read ACL、semantic backend lifecycle lock；同时**删除旧 import 依赖与 compatibility-only private re-export/private exports**，把 v0.12.4 保留的兼容层择干净。若 v0.12.4 review 体量可控，也可并入 v0.12.4；若 strict read ACL 影响过大，再作为例外单独评估 |
+| v0.12.5（仅必要时） | 一致性 + 隔离 + lifecycle hardening + 兼容层择干净 | **兼容层清理**：删除旧 import 依赖与 compatibility-only private re-export/private exports，把 v0.12.4 保留的兼容层择干净；**事务一致性**：H5 `memory_edit()` 事务内重检 protection/status，H6 `memory_confirm_pending_workspace()` 单事务原子化，H7 `memory_supersede()` status/conflict/audit 单事务原子化；**strict read ACL**：H8-b 覆盖 `memory_get`、review/history/conflict_detail、console detail 等 read-by-id/detail 路径，不新增 payload，使用 `settings.workspace` 作为 caller workspace context；**semantic lifecycle**：H8-d 统一 backend lifecycle lock，in-flight inference best-effort 完成，不实现取消。若 v0.12.4 review 体量可控，也可并入 v0.12.4；若 strict read ACL 影响过大，再作为例外单独评估 |
 
 每个 patch 只承载清晰主题，并配独立 regression tests、migration note 与 release note。CHANGELOG 必须列出对应 patch 的行为变化；未完成的 H 项不得写成已修复。
 

@@ -3,6 +3,28 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.12.4] — 2026-08-09
+
+Architecture baseline refactor for maintainability and release hardening. This patch keeps the MCP tool surface stable while splitting the former `tools.py`, `db.py`, and `doctor.py` God objects into focused pipelines, stores, and doctor check modules.
+
+### Changed
+
+- **MemoryTools facade slimmed** — `tools.py` now composes `ProductSurfaces`, `ReadPipeline`, `WritePipeline`, `OperationsPipeline`, `SectionPipeline`, `ConflictSignalPipeline`, and background workers. Legacy `memory_*` method signatures remain available on `MemoryTools` as thin delegates.
+- **MemoryDB facade split into stores** — `memory_arbiter.db` is now a package. `MemoryDB` remains the connection/transaction authority and delegates to `SchemaStore`, `MemoriesStore`, `ConflictStore`, `VectorStore`, `WorkspaceStore`, `SectionStore`, `SemanticNoticeStore`, `AuditStore`, and `MetaStore`.
+- **Doctor checks extracted** — health check implementations live in `doctor_checks/all_checks.py`, with shared data model/helpers in `doctor_checks/common.py`; `memory_arbiter.doctor` remains the public facade and preserves legacy private check names for tests/diagnostics.
+- **Shared low-level helpers consolidated** — CJK/text/tag helpers moved to `text.py`, time parsing helpers to `timeutil.py`, and cross-module constants/isolation helpers to `constants.py`.
+
+### Fixed
+
+- Preserved legacy monkeypatch/diagnostic seams for `memory_arbiter.tools.search_memories`, `compare_memories`, `extract_claims`, and `_linked_open_items_for_search` after pipeline extraction.
+- Fixed a doctor split circular import so `memory_arbiter.doctor_checks.all_checks` can be imported directly from a fresh interpreter.
+- Added refactor safety tooling for symbol/signature snapshots, monkeypatch inventory, getattr attribution, and mypy no-new-errors checks.
+
+### Compatibility notes
+
+- MCP tools and `MemoryTools` method signatures remain compatible.
+- `MemoryDB` no longer exposes the old one-line structured claim/judgment forwarding methods such as `publish_memory_claims` and `submit_conflict_judgment`; direct internal callers should use `db.claims.*` and `db.judgments.*`. This was an intentional narrowing of the DB God-object surface.
+
 ## [0.12.3] — 2026-08-09
 
 Subject-required writes and console/search pagination hardening. This patch tightens the memory data contract, adds a guarded backfill helper for historical empty-subject rows, and fixes strict workspace isolation on expired recall.
