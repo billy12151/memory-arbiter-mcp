@@ -763,7 +763,7 @@ def test_claim_failure_is_fail_open_and_doctor_visible(
     def explode(*_args: object, **_kwargs: object) -> list[dict]:
         raise RuntimeError("extractor boom")
 
-    monkeypatch.setattr("memory_arbiter.tools.extract_claims", explode)
+    monkeypatch.setattr("memory_arbiter.pipeline.write.extract_claims", explode)
     result = _write_claim(tools, "5432")
     assert result["ok"] is True
     assert result["data"]["claim_indexed"] is False
