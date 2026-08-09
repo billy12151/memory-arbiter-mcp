@@ -18,6 +18,7 @@ from ..degrade import DegradeState
 from ..models import MemoryRecord, utc_now_iso
 from .sections_store import SectionStore
 from .semantic_notices import SemanticNoticeStore
+from .audit import AuditStore
 
 # Explicit export list. The pre-split db.py surfaced its top-level imports
 # (json/re/sqlite3/…) as module attributes; the package facade re-exports them
@@ -112,6 +113,7 @@ class MemoryDB:
         self.judgments = ConflictJudgmentStore(self)
         self.sections = SectionStore(self)
         self.semantic_notices = SemanticNoticeStore(self)
+        self.audit = AuditStore(self)
         self._claim_store = self.claims
         self._judgment_store = self.judgments
         self._init_database()
@@ -2330,35 +2332,7 @@ class MemoryDB:
     def get_memory_summaries(
         self, memory_ids: list[int],
     ) -> dict[int, dict[str, Any]]:
-        """Batch-fetch lightweight summaries for a set of memory IDs.
-
-        Returns ``{id: {id, subject, status, source_type, protection_level,
-        tags, snippet}}``. Missing / non-active IDs are simply absent from the
-        result (callers treat absence as "vanished"). Never raises.
-        """
-        if not memory_ids or not self._db_available:
-            return {}
-        unique_ids = sorted(set(int(i) for i in memory_ids if i is not None))
-        if not unique_ids:
-            return {}
-        out: dict[int, dict[str, Any]] = {}
-        try:
-            with self.connection() as conn:
-                for chunk_start in range(0, len(unique_ids), 500):
-                    chunk = unique_ids[chunk_start:chunk_start + 500]
-                    ph = ",".join("?" * len(chunk))
-                    rows = conn.execute(
-                        f"SELECT id, subject, status, source_type, "
-                        f"protection_level, tags, "
-                        f"substr(content, 1, 200) AS snippet "
-                        f"FROM memories WHERE id IN ({ph}) AND status = 'active'",
-                        chunk,
-                    ).fetchall()
-                    for r in rows:
-                        out[int(r["id"])] = row_to_dict(r)
-        except sqlite3.Error:
-            return {}
-        return out
+        return self.audit.get_memory_summaries(memory_ids)
 
     # ------------------------------------------------------------------
     # v0.7.5: conflict-scan enrichment (id=243 path-B).
@@ -2829,66 +2803,17 @@ class MemoryDB:
 
     @property
     def scan_log_path(self) -> Path:
-        """``scan_log.jsonl`` sits next to ``memory.sqlite3``."""
-        return self.settings.db_path.parent / "scan_log.jsonl"
+        return self.audit.scan_log_path
 
-    #  v0.8.8: attention_log.jsonl — diagnostic layer for the attention_required
-    #  flag. Doctor reports volume by source so the operator can see whether a
-    #  given source (esp. the advisory runtime_metadata_hint) is flooding the
-    #  flag — the cry-wolf indicator. Same best-effort discipline as scan_log.
     @property
     def attention_log_path(self) -> Path:
-        """``attention_log.jsonl`` sits next to ``memory.sqlite3``."""
-        return self.settings.db_path.parent / "attention_log.jsonl"
+        return self.audit.attention_log_path
 
     def log_attention(self, *, trigger: str, source: str, memory_ids: list) -> None:
-        """Append one attention event (v0.8.8). Best-effort diagnostic layer.
-
-        Uses ``"a"`` mode + a single ``write`` so concurrent calls don't
-        corrupt each other's lines under POSIX (< PIPE_BUF atomicity).
-        Never raises — a failed diagnostic write must not break the
-        write/search that triggered it.
-        """
-        try:
-            entry = {
-                "ts": utc_now_iso(),
-                "trigger": trigger,
-                "source": source,
-                "ids": [int(i) for i in memory_ids if i is not None],
-            }
-            line = json.dumps(entry, ensure_ascii=False) + "\n"
-            with open(self.attention_log_path, "a", encoding="utf-8") as fh:
-                fh.write(line)
-        except (OSError, ValueError, TypeError):
-            pass
+        return self.audit.log_attention(trigger=trigger, source=source, memory_ids=memory_ids)
 
     def _scan_log_last_completed(self) -> Optional[dict[str, Any]]:
-        """Read the last ``status=completed`` entry from scan_log.
-
-        Tolerant: missing file -> None; corrupted lines skipped; if no
-        ``completed`` line exists, returns None. Read only for legacy scan
-        diagnostics; no writer remains, so a None result is the expected
-        steady state, not a defect.
-        """
-        path = self.scan_log_path
-        if not path.exists():
-            return None
-        last_completed: Optional[dict[str, Any]] = None
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except (ValueError, TypeError):
-                        continue
-                    if isinstance(rec, dict) and rec.get("status") == "completed":
-                        last_completed = rec
-        except OSError:
-            return None
-        return last_completed
+        return self.audit.scan_log_last_completed()
 
     # ------------------------------------------------------------------
     #  Legacy vector conflict candidate scan was removed.
@@ -3209,67 +3134,7 @@ class MemoryDB:
     # ------------------------------------------------------------------
 
     def audit_summary(self) -> dict[str, Any]:
-        """Pure-SQL aggregate overview per workspace."""
-        empty = {"workspaces": {}, "total_memories": 0, "total_open_conflicts": 0}
-        if not self._db_available:
-            return empty
-        with self.connection() as conn:
-            mem_rows = conn.execute(
-                """
-                SELECT workspace,
-                       COUNT(*) AS count,
-                       MIN(event_time) AS oldest,
-                       MAX(event_time) AS newest,
-                       source_type
-                FROM memories
-                WHERE status != 'deleted'
-                GROUP BY workspace, source_type
-                """
-            ).fetchall()
-
-            open_conflict_rows = conn.execute(
-                "SELECT workspace, COUNT(*) AS open_conflicts FROM ("
-                " SELECT m.workspace AS workspace FROM conflicts c"
-                " JOIN memories m ON m.id IN (c.left_id, c.right_id)"
-                " WHERE c.status = 'open' GROUP BY c.id"
-                ") GROUP BY workspace"
-            ).fetchall()
-            open_conflicts_by_ws = {row["workspace"]: int(row["open_conflicts"]) for row in open_conflict_rows}
-
-        workspaces: dict[str, dict[str, Any]] = {}
-        total_memories = 0
-        for row in mem_rows:
-            ws = row["workspace"]
-            bucket = workspaces.setdefault(
-                ws,
-                {"count": 0, "oldest": None, "newest": None, "open_conflicts": 0, "by_source_type": {}},
-            )
-            count = int(row["count"])
-            bucket["count"] += count
-            total_memories += count
-            oldest, newest = row["oldest"], row["newest"]
-            if oldest is not None and (bucket["oldest"] is None or oldest < bucket["oldest"]):
-                bucket["oldest"] = oldest
-            if newest is not None and (bucket["newest"] is None or newest > bucket["newest"]):
-                bucket["newest"] = newest
-            if row["source_type"] is not None:
-                bucket["by_source_type"][row["source_type"]] = (
-                    bucket["by_source_type"].get(row["source_type"], 0) + count
-                )
-
-        total_open_conflicts = 0
-        for ws, count in open_conflicts_by_ws.items():
-            workspaces.setdefault(
-                ws,
-                {"count": 0, "oldest": None, "newest": None, "open_conflicts": 0, "by_source_type": {}},
-            )["open_conflicts"] = count
-            total_open_conflicts += count
-
-        return {
-            "workspaces": workspaces,
-            "total_memories": total_memories,
-            "total_open_conflicts": total_open_conflicts,
-        }
+        return self.audit.audit_summary()
 
     # ==================================================================
     #  v0.6.0: _vec_index_meta + section operations
