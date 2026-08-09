@@ -19,6 +19,7 @@ from ..models import MemoryRecord, utc_now_iso
 from .sections_store import SectionStore
 from .semantic_notices import SemanticNoticeStore
 from .audit import AuditStore
+from .meta import MetaStore
 
 # Explicit export list. The pre-split db.py surfaced its top-level imports
 # (json/re/sqlite3/…) as module attributes; the package facade re-exports them
@@ -114,6 +115,7 @@ class MemoryDB:
         self.sections = SectionStore(self)
         self.semantic_notices = SemanticNoticeStore(self)
         self.audit = AuditStore(self)
+        self.meta = MetaStore(self)
         self._claim_store = self.claims
         self._judgment_store = self.judgments
         self._init_database()
@@ -3144,103 +3146,25 @@ class MemoryDB:
 
     @staticmethod
     def _get_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:
-        row = conn.execute("SELECT value FROM _vec_index_meta WHERE key = ?", (key,)).fetchone()
-        return str(row["value"]) if row else None
+        return MetaStore.get_meta(conn, key)
 
     @staticmethod
     def _set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
-        conn.execute(
-            "INSERT INTO _vec_index_meta(key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
+        return MetaStore.set_meta(conn, key, value)
 
     @staticmethod
     def _delete_meta(conn: sqlite3.Connection, key: str) -> None:
-        conn.execute("DELETE FROM _vec_index_meta WHERE key = ?", (key,))
+        return MetaStore.delete_meta(conn, key)
 
     def get_vec_index_state(self) -> dict[str, Any]:
-        """Read all _vec_index_meta keys as a dict."""
-        if not self._db_available:
-            return {"state": "unmanaged"}
-        with self.connection() as conn:
-            rows = conn.execute("SELECT key, value FROM _vec_index_meta").fetchall()
-            meta = {str(r["key"]): str(r["value"]) for r in rows}
-        result: dict[str, Any] = {
-            "state": meta.get("state", "unmanaged"),
-            "active_space_id": meta.get("active_space_id"),
-            "target_space_id": meta.get("target_space_id"),
-            "migration_cursor": int(meta["migration_cursor"]) if "migration_cursor" in meta else None,
-            "migration_epoch": meta.get("migration_epoch"),
-            "last_error": meta.get("last_error"),
-        }
-        return result
+        return self.meta.get_vec_index_state()
 
     def init_vec_index_state(
         self,
         embedding_space_id: Optional[str],
         has_managed_embedder: bool,
     ) -> None:
-        """Legacy initialization of _vec_index_meta (design doc §1.1b).
-
-        Called once at startup after schema migration.  Determines the
-        initial state based on whether the embedder is available and whether
-        the vec tables already have data.
-        """
-        if not self._db_available:
-            return
-        with self.write_transaction() as conn:
-            if not has_managed_embedder or embedding_space_id is None:
-                self._set_meta(conn, "state", "unmanaged")
-                return
-
-            rows = conn.execute("SELECT key, value FROM _vec_index_meta").fetchall()
-            meta = {str(r["key"]): str(r["value"]) for r in rows}
-            state = meta.get("state")
-            active_space_id = meta.get("active_space_id")
-            target_space_id = meta.get("target_space_id")
-
-            # Reconcile the persisted state with the embedder loaded by this
-            # process.  Returning merely because ``state`` exists would leave
-            # a database marked ready after the model (and vector space) has
-            # changed.
-            if active_space_id == embedding_space_id:
-                self._set_meta(conn, "state", "ready")
-                for key in (
-                    "target_space_id", "migration_cursor", "migration_epoch",
-                    "migration_lease_owner", "migration_lease_expires_at",
-                    "last_error",
-                ):
-                    self._delete_meta(conn, key)
-                return
-
-            if state in {"mismatch", "failed"} and target_space_id == embedding_space_id:
-                return  # resume the existing migration and preserve its cursor
-
-            # Check if vec tables have data
-            mem_vec_count = conn.execute("SELECT COUNT(*) AS c FROM memories_vec").fetchone()["c"]
-            sec_vec_count = 0
-            try:
-                sec_vec_count = conn.execute("SELECT COUNT(*) AS c FROM memory_sections_vec").fetchone()["c"]
-            except sqlite3.Error:
-                pass
-
-            if not active_space_id and mem_vec_count == 0 and sec_vec_count == 0:
-                # Fresh install — trust current embedder
-                self._set_meta(conn, "state", "ready")
-                self._set_meta(conn, "active_space_id", embedding_space_id)
-                self._delete_meta(conn, "target_space_id")
-            else:
-                # Existing/previous vectors belong to an unknown or different
-                # space.  Start a fresh migration towards the current model.
-                self._set_meta(conn, "state", "mismatch")
-                self._set_meta(conn, "target_space_id", embedding_space_id)
-                self._set_meta(conn, "migration_epoch", uuid.uuid4().hex)
-                for key in (
-                    "migration_cursor", "migration_lease_owner",
-                    "migration_lease_expires_at", "last_error",
-                ):
-                    self._delete_meta(conn, key)
+        return self.meta.init_vec_index_state(embedding_space_id, has_managed_embedder)
 
     # ---- Section CRUD ----
 
