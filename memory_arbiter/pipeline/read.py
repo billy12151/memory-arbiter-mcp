@@ -8,7 +8,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from ..arbitration import compare_memories
 from ..constants import strict_ws
 from ..models import MemoryStatus
-from ..search import search_memories, _linked_open_items_for_search
+from ..search import search_memories
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
@@ -34,6 +34,13 @@ class ReadPipeline:
         # Preserve legacy patch seam for memory_arbiter.tools.compare_memories.
         from .. import tools as tools_mod
         return getattr(tools_mod, "compare_memories")(*args, **kwargs)
+
+    @staticmethod
+    def _linked_open_items_for_search(*args: Any, **kwargs: Any) -> Any:
+        # Preserve the legacy monkeypatch seam for
+        # memory_arbiter.tools._linked_open_items_for_search.
+        from .. import tools as tools_mod
+        return getattr(tools_mod, "_linked_open_items_for_search")(*args, **kwargs)
 
     def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
         if "include_superseded" in _:
@@ -176,7 +183,7 @@ class ReadPipeline:
         # never on browse/fallback/empty. Failures degrade to [] + warning.
         linked: list[dict[str, Any]] = []
         if include_linked_open_items and retrieval_mode == "direct" and results:
-            linked = _linked_open_items_for_search(
+            linked = self._linked_open_items_for_search(
                 self.db, results, extra_warnings,
                 ws_canonical=strict_ws(isolation, ws_canonical),
             )

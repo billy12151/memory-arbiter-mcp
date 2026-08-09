@@ -1808,6 +1808,40 @@ def test_no_embedding_no_false_warning(tmp_path: Path) -> None:
     assert not any("auto-embedding" in warning for warning in found["warnings"])
 
 
+def test_linked_open_items_uses_tools_patch_seam(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        embedding_auto_query=False,
+        embedding_auto_write=False,
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+
+    def fake_search_memories(db, query, workspace, tags, limit, status_filter="active", **kwargs):
+        return SearchOutcome(
+            results=[{"id": 1, "content": "direct hit"}],
+            warnings=[],
+            has_more=False,
+            total_estimate=1,
+            retrieval_mode="direct",
+        )
+
+    def fake_linked_open_items(db, results, warnings, ws_canonical=None):
+        return [{"sentinel": True}]
+
+    monkeypatch.setattr("memory_arbiter.tools.search_memories", fake_search_memories)
+    monkeypatch.setattr("memory_arbiter.tools._linked_open_items_for_search", fake_linked_open_items)
+
+    result = tools.memory_search(
+        query="semantic query",
+        include_linked_open_items=True,
+        include_conflict_signal=False,
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["linked_open_items"] == [{"sentinel": True}]
+
+
 def test_auto_embedding_injects_query_embedding(tmp_path: Path, monkeypatch) -> None:
     settings = Settings(
         db_path=tmp_path / "memory.sqlite3",
