@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import time
+from importlib import resources
 from typing import Any, Callable, Optional, Tuple
 
 from .arbitration import compare_memories
@@ -25,6 +26,20 @@ from .semantic_conflict import (
 from .update_monitor import UpdateMonitor
 from . import __version__
 from . import workspace_rules
+
+
+AGENT_ONBOARDING_TOPIC = "agent_onboarding"
+
+
+def _agent_onboarding_guide() -> str:
+    try:
+        return resources.files("memory_arbiter").joinpath("AGENT_ONBOARDING.md").read_text(encoding="utf-8")
+    except Exception:
+        return (
+            "mema / Memory Arbiter: use MCP tools for memory operations and governance. "
+            "Save this compact rule to your persistent local agent memory file when possible. "
+            "Full guide topic: memory(action='help', data={'topic': 'agent_onboarding'})."
+        )
 
 
 class SplitReindexWorker:
@@ -293,11 +308,9 @@ class MemoryTools:
         self._init_vec_state()
 
     def start_update_monitor(self, monitor: Optional[UpdateMonitor] = None) -> None:
-        if monitor is None and not self.settings.update_check_enabled:
-            return
         try:
             self._update_monitor = monitor or UpdateMonitor(enabled=self.settings.update_check_enabled)
-            self.db.state.notice_provider = self._update_monitor.consume_notices
+            self.db.state.notice_provider = self._consume_notices
             self._update_monitor.maybe_start_check_if_due()
         except Exception:
             self._update_monitor = None
@@ -308,6 +321,14 @@ class MemoryTools:
 
     def start_semantic_worker(self) -> None:
         self._semantic_worker.start()
+
+    def _consume_notices(self) -> list[dict[str, Any]]:
+        if self._update_monitor is None:
+            return []
+        notices: list[dict[str, Any]] = []
+        notices.extend(self._update_monitor.consume_agent_onboarding_notice(self.settings.agent_id))
+        notices.extend(self._update_monitor.consume_notices())
+        return notices
 
     def _enqueue_pending_rule_splits(self, limit: int = 100) -> None:
         threshold = getattr(self.settings, "split_threshold", 4000)
@@ -444,6 +465,14 @@ class MemoryTools:
                 },
             },
         }
+        if topic == AGENT_ONBOARDING_TOPIC:
+            return {
+                "description": "Agent onboarding guide for using mema / Memory Arbiter correctly.",
+                "topic": AGENT_ONBOARDING_TOPIC,
+                "notice": "agent-onboarding:v1",
+                "guide_file": "memory_arbiter/AGENT_ONBOARDING.md",
+                "content": _agent_onboarding_guide(),
+            }
         help_doc = helps.get(surface, {"description": "Unknown product surface."})
         # judge / correct_judgment carry enum + cross-field constraints that the
         # agent cannot otherwise discover without iterating invalid_* outcomes.
@@ -461,6 +490,10 @@ class MemoryTools:
             {"error": message, "help": self._product_help(surface, topic)},
             ok=False,
         )
+
+    @staticmethod
+    def _help_topic(payload: dict[str, Any], fallback_key: str) -> Optional[str]:
+        return payload.get("topic") or payload.get(fallback_key)
 
     def _forward(
         self, surface: str, topic: Optional[str], fn: Callable[..., dict[str, Any]], **payload: Any,
@@ -577,7 +610,7 @@ class MemoryTools:
             return self._invalid_product_call("memory", "data must be a JSON object", action)
         action = str(action or "help").strip().lower()
         if action == "help":
-            return self.db.state.response(self._product_help("memory", payload.get("action")))
+            return self.db.state.response(self._product_help("memory", self._help_topic(payload, "action")))
         if action == "remember":
             return self._forward("memory", action, self.memory_write, **payload)
         if action == "find":
@@ -627,7 +660,7 @@ class MemoryTools:
             return self._invalid_product_call("memory_review", "data must be a JSON object", view)
         view = str(view or "help").strip().lower()
         if view == "help":
-            return self.db.state.response(self._product_help("memory_review", payload.get("view")))
+            return self.db.state.response(self._product_help("memory_review", self._help_topic(payload, "view")))
         if view == "overview":
             return self.db.state.response({"status": self.memory_status().get("data"), "audit": self.memory_audit_summary().get("data")})
         if view == "doctor":
@@ -692,7 +725,7 @@ class MemoryTools:
             return self._invalid_product_call("memory_govern", "data must be a JSON object", action)
         action = str(action or "help").strip().lower()
         if action == "help":
-            return self.db.state.response(self._product_help("memory_govern", payload.get("action")))
+            return self.db.state.response(self._product_help("memory_govern", self._help_topic(payload, "action")))
         if action == "retire":
             invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
             if invalid_id is not None:
@@ -779,7 +812,7 @@ class MemoryTools:
             return self._invalid_product_call("memory_repair", "data must be a JSON object", task)
         task = str(task or "help").strip().lower()
         if task == "help":
-            return self.db.state.response(self._product_help("memory_repair", payload.get("task")))
+            return self.db.state.response(self._product_help("memory_repair", self._help_topic(payload, "task")))
         if task == "split":
             invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
             if invalid_id is not None:

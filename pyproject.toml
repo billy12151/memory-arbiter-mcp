@@ -29,6 +29,9 @@ mema = "memory_arbiter.server:main"
 [tool.setuptools.packages.find]
 include = ["memory_arbiter*"]
 
+[tool.setuptools.package-data]
+memory_arbiter = ["AGENT_ONBOARDING.md"]
+
 [tool.setuptools.dynamic]
 version = { attr = "memory_arbiter.__version__" }
 

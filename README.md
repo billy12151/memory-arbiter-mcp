@@ -238,41 +238,9 @@ Change `MEMORY_ARBITER_CLIENT` for each tool (`openclaw`, `zcode`, `codex`, `cur
 
 > **New session required:** MCP servers are loaded at session startup. Already-open sessions will not see newly added tools.
 
-#### Agent instruction: what to write where
+#### Agent onboarding guide
 
-If your client also keeps local markdown such as `MEMORY.md`, `AGENTS.md`, or tool-specific notes, paste this rule into your agent instructions:
-
-```text
-Local markdown files store only self-use information: rules, tool experience,
-config notes, and agent persona. Anything that might be reused by another agent
-or platform — requirements, research, decisions, progress, user preferences,
-knowledge conclusions — goes into memory-arbiter.
-
-Every write must fill: subject, tags, source_type (`user_confirmed`,
-`agent_generated`, or `document_extracted`), event_time (ISO 8601), workspace,
-and source_ref. Use `user_confirmed` only for facts the user explicitly verified;
-it auto-locks the record.
-
-`mema` is the short name for Memory Arbiter. In Chinese contexts, it can also be
-called **迷码**. Treat user phrases such as "search mema", "check mema", "write
-this to mema", "remember this in mema", "mema 查记忆", "迷码查一下", or "写到迷码"
-as requests to use memory-arbiter tools, not as references to a local file. Map
-search/read/update/save requests through the task-oriented `memory` tool:
-`action=find`, `action=read`, `action=update`, or `action=remember`.
-
-Use `memory(action="find")` before reading source files. When the user says a new
-source-of-truth document replaces an older current document, find/read the
-existing memory and call `memory(action="update")`; do not create a second active
-current memory. Only use `memory_govern(action="retire")` when the user explicitly
-asks to retire a whole memory. If a response returns
-action_required=judge_conflict_before_use, call `memory(action="judge")` with the
-included snapshot pins before using the conflicting claim.
-
-When a todo is complete, remove the `todo` tag with
-`memory(action="update", data={"memory_id": id, "tags_only": true,
-"remove_tags": ["todo"]})`. Do not only write a new "done" memory, or the old
-todo remains active and can mislead future searches.
-```
+For the compact rule agents should save to their persistent local memory file, see the local [`memory_arbiter/AGENT_ONBOARDING.md`](memory_arbiter/AGENT_ONBOARDING.md) file or the GitHub copy at <https://github.com/billy12151/memory-arbiter-mcp/blob/main/memory_arbiter/AGENT_ONBOARDING.md>. Agents can also read the same guide through `memory(action="help", data={"topic": "agent_onboarding"})`.
 
 ### Client config locations
 
@@ -714,35 +682,9 @@ Console 默认监听 `127.0.0.1`，当前版本仅限本地。它是可见性与
 
 > **需要新建会话：** MCP server 在会话启动时加载。已经打开的会话不会看到新加的工具。
 
-#### Agent 指令：什么写到哪里
+#### Agent onboarding guide
 
-如果你的客户端也维护本地 markdown，例如 `MEMORY.md`、`AGENTS.md` 或工具自己的笔记，把下面这段贴进 agent 指令：
-
-```text
-本地 markdown 只存自用信息：规则、工具经验、配置说明、agent persona。
-凡是可能被其他 agent 或平台复用的信息——需求、调研、决策、进展、
-用户偏好、知识结论——都写入 memory-arbiter。
-
-每次写入必填：subject、tags、source_type（user_confirmed、agent_generated、
-document_extracted）、event_time（ISO 8601）、workspace、source_ref。
-user_confirmed 只用于用户明确确认过的事实；它会自动锁定记录。
-
-`mema` 是 memory-arbiter 的短称，中文语境也可叫 **迷码**。用户说“mema 查记忆”、
-“查一下 mema”、“迷码查一下”、“写到 mema”、“写到迷码”、“mema 记一下”、
-“remember this in mema”等，都应理解为使用 memory-arbiter 工具，而不是引用
-某个本地文件。查询/读取/更新/保存请求统一走任务型 `memory` 工具：
-`action=find`、`action=read`、`action=update`、`action=remember`。
-
-先 `memory(action="find")`，再读源文件补细节。用户说“以后以新文档为准”或
-“替换当前文档”时，先 find/read 找到已有 current 记忆，再 `memory(action="update")`；
-不要新增第二条 active current 记忆。只有用户明确要求“整条旧记忆过期/废弃”时，
-才使用 `memory_govern(action="retire")`。如果响应返回
-action_required=judge_conflict_before_use，用 `memory(action="judge")` 提交随响应返回的
-snapshot pins 后，再使用冲突 claim。
-
-待办完成后，用 `memory(action="update", data={"memory_id": id, "tags_only": true,
-"remove_tags": ["todo"]})` 移除 todo tag。不要只写一条新的“已完成”记忆，否则旧 todo 仍保持 active，会误导后续检索。
-```
+Agent 应持久化到本地 agent 记忆文件的短规则见本地 [`memory_arbiter/AGENT_ONBOARDING.md`](memory_arbiter/AGENT_ONBOARDING.md)，也可查看 GitHub 版本：<https://github.com/billy12151/memory-arbiter-mcp/blob/main/memory_arbiter/AGENT_ONBOARDING.md>。Agent 也可以通过 `memory(action="help", data={"topic": "agent_onboarding"})` 读取同一份指南。
 
 ### 客户端配置位置
 

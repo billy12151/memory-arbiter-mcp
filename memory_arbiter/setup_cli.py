@@ -59,10 +59,9 @@ def _default_config_dict(model_path: Path, db_path: Path, backup_jsonl: Path) ->
 
     Mirrors ``examples/memory-arbiter.config.example.json`` field structure but
     drops the long ``_readme`` tutorials (runtime config does not need the
-    lesson) and writes absolute paths. Kept here (not loaded from the wheel)
-    because pyproject has no ``package-data`` declaration — examples/ is in
-    sdist but not in wheel. Inlining makes the behaviour testable and
-    install-path-independent.
+    lesson) and writes absolute paths. Kept inline instead of loaded from
+    examples/ because examples are not wheel package data. Inlining makes the
+    behaviour testable and install-path-independent.
     """
     return {
         "db_path": str(db_path),

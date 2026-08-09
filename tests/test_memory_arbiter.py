@@ -1474,6 +1474,16 @@ def test_product_judge_help_exposes_enum_constraints(tmp_path: Path) -> None:
     assert "judge_constraints" in missing["data"]["help"]
     assert "expected_left_version" in missing["data"]["help"]["missing_fields"]
 
+def test_product_help_exposes_agent_onboarding_topic(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+
+    help_doc = tools.memory(action="help", data={"topic": "agent_onboarding"})["data"]
+    assert help_doc["topic"] == "agent_onboarding"
+    assert help_doc["notice"] == "agent-onboarding:v1"
+    assert help_doc["guide_file"] == "memory_arbiter/AGENT_ONBOARDING.md"
+    assert "Compact rule to save" in help_doc["content"]
+    assert "memory(action=\"find\")" in help_doc["content"]
+
 
 
 def test_product_forwards_handle_bad_secondary_int_args(tmp_path: Path) -> None:

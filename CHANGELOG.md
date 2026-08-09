@@ -3,6 +3,20 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.12.2] — 2026-08-09
+
+Agent onboarding notice + guide. Additive notice/help/docs change only; no memory DB schema change and no breaking changes to existing tool calls.
+
+### Added
+
+- **One-time agent onboarding notice** — successful MCP responses can now include an `agent_onboarding` notice once per `MEMORY_ARBITER_AGENT_ID` and notice version (`agent-onboarding:v1`). The notice asks agents to persist a compact mema rule to their local agent memory file and points to the full guide. Suppression state is stored in the existing sidecar update state JSON, not in the memory database.
+- **Agent onboarding help topic** — `memory(action="help", data={"topic": "agent_onboarding"})` returns the same guide content available in the package file.
+- **Packaged guide file** — `memory_arbiter/AGENT_ONBOARDING.md` is included in the wheel and serves as the stable local source users can feed to agents that did not retain the onboarding rule.
+
+### Changed
+
+- README now links to the local guide file and GitHub copy instead of embedding the full agent instruction text.
+
 ## [0.12.1] — 2026-08-08
 
 Workspace-alias governance + hardening on top of the existing workspace
