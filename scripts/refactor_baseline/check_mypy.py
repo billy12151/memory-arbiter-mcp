@@ -23,7 +23,14 @@ BASELINE = Path(__file__).resolve().parent / "mypy_strict_baseline.txt"
 PY = ROOT / ".venv" / "bin" / "python"
 
 
-_LINE_RE = re.compile(r"(memory_arbiter/[a-z_0-9]+\.py):\d+:")
+_LINE_RE = re.compile(r"(memory_arbiter/[a-z_0-9/]+\.py):\d+:")
+
+# A file that was MOVED by the refactor keeps the same errors under a new path.
+# Normalise the moved path back to its pre-refactor location so a pure move does
+# not look like "N new errors". Key: post-move path -> pre-move path.
+_PATH_MOVE_ALIASES = {
+    "memory_arbiter/db/core.py": "memory_arbiter/db.py",
+}
 
 
 def _strip_lineno(err: str) -> str:
@@ -34,7 +41,10 @@ def _strip_lineno(err: str) -> str:
     ``file:line: message`` would flag pure line-drift as a NEW error. We only
     care whether the *kind* of error at a *file* is new.
     """
-    return _LINE_RE.sub(r"\1:@:", err)
+    out = _LINE_RE.sub(r"\1:@:", err)
+    for new_path, old_path in _PATH_MOVE_ALIASES.items():
+        out = out.replace(new_path, old_path)
+    return out
 
 
 def current_errors() -> list[str]:

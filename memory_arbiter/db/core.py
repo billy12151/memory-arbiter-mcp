@@ -11,11 +11,48 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
 
-from .claims_db import StructuredClaimStore
-from .config import Settings
-from .conflict_judgments import ConflictJudgmentStore
-from .degrade import DegradeState
-from .models import MemoryRecord, utc_now_iso
+from ..claims_db import StructuredClaimStore
+from ..config import Settings
+from ..conflict_judgments import ConflictJudgmentStore
+from ..degrade import DegradeState
+from ..models import MemoryRecord, utc_now_iso
+
+# Explicit export list. The pre-split db.py surfaced its top-level imports
+# (json/re/sqlite3/…) as module attributes; the package facade re-exports them
+# for attribute/snapshot parity (R8), and listing them here satisfies mypy
+# strict's "explicit export" rule for that facade re-export.
+__all__ = [
+    "MemoryDB",
+    "row_to_dict",
+    "_BUSY_TIMEOUT_MS",
+    "_CJK_CHAR_RE",
+    "_canon_entity",
+    "_canon_scope",
+    "_coerce_tags_db",
+    "_coerce_ws",
+    "_normalize_alias_key",
+    "_subject_tokens",
+    "Any",
+    "ConflictJudgmentStore",
+    "DegradeState",
+    "Iterator",
+    "MemoryRecord",
+    "Optional",
+    "Path",
+    "Settings",
+    "StructuredClaimStore",
+    "Tuple",
+    "contextmanager",
+    "datetime",
+    "json",
+    "re",
+    "sqlite3",
+    "struct",
+    "time",
+    "timezone",
+    "utc_now_iso",
+    "uuid",
+]
 
 _BUSY_TIMEOUT_MS = 5000
 
@@ -3179,7 +3216,7 @@ class MemoryDB:
                     return {"outcome": "no_change", "memory_id": memory_id, "tags": old_tags}
 
                 new_tags_json = json.dumps(new_tags_list, ensure_ascii=False)
-                from .claims import resolve_entity
+                from ..claims import resolve_entity
                 old_entity, _ = resolve_entity(current)
                 new_record = dict(current)
                 new_record["tags"] = new_tags_list
@@ -3747,13 +3784,13 @@ def _canon_entity(value: Any) -> str:
     tool) and re-applied at list/detection read time (idempotent) so storage stays
     deduped regardless of how a value was written. Returns "" for empty/None.
     """
-    from .text import canon_entity
+    from ..text import canon_entity
     return canon_entity(value)
 
 
 def _canon_scope(value: Any) -> str:
     """Same lexical normalisation as entity; kept separate for API clarity."""
-    from .text import canon_scope
+    from ..text import canon_scope
     return canon_scope(value)
 
 
@@ -3763,14 +3800,14 @@ def _coerce_tags_db(raw: Any) -> list[str]:
     Implementation lives in text.coerce_tags (Phase 1 single source); thin re-export
     here so db.py scan logic and existing imports keep working.
     """
-    from .text import coerce_tags
+    from ..text import coerce_tags
     return coerce_tags(raw)
 
 
 # CJK Unicode range for subject tokenisation (write_hints candidate recall).
 # Single source: text.CJK_RE_SUBJECT (contiguous 㐀-鿿 range; a superset of
 # text.CJK_RE_SEARCH differing only by U+4DC0-4DFF). Re-exported for back-compat.
-from .text import CJK_RE_SUBJECT as _CJK_CHAR_RE
+from ..text import CJK_RE_SUBJECT as _CJK_CHAR_RE
 
 
 def _subject_tokens(subject: str) -> list[str]:
@@ -3778,6 +3815,6 @@ def _subject_tokens(subject: str) -> list[str]:
 
     Implementation lives in text.subject_tokens (Phase 1); thin re-export here.
     """
-    from .text import subject_tokens
+    from ..text import subject_tokens
     return subject_tokens(subject)
 
