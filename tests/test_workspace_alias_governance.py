@@ -114,7 +114,7 @@ def test_accept_after_reject_refused_without_authorization(tmp_path):
 
 def test_rename_canonical_updates_memories(tmp_path):
     t = make_tools(tmp_path)
-    t.memory_write(content="alpha note", workspace="OldName", source_type="agent_generated")
+    t.memory_write(content="alpha note", workspace="OldName", source_type="agent_generated", subject="test")
     r = t.memory_govern("rename_workspace_canonical", {"old": "OldName", "new": "NewName"})
     assert r["ok"] is True
     assert r["data"]["memories_updated"] >= 1
@@ -126,7 +126,7 @@ def test_rename_canonical_updates_memories(tmp_path):
 
 def test_migrate_moves_memories_and_records_alias(tmp_path):
     t = make_tools(tmp_path)
-    t.memory_write(content="beta note", workspace="Sub2", source_type="agent_generated")
+    t.memory_write(content="beta note", workspace="Sub2", source_type="agent_generated", subject="test")
     r = t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
     assert r["ok"] is True
     assert r["data"]["memories_updated"] >= 1
@@ -140,7 +140,7 @@ def test_migrate_moves_memories_and_records_alias(tmp_path):
 
 def test_confirm_pending_workspace_activates_and_aliases(tmp_path):
     t = make_tools(tmp_path, isolation="strict")
-    w = t.memory_write(content="gamma note", workspace="BrandNew", source_type="agent_generated")
+    w = t.memory_write(content="gamma note", workspace="BrandNew", source_type="agent_generated", subject="test")
     mid = w["data"]["id"]
     # strict + new workspace → pending
     assert t.db.get_memory(mid)["status"] == MemoryStatus.PENDING.value
@@ -176,8 +176,8 @@ def test_nonstring_rename_migrate_do_not_crash(tmp_path):
 
 def test_rename_into_existing_canonical_merges(tmp_path):
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="OldName", source_type="agent_generated")
-    t.memory_write(content="b", workspace="NewName", source_type="agent_generated")
+    t.memory_write(content="a", workspace="OldName", source_type="agent_generated", subject="test")
+    t.memory_write(content="b", workspace="NewName", source_type="agent_generated", subject="test")
     r = t.memory_govern("rename_workspace_canonical", {"old": "OldName", "new": "NewName"})
     assert r["ok"] is True
     # old canonical row must be gone (merged), not silently left behind
@@ -189,7 +189,7 @@ def test_rename_into_existing_canonical_merges(tmp_path):
 
 def test_rename_repoints_confirmed_alias(tmp_path):
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="OldName", source_type="agent_generated")
+    t.memory_write(content="a", workspace="OldName", source_type="agent_generated", subject="test")
     t.memory_govern("accept_workspace_alias", {"alias": "jinying", "canonical": "OldName"})
     t.memory_govern("rename_workspace_canonical", {"old": "OldName", "new": "NewName"})
     # alias must now resolve to the renamed canonical, not the dead old name
@@ -201,7 +201,7 @@ def test_rename_repoints_confirmed_alias(tmp_path):
 
 def test_migrate_records_alias_in_same_call(tmp_path):
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
     t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
     # alias present immediately (no separate-transaction gap)
     cur = t.db.get_workspace_alias("Sub2")
@@ -214,7 +214,7 @@ def test_migrate_records_alias_in_same_call(tmp_path):
 
 def test_confirm_pending_actually_sets_canonical_column(tmp_path):
     t = make_tools(tmp_path, isolation="strict")
-    w = t.memory_write(content="g", workspace="金营二期", source_type="agent_generated")
+    w = t.memory_write(content="g", workspace="金营二期", source_type="agent_generated", subject="test")
     mid = w["data"]["id"]
     r = t.memory_govern("confirm_pending_workspace", {"memory_id": mid, "canonical": "金营项目"})
     assert r["ok"] is True and r["data"]["confirmed"] is True
@@ -295,7 +295,7 @@ def test_confirm_pending_fails_cleanly_on_missing_memory(tmp_path):
 
 def test_migrate_registers_destination_canonical(tmp_path):
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="A", source_type="agent_generated")
+    t.memory_write(content="a", workspace="A", source_type="agent_generated", subject="test")
     t.memory_govern("migrate_workspace", {"from": "A", "to": "NewProj"})
     # destination must be a registered canonical, not a phantom
     with t.db.connection() as conn:
@@ -308,7 +308,7 @@ def test_migrate_registers_destination_canonical(tmp_path):
 
 def test_migrate_repoints_existing_alias(tmp_path):
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
     t.memory_govern("accept_workspace_alias", {"alias": "X", "canonical": "Sub2"})
     t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
     # alias X must now forward to Main, not dangle at the migrated-away Sub2
@@ -323,7 +323,7 @@ def test_confirm_pending_refuses_rejected_alias(tmp_path):
     t.db.resolve_workspace_canonical("金科营销项目", None, register_new=True)
     # user rejects 项目 == 金科营销项目
     t.memory_govern("reject_workspace_alias", {"alias": "项目", "canonical": "金科营销项目"})
-    w = t.memory_write(content="x", workspace="项目", source_type="agent_generated")
+    w = t.memory_write(content="x", workspace="项目", source_type="agent_generated", subject="test")
     mid = w["data"]["id"]
     r = t.memory_govern("confirm_pending_workspace", {"memory_id": mid, "canonical": "金科营销项目"})
     assert r["ok"] is False  # refused — rejection not silently reversed
@@ -410,7 +410,7 @@ def test_merge_rename_repoints_rejected_alias(tmp_path):
 
 def test_migrate_repoints_rejected_alias(tmp_path):
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
     t.memory_govern("reject_workspace_alias", {"alias": "foo", "canonical": "Sub2"})
     t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
     row = t.db.get_workspace_alias("foo")
@@ -449,7 +449,7 @@ def test_qwen_related_relation_does_not_silent_merge(tmp_path):
     t._ensure_semantic_backend = lambda: StubBackend(  # type: ignore
         WorkspaceCandidateSignal("金营项目", "related", 0.95, "topical only")
     )
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated")
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
     # NOT merged — related@0.95 is not identity-grade
     assert r["data"]["workspace_canonical"] != "金营项目"
     assert r["data"]["workspace_decision"] == "ASK"
@@ -461,7 +461,7 @@ def test_migrate_deletes_phantom_source_canonical(tmp_path):
     # migrate subsumes from_ws into to_ws; the from_ws canonical row must be
     # gone so a later raw-from_ws write doesn't exact-match a phantom.
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
     t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
     with t.db.connection() as c:
         names = [r["name"] for r in c.execute("SELECT name FROM workspace_canonicals")]
@@ -473,7 +473,7 @@ def test_migrate_no_self_alias_when_rejection_uses_to_key(tmp_path):
     # reject(Main, Sub2) then migrate(Sub2 → Main) must not leave a
     # "Main is not Main" self-alias row.
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
     t.memory_govern("reject_workspace_alias", {"alias": "Main", "canonical": "Sub2"})
     t.memory_govern("migrate_workspace", {"from": "Sub2", "to": "Main"})
     row = t.db.get_workspace_alias("Main")
@@ -496,7 +496,7 @@ def test_migrate_forwarding_event_records_true_prior_snapshot(tmp_path):
     # When the forwarding key was rejected, the guard fires and the audit event
     # must record the REAL prior canonical/status (not a repoint-mutated value).
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated")
+    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
     # forwarding-key rejection: normalize("Sub2") rejected against "Sub2" is
     # degenerate; use a rejection keyed on Sub2 pointing at some other canonical.
     t.memory_govern("reject_workspace_alias", {"alias": "Sub2", "canonical": "Other"})
@@ -513,7 +513,7 @@ def test_migrate_forwarding_event_records_true_prior_snapshot(tmp_path):
 def test_chained_migrate_with_rejection_stays_consistent(tmp_path):
     # migrate A→B then B→C, with a rejection on an unrelated key targeting A.
     t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="A", source_type="agent_generated")
+    t.memory_write(content="a", workspace="A", source_type="agent_generated", subject="test")
     t.memory_govern("reject_workspace_alias", {"alias": "foo", "canonical": "A"})
     t.memory_govern("migrate_workspace", {"from": "A", "to": "B"})
     t.memory_govern("migrate_workspace", {"from": "B", "to": "C"})

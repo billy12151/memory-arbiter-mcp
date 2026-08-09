@@ -183,14 +183,18 @@ class ConsoleAPI:
             # browsing the memories page: newest first, paginated.
             if not query and not tag_filter and not workspace and not source_type:
                 return self._recent_browse(page_size, page_offset)
-            if page_offset:
-                return {"error": "offset is not supported for active search; narrow with a more specific query or tags_filter", "_http_status": 400}
+            # Active search with query/filters: memory_search supports offset as
+            # best-effort query-recall pagination (deep pages may return empty
+            # while has_more is still true, because total_estimate is an estimate).
+            # `count` in the response is the page size, not a total — the UI must
+            # drive paging off has_more, not a page count.
             response = self.tools.memory_search(
                 query=query or "",
                 workspace=workspace or None,
                 source_type=source_type or None,
                 tags_filter=tag_filter,
                 limit=page_size,
+                offset=page_offset,
                 include_linked_open_items=False,
                 include_conflict_signal=True,
             )
@@ -206,9 +210,24 @@ class ConsoleAPI:
         data = self._payload(response)
         if not self._ok(response):
             return {"error": data.get("error") or "memory search failed", "_http_status": 400}
+        # `count` from memory_search(_expired) is the page size (len results),
+        # NOT a total. `total_estimate` is the engine's total signal:
+        #   - expired without query: exact (SQL COUNT) → pagination_precision="exact"
+        #   - active search / expired with query: best-effort estimate (query-recall)
+        # `total_precise` tells the UI whether to show "共 N 条" vs "约 N 条".
+        total = data.get("total_estimate", len(data.get("results") or []))
+        precision = data.get("pagination_precision")
+        if precision is not None:
+            total_precise = precision == "exact"
+        else:
+            # active search path has no pagination_precision field; it is always
+            # best-effort query-recall (memory_search deliberately unpaginated).
+            total_precise = False
         return {
             "items": data.get("results") or [],
             "count": data.get("count", len(data.get("results") or [])),
+            "total": total,
+            "total_precise": total_precise,
             "has_more": data.get("has_more", False),
             "status": normalized_status,
             "query_domain": data.get("query_domain"),
@@ -224,7 +243,7 @@ class ConsoleAPI:
         """
         db = self.tools.db
         if not db.db_available:
-            return {"items": [], "count": 0, "has_more": False, "status": "active"}
+            return {"items": [], "count": 0, "total": 0, "total_precise": True, "has_more": False, "status": "active"}
         # strict isolation requires a workspace on every recall — browsing
         # without one would leak cross-workspace memories. Reject the same way
         # memory_search does, so the console surfaces the error rather than
@@ -251,6 +270,8 @@ class ConsoleAPI:
         return {
             "items": items,
             "count": total,
+            "total": total,
+            "total_precise": True,
             "has_more": has_more,
             "status": "active",
         }

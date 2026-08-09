@@ -1910,6 +1910,8 @@ class MemoryDB:
         warnings: list[str] = []
         if not record.content:
             raise ValueError("content is required")
+        if not record.subject or not str(record.subject).strip():
+            raise ValueError("subject is required")
         if not self._db_available or not self.state.sqlite_writable:
             self._append_backup(record)
             warnings.append("SQLite write unavailable; wrote append-only JSONL backup.")
@@ -3316,6 +3318,13 @@ class MemoryDB:
                 old_tags = current.get("tags") or []
                 old_version = int(current.get("version") or 1)
                 tags_json = json.dumps(new_tags, ensure_ascii=False) if new_tags is not None else json.dumps(old_tags, ensure_ascii=False)
+                # Defense in depth: an empty-string subject would silently wipe the
+                # field via the branch below (`new_subject if new_subject is not None
+                # else old_subject`). Reject it here too — tools.memory_edit already
+                # guards this at the service layer, but direct callers of this DB
+                # method must not be able to clear subject either.
+                if new_subject is not None and not str(new_subject).strip():
+                    raise ValueError("new_subject must be non-empty when provided")
                 subject_value = new_subject if new_subject is not None else old_subject
                 history_cur = conn.execute(
                     """

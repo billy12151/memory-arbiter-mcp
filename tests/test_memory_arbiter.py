@@ -298,7 +298,7 @@ def test_arbitrate_deprecated_apply_param_errors_loudly(tmp_path: Path) -> None:
 
 def test_confirm_promotes_record(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    written = tools.memory_write(content="OpenClaw memory plugin is enabled for agent alpha", source_type="pending")
+    written = tools.memory_write(content="OpenClaw memory plugin is enabled for agent alpha", source_type="pending", subject="memory-plugin-enabled")
     confirmed = tools.memory_confirm(written["data"]["id"], source_ref="user-chat", authorized=True)
 
     assert confirmed["ok"] is True
@@ -337,7 +337,7 @@ def test_confirm_rejects_inactive_memory(tmp_path: Path) -> None:
 
 def test_confirm_requires_authorization(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    written = tools.memory_write(content="a fact to confirm", source_type="agent_generated")
+    written = tools.memory_write(content="a fact to confirm", source_type="agent_generated", subject="fact-to-confirm")
     memory_id = written["data"]["id"]
 
     rejected = tools.memory_confirm(memory_id=memory_id, source_ref="chat", authorized=False)
@@ -2333,6 +2333,7 @@ def test_split_failure_merges_error_into_existing_metadata(tmp_path: Path) -> No
     tools = make_vec_tools(tmp_path)
     written = tools.memory_write(
         content="first section\nsecond section",
+        subject="split-failure-test",
         metadata={"keep": "yes", "nested": {"value": 1}},
     )
     memory_id = written["data"]["id"]
@@ -2773,10 +2774,10 @@ def test_v061_t3_split_active_exempt_from_long_content_penalty(tmp_path: Path) -
     _set_vec_ready(tools)
 
     long_content = "alpha " + ("x" * 3000) + "\n" + "beta " + ("y" * 60)
-    mid = tools.memory_write(content=long_content, subject=None, tags=None)["data"]["id"]
+    mid = tools.memory_write(content=long_content, subject="long-content-split", tags=None)["data"]["id"]
     _publish_two_sections(tools, mid, long_content, "alpha", "beta")
 
-    # Query "alpha" hits content lexically (FTS) but subject/tags are None (weak).
+    # Query "alpha" hits content lexically (FTS); subject set but tags None (weak tag signal).
     result = tools.memory_search(
         query="alpha", query_embedding=_keyword_embedding("alpha"), debug_ranking=True
     )
@@ -2796,7 +2797,7 @@ def test_v061_t4_non_split_still_gets_long_content_penalty(tmp_path: Path) -> No
     _set_vec_ready(tools)
 
     long_content = "alpha " + ("x" * 3000)
-    mid = tools.memory_write(content=long_content, subject=None, tags=None)["data"]["id"]
+    mid = tools.memory_write(content=long_content, subject="long-content-nosplit", tags=None)["data"]["id"]
     # NOT split — so the penalty should still apply.
 
     result = tools.memory_search(query="alpha", debug_ranking=True)
@@ -2927,7 +2928,7 @@ def test_v061_t10_penalty_baseline_c9(tmp_path: Path) -> None:
     _set_vec_ready(tools)
 
     long_content = "alpha " + ("x" * 3000)
-    mid = tools.memory_write(content=long_content, subject=None, tags=None)["data"]["id"]
+    mid = tools.memory_write(content=long_content, subject="long-content-penalty", tags=None)["data"]["id"]
     result = tools.memory_search(query="alpha", debug_ranking=True)
     debug_map = {r["id"]: r for r in result["data"]["results"]}
     assert mid in debug_map
@@ -2975,7 +2976,7 @@ def test_v061_t12_content_only_penalty_still_applies_to_split_active(tmp_path: P
     _set_vec_ready(tools)
 
     long_content = "alpha " + ("x" * 3000) + "\nbeta " + ("y" * 60)
-    mid = tools.memory_write(content=long_content, subject=None, tags=None)["data"]["id"]
+    mid = tools.memory_write(content=long_content, subject="long-content-section-embed", tags=None)["data"]["id"]
     _publish_two_sections(tools, mid, long_content, "alpha", "beta")
 
     result = tools.memory_search(
@@ -3954,3 +3955,137 @@ def test_count_matches_post_filter(tmp_path: Path) -> None:
     assert res["data"]["total_estimate"] == 8
     assert len(res["data"]["results"]) == 8
     assert res["data"]["has_more"] is False
+
+
+def test_insert_memory_rejects_empty_subject(tmp_path: Path) -> None:
+    # B1: subject is now required at the DB layer, mirroring the content check.
+    tools = make_tools(tmp_path)
+    db = tools.db
+    from memory_arbiter.models import MemoryRecord
+
+    record = MemoryRecord(
+        content="content without subject",
+        agent_id="agent-a",
+        workspace="repo-a",
+        subject=None,
+    )
+    with pytest.raises(ValueError, match="subject is required"):
+        db.insert_memory(record, "repo-a")
+
+    # 空串 / 纯空白同样拒绝
+    for empty in ("", "   "):
+        record_empty = MemoryRecord(
+            content="c", agent_id="agent-a", workspace="repo-a", subject=empty
+        )
+        with pytest.raises(ValueError, match="subject is required"):
+            db.insert_memory(record_empty, "repo-a")
+
+    # 正常带 subject 仍可写入
+    ok = tools.memory_write(content="has subject", subject="s1", source_type="agent_generated")
+    assert ok["ok"] is True
+
+
+def test_memory_write_rejects_empty_subject_contract(tmp_path: Path) -> None:
+    """T2: memory_write (the MCP agent-facing path) must return ok=False with a
+    clear error when subject is missing or empty — BEFORE any workspace
+    canonical side effect. This is the contract agents rely on."""
+    tools = make_tools(tmp_path)
+
+    # missing subject entirely
+    res = tools.memory_write(content="no subject", source_type="agent_generated")
+    assert res["ok"] is False
+    assert res["data"]["written"] is False
+    assert "subject is required" in res["data"]["error"]
+
+    # empty string
+    res2 = tools.memory_write(content="empty subject", subject="", source_type="agent_generated")
+    assert res2["ok"] is False
+    assert "subject is required" in res2["data"]["error"]
+
+    # whitespace-only
+    res3 = tools.memory_write(content="ws subject", subject="   ", source_type="agent_generated")
+    assert res3["ok"] is False
+    assert "subject is required" in res3["data"]["error"]
+
+    # strict isolation + missing workspace + missing subject: subject error
+    # must surface FIRST (before workspace error), so the workspace canonical
+    # registration side effect never runs for a rejected write.
+    strict_tools = make_tools(tmp_path)
+    strict_tools.settings.isolation = "strict"
+    res4 = strict_tools.memory_write(content="x", workspace="")  # no subject, no ws
+    assert res4["ok"] is False
+    # subject check precedes workspace check in memory_write
+    assert "subject is required" in res4["data"]["error"]
+
+
+def test_memory_edit_rejects_empty_new_subject(tmp_path: Path) -> None:
+    # B2: passing new_subject="" (empty string) used to wipe subject via
+    # edit_memory's `new_subject if new_subject is not None else old_subject`
+    # branch. It must now be refused at the service layer (pass None to keep).
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="original content", subject="keep-me", source_type="agent_generated"
+    )
+    mid = written["data"]["id"]
+
+    res = tools.memory_edit(memory_id=mid, new_content="original content", new_subject="")
+    assert res["ok"] is False
+    assert "new_subject is empty" in res["data"]["error"]
+    # subject 未被清空
+    got = tools.memory_get(memory_id=mid)["data"]["memory"]
+    assert got["subject"] == "keep-me"
+
+    # 纯空白同样拒绝
+    res2 = tools.memory_edit(memory_id=mid, new_content="original content", new_subject="   ")
+    assert res2["ok"] is False
+    assert "new_subject is empty" in res2["data"]["error"]
+
+    # None 保持原 subject（合法）
+    res3 = tools.memory_edit(memory_id=mid, new_content="original content", new_subject=None, reason="noop edit")
+    assert res3["ok"] is True
+    got3 = tools.memory_get(memory_id=mid)["data"]["memory"]
+    assert got3["subject"] == "keep-me"
+
+
+def test_tags_only_edit_unaffected_by_subject_rule(tmp_path: Path) -> None:
+    # B 回归: tags-only 路径走 update_tags_low_side_effect，完全不碰 subject，
+    # 因此不受 subject 必填/空值拦截影响。用一条 subject 为空的历史记录验证
+    # （历史空 subject 记录必须仍能 tags-only 编辑，否则回填前就无法打标）。
+    tools = make_tools(tmp_path)
+    db = tools.db
+    from memory_arbiter.models import MemoryRecord
+
+    # 直接写一条 subject 为空的记录（绕过 memory_write，模拟历史数据）
+    record = MemoryRecord(
+        content="legacy no-subject memory",
+        agent_id="agent-a",
+        workspace="repo-a",
+        subject=None,
+    )
+    # 直接 INSERT 绕过新的 subject 校验（构造历史空 subject 数据）
+    with db.connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO memories (content, agent_id, workspace, tags, source_type, "
+            "event_time, ingest_time, confidence, protection_level, status, subject, "
+            "metadata, version, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (record.content, record.agent_id, "repo-a", "[]", "agent_generated",
+             "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", 0.5, "normal",
+             "active", None, "{}", 1, "2026-01-01T00:00:00Z"),
+        )
+        mid = int(cur.lastrowid)
+        if db.state.fts5_available:
+            conn.execute(
+                "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
+                (mid, record.content, "", ""),
+            )
+        conn.commit()
+
+    # tags-only 编辑必须成功（subject 仍为空也不拦）
+    res = tools.memory_edit(memory_id=mid, tags_only=True, add_tags=["backfill"], authorized=False)
+    assert res["ok"] is True
+    assert res["data"]["tags_only"] is True
+    got = tools.memory_get(memory_id=mid)["data"]["memory"]
+    assert "backfill" in got["tags"]
+    # subject 未被改动（仍为空，待回填脚本处理）
+    assert got["subject"] in (None, "")

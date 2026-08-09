@@ -1160,6 +1160,17 @@ class MemoryTools:
         if not allowed:
             return self.db.state.response({"written": False}, ok=False, extra_warnings=warnings)
         try:
+            # subject is required at write time, BEFORE any workspace side effect.
+            # A missing/empty subject must fail fast here — otherwise a failed write
+            # would still register the workspace canonical (resolve_workspace_canonical
+            # below runs with register_new=True), letting a retry skip the strict
+            # new-workspace pending gate.
+            if not payload.get("subject") or not str(payload["subject"]).strip():
+                return self.db.state.response(
+                    {"written": False, "error": "subject is required"},
+                    ok=False,
+                    extra_warnings=warnings,
+                )
             # ── Workspace isolation (strict/weak/none) ──
             isolation = getattr(self.settings, "isolation", "none")
             # strict: workspace is mandatory on the write path. Inspect the RAW
@@ -1901,7 +1912,7 @@ class MemoryTools:
             return None
         return {"possible_supersede_targets": targets}
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
         if "include_superseded" in _:
             return self.db.state.response(
                 {
@@ -1962,6 +1973,7 @@ class MemoryTools:
         outcome = search_memories(
             self.db, query, workspace, tags, limit,
             status_filter="active",  # Default: active only
+            offset=offset,
             debug_ranking=debug_ranking,
             query_embedding=query_embedding,
             tags_filter=tags_filter,
@@ -2146,6 +2158,30 @@ class MemoryTools:
         superseded_limit_cap = getattr(self.settings, "superseded_limit", 20)
         effective_limit = min(max(1, limit_requested), max(1, int(superseded_limit_cap)), 50)
 
+        # v0.12.3: expired recall must honor the same workspace isolation
+        # boundary as active recall. Expired includes pending/conflicted records,
+        # so strict mode without a workspace must fail closed instead of browsing
+        # the global audit/history domain.
+        isolation = getattr(self.settings, "isolation", "none")
+        ws_canonical = None
+        if isolation != "none" and (workspace or "").strip():
+            embedder, _ = self._ensure_embedder()
+            resolved = self.db.resolve_workspace_canonical(
+                workspace, embedder, register_new=False,
+            )
+            ws_canonical = resolved["canonical"]
+        elif isolation == "strict":
+            return self.db.state.response(
+                {
+                    "error": "isolation=strict requires a workspace on every expired search; "
+                             "an empty workspace would bypass isolation.",
+                    "results": [],
+                    "count": 0,
+                },
+                ok=False,
+                extra_warnings=extra_warnings,
+            )
+
         outcome = search_memories(
             self.db, query, workspace, tags, effective_limit,
             status_filter="expired",  # superseded + conflicted + pending (§3.5 split)
@@ -2156,6 +2192,8 @@ class MemoryTools:
             before_time=before_time,
             source_type=source_type,
             offset=effective_offset,
+            ws_canonical=ws_canonical,
+            isolation=isolation,
         )
         results = outcome.results
         warnings = outcome.warnings
@@ -2217,7 +2255,7 @@ class MemoryTools:
             "next_offset": next_offset,
             "offset_clamped": effective_offset != offset_requested,
             "limit_capped": effective_limit != limit_requested,
-            "pagination_precision": "exact" if not query else "best_effort",
+            "pagination_precision": "exact" if not str(query or "").strip() else "best_effort",
         }
         if attention_required:
             response_data["attention_required"] = True
@@ -3205,6 +3243,11 @@ class MemoryTools:
         if new_content is not None and not str(new_content).strip():
             return self.db.state.response(
                 {"error": "new_content is empty; refusing to wipe memory content (use memory_supersede to retire it, or pass real content)", "edited": False},
+                ok=False,
+            )
+        if new_subject is not None and not str(new_subject).strip():
+            return self.db.state.response(
+                {"error": "new_subject is empty; refusing to wipe subject (pass None to keep current)", "edited": False},
                 ok=False,
             )
         if new_content is not None:

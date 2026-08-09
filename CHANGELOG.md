@@ -3,6 +3,26 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.12.3] — 2026-08-09
+
+Subject-required writes and console/search pagination hardening. This patch tightens the memory data contract, adds a guarded backfill helper for historical empty-subject rows, and fixes strict workspace isolation on expired recall.
+
+### Added
+
+- **Guarded subject backfill helper** — `scripts/backfill_subjects.py` uses the normal `memory_edit` path to backfill historical active rows that predate the subject requirement, preserving version/history/FTS/vector side effects. The built-in plan validates expected workspace and content hash before editing so integer-id collisions in another DB fail closed.
+- **Active search offset support** — `memory_search` and the Console memories API now accept `offset` for best-effort query-recall pagination. Empty-query browse and expired recall continue to use exact SQL-backed pagination where available.
+
+### Changed
+
+- **Subject is now required on writes** — `memory_write` and `MemoryDB.insert_memory` reject missing or blank subjects; `memory_edit` also refuses to wipe a subject with an empty `new_subject`.
+- Console memories pagination now exposes `total`, `total_precise`, and best-effort labels so the UI does not treat query-recall estimates as exact totals.
+- SQLite WAL/SHM sidecar files are ignored by git.
+
+### Fixed
+
+- **Strict isolation on expired recall** — `memory_search_expired` now requires a workspace under `isolation=strict` and hard-filters by canonical workspace, preventing pending/superseded/conflicted records from leaking through expired/history recall or Console expired pages.
+- Legacy MCP `memory_search` wrapper now forwards `offset` and its help text no longer claims active search has no offset cursor.
+
 ## [0.12.2] — 2026-08-09
 
 Agent onboarding notice + guide. Additive notice/help/docs change only; no memory DB schema change and no breaking changes to existing tool calls.

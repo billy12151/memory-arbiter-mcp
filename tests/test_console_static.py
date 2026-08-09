@@ -64,3 +64,25 @@ def test_console_static_does_not_offer_write_actions() -> None:
     lower = INDEX_HTML.lower()
     for word in forbidden:
         assert word not in lower
+
+
+def test_pagination_functions_exist_and_bind_correctly() -> None:
+    """T3: pagination JS functions and event bindings must exist in the served
+    HTML. This locks the wiring that a node --check syntax parse cannot catch —
+    e.g. a misspelled handler name or a broken onkeydown attribute would parse
+    fine as a string but silently break the UI."""
+    # functions defined at top level
+    for fn in ("function memPrev(", "function memNext(", "function memJump(",
+               "function commitFilters("):
+        assert fn in INDEX_HTML, f"missing: {fn}"
+    # memJump Enter binding
+    assert 'onkeydown="if(event.key===' in INDEX_HTML
+    assert "memJump(parseInt(this.value,10)||1)" in INDEX_HTML
+    # jump input disabled when totalPages<=1 (jumpDisabled flag drives it)
+    assert "jumpDisabled" in INDEX_HTML
+    assert "totalPages<=1" in INDEX_HTML
+    # pagination state initialized with the default page size constant
+    assert "DEFAULT_PAGE_SIZE" in INDEX_HTML
+    assert "memPage: {" in INDEX_HTML
+    # request sequence guard against stale responses (M3 race fix)
+    assert "memReqSeq" in INDEX_HTML

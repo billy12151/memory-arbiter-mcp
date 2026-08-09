@@ -432,7 +432,7 @@ class TestWorkspaceAliasHealth:
         # Insert a pending memory (simulating strict-blocked new workspace)
         from memory_arbiter.models import MemoryRecord, MemoryStatus
         record = MemoryRecord(content="pending test", agent_id="a",
-                              workspace="newproj", status=MemoryStatus.PENDING.value)
+                              workspace="newproj", status=MemoryStatus.PENDING.value, subject="pending-test")
         db.insert_memory(record, "newproj")
         report = _run(tmp_path, s)
         finding = [f for f in report.findings

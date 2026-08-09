@@ -88,7 +88,7 @@ def test_weak_high_confidence_silent_merge(tmp_path):
     t = make_tools(tmp_path, "weak")
     backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.95, "同项目"))
     _force_undecided_with_candidate(t, backend)
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated")
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
     d = r["data"]
     assert d["workspace_decision"] == "AUTO"
     assert d["workspace_canonical"] == "金营项目"
@@ -99,7 +99,7 @@ def test_weak_low_confidence_asks_not_merge(tmp_path):
     t = make_tools(tmp_path, "weak")
     backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "related", 0.5, "可能相关"))
     _force_undecided_with_candidate(t, backend)
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated")
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
     d = r["data"]
     assert d["workspace_decision"] == "ASK"
     # NOT silently merged
@@ -111,7 +111,7 @@ def test_strict_never_silent_merges_even_high_conf(tmp_path):
     t = make_tools(tmp_path, "strict")
     backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.99, "同项目"))
     _force_undecided_with_candidate(t, backend)
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated")
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
     d = r["data"]
     # strict: high-conf candidate does NOT auto-merge; memory stays pending
     assert d["workspace_canonical"] != "金营项目"
@@ -121,7 +121,7 @@ def test_strict_never_silent_merges_even_high_conf(tmp_path):
 def test_no_backend_falls_back_to_ask(tmp_path):
     t = make_tools(tmp_path, "weak")
     _force_undecided_with_candidate(t, None)  # no backend
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated")
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
     assert r["data"]["workspace_decision"] == "ASK"
 
 

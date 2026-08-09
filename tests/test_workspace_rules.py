@@ -145,7 +145,7 @@ def make_tools(tmp_path: Path, isolation: str = "weak") -> MemoryTools:
 
 def test_write_surfaces_ask_for_generic_workspace(tmp_path):
     t = make_tools(tmp_path)
-    r = t.memory_write(content="some plan", workspace="月报", source_type="agent_generated")
+    r = t.memory_write(content="some plan", workspace="月报", source_type="agent_generated", subject="test")
     data = r["data"]
     assert data["workspace_decision"] == "ASK"
     assert data.get("write_hints", {}).get("workspace_review")
@@ -153,5 +153,5 @@ def test_write_surfaces_ask_for_generic_workspace(tmp_path):
 
 def test_write_auto_for_specific_workspace(tmp_path):
     t = make_tools(tmp_path)
-    r = t.memory_write(content="alpha", workspace="金营项目", source_type="agent_generated")
+    r = t.memory_write(content="alpha", workspace="金营项目", source_type="agent_generated", subject="test")
     assert r["data"]["workspace_decision"] == "AUTO"

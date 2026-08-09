@@ -37,8 +37,8 @@ def make_tools(tmp_path: Path, isolation: str = "none", *, vec: bool = False) ->
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
 
-def _write(tools: MemoryTools, content: str, workspace: str = "default", **kw) -> dict:
-    return tools.memory_write(content=content, workspace=workspace, source_type="agent_generated", **kw)
+def _write(tools: MemoryTools, content: str, workspace: str = "default", subject: str = "test", **kw) -> dict:
+    return tools.memory_write(content=content, workspace=workspace, source_type="agent_generated", subject=subject, **kw)
 
 
 def _results(search: dict) -> list:
@@ -90,17 +90,39 @@ def test_none_recall_ignores_workspace(tmp_path):
 
 def test_strict_write_without_workspace_errors(tmp_path):
     tools = make_tools(tmp_path, "strict")
-    r = tools.memory_write(content="no ws", source_type="agent_generated", workspace="")
+    r = tools.memory_write(content="no ws", source_type="agent_generated", workspace="", subject="test")
     assert r["ok"] is False
     assert "strict" in (r["data"].get("error") or "").lower()
 
 
 def test_strict_recall_without_workspace_errors(tmp_path):
     tools = make_tools(tmp_path, "strict")
-    tools.memory_write(content="x", workspace="projA", source_type="agent_generated")
+    tools.memory_write(content="x", workspace="projA", source_type="agent_generated", subject="test")
     r = tools.memory_search(query="x", limit=10)
     assert r["ok"] is False
     assert "strict" in (r["data"].get("error") or "").lower()
+
+
+def test_strict_expired_recall_without_workspace_errors(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    _write(tools, "pending alpha", "projA")
+
+    r = tools.memory_search_expired(query="pending", limit=10)
+
+    assert r["ok"] is False
+    assert "strict" in (r["data"].get("error") or "").lower()
+    assert r["data"]["results"] == []
+
+
+def test_strict_expired_recall_hard_filters_workspace(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    a_id = _write(tools, "pending shared alpha", "projA")["data"]["id"]
+    _write(tools, "pending shared beta", "projB")
+
+    r = tools.memory_search_expired(query="pending shared", workspace="projA", limit=10)
+
+    assert r["ok"] is True
+    assert [(m["id"], m["workspace"]) for m in _results(r)] == [(a_id, "projA")]
 
 
 def test_strict_new_workspace_blocks_as_pending(tmp_path):

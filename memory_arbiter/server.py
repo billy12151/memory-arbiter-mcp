@@ -96,7 +96,7 @@ def build_server() -> Any:
         subject: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Write one structured memory into the cross-tool shared store. content is required; subject/tags/source_type are strongly recommended.
+        """Write one structured memory into the cross-tool shared store. content and subject are required; tags/source_type are strongly recommended.
 
 tags are the primary ranking and filter signal (a tag exact-match outweighs content). Tag with "query-intent words" — terms a user might later search with. Examples:
   release note -> tags include "release" + version number
@@ -124,8 +124,8 @@ v0.9 conflict gate: ALWAYS inspect `action_required`, `verification_status`, and
         )
 
     @legacy_tool()
-    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_superseded: Optional[bool] = None) -> dict[str, Any]:
-        """Retrieve active memories by relevance. limit is page size (default 10), not a result cap. has_more=true means more unreturned active results may exist; memory_search has no offset cursor, so narrow with a more specific query, a larger limit (max 100), or tags_filter. For paginated expired/history recall use memory_search_expired.
+    def memory_search(query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_superseded: Optional[bool] = None) -> dict[str, Any]:
+        """Retrieve active memories by relevance. limit is page size (default 10), not a result cap. offset enables best-effort query-recall pagination; deep pages may return empty because total_estimate is an estimate. For paginated expired/history recall use memory_search_expired.
 
 v0.9.4: active-query split — ``memory_search`` returns ONLY ``status='active'`` memories. Superseded/deleted memories are excluded at the database level. For superseded history recall use ``memory_search_expired``.
 
@@ -151,6 +151,7 @@ Note: tags_filter is AND semantics — every listed tag must be present. Suited 
 v0.5.0: with GGUF embedding + sqlite-vec configured, the query is vectorized automatically even without query_embedding; an explicit query_embedding still takes precedence."""
         kwargs = dict(
             query=query, workspace=workspace, tags=tags or [], limit=limit,
+            offset=offset,
             debug_ranking=debug_ranking, query_embedding=query_embedding,
             tags_filter=tags_filter, after_time=after_time, before_time=before_time,
             source_type=source_type, include_linked_open_items=include_linked_open_items,
