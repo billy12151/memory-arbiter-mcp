@@ -607,9 +607,9 @@ def _check_vector_chain(
                 embedder, model_warnings = build_embedder(
                     str(settings.embedding_model_path),
                     settings.vec_dim,
-                    n_ctx=getattr(settings, "embedding_n_ctx", 2048),
-                    reserved_tokens=getattr(settings, "embedding_reserved_tokens", 64),
-                    max_section_chars=getattr(settings, "max_section_chars", 3600),
+                    n_ctx=settings.embedding_n_ctx,
+                    reserved_tokens=settings.embedding_reserved_tokens,
+                    max_section_chars=settings.max_section_chars,
                 )
                 model_usable = embedder is not None
                 if not model_usable:
@@ -676,7 +676,7 @@ def _check_semantic_chain(settings: Settings) -> list[Finding]:
     findings: list[Finding] = []
 
     # Link 1: model_path configured
-    model_path = getattr(settings, "semantic_conflict_model_path", None)
+    model_path = settings.semantic_conflict_model_path
     if not model_path:
         findings.append(Finding(
             check_id="semantic.link1.model_path", dimension=dim, severity=Severity.INFO,
@@ -699,7 +699,7 @@ def _check_semantic_chain(settings: Settings) -> list[Finding]:
     ))
 
     # Link 2: enabled flag
-    enabled = bool(getattr(settings, "semantic_conflict_enabled", False))
+    enabled = bool(settings.semantic_conflict_enabled)
     if not enabled:
         # Distinguish: model_path set + auto-enable should have turned it on,
         # so an explicit false is an intentional user override.
@@ -746,7 +746,7 @@ def _check_semantic_chain(settings: Settings) -> list[Finding]:
     ))
 
     # Link 4: on_write active
-    on_write = str(getattr(settings, "semantic_conflict_on_write", "async"))
+    on_write = str(settings.semantic_conflict_on_write)
     if on_write == "off":
         findings.append(Finding(
             check_id="semantic.link4.on_write", dimension=dim, severity=Severity.WARNING,
@@ -915,7 +915,7 @@ def _check_split_backlog(
                    "vec 未 ready，分段能力不可用，backlog 检查不适用")
     if not _table_exists(conn, "memories"):
         return _na("split.long_unsplit_backlog", "split", "memories 表不存在")
-    threshold = getattr(settings, "split_threshold", 4000)
+    threshold = settings.split_threshold
     rows = conn.execute(
         "SELECT id, length(content) AS clen FROM memories "
         "WHERE status='active' AND split_status IS NULL "
@@ -1500,7 +1500,7 @@ def _check_workspace_alias_health(conn: sqlite3.Connection, settings: Settings) 
         "SELECT COUNT(*) FROM workspace_aliases WHERE status='confirmed'") or 0)
     rejected = int(_scalar(conn,
         "SELECT COUNT(*) FROM workspace_aliases WHERE status='rejected'") or 0)
-    isolation = getattr(settings, "isolation", "none")
+    isolation = settings.isolation
 
     # Pending memories are a strict-isolation concept (new workspace blocked
     # until confirmed). Report them only under strict so the count isn't

@@ -638,7 +638,7 @@ class MemoryDB:
             )
 
     def _ensure_vec_table(self, conn: sqlite3.Connection) -> None:
-        dim = int(getattr(self.settings, "vec_dim", 768) or 768)
+        dim = int(self.settings.vec_dim or 768)
         try:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec "
@@ -652,7 +652,7 @@ class MemoryDB:
 
     def _ensure_section_vec_table(self, conn: sqlite3.Connection) -> None:
         """Create the section-level vec0 table (v0.6.0)."""
-        dim = int(getattr(self.settings, "vec_dim", 768) or 768)
+        dim = int(self.settings.vec_dim or 768)
         try:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_sections_vec "
@@ -673,7 +673,7 @@ class MemoryDB:
         canonical for a raw workspace string. Failure is non-fatal — alias
         resolution degrades to exact string match.
         """
-        dim = int(getattr(self.settings, "vec_dim", 768) or 768)
+        dim = int(self.settings.vec_dim or 768)
         try:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS workspace_canonicals_vec "
@@ -699,7 +699,7 @@ class MemoryDB:
 
         Requires sqlite-vec >= 0.1.6 for metadata-column filter support.
         """
-        dim = int(getattr(self.settings, "vec_dim", 768) or 768)
+        dim = int(self.settings.vec_dim or 768)
         mem_has_col = False
         sec_has_col = False
         try:
@@ -878,7 +878,7 @@ class MemoryDB:
         if match_distance is None:
             # Explicit None check (not truthy fallback): 0.0 is a legitimate
             # "exact-vector-only" setting and must not be swallowed to 0.25.
-            configured = getattr(self.settings, "workspace_match_distance", None)
+            configured = self.settings.workspace_match_distance
             match_distance = float(0.25 if configured is None else configured)
 
         try:

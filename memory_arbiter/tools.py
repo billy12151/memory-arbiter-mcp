@@ -12,6 +12,7 @@ from .arbitration import compare_memories
 from .claims import extract_claims
 from .conflict_judgments import ConflictJudgmentStore
 from .config import Settings
+from .constants import strict_ws
 from .db import MemoryDB, _canon_entity, _canon_scope
 from .embedder import ManagedEmbedder
 from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
@@ -331,9 +332,9 @@ class MemoryTools:
         return notices
 
     def _enqueue_pending_rule_splits(self, limit: int = 100) -> None:
-        threshold = getattr(self.settings, "split_threshold", 4000)
-        max_sections = getattr(self.settings, "max_sections", 50)
-        max_section_chars = getattr(self.settings, "max_section_chars", 3600)
+        threshold = self.settings.split_threshold
+        max_sections = self.settings.max_sections
+        max_section_chars = self.settings.max_section_chars
         if self.db.get_vec_index_state().get("state") != "ready":
             return
         try:
@@ -884,9 +885,9 @@ class MemoryTools:
             embedder, warnings = build_embedder(
                 str(self.settings.embedding_model_path),
                 self.settings.vec_dim,
-                n_ctx=getattr(self.settings, "embedding_n_ctx", 2048),
-                reserved_tokens=getattr(self.settings, "embedding_reserved_tokens", 64),
-                max_section_chars=getattr(self.settings, "max_section_chars", 3600),
+                n_ctx=self.settings.embedding_n_ctx,
+                reserved_tokens=self.settings.embedding_reserved_tokens,
+                max_section_chars=self.settings.max_section_chars,
             )
             self._embedder_warnings.extend(warnings)
             if embedder is None:
@@ -905,9 +906,9 @@ class MemoryTools:
 
     def _semantic_configured(self) -> bool:
         return (
-            bool(getattr(self.settings, "semantic_conflict_enabled", False))
-            and getattr(self.settings, "semantic_conflict_backend", "local_gguf") == "local_gguf"
-            and getattr(self.settings, "semantic_conflict_model_path", None) is not None
+            bool(self.settings.semantic_conflict_enabled)
+            and self.settings.semantic_conflict_backend == "local_gguf"
+            and self.settings.semantic_conflict_model_path is not None
         )
 
     def _ensure_semantic_backend(self) -> Optional[SemanticBackend]:
@@ -950,10 +951,10 @@ class MemoryTools:
             self._semantic_backend.status()
             if self._semantic_backend is not None else
             {
-                "backend": getattr(self.settings, "semantic_conflict_backend", "local_gguf"),
-                "model_path": str(getattr(self.settings, "semantic_conflict_model_path", None) or ""),
+                "backend": self.settings.semantic_conflict_backend,
+                "model_path": str(self.settings.semantic_conflict_model_path or ""),
                 "model_exists": bool(
-                    getattr(self.settings, "semantic_conflict_model_path", None)
+                    self.settings.semantic_conflict_model_path
                     and self.settings.semantic_conflict_model_path.exists()
                 ),
                 "model_state": "unloaded",
@@ -961,15 +962,15 @@ class MemoryTools:
             }
         )
         return {
-            "enabled": bool(getattr(self.settings, "semantic_conflict_enabled", False)),
+            "enabled": bool(self.settings.semantic_conflict_enabled),
             "configured": self._semantic_configured(),
-            "on_write": getattr(self.settings, "semantic_conflict_on_write", "async"),
-            "pair_text_gate": getattr(self.settings, "semantic_conflict_pair_text_gate", "medium"),
-            "resident": bool(getattr(self.settings, "semantic_conflict_resident", True)),
+            "on_write": self.settings.semantic_conflict_on_write,
+            "pair_text_gate": self.settings.semantic_conflict_pair_text_gate,
+            "resident": bool(self.settings.semantic_conflict_resident),
             "max_concurrency": 1,
             "max_concurrency_note": "reserved; MVP semantic worker is single-threaded (configured values are clamped to 1)",
-            "job_timeout_ms": int(getattr(self.settings, "semantic_conflict_job_timeout_ms", 5000)),
-            "min_pair_budget_ms": int(getattr(self.settings, "semantic_conflict_min_pair_budget_ms", 1000)),
+            "job_timeout_ms": int(self.settings.semantic_conflict_job_timeout_ms),
+            "min_pair_budget_ms": int(self.settings.semantic_conflict_min_pair_budget_ms),
             "last_pair_duration_ms": self._last_pair_duration_ms,
             "job_deadline_behavior": (
                 "The deadline gates BETWEEN pairs only. A model call (synchronous C inference) "
@@ -1019,9 +1020,9 @@ class MemoryTools:
     def _enqueue_semantic_conflict_check(self, memory_id: Optional[int], record: Any) -> dict[str, Any]:
         if memory_id is None:
             return {"status": "skipped", "reason": "backup_only"}
-        if not getattr(self.settings, "semantic_conflict_enabled", False):
+        if not self.settings.semantic_conflict_enabled:
             return {"status": "disabled"}
-        if getattr(self.settings, "semantic_conflict_on_write", "async") == "off":
+        if self.settings.semantic_conflict_on_write == "off":
             return {"status": "off"}
         stored = self.db.get_memory(int(memory_id)) or {}
         content = (record.get("content") if isinstance(record, dict) else getattr(record, "content", None))
@@ -1047,9 +1048,9 @@ class MemoryTools:
             subject=record.get("subject"),
             tags=[str(t) for t in tags if isinstance(t, str)],
             exclude_id=int(memory_id),
-            limit=int(getattr(self.settings, "semantic_conflict_candidate_limit", 30)),
+            limit=int(self.settings.semantic_conflict_candidate_limit),
         )
-        return candidates[: int(getattr(self.settings, "semantic_conflict_pair_limit", 10))]
+        return candidates[: int(self.settings.semantic_conflict_pair_limit)]
 
     def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> None:
         if not self._semantic_configured():
@@ -1067,15 +1068,15 @@ class MemoryTools:
         backend = self._ensure_semantic_backend()
         if backend is None:
             return
-        timeout_ms = float(getattr(self.settings, "semantic_conflict_job_timeout_ms", 5000))
+        timeout_ms = float(self.settings.semantic_conflict_job_timeout_ms)
         deadline = time.monotonic() + (timeout_ms / 1000.0)
         # The model call is a synchronous, non-interruptible C call; the
         # deadline can only gate *between* pairs, not abort one in flight.
         # Reserve a floor so we never start a fresh inference with only a few
         # ms left (which would blow the budget and stall the worker). 1s is a
         # conservative lower bound for a 0.5B local model on a single short pair.
-        min_pair_budget = float(getattr(self.settings, "semantic_conflict_min_pair_budget_ms", 1000)) / 1000.0
-        isolation = getattr(self.settings, "isolation", "none")
+        min_pair_budget = float(self.settings.semantic_conflict_min_pair_budget_ms) / 1000.0
+        isolation = self.settings.isolation
         for peer in self._semantic_candidate_memories(memory_id, record):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1109,14 +1110,14 @@ class MemoryTools:
             call_start = time.monotonic()
             signal = backend.classify_pair(record, peer_record)
             self._last_pair_duration_ms = int((time.monotonic() - call_start) * 1000)
-            if not getattr(self.settings, "semantic_conflict_resident", True) and self._semantic_backend is not None:
+            if not self.settings.semantic_conflict_resident and self._semantic_backend is not None:
                 self._semantic_backend.unload()
             if not signal.candidate:
                 continue
             gate = pair_text_gate(
                 f"subject: {record.get('subject') or ''}\ntags: {', '.join(record.get('tags') or []) if isinstance(record.get('tags'), list) else ''}\ncontent: {record.get('content') or ''}",
                 f"subject: {peer_record.get('subject') or ''}\ntags: {', '.join(peer_record.get('tags') or []) if isinstance(peer_record.get('tags'), list) else ''}\ncontent: {peer_record.get('content') or ''}",
-                mode=getattr(self.settings, "semantic_conflict_pair_text_gate", "medium"),
+                mode=self.settings.semantic_conflict_pair_text_gate,
             )
             if not gate.passed:
                 continue
@@ -1172,7 +1173,7 @@ class MemoryTools:
                     extra_warnings=warnings,
                 )
             # ── Workspace isolation (strict/weak/none) ──
-            isolation = getattr(self.settings, "isolation", "none")
+            isolation = self.settings.isolation
             # strict: workspace is mandatory on the write path. Inspect the RAW
             # payload — MemoryRecord.from_input substitutes "default" for a
             # missing/empty workspace, which would mask the omission here.
@@ -1948,7 +1949,7 @@ class MemoryTools:
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
         # v0.9.7: workspace isolation on the read path.
-        isolation = getattr(self.settings, "isolation", "none")
+        isolation = self.settings.isolation
         ws_canonical = None
         if isolation != "none" and (workspace or "").strip():
             embedder, _ = self._ensure_embedder()
@@ -2055,7 +2056,7 @@ class MemoryTools:
         if include_linked_open_items and retrieval_mode == "direct" and results:
             linked = _linked_open_items_for_search(
                 self.db, results, extra_warnings,
-                ws_canonical=ws_canonical if isolation == "strict" else None,
+                ws_canonical=strict_ws(isolation, ws_canonical),
             )
         response_data = {
             "results": results,
@@ -2155,14 +2156,14 @@ class MemoryTools:
         offset_requested = int(offset)
         effective_offset = max(0, min(offset_requested, 10000))
         # Apply superseded_limit cap
-        superseded_limit_cap = getattr(self.settings, "superseded_limit", 20)
+        superseded_limit_cap = self.settings.superseded_limit
         effective_limit = min(max(1, limit_requested), max(1, int(superseded_limit_cap)), 50)
 
         # v0.12.3: expired recall must honor the same workspace isolation
         # boundary as active recall. Expired includes pending/conflicted records,
         # so strict mode without a workspace must fail closed instead of browsing
         # the global audit/history domain.
-        isolation = getattr(self.settings, "isolation", "none")
+        isolation = self.settings.isolation
         ws_canonical = None
         if isolation != "none" and (workspace or "").strip():
             embedder, _ = self._ensure_embedder()
@@ -3879,8 +3880,8 @@ class MemoryTools:
             vec_disabled_reason = "gate_closed_state_not_ready"
         else:
             vec_disabled_reason = "vec_extension_unavailable"
-        threshold = getattr(self.settings, "section_vec_distance_threshold", 0.42)
-        fulltext_threshold = getattr(self.settings, "section_fulltext_threshold", 0.8)
+        threshold = self.settings.section_vec_distance_threshold
+        fulltext_threshold = self.settings.section_fulltext_threshold
 
         active_ids = [
             r.get("id") for r in results
@@ -4286,8 +4287,8 @@ class MemoryTools:
         NULL/failed/declined) or "rebuild" (replace existing active sections).
         """
         mid = memory_id
-        max_sections = getattr(self.settings, "max_sections", 50)
-        max_section_chars = getattr(self.settings, "max_section_chars", 3600)
+        max_sections = self.settings.max_sections
+        max_section_chars = self.settings.max_section_chars
 
         # 1) Count gate.
         if len(sections_data) < 2 or len(sections_data) > max_sections:
@@ -4438,9 +4439,9 @@ class MemoryTools:
             original content is untouched.
         """
         warnings: list[str] = []
-        threshold = getattr(self.settings, "split_threshold", 4000)
-        max_sections = getattr(self.settings, "max_sections", 50)
-        max_section_chars = getattr(self.settings, "max_section_chars", 3600)
+        threshold = self.settings.split_threshold
+        max_sections = self.settings.max_sections
+        max_section_chars = self.settings.max_section_chars
 
         mem = self.db.get_memory(memory_id)
         if mem is None or mem.get("status") != "active":
@@ -4546,7 +4547,7 @@ class MemoryTools:
                     "error": "vec index not ready",
                     "vec_index_state": vec_state,
                 }, ok=False)
-            if len(content) <= getattr(self.settings, "split_threshold", 4000):
+            if len(content) <= self.settings.split_threshold:
                 return self.db.state.response({"error": "content below threshold, no need to split"})
 
             # v0.8: prepare returns the full snapshot for the Agent to continue.
@@ -4751,7 +4752,7 @@ class MemoryTools:
         failed = 0
         processed = 0
         errors: list[dict] = []
-        max_section_chars = getattr(self.settings, "max_section_chars", 3600)
+        max_section_chars = self.settings.max_section_chars
 
         for mid in target_ids:
             processed += 1

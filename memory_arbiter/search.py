@@ -32,6 +32,7 @@ RetrievalMode = Literal[
 # Tests match on the prefix substring, so keep the prefix stable.
 # Single source: constants.NO_DIRECT_MATCH_PREFIX (Phase 1); re-exported here.
 from .constants import NO_DIRECT_MATCH_PREFIX as _NO_DIRECT_MATCH_PREFIX
+from .constants import strict_ws
 
 
 @dataclass
@@ -953,7 +954,7 @@ def search_memories(
         result, bm_warnings, bm_has_more, bm_total = _search_bm25(
             db, query, workspace, tags, limit, status_clause, like_status_clause, warnings, debug_ranking,
             offset=offset,
-            ws_canonical=ws_canonical if (isolation == "strict" and ws_canonical) else None,
+            ws_canonical=strict_ws(isolation, ws_canonical),
         )
         # Infer retrieval_mode for the legacy bm25 path: _search_bm25 internally
         # falls back to _recent_fallback when query has no hit (appending its
@@ -978,7 +979,7 @@ def search_memories(
     # 继续往下（wide_recall 内部仍会因 not query 返 []，post-filter 后仍空，
     # 最终走第二步的 "query required for filter-aware recall" 精准 warning）。
     if not query and not has_filters:
-        fb_ws = ws_canonical if (isolation == "strict" and ws_canonical) else None
+        fb_ws = strict_ws(isolation, ws_canonical)
         fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(
             db, workspace, tags, limit, like_status_clause, warnings, offset=offset, ws_canonical=fb_ws,
         )
@@ -990,14 +991,14 @@ def search_memories(
     # 解锁 list-by-tag / by-source_type / by-time。v0.9.4 adds SQL OFFSET for
     # expired audit pagination.
     if not query and has_filters:
-        strict_ws = ws_canonical if (isolation == "strict" and ws_canonical) else None
+        strict_ws_filter = strict_ws(isolation, ws_canonical)
         rows = db.recall_by_filters(
             like_status_clause, tags_filter, after_dt, before_dt, source_type, limit, offset,
-            ws_canonical=strict_ws,
+            ws_canonical=strict_ws_filter,
         )
         total_estimate = db.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
-            ws_canonical=strict_ws,
+            ws_canonical=strict_ws_filter,
         )
         if not rows:
             warning = "offset beyond result set" if total_estimate > 0 and offset >= total_estimate else "no memories match the given filters"
@@ -1015,13 +1016,13 @@ def search_memories(
     # pool_cap is preserved (keeps the pool-saturation / Channel-6 skip
     # semantics intact). Query-recall still has no exact total; the empty-query
     # SQL paths above are the precise pagination paths.
-    base_pool_cap = getattr(db.settings, "recall_pool_cap", 50)
+    base_pool_cap = db.settings.recall_pool_cap
     pool_cap = max(base_pool_cap, offset + limit + 1) if offset > 0 else base_pool_cap
     pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause,
                         status_filter=status_filter, query_embedding=query_embedding,
                         pool_cap=pool_cap,
-                        content_like_cap=getattr(db.settings, "content_like_cap", 30),
-                        ws_canonical=ws_canonical if (isolation == "strict" and ws_canonical) else None)
+                        content_like_cap=db.settings.content_like_cap,
+                        ws_canonical=strict_ws(isolation, ws_canonical))
 
     # v0.9.7: strict isolation — hard-filter the candidate pool to the query's
     # canonical workspace. weak does NOT filter (it only nudges ranking in
@@ -1073,7 +1074,7 @@ def search_memories(
     if has_filters:
         total_estimate = db.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
-            ws_canonical=ws_canonical if (isolation == "strict" and ws_canonical) else None,
+            ws_canonical=strict_ws(isolation, ws_canonical),
         )
     else:
         total_estimate = len(pool)
