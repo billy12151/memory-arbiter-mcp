@@ -1,4 +1,5 @@
 """Conflict signal attachment pipeline for MemoryTools (Phase 4 extraction)."""
+# mypy: disable-error-code=type-arg
 from __future__ import annotations
 
 from typing import Any, Optional, TYPE_CHECKING
@@ -198,7 +199,7 @@ class ConflictSignalPipeline:
         rec: dict[str, Any],
         all_results: list[dict[str, Any]],
         result_id_set: set[int],
-        dismissed_pairs: Optional[set[tuple[int, int]]] = None,
+        dismissed_pairs: Optional[set] = None,
     ) -> Optional[dict[str, Any]]:
         """Compute a runtime_metadata_hint by comparing this result against
         other results in the same result set (bounded to first 20).
