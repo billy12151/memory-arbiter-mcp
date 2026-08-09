@@ -29,6 +29,12 @@ class ReadPipeline:
         from .. import tools as tools_mod
         return getattr(tools_mod, "search_memories")(*args, **kwargs)
 
+    @staticmethod
+    def _compare_memories(*args: Any, **kwargs: Any) -> Any:
+        # Preserve legacy patch seam for memory_arbiter.tools.compare_memories.
+        from .. import tools as tools_mod
+        return getattr(tools_mod, "compare_memories")(*args, **kwargs)
+
     def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
         if "include_superseded" in _:
             return self.db.state.response(
@@ -503,4 +509,4 @@ class ReadPipeline:
         right_record = right or (self.db.get_memory(int(right_id)) if right_id is not None else None)
         if not left_record or not right_record:
             return self.db.state.response({"error": "left and right records are required"}, ok=False)
-        return self.db.state.response({"comparison": compare_memories(left_record, right_record), "left": left_record, "right": right_record})
+        return self.db.state.response({"comparison": self._compare_memories(left_record, right_record), "left": left_record, "right": right_record})

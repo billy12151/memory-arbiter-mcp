@@ -23,6 +23,12 @@ class OperationsPipeline:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._tools, name)
 
+    @staticmethod
+    def _compare_memories(*args: Any, **kwargs: Any) -> Any:
+        # Preserve legacy patch seam for memory_arbiter.tools.compare_memories.
+        from .. import tools as tools_mod
+        return getattr(tools_mod, "compare_memories")(*args, **kwargs)
+
     def memory_arbitrate(self, left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, **_: Any) -> dict[str, Any]:
         if _.get("apply") is not None:
             return self.db.state.response(
@@ -33,7 +39,7 @@ class OperationsPipeline:
         right = self.db.get_memory(int(right_id))
         if not left or not right:
             return self.db.state.response({"error": "memory id not found"}, ok=False)
-        comparison = compare_memories(left, right)
+        comparison = self._compare_memories(left, right)
         conflict_id = None
         if mark_conflict:
             reason = "; ".join(comparison["reasons"])

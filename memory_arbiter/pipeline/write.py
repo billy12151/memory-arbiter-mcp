@@ -22,6 +22,14 @@ class WritePipeline:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._tools, name)
 
+    @staticmethod
+    def _extract_claims(*args: Any, **kwargs: Any) -> Any:
+        # Preserve the legacy monkeypatch seam: tests/external diagnostics patch
+        # memory_arbiter.tools.extract_claims, so resolve that binding at call
+        # time instead of using this module's import cache (R4).
+        from .. import tools as tools_mod
+        return getattr(tools_mod, "extract_claims", extract_claims)(*args, **kwargs)
+
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         allowed, warnings = self._allowed(payload.get("agent_id"), payload.get("client"))
         if not allowed:
@@ -440,7 +448,7 @@ class WritePipeline:
 
             diagnostics = {}
             try:
-                claims = extract_claims(record, diagnostics)
+                claims = self._extract_claims(record, diagnostics)
                 publish = self.db.claims.publish_memory_claims(
                     int(memory_id), claims,
                     int(diagnostics.get("ambiguous_key_count") or 0),
