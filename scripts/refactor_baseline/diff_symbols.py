@@ -63,6 +63,23 @@ ALLOWED_REMOVALS = {
     # db.py's duplicate `import re as _re` (line ~3789); superseded by
     # text.CJK_RE_SUBJECT re-export. R11-补. No test/external import of `_re`.
     "memory_arbiter.db::_re": "R11-补: duplicate `import re as _re` removed; superseded by text.CJK_RE_SUBJECT",
+    # Phase 3 dedelegation (§4.1): the 13 one-line claim/judgment forwarding
+    # methods on MemoryDB were removed; callers (and R4 b-class monkeypatch
+    # targets) migrated to db.claims.* / db.judgments.*. INTENTIONAL API
+    # narrowing of MemoryDB's God-Object surface — flagged for user sign-off.
+    "memory_arbiter.db.MemoryDB::publish_memory_claims": "§4.1 dedelegation -> db.claims.publish_memory_claims",
+    "memory_arbiter.db.MemoryDB::mark_claim_index_failed": "§4.1 dedelegation -> db.claims.mark_claim_index_failed",
+    "memory_arbiter.db.MemoryDB::mark_claim_reconciled": "§4.1 dedelegation -> db.claims.mark_claim_reconciled",
+    "memory_arbiter.db.MemoryDB::list_memory_claims": "§4.1 dedelegation -> db.claims.list_memory_claims",
+    "memory_arbiter.db.MemoryDB::find_structured_claim_pairs": "§4.1 dedelegation -> db.claims.find_structured_claim_pairs",
+    "memory_arbiter.db.MemoryDB::list_structured_open_conflicts_for_memory": "§4.1 dedelegation -> db.claims.list_structured_open_conflicts_for_memory",
+    "memory_arbiter.db.MemoryDB::read_structured_open_conflicts_for_memory": "§4.1 dedelegation -> db.claims.read_structured_open_conflicts_for_memory",
+    "memory_arbiter.db.MemoryDB::structured_pair_gate_states": "§4.1 dedelegation -> db.claims.structured_pair_gate_states",
+    "memory_arbiter.db.MemoryDB::build_conflict_judgment_request": "§4.1 dedelegation -> db.judgments.build_conflict_judgment_request",
+    "memory_arbiter.db.MemoryDB::build_conflict_judgment_requests": "§4.1 dedelegation -> db.judgments.build_conflict_judgment_requests",
+    "memory_arbiter.db.MemoryDB::submit_conflict_judgment": "§4.1 dedelegation -> db.judgments.submit_conflict_judgment",
+    "memory_arbiter.db.MemoryDB::correct_conflict_judgment": "§4.1 dedelegation -> db.judgments.correct_conflict_judgment",
+    "memory_arbiter.db.MemoryDB::list_conflict_judgments": "§4.1 dedelegation -> db.judgments.list_conflict_judgments",
 }
 
 

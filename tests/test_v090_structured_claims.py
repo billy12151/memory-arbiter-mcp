@@ -173,14 +173,14 @@ def test_schema_and_zero_claim_are_distinct_from_failure(tmp_path: Path) -> None
 def test_claim_publish_failure_rolls_back_old_index_and_claims_cascade(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
     memory_id = _write_claim(tools, "5432")["data"]["id"]
-    original = tools.db.list_memory_claims(memory_id)
+    original = tools.db.claims.list_memory_claims(memory_id)
     duplicate = dict(original[0])
     duplicate.pop("id", None)
-    outcome = tools.db.publish_memory_claims(
+    outcome = tools.db.claims.publish_memory_claims(
         memory_id, [duplicate, duplicate], expected_claim_revision=1,
     )
     assert outcome["outcome"] == "error"
-    assert tools.db.list_memory_claims(memory_id)[0]["value"] == "5432"
+    assert tools.db.claims.list_memory_claims(memory_id)[0]["value"] == "5432"
     with tools.db.connection() as conn:
         conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
         conn.commit()
@@ -737,7 +737,7 @@ def test_claim_publish_retries_concurrent_revision_change(
     tools = _tools(tmp_path, mode="off")
     memory_id = _write_claim(tools, "5432")["data"]["id"]
     tools.settings.structured_claim_mode = "beta_all"
-    original = tools.db.publish_memory_claims
+    original = tools.db.claims.publish_memory_claims
     calls = 0
 
     def racing_publish(*args: object, **kwargs: object) -> dict:
@@ -747,10 +747,10 @@ def test_claim_publish_retries_concurrent_revision_change(
             assert tools.db.edit_memory(memory_id, "port: 3306") is not None
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(tools.db, "publish_memory_claims", racing_publish)
+    monkeypatch.setattr(tools.db.claims, "publish_memory_claims", racing_publish)
     rebuilt = tools.memory_rebuild_claims(memory_ids=[memory_id], dry_run=False)
     assert rebuilt["ok"] is True and calls == 2
-    claim = tools.db.list_memory_claims(memory_id)[0]
+    claim = tools.db.claims.list_memory_claims(memory_id)[0]
     assert claim["value"] == "3306"
     assert claim["claim_revision"] == 2
 
@@ -781,18 +781,18 @@ def test_reconciliation_failure_remains_rebuildable_and_doctor_visible(
 ) -> None:
     tools = _tools(tmp_path)
     _write_claim(tools, "5432")
-    original_find = tools.db.find_structured_claim_pairs
+    original_find = tools.db.claims.find_structured_claim_pairs
 
     def fail_collision_query(_memory_id: int) -> dict:
         return {"pairs": [], "evolution_pairs": 0, "error": True}
 
-    monkeypatch.setattr(tools.db, "find_structured_claim_pairs", fail_collision_query)
+    monkeypatch.setattr(tools.db.claims, "find_structured_claim_pairs", fail_collision_query)
     second = _write_claim(tools, "3306")
     second_id = second["data"]["id"]
     assert second["data"]["claim_indexed"] is True
     assert second["data"]["claim_reconciled"] is False
     assert not second["data"].get("attention_required")
-    monkeypatch.setattr(tools.db, "find_structured_claim_pairs", original_find)
+    monkeypatch.setattr(tools.db.claims, "find_structured_claim_pairs", original_find)
 
     plan = tools.memory_rebuild_claims(dry_run=True)
     assert second_id in plan["data"]["memory_ids"]
@@ -815,13 +815,13 @@ def test_open_conflict_read_failure_does_not_advance_reconciled_marker(
 ) -> None:
     tools = _tools(tmp_path)
     _write_claim(tools, "5432")
-    original_read = tools.db.read_structured_open_conflicts_for_memory
+    original_read = tools.db.claims.read_structured_open_conflicts_for_memory
 
     def fail_open_read(_memory_id: int) -> dict:
         return {"rows": [], "error": "injected open-row read failure"}
 
     monkeypatch.setattr(
-        tools.db, "read_structured_open_conflicts_for_memory", fail_open_read,
+        tools.db.claims, "read_structured_open_conflicts_for_memory", fail_open_read,
     )
     second = _write_claim(tools, "3306")
     second_id = second["data"]["id"]
@@ -830,7 +830,7 @@ def test_open_conflict_read_failure_does_not_advance_reconciled_marker(
     assert tools.db.get_memory(second_id)["claims_reconciled_revision"] is None
 
     monkeypatch.setattr(
-        tools.db, "read_structured_open_conflicts_for_memory", original_read,
+        tools.db.claims, "read_structured_open_conflicts_for_memory", original_read,
     )
     assert second_id in tools.memory_rebuild_claims(dry_run=True)["data"]["memory_ids"]
     repaired = tools.memory_rebuild_claims(memory_ids=[second_id], dry_run=False)
@@ -872,13 +872,13 @@ def test_concurrent_writes_surface_a_structured_gate(
 ) -> None:
     tools = _tools(tmp_path)
     rendezvous = Barrier(2)
-    original_publish = tools.db.publish_memory_claims
+    original_publish = tools.db.claims.publish_memory_claims
 
     def synchronized_publish(*args: object, **kwargs: object) -> dict:
         rendezvous.wait(timeout=5)
         return original_publish(*args, **kwargs)
 
-    monkeypatch.setattr(tools.db, "publish_memory_claims", synchronized_publish)
+    monkeypatch.setattr(tools.db.claims, "publish_memory_claims", synchronized_publish)
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
             pool.submit(_write_claim, tools, value)
@@ -1017,7 +1017,7 @@ def test_inactive_write_does_not_publish_or_collide(tmp_path: Path) -> None:
     )
     assert not pending["data"].get("attention_required")
     assert pending["data"]["realtime_conflict_check"]["skipped_reason"] == "inactive"
-    assert tools.db.list_memory_claims(pending["data"]["id"]) == []
+    assert tools.db.claims.list_memory_claims(pending["data"]["id"]) == []
 
 
 def test_structured_claim_mode_config_and_invalid_fallback(

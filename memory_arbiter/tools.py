@@ -1556,7 +1556,7 @@ class MemoryTools:
                 })
             expected_revision = int(record.get("claim_revision") or 1)
             if record.get("status") != "active":
-                publish = self.db.publish_memory_claims(
+                publish = self.db.claims.publish_memory_claims(
                     int(memory_id), [], 0,
                     expected_claim_revision=expected_revision,
                 )
@@ -1575,13 +1575,13 @@ class MemoryTools:
             diagnostics = {}
             try:
                 claims = extract_claims(record, diagnostics)
-                publish = self.db.publish_memory_claims(
+                publish = self.db.claims.publish_memory_claims(
                     int(memory_id), claims,
                     int(diagnostics.get("ambiguous_key_count") or 0),
                     expected_claim_revision=expected_revision,
                 )
             except Exception as exc:
-                self.db.mark_claim_index_failed(
+                self.db.claims.mark_claim_index_failed(
                     int(memory_id), expected_claim_revision=expected_revision,
                 )
                 return finish({
@@ -1614,7 +1614,7 @@ class MemoryTools:
             })
 
         if publish.get("outcome") != "indexed":
-            self.db.mark_claim_index_failed(
+            self.db.claims.mark_claim_index_failed(
                 int(memory_id), expected_claim_revision=expected_revision,
             )
             return finish({
@@ -1631,7 +1631,7 @@ class MemoryTools:
                 ],
             })
 
-        detection = self.db.find_structured_claim_pairs(int(memory_id))
+        detection = self.db.claims.find_structured_claim_pairs(int(memory_id))
         if detection.get("stale_index") or detection.get("error"):
             return finish({
                 "diagnostic": {
@@ -1659,7 +1659,7 @@ class MemoryTools:
         }
         reconciliation_errors: list[str] = []
 
-        existing_state = self.db.read_structured_open_conflicts_for_memory(
+        existing_state = self.db.claims.read_structured_open_conflicts_for_memory(
             int(memory_id)
         )
         if existing_state.get("error"):
@@ -1681,7 +1681,7 @@ class MemoryTools:
                         f"{resolved.get('outcome')}"
                     )
 
-        gate_states = self.db.structured_pair_gate_states(
+        gate_states = self.db.claims.structured_pair_gate_states(
             int(memory_id), list(current_pairs.values())
         )
         if gate_states.get("error"):
@@ -1739,7 +1739,7 @@ class MemoryTools:
         conflicts: list[dict[str, Any]] = []
         pending_user_conflicts: list[dict[str, Any]] = []
         if recorded:
-            current_state = self.db.read_structured_open_conflicts_for_memory(
+            current_state = self.db.claims.read_structured_open_conflicts_for_memory(
                 int(memory_id)
             )
             if current_state.get("error"):
@@ -1755,7 +1755,7 @@ class MemoryTools:
                 if (current_rows.get(conflict_id) or {}).get("judgment_status")
                 in {None, "pending_llm"}
             ]
-            requests = self.db.build_conflict_judgment_requests(pending_ids)
+            requests = self.db.judgments.build_conflict_judgment_requests(pending_ids)
             for conflict_id, peer_id in recorded:
                 current_row = current_rows.get(conflict_id)
                 if current_row is None:
@@ -1809,7 +1809,7 @@ class MemoryTools:
             })
 
         elapsed_before_marker = (time.perf_counter() - started) * 1000
-        marker = self.db.mark_claim_reconciled(
+        marker = self.db.claims.mark_claim_reconciled(
             int(memory_id),
             expected_revision,
             elapsed_before_marker,
@@ -3031,8 +3031,8 @@ class MemoryTools:
             return self.db.state.response(
                 {"error": "conflict id, snapshot pins, and winner must be integers"}, ok=False,
             )
-        request_before = self.db.build_conflict_judgment_request(conflict_id_int)
-        result = self.db.submit_conflict_judgment(
+        request_before = self.db.judgments.build_conflict_judgment_request(conflict_id_int)
+        result = self.db.judgments.submit_conflict_judgment(
             conflict_id_int, left_version, right_version, left_revision, right_revision,
             verdict, recommended_use, winner,
             confidence_hint, reason, bool(affects_current_output), usage_context,
@@ -3086,7 +3086,7 @@ class MemoryTools:
                 {"error": "conflict id, judgment id, snapshot pins, and winner must be integers"},
                 ok=False,
             )
-        result = self.db.correct_conflict_judgment(
+        result = self.db.judgments.correct_conflict_judgment(
             conflict_id_int, verdict, recommended_use, winner,
             reason, judgment_id, left_version, right_version,
             left_revision, right_revision, judge_ref=judge_ref,
@@ -3100,7 +3100,7 @@ class MemoryTools:
             conflict_id_int = int(conflict_id)
         except (TypeError, ValueError):
             return self.db.state.response({"error": "conflict_id must be an integer"}, ok=False)
-        rows = self.db.list_conflict_judgments(conflict_id_int)
+        rows = self.db.judgments.list_conflict_judgments(conflict_id_int)
         return self.db.state.response({
             "conflict_id": conflict_id_int, "judgments": rows, "count": len(rows),
         })
@@ -3697,7 +3697,7 @@ class MemoryTools:
             conflict_source = "open_table"
         judgment_request = None
         if conflict_source == "structured_claim_candidate":
-            judgment_request = self.db.build_conflict_judgment_request(int(primary["id"]))
+            judgment_request = self.db.judgments.build_conflict_judgment_request(int(primary["id"]))
         resolution_kind = primary.get("resolution_kind") or primary.get("judgment_resolution_kind")
         conflict_scope = primary.get("conflict_scope") or primary.get("judgment_conflict_scope")
         recommended_resolution_action = ConflictJudgmentStore.resolution_action(resolution_kind)

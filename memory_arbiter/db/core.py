@@ -103,8 +103,13 @@ class MemoryDB:
         self.state = DegradeState()
         self._db_available = False
         self._sqlite_vec_loadable = False
-        self._claim_store = StructuredClaimStore(self)
-        self._judgment_store = ConflictJudgmentStore(self)
+        # Public sub-store accessors (Phase 3). ``claims``/``judgments`` are the
+        # canonical handles; the underscore aliases are kept for back-compat with
+        # existing internal references.
+        self.claims = StructuredClaimStore(self)
+        self.judgments = ConflictJudgmentStore(self)
+        self._claim_store = self.claims
+        self._judgment_store = self.judgments
         self._init_database()
 
     # ------------------------------------------------------------------
@@ -2690,142 +2695,6 @@ class MemoryDB:
         except sqlite3.Error:
             return None
 
-    # ------------------------------------------------------------------
-    # v0.9: structured claim and judgment store delegation
-    # ------------------------------------------------------------------
-
-    def publish_memory_claims(
-        self,
-        memory_id: int,
-        claims: list[dict[str, Any]],
-        ambiguous_count: int = 0,
-        expected_claim_revision: Optional[int] = None,
-    ) -> dict[str, Any]:
-        return self._claim_store.publish_memory_claims(
-            memory_id, claims, ambiguous_count, expected_claim_revision,
-        )
-
-    def mark_claim_index_failed(
-        self, memory_id: int, expected_claim_revision: Optional[int] = None,
-    ) -> None:
-        self._claim_store.mark_claim_index_failed(memory_id, expected_claim_revision)
-
-    def mark_claim_reconciled(
-        self,
-        memory_id: int,
-        expected_claim_revision: int,
-        enrich_ms: float,
-        candidate_count: int,
-    ) -> dict[str, Any]:
-        return self._claim_store.mark_claim_reconciled(
-            memory_id, expected_claim_revision, enrich_ms, candidate_count,
-        )
-
-    def list_memory_claims(
-        self, memory_id: int, current_only: bool = True,
-    ) -> list[dict[str, Any]]:
-        return self._claim_store.list_memory_claims(memory_id, current_only)
-
-    def find_structured_claim_pairs(self, memory_id: int) -> dict[str, Any]:
-        return self._claim_store.find_structured_claim_pairs(memory_id)
-
-    def list_structured_open_conflicts_for_memory(
-        self, memory_id: int,
-    ) -> list[dict[str, Any]]:
-        return self._claim_store.list_structured_open_conflicts_for_memory(memory_id)
-
-    def read_structured_open_conflicts_for_memory(
-        self, memory_id: int,
-    ) -> dict[str, Any]:
-        return self._claim_store.read_structured_open_conflicts_for_memory(memory_id)
-
-    def structured_pair_gate_states(
-        self, memory_id: int, pairs: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        return self._claim_store.structured_pair_gate_states(memory_id, pairs)
-
-    def build_conflict_judgment_request(
-        self, conflict_id: int,
-    ) -> Optional[dict[str, Any]]:
-        return self._judgment_store.build_conflict_judgment_request(conflict_id)
-
-    def build_conflict_judgment_requests(
-        self, conflict_ids: list[int],
-    ) -> dict[int, dict[str, Any]]:
-        return self._judgment_store.build_conflict_judgment_requests(conflict_ids)
-
-    def submit_conflict_judgment(
-        self,
-        conflict_id: int,
-        expected_left_version: int,
-        expected_right_version: int,
-        expected_left_claim_revision: int,
-        expected_right_claim_revision: int,
-        verdict: str,
-        recommended_use: str,
-        suggested_winner: Optional[int],
-        confidence_hint: Optional[str],
-        reason: str,
-        affects_current_output: bool,
-        usage_context: str,
-        judge_ref: Optional[str] = None,
-        resolution_kind: Optional[str] = None,
-        conflict_scope: Optional[str] = None,
-    ) -> dict[str, Any]:
-        return self._judgment_store.submit_conflict_judgment(
-            conflict_id=conflict_id,
-            expected_left_version=expected_left_version,
-            expected_right_version=expected_right_version,
-            expected_left_claim_revision=expected_left_claim_revision,
-            expected_right_claim_revision=expected_right_claim_revision,
-            verdict=verdict,
-            recommended_use=recommended_use,
-            suggested_winner=suggested_winner,
-            confidence_hint=confidence_hint,
-            reason=reason,
-            affects_current_output=affects_current_output,
-            usage_context=usage_context,
-            judge_ref=judge_ref,
-            resolution_kind=resolution_kind,
-            conflict_scope=conflict_scope,
-        )
-
-    def correct_conflict_judgment(
-        self,
-        conflict_id: int,
-        verdict: str,
-        recommended_use: str,
-        suggested_winner: Optional[int],
-        reason: str,
-        expected_judgment_id: int,
-        expected_left_version: int,
-        expected_right_version: int,
-        expected_left_claim_revision: int,
-        expected_right_claim_revision: int,
-        judge_ref: Optional[str] = None,
-        resolution_kind: Optional[str] = None,
-        conflict_scope: Optional[str] = None,
-    ) -> dict[str, Any]:
-        return self._judgment_store.correct_conflict_judgment(
-            conflict_id=conflict_id,
-            verdict=verdict,
-            recommended_use=recommended_use,
-            suggested_winner=suggested_winner,
-            reason=reason,
-            expected_judgment_id=expected_judgment_id,
-            expected_left_version=expected_left_version,
-            expected_right_version=expected_right_version,
-            expected_left_claim_revision=expected_left_claim_revision,
-            expected_right_claim_revision=expected_right_claim_revision,
-            judge_ref=judge_ref,
-            resolution_kind=resolution_kind,
-            conflict_scope=conflict_scope,
-        )
-
-    def list_conflict_judgments(
-        self, conflict_id: int,
-    ) -> list[dict[str, Any]]:
-        return self._judgment_store.list_conflict_judgments(conflict_id)
 
     def dismissed_pairs_for(self, memory_ids: list[int]) -> set:
         """v0.8.8: canonical ``(a, b)`` pairs (a<b) that are currently dismissed
