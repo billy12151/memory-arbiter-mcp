@@ -52,9 +52,8 @@ class SearchOutcome:
 
 import re
 
-_CJK_RE = re.compile(
-    r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]"
-)
+# Single source: text.CJK_RE_SEARCH (Phase 1). Re-exported here for back-compat.
+from .text import CJK_RE_SEARCH as _CJK_RE
 
 
 def _is_cjk_token(token: str) -> bool:
@@ -64,26 +63,12 @@ def _is_cjk_token(token: str) -> bool:
 def _split_cjk_token(token: str) -> list[str]:
     """Split a CJK run into overlapping 3-character trigrams (unquoted).
 
-    The FTS5 table uses ``tokenize='trigram'``, which indexes 3-char windows
-    and only matches queries that produce at least one trigram. A 2-char
-    phrase such as ``"营销"`` matches nothing under trigram indexing, and a
-    full-token phrase such as ``"营销交付系统"`` requires every trigram to be
-    present contiguously — so an "overspecified" query (extra chars not in the
-    document) silently misses.
-
-    Splitting into overlapping 3-grams joined by ``OR`` fixes both: each
-    trigram is a bare FTS5 term that matches any document whose trigram set
-    contains it, and the OR means shared trigrams still hit even when some
-    trigrams of the query are absent from the document. This restores recall
-    for Chinese queries without adding a tokenizer dependency.
+    Implementation lives in text.split_cjk_token (Phase 1); thin re-export here.
+    The FTS5 table uses ``tokenize='trigram'``: OR-joined trigrams restore recall
+    for Chinese queries where a strict phrase would silently miss.
     """
-    cleaned = "".join(c for c in token if _CJK_RE.search(c) or c.isalnum())
-    if len(cleaned) < 3:
-        # 1-2 char CJK runs cannot form a trigram; emit nothing rather than a
-        # 2-char phrase (which is a guaranteed miss under trigram indexing).
-        # Caller falls back to LIKE for these via the empty-result path.
-        return []
-    return [cleaned[i : i + 3] for i in range(len(cleaned) - 2)]
+    from .text import split_cjk_token
+    return split_cjk_token(token)
 
 
 def _quote_phrase(token: str) -> str:
@@ -318,52 +303,32 @@ def _score_surface(
 # leak through). See design doc §2.3-§2.6.
 
 def _normalize_token_for_tag_match(token: str) -> str:
-    """Normalize a token for tag-level matching.
+    """Normalize a token for tag-level matching (query AND tags).
 
-    Applied to BOTH query tokens and tags (bidirectional — review_1 漏洞 2).
-    Strips a leading ``v`` only when it prefixes a version-like token
-    (``v0.7.2`` → ``0.7.2``) so ``query="v0.7.2"`` matches ``tag="0.7.2"``.
-    Words like ``vue`` are left alone (v not followed by a digit).
+    Implementation lives in text.normalize_token_for_tag_match (Phase 1); thin
+    re-export here. Strips a leading ``v`` only when it prefixes a version token.
     """
-    s = (token or "").lower().strip()
-    if len(s) > 1 and s[0] == "v" and s[1].isdigit():
-        s = s[1:]
-    return s
+    from .text import normalize_token_for_tag_match
+    return normalize_token_for_tag_match(token)
 
 
 def _cjk_substring_match(tag_norm: str, query_token_norm: str) -> bool:
     """CJK substring match — prefix/suffix only, never middle.
 
-    - prefix: tag ``发版`` matches query token ``发版历史`` (tag is query's prefix)
-    - suffix: tag ``历史`` matches query token ``发版历史`` (tag is query's suffix)
-    - middle: tag ``版历`` does NOT match query token ``发版历史`` (prevents
-      bigram-artifact tags created by anchor slicing from leaking through)
-
-    The ``len >= 2`` gate on both sides also excludes single-char tags, which
-    would over-match (design §8 risk 4 / S2: actual risk is under-match of
-    single-char tags, accepted).
+    Implementation lives in text.cjk_substring_match (Phase 1); thin re-export here.
     """
-    if tag_norm == query_token_norm:
-        return True
-    if len(tag_norm) >= 2 and len(query_token_norm) >= 2:
-        return query_token_norm.startswith(tag_norm) or query_token_norm.endswith(tag_norm)
-    return False
+    from .text import cjk_substring_match
+    return cjk_substring_match(tag_norm, query_token_norm)
 
 
 def _is_pure_cjk_token(token: str) -> bool:
-    """A token is "pure CJK" if it contains NO ASCII alphanumeric chars.
+    """True if the token contains NO ASCII alphanumerics (OPPOSITE of _is_cjk_token).
 
-    Used by _score_tags_surface to pick the match path per query token:
-      - pure CJK  → prefix/suffix substring match (发版 / 发版历史)
-      - otherwise → equality match (v0.7.2 / memory / 0.7.2发版 mixed)
-
-    Note this is the OPPOSITE of the existing ``_is_cjk_token`` (which returns
-    True if a token contains ANY CJK char, and serves the FTS trigram path).
-    A mixed token like ``0.7.2发版`` is _is_cjk_token=True but _is_pure_cjk=False,
-    so it correctly takes the equality path (design S1/E2/M3). Do not merge
-    these two helpers.
+    Implementation lives in text.is_pure_cjk_token (Phase 1); thin re-export here.
+    Do NOT merge with _is_cjk_token (any-CJK) — they serve different match paths.
     """
-    return not any(c.isascii() and c.isalnum() for c in token)
+    from .text import is_pure_cjk_token
+    return is_pure_cjk_token(token)
 
 
 def _score_tags_surface(
@@ -1145,29 +1110,11 @@ def search_memories(
 def _coerce_tags(raw: Any) -> list[str]:
     """v0.7.4: normalise a memory's ``tags`` field into a deduped ``list[str]``.
 
-    Accepts whatever row_to_dict / the DB hands us: an actual list, a JSON
-    string, a malformed string, a scalar, or None. Never raises — bad shapes
-    yield []. Deduplicates preserving first-seen order.
+    Implementation lives in text.coerce_tags (Phase 1 single source); thin re-export
+    here so existing imports keep working. Never raises — bad shapes yield [].
     """
-    if raw is None:
-        return []
-    if isinstance(raw, list):
-        tags = raw
-    elif isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            tags = parsed if isinstance(parsed, list) else []
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return []
-    else:
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
-    for t in tags:
-        if isinstance(t, str) and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
+    from .text import coerce_tags
+    return coerce_tags(raw)
 
 
 def _linked_open_items_for_search(

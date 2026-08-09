@@ -77,7 +77,9 @@ GENERIC_ANCHORS: frozenset[str] = frozenset({
 
 
 def _is_cjk_char(ch: str) -> bool:
-    return bool(_CJK_RE.match(ch))
+    """True if a char is CJK. Implementation: text.is_cjk_char (Phase 1); re-export."""
+    from .text import is_cjk_char
+    return is_cjk_char(ch)
 
 
 def _split_runs(text: str) -> list[tuple[str, str]]:
@@ -98,12 +100,11 @@ def _split_runs(text: str) -> list[tuple[str, str]]:
 def _cjk_bigrams(cjk_run: str) -> list[str]:
     """Sliding window of length 2 over a CJK run.
 
-    Single-char CJK run yields nothing — a 1-char anchor is too noisy (single
-    chars hit too widely). If the run is exactly 1 char, return [].
+    Implementation: text.cjk_bigrams (Phase 1); re-export. Single-char run yields
+    [] (a 1-char anchor is too noisy).
     """
-    if len(cjk_run) < 2:
-        return []
-    return [cjk_run[i : i + 2] for i in range(len(cjk_run) - 1)]
+    from .text import cjk_bigrams
+    return cjk_bigrams(cjk_run)
 
 
 def extract_anchors(text: str, mode: str = "query") -> list[Anchor]:

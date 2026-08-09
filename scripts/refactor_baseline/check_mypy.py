@@ -23,6 +23,20 @@ BASELINE = Path(__file__).resolve().parent / "mypy_strict_baseline.txt"
 PY = ROOT / ".venv" / "bin" / "python"
 
 
+_LINE_RE = re.compile(r"(memory_arbiter/[a-z_0-9]+\.py):\d+:")
+
+
+def _strip_lineno(err: str) -> str:
+    """Normalise an error to file + message, dropping the line number.
+
+    Move commits shorten/lengthen functions, shifting the line an error is
+    reported on without changing the error itself. Comparing by full
+    ``file:line: message`` would flag pure line-drift as a NEW error. We only
+    care whether the *kind* of error at a *file* is new.
+    """
+    return _LINE_RE.sub(r"\1:@:", err)
+
+
 def current_errors() -> list[str]:
     proc = subprocess.run(
         [str(PY), "-m", "mypy", "--strict", "memory_arbiter/"],
@@ -30,11 +44,11 @@ def current_errors() -> list[str]:
     )
     out = proc.stdout + proc.stderr
     lines = [ln for ln in out.splitlines() if "error:" in ln]
-    return sorted(re.sub(r" \[[a-z-]+\]$", "", ln) for ln in lines)
+    return sorted(_strip_lineno(re.sub(r" \[[a-z-]+\]$", "", ln)) for ln in lines)
 
 
 def main() -> int:
-    baseline = set(BASELINE.read_text(encoding="utf-8").splitlines())
+    baseline = {_strip_lineno(e) for e in BASELINE.read_text(encoding="utf-8").splitlines()}
     now = current_errors()
     new = [e for e in now if e not in baseline]
     gone = [e for e in baseline if e not in now]

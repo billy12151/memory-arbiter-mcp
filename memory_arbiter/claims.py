@@ -55,15 +55,18 @@ _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 def canon_token(value: Any) -> str:
-    """Canonicalise entity/attribute/scope without semantic aliasing."""
-    if value is None:
-        return ""
-    text = re.sub(r"\s+", " ", str(value).strip()).lower()
-    return text.strip("。，,;；:：.、· \t-—")
+    """Canonicalise entity/attribute/scope without semantic aliasing.
+
+    Implementation lives in text.canon_token (Phase 1 single source); re-export here.
+    """
+    from .text import canon_token
+    return canon_token(value)
 
 
 def canon_scope(value: Any) -> str:
-    return canon_token(value)
+    """Implementation lives in text.canon_scope (Phase 1); re-export here."""
+    from .text import canon_scope
+    return canon_scope(value)
 
 
 def canon_value(value: Any, *, value_type: Optional[str] = None) -> str:

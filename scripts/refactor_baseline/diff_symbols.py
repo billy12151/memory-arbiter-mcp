@@ -57,6 +57,14 @@ DEFAULT_ALLOWED_MODULE_MOVES = {
     "memory_arbiter.text", "memory_arbiter.timeutil", "memory_arbiter.constants",
 }
 
+# Symbols the refactor REMOVES on purpose (internal aliases with no external or
+# test dependency), each justified in the plan. Keyed label -> reason.
+ALLOWED_REMOVALS = {
+    # db.py's duplicate `import re as _re` (line ~3789); superseded by
+    # text.CJK_RE_SUBJECT re-export. R11-补. No test/external import of `_re`.
+    "memory_arbiter.db::_re": "R11-补: duplicate `import re as _re` removed; superseded by text.CJK_RE_SUBJECT",
+}
+
 
 def _index(snapshot: dict) -> dict[str, dict]:
     """Flatten snapshot into {label: descriptor} keyed by module/class + name."""
@@ -81,11 +89,15 @@ def main() -> int:
 
     unsafe: list[str] = []
     moved_ok: list[str] = []
+    removed_ok: list[str] = []
 
     for label, bdesc in before.items():
         adesc = after.get(label)
         if adesc is None:
-            unsafe.append(f"MISSING  {label}  (was {bdesc.get('kind')} in {bdesc.get('module')})")
+            if label in ALLOWED_REMOVALS:
+                removed_ok.append(f"removed {label}  ({ALLOWED_REMOVALS[label]})")
+            else:
+                unsafe.append(f"MISSING  {label}  (was {bdesc.get('kind')} in {bdesc.get('module')})")
             continue
         bsig, asig = _norm_sig(bdesc.get("signature")), _norm_sig(adesc.get("signature"))
         if bsig != asig:
@@ -104,6 +116,10 @@ def main() -> int:
     if moved_ok:
         print(f"OK module moves ({len(moved_ok)}):")
         for line in moved_ok:
+            print(f"  ~ {line}")
+    if removed_ok:
+        print(f"OK allowed removals ({len(removed_ok)}):")
+        for line in removed_ok:
             print(f"  ~ {line}")
     if added:
         print(f"New symbols ({len(added)}, allowed):")

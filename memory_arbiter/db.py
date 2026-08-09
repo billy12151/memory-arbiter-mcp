@@ -3747,67 +3747,37 @@ def _canon_entity(value: Any) -> str:
     tool) and re-applied at list/detection read time (idempotent) so storage stays
     deduped regardless of how a value was written. Returns "" for empty/None.
     """
-    from .claims import canon_token
-    return canon_token(value)
+    from .text import canon_entity
+    return canon_entity(value)
 
 
 def _canon_scope(value: Any) -> str:
     """Same lexical normalisation as entity; kept separate for API clarity."""
-    from .claims import canon_scope
+    from .text import canon_scope
     return canon_scope(value)
 
 
 def _coerce_tags_db(raw: Any) -> list[str]:
-    """Normalise a ``tags`` value into a deduped ``list[str]`` (db-side copy).
+    """Normalise a ``tags`` value into a deduped ``list[str]``.
 
-    Mirrors ``search._coerce_tags`` but lives here so db.py scan logic doesn't
-    reverse-depend on search.py. Accepts list / JSON string / malformed / None;
-    never raises.
+    Implementation lives in text.coerce_tags (Phase 1 single source); thin re-export
+    here so db.py scan logic and existing imports keep working.
     """
-    if raw is None:
-        return []
-    if isinstance(raw, list):
-        tags = raw
-    elif isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            tags = parsed if isinstance(parsed, list) else []
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return []
-    else:
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
-    for t in tags:
-        if isinstance(t, str) and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
+    from .text import coerce_tags
+    return coerce_tags(raw)
 
 
 # CJK Unicode range for subject tokenisation (write_hints candidate recall).
-import re as _re
-
-_CJK_CHAR_RE = _re.compile(r"[㐀-鿿豈-﫿぀-ヿ가-힯]")
+# Single source: text.CJK_RE_SUBJECT (contiguous 㐀-鿿 range; a superset of
+# text.CJK_RE_SEARCH differing only by U+4DC0-4DFF). Re-exported for back-compat.
+from .text import CJK_RE_SUBJECT as _CJK_CHAR_RE
 
 
 def _subject_tokens(subject: str) -> list[str]:
     """Split a subject into tokens for LIKE-based candidate recall.
 
-    CJK: split into 2-char sliding windows (LIKE %xx% is coarse enough).
-    ASCII: split on whitespace/punctuation, keep tokens ≥ 2 chars.
+    Implementation lives in text.subject_tokens (Phase 1); thin re-export here.
     """
-    if not subject:
-        return []
-    tokens: list[str] = []
-    for word in subject.split():
-        if not word:
-            continue
-        if _CJK_CHAR_RE.search(word):
-            # CJK-heavy token: use 2-char sliding windows.
-            chars = "".join(c for c in word if _CJK_CHAR_RE.match(c) or c.isalnum())
-            for i in range(len(chars) - 1):
-                tokens.append(chars[i:i + 2])
-        elif len(word) >= 2:
-            tokens.append(word.lower())
-    return tokens
+    from .text import subject_tokens
+    return subject_tokens(subject)
+
