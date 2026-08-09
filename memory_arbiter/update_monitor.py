@@ -30,16 +30,12 @@ def _now() -> datetime:
 
 
 def _parse_time(value: Any) -> Optional[datetime]:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        normalized = value.replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(normalized)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    except ValueError:
-        return None
+    """Parse an ISO-8601 string to UTC; None on bad input.
+
+    Implementation lives in timeutil.parse_iso8601_utc (Phase 1); thin re-export.
+    """
+    from .timeutil import parse_iso8601_utc
+    return parse_iso8601_utc(value)
 
 
 def _version_parts(version: str) -> tuple[int, ...]:

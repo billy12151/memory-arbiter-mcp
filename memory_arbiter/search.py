@@ -28,9 +28,10 @@ RetrievalMode = Literal[
 
 # v0.7.4.1: single source of truth for the recent-fallback warning. The legacy
 # bm25 path infers retrieval_mode by sniffing this warning (it has no structured
-# mode signal), so the literal must live here as a constant — never inline it.
+# mode signal), so the literal must live in ONE place — never inline it.
 # Tests match on the prefix substring, so keep the prefix stable.
-_NO_DIRECT_MATCH_PREFIX = "No direct memory match"
+# Single source: constants.NO_DIRECT_MATCH_PREFIX (Phase 1); re-exported here.
+from .constants import NO_DIRECT_MATCH_PREFIX as _NO_DIRECT_MATCH_PREFIX
 
 
 @dataclass
@@ -187,18 +188,12 @@ def _trust_bonus(record: dict[str, Any]) -> float:
 
 
 def _parse_ingest_time(record: dict[str, Any]) -> Optional[datetime]:
-    """Parse ingest_time as a timezone-aware UTC datetime, if possible."""
-    raw = record.get("ingest_time") or ""
-    if not raw:
-        return None
-    try:
-        normalized = raw.replace("Z", "+00:00")
-        ts = datetime.fromisoformat(normalized)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return ts.astimezone(timezone.utc)
-    except (ValueError, TypeError):
-        return None
+    """Parse ingest_time as a timezone-aware UTC datetime, if possible.
+
+    Implementation lives in timeutil.parse_iso8601_utc (Phase 1); thin re-export.
+    """
+    from .timeutil import parse_iso8601_utc
+    return parse_iso8601_utc(record.get("ingest_time"))
 
 
 def _ingest_sort_key(record: dict[str, Any]) -> float:
@@ -800,23 +795,11 @@ def _sanitize_fts_query_or(query: str) -> str:
 def _parse_time(s: Any) -> Optional[datetime]:
     """v0.7.3: parse an ISO 8601 time string for after_time/before_time filtering.
 
-    Naive datetimes are treated as UTC (conservative). Returns None on:
-      - falsy input (None / "" / 0 / [] / {} — also caught falsy by callers)
-      - non-string input that reaches the try (int / list → TypeError)
-      - unparseable strings (ValueError)
-    Catches (ValueError, TypeError) to mirror _parse_ingest_time (search.py:173);
-    without TypeError the whole search would crash if an MCP caller passed a
-    non-string value (design §3.4 D1).
+    Implementation lives in timeutil.parse_iso8601 (Phase 1); thin re-export here.
+    Naive datetimes are treated as UTC; returns None on falsy/unparseable input.
     """
-    if not s:
-        return None
-    try:
-        dt = datetime.fromisoformat(s) if isinstance(s, str) else datetime.fromisoformat(str(s))
-    except (ValueError, TypeError):
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    from .timeutil import parse_iso8601
+    return parse_iso8601(s)
 
 
 def _sanitize_tags_filter(tags_filter: Optional[list[str]]) -> Optional[list[str]]:

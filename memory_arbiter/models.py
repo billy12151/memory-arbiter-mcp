@@ -29,7 +29,9 @@ class MemoryStatus(str, Enum):
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    """Current UTC time as ISO-8601 (µs stripped). Implementation: timeutil.utc_now_iso (Phase 1)."""
+    from .timeutil import utc_now_iso
+    return utc_now_iso()
 
 
 def normalize_iso(value: Optional[str]) -> str:

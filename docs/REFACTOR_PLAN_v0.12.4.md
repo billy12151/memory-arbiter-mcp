@@ -16,7 +16,7 @@ mema 的**模块边界设计是合理的**——models / config / db / search / 
 1. 三个核心文件严重超限：`tools.py` 4871 行（120 个方法）、`db.py` 3813 行（98 个方法）、`doctor.py` 1880 行（31 个检查）。`MemoryDB` 和 `MemoryTools` 都已退化为 God Object。
 2. 一批真正的领域逻辑（分章管线、冲突信号、产品面调度、语义冲突 worker、sections CRUD、workspace 别名治理）被埋在巨型类内部，无法独立理解、独立测试、独立复用。
 3. 底层小方法存在系统性重复：CJK/token 文本工具 3 处、ISO 时间解析 4 处、settings 防御性 `getattr` 50+ 处、隔离字符串字面量散落 6 个文件、conflict source/status 字面量贯穿 tools+search+db。
-4. 硬编码契约常量在注释里反复声明"single source of truth"（`_NO_DIRECT_MATCH_PREFIX`、`_RECENT_FALLBACK_WARNING_PREFIX`），恰恰说明它们需要一个真正的家。
+4. 硬编码契约常量在注释里反复声明"single source of truth"（`_NO_DIRECT_MATCH_PREFIX`），恰恰说明它们需要一个真正的家。（注：方案初稿另列 `_RECENT_FALLBACK_WARNING_PREFIX`，经核查该常量**在代码中不存在**，系误记，已删除。）
 
 **方案：两条轨道交付 v0.12.4。第一条是 6 个阶段、约 17 天的架构拆分轨，使用纯代码移动 + 委托模式，要求行为不漂移；第二条是 hardening 轨，把本轮对抗性 review 发现的授权、隔离、事务、配置容错、输入规范化、并发生命周期缺陷作为显式行为变更逐项修复。阶段仅为提交节奏，全程只发一个补丁版本。**
 
@@ -222,7 +222,7 @@ memory_arbiter/
 | `IsolationLevel`（none/weak/strict）+ `isolation_active(level)` | tools ×3、search ×9、doctor、console_api | `models.py` StrEnum；search 的 9 处 `isolation == "strict" and ws_canonical` 折叠为 `strict_ws(isolation, ws_canonical)` 一处实现 |
 | `ConflictSource`（open_table/structured_claim_candidate/metadata_write_hint/runtime_metadata_hint/metadata_overlap）、`ConflictStatus` | tools 信号组装、db 记录、search 透传 | `models.py` StrEnum |
 | `RetrievalMode` | search.py Literal 别名 | 迁入 models（StrEnum），保持 JSON 序列化兼容 |
-| `_NO_DIRECT_MATCH_PREFIX`、`_RECENT_FALLBACK_WARNING_PREFIX` | search.py（注释自述 single source of truth） | 移至 `constants.py`，bm25 嗅探逻辑不变 |
+| `_NO_DIRECT_MATCH_PREFIX` | search.py（注释自述 single source of truth） | 移至 `constants.py`，bm25 嗅探逻辑不变（`_RECENT_FALLBACK_WARNING_PREFIX` 经核查不存在，已删） |
 | 响应包络 `{"ok","mode","warnings","degraded","data"}` | 139 处散落调用 | 保持 `DegradeState.response` 唯一出口（不动），新增类型化 `ToolResponse` 仅做文档/校验，不改运行行为 |
 
 ### 5.4 Settings 单一真相
