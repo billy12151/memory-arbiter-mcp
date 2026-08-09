@@ -17,6 +17,7 @@ from ..conflict_judgments import ConflictJudgmentStore
 from ..degrade import DegradeState
 from ..models import MemoryRecord, utc_now_iso
 from .sections_store import SectionStore
+from .semantic_notices import SemanticNoticeStore
 
 # Explicit export list. The pre-split db.py surfaced its top-level imports
 # (json/re/sqlite3/…) as module attributes; the package facade re-exports them
@@ -110,6 +111,7 @@ class MemoryDB:
         self.claims = StructuredClaimStore(self)
         self.judgments = ConflictJudgmentStore(self)
         self.sections = SectionStore(self)
+        self.semantic_notices = SemanticNoticeStore(self)
         self._claim_store = self.claims
         self._judgment_store = self.judgments
         self._init_database()
@@ -2787,79 +2789,28 @@ class MemoryDB:
         right_claim_revision: Optional[int] = None,
         source: str = "semantic_write_gate",
     ) -> dict[str, Any]:
-        if not self._db_available or not self.state.sqlite_writable:
-            return {"outcome": "unavailable"}
-        now = utc_now_iso()
-        with self.write_transaction() as conn:
-            try:
-                cur = conn.execute(
-                    """
-                    INSERT INTO semantic_notices(
-                        created_at, status, severity, source, memory_id, peer_id,
-                        conflict_id, notice_type, title, message, payload, dedupe_key,
-                        left_version, right_version, left_claim_revision, right_claim_revision
-                    ) VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        now, str(severity or "normal"), str(source or "semantic_write_gate"),
-                        int(memory_id), int(peer_id) if peer_id is not None else None,
-                        int(conflict_id) if conflict_id is not None else None,
-                        str(notice_type or "semantic_candidate"), str(title or "Semantic notice"),
-                        str(message or ""), json.dumps(payload or {}, ensure_ascii=False),
-                        dedupe_key, left_version, right_version,
-                        left_claim_revision, right_claim_revision,
-                    ),
-                )
-                return {"outcome": "created", "notice_id": int(cur.lastrowid)}
-            except sqlite3.IntegrityError:
-                # A dedupe_key collision is the only benign IntegrityError here;
-                # anything else (FK violation, etc.) is a real write failure
-                # and must not be masked as "deduped". The failed INSERT leaves
-                # nothing to commit, so returning (rather than re-raising) is safe
-                # and keeps the worker from crashing on a bad notice.
-                if not dedupe_key:
-                    return {"outcome": "error", "reason": "integrity_constraint"}
-                row = conn.execute(
-                    "SELECT id FROM semantic_notices WHERE dedupe_key=?",
-                    (dedupe_key,),
-                ).fetchone()
-                if row is None:
-                    # Constraint fired but not on our dedupe_key (e.g. FK);
-                    # do not claim a dedupe that didn't happen.
-                    return {"outcome": "error", "reason": "integrity_constraint"}
-                return {"outcome": "deduped", "notice_id": int(row["id"])}
+        return self.semantic_notices.record_semantic_notice(
+            memory_id=memory_id,
+            peer_id=peer_id,
+            severity=severity,
+            notice_type=notice_type,
+            title=title,
+            message=message,
+            payload=payload,
+            dedupe_key=dedupe_key,
+            conflict_id=conflict_id,
+            left_version=left_version,
+            right_version=right_version,
+            left_claim_revision=left_claim_revision,
+            right_claim_revision=right_claim_revision,
+            source=source,
+        )
 
     def list_semantic_notices(self, status: str = "open", limit: int = 10) -> list[dict[str, Any]]:
-        if not self._db_available:
-            return []
-        try:
-            with self.connection() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM semantic_notices WHERE status=? ORDER BY created_at DESC, id DESC LIMIT ?",
-                    (str(status or "open"), max(1, min(100, int(limit)))),
-                ).fetchall()
-            notices = [row_to_dict(row) for row in rows]
-            for notice in notices:
-                try:
-                    notice["payload"] = json.loads(notice.get("payload") or "{}")
-                except Exception:
-                    notice["payload"] = {}
-            return notices
-        except Exception:
-            return []
+        return self.semantic_notices.list_semantic_notices(status=status, limit=limit)
 
     def semantic_notice_counts(self) -> dict[str, int]:
-        if not self._db_available:
-            return {}
-        try:
-            with self.connection() as conn:
-                rows = conn.execute(
-                    "SELECT status, COUNT(*) AS count FROM semantic_notices GROUP BY status"
-                ).fetchall()
-            return {str(row["status"]): int(row["count"] or 0) for row in rows}
-        except Exception:
-            return {}
-
+        return self.semantic_notices.semantic_notice_counts()
 
     def is_semantic_pair_closed(
         self,
@@ -2869,69 +2820,12 @@ class MemoryDB:
         right_version: Optional[int] = None,
         notice_type: str = "semantic_pair",
     ) -> bool:
-        if not self._db_available:
-            return False
-        a, b = sorted([int(left_id), int(right_id)])
-        try:
-            with self.connection() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM semantic_notices
-                    WHERE status IN ('dismissed','resolved')
-                      AND notice_type=?
-                      AND ((memory_id=? AND peer_id=?) OR (memory_id=? AND peer_id=?))
-                    """,
-                    (notice_type, a, b, b, a),
-                ).fetchall()
-            for row in rows:
-                notice = row_to_dict(row)
-                lv = notice.get("left_version")
-                rv = notice.get("right_version")
-                if left_version is None or right_version is None:
-                    if lv is not None and rv is not None:
-                        return True
-                    continue
-                if lv is None or rv is None:
-                    continue
-                if notice.get("memory_id") == left_id:
-                    if lv == left_version and rv == right_version:
-                        return True
-                else:
-                    if lv == right_version and rv == left_version:
-                        return True
-        except Exception:
-            return False
-        return False
+        return self.semantic_notices.is_semantic_pair_closed(
+            left_id, right_id, left_version, right_version, notice_type,
+        )
 
     def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "") -> dict[str, Any]:
-        if not self._db_available or not self.state.sqlite_writable:
-            return {"outcome": "unavailable"}
-        status = str(status or "").strip().lower()
-        if status not in {"open", "delivered", "dismissed", "resolved", "stale"}:
-            return {"outcome": "invalid_status"}
-        column = {
-            "delivered": "delivered_at",
-            "dismissed": "dismissed_at",
-            "resolved": "resolved_at",
-            "stale": "resolved_at",
-        }.get(status)
-        now = utc_now_iso()
-        with self.write_transaction() as conn:
-            if column:
-                cur = conn.execute(
-                    f"UPDATE semantic_notices SET status=?, {column}=? WHERE id=?",
-                    (status, now, int(notice_id)),
-                )
-            else:
-                cur = conn.execute(
-                    "UPDATE semantic_notices SET status=? WHERE id=?",
-                    (status, int(notice_id)),
-                )
-        return {"outcome": "updated" if cur.rowcount else "not_found", "reason": reason}
-
-    # ------------------------------------------------------------------
-    #  v0.7.5: scan_log.jsonl (diagnostic layer for conflict scan + doctor)
-    # ------------------------------------------------------------------
+        return self.semantic_notices.update_semantic_notice_status(notice_id, status, reason)
 
     @property
     def scan_log_path(self) -> Path:
