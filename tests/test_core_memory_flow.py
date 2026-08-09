@@ -1,0 +1,802 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+from memory_arbiter.arbitration import compare_memories
+from memory_arbiter.config import Settings, parse_bool
+from memory_arbiter.db import MemoryDB
+from memory_arbiter.embedder import EmbedResult
+from memory_arbiter.models import SourceType
+from memory_arbiter.tools import MemoryTools
+
+
+class _MockManagedEmbedder:
+    """Minimal mock for ManagedEmbedder — wraps a plain encode function.
+
+    Mirrors the production Never-raises contract: if _encode raises, the
+    exception is caught, last_encode_error is set, and an empty EmbedResult
+    is returned so callers must check er.embedding.
+    """
+
+    def __init__(self, encode_fn):
+        self._encode = encode_fn
+        self.embedding_space_id = "mock_space_id"
+        self.last_encode_error = None
+
+    def embed_text(self, prefix="", body="", max_body_chars=None):
+        # Mirror the production separator so the prefix's trailing token and the
+        # body's leading token are not merged (e.g. "alpha"+"alpha x" → "alphaalpha").
+        sep = "\n" if prefix and body else ""
+        text = (prefix + sep + body).strip()
+        try:
+            emb = self._encode(text)
+        except Exception as exc:
+            self.last_encode_error = str(exc)
+            return EmbedResult(embedding=[], truncated=True, original_tokens=0, used_tokens=0)
+        return EmbedResult(embedding=emb, truncated=False, original_tokens=0, used_tokens=0)
+
+
+def make_tools(tmp_path: Path) -> MemoryTools:
+    settings = Settings(
+        db_path=tmp_path / "memory.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        client="codex",
+        agent_id="agent-a",
+        workspace="repo-a",
+        enable_sqlite_vec=False,
+    )
+    return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def make_vec_tools(tmp_path: Path) -> MemoryTools:
+    pytest.importorskip("sqlite_vec")
+    settings = Settings(
+        db_path=tmp_path / "memory-vec.sqlite3",
+        backup_jsonl=tmp_path / "backup-vec.jsonl",
+        client="codex",
+        agent_id="agent-a",
+        workspace="repo-a",
+        enable_sqlite_vec=True,
+        vec_dim=2,
+        split_threshold=1,
+    )
+    return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def clear_config_env(monkeypatch) -> None:
+    for key in (
+        "MEMORY_ARBITER_CONFIG",
+        "MEMORY_ARBITER_DB_PATH",
+        "MEMORY_ARBITER_BACKUP_JSONL",
+        "MEMORY_ARBITER_POLICY",
+        "MEMORY_ARBITER_CLIENT",
+        "MEMORY_ARBITER_AGENT_ID",
+        "MEMORY_ARBITER_WORKSPACE",
+        "MEMORY_ARBITER_ENABLE_SQLITE_VEC",
+        "MEMORY_ARBITER_VEC_DIM",
+        "MEMORY_ARBITER_RECALL_POOL_CAP",
+        "MEMORY_ARBITER_CONTENT_LIKE_CAP",
+        "MEMORY_ARBITER_EMBEDDING_PROVIDER",
+        "MEMORY_ARBITER_EMBEDDING_MODEL_PATH",
+        "MEMORY_ARBITER_EMBEDDING_AUTO_QUERY",
+        "MEMORY_ARBITER_EMBEDDING_AUTO_WRITE",
+        "MEMORY_ARBITER_GGUF",
+        "MEMORY_ARBITER_TOOL_PROFILE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+
+def test_write_and_search(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="Project API token policy lives in README security section.",
+        tags=["policy", "security"],
+        source_type="document_extracted",
+        event_time="2026-01-01T00:00:00Z",
+        subject="api-token-policy",
+    )
+    assert written["ok"] is True
+    assert written["data"]["id"] is not None
+
+    found = tools.memory_search(query="token policy", workspace="repo-a")
+    assert found["ok"] is True
+    assert found["data"]["count"] >= 1
+    assert found["data"]["results"][0]["subject"] == "api-token-policy"
+
+
+def test_chinese_search_matches_contiguous_fragment(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="京东科技金融营销系统梳理，覆盖金营、营销链路、活动费用申请和活动配置。",
+        tags=["营销系统", "金营", "系统梳理"],
+        source_type="document_extracted",
+        subject="京东科技金融-营销系统梳理",
+    )
+
+    found = tools.memory_search(query="营销系统", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert found["data"]["count"] >= 1
+    assert found["data"]["results"][0]["subject"] == "京东科技金融-营销系统梳理"
+
+
+def test_chinese_search_overspecified_query_still_matches(tmp_path: Path) -> None:
+    """Regression for the original '营销交付系统' bug: a query whose bigrams
+    are not all present in the document must still hit FTS5 via OR recall on
+    the shared bigrams, instead of falling back to recent memories."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="营销交付需求提报：银行走XBP，自持走邮件，财富走JoySpace。活动配置走权益中台。",
+        tags=["营销交付", "营销链路"],
+        source_type="document_extracted",
+        subject="营销交付-需求提报链路",
+    )
+
+    # "营销交付系统" has bigrams (付系, 系统) absent from the doc; the shared
+    # bigrams (营销, 销交, 交付) must still match via OR.
+    found = tools.memory_search(query="营销交付系统", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert found["data"]["count"] >= 1
+    assert found["data"]["results"][0]["subject"] == "营销交付-需求提报链路"
+    # Must NOT have triggered the recent-memory fallback.
+    assert not any("No direct memory match" in w for w in found["warnings"])
+
+
+def test_search_returns_recent_memories_when_no_direct_match(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="来源：营销系统梳理.xlsx。营销链路包含需求提报、费用申请、设计图提报、活动配置等环节。",
+        tags=["营销系统", "金营", "PRD参考"],
+        source_type="document_extracted",
+        subject="京东科技金融-营销系统梳理",
+        event_time="2026-07-04T09:00:30Z",
+    )
+
+    found = tools.memory_search(query="营销运营全流程 系统", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert found["data"]["count"] == 1
+    assert found["data"]["results"][0]["subject"] == "京东科技金融-营销系统梳理"
+    assert any("No direct memory match" in warning for warning in found["warnings"])
+
+
+def test_recent_fallback_ranks_by_trust_then_recency(tmp_path: Path) -> None:
+    """Regression: when a query misses FTS5 and falls back to recent memories,
+    a user_confirmed+locked record must outrank a newer agent_generated+normal
+    one. Previously pure ``ingest_time DESC`` ordering let daily agent chatter
+    bury authoritative records."""
+    tools = make_tools(tmp_path)
+    # Newer but low-trust: agent chatter from today.
+    tools.memory_write(
+        content="memory-arbiter v0.2.4 release notes supersede tooling spec",
+        subject="release-chatter",
+        source_type="agent_generated",
+        event_time="2026-07-05T00:00:00Z",
+    )
+    # Older but authoritative: the actual system overview the user confirmed.
+    tools.memory_write(
+        content="营销系统梳理：金营平台、权益中台、活动配置全链路系统清单",
+        subject="营销系统-权威",
+        source_type="user_confirmed",
+        confidence=1.0,
+        event_time="2026-07-04T00:00:00Z",
+    )
+
+    found = tools.memory_search(query="完全不存在的查询词 xyz123", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert any("No direct memory match" in w for w in found["warnings"])
+    results = found["data"]["results"]
+    assert len(results) == 2
+    # Authoritative record must rank first despite being older.
+    assert results[0]["subject"] == "营销系统-权威"
+    assert results[0]["protection_level"] == "locked"
+    assert results[1]["subject"] == "release-chatter"
+
+
+def test_memory_recent_ignores_workspace_filter(tmp_path: Path) -> None:
+    # v0.7.4 (M3): workspace is reserved metadata; memory_recent lists the
+    # whole shared library regardless of the workspace argument.
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="Old memory", subject="old", event_time="2026-01-01T00:00:00Z")
+    tools.memory_write(content="New memory", subject="new", event_time="2026-02-01T00:00:00Z")
+    tools.memory_write(content="Other workspace", subject="other", workspace="repo-b", event_time="2026-03-01T00:00:00Z")
+
+    recent = tools.memory_recent(workspace="repo-a", limit=10)
+
+    assert recent["ok"] is True
+    subjects = [record["subject"] for record in recent["data"]["results"]]
+    # All three visible — passing workspace="repo-a" does NOT hide repo-b.
+    assert "other" in subjects
+    assert "new" in subjects
+    assert "old" in subjects
+    # Ordered newest-first by event_time.
+    assert subjects == ["other", "new", "old"]
+
+
+def test_arbitration_prefers_event_time(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(content="Use port 3000", subject="dev-port", event_time="2026-01-01T00:00:00Z")
+    new = tools.memory_write(content="Use port 5173", subject="dev-port", event_time="2026-02-01T00:00:00Z")
+    result = tools.memory_arbitrate(old["data"]["id"], new["data"]["id"], mark_conflict=True)
+
+    assert result["ok"] is True
+    assert result["data"]["comparison"]["winner_id"] == new["data"]["id"]
+    assert result["data"]["conflict_id"] is not None
+
+
+def test_user_confirmed_is_protected(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    confirmed = tools.memory_write(
+        content="User says production branch is main",
+        subject="prod-branch",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    generated = tools.memory_write(
+        content="Agent guessed production branch is release",
+        subject="prod-branch",
+        source_type="agent_generated",
+        event_time="2026-03-01T00:00:00Z",
+    )
+    result = tools.memory_arbitrate(confirmed["data"]["id"], generated["data"]["id"], authorized=True)
+
+    assert result["data"]["comparison"]["winner_id"] == confirmed["data"]["id"]
+    assert "automatic overwrite is forbidden" in result["data"]["comparison"]["reasons"][0]
+
+
+def test_arbitrate_apply_requires_authorization(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(
+        content="old fact",
+        subject="fact",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    new = tools.memory_write(
+        content="new fact",
+        subject="fact",
+        source_type="agent_generated",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    loser_id, winner_id = old["data"]["id"], new["data"]["id"]
+
+    # Unauthorized: the comparison still runs, but the loser is NOT auto-superseded.
+    rejected = tools.memory_arbitrate(loser_id, winner_id, authorized=False)
+    assert rejected["ok"] is True
+    assert rejected["data"]["applied"] is False
+    assert tools.db.get_memory(loser_id)["status"] == "active"
+
+    # Authorized: the non-protected loser is auto-superseded.
+    applied = tools.memory_arbitrate(loser_id, winner_id, authorized=True)
+    assert applied["data"]["applied"] is True
+    assert tools.db.get_memory(loser_id)["status"] == "superseded"
+
+
+def test_arbitrate_deprecated_apply_param_errors_loudly(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(content="old", subject="s", source_type="agent_generated", event_time="2026-01-01T00:00:00Z")
+    new = tools.memory_write(content="new", subject="s", source_type="agent_generated", event_time="2026-02-01T00:00:00Z")
+
+    # The deprecated `apply` arg must fail loudly with a migration hint — never a silent no-op.
+    rejected = tools.memory_arbitrate(old["data"]["id"], new["data"]["id"], apply=True)
+    assert rejected["ok"] is False
+    assert rejected["data"]["applied"] is False
+    assert "authorized" in rejected["data"]["error"]
+    # Loser is untouched.
+    assert tools.db.get_memory(old["data"]["id"])["status"] == "active"
+
+
+def test_confirm_promotes_record(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(content="OpenClaw memory plugin is enabled for agent alpha", source_type="pending", subject="memory-plugin-enabled")
+    confirmed = tools.memory_confirm(written["data"]["id"], source_ref="user-chat", authorized=True)
+
+    assert confirmed["ok"] is True
+    assert confirmed["data"]["record"]["source_type"] == SourceType.USER_CONFIRMED.value
+    assert confirmed["data"]["record"]["protection_level"] == "locked"
+
+
+def test_confirm_rejects_inactive_memory(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(
+        content="old fact",
+        subject="fact",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    new = tools.memory_write(
+        content="new fact",
+        subject="fact",
+        source_type="agent_generated",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    old_id = old["data"]["id"]
+    assert tools.memory_supersede(
+        memory_id=old_id,
+        reason="replaced",
+        superseded_by=new["data"]["id"],
+        authorized=True,
+    )["ok"] is True
+
+    rejected = tools.memory_confirm(old_id, source_ref="late-user-chat", authorized=True)
+    assert rejected["ok"] is False
+    assert rejected["data"]["confirmed"] is False
+    assert "not active" in rejected["data"]["error"]
+    assert tools.db.get_memory(old_id)["status"] == "superseded"
+
+
+def test_confirm_requires_authorization(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(content="a fact to confirm", source_type="agent_generated", subject="fact-to-confirm")
+    memory_id = written["data"]["id"]
+
+    rejected = tools.memory_confirm(memory_id=memory_id, source_ref="chat", authorized=False)
+    assert rejected["ok"] is False
+    assert rejected["data"]["confirmed"] is False
+    assert "authorized" in rejected["data"]["error"]
+    # Memory must stay unchanged when unauthorized.
+    unchanged = tools.db.get_memory(memory_id)
+    assert unchanged["source_type"] == "agent_generated"
+    assert unchanged["protection_level"] == "normal"
+
+    # Authorized: promotion succeeds.
+    confirmed = tools.memory_confirm(memory_id=memory_id, source_ref="chat", authorized=True)
+    assert confirmed["ok"] is True
+    assert confirmed["data"]["record"]["source_type"] == SourceType.USER_CONFIRMED.value
+    assert confirmed["data"]["record"]["protection_level"] == "locked"
+
+
+def test_supersede_requires_authorization(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="Old spec",
+        subject="spec",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+
+    rejected = tools.memory_supersede(memory_id=memory_id, reason="replaced", authorized=False)
+    assert rejected["ok"] is False
+    assert rejected["data"]["superseded"] is False
+    # Memory must remain active+locked when unauthorized
+    still_active = tools.db.get_memory(memory_id)
+    assert still_active["status"] == "active"
+    assert still_active["protection_level"] == "locked"
+
+
+def test_supersede_marks_record_and_resolves_conflicts(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(
+        content="Old release spec",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    new = tools.memory_write(
+        content="New release spec supersedes the old one",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    old_id, new_id = old["data"]["id"], new["data"]["id"]
+
+    # arbitrate hits the user-protected wall and leaves an open conflict
+    blocked = tools.memory_arbitrate(old_id, new_id, mark_conflict=True, authorized=True)
+    assert blocked["data"]["comparison"]["manual_review"] is True
+    open_conflicts_before = tools.memory_list_conflicts(status="open")["data"]["count"]
+    assert open_conflicts_before >= 1
+
+    result = tools.memory_supersede(
+        memory_id=old_id,
+        reason="replaced by newer spec",
+        superseded_by=new_id,
+        authorized=True,
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["superseded"] is True
+    assert result["data"]["memory_id"] == old_id
+    assert result["data"]["conflict_id"] is not None
+    assert result["data"]["linked_conflicts_resolved"] >= 1
+
+    updated = tools.db.get_memory(old_id)
+    assert updated["status"] == "superseded"
+    assert updated["protection_level"] == "normal"
+
+    # The open conflict from the blocked arbitrate must now be resolved
+    open_conflicts_after = tools.memory_list_conflicts(status="open")["data"]["count"]
+    assert open_conflicts_after == 0
+    # And an audit row exists for the supersede itself
+    resolved = tools.memory_list_conflicts(status="resolved")["data"]["conflicts"]
+    assert any("USER-AUTHORIZED SUPERSEDE" in c["reason"] for c in resolved)
+
+
+def test_supersede_rejects_already_superseded(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="Stale memory",
+        subject="stale",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+    first = tools.memory_supersede(memory_id=memory_id, reason="stale", authorized=True)
+    assert first["ok"] is True
+
+    second = tools.memory_supersede(memory_id=memory_id, reason="stale again", authorized=True)
+    assert second["ok"] is False
+    assert "already" in second["data"]["error"]
+
+
+def test_degraded_status_mentions_missing_vec(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    status = tools.memory_status()
+
+    assert status["ok"] is True
+    assert status["degraded"] is True
+    # Wording varies by whether the package is installed; pin only the
+    # invariant — vec is off and the warning says so.
+    assert any("disabled" in warning and "sqlite-vec" in warning for warning in status["warnings"])
+
+
+def test_vec_disabled_but_installed_warns_with_enable_hint(tmp_path: Path) -> None:
+    """When the package is loadable but the env switch is off, the warning
+    should point at the exact env var to flip — not just say "disabled".
+
+    This is the diagnostic gap that made the last reinstall-overwrite incident
+    hard to spot: the user saw a generic "disabled by configuration" and had
+    no way to tell the package was actually fine, only the switch was missing.
+    Skipped on machines where sqlite-vec isn't installed (the hint would be
+    misleading there — the install line covers that path instead).
+    """
+    pytest.importorskip("sqlite_vec")
+    tools = make_tools(tmp_path)  # enable_sqlite_vec=False in this fixture
+    status = tools.memory_status()
+
+    assert status["data"]["sqlite_vec_available"] is False
+    joined = " ".join(status["warnings"])
+    assert "MEMORY_ARBITER_ENABLE_SQLITE_VEC=true" in joined
+
+
+def test_compare_manual_review_when_both_protected() -> None:
+    left = {
+        "id": 1,
+        "source_type": "user_confirmed",
+        "protection_level": "locked",
+        "event_time": "2026-01-01T00:00:00Z",
+        "ingest_time": "2026-01-02T00:00:00Z",
+    }
+    right = {
+        "id": 2,
+        "source_type": "user_confirmed",
+        "protection_level": "locked",
+        "event_time": "2026-02-01T00:00:00Z",
+        "ingest_time": "2026-02-02T00:00:00Z",
+    }
+    result = compare_memories(left, right)
+
+    assert result["manual_review"] is True
+    assert result["winner_id"] is None
+
+
+def test_audit_summary_aggregates_per_workspace(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    # This legacy aggregate test creates a protected structured value pair on
+    # purpose but only intends to count the manually recorded conflict below.
+    # v0.9 beta_all would correctly add a second pending structured candidate,
+    # so isolate the old audit fixture with the emergency-off mode.
+    tools.settings.structured_claim_mode = "off"
+    tools.memory_write(
+        content="Confirmed port 5173",
+        subject="dev-port",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    tools.memory_write(
+        content="Agent guessed port 3000",
+        subject="dev-port",
+        source_type="agent_generated",
+        event_time="2026-03-01T00:00:00Z",
+    )
+    tools.memory_write(
+        content="Other workspace memory",
+        subject="other",
+        workspace="repo-b",
+        source_type="document_extracted",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    # Create an open conflict inside repo-a
+    ids = [r["id"] for r in tools.memory_recent(workspace="repo-a", limit=10)["data"]["results"]]
+    tools.memory_arbitrate(ids[0], ids[1], mark_conflict=True)
+
+    summary = tools.memory_audit_summary()
+    data = summary["data"]
+
+    assert summary["ok"] is True
+    assert data["total_memories"] == 3
+    assert data["total_open_conflicts"] == 1
+    repo_a = data["workspaces"]["repo-a"]
+    assert repo_a["count"] == 2
+    assert repo_a["oldest"] == "2026-01-01T00:00:00+00:00"
+    assert repo_a["newest"] == "2026-03-01T00:00:00+00:00"
+    assert repo_a["open_conflicts"] == 1
+    assert repo_a["by_source_type"] == {"user_confirmed": 1, "agent_generated": 1}
+    assert data["workspaces"]["repo-b"]["count"] == 1
+
+
+def test_audit_summary_empty_when_no_memories(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    summary = tools.memory_audit_summary()
+    assert summary["ok"] is True
+    assert summary["data"] == {
+        "workspaces": {},
+        "total_memories": 0,
+        "total_open_conflicts": 0,
+    }
+
+
+def test_fts5_search_handles_query_with_dots(tmp_path: Path) -> None:
+    """Regression: queries containing '.' (e.g. version numbers, file paths)
+    used to raise ``fts5: syntax error near "."`` and silently fall back to
+    LIKE. FTS5 must now run without warnings."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="Release notes for memory-arbiter v0.2.1, the token optimization release.",
+        subject="v0.2.1 release",
+        source_type="document_extracted",
+    )
+
+    found = tools.memory_search(query="v0.2.1", workspace="repo-a")
+
+    assert found["ok"] is True
+    assert found["data"]["count"] == 1
+    assert found["data"]["results"][0]["subject"] == "v0.2.1 release"
+    assert not any("FTS5 query failed" in w for w in found["warnings"])
+
+
+def test_fts5_search_handles_special_chars_without_warning(tmp_path: Path) -> None:
+    """FTS5 special chars (``: * ( ) -``) in the query must not trigger a
+    syntax-error fallback to LIKE."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        content="Config lives at config/db.py with key apiKey:path(0)",
+        subject="config-paths",
+        source_type="document_extracted",
+    )
+
+    for query in ("config/db.py", "apiKey:path(0)", "config * (db)"):
+        found = tools.memory_search(query=query, workspace="repo-a")
+        assert found["ok"] is True
+        assert not any("FTS5 query failed" in w for w in found["warnings"]), (
+            f"query {query!r} triggered FTS5 fallback: {found['warnings']}"
+        )
+
+
+def test_sanitize_fts_query_quotes_and_joins_tokens() -> None:
+    from memory_arbiter.search import _sanitize_fts_query
+
+    assert _sanitize_fts_query("") == ""
+    assert _sanitize_fts_query("v0.2.1") == '"v0.2.1"'
+    assert _sanitize_fts_query("v0.2.1 release task") == '"v0.2.1" AND "release" AND "task"'
+    # Embedded double-quotes are escaped as "" per FTS5 phrase syntax
+    assert _sanitize_fts_query('a"b') == '"a""b"'
+
+
+def test_sanitize_fts_query_splits_cjk_into_trigram_or_group() -> None:
+    """Regression: a CJK token used to be wrapped as a single strict phrase,
+    so ``营销交付系统`` missed documents that contained ``营销交付需求提报``
+    (one trigram absent). It must now expand to an OR of overlapping trigrams.
+
+    The FTS5 table uses ``tokenize='trigram'``, which only matches queries
+    that produce 3-char tokens — so 2-char phrases never hit, and a strict
+    CJK phrase silently misses when overspecified. Bare trigrams joined by
+    OR restore recall without any new tokenizer dependency.
+    """
+    from memory_arbiter.search import _sanitize_fts_query
+
+    # Pure CJK: overlapping trigrams (unquoted) joined by OR.
+    assert _sanitize_fts_query("营销交付") == "(营销交 OR 销交付)"
+    assert _sanitize_fts_query("营销交付系统") == (
+        "(营销交 OR 销交付 OR 交付系 OR 付系统)"
+    )
+    # Single/double CJK chars cannot form a trigram → dropped (LIKE fallback
+    # handles them via the empty-FTS-result path).
+    assert _sanitize_fts_query("营") == ""
+    assert _sanitize_fts_query("营销") == ""
+    # Mixed CJK + ASCII: short CJK token dropped, ASCII token preserved.
+    assert _sanitize_fts_query("营销 marketing") == '"marketing"'
+    # ASCII behavior unchanged when no CJK present.
+    assert _sanitize_fts_query("v0.2.1 release") == '"v0.2.1" AND "release"'
+
+
+def test_search_excludes_superseded_by_default(tmp_path: Path) -> None:
+    """v0.2.6: search filters out superseded records unless explicitly opted in.
+
+    A superseded record is, by definition, no longer authoritative. Letting it
+    leak into default results pollutes recall — release chatter, superseded
+    specs, etc. drown out current truth. The default must hide them.
+    """
+    tools = make_tools(tmp_path)
+    active = tools.memory_write(
+        content="release-spec-v2 active authoritative",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    stale = tools.memory_write(
+        content="release-spec-v1 stale superseded",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    active_id, stale_id = active["data"]["id"], stale["data"]["id"]
+    superseded = tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
+    assert superseded["data"]["superseded"] is True
+
+    found = tools.memory_search(query="release-spec", workspace="repo-a")
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert active_id in ids
+    assert stale_id not in ids, "superseded record leaked into default search results"
+
+
+def test_search_active_domain_excludes_non_active_non_superseded_statuses(tmp_path: Path) -> None:
+    """v0.9.4: active search means status='active', not merely not-deleted."""
+    tools = make_tools(tmp_path)
+    active = tools.memory_write(
+        content="release-domain active record",
+        subject="release-domain",
+        status="active",
+    )
+    pending = tools.memory_write(
+        content="release-domain pending record",
+        subject="release-domain",
+        status="pending",
+    )
+    conflicted = tools.memory_write(
+        content="release-domain conflicted record",
+        subject="release-domain",
+        status="conflicted",
+    )
+
+    found = tools.memory_search(query="release-domain")
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert active["data"]["id"] in ids
+    assert pending["data"]["id"] not in ids
+    assert conflicted["data"]["id"] not in ids
+
+    # v0.9.4 点2: expired recall surfaces all non-active non-deleted statuses
+    # (superseded + conflicted + pending), not just superseded. make_tools runs
+    # FTS-only, exercising the expanded NOT IN ('active','deleted') status_clause.
+    expired = tools.memory_search_expired(query="release-domain")
+    expired_ids = [r["id"] for r in expired["data"]["results"]]
+    assert pending["data"]["id"] in expired_ids
+    assert conflicted["data"]["id"] in expired_ids
+    assert active["data"]["id"] not in expired_ids
+
+
+def test_search_includes_superseded_when_requested(tmp_path: Path) -> None:
+    """v0.9.4: memory_search_expired returns superseded records.
+
+    Audit/history walkthroughs need to see the full supersede chain. The
+    ``memory_search_expired`` tool returns only superseded memories.
+    """
+    tools = make_tools(tmp_path)
+    active = tools.memory_write(
+        content="release-spec-v2 active authoritative",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    stale = tools.memory_write(
+        content="release-spec-v1 stale superseded record",
+        subject="release-spec",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    active_id, stale_id = active["data"]["id"], stale["data"]["id"]
+    tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
+
+    # memory_search (active only)
+    found = tools.memory_search(query="release-spec", workspace="repo-a")
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert active_id in ids, "active record missing in active search"
+    assert stale_id not in ids, "superseded record leaked into active search results"
+
+    # memory_search_expired (expired history: non-active non-deleted)
+    expired = tools.memory_search_expired(query="release-spec", workspace="repo-a")
+    expired_ids = [r["id"] for r in expired["data"]["results"]]
+    assert stale_id in expired_ids, "superseded record not returned by memory_search_expired"
+    assert active_id not in expired_ids, "active record leaked into expired search results"
+
+
+def test_supersede_rejects_non_active_replacement(tmp_path: Path) -> None:
+    """v0.2.6: supersede chain-breakage guard.
+
+    Starting in v0.2.6, search hides superseded records by default. If a
+    supersede points at a replacement that is itself deleted/superseded, the
+    default would leave the chain pointing at a record search can't see — the
+    user loses both views. Reject early with an explicit error.
+    """
+    tools = make_tools(tmp_path)
+    # Build a chain: A (active) ← supersedes — B (active) ← supersedes — C (active)
+    a = tools.memory_write(content="A active", subject="s", source_type="user_confirmed", event_time="2026-01-01T00:00:00Z")
+    b = tools.memory_write(content="B active", subject="s", source_type="user_confirmed", event_time="2026-02-01T00:00:00Z")
+    c = tools.memory_write(content="C active", subject="s", source_type="user_confirmed", event_time="2026-03-01T00:00:00Z")
+    a_id, b_id, c_id = a["data"]["id"], b["data"]["id"], c["data"]["id"]
+    # B supersedes A — A is now superseded, B still active.
+    tools.memory_supersede(memory_id=a_id, reason="B replaces A", superseded_by=b_id, authorized=True)
+
+    # Now try to supersede C by pointing at A (which is itself superseded) — must be rejected.
+    rejected = tools.memory_supersede(memory_id=c_id, reason="C replaced by A", superseded_by=a_id, authorized=True)
+    assert rejected["ok"] is False
+    assert "not active" in rejected["data"]["error"]
+    # C must remain active (the supersede was blocked before any state change).
+    c_record = tools.db.get_memory(c_id)
+    assert c_record["status"] == "active"
+
+
+def test_superseded_always_ranked_below_active_even_with_higher_score(tmp_path: Path) -> None:
+    """v0.9.4: active/expired query split replaces the soft-demote safety net.
+
+    The old soft-demote clause (superseded ranked below active regardless of
+    bm25 score) is superseded by interface isolation: ``memory_search`` only
+    returns active rows, ``memory_search_expired`` only returns superseded
+    rows. A superseded record with a higher bm25 signal therefore never
+    competes with the active record in the same result set — the stronger
+    guarantee the demote clause was approximating.
+    """
+    tools = make_tools(tmp_path)
+    # Active record: short, mentions query term once → lower bm25 signal.
+    active = tools.memory_write(
+        content="release release-spec canonical",
+        subject="release-spec-active",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    # Superseded record: long, repeats query term many times → higher bm25 signal.
+    stale_blob = "release release release release release release-spec release-spec release-spec"
+    stale = tools.memory_write(
+        content=stale_blob,
+        subject="release-spec-stale",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    active_id, stale_id = active["data"]["id"], stale["data"]["id"]
+    tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
+
+    # memory_search (active-only): the superseded record must NOT surface,
+    # even though it has the higher bm25 signal.
+    found = tools.memory_search(query="release", workspace="repo-a")
+    ids = [r["id"] for r in found["data"]["results"]]
+    assert active_id in ids, "active record missing from memory_search"
+    assert stale_id not in ids, "superseded record leaked into active-only memory_search"
+
+    # memory_search_expired (expired history): the superseded record IS surfaced
+    # for audit, and the active record does NOT leak in.
+    expired = tools.memory_search_expired(query="release", workspace="repo-a")
+    expired_ids = [r["id"] for r in expired["data"]["results"]]
+    assert stale_id in expired_ids, "superseded record not returned by memory_search_expired"
+    assert active_id not in expired_ids, "active record leaked into memory_search_expired"
+
+
+# ---- v0.3.1: optional semantic recall (sqlite-vec vec0) -----------------
+try:
+    import sqlite_vec  # type: ignore  # noqa: F401
+    _VEC_AVAILABLE = True
+except Exception:
+    _VEC_AVAILABLE = False
+
+
+
