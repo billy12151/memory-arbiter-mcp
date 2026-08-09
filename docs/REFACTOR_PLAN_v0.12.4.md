@@ -310,7 +310,16 @@ Hardening 轨不得与“纯移动”提交混在一起。每个修复项需要�
 | H9 | Metadata 输入规范化 | `metadata` 必须是 JSON object；缺失/null→`{}`；dict 浅拷贝；禁止 `dict(value)` 魔法转换 list/string | 中 | `metadata="x"`、`metadata=[]` 拒绝；`metadata={"a":1}` 正常；product/legacy 两路径覆盖 |
 | H10 | Numeric 输入规范化 | `confidence` 等 numeric 字段必须是 finite number，范围按字段定义校验（confidence 建议 `[0.0,1.0]`），无效值结构化拒绝，不 silent clamp | 中 | `confidence="abc"`/`"nan"`/`"inf"`/`-1`/`2` 拒绝，合法边界 0/1 通过 |
 
-**里程碑建议**：仍倾向只发**一个补丁版本 v0.12.4**，但发布说明必须从 “internal refactor, no behavior change” 改为 “internal refactor + security/consistency hardening”。安全修复可以走 patch，但 release note 必须列出 loose/invalid payload 被拒绝、policy 生效、strict 读隔离（若启用）等兼容影响；若 H8-b strict read ACL 被判定为产品语义大改，则升级为 v0.13.0。阶段划分只用于控制提交节奏与 review 体量；中间完成点不单独发版。CHANGELOG 必须列出 H1–H10 的行为变化，H8 子项未完成不得写成已修复。
+### 7.3 v0.12.x 版本节奏（1–2 个 patch 收口）
+
+用户确认：后续不要动不动跳大版本号，也不要把计划拆成 v0.12.4 到 v0.12.10 这种过碎节奏。v0.12.x 清理线按 **1–2 个 patch** 集中解决；除非公开 API 或 strict read ACL 被最终确认是产品语义大改，否则不预设跳 v0.13。
+
+| 版本 | 主题 | 范围 |
+|---|---|---|
+| v0.12.4 | 结构收口 + 兼容层治理 + 入口 hardening | 当前已拆结构对齐文档；`db/__init__.py`、`search/__init__.py` 区分 public API 与 compatibility-only private exports；legacy import smoke；内部代码不再新增/依赖 compatibility re-export；行为测试改新路径、兼容测试专测旧路径；scripts/docs/examples 只修 import；H1/H2/H3/H4/H8-a/H8-c/H9/H10：authorized、config、tags、metadata、numeric、policy 基础语义与 mutating gate。**v0.12.4 保留兼容层作为迁移安全网，不删除旧 import/private re-export** |
+| v0.12.5（仅必要时） | 一致性 + 隔离 + lifecycle hardening + 兼容层择干净 | H5/H6/H7/H8-b/H8-d：edit 事务内重检、confirm pending workspace 原子化、supersede 原子化、strict read ACL、semantic backend lifecycle lock；同时**删除旧 import 依赖与 compatibility-only private re-export/private exports**，把 v0.12.4 保留的兼容层择干净。若 v0.12.4 review 体量可控，也可并入 v0.12.4；若 strict read ACL 影响过大，再作为例外单独评估 |
+
+每个 patch 只承载清晰主题，并配独立 regression tests、migration note 与 release note。CHANGELOG 必须列出对应 patch 的行为变化；未完成的 H 项不得写成已修复。
 
 ---
 

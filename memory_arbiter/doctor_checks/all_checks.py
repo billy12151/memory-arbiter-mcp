@@ -15,7 +15,7 @@ from typing import Any, Callable, Optional
 from ..config import Settings
 from ..degrade import DegradeState
 from .. import __version__
-from ..doctor import (
+from .common import (
     Finding,
     Severity,
     _days_since_iso,

@@ -50,6 +50,7 @@ DEFAULT_ALLOWED_MODULE_MOVES = {
     "memory_arbiter.search.filters", "memory_arbiter.search.fts",
     # doctor.py -> doctor_checks/ package
     "memory_arbiter.doctor", "memory_arbiter.doctor_checks",
+    "memory_arbiter.doctor_checks.common",
     "memory_arbiter.doctor_checks.all_checks",
     "memory_arbiter.doctor_checks.config_env", "memory_arbiter.doctor_checks.vector",
     "memory_arbiter.doctor_checks.semantic", "memory_arbiter.doctor_checks.split",
