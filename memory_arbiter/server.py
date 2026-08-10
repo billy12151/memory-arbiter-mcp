@@ -66,13 +66,14 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_govern(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """User-authorized Memory Arbiter governance. Use action=retire/resolve_conflict/confirm/correct_judgment/help.
+        """User-authorized Memory Arbiter governance. Use action=retire/resolve_conflict/confirm/correct_judgment/accept_workspace_alias/reject_workspace_alias/rename_workspace_canonical/migrate_workspace/confirm_pending_workspace/help.
 
         Use only for explicit governance decisions. Do not use retire for
         ordinary updates, partial conflicts, or source-of-truth replacement;
         use memory(action="update") instead. Retire is only for whole-memory
-        retirement after explicit user authorization. If unsure about fields,
-        call action=help.
+        retirement after explicit user authorization. Workspace alias decisions
+        and pending workspace confirmation also belong here. If unsure about
+        fields, call action=help.
         """
         return tools.memory_govern(action=action, data=data or {})
 

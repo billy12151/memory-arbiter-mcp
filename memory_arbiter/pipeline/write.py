@@ -147,7 +147,7 @@ class WritePipeline:
                     "attention_summary": (
                         f"strict isolation: workspace {ws_canonical!r} is new. "
                         "Memory written as pending and excluded from active recall "
-                        "until activated via memory_activate."
+                        "until confirmed via memory_govern(action=\"confirm_pending_workspace\")."
                     ),
                 })
             elif isolation == "weak" and ws_is_new:

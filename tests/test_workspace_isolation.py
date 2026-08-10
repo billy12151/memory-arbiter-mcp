@@ -376,16 +376,11 @@ def test_strict_no_leak_when_query_matches_nothing(tmp_path):
     assert res == [], f"strict leaked cross-workspace memory on no-match: {[m['workspace'] for m in res]}"
 
 
-def test_strict_attention_summary_names_memory_activate(tmp_path):
-    """v0.9.7 regression: the strict new-workspace block response must tell the
-    user to use memory_activate (not memory_confirm, which rejects pending
-    memories as 'not active').
-    """
+def test_strict_attention_summary_names_confirm_pending_workspace(tmp_path):
     tools = make_tools(tmp_path, "strict")
     r = _write(tools, "first in new ws", "projA")
     summary = r["data"].get("attention_summary") or ""
-    assert "memory_activate" in summary, f"attention_summary points at wrong tool: {summary!r}"
-    assert "memory_confirm" not in summary
+    assert "confirm_pending_workspace" in summary, f"attention_summary points at wrong tool: {summary!r}"
 
 
 def test_strict_bm25_direct_hits_are_workspace_scoped(tmp_path, monkeypatch):

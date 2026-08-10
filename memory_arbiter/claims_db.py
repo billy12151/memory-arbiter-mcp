@@ -223,8 +223,16 @@ class StructuredClaimStore:
                     return {"pairs": [], "evolution_pairs": 0}
                 if target.get("claims_indexed_revision") != target.get("claim_revision"):
                     return {"pairs": [], "evolution_pairs": 0, "stale_index": True}
+                workspace_clause = ""
+                params: list[Any] = [int(memory_id), int(target.get("claim_revision") or 1)]
+                if getattr(db.settings, "isolation", "none") != "none":
+                    target_workspace = str(target.get("workspace_canonical") or target.get("workspace") or "")
+                    if not target_workspace:
+                        return {"pairs": [], "evolution_pairs": 0}
+                    workspace_clause = "AND COALESCE(NULLIF(pm.workspace_canonical, ''), pm.workspace) = ?"
+                    params.append(target_workspace)
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT
                       mine.entity, mine.attribute, mine.scope AS mine_scope,
                       mine.value AS mine_value, mine.raw_value AS mine_raw_value,
@@ -249,9 +257,10 @@ class StructuredClaimStore:
                       AND pm.status='active'
                       AND peer.claim_revision=pm.claim_revision
                       AND pm.claims_indexed_revision=pm.claim_revision
+                      {workspace_clause}
                     ORDER BY peer.memory_id, mine.attribute
                     """,
-                    (int(memory_id), int(target.get("claim_revision") or 1)),
+                    tuple(params),
                 ).fetchall()
         except sqlite3.Error:
             return {"pairs": [], "evolution_pairs": 0, "error": True}

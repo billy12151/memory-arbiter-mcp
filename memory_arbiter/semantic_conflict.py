@@ -643,9 +643,22 @@ class LocalGGUFSemanticBackend:
             }
 
 
-def notice_dedupe_key(left_id: int, right_id: int, left_version: int, right_version: int, notice_type: str) -> str:
-    left = (int(left_id), int(left_version))
-    right = (int(right_id), int(right_version))
-    (a_id, a_version), (b_id, b_version) = sorted([left, right], key=lambda item: item[0])
-    raw = f"semantic:{a_id}:{a_version}:{b_id}:{b_version}:{notice_type}"
+def notice_dedupe_key(
+    left_id: int,
+    right_id: int,
+    left_version: int,
+    right_version: int,
+    notice_type: str,
+    left_claim_revision: int | None = None,
+    right_claim_revision: int | None = None,
+) -> str:
+    left = (int(left_id), int(left_version), left_claim_revision)
+    right = (int(right_id), int(right_version), right_claim_revision)
+    (a_id, a_version, a_claim_revision), (b_id, b_version, b_claim_revision) = sorted(
+        [left, right], key=lambda item: item[0]
+    )
+    revision_part = ""
+    if a_claim_revision is not None or b_claim_revision is not None:
+        revision_part = f":{int(a_claim_revision or 0)}:{int(b_claim_revision or 0)}"
+    raw = f"semantic:{a_id}:{a_version}{revision_part}:{b_id}:{b_version}:{notice_type}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

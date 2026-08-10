@@ -263,7 +263,7 @@ v0.11.0 introduces a task-oriented default MCP surface. New clients see four pro
 |---|---|
 | `memory` | Daily memory operations: remember, find, read, update, submit conflict judgment, and status. Use `action=help` for command-specific fields. |
 | `memory_review` | Read-only inspection: overview, doctor, conflicts, conflict detail, judgments, history, expired memories, audit, and entities. |
-| `memory_govern` | Explicit user-authorized governance: retire a whole memory, resolve a conflict, confirm a memory, or correct a judgment. Do not use for ordinary updates. |
+| `memory_govern` | Explicit user-authorized governance: retire a whole memory, resolve a conflict, confirm a memory, correct a judgment, and govern workspace aliases / pending workspaces. Do not use for ordinary updates. |
 | `memory_repair` | Maintenance and repair: split, rebuild claims/embeddings, cleanup, vector resync, entity backfill, and pending activation. Prefer dry-run first. |
 
 Low-level tool implementations remain inside Memory Arbiter and are reused by the product tools, but their schemas are not exposed by default. This keeps ordinary Agent context smaller and makes the daily path easier to choose.
@@ -321,7 +321,9 @@ By default, `workspace` is a stored label and does not filter recall. If you nee
 |---|---|---|---|---|
 | `none` (default) | optional | full library | ignored | silent |
 | `weak` | recommended | full library | same workspace boosted, cross-workspace demoted | `write_hints.new_workspace_detected` |
-| `strict` | required | error | hard filter to canonical workspace | written as `pending` until `memory_repair(task="activate_pending")` |
+| `strict` | required | error | hard filter to canonical workspace | written as `pending` until `memory_govern(action="confirm_pending_workspace")` |
+
+Under `strict`, by-id/detail paths (read, history, conflict detail, judgments, audit, and explicit-workspace mutation helpers) also use the caller workspace and may return `forbidden_strict_workspace` / not-found style responses when the record is outside that workspace.
 
 Use `weak` when unsure. `strict` trades recallability for isolation: a wrong workspace can make memories silently unrecallable.
 
@@ -707,7 +709,7 @@ v0.11.0 起默认 MCP 工具面改为任务型接口。新客户端默认只看�
 |---|---|
 | `memory` | 日常记忆操作：remember、find、read、update、judge、status。需要参数示例时用 `action=help`。 |
 | `memory_review` | 只读审计：overview、doctor、conflicts、conflict_detail、judgments、history、expired、audit、entities。 |
-| `memory_govern` | 用户授权治理：整条记忆过期、关闭冲突、确认记忆、纠正 judgment。不要用于普通更新。 |
+| `memory_govern` | 用户授权治理：整条记忆过期、关闭冲突、确认记忆、纠正 judgment，以及 workspace 别名 / pending workspace 治理。不要用于普通更新。 |
 | `memory_repair` | 维护修复：分段、重建 claims/embeddings、清理、向量状态同步、entity 回灌、pending 激活。优先 dry-run。 |
 
 低层工具实现仍保留在 Memory Arbiter 内部，并由上述产品工具复用，但默认不再把它们的 schema 暴露给 Agent。这样可以减少常驻 MCP 工具 token，也让日常路径更容易选择。
@@ -764,7 +766,9 @@ tag 被当作离散标签，而不是一句普通文本。带有 `v0.7.2` 和 `r
 |---|---|---|---|---|
 | `none`（默认） | 可选 | 全库 | 忽略 | 静默 |
 | `weak` | 建议 | 全库 | 同 workspace 加权、跨 workspace 降权 | `write_hints.new_workspace_detected` |
-| `strict` | 必填 | 报错 | 硬过滤到 canonical workspace | 写为 `pending`，直到 `memory_repair(task="activate_pending")` |
+| `strict` | 必填 | 报错 | 硬过滤到 canonical workspace | 写为 `pending`，直到 `memory_govern(action="confirm_pending_workspace")` |
+
+在 `strict` 下，按 ID/detail 路径（read、history、conflict detail、judgments、audit，以及显式传 workspace 的变更工具）也使用 caller workspace；记录不属于该 workspace 时会返回 `forbidden_strict_workspace` 或 not-found 风格结果。
 
 不确定时用 `weak`。`strict` 是用召回性换隔离性：workspace 传错会让记忆静默不可召回。
 

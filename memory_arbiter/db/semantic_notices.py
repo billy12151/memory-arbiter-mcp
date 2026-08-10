@@ -110,6 +110,8 @@ class SemanticNoticeStore:
         left_version: Optional[int] = None,
         right_version: Optional[int] = None,
         notice_type: str = "semantic_pair",
+        left_claim_revision: Optional[int] = None,
+        right_claim_revision: Optional[int] = None,
     ) -> bool:
         db = self._db
         if not db._db_available:
@@ -130,17 +132,31 @@ class SemanticNoticeStore:
                 notice = dict(row)
                 lv = notice.get("left_version")
                 rv = notice.get("right_version")
+                lcr = notice.get("left_claim_revision")
+                rcr = notice.get("right_claim_revision")
                 if left_version is None or right_version is None:
-                    if lv is not None and rv is not None:
+                    if lv is not None and rv is not None and lcr is not None and rcr is not None:
                         return True
                     continue
-                if lv is None or rv is None:
+                if lv is None or rv is None or lcr is None or rcr is None:
                     continue
-                if notice.get("memory_id") == left_id:
-                    if lv == left_version and rv == right_version:
+                if left_claim_revision is None or right_claim_revision is None:
+                    continue
+                if int(notice.get("memory_id")) == int(left_id):
+                    if (
+                        int(lv) == int(left_version)
+                        and int(rv) == int(right_version)
+                        and int(lcr) == int(left_claim_revision)
+                        and int(rcr) == int(right_claim_revision)
+                    ):
                         return True
                 else:
-                    if lv == right_version and rv == left_version:
+                    if (
+                        int(lv) == int(right_version)
+                        and int(rv) == int(left_version)
+                        and int(lcr) == int(right_claim_revision)
+                        and int(rcr) == int(left_claim_revision)
+                    ):
                         return True
         except Exception:
             return False

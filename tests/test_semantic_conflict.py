@@ -337,17 +337,27 @@ def test_dismissed_semantic_notice_closes_same_snapshot_pair(tmp_path: Path):
     right = tools.memory_write(content="默认模型改为 Qwen。", subject="model choice", tags=["mema", "model"])["data"]
     lv = tools.db.get_memory_version(left["id"]) or 1
     rv = tools.db.get_memory_version(right["id"]) or 1
+    lcr = (tools.db.get_memory(left["id"]) or {}).get("claim_revision") or 1
+    rcr = (tools.db.get_memory(right["id"]) or {}).get("claim_revision") or 1
     notice = tools.db.record_semantic_notice(
         memory_id=right["id"], peer_id=left["id"], severity="normal",
         notice_type="semantic_pair", title="test", message="msg", payload={},
         dedupe_key="close-test", left_version=rv, right_version=lv,
+        left_claim_revision=rcr, right_claim_revision=lcr,
     )
     assert notice["outcome"] == "created"
     tools.db.update_semantic_notice_status(notice["notice_id"], "dismissed")
-    assert tools.db.is_semantic_pair_closed(left["id"], right["id"], lv, rv)
+    assert tools.db.is_semantic_pair_closed(
+        left["id"], right["id"], lv, rv,
+        left_claim_revision=lcr, right_claim_revision=rcr,
+    )
     edited = tools.memory_edit(memory_id=left["id"], new_content="默认模型推荐 MiniCPM，但需复核。")
     assert edited["ok"] is True
-    assert not tools.db.is_semantic_pair_closed(left["id"], right["id"], tools.db.get_memory_version(left["id"]), rv)
+    assert not tools.db.is_semantic_pair_closed(
+        left["id"], right["id"], tools.db.get_memory_version(left["id"]), rv,
+        left_claim_revision=(tools.db.get_memory(left["id"]) or {}).get("claim_revision"),
+        right_claim_revision=rcr,
+    )
 
 
 def test_worker_resume_method_does_not_clear_disabled(tmp_path: Path):

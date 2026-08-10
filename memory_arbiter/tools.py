@@ -675,10 +675,16 @@ class MemoryTools:
                     continue
             left_version = self.db.get_memory_version(int(memory_id)) or 1
             right_version = self.db.get_memory_version(int(peer_record["id"])) or 1
+            left_claim_revision = int(record.get("claim_revision") or 1)
+            right_claim_revision = int(peer_record.get("claim_revision") or 1)
             try:
                 if self.db.is_pair_dismissed(int(memory_id), int(peer_record["id"])):
                     continue
-                if self.db.is_semantic_pair_closed(int(memory_id), int(peer_record["id"]), left_version, right_version):
+                if self.db.is_semantic_pair_closed(
+                    int(memory_id), int(peer_record["id"]), left_version, right_version,
+                    left_claim_revision=left_claim_revision,
+                    right_claim_revision=right_claim_revision,
+                ):
                     continue
             except Exception:
                 pass
@@ -699,7 +705,8 @@ class MemoryTools:
             if not gate.passed:
                 continue
             dedupe = notice_dedupe_key(
-                int(memory_id), int(peer_record["id"]), left_version, right_version, "semantic_pair"
+                int(memory_id), int(peer_record["id"]), left_version, right_version,
+                "semantic_pair", left_claim_revision, right_claim_revision,
             )
             title = f"Possible semantic memory conflict with #{peer_record['id']}"
             message = "; ".join(gate.reasons) or signal.candidate_type

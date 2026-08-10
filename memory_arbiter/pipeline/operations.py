@@ -55,15 +55,25 @@ class OperationsPipeline:
             reason = "; ".join(comparison["reasons"])
             conflict_id = self.db.record_conflict(int(left_id), int(right_id), left.get("subject") or right.get("subject"), reason, comparison["winner_id"])
         applied = False
+        resolved = 0
         if authorized and comparison["winner_id"] and comparison["loser_id"] and not comparison["manual_review"]:
             loser = self.db.get_memory(int(comparison["loser_id"]))
             if loser and loser.get("protection_level") != ProtectionLevel.LOCKED.value and loser.get("source_type") != SourceType.USER_CONFIRMED.value:
-                applied = self.db.update_memory(int(comparison["loser_id"]), {"status": "superseded"})
+                try:
+                    with self.db.write_transaction() as conn:
+                        applied = self.db.update_memory_on_conn(
+                            conn, int(comparison["loser_id"]), {"status": "superseded"}
+                        )
+                        if applied:
+                            resolved = self.db.resolve_conflicts_for_on_conn(conn, int(comparison["loser_id"]))
+                except sqlite3.Error:
+                    applied = False
+                    resolved = 0
                 # v0.9.4: vec parent_status sync happens inside update_memory
                 # (it writes both memories_vec + memory_sections_vec in the
                 # same transaction as the status flip). The redundant
                 # mark_vectors_for_memory call is gone — same value, twice.
-        result_data = {"comparison": comparison, "conflict_id": conflict_id, "applied": applied}
+        result_data = {"comparison": comparison, "conflict_id": conflict_id, "applied": applied, "linked_conflicts_resolved": resolved}
         if caller.isolation == "strict":
             result_data.update(caller.response_fields())
         return self.db.state.response(result_data, extra_warnings=list(caller.warnings))
@@ -206,9 +216,16 @@ class OperationsPipeline:
                 {"error": "authorized=True is required to confirm a memory", "confirmed": False},
                 ok=False,
             )
-        memory = self.db.get_memory(int(memory_id))
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        memory = self._get_memory_visible(int(memory_id), caller)
         if not memory:
-            return self.db.state.response({"error": "memory id not found"}, ok=False)
+            data = {"error": "memory id not found"}
+            if caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
         if memory.get("status") != "active":
             return self.db.state.response(
                 {
@@ -241,7 +258,9 @@ class OperationsPipeline:
             )
             warnings.extend(structured.get("warnings") or [])
             self._apply_structured_gate(data, structured)
-        return self.db.state.response(data, extra_warnings=warnings)
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=warnings + list(caller.warnings))
 
     # ------------------------------------------------------------------
     #  Workspace alias governance (design 636 §8 / 637). User-authorized
@@ -329,7 +348,13 @@ class OperationsPipeline:
         fails (ok=False) unless authorized=true — a rejection is a user
         decision and must not be silently reversed by a confirm-pending flow.
         """
-        warnings: list[str] = []
+        explicit_workspace = _.get("workspace")
+        caller = self._caller_workspace(explicit_workspace) if explicit_workspace else None
+        if caller is not None:
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+        warnings: list[str] = list(caller.warnings) if caller is not None else []
         # Compute the canonical embedding before BEGIN IMMEDIATE. Embedder calls
         # may be slow and must not run while holding SQLite's write lock.
         embedder, ensure_warnings = self._ensure_embedder()
@@ -347,6 +372,12 @@ class OperationsPipeline:
                         f"memory is not pending (status={memory.get('status')}); only pending memories can be confirmed"
                     )
                 raw_ws = memory.get("workspace") or ""
+                if caller is not None and caller.isolation == "strict":
+                    memory_workspace = raw_workspace(memory)
+                    if not memory_workspace or memory_workspace != caller.canonical:
+                        raise ValueError("forbidden_strict_workspace: pending memory is outside caller workspace")
+                    if str(canonical or "").strip() != caller.canonical:
+                        raise ValueError("forbidden_strict_workspace: canonical must match caller workspace")
                 ok_alias, alias_warnings = self.db.upsert_workspace_alias_on_conn(
                     conn, raw_ws, canonical, relation="alias", status="confirmed",
                     source="user", action="accept", judge_type="user", reason=reason,
@@ -400,8 +431,19 @@ class OperationsPipeline:
             "canonical": canonical,
             "record": updated,
         }
+        if caller is not None and caller.isolation == "strict":
+            data.update(caller.response_fields())
         if activated:
-            data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), updated or {})
+            structured = self._index_and_reconcile_claims(int(memory_id))
+            data["realtime_conflict_check"] = structured["diagnostic"]
+            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            data["claim_reconciled"] = bool(
+                structured["diagnostic"].get("claim_reconciled")
+            )
+            warnings.extend(structured.get("warnings") or [])
+            self._apply_structured_gate(data, structured)
+            data["record"] = self.db.get_memory(int(memory_id))
+            data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), data["record"] or {})
         return self.db.state.response(data, ok=True, extra_warnings=warnings)
 
     def memory_activate(
@@ -419,9 +461,19 @@ class OperationsPipeline:
                 {"error": "authorized=True is required to activate a pending memory", "activated": False},
                 ok=False,
             )
-        memory = self.db.get_memory(int(memory_id))
+        explicit_workspace = _.get("workspace")
+        caller = self._caller_workspace(explicit_workspace) if explicit_workspace else None
+        if caller is not None:
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+        memory = self._get_memory_visible(int(memory_id), caller) if caller is not None else self.db.get_memory(int(memory_id))
         if not memory:
-            return self.db.state.response({"error": "memory id not found", "activated": False}, ok=False)
+            data = {"error": "memory id not found", "activated": False}
+            warnings = list(caller.warnings) if caller is not None else []
+            if caller is not None and caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, ok=False, extra_warnings=warnings)
         if memory.get("status") != MemoryStatus.PENDING.value:
             return self.db.state.response(
                 {
@@ -433,9 +485,21 @@ class OperationsPipeline:
         ok = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
         updated = self.db.get_memory(int(memory_id)) if ok else memory
         data = {"activated": ok, "record": updated}
+        warnings: list[str] = list(caller.warnings) if caller is not None else []
+        if caller is not None and caller.isolation == "strict":
+            data.update(caller.response_fields())
         if ok:
-            data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), updated or {})
-        return self.db.state.response(data)
+            structured = self._index_and_reconcile_claims(int(memory_id))
+            data["realtime_conflict_check"] = structured["diagnostic"]
+            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            data["claim_reconciled"] = bool(
+                structured["diagnostic"].get("claim_reconciled")
+            )
+            warnings.extend(structured.get("warnings") or [])
+            self._apply_structured_gate(data, structured)
+            data["record"] = self.db.get_memory(int(memory_id))
+            data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), data["record"] or {})
+        return self.db.state.response(data, extra_warnings=warnings)
 
     def memory_supersede(
         self,
@@ -456,6 +520,22 @@ class OperationsPipeline:
             return self.db.state.response(
                 {"error": "authorized=True is required to supersede a memory", "superseded": False},
                 ok=False,
+            )
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict" and self._get_memory_visible(int(memory_id), caller) is None:
+            return self.db.state.response(
+                forbidden_payload("memory", workspace=caller),
+                ok=False,
+                extra_warnings=list(caller.warnings),
+            )
+        if superseded_by is not None and caller.isolation == "strict" and self._get_memory_visible(int(superseded_by), caller) is None:
+            return self.db.state.response(
+                forbidden_payload("memory", workspace=caller, reason="replacement_workspace_acl"),
+                ok=False,
+                extra_warnings=list(caller.warnings),
             )
         resolved = 0
         conflict_id: Optional[int] = None
@@ -528,7 +608,9 @@ class OperationsPipeline:
             "conflict_id": conflict_id,
             "record": updated,
         }
-        return self.db.state.response(resp)
+        if caller.isolation == "strict":
+            resp.update(caller.response_fields())
+        return self.db.state.response(resp, extra_warnings=list(caller.warnings))
 
     def _split_capability(self, vec_state: dict[str, Any]) -> dict[str, Any]:
         """v0.8 §6.5: whether the server can split, and why/why not."""
@@ -627,6 +709,16 @@ class OperationsPipeline:
             return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
         if not clear and not _canon_entity(entity):
             return self.db.state.response({"error": "entity is required unless clear=true"}, ok=False)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict" and self._get_memory_visible(memory_id_int, caller) is None:
+            return self.db.state.response(
+                forbidden_payload("memory", workspace=caller),
+                ok=False,
+                extra_warnings=list(caller.warnings),
+            )
         set_fields: dict[str, Any] = {}
         clear_fields: list[str] = []
         if clear:
@@ -668,7 +760,9 @@ class OperationsPipeline:
             warnings.extend(structured.get("warnings") or [])
             self._apply_structured_gate(data, structured)
         data["record"] = self.db.get_memory(memory_id_int)
-        return self.db.state.response(data, extra_warnings=warnings)
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=warnings + list(caller.warnings))
 
     def memory_list_entities(
         self, limit: int = 50, include_unassigned: bool = True, **_: Any,
@@ -1246,16 +1340,34 @@ class OperationsPipeline:
                 {"error": "authorized=True is required for full history cleanup (no memory_id / older_than_days filter)", "cleaned": 0},
                 ok=False,
             )
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict":
+            if memory_id is None:
+                return self.db.state.response(
+                    forbidden_payload("memory_history", workspace=caller, reason="workspace_scoped_cleanup_requires_memory_id"),
+                    ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
+            if self._get_memory_visible(int(memory_id), caller) is None:
+                return self.db.state.response(
+                    forbidden_payload("memory_history", workspace=caller),
+                    ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
         cleaned = self.db.cleanup_history(memory_id=memory_id, older_than_days=older_than_days)
         scope = "full" if full_cleanup else ("memory" if memory_id is not None else "by_age")
-        return self.db.state.response(
-            {
-                "cleaned": cleaned,
-                "scope": scope,
-                "memory_id": memory_id,
-                "older_than_days": older_than_days,
-            }
-        )
+        data = {
+            "cleaned": cleaned,
+            "scope": scope,
+            "memory_id": memory_id,
+            "older_than_days": older_than_days,
+        }
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     def memory_cleanup_inactive_vectors(
         self,

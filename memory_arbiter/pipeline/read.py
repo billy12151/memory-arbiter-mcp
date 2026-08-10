@@ -495,10 +495,20 @@ class ReadPipeline:
             return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
         if not isinstance(embedding, list) or not embedding:
             return self.db.state.response({"error": "embedding must be a non-empty list of floats"}, ok=False)
-        if not self.db.get_memory(memory_id_int):
-            return self.db.state.response({"error": f"memory id {memory_id_int} not found"}, ok=False)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if not self._get_memory_visible(memory_id_int, caller):
+            data = {"error": f"memory id {memory_id_int} not found"}
+            if caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
         ok, store_warnings = self.db.store_embedding(memory_id_int, embedding)
-        return self.db.state.response({"stored": ok, "memory_id": memory_id_int, "dimensions": len(embedding)}, ok=ok, extra_warnings=store_warnings)
+        data = {"stored": ok, "memory_id": memory_id_int, "dimensions": len(embedding)}
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, ok=ok, extra_warnings=store_warnings + list(caller.warnings))
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         limit = max(1, min(int(limit), 100))

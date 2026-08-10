@@ -3,6 +3,27 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.12.5] — 2026-08-10
+
+Strict workspace isolation, workspace-governance, and semantic-notice release hardening.
+
+### Added
+
+- Added adversarial regression coverage for strict cross-workspace mutating ID paths, pending workspace confirmation, structured-claim isolation, activation claim reindexing, arbitration cleanup, and semantic-notice claim pins.
+
+### Changed
+
+- Strict read ACL now consistently protects by-id mutation helpers when callers provide an explicit `workspace`, while legacy/global activation remains available for the existing low-level repair flow.
+- Strict new-workspace guidance now points agents at `memory_govern(action="confirm_pending_workspace")` instead of the legacy `memory_activate` name.
+- Semantic notice dedupe/closed checks now include `claim_revision` pins so claim-only metadata/entity changes can reopen semantic review without content-version changes.
+
+### Fixed
+
+- Prevented cross-workspace structured-claim collision scans from creating conflicts/notices under workspace isolation.
+- Reindexed and reconciled structured claims immediately when pending memories are activated or confirmed, so active records are not left stale until a later rebuild.
+- Blocked explicit-workspace cross-tenant writes for `memory_confirm`, `memory_supersede`, `memory_set_entity`, `memory_store_embedding`, and history cleanup.
+- `memory_arbitrate(authorized=True)` now resolves open conflicts touching the loser in the same transaction as superseding it.
+
 ## [0.12.4] — 2026-08-09
 
 Architecture baseline refactor for maintainability and release hardening. This patch keeps the MCP tool surface stable while splitting the former `tools.py`, `db.py`, and `doctor.py` God objects into focused pipelines, stores, and doctor check modules.

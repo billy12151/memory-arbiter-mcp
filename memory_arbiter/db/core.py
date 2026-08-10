@@ -651,9 +651,12 @@ class MemoryDB:
         left_version: Optional[int] = None,
         right_version: Optional[int] = None,
         notice_type: str = "semantic_pair",
+        left_claim_revision: Optional[int] = None,
+        right_claim_revision: Optional[int] = None,
     ) -> bool:
         return self.semantic_notices.is_semantic_pair_closed(
             left_id, right_id, left_version, right_version, notice_type,
+            left_claim_revision, right_claim_revision,
         )
 
     def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "") -> dict[str, Any]:

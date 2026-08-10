@@ -45,7 +45,7 @@ No config file is required for lexical recall. For semantic recall, prefer the c
 |---|---|---|
 | `MEMORY_ARBITER_CLIENT` | `codex` | Client identifier (e.g. `codex`, `claude-code`, `cursor`, `zcode`). Used for policy checks. |
 | `MEMORY_ARBITER_AGENT_ID` | `default` | Agent identity within a client. |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | Record field on each memory. Not used for search filtering (v0.6.2). |
+| `MEMORY_ARBITER_WORKSPACE` | `default` | Default record/caller workspace. Under `isolation=strict`, used as the fallback caller workspace for search/read/detail filtering when a request does not pass `workspace`. |
 | `MEMORY_ARBITER_CONFIG` | _(none)_ | Optional path to an alternate JSON config file. If set, memory-arbiter reads that file instead of the default `~/.config/memory-arbiter/config.json`; file values still override other env fallbacks. |
 | `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid` (wide recall + soft rerank, default) or `bm25` (legacy v0.2.6 single-FTS). No config-file equivalent. |
 | `MEMORY_ARBITER_GGUF` | _(none)_ | Legacy GGUF model path fallback. Prefer `embedding.model_path` in the config file for v0.5.0 auto-embedding. |
@@ -201,7 +201,7 @@ Memory Arbiter 是一层 token 优化中间件：用精准检索替代全文加�
 |---|---|---|
 | `MEMORY_ARBITER_CLIENT` | `codex` | 客户端标识（如 `codex`、`claude-code`、`cursor`、`zcode`），用于策略判断。 |
 | `MEMORY_ARBITER_AGENT_ID` | `default` | 客户端内的 agent 身份。 |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | 记忆记录上的字段。v0.6.2 起不再用于搜索过滤。 |
+| `MEMORY_ARBITER_WORKSPACE` | `default` | 默认记录 / caller workspace；`isolation=strict` 下，请求未传 `workspace` 时会作为搜索、读取和详情过滤的 fallback caller workspace。 |
 | `MEMORY_ARBITER_CONFIG` | _(无)_ | 可选：指定另一个 JSON 配置文件路径。设置后读取该文件，而不是默认的 `~/.config/memory-arbiter/config.json`；配置文件里的字段仍然优先于其他 env 兜底值。 |
 | `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid`（宽召回 + 软重排，默认）或 `bm25`（legacy v0.2.6 单 FTS）。无配置文件对应。 |
 | `MEMORY_ARBITER_GGUF` | _(无)_ | 旧版 GGUF 模型路径兜底。v0.5.0 自动向量化建议改用配置文件里的 `embedding.model_path`。 |
