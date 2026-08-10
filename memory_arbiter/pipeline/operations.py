@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from typing import Any, Optional, TYPE_CHECKING
 
 from .. import __version__
+from ..acl import forbidden_payload, raw_workspace
 from ..arbitration import compare_memories
 from ..conflict_judgments import ConflictJudgmentStore
-from ..db import MemoryDB, _canon_entity, _canon_scope
+from ..db import MemoryDB
 from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
+from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
@@ -35,10 +38,17 @@ class OperationsPipeline:
                 {"error": "the 'apply' parameter was renamed to 'authorized' in v0.8.5 and no longer takes effect; pass authorized=True to auto-supersede the non-protected loser", "applied": False},
                 ok=False,
             )
-        left = self.db.get_memory(int(left_id))
-        right = self.db.get_memory(int(right_id))
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        left = self._get_memory_visible(int(left_id), caller)
+        right = self._get_memory_visible(int(right_id), caller)
         if not left or not right:
-            return self.db.state.response({"error": "memory id not found"}, ok=False)
+            data = {"error": "memory id not found"}
+            if caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
         comparison = self._compare_memories(left, right)
         conflict_id = None
         if mark_conflict:
@@ -53,7 +63,10 @@ class OperationsPipeline:
                 # (it writes both memories_vec + memory_sections_vec in the
                 # same transaction as the status flip). The redundant
                 # mark_vectors_for_memory call is gone — same value, twice.
-        return self.db.state.response({"comparison": comparison, "conflict_id": conflict_id, "applied": applied})
+        result_data = {"comparison": comparison, "conflict_id": conflict_id, "applied": applied}
+        if caller.isolation == "strict":
+            result_data.update(caller.response_fields())
+        return self.db.state.response(result_data, extra_warnings=list(caller.warnings))
 
     def _with_resolution_guidance(self, conflict: dict[str, Any]) -> dict[str, Any]:
         resolution_kind = conflict.get("resolution_kind") or conflict.get("judgment_resolution_kind")
@@ -82,11 +95,27 @@ class OperationsPipeline:
         return enriched
 
     def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
-        conflicts = [
-            self._with_resolution_guidance(c)
-            for c in self.db.list_conflicts(status=status, limit=int(limit), source=source)
-        ]
-        return self.db.state.response({"conflicts": conflicts, "count": len(conflicts)})
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        conflicts = []
+        raw_limit = max(int(limit), 1)
+        scan_limit = 10000 if caller.isolation == "strict" else raw_limit
+        for c in self.db.list_conflicts(status=status, limit=scan_limit, source=source):
+            if caller.isolation == "strict":
+                detail = self._conflict_detail_for_workspace(int(c.get("id")), caller)
+                if detail is None:
+                    continue
+                conflicts.append(detail["conflict"])
+                if len(conflicts) >= raw_limit:
+                    break
+            else:
+                conflicts.append(self._with_resolution_guidance(c))
+        data = {"conflicts": conflicts, "count": len(conflicts)}
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     def memory_record_conflict(
         self,
@@ -154,8 +183,22 @@ class OperationsPipeline:
         conflict row — used to dismiss a false positive without touching
         either memory.
         """
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict":
+            detail = self._conflict_detail_for_workspace(int(conflict_id), caller)
+            if detail is None:
+                return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
+            if not (detail.get("left", {}).get("visible") and detail.get("right", {}).get("visible")):
+                return self.db.state.response(
+                    forbidden_payload("conflict", workspace=caller, reason="partial_conflict_governance_not_supported"),
+                    ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
         result = self.db.resolve_conflict(int(conflict_id), reason=reason, status=status)
-        return self.db.state.response(result)
+        return self.db.state.response(result, extra_warnings=list(caller.warnings))
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
         if not authorized:
@@ -286,45 +329,80 @@ class OperationsPipeline:
         fails (ok=False) unless authorized=true — a rejection is a user
         decision and must not be silently reversed by a confirm-pending flow.
         """
-        memory = self.db.get_memory(int(memory_id))
-        if not memory:
-            return self.db.state.response({"error": "memory id not found", "confirmed": False}, ok=False)
-        raw_ws = memory.get("workspace") or ""
         warnings: list[str] = []
-        ok_alias, alias_warnings = self.db.upsert_workspace_alias(
-            raw_ws, canonical, relation="alias", status="confirmed",
-            source="user", action="accept", judge_type="user", reason=reason,
-            force=self._is_truthy(authorized),
-        )
-        warnings.extend(alias_warnings)
-        # Point the memory at the confirmed canonical. update_memory's whitelist
-        # doesn't include workspace_canonical (it would bypass claim_revision
-        # semantics), so use the dedicated helper. Pass the embedder so the
-        # canonical also gets its vec row (else strict-isolation KNN re-splits).
+        # Compute the canonical embedding before BEGIN IMMEDIATE. Embedder calls
+        # may be slow and must not run while holding SQLite's write lock.
         embedder, ensure_warnings = self._ensure_embedder()
         warnings.extend(ensure_warnings)
-        canonical_set, canonical_warnings = self.db.set_memory_workspace_canonical(
-            int(memory_id), canonical, embedder,
-        )
-        warnings.extend(canonical_warnings)
-        # Do NOT activate a pending memory if the canonical write failed — that
-        # would leave the memory active while still pointing at the raw pending
-        # workspace, defeating the point of confirmation.
+        precomputed_embedding = self.db.prepare_workspace_canonical_embedding(canonical, embedder)
         activated = False
-        if canonical_set and memory.get("status") == MemoryStatus.PENDING.value:
-            activated = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
-        updated = self.db.get_memory(int(memory_id))
-        confirmed_all = ok_alias and canonical_set
+        updated: Optional[dict[str, Any]] = None
+        try:
+            with self.db.write_transaction() as conn:
+                memory = self.db.get_memory_on_conn(conn, int(memory_id))
+                if not memory:
+                    raise ValueError("memory id not found")
+                if memory.get("status") != MemoryStatus.PENDING.value:
+                    raise ValueError(
+                        f"memory is not pending (status={memory.get('status')}); only pending memories can be confirmed"
+                    )
+                raw_ws = memory.get("workspace") or ""
+                ok_alias, alias_warnings = self.db.upsert_workspace_alias_on_conn(
+                    conn, raw_ws, canonical, relation="alias", status="confirmed",
+                    source="user", action="accept", judge_type="user", reason=reason,
+                    force=self._is_truthy(authorized),
+                )
+                if not ok_alias:
+                    raise ValueError("; ".join(alias_warnings) or "workspace alias not written")
+                warnings.extend(alias_warnings)
+                canonical_set, canonical_warnings = self.db.set_memory_workspace_canonical_on_conn(
+                    conn, int(memory_id), canonical, precomputed_embedding,
+                )
+                if not canonical_set:
+                    raise ValueError("; ".join(canonical_warnings) or "workspace_canonical not set")
+                warnings.extend(canonical_warnings)
+                activated = self.db.update_memory_on_conn(
+                    conn, int(memory_id), {"status": MemoryStatus.ACTIVE.value},
+                )
+                if not activated:
+                    raise ValueError("failed to activate pending memory")
+                updated = self.db.get_memory_on_conn(conn, int(memory_id))
+        except ValueError as exc:
+            data = {
+                "confirmed": False,
+                "activated": False,
+                "canonical": canonical,
+                "record": self.db.get_memory(int(memory_id)),
+                "error": str(exc),
+            }
+            return self.db.state.response(data, ok=False, extra_warnings=warnings)
+        except sqlite3.Error as exc:
+            data = {
+                "confirmed": False,
+                "activated": False,
+                "canonical": canonical,
+                "record": self.db.get_memory(int(memory_id)),
+                "error": f"confirm pending workspace failed: {exc}",
+            }
+            return self.db.state.response(data, ok=False, extra_warnings=warnings)
+        except Exception as exc:
+            data = {
+                "confirmed": False,
+                "activated": False,
+                "canonical": canonical,
+                "record": self.db.get_memory(int(memory_id)),
+                "error": f"confirm pending workspace failed: {exc}",
+            }
+            return self.db.state.response(data, ok=False, extra_warnings=warnings)
         data = {
-            "confirmed": confirmed_all,
+            "confirmed": True,
             "activated": activated,
             "canonical": canonical,
             "record": updated,
         }
         if activated:
             data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), updated or {})
-        # Response ok reflects the FULL operation, not just the alias step.
-        return self.db.state.response(data, ok=confirmed_all, extra_warnings=warnings)
+        return self.db.state.response(data, ok=True, extra_warnings=warnings)
 
     def memory_activate(
         self, memory_id: int, authorized: bool = False, **_: Any,
@@ -379,62 +457,70 @@ class OperationsPipeline:
                 {"error": "authorized=True is required to supersede a memory", "superseded": False},
                 ok=False,
             )
-        memory = self.db.get_memory(int(memory_id))
-        if not memory:
-            return self.db.state.response({"error": "memory id not found", "superseded": False}, ok=False)
-        if memory.get("status") in {"superseded", "deleted"}:
-            return self.db.state.response(
-                {"error": f"memory already {memory.get('status')}", "superseded": False},
-                ok=False,
-            )
-        if superseded_by is not None:
-            replacement = self.db.get_memory(int(superseded_by))
-            if not replacement:
-                return self.db.state.response(
-                    {"error": "superseded_by memory id not found", "superseded": False},
-                    ok=False,
+        resolved = 0
+        conflict_id: Optional[int] = None
+        updated: Optional[dict[str, Any]] = None
+        try:
+            with self.db.write_transaction() as conn:
+                memory = self.db.get_memory_on_conn(conn, int(memory_id))
+                if not memory:
+                    raise ValueError("memory id not found")
+                if memory.get("status") in {"superseded", "deleted"}:
+                    raise ValueError(f"memory already {memory.get('status')}")
+                if superseded_by is not None:
+                    replacement = self.db.get_memory_on_conn(conn, int(superseded_by))
+                    if not replacement:
+                        raise ValueError("superseded_by memory id not found")
+                    if replacement.get("status") != "active":
+                        raise ValueError(
+                            f"superseded_by target is not active (status={replacement.get('status')}); pick a live replacement to avoid a broken chain"
+                        )
+                status_updated = self.db.update_memory_on_conn(
+                    conn,
+                    int(memory_id),
+                    {"status": "superseded", "protection_level": ProtectionLevel.NORMAL.value},
                 )
-            # Guard against supersede-chain breakage: starting in v0.2.6,
-            # memory_search filters out superseded records by default. If the
-            # replacement target is itself deleted/superseded, the new default
-            # would leave the chain pointing at a record that search can't see
-            # — the user would lose both the old and the new view. Reject early
-            # with an explicit error so the caller picks a live replacement.
-            if replacement.get("status") != "active":
-                return self.db.state.response(
-                    {"error": f"superseded_by target is not active (status={replacement.get('status')}); pick a live replacement to avoid a broken chain", "superseded": False},
-                    ok=False,
+                if not status_updated:
+                    raise ValueError("failed to update memory status")
+                # v0.9.4: vec parent_status sync happens inside update_memory (it
+                # writes both memories_vec + memory_sections_vec in the same
+                # transaction as the status flip, retaining vectors for audit recall
+                # via memory_search_expired). Content/FTS kept for audit; vectors are
+                # a derivative and can be recomputed from content if ever needed.
+                resolved = self.db.resolve_conflicts_for_on_conn(conn, int(memory_id))
+                audit_reason = f"USER-AUTHORIZED SUPERSEDE: {reason}"
+                conflict_id = self.db.record_conflict_on_conn(
+                    conn,
+                    int(memory_id),
+                    int(superseded_by) if superseded_by is not None else int(memory_id),
+                    memory.get("subject"),
+                    audit_reason,
+                    int(superseded_by) if superseded_by is not None else None,
+                    status="resolved",
                 )
-
-        status_updated = self.db.update_memory(
-            int(memory_id),
-            {"status": "superseded", "protection_level": ProtectionLevel.NORMAL.value},
-        )
-        if not status_updated:
+                if conflict_id is None:
+                    raise sqlite3.Error("failed to append supersede audit conflict")
+                updated = self.db.get_memory_on_conn(conn, int(memory_id))
+        except ValueError as exc:
+            return self.db.state.response({"error": str(exc), "superseded": False}, ok=False)
+        except sqlite3.Error as exc:
             return self.db.state.response(
                 {
-                    "error": "failed to update memory status",
+                    "error": f"supersede failed; transaction rolled back: {exc}",
                     "superseded": False,
                     "memory_id": int(memory_id),
                 },
                 ok=False,
             )
-        # v0.9.4: vec parent_status sync happens inside update_memory (it
-        # writes both memories_vec + memory_sections_vec in the same
-        # transaction as the status flip, retaining vectors for audit recall
-        # via memory_search_expired). Content/FTS kept for audit; vectors are
-        # a derivative and can be recomputed from content if ever needed.
-        resolved = self.db.resolve_conflicts_for(int(memory_id))
-        audit_reason = f"USER-AUTHORIZED SUPERSEDE: {reason}"
-        conflict_id = self.db.record_conflict(
-            int(memory_id),
-            int(superseded_by) if superseded_by is not None else int(memory_id),
-            memory.get("subject"),
-            audit_reason,
-            int(superseded_by) if superseded_by is not None else None,
-            status="resolved",
-        )
-        updated = self.db.get_memory(int(memory_id))
+        except Exception as exc:
+            return self.db.state.response(
+                {
+                    "error": f"supersede failed; transaction rolled back: {exc}",
+                    "superseded": False,
+                    "memory_id": int(memory_id),
+                },
+                ok=False,
+            )
         resp = {
             "superseded": True,
             "memory_id": int(memory_id),
@@ -591,9 +677,52 @@ class OperationsPipeline:
             limit_int = max(1, min(500, int(limit)))
         except (TypeError, ValueError):
             return self.db.state.response({"error": "limit must be an integer"}, ok=False)
-        return self.db.state.response(
-            self.db.list_entities(limit=limit_int, include_unassigned=bool(include_unassigned))
-        )
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation != "strict":
+            return self.db.state.response(
+                self.db.list_entities(limit=limit_int, include_unassigned=bool(include_unassigned))
+            )
+        counts: dict[str, int] = {}
+        sample: dict[str, int] = {}
+        unassigned: list[int] = []
+        total = 0
+        from ..claims import canon_token
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, metadata FROM memories WHERE status='active' "
+                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? ORDER BY id",
+                (caller.canonical,),
+            ).fetchall()
+        for row in rows:
+            total += 1
+            try:
+                md = json.loads(row["metadata"] or "{}")
+                if not isinstance(md, dict):
+                    md = {}
+            except Exception:
+                md = {}
+            entity = canon_token(md.get("entity"))
+            if entity:
+                counts[entity] = counts.get(entity, 0) + 1
+                sample.setdefault(entity, int(row["id"]))
+            elif include_unassigned:
+                unassigned.append(int(row["id"]))
+        data = {
+            "entities": [
+                {"entity": entity, "count": counts[entity], "sample_memory_id": sample[entity]}
+                for entity in sorted(counts, key=lambda key: (-counts[key], key))[:limit_int]
+            ],
+            "distinct_entities": len(counts),
+            "assigned_count": sum(counts.values()),
+            "total_active": total,
+            "unassigned_count": total - sum(counts.values()),
+            "unassigned_ids": unassigned[:limit_int],
+            **caller.response_fields(),
+        }
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     def memory_rebuild_claims(
         self,
@@ -611,24 +740,41 @@ class OperationsPipeline:
             batch = max(1, min(500, int(batch_size)))
         except (TypeError, ValueError):
             return self.db.state.response({"error": "batch_size must be an integer"}, ok=False)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
         if memory_ids is None:
             with self.db.connection() as conn:
+                ws_clause = ""
+                params: list[Any] = []
+                if caller.isolation == "strict":
+                    ws_clause = "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? "
+                    params.append(caller.canonical)
                 rows = conn.execute(
                     "SELECT id FROM memories WHERE status='active' "
+                    f"{ws_clause}"
                     "AND (claims_indexed_revision IS NULL "
                     "OR claims_indexed_revision<>claim_revision "
                     "OR claims_reconciled_revision IS NULL "
                     "OR claims_reconciled_revision<>claim_revision) "
-                    "ORDER BY id LIMIT ?", (batch,)
+                    "ORDER BY id LIMIT ?", (*params, batch)
                 ).fetchall()
                 ids = [int(row["id"]) for row in rows]
         else:
             try:
-                ids = list(dict.fromkeys(int(value) for value in memory_ids))[:batch]
+                requested_ids = list(dict.fromkeys(int(value) for value in memory_ids))[:batch]
             except (TypeError, ValueError):
                 return self.db.state.response({"error": "memory_ids must contain integers"}, ok=False)
+            if caller.isolation == "strict":
+                ids = [mid for mid in requested_ids if self._get_memory_visible(mid, caller)]
+            else:
+                ids = requested_ids
         if dry_run:
-            return self.db.state.response({"dry_run": True, "memory_ids": ids, "count": len(ids)})
+            data = {"dry_run": True, "memory_ids": ids, "count": len(ids)}
+            if caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, extra_warnings=list(caller.warnings))
         results = []
         for memory_id in ids:
             results.append({"memory_id": memory_id, **self._index_and_reconcile_claims(memory_id)})
@@ -671,6 +817,20 @@ class OperationsPipeline:
             return self.db.state.response(
                 {"error": "conflict id, snapshot pins, and winner must be integers"}, ok=False,
             )
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict":
+            detail = self._conflict_detail_for_workspace(conflict_id_int, caller)
+            if detail is None:
+                return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
+            if not (detail.get("left", {}).get("visible") and detail.get("right", {}).get("visible")):
+                return self.db.state.response(
+                    forbidden_payload("conflict", workspace=caller, reason="partial_conflict_governance_not_supported"),
+                    ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
         request_before = self.db.judgments.build_conflict_judgment_request(conflict_id_int)
         result = self.db.judgments.submit_conflict_judgment(
             conflict_id_int, left_version, right_version, left_revision, right_revision,
@@ -726,6 +886,20 @@ class OperationsPipeline:
                 {"error": "conflict id, judgment id, snapshot pins, and winner must be integers"},
                 ok=False,
             )
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict":
+            detail = self._conflict_detail_for_workspace(conflict_id_int, caller)
+            if detail is None:
+                return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
+            if not (detail.get("left", {}).get("visible") and detail.get("right", {}).get("visible")):
+                return self.db.state.response(
+                    forbidden_payload("conflict", workspace=caller, reason="partial_conflict_governance_not_supported"),
+                    ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
         result = self.db.judgments.correct_conflict_judgment(
             conflict_id_int, verdict, recommended_use, winner,
             reason, judgment_id, left_version, right_version,
@@ -740,14 +914,60 @@ class OperationsPipeline:
             conflict_id_int = int(conflict_id)
         except (TypeError, ValueError):
             return self.db.state.response({"error": "conflict_id must be an integer"}, ok=False)
-        rows = self.db.judgments.list_conflict_judgments(conflict_id_int)
-        return self.db.state.response({
-            "conflict_id": conflict_id_int, "judgments": rows, "count": len(rows),
-        })
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict":
+            detail = self._conflict_detail_for_workspace(conflict_id_int, caller)
+            if detail is None:
+                return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
+            rows = detail.get("judgments") or []
+        else:
+            rows = self.db.judgments.list_conflict_judgments(conflict_id_int)
+        data = {"conflict_id": conflict_id_int, "judgments": rows, "count": len(rows)}
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
-        summary = self.db.audit_summary()
-        return self.db.state.response(summary)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation != "strict":
+            summary = self.db.audit_summary()
+            return self.db.state.response(summary)
+        with self.db.connection() as conn:
+            mem_rows = conn.execute(
+                "SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS workspace, "
+                "COUNT(*) AS count, MIN(event_time) AS oldest, MAX(event_time) AS newest, source_type "
+                "FROM memories WHERE status != 'deleted' "
+                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? "
+                "GROUP BY workspace, source_type",
+                (caller.canonical,),
+            ).fetchall()
+        by_source_type: dict[str, int] = {}
+        bucket: dict[str, Any] = {"count": 0, "oldest": None, "newest": None, "open_conflicts": 0, "by_source_type": by_source_type}
+        for row in mem_rows:
+            count = int(row["count"] or 0)
+            bucket["count"] = int(bucket["count"] or 0) + count
+            if row["oldest"] is not None and (bucket["oldest"] is None or row["oldest"] < bucket["oldest"]):
+                bucket["oldest"] = row["oldest"]
+            if row["newest"] is not None and (bucket["newest"] is None or row["newest"] > bucket["newest"]):
+                bucket["newest"] = row["newest"]
+            if row["source_type"] is not None:
+                source_type = str(row["source_type"])
+                by_source_type[source_type] = by_source_type.get(source_type, 0) + count
+        conflicts = self.memory_list_conflicts(status="open", limit=10000, workspace=caller.workspace).get("data", {}).get("conflicts", [])
+        bucket["open_conflicts"] = len(conflicts)
+        summary = {
+            "workspaces": {caller.canonical: bucket} if caller.canonical else {},
+            "total_memories": bucket["count"],
+            "total_open_conflicts": len(conflicts),
+            **caller.response_fields(),
+        }
+        return self.db.state.response(summary, extra_warnings=list(caller.warnings))
 
     def memory_edit(
         self,
@@ -789,6 +1009,17 @@ class OperationsPipeline:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
             return self.db.state.response({"error": "memory_id must be an integer", "edited": False}, ok=False)
+
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict" and self._get_memory_visible(memory_id_int, caller) is None:
+            return self.db.state.response(
+                forbidden_payload("memory", workspace=caller),
+                ok=False,
+                extra_warnings=list(caller.warnings),
+            )
 
         # ---- tags-only fast path (v0.7.6) ----
         if tags_only:
@@ -856,95 +1087,45 @@ class OperationsPipeline:
                 ok=False,
             )
 
-        # ---- full / partial content edit (existing path) ----
-        memory = self.db.get_memory(memory_id_int)
-        if not memory:
-            return self.db.state.response({"error": "memory id not found", "edited": False}, ok=False)
-        if memory.get("status") in {"superseded", "deleted"}:
-            return self.db.state.response(
-                {"error": f"memory already {memory.get('status')}", "edited": False},
-                ok=False,
-            )
-        is_protected = (
-            memory.get("protection_level") == ProtectionLevel.LOCKED.value
-            or memory.get("source_type") == SourceType.USER_CONFIRMED.value
-        )
-        if is_protected and not authorized:
-            return self.db.state.response(
-                {"error": "authorized=True is required to edit a locked/user_confirmed memory", "edited": False},
-                ok=False,
-            )
-        # Resolve the resulting content from the two edit modes.
-        current_content = memory.get("content") or ""
-        if new_content is not None and (old_text or new_text):
-            return self.db.state.response(
-                {"error": "pass either new_content (full replace) or old_text+new_text (partial), not both", "edited": False},
-                ok=False,
-            )
-        if new_content is not None and not str(new_content).strip():
-            return self.db.state.response(
-                {"error": "new_content is empty; refusing to wipe memory content (use memory_supersede to retire it, or pass real content)", "edited": False},
-                ok=False,
-            )
-        if new_subject is not None and not str(new_subject).strip():
-            return self.db.state.response(
-                {"error": "new_subject is empty; refusing to wipe subject (pass None to keep current)", "edited": False},
-                ok=False,
-            )
-        if new_content is not None:
-            resolved_content = new_content
-        elif old_text is not None and new_text is not None:
-            if old_text not in current_content:
-                return self.db.state.response(
-                    {"error": "old_text not found in current content", "edited": False},
-                    ok=False,
-                )
-            resolved_content = current_content.replace(old_text, new_text, 1)
-        else:
-            return self.db.state.response(
-                {"error": "provide new_content for full replace, or old_text+new_text for partial replace, or tags_only=true", "edited": False},
-                ok=False,
-            )
-        # Resolve tags: new_tags (full replace) + add_tags/remove_tags (delta).
-        # add/remove overlay on top of new_tags (if given) else current tags,
-        # mirroring update_tags_low_side_effect's order-preserving dedup
-        # (remove first, then add). Previously the content path dropped
-        # add_tags/remove_tags entirely (silent no-op) — fixed.
-        current_tags_raw = memory.get("tags") or []
-        if isinstance(current_tags_raw, str):
-            try:
-                current_tags_raw = json.loads(current_tags_raw)
-            except (json.JSONDecodeError, ValueError):
-                current_tags_raw = []
-        resolved_new_tags: Optional[list[str]]
-        if new_tags is not None:
-            resolved_new_tags = list(new_tags)
-        else:
-            resolved_new_tags = list(current_tags_raw)
-        if add_tags or remove_tags:
-            tag_set = set(resolved_new_tags)
-            for t in (remove_tags or []):
-                if t in tag_set:
-                    tag_set.discard(t)
-                    resolved_new_tags = [x for x in resolved_new_tags if x != t]
-            for t in (add_tags or []):
-                if t not in tag_set:
-                    tag_set.add(t)
-                    resolved_new_tags.append(t)
-        else:
-            # No delta: pass new_tags through as-is, or None to keep current.
-            resolved_new_tags = new_tags
-
-        history_id = self.db.edit_memory(
+        # ---- full / partial content edit ----
+        expected_version_raw = _.get("expected_version")
+        expected_hash = _.get("expected_content_hash") or _.get("content_hash")
+        try:
+            expected_version = int(expected_version_raw) if expected_version_raw is not None else None
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "expected_version must be an integer", "edited": False}, ok=False)
+        result = self.db.edit_memory_intent(
             memory_id_int,
-            resolved_content,
+            new_content=new_content,
+            old_text=old_text,
+            new_text=new_text,
             new_subject=new_subject,
-            new_tags=resolved_new_tags,
+            new_tags=new_tags,
+            add_tags=add_tags,
+            remove_tags=remove_tags,
             reason=reason or None,
+            authorized=authorized,
+            expected_version=expected_version,
+            expected_content_hash=str(expected_hash) if expected_hash is not None else None,
         )
-        if history_id is None:
-            return self.db.state.response({"error": "edit failed (db not writable)", "edited": False}, ok=False)
-        updated = self.db.get_memory(memory_id_int)
+        outcome = result.get("outcome")
+        if outcome != "edited":
+            if outcome == "not_found":
+                error = "memory id not found"
+            elif outcome == "not_active":
+                status = result.get("status")
+                error = f"memory already {status}" if status in {"superseded", "deleted"} else f"memory is not active (status={status}); cannot edit"
+            elif outcome == "forbidden":
+                error = "authorized=True is required to edit a locked/user_confirmed memory"
+            elif outcome == "stale_edit":
+                error = result.get("error") or f"stale_edit: {result.get('reason') or 'current memory changed'}"
+            elif outcome == "unavailable":
+                error = "database not available"
+            else:
+                error = result.get("error") or "edit failed (db not writable)"
+            return self.db.state.response({"error": error, "edited": False, **result}, ok=False)
+        history_id = int(result["history_id"])
+        updated = result.get("record") or self.db.get_memory(memory_id_int)
         embedding_warnings: list[str] = []
         embedding_stored: Optional[bool] = None
         if self.settings.embedding_auto_write and self._embedding_configured():
@@ -1014,18 +1195,26 @@ class OperationsPipeline:
         """View the version-chain (historical snapshots) of a memory, newest
         version first. Read-only; does not modify any table.
         """
-        memory = self.db.get_memory(int(memory_id))
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        memory = self._get_memory_visible(int(memory_id), caller)
         if not memory:
-            return self.db.state.response({"error": "memory id not found"}, ok=False)
+            data = {"error": "memory id not found"}
+            if caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
         history = self.db.list_history(int(memory_id))
-        return self.db.state.response(
-            {
-                "memory_id": int(memory_id),
-                "current_version": int(memory.get("version") or 1),
-                "history": history,
-                "count": len(history),
-            }
-        )
+        history_data: dict[str, Any] = {
+            "memory_id": int(memory_id),
+            "current_version": int(memory.get("version") or 1),
+            "history": history,
+            "count": len(history),
+        }
+        if caller.isolation == "strict":
+            history_data.update(caller.response_fields())
+        return self.db.state.response(history_data, extra_warnings=list(caller.warnings))
 
     def memory_cleanup_history(
         self,

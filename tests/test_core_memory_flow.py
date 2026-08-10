@@ -423,7 +423,63 @@ def test_supersede_marks_record_and_resolves_conflicts(tmp_path: Path) -> None:
     assert any("USER-AUTHORIZED SUPERSEDE" in c["reason"] for c in resolved)
 
 
-def test_supersede_rejects_already_superseded(tmp_path: Path) -> None:
+def test_supersede_audit_failure_rolls_back_status_and_conflicts(monkeypatch, tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old = tools.memory_write(
+        content="Old audited fact",
+        subject="audit",
+        source_type="user_confirmed",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    new = tools.memory_write(
+        content="New audited fact",
+        subject="audit",
+        source_type="user_confirmed",
+        event_time="2026-02-01T00:00:00Z",
+    )
+    old_id, new_id = old["data"]["id"], new["data"]["id"]
+    tools.memory_arbitrate(old_id, new_id, mark_conflict=True, authorized=True)
+    assert tools.memory_list_conflicts(status="open")["data"]["count"] >= 1
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("audit insert exploded")
+
+    monkeypatch.setattr(tools.db, "record_conflict_on_conn", boom)
+    result = tools.memory_supersede(
+        memory_id=old_id,
+        reason="must rollback",
+        superseded_by=new_id,
+        authorized=True,
+    )
+
+    assert result["ok"] is False
+    updated = tools.db.get_memory(old_id)
+    assert updated["status"] == "active"
+    assert updated["protection_level"] == "locked"
+    assert tools.memory_list_conflicts(status="open")["data"]["count"] >= 1
+
+
+def test_external_conn_helper_raises_and_write_transaction_rolls_back(monkeypatch, tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="rollback helper fact",
+        subject="helper",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("audit insert exploded")
+
+    monkeypatch.setattr(tools.db, "record_conflict_on_conn", boom)
+    with pytest.raises(RuntimeError):
+        with tools.db.write_transaction() as conn:
+            assert tools.db.update_memory_on_conn(conn, memory_id, {"status": "superseded"}) is True
+            tools.db.record_conflict_on_conn(conn, memory_id, memory_id, "helper", "audit", None, status="resolved")
+
+    assert tools.db.get_memory(memory_id)["status"] == "active"
+
     tools = make_tools(tmp_path)
     written = tools.memory_write(
         content="Stale memory",

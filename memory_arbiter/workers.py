@@ -117,9 +117,11 @@ class SemanticConflictWorker:
         self._lock = threading.RLock()
         self._paused = False
         self._runtime_disabled = False
+        self._shutdown = False
         self._last_error: Optional[str] = None
         self._error_seq = 0
         self._processed = 0
+        self._skipped = 0
 
     def start(self) -> None:
         if not self._tools.settings.semantic_conflict_enabled:
@@ -150,11 +152,13 @@ class SemanticConflictWorker:
     def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         if not self._tools.settings.semantic_conflict_enabled:
             return {"status": "disabled"}
-        if self._runtime_disabled:
-            return {"status": "runtime_disabled"}
-        if self._paused:
-            return {"status": "paused"}
         with self._cond:
+            if self._shutdown:
+                return {"status": "shutdown"}
+            if self._runtime_disabled:
+                return {"status": "runtime_disabled"}
+            if self._paused:
+                return {"status": "paused"}
             max_size = int(getattr(self._tools.settings, "semantic_conflict_queue_max_size", 100))
             if len(self._pending) >= max_size and int(memory_id) not in self._pending:
                 return {"status": "queue_full"}
@@ -167,6 +171,8 @@ class SemanticConflictWorker:
         with self._cond:
             if not self._tools.settings.semantic_conflict_enabled:
                 state = "config_disabled"
+            elif self._shutdown:
+                state = "shutdown"
             elif getattr(self._tools.settings, "semantic_conflict_on_write", "async") == "off":
                 # enabled but on_write=off: writes never enqueue and start() does
                 # not spin up the thread, so report disabled rather than "running".
@@ -182,6 +188,8 @@ class SemanticConflictWorker:
                 "queue_depth": len(self._pending),
                 "inflight": sorted(self._inflight),
                 "processed": self._processed,
+                "skipped": self._skipped,
+                "shutdown": self._shutdown,
                 "last_error": self._last_error,
             }
 
@@ -189,20 +197,49 @@ class SemanticConflictWorker:
         with self._cond:
             self._paused = True
 
+    def shutdown(self, discard_pending: bool = True) -> dict[str, Any]:
+        with self._cond:
+            self._shutdown = True
+            self._paused = True
+            skipped = 0
+            if discard_pending:
+                skipped = len(self._pending)
+                self._pending.clear()
+                self._skipped += skipped
+            self._cond.notify_all()
+            return {"status": "shutdown", "discarded_pending": skipped, "inflight": len(self._inflight)}
+
+    def wait_drained(self, timeout: float = 30.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._cond:
+            while self._inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
+
     def disable_runtime(self) -> None:
         with self._cond:
             self._runtime_disabled = True
             self._paused = True
+            skipped = len(self._pending)
+            if skipped:
+                self._pending.clear()
+                self._skipped += skipped
+            self._cond.notify_all()
 
     def enable_runtime(self) -> None:
         with self._cond:
+            if self._shutdown:
+                return
             self._runtime_disabled = False
             self._paused = False
             self._cond.notify_all()
 
     def resume(self) -> None:
         with self._cond:
-            if self._runtime_disabled:
+            if self._runtime_disabled or self._shutdown:
                 return
             self._paused = False
             self._cond.notify_all()
@@ -218,6 +255,9 @@ class SemanticConflictWorker:
 
     def _ensure_thread(self) -> None:
         with self._lock:
+            with self._cond:
+                if self._shutdown:
+                    return
             if self._thread is not None and self._thread.is_alive():
                 return
             self._thread = threading.Thread(
@@ -228,8 +268,12 @@ class SemanticConflictWorker:
     def _run(self) -> None:
         while True:
             with self._cond:
-                while not self._pending or self._paused:
+                while (not self._pending or self._paused) and not self._shutdown:
                     self._cond.wait()
+                if self._shutdown and not self._pending:
+                    return
+                if self._shutdown and self._paused:
+                    return
                 memory_id = next(iter(self._pending))
                 snapshot = self._pending.pop(memory_id)
                 self._inflight.add(memory_id)

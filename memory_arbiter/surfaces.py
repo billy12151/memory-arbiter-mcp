@@ -304,11 +304,11 @@ class ProductSurfaces:
         if view == "help":
             return self.db.state.response(self._product_help("memory_review", self._help_topic(payload, "view")))
         if view == "overview":
-            return self.db.state.response({"status": self.memory_status().get("data"), "audit": self.memory_audit_summary().get("data")})
+            return self.db.state.response({"status": self.memory_status().get("data"), "audit": self.memory_audit_summary(**payload).get("data")})
         if view == "doctor":
             return self._forward("memory_review", view, self.memory_doctor_overview, **payload)
         if view == "audit":
-            return self.memory_audit_summary()
+            return self._forward("memory_review", view, self.memory_audit_summary, **payload)
         if view == "conflicts":
             return self._forward("memory_review", view, self.memory_list_conflicts, **payload)
         if view == "conflict_detail":
@@ -321,18 +321,17 @@ class ProductSurfaces:
             limit_int = self._int_product_arg("memory_review", payload.get("limit", 200), "limit", view)
             if isinstance(limit_int, dict):
                 return limit_int
-            row = self.db.list_conflicts(status=payload.get("status", "open"), limit=limit_int)
-            conflict = next((c for c in row if int(c.get("id")) == conflict_id_int), None)
-            if conflict is None:
-                try:
-                    with self.db.connection() as conn:
-                        raw = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id_int,)).fetchone()
-                        conflict = {k: raw[k] for k in raw.keys()} if raw else None
-                except Exception:
-                    conflict = None
-            if conflict is None:
-                return self.db.state.response({"error": "conflict id not found"}, ok=False)
-            return self.db.state.response({"conflict": self._with_resolution_guidance(conflict)})
+            caller = self._caller_workspace(payload.get("workspace"))
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+            detail = self._conflict_detail_for_workspace(conflict_id_int, caller)
+            if detail is None:
+                data = {"error": "conflict id not found"}
+                if caller.isolation == "strict":
+                    data.update(caller.response_fields())
+                return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
+            return self.db.state.response(detail, extra_warnings=list(caller.warnings))
         if view == "judgments":
             conflict_id = payload.get("conflict_id") or payload.get("id")
             if conflict_id is None:
@@ -340,7 +339,7 @@ class ProductSurfaces:
             conflict_id_int = self._int_product_arg("memory_review", conflict_id, "conflict_id", view)
             if isinstance(conflict_id_int, dict):
                 return conflict_id_int
-            return self.memory_list_conflict_judgments(conflict_id=conflict_id_int)
+            return self._forward("memory_review", view, self.memory_list_conflict_judgments, conflict_id=conflict_id_int, workspace=payload.get("workspace"))
         if view == "history":
             memory_id = payload.get("memory_id") or payload.get("id")
             if memory_id is None:
@@ -348,7 +347,7 @@ class ProductSurfaces:
             memory_id_int = self._int_product_arg("memory_review", memory_id, "memory_id", view)
             if isinstance(memory_id_int, dict):
                 return memory_id_int
-            return self.memory_history(memory_id=memory_id_int)
+            return self.memory_history(memory_id=memory_id_int, workspace=payload.get("workspace"))
         if view == "expired":
             return self._forward("memory_review", view, self.memory_search_expired, **payload)
         if view == "entities":
@@ -374,6 +373,11 @@ class ProductSurfaces:
                 return invalid_id
             if not payload.get("reason"):
                 return self._invalid_product_call("memory_govern", "retire requires reason and authorized=true", action)
+            if payload.get("superseded_by") is not None:
+                superseded_by_int = self._int_product_arg("memory_govern", payload.get("superseded_by"), "superseded_by", action)
+                if isinstance(superseded_by_int, dict):
+                    return superseded_by_int
+                payload["superseded_by"] = superseded_by_int
             return self._forward("memory_govern", action, self.memory_supersede, **payload)
         if action == "resolve_conflict":
             invalid_id = self._coerce_product_id("memory_govern", payload, "conflict_id", action)
@@ -485,7 +489,12 @@ class ProductSurfaces:
                 return invalid_id
             return self._forward("memory_repair", task, self.memory_activate, **payload)
         if task == "semantic_control":
-            return self.db.state.response(self._semantic_control(str(payload.get("action") or "status")))
+            timeout_raw = payload.get("timeout")
+            timeout_value = 30.0 if timeout_raw is None else float(timeout_raw)
+            return self.db.state.response(self._semantic_control_with_timeout(
+                str(payload.get("action") or "status"),
+                timeout=timeout_value,
+            ))
         if task == "notice":
             action = str(payload.get("action") or "list").strip().lower()
             if action == "list":

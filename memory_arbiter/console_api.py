@@ -50,11 +50,24 @@ class ConsoleAPI:
     def health(self) -> dict[str, Any]:
         return {"ok": True, "version": __version__, "read_only": True, "brand": {"en": "mema", "zh": "迷码"}}
 
-    def overview(self) -> dict[str, Any]:
+    def _strict_workspace_required(self, workspace: Optional[str]) -> Optional[dict[str, Any]]:
+        if getattr(self.tools.settings, "isolation", "none") == "strict" and not str(workspace or "").strip():
+            return {"error": "isolation=strict requires an explicit workspace query", "_http_status": 400}
+        return None
+
+    def overview(self, workspace: Optional[str] = None) -> dict[str, Any]:
+        missing_ws = self._strict_workspace_required(workspace)
+        if missing_ws is not None:
+            return missing_ws
+        caller = self.tools._caller_workspace(workspace)
+        denied = self.tools._strict_acl_unavailable(caller)
+        if denied is not None:
+            payload = self._payload(denied)
+            return {"error": payload.get("error") or "forbidden_strict_workspace", "_http_status": 403, **caller.response_fields()}
         status = self._payload(self.tools.memory_status())
-        audit = self._payload(self.tools.memory_audit_summary())
+        audit = self._payload(self.tools.memory_audit_summary(workspace=workspace))
         doctor = self._payload(self.tools.memory_doctor_overview(deep=False))
-        counts = self._status_counts()
+        counts = self._status_counts(workspace=workspace)
         by_workspace = {k: v.get("count", 0) for k, v in (audit.get("workspaces") or {}).items()}
         by_source_type: dict[str, int] = {}
         for ws_data in (audit.get("workspaces") or {}).values():
@@ -85,55 +98,65 @@ class ConsoleAPI:
             "status": status,
         }
 
-    def _status_counts(self) -> dict[str, int]:
+    def _status_counts(self, workspace: Optional[str] = None) -> dict[str, int]:
         counts = {"total": 0, "active": 0, "superseded": 0, "conflicted": 0, "pending": 0, "deleted": 0, "expired": 0, "open_conflicts": 0}
         if not self.tools.db.db_available:
             return counts
         try:
-            with self.tools.db.connection() as conn:
-                rows = conn.execute("SELECT status, COUNT(*) AS count FROM memories GROUP BY status").fetchall()
-                for row in rows:
-                    status = row["status"] or "unknown"
-                    count = int(row["count"] or 0)
-                    counts[status] = count
-                    counts["total"] += count
-                conflict_row = conn.execute("SELECT COUNT(*) AS count FROM conflicts WHERE status='open'").fetchone()
-                counts["open_conflicts"] = int(conflict_row["count"] or 0) if conflict_row else 0
+            caller = self.tools._caller_workspace(workspace)
+            if caller.isolation == "strict" and caller.canonical:
+                with self.tools.db.connection() as conn:
+                    rows = conn.execute(
+                        "SELECT status, COUNT(*) AS count FROM memories "
+                        "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? GROUP BY status",
+                        (caller.canonical,),
+                    ).fetchall()
+                    for row in rows:
+                        status = row["status"] or "unknown"
+                        count = int(row["count"] or 0)
+                        counts[status] = count
+                        counts["total"] += count
+                conflicts = self._payload(self.tools.memory_list_conflicts(status="open", limit=10000, workspace=caller.workspace)).get("conflicts") or []
+                counts["open_conflicts"] = len(conflicts)
+            else:
+                with self.tools.db.connection() as conn:
+                    rows = conn.execute("SELECT status, COUNT(*) AS count FROM memories GROUP BY status").fetchall()
+                    for row in rows:
+                        status = row["status"] or "unknown"
+                        count = int(row["count"] or 0)
+                        counts[status] = count
+                        counts["total"] += count
+                    conflict_row = conn.execute("SELECT COUNT(*) AS count FROM conflicts WHERE status='open'").fetchone()
+                    counts["open_conflicts"] = int(conflict_row["count"] or 0) if conflict_row else 0
         except sqlite3.Error:
             return counts
         counts["expired"] = counts.get("superseded", 0) + counts.get("conflicted", 0) + counts.get("pending", 0)
         return counts
 
-    def conflicts(self, status: str = "open", limit: Any = 50) -> dict[str, Any]:
-        response = self.tools.memory_list_conflicts(status=status or "open", limit=self._limit(limit, 50, 200))
+    def conflicts(self, status: str = "open", limit: Any = 50, workspace: Optional[str] = None) -> dict[str, Any]:
+        missing_ws = self._strict_workspace_required(workspace)
+        if missing_ws is not None:
+            return missing_ws
+        response = self.tools.memory_list_conflicts(status=status or "open", limit=self._limit(limit, 50, 200), workspace=workspace)
+        if not self._ok(response):
+            data = self._payload(response)
+            return {"error": data.get("error") or "conflict list failed", "_http_status": 400}
         data = self._payload(response)
         items = data.get("conflicts") or []
         return {"items": items, "count": len(items), "status": status or "open"}
 
-    def conflict_detail(self, conflict_id: int) -> dict[str, Any]:
-        conflict = self._get_conflict_row(conflict_id)
-        if not conflict:
+    def conflict_detail(self, conflict_id: int, workspace: Optional[str] = None) -> dict[str, Any]:
+        missing_ws = self._strict_workspace_required(workspace)
+        if missing_ws is not None:
+            return missing_ws
+        caller = self.tools._caller_workspace(workspace)
+        denied = self.tools._strict_acl_unavailable(caller)
+        if denied is not None:
+            return {"error": (denied.get("data") or {}).get("error", "forbidden_strict_workspace"), "_http_status": 403}
+        detail = self.tools._conflict_detail_for_workspace(conflict_id, caller)
+        if not detail:
             return {"error": f"conflict id {conflict_id} not found", "_http_status": 404}
-        resolution_kind = conflict.get("resolution_kind") or conflict.get("judgment_resolution_kind")
-        conflict["resolution_kind"] = resolution_kind
-        conflict["conflict_scope"] = conflict.get("conflict_scope") or conflict.get("judgment_conflict_scope")
-        conflict["recommended_resolution_action"] = ConflictJudgmentStore.resolution_action(resolution_kind)
-        conflict["supersede_candidate"] = ConflictJudgmentStore.is_supersede_candidate(resolution_kind)
-        left = self._memory_or_error(conflict.get("left_id"), sections="all")
-        right = self._memory_or_error(conflict.get("right_id"), sections="all")
-        judgments = self._payload(self.tools.memory_list_conflict_judgments(conflict_id)).get("judgments", [])
-        winner = conflict.get("suggested_winner") or conflict.get("winner_id") or conflict.get("judgment_suggested_winner")
-        winner_side = None
-        if winner is not None:
-            try:
-                winner_int = int(winner)
-                if winner_int == int(conflict.get("left_id")):
-                    winner_side = "left"
-                elif winner_int == int(conflict.get("right_id")):
-                    winner_side = "right"
-            except (TypeError, ValueError):
-                winner_side = None
-        return {"conflict": conflict, "left": left, "right": right, "winner_side": winner_side, "judgments": judgments}
+        return detail
 
     def _get_conflict_row(self, conflict_id: int) -> Optional[dict[str, Any]]:
         if not self.tools.db.db_available:
@@ -169,6 +192,9 @@ class ConsoleAPI:
         offset: Any = 0,
     ) -> dict[str, Any]:
         normalized_status = (status or "active").strip().lower()
+        missing_ws = self._strict_workspace_required(workspace)
+        if missing_ws is not None:
+            return missing_ws
         if normalized_status not in {"active", "expired"}:
             return {"error": "status must be active or expired", "_http_status": 400}
         tag_filter = [t.strip() for t in (tags or "").split(",") if t.strip()] or None
@@ -181,8 +207,8 @@ class ConsoleAPI:
             # recent memories behind locked/user_confirmed ones). Direct
             # ORDER BY ingest_time DESC gives the user what they expect when
             # browsing the memories page: newest first, paginated.
-            if not query and not tag_filter and not workspace and not source_type:
-                return self._recent_browse(page_size, page_offset)
+            if not query and not tag_filter and not source_type:
+                return self._recent_browse(page_size, page_offset, workspace=workspace)
             # Active search with query/filters: memory_search supports offset as
             # best-effort query-recall pagination (deep pages may return empty
             # while has_more is still true, because total_estimate is an estimate).
@@ -234,7 +260,7 @@ class ConsoleAPI:
             "warnings": response.get("warnings", []) if isinstance(response, dict) else [],
         }
 
-    def _recent_browse(self, limit: int, offset: int) -> dict[str, Any]:
+    def _recent_browse(self, limit: int, offset: int, workspace: Optional[str] = None) -> dict[str, Any]:
         """Browse active memories by recency (newest first), paginated.
 
         Bypasses memory_search so the memories page shows the actual newest
@@ -249,25 +275,37 @@ class ConsoleAPI:
         # memory_search does, so the console surfaces the error rather than
         # silently bypassing isolation.
         isolation = getattr(self.tools.settings, "isolation", "none")
-        if isolation == "strict":
-            return {"error": "isolation=strict requires a workspace to browse memories; "
-                             "add a workspace filter or switch to search.",
-                    "_http_status": 400}
+        caller = self.tools._caller_workspace(workspace)
+        if isolation == "strict" and not caller.canonical:
+            return {"error": "forbidden_strict_workspace", "_http_status": 400, **caller.response_fields()}
         try:
             with db.connection() as conn:
-                total = int(conn.execute(
-                    "SELECT COUNT(*) FROM memories WHERE status='active'"
-                ).fetchone()[0] or 0)
-                rows = conn.execute(
-                    "SELECT * FROM memories WHERE status='active' "
-                    "ORDER BY ingest_time DESC, id DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                ).fetchall()
+                if isolation == "strict":
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM memories WHERE status='active' "
+                        "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
+                        (caller.canonical,),
+                    ).fetchone()[0] or 0)
+                    rows = conn.execute(
+                        "SELECT * FROM memories WHERE status='active' "
+                        "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? "
+                        "ORDER BY ingest_time DESC, id DESC LIMIT ? OFFSET ?",
+                        (caller.canonical, limit, offset),
+                    ).fetchall()
+                else:
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM memories WHERE status='active'"
+                    ).fetchone()[0] or 0)
+                    rows = conn.execute(
+                        "SELECT * FROM memories WHERE status='active' "
+                        "ORDER BY ingest_time DESC, id DESC LIMIT ? OFFSET ?",
+                        (limit, offset),
+                    ).fetchall()
         except sqlite3.Error as exc:
             return {"error": f"browse failed: {exc}", "_http_status": 500}
         items = [dict(r) for r in rows]
         has_more = total > offset + len(items)
-        return {
+        out = {
             "items": items,
             "count": total,
             "total": total,
@@ -275,16 +313,22 @@ class ConsoleAPI:
             "has_more": has_more,
             "status": "active",
         }
+        if isolation == "strict":
+            out.update(caller.response_fields())
+        return out
 
-    def memory_detail(self, memory_id: int, sections: str = "catalog") -> dict[str, Any]:
-        return self._memory_or_error(memory_id, sections=sections if sections in {"none", "catalog", "all"} else "catalog")
+    def memory_detail(self, memory_id: int, sections: str = "catalog", workspace: Optional[str] = None) -> dict[str, Any]:
+        missing_ws = self._strict_workspace_required(workspace)
+        if missing_ws is not None:
+            return missing_ws
+        return self._memory_or_error(memory_id, sections=sections if sections in {"none", "catalog", "all"} else "catalog", workspace=workspace)
 
-    def _memory_or_error(self, memory_id: Any, sections: str = "catalog") -> dict[str, Any]:
+    def _memory_or_error(self, memory_id: Any, sections: str = "catalog", workspace: Optional[str] = None) -> dict[str, Any]:
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
             return {"error": "memory_id must be an integer", "_http_status": 400}
-        response = self.tools.memory_get(memory_id=memory_id_int, sections=sections)
+        response = self.tools.memory_get(memory_id=memory_id_int, sections=sections, workspace=workspace)
         data = self._payload(response)
         if not self._ok(response):
             return {"error": data.get("error") or f"memory id {memory_id_int} not found", "_http_status": 404}

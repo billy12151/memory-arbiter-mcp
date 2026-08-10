@@ -42,7 +42,7 @@ class AuditStore:
                     ph = ",".join("?" * len(chunk))
                     rows = conn.execute(
                         f"SELECT id, subject, status, source_type, "
-                        f"protection_level, tags, "
+                        f"protection_level, tags, workspace, workspace_canonical, "
                         f"substr(content, 1, 200) AS snippet "
                         f"FROM memories WHERE id IN ({ph}) AND status = 'active'",
                         chunk,

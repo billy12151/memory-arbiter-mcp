@@ -42,18 +42,26 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._json(self.api.health(), send_body=send_body)
                 return
             if parsed.path == "/api/overview":
-                self._json(self.api.overview(), send_body=send_body)
+                qs = parse_qs(parsed.query)
+                ws = _one(qs, "workspace", "") or None
+                self._json_or_error(self.api.overview(workspace=ws) if ws else self.api.overview(), send_body=send_body)
                 return
             if parsed.path == "/api/conflicts":
                 qs = parse_qs(parsed.query)
-                self._json(self.api.conflicts(status=_one(qs, "status", "open"), limit=_one(qs, "limit", "50")), send_body=send_body)
+                ws = _one(qs, "workspace", "") or None
+                kwargs = {"status": _one(qs, "status", "open"), "limit": _one(qs, "limit", "50")}
+                if ws:
+                    kwargs["workspace"] = ws
+                self._json_or_error(self.api.conflicts(**kwargs), send_body=send_body)
                 return
             if parsed.path.startswith("/api/conflicts/"):
                 conflict_id = _path_int(parsed.path)
                 if conflict_id is None:
                     self._json({"error": "conflict id must be an integer"}, status=HTTPStatus.BAD_REQUEST, send_body=send_body)
                     return
-                self._json_or_error(self.api.conflict_detail(conflict_id), send_body=send_body)
+                qs = parse_qs(parsed.query)
+                ws = _one(qs, "workspace", "") or None
+                self._json_or_error(self.api.conflict_detail(conflict_id, workspace=ws) if ws else self.api.conflict_detail(conflict_id), send_body=send_body)
                 return
             if parsed.path == "/api/memories":
                 qs = parse_qs(parsed.query)
@@ -73,7 +81,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 if memory_id is None:
                     self._json({"error": "memory id must be an integer"}, status=HTTPStatus.BAD_REQUEST, send_body=send_body)
                     return
-                self._json_or_error(self.api.memory_detail(memory_id, sections=_one(qs, "sections", "catalog")), send_body=send_body)
+                ws = _one(qs, "workspace", "") or None
+                self._json_or_error(self.api.memory_detail(memory_id, sections=_one(qs, "sections", "catalog"), workspace=ws) if ws else self.api.memory_detail(memory_id, sections=_one(qs, "sections", "catalog")), send_body=send_body)
                 return
             if parsed.path == "/api/doctor":
                 self._json(self.api.doctor(), send_body=send_body)

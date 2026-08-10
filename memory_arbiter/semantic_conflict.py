@@ -112,13 +112,27 @@ class SemanticBackend(Protocol):
     def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
         ...
 
+    def suggest_workspace_candidate(
+        self,
+        ws_raw: str,
+        evidence: dict[str, Any],
+        candidates: list[str],
+    ) -> WorkspaceCandidateSignal:
+        ...
+
     def load(self) -> None:
         ...
 
     def status(self) -> dict[str, Any]:
         ...
 
-    def unload(self) -> None:
+    def unload(self, timeout: float = 30.0, disable: bool = False) -> dict[str, Any]:
+        ...
+
+    def maybe_unload_if_idle(self) -> dict[str, Any]:
+        ...
+
+    def set_disabled(self, disabled: bool) -> None:
         ...
 
 
@@ -370,28 +384,60 @@ class LocalGGUFSemanticBackend:
         self.n_threads = int(n_threads)
         self.n_batch = int(n_batch)
         self._llm: Any = None
-        self._lock = threading.Lock()
+        self._cond = threading.Condition(threading.Lock())
+        self._load_lock = threading.Lock()
+        self._infer_lock = threading.Lock()
         self._last_error: Optional[str] = None
         self._loaded_at: Optional[float] = None
+        self._inflight = 0
+        self._unloading = False
+        self._loading = False
+        self._disabled = False
+        self._generation = 0
+
+    def _build_llm(self) -> Any:
+        if not self.model_path.exists():
+            raise FileNotFoundError(str(self.model_path))
+        from llama_cpp import Llama  # type: ignore
+        kwargs = {
+            "model_path": str(self.model_path),
+            "n_ctx": self.n_ctx,
+            "n_threads": self.n_threads,
+            "verbose": False,
+        }
+        if self.n_batch > 0:
+            kwargs["n_batch"] = self.n_batch
+        return Llama(**kwargs)
 
     def _ensure_llm(self) -> Any:
-        with self._lock:
+        with self._cond:
+            while self._unloading or self._loading:
+                self._cond.wait()
+            if self._disabled:
+                raise RuntimeError("semantic backend disabled")
             if self._llm is not None:
                 return self._llm
-            if not self.model_path.exists():
-                raise FileNotFoundError(str(self.model_path))
-            from llama_cpp import Llama  # type: ignore
-            kwargs = {
-                "model_path": str(self.model_path),
-                "n_ctx": self.n_ctx,
-                "n_threads": self.n_threads,
-                "verbose": False,
-            }
-            if self.n_batch > 0:
-                kwargs["n_batch"] = self.n_batch
-            self._llm = Llama(**kwargs)
+            self._loading = True
+        try:
+            with self._load_lock:
+                llm = self._build_llm()
+        except BaseException:
+            with self._cond:
+                self._loading = False
+                self._cond.notify_all()
+            raise
+        with self._cond:
+            self._llm = llm
             self._loaded_at = time.time()
             self._last_error = None
+            self._loading = False
+            self._cond.notify_all()
+            if self._disabled or self._unloading:
+                # Caller requested unload/disable while native loading was in progress.
+                self._llm = None
+                self._loaded_at = None
+                self._generation += 1
+                raise RuntimeError("semantic backend disabled")
             return self._llm
 
     def load(self) -> None:
@@ -404,27 +450,135 @@ class LocalGGUFSemanticBackend:
         content = record.get("content") or ""
         return f"subject: {subject}\ntags: {tags}\ncontent: {content}".strip()
 
-    def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
+    def _acquire_llm_for_call(self) -> Any | None:
+        with self._cond:
+            while self._unloading or self._loading:
+                self._cond.wait()
+            if self._disabled:
+                return None
+            if self._llm is not None:
+                self._inflight += 1
+                return self._llm
+            self._loading = True
+            self._inflight += 1
         try:
-            llm = self._ensure_llm()
+            with self._load_lock:
+                llm = self._build_llm()
+        except BaseException:
+            with self._cond:
+                self._loading = False
+                self._inflight = max(0, self._inflight - 1)
+                self._cond.notify_all()
+            raise
+        with self._cond:
+            self._llm = llm
+            self._loaded_at = time.time()
+            self._last_error = None
+            self._loading = False
+            if self._disabled or self._unloading:
+                self._llm = None
+                self._loaded_at = None
+                self._generation += 1
+                self._inflight = max(0, self._inflight - 1)
+                self._cond.notify_all()
+                return None
+            self._cond.notify_all()
+            return self._llm
+
+    def _release_llm_for_call(self) -> None:
+        with self._cond:
+            self._inflight = max(0, self._inflight - 1)
+            self._cond.notify_all()
+
+    def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
+        llm: Any | None = None
+        acquired = False
+        try:
+            llm = self._acquire_llm_for_call()
+            if llm is None:
+                return ModelSignal(False, "backend_unavailable", None, "", None, "disabled")
+            acquired = True
             text = f"A: {self._memory_text(left)}\nB: {self._memory_text(right)}"
-            out = llm.create_chat_completion(
-                messages=[{"role": "system", "content": _PAIR_PROMPT}, {"role": "user", "content": f"输入: {text}\n输出:"}],
-                max_tokens=120,
-                temperature=0.0,
-                top_p=0.9,
-                stop=["\n\n", "</s>"],
-            )
+            with self._infer_lock:
+                out = llm.create_chat_completion(
+                    messages=[{"role": "system", "content": _PAIR_PROMPT}, {"role": "user", "content": f"输入: {text}\n输出:"}],
+                    max_tokens=120,
+                    temperature=0.0,
+                    top_p=0.9,
+                    stop=["\n\n", "</s>"],
+                )
             raw = out["choices"][0]["message"]["content"]
             return model_signal_from_text(raw)
         except Exception as exc:
-            self._last_error = str(exc)
+            with self._cond:
+                self._last_error = str(exc)
             return ModelSignal(False, "backend_error", None, "", None, str(exc))
+        finally:
+            if acquired:
+                self._release_llm_for_call()
 
-    def unload(self) -> None:
-        with self._lock:
+    def unload(self, timeout: float = 30.0, disable: bool = False) -> dict[str, Any]:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._cond:
+            if disable:
+                self._disabled = True
+            self._unloading = True
+            while self._inflight > 0 or self._loading:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._unloading = False
+                    self._cond.notify_all()
+                    return {
+                        "ok": False,
+                        "unloaded": False,
+                        "timeout": True,
+                        "inflight": self._inflight,
+                        "loading": self._loading,
+                        "retry_hint": "retry unload after current semantic inference or load completes",
+                        "generation": self._generation,
+                    }
+                self._cond.wait(remaining)
             self._llm = None
             self._loaded_at = None
+            self._generation += 1
+            self._unloading = False
+            self._cond.notify_all()
+            return {
+                "ok": True,
+                "unloaded": True,
+                "timeout": False,
+                "inflight": 0,
+                "retry_hint": None,
+                "generation": self._generation,
+            }
+
+    def maybe_unload_if_idle(self) -> dict[str, Any]:
+        with self._cond:
+            if self._inflight > 0 or self._unloading or self._loading:
+                return {
+                    "ok": False,
+                    "unloaded": False,
+                    "reason": "busy",
+                    "inflight": self._inflight,
+                    "generation": self._generation,
+                }
+            was_loaded = self._llm is not None
+            if was_loaded:
+                self._llm = None
+                self._loaded_at = None
+                self._generation += 1
+            return {
+                "ok": True,
+                "unloaded": was_loaded,
+                "reason": "idle" if was_loaded else "already_unloaded",
+                "inflight": 0,
+                "generation": self._generation,
+            }
+
+    def set_disabled(self, disabled: bool) -> None:
+        with self._cond:
+            self._disabled = bool(disabled)
+            self._cond.notify_all()
 
     def suggest_workspace_candidate(
         self,
@@ -438,39 +592,55 @@ class LocalGGUFSemanticBackend:
         this given isolation + rule vetoes. Degrades to a safe uncertain/no-op on
         any backend error — never raises.
         """
+        llm: Any | None = None
+        acquired = False
         try:
-            llm = self._ensure_llm()
+            llm = self._acquire_llm_for_call()
+            if llm is None:
+                return WorkspaceCandidateSignal(None, "uncertain", None, "", "", "disabled")
+            acquired = True
             title = str(evidence.get("title") or "")
             keys = " / ".join(evidence.get("key_sentences") or [])[:300]
             cand_str = ", ".join(candidates) if candidates else "(无)"
             text = (
                 f"workspace原文: {ws_raw}\n标题: {title}\n关键句: {keys}\n候选: {cand_str}"
             )
-            out = llm.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": _WORKSPACE_PROMPT},
-                    {"role": "user", "content": f"输入:\n{text}\n输出:"},
-                ],
-                max_tokens=120,
-                temperature=0.0,
-                top_p=0.9,
-                stop=["\n\n", "</s>"],
-            )
+            with self._infer_lock:
+                out = llm.create_chat_completion(
+                    messages=[
+                        {"role": "system", "content": _WORKSPACE_PROMPT},
+                        {"role": "user", "content": f"输入:\n{text}\n输出:"},
+                    ],
+                    max_tokens=120,
+                    temperature=0.0,
+                    top_p=0.9,
+                    stop=["\n\n", "</s>"],
+                )
             raw = out["choices"][0]["message"]["content"]
             return workspace_candidate_from_text(raw, candidates)
         except Exception as exc:
-            self._last_error = str(exc)
+            with self._cond:
+                self._last_error = str(exc)
             return WorkspaceCandidateSignal(None, "uncertain", None, "", "", str(exc))
+        finally:
+            if acquired:
+                self._release_llm_for_call()
 
     def status(self) -> dict[str, Any]:
-        return {
-            "backend": "local_gguf",
-            "model_path": str(self.model_path),
-            "model_exists": self.model_path.exists(),
-            "model_state": "resident" if self._llm is not None else "unloaded",
-            "loaded_at": self._loaded_at,
-            "last_error": self._last_error,
-        }
+        with self._cond:
+            state = "resident" if self._llm is not None else "unloaded"
+            return {
+                "backend": "local_gguf",
+                "model_path": str(self.model_path),
+                "model_exists": self.model_path.exists(),
+                "model_state": state,
+                "loaded_at": self._loaded_at,
+                "last_error": self._last_error,
+                "inflight": self._inflight,
+                "unloading": self._unloading,
+                "disabled": self._disabled,
+                "generation": self._generation,
+            }
 
 
 def notice_dedupe_key(left_id: int, right_id: int, left_version: int, right_version: int, notice_type: str) -> str:

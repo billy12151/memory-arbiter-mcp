@@ -45,6 +45,174 @@ def _results(search: dict) -> list:
     return (search.get("data") or {}).get("results") or []
 
 
+def _active_write(tools: MemoryTools, content: str, workspace: str, subject: str = "test", **kw) -> int:
+    mid = _write(tools, content, workspace, subject=subject, **kw)["data"]["id"]
+    tools.memory_activate(memory_id=mid, authorized=True)
+    return mid
+
+
+# ── v0.12.5 strict read ACL ────────────────────────────────────────────────
+
+
+def test_strict_memory_get_by_id_filters_workspace(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    a_id = _active_write(tools, "alpha private", "projA")
+    b_id = _active_write(tools, "beta private", "projB")
+
+    ok = tools.memory_get(memory_id=a_id, workspace="projA")
+    denied = tools.memory_get(memory_id=b_id, workspace="projA")
+
+    assert ok["ok"] is True and ok["data"]["memory"]["id"] == a_id
+    assert denied["ok"] is False
+    assert denied["data"]["workspace_source"] == "explicit"
+
+
+def test_strict_history_filters_workspace(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    b_id = _active_write(tools, "beta private", "projB")
+
+    r = tools.memory_history(memory_id=b_id, workspace="projA")
+
+    assert r["ok"] is False
+    assert r["data"]["workspace_source"] == "explicit"
+
+
+def test_strict_conflict_detail_any_side_redacts_hidden_side(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    a_id = _active_write(tools, "alpha visible text", "projA")
+    b_id = _active_write(tools, "beta hidden secret", "projB")
+    cid = tools.memory_record_conflict(
+        left_id=a_id, right_id=b_id, reason="hidden beta secret conflicts", conflict_point="secret point"
+    )["data"]["conflict_id"]
+
+    detail = tools.memory_review(view="conflict_detail", data={"conflict_id": cid, "workspace": "projA"})
+    denied = tools.memory_review(view="conflict_detail", data={"conflict_id": cid, "workspace": "projC"})
+
+    assert detail["ok"] is True
+    assert detail["data"]["left"]["visible"] is True
+    assert detail["data"]["right"]["visible"] is False
+    assert "reason" in detail["data"]["conflict"]["redacted_fields"]
+    assert "hidden beta secret" not in str(detail["data"])
+    assert denied["ok"] is False
+
+
+def test_strict_console_memory_detail_uses_workspace_acl(tmp_path):
+    from memory_arbiter.console_api import ConsoleAPI
+
+    tools = make_tools(tmp_path, "strict")
+    b_id = _active_write(tools, "beta console secret", "projB")
+    api = ConsoleAPI(tools=tools)
+
+    denied = api.memory_detail(b_id, sections="all", workspace="projA")
+    ok = api.memory_detail(b_id, sections="all", workspace="projB")
+
+    assert denied["_http_status"] == 404
+    assert "beta console secret" not in str(denied)
+    assert ok["memory"]["id"] == b_id
+
+
+def test_strict_memory_split_prepare_filters_workspace_before_content(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    tools.settings.split_threshold = 10
+    b_id = _active_write(tools, "beta split secret content long enough", "projB")
+
+    r = tools.memory_split(memory_id=b_id, workspace="projA")
+
+    assert r["ok"] is False
+    assert "beta split secret" not in str(r)
+
+
+def test_strict_search_conflict_signal_redacts_cross_workspace_peer(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    a_id = _active_write(tools, "alpha searchable conflict", "projA", subject="same")
+    b_id = _active_write(tools, "beta hidden conflict", "projB", subject="same")
+    tools.memory_record_conflict(left_id=a_id, right_id=b_id, reason="hidden beta conflict")
+
+    r = tools.memory_search(query="searchable", workspace="projA", limit=10)
+    sig = r["data"]["results"][0].get("conflict_signal") or {}
+
+    assert sig.get("conflict_id") is not None
+    assert sig.get("conflict_point") is None
+    assert sig.get("suggested_winner") is None
+    assert sig.get("judgment") is None
+    assert sig.get("redacted_fields")
+    assert sig["conflict_peer"]["redaction_reason"] == "workspace_acl"
+    assert "beta hidden conflict" not in str(sig)
+
+
+def test_strict_conflict_signal_redacts_legacy_empty_workspace_peer(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    a_id = _active_write(tools, "alpha legacy peer search", "projA", subject="same")
+    b_id = _active_write(tools, "beta legacy secret peer", "projB", subject="same")
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET workspace='', workspace_canonical=NULL WHERE id=?", (b_id,))
+    tools.memory_record_conflict(left_id=a_id, right_id=b_id, reason="legacy secret reason", conflict_point="LEGACY_SECRET_POINT")
+
+    r = tools.memory_search(query="legacy peer search", workspace="projA", limit=10)
+    sig = r["data"]["results"][0].get("conflict_signal") or {}
+
+    assert sig.get("conflict_point") is None
+    assert sig.get("suggested_winner") is None
+    assert sig.get("judgment") is None
+    assert sig["conflict_peer"]["redaction_reason"] == "workspace_acl"
+    assert "LEGACY_SECRET_POINT" not in str(sig)
+    assert "beta legacy secret" not in str(sig)
+
+
+def test_strict_expired_search_does_not_attach_conflict_signal(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    a_id = _active_write(tools, "alpha expired searchable", "projA", subject="same")
+    b_id = _active_write(tools, "beta expired hidden", "projB", subject="same")
+    tools.memory_record_conflict(left_id=a_id, right_id=b_id, reason="hidden expired reason", conflict_point="EXPIRED_SECRET_POINT")
+    tools.db.update_memory(a_id, {"status": "superseded"})
+
+    r = tools.memory_search_expired(query="expired searchable", workspace="projA", limit=10)
+    result = r["data"]["results"][0]
+
+    assert "conflict_signal" not in result
+    assert "EXPIRED_SECRET_POINT" not in str(r)
+
+
+
+def test_strict_memory_recent_and_compare_filter_workspace(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    a_id = _active_write(tools, "alpha recent", "projA")
+    b_id = _active_write(tools, "beta recent", "projB")
+
+    recent = tools.memory_recent(workspace="projA", limit=10)
+    compare = tools.memory_compare(left_id=a_id, right_id=b_id, workspace="projA")
+
+    assert [m["id"] for m in recent["data"]["results"]] == [a_id]
+    assert compare["ok"] is False
+    assert "beta recent" not in str(compare)
+
+
+
+def test_strict_memory_edit_filters_workspace_before_write(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    b_id = _active_write(tools, "beta edit secret", "projB")
+
+    denied = tools.memory_edit(memory_id=b_id, new_content="attacker edit", workspace="projA")
+    unchanged = tools.memory_get(memory_id=b_id, workspace="projB")
+
+    assert denied["ok"] is False
+    assert unchanged["data"]["memory"]["content"] == "beta edit secret"
+    assert "attacker edit" not in str(unchanged)
+
+
+
+def test_strict_memory_arbitrate_requires_both_visible(tmp_path):
+    tools = make_tools(tmp_path, "strict")
+    a_id = _active_write(tools, "alpha arbitrate", "projA")
+    b_id = _active_write(tools, "beta hidden arbitrate", "projB")
+
+    r = tools.memory_arbitrate(a_id, b_id, mark_conflict=False, workspace="projA")
+
+    assert r["ok"] is False
+    assert "beta hidden arbitrate" not in str(r)
+
+
+
 # ── Config ────────────────────────────────────────────────────────────────
 
 def test_isolation_default_is_none(tmp_path):
@@ -95,22 +263,25 @@ def test_strict_write_without_workspace_errors(tmp_path):
     assert "strict" in (r["data"].get("error") or "").lower()
 
 
-def test_strict_recall_without_workspace_errors(tmp_path):
+def test_strict_recall_without_workspace_uses_settings_workspace(tmp_path):
     tools = make_tools(tmp_path, "strict")
     tools.memory_write(content="x", workspace="projA", source_type="agent_generated", subject="test")
     r = tools.memory_search(query="x", limit=10)
-    assert r["ok"] is False
-    assert "strict" in (r["data"].get("error") or "").lower()
+    assert r["ok"] is True
+    assert r["data"]["workspace_source"] == "settings"
+    assert r["data"]["caller_workspace"] == "default"
+    assert r["data"]["results"] == []
 
 
-def test_strict_expired_recall_without_workspace_errors(tmp_path):
+def test_strict_expired_recall_without_workspace_uses_settings_workspace(tmp_path):
     tools = make_tools(tmp_path, "strict")
     _write(tools, "pending alpha", "projA")
 
     r = tools.memory_search_expired(query="pending", limit=10)
 
-    assert r["ok"] is False
-    assert "strict" in (r["data"].get("error") or "").lower()
+    assert r["ok"] is True
+    assert r["data"]["workspace_source"] == "settings"
+    assert r["data"]["caller_workspace"] == "default"
     assert r["data"]["results"] == []
 
 

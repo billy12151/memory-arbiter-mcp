@@ -1,6 +1,7 @@
 """Memory row CRUD, filters, edit/history operations for MemoryDB (Phase 3 extraction)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -101,73 +102,120 @@ class MemoriesStore:
         row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
         return _row_to_dict(row) if row else None
 
-    def get_memory(self, memory_id: int) -> Optional[dict[str, Any]]:
+    def get_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> Optional[dict[str, Any]]:
+        """Fetch a memory using the caller's transaction/connection."""
+        return self._fetch_memory(conn, int(memory_id))
+
+    def get_memory(self, memory_id: int, *, conn: Optional[sqlite3.Connection] = None) -> Optional[dict[str, Any]]:
+        if conn is not None:
+            return self.get_memory_on_conn(conn, memory_id)
         if not self._db_available:
             return None
         with self.connection() as conn:
             return self._fetch_memory(conn, memory_id)
 
-    def update_memory(self, memory_id: int, updates: dict[str, Any]) -> bool:
-        if not self._db_available or not self.state.sqlite_writable:
-            return False
+    def get_memory_for_workspace(self, memory_id: int, ws_canonical: str) -> Optional[dict[str, Any]]:
+        """ACL-specific read-by-id helper; does not change get_memory semantics."""
+        if not self._db_available or not str(ws_canonical or "").strip():
+            return None
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM memories WHERE id = ? "
+                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
+                (int(memory_id), str(ws_canonical)),
+            ).fetchone()
+            return _row_to_dict(row) if row else None
+
+    def list_memories_for_workspace(self, ws_canonical: str, limit: int = 50) -> list[dict[str, Any]]:
+        """ACL-specific recent/list helper scoped to one canonical workspace."""
+        if not self._db_available or not str(ws_canonical or "").strip():
+            return []
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE status != 'deleted' "
+                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? "
+                "ORDER BY event_time DESC, ingest_time DESC LIMIT ?",
+                (str(ws_canonical), int(limit)),
+            ).fetchall()
+            return [_row_to_dict(row) for row in rows]
+
+    def update_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int, updates: dict[str, Any]) -> bool:
+        """Update allowed memory fields using caller-owned transaction.
+
+        External-transaction mode intentionally does not catch sqlite3.Error:
+        callers need an exception to roll back the whole unit of work.
+        """
         allowed = {"source_type", "confidence", "protection_level", "status", "metadata"}
         pairs = [(key, value) for key, value in updates.items() if key in allowed]
         if not pairs:
             return True
+        current = self._fetch_memory(conn, int(memory_id))
+        if not current:
+            return False
+        changed = any(current.get(key) != value for key, value in pairs)
+        if not changed:
+            return True
+        status_changed = any(
+            key == "status" and current.get(key) != value
+            for key, value in pairs
+        )
+        new_status = next((value for key, value in pairs if key == "status"), None)
+        # Claim judgments depend not only on extracted text but also on
+        # trust/protection/status.  Changing any of those must invalidate
+        # the old CAS snapshot.  Metadata only participates when its
+        # canonical entity/scope changes; bookkeeping such as
+        # confirmed_from does not create a second revision bump.
+        judgment_semantics_changed = any(
+            key in {"source_type", "confidence", "protection_level", "status"}
+            and current.get(key) != value
+            for key, value in pairs
+        )
+        metadata_update = next((value for key, value in pairs if key == "metadata"), None)
+        if isinstance(metadata_update, dict):
+            current_md = current.get("metadata") or {}
+            current_md = current_md if isinstance(current_md, dict) else {}
+            judgment_semantics_changed = judgment_semantics_changed or (
+                _canon_entity(current_md.get("entity")) != _canon_entity(metadata_update.get("entity"))
+                or _canon_scope(current_md.get("scope")) != _canon_scope(metadata_update.get("scope"))
+            )
+        sql = ", ".join(f"{key} = ?" for key, _ in pairs)
+        if judgment_semantics_changed:
+            sql += ", claim_revision = claim_revision + 1"
+        values = [
+            json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
+            for _, v in pairs
+        ]
+        values.append(int(memory_id))
+        conn.execute(f"UPDATE memories SET {sql} WHERE id = ?", values)
+        if status_changed and self.state.sqlite_vec_available:
+            try:
+                conn.execute(
+                    "UPDATE memories_vec SET parent_status = ? WHERE id = ?",
+                    (str(new_status or "deleted"), int(memory_id)),
+                )
+                conn.execute(
+                    "UPDATE memory_sections_vec SET parent_status = ? WHERE id IN "
+                    "(SELECT id FROM memory_sections WHERE memory_id = ?)",
+                    (str(new_status or "deleted"), int(memory_id)),
+                )
+            except sqlite3.Error:
+                pass
+        return True
+
+    def update_memory(
+        self,
+        memory_id: int,
+        updates: dict[str, Any],
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        if conn is not None:
+            return self.update_memory_on_conn(conn, memory_id, updates)
+        if not self._db_available or not self.state.sqlite_writable:
+            return False
         try:
-            with self.write_transaction() as conn:
-                current = self._fetch_memory(conn, int(memory_id))
-                if not current:
-                    return False
-                changed = any(current.get(key) != value for key, value in pairs)
-                if not changed:
-                    return True
-                status_changed = any(
-                    key == "status" and current.get(key) != value
-                    for key, value in pairs
-                )
-                new_status = next((value for key, value in pairs if key == "status"), None)
-                # Claim judgments depend not only on extracted text but also on
-                # trust/protection/status.  Changing any of those must invalidate
-                # the old CAS snapshot.  Metadata only participates when its
-                # canonical entity/scope changes; bookkeeping such as
-                # confirmed_from does not create a second revision bump.
-                judgment_semantics_changed = any(
-                    key in {"source_type", "confidence", "protection_level", "status"}
-                    and current.get(key) != value
-                    for key, value in pairs
-                )
-                metadata_update = next((value for key, value in pairs if key == "metadata"), None)
-                if isinstance(metadata_update, dict):
-                    current_md = current.get("metadata") or {}
-                    current_md = current_md if isinstance(current_md, dict) else {}
-                    judgment_semantics_changed = judgment_semantics_changed or (
-                        _canon_entity(current_md.get("entity")) != _canon_entity(metadata_update.get("entity"))
-                        or _canon_scope(current_md.get("scope")) != _canon_scope(metadata_update.get("scope"))
-                    )
-                sql = ", ".join(f"{key} = ?" for key, _ in pairs)
-                if judgment_semantics_changed:
-                    sql += ", claim_revision = claim_revision + 1"
-                values = [
-                    json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
-                    for _, v in pairs
-                ]
-                values.append(int(memory_id))
-                conn.execute(f"UPDATE memories SET {sql} WHERE id = ?", values)
-                if status_changed and self.state.sqlite_vec_available:
-                    try:
-                        conn.execute(
-                            "UPDATE memories_vec SET parent_status = ? WHERE id = ?",
-                            (str(new_status or "deleted"), int(memory_id)),
-                        )
-                        conn.execute(
-                            "UPDATE memory_sections_vec SET parent_status = ? WHERE id IN "
-                            "(SELECT id FROM memory_sections WHERE memory_id = ?)",
-                            (str(new_status or "deleted"), int(memory_id)),
-                        )
-                    except sqlite3.Error:
-                        pass
-                return True
+            with self.write_transaction() as txn_conn:
+                return self.update_memory_on_conn(txn_conn, memory_id, updates)
         except sqlite3.Error:
             return False
 
@@ -481,6 +529,215 @@ class MemoriesStore:
             return []
         return list(candidates.values())
 
+    def edit_memory_intent_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: int,
+        *,
+        new_content: Optional[str] = None,
+        old_text: Optional[str] = None,
+        new_text: Optional[str] = None,
+        new_subject: Optional[str] = None,
+        new_tags: Optional[list[str]] = None,
+        add_tags: Optional[list[str]] = None,
+        remove_tags: Optional[list[str]] = None,
+        reason: Optional[str] = None,
+        authorized: bool = False,
+        expected_version: Optional[int] = None,
+        expected_content_hash: Optional[str] = None,
+        require_active: bool = True,
+    ) -> dict[str, Any]:
+        """Apply a full/partial edit intent inside caller-owned transaction.
+
+        This helper re-reads the row after BEGIN IMMEDIATE, re-checks protection
+        and status, validates optional CAS pins, computes partial content and tag
+        overlays from the current row, then writes history + memory update. It
+        deliberately does not catch sqlite3.Error so outer transactions roll back.
+        """
+        current = self._fetch_memory(conn, int(memory_id))
+        if not current:
+            return {"outcome": "not_found", "memory_id": int(memory_id)}
+        status = current.get("status")
+        if require_active and status != "active":
+            return {"outcome": "not_active", "memory_id": int(memory_id), "status": status}
+        protection = current.get("protection_level")
+        source_type = current.get("source_type")
+        is_protected = protection == "locked" or source_type == "user_confirmed"
+        if is_protected and not authorized:
+            return {
+                "outcome": "forbidden",
+                "memory_id": int(memory_id),
+                "protection_level": protection,
+                "source_type": source_type,
+            }
+        old_version = int(current.get("version") or 1)
+        if expected_version is not None and old_version != int(expected_version):
+            return {
+                "outcome": "stale_edit",
+                "memory_id": int(memory_id),
+                "reason": "version_mismatch",
+                "current_version": old_version,
+                "expected_version": int(expected_version),
+            }
+        old_content = current.get("content") or ""
+        current_hash = hashlib.sha256(old_content.encode("utf-8")).hexdigest()
+        if expected_content_hash is not None and current_hash != str(expected_content_hash):
+            return {
+                "outcome": "stale_edit",
+                "memory_id": int(memory_id),
+                "reason": "content_hash_mismatch",
+                "current_version": old_version,
+            }
+        if new_content is not None and (old_text is not None or new_text is not None):
+            return {"outcome": "invalid", "memory_id": int(memory_id), "error": "pass either new_content (full replace) or old_text+new_text (partial), not both"}
+        if new_content is not None:
+            if not str(new_content).strip():
+                return {"outcome": "invalid", "memory_id": int(memory_id), "error": "new_content is empty; refusing to wipe memory content (use memory_supersede to retire it, or pass real content)"}
+            resolved_content = str(new_content)
+        elif old_text is not None and new_text is not None:
+            if str(old_text) not in old_content:
+                return {"outcome": "stale_edit", "memory_id": int(memory_id), "reason": "old_text_not_found", "error": "old_text not found in current content"}
+            resolved_content = old_content.replace(str(old_text), str(new_text), 1)
+        else:
+            return {"outcome": "invalid", "memory_id": int(memory_id), "error": "provide new_content for full replace, or old_text+new_text for partial replace, or tags_only=true"}
+        if new_subject is not None and not str(new_subject).strip():
+            return {"outcome": "invalid", "memory_id": int(memory_id), "error": "new_subject is empty; refusing to wipe subject (pass None to keep current)"}
+        old_subject = current.get("subject")
+        subject_value = new_subject if new_subject is not None else old_subject
+        old_tags = current.get("tags") or []
+        if isinstance(old_tags, str):
+            try:
+                parsed_tags = json.loads(old_tags)
+                old_tags = parsed_tags if isinstance(parsed_tags, list) else []
+            except (json.JSONDecodeError, ValueError):
+                old_tags = []
+        resolved_tags: list[str]
+        if new_tags is not None:
+            resolved_tags = list(new_tags)
+        else:
+            resolved_tags = list(old_tags)
+        tag_set = set(resolved_tags)
+        for tag in (remove_tags or []):
+            if tag in tag_set:
+                tag_set.discard(tag)
+                resolved_tags = [existing for existing in resolved_tags if existing != tag]
+        for tag in (add_tags or []):
+            if tag not in tag_set:
+                tag_set.add(tag)
+                resolved_tags.append(tag)
+        history_cur = conn.execute(
+            """
+            INSERT INTO memory_history
+            (memory_id, content_snapshot, subject_snapshot, tags_snapshot, version, changed_at, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(memory_id),
+                old_content,
+                old_subject,
+                json.dumps(old_tags, ensure_ascii=False),
+                old_version,
+                utc_now_iso(),
+                reason,
+            ),
+        )
+        if history_cur.lastrowid is None:
+            raise sqlite3.Error("memory_history insert did not return an id")
+        history_id = int(history_cur.lastrowid)
+        conn.execute(
+            "UPDATE memories SET content=?, subject=?, tags=?, version=?, "
+            "claim_revision=claim_revision+1 WHERE id=?",
+            (
+                resolved_content,
+                subject_value,
+                json.dumps(resolved_tags, ensure_ascii=False),
+                old_version + 1,
+                int(memory_id),
+            ),
+        )
+        self._delete_sections_for_memory(conn, int(memory_id))
+        conn.execute(
+            "UPDATE memories SET split_status = NULL, "
+            "split_revision = split_revision + 1 WHERE id = ?",
+            (int(memory_id),),
+        )
+        if self.state.fts5_available:
+            conn.execute(
+                "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) VALUES('delete', ?, ?, ?, ?)",
+                (int(memory_id), old_content, " ".join(old_tags), old_subject or ""),
+            )
+            conn.execute(
+                "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
+                (int(memory_id), resolved_content, " ".join(resolved_tags), subject_value or ""),
+            )
+        updated = self._fetch_memory(conn, int(memory_id))
+        return {
+            "outcome": "edited",
+            "memory_id": int(memory_id),
+            "history_id": history_id,
+            "new_version": old_version + 1,
+            "record": updated,
+            "claim_semantics_changed": True,
+        }
+
+    def edit_memory_intent(
+        self,
+        memory_id: int,
+        *,
+        new_content: Optional[str] = None,
+        old_text: Optional[str] = None,
+        new_text: Optional[str] = None,
+        new_subject: Optional[str] = None,
+        new_tags: Optional[list[str]] = None,
+        add_tags: Optional[list[str]] = None,
+        remove_tags: Optional[list[str]] = None,
+        reason: Optional[str] = None,
+        authorized: bool = False,
+        expected_version: Optional[int] = None,
+        expected_content_hash: Optional[str] = None,
+        conn: Optional[sqlite3.Connection] = None,
+        require_active: bool = True,
+    ) -> dict[str, Any]:
+        if conn is not None:
+            return self.edit_memory_intent_on_conn(
+                conn,
+                memory_id,
+                new_content=new_content,
+                old_text=old_text,
+                new_text=new_text,
+                new_subject=new_subject,
+                new_tags=new_tags,
+                add_tags=add_tags,
+                remove_tags=remove_tags,
+                reason=reason,
+                authorized=authorized,
+                expected_version=expected_version,
+                expected_content_hash=expected_content_hash,
+                require_active=require_active,
+            )
+        if not self._db_available or not self.state.sqlite_writable:
+            return {"outcome": "unavailable", "memory_id": int(memory_id)}
+        try:
+            with self.write_transaction() as txn_conn:
+                return self.edit_memory_intent_on_conn(
+                    txn_conn,
+                    memory_id,
+                    new_content=new_content,
+                    old_text=old_text,
+                    new_text=new_text,
+                    new_subject=new_subject,
+                    new_tags=new_tags,
+                    add_tags=add_tags,
+                    remove_tags=remove_tags,
+                    reason=reason,
+                    authorized=authorized,
+                    expected_version=expected_version,
+                    expected_content_hash=expected_content_hash,
+                    require_active=require_active,
+                )
+        except sqlite3.Error:
+            return {"outcome": "error", "memory_id": int(memory_id)}
+
     def edit_memory(
         self,
         memory_id: int,
@@ -488,74 +745,26 @@ class MemoriesStore:
         new_subject: Optional[str] = None,
         new_tags: Optional[list[str]] = None,
         reason: Optional[str] = None,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+        authorized: bool = True,
     ) -> Optional[int]:
         """In-place edit a memory's content, archiving the prior version."""
-        if not self._db_available or not self.state.sqlite_writable:
-            return None
-        try:
-            # write_transaction (BEGIN IMMEDIATE) serializes concurrent edits: the
-            # write lock is taken BEFORE the read, so a second edit blocks until the
-            # first commits and then sees the bumped version (#3 — was self.connection(),
-            # which let two edits both read v=1 and both write v=2: lost update + dup
-            # history version).
-            with self.write_transaction() as conn:
-                current = self._fetch_memory(conn, memory_id)
-                if not current:
-                    return None
-                old_content = current["content"]
-                old_subject = current.get("subject")
-                old_tags = current.get("tags") or []
-                old_version = int(current.get("version") or 1)
-                tags_json = json.dumps(new_tags, ensure_ascii=False) if new_tags is not None else json.dumps(old_tags, ensure_ascii=False)
-                # Defense in depth: an empty-string subject would silently wipe the
-                # field via the branch below (`new_subject if new_subject is not None
-                # else old_subject`). Reject it here too — tools.memory_edit already
-                # guards this at the service layer, but direct callers of this DB
-                # method must not be able to clear subject either.
-                if new_subject is not None and not str(new_subject).strip():
-                    raise ValueError("new_subject must be non-empty when provided")
-                subject_value = new_subject if new_subject is not None else old_subject
-                history_cur = conn.execute(
-                    """
-                    INSERT INTO memory_history
-                    (memory_id, content_snapshot, subject_snapshot, tags_snapshot, version, changed_at, reason)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        memory_id,
-                        old_content,
-                        old_subject,
-                        json.dumps(old_tags, ensure_ascii=False),
-                        old_version,
-                        utc_now_iso(),
-                        reason,
-                    ),
-                )
-                history_id = int(history_cur.lastrowid)
-                conn.execute(
-                    "UPDATE memories SET content=?, subject=?, tags=?, version=?, "
-                    "claim_revision=claim_revision+1 WHERE id=?",
-                    (new_content, subject_value, tags_json, old_version + 1, memory_id),
-                )
-                # v0.6.0: content changed → clear sections + bump split_revision
-                self._delete_sections_for_memory(conn, memory_id)
-                conn.execute(
-                    "UPDATE memories SET split_status = NULL, "
-                    "split_revision = split_revision + 1 WHERE id = ?",
-                    (memory_id,),
-                )
-                if self.state.fts5_available:
-                    conn.execute(
-                        "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) VALUES('delete', ?, ?, ?, ?)",
-                        (memory_id, old_content, " ".join(old_tags), old_subject or ""),
-                    )
-                    conn.execute(
-                        "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
-                        (memory_id, new_content, " ".join(new_tags) if new_tags is not None else " ".join(old_tags), subject_value or ""),
-                    )
-                return history_id
-        except sqlite3.Error:
-            return None
+        result = self.edit_memory_intent(
+            memory_id,
+            new_content=new_content,
+            new_subject=new_subject,
+            new_tags=new_tags,
+            reason=reason,
+            authorized=authorized,
+            conn=conn,
+            require_active=False,
+        )
+        if result.get("outcome") == "edited":
+            return int(result["history_id"])
+        if result.get("outcome") == "invalid" and result.get("error", "").startswith("new_subject is empty"):
+            raise ValueError("new_subject must be non-empty when provided")
+        return None
 
     def list_history(self, memory_id: int) -> list[dict[str, Any]]:
         if not self._db_available:

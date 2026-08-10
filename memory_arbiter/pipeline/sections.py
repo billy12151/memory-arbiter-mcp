@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
+from ..acl import forbidden_payload
 from ..db import MemoryDB
 from ..models import MemoryRecord
 
@@ -728,9 +729,16 @@ class SectionPipeline:
         memories) rather than relying on a server-side batch protocol.
         """
         mid = int(memory_id)
-        memory = self.db.get_memory(mid)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        memory = self._get_memory_visible(mid, caller)
         if not memory:
-            return self.db.state.response({"error": "memory not found"}, ok=False)
+            data = {"error": "memory not found"}
+            if caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
 
         content = memory.get("content") or ""
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -894,6 +902,16 @@ class SectionPipeline:
         """Rebuild embeddings after model switch or for repair."""
         vec_state = self.db.get_vec_index_state()
         state = vec_state.get("state", "unmanaged")
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict" and not memory_ids:
+            return self.db.state.response(
+                forbidden_payload("repair", workspace=caller, reason="maintenance_scope_not_workspace_filtered"),
+                ok=False,
+                extra_warnings=list(caller.warnings),
+            )
 
         if state == "unmanaged":
             return self.db.state.response({"error": "unmanaged: no managed embedder"}, ok=False)
@@ -904,6 +922,12 @@ class SectionPipeline:
 
         # Determine target memories
         migration_mode = state in ("mismatch", "failed")
+        if migration_mode and caller.isolation == "strict":
+            return self.db.state.response(
+                forbidden_payload("repair", workspace=caller, reason="global_embedding_migration_not_workspace_scoped"),
+                ok=False,
+                extra_warnings=list(caller.warnings),
+            )
         migration_cursor = vec_state.get("migration_cursor")
         cursor_value = int(migration_cursor) if migration_cursor is not None else -1
         if migration_mode:
@@ -915,13 +939,18 @@ class SectionPipeline:
                 }, ok=False)
             # Migration mode: continue after the persisted contiguous cursor.
             with self.db.connection() as conn:
+                where = ["(v.id IS NOT NULL OR s.id IS NOT NULL)", "m.id > ?"]
+                params: list[Any] = [cursor_value]
+                if caller.isolation == "strict" and caller.canonical:
+                    where.append("COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?")
+                    params.append(caller.canonical)
                 rows = conn.execute(
                     "SELECT DISTINCT m.id AS id FROM memories m "
                     "LEFT JOIN memories_vec v ON v.id = m.id "
                     "LEFT JOIN memory_sections s ON s.memory_id = m.id "
-                    "WHERE (v.id IS NOT NULL OR s.id IS NOT NULL) AND m.id > ? "
+                    f"WHERE {' AND '.join(where)} "
                     "ORDER BY m.id",
-                    (cursor_value,),
+                    params,
                 ).fetchall()
                 target_ids = [int(r["id"]) for r in rows]
         elif state == "ready":
@@ -930,6 +959,8 @@ class SectionPipeline:
                     "error": "ready state: specify memory_ids for local repair"
                 }, ok=False)
             target_ids = [int(mid) for mid in memory_ids]
+            if caller.isolation == "strict":
+                target_ids = [mid for mid in target_ids if self._get_memory_visible(mid, caller)]
         else:
             return self.db.state.response({"error": f"unexpected state: {state}"}, ok=False)
 
@@ -938,14 +969,17 @@ class SectionPipeline:
             target_ids = target_ids[:batch_size]
 
         if dry_run:
-            return self.db.state.response({
+            data = {
                 "dry_run": True,
                 "target_memory_ids": target_ids,
                 "target_count": len(target_ids),
                 "current_space_id": embedder.embedding_space_id,
                 "active_space_id": vec_state.get("active_space_id"),
                 "global_state": state,
-            })
+            }
+            if caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
         # Execute rebuild
         succeeded = 0

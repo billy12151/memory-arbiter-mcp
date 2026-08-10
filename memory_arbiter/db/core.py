@@ -303,6 +303,32 @@ class MemoryDB:
             force=force,
         )
 
+    def upsert_workspace_alias_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        alias: str,
+        canonical: str,
+        *,
+        relation: str = "alias",
+        status: str = "confirmed",
+        source: str = "user",
+        action: str = "accept",
+        judge_type: str = "user",
+        reason: Optional[str] = None,
+        force: bool = False,
+    ) -> Tuple[bool, list[str]]:
+        return self.workspaces.upsert_workspace_alias(
+            alias, canonical,
+            relation=relation,
+            status=status,
+            source=source,
+            action=action,
+            judge_type=judge_type,
+            reason=reason,
+            force=force,
+            conn=conn,
+        )
+
     def get_workspace_alias(self, alias: str) -> Optional[dict[str, Any]]:
         return self.workspaces.get_workspace_alias(alias)
 
@@ -326,6 +352,11 @@ class MemoryDB:
             from_ws, to_ws, judge_type=judge_type, reason=reason, embedder=embedder,
         )
 
+    def prepare_workspace_canonical_embedding(
+        self, canonical: str, embedder: Any = None,
+    ) -> Optional[list[float]]:
+        return self.workspaces.prepare_workspace_canonical_embedding(canonical, embedder)
+
     def set_memory_workspace_canonical(
         self,
         memory_id: int,
@@ -333,6 +364,21 @@ class MemoryDB:
         embedder: Any = None,
     ) -> Tuple[bool, list[str]]:
         return self.workspaces.set_memory_workspace_canonical(memory_id, canonical, embedder)
+
+    def set_memory_workspace_canonical_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: int,
+        canonical: str,
+        precomputed_embedding: Optional[list[float]] = None,
+    ) -> Tuple[bool, list[str]]:
+        return self.workspaces.set_memory_workspace_canonical(
+            memory_id,
+            canonical,
+            None,
+            conn=conn,
+            precomputed_embedding=precomputed_embedding,
+        )
 
     def delete_embedding(self, memory_id: int) -> Tuple[bool, list[str]]:
         return self.vectors.delete_embedding(memory_id)
@@ -382,11 +428,23 @@ class MemoryDB:
     def _fetch_memory(conn: sqlite3.Connection, memory_id: int) -> Optional[dict[str, Any]]:
         return MemoriesStore._fetch_memory(conn, memory_id)
 
+    def get_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> Optional[dict[str, Any]]:
+        return self.memories.get_memory_on_conn(conn, memory_id)
+
     def get_memory(self, memory_id: int) -> Optional[dict[str, Any]]:
         return self.memories.get_memory(memory_id)
 
+    def get_memory_for_workspace(self, memory_id: int, ws_canonical: str) -> Optional[dict[str, Any]]:
+        return self.memories.get_memory_for_workspace(memory_id, ws_canonical)
+
+    def list_memories_for_workspace(self, ws_canonical: str, limit: int = 50) -> list[dict[str, Any]]:
+        return self.memories.list_memories_for_workspace(ws_canonical, limit)
+
     def update_memory(self, memory_id: int, updates: dict[str, Any]) -> bool:
         return self.memories.update_memory(memory_id, updates)
+
+    def update_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int, updates: dict[str, Any]) -> bool:
+        return self.memories.update_memory(memory_id, updates, conn=conn)
 
     def list_memories(self, workspace: Optional[str] = None, subject: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
         return self.memories.list_memories(workspace, subject, limit)
@@ -435,8 +493,23 @@ class MemoryDB:
     def record_conflict(self, left_id: int, right_id: int, subject: Optional[str], reason: str, winner_id: Optional[int], status: str = "open") -> Optional[int]:
         return self.conflicts.record_conflict(left_id, right_id, subject, reason, winner_id, status)
 
+    def record_conflict_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        left_id: int,
+        right_id: int,
+        subject: Optional[str],
+        reason: str,
+        winner_id: Optional[int],
+        status: str = "open",
+    ) -> int:
+        return self.conflicts.record_conflict_on_conn(conn, left_id, right_id, subject, reason, winner_id, status)
+
     def resolve_conflicts_for(self, memory_id: int) -> int:
         return self.conflicts.resolve_conflicts_for(memory_id)
+
+    def resolve_conflicts_for_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> int:
+        return self.conflicts.resolve_conflicts_for_on_conn(conn, memory_id)
 
     def list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None) -> list[dict[str, Any]]:
         return self.conflicts.list_conflicts(status, limit, source)
@@ -658,6 +731,55 @@ class MemoryDB:
         reason: Optional[str] = None,
     ) -> Optional[int]:
         return self.memories.edit_memory(memory_id, new_content, new_subject, new_tags, reason)
+
+    def edit_memory_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: int,
+        new_content: str,
+        new_subject: Optional[str] = None,
+        new_tags: Optional[list[str]] = None,
+        reason: Optional[str] = None,
+        *,
+        authorized: bool = True,
+    ) -> Optional[int]:
+        return self.memories.edit_memory(
+            memory_id, new_content, new_subject, new_tags, reason,
+            conn=conn, authorized=authorized,
+        )
+
+    def edit_memory_intent(
+        self,
+        memory_id: int,
+        *,
+        new_content: Optional[str] = None,
+        old_text: Optional[str] = None,
+        new_text: Optional[str] = None,
+        new_subject: Optional[str] = None,
+        new_tags: Optional[list[str]] = None,
+        add_tags: Optional[list[str]] = None,
+        remove_tags: Optional[list[str]] = None,
+        reason: Optional[str] = None,
+        authorized: bool = False,
+        expected_version: Optional[int] = None,
+        expected_content_hash: Optional[str] = None,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> dict[str, Any]:
+        return self.memories.edit_memory_intent(
+            memory_id,
+            new_content=new_content,
+            old_text=old_text,
+            new_text=new_text,
+            new_subject=new_subject,
+            new_tags=new_tags,
+            add_tags=add_tags,
+            remove_tags=remove_tags,
+            reason=reason,
+            authorized=authorized,
+            expected_version=expected_version,
+            expected_content_hash=expected_content_hash,
+            conn=conn,
+        )
 
     def list_history(self, memory_id: int) -> list[dict[str, Any]]:
         return self.memories.list_history(memory_id)

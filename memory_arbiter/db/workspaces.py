@@ -211,6 +211,80 @@ class WorkspaceStore:
     #  Workspace alias governance (design 637). Current-state table +
     #  append-only event log + UNIQUE + single transaction. NO CAS.
     # ------------------------------------------------------------------
+    def upsert_workspace_alias_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        alias: str,
+        canonical: str,
+        *,
+        relation: str = "alias",
+        status: str = "confirmed",
+        source: str = "user",
+        action: str = "accept",
+        judge_type: str = "user",
+        reason: Optional[str] = None,
+        force: bool = False,
+    ) -> Tuple[bool, list[str]]:
+        alias_key = _normalize_alias_key(alias)
+        if not alias_key:
+            return False, ["alias must be a non-empty workspace string."]
+        canonical = _coerce_ws(canonical)
+        if not canonical:
+            return False, ["canonical must be a non-empty workspace string."]
+        if status not in {"confirmed", "rejected"}:
+            return False, [f"status={status!r} invalid; expected confirmed|rejected."]
+        now = utc_now_iso()
+        prev = conn.execute(
+            "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
+            (alias_key,),
+        ).fetchone()
+        old_canonical = prev["canonical"] if prev else None
+        old_status = prev["status"] if prev else None
+        # Guard: do not silently reverse a user rejection.
+        if (
+            prev is not None
+            and old_status == "rejected"
+            and status == "confirmed"
+            and not force
+        ):
+            return False, [
+                f"workspace {alias_key!r} was explicitly rejected as an alias of "
+                f"{old_canonical!r}; refusing to confirm it silently. Pass an "
+                "authorized override to change this decision."
+            ]
+        conn.execute(
+            """INSERT INTO workspace_aliases
+                 (alias_workspace, canonical, relation, status, source, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(alias_workspace) DO UPDATE SET
+                 canonical=excluded.canonical,
+                 relation=excluded.relation,
+                 status=excluded.status,
+                 source=excluded.source,
+                 updated_at=excluded.updated_at""",
+            (alias_key, canonical, relation, status, source, now),
+        )
+        conn.execute(
+            """INSERT INTO workspace_alias_events
+                 (alias_workspace, old_canonical, new_canonical,
+                  old_status, new_status, action, judge_type, reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (alias_key, old_canonical, canonical, old_status, status,
+             action, judge_type, reason, now),
+        )
+        # Register the target canonical for confirmed aliases so the
+        # resolver's confirmed-alias short-circuit never returns a name
+        # that has no row in workspace_canonicals (which would silently
+        # disable KNN fuzzy-merge and let a later near-miss re-split).
+        # Rejected aliases don't register — a rejection doesn't create
+        # a workspace, it only records that this key is NOT that name.
+        if status == "confirmed":
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                (canonical, now),
+            )
+        return True, []
+
     def upsert_workspace_alias(
         self,
         alias: str,
@@ -223,6 +297,7 @@ class WorkspaceStore:
         judge_type: str = "user",
         reason: Optional[str] = None,
         force: bool = False,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> Tuple[bool, list[str]]:
         """Upsert the current alias state AND append an audit event in one txn.
 
@@ -238,73 +313,39 @@ class WorkspaceStore:
         path can reverse a user's explicit "keep separate" decision by accident.
         Re-asserting a rejection, or overriding with force, is always allowed.
         """
+        if conn is not None:
+            return self.upsert_workspace_alias_on_conn(
+                conn,
+                alias,
+                canonical,
+                relation=relation,
+                status=status,
+                source=source,
+                action=action,
+                judge_type=judge_type,
+                reason=reason,
+                force=force,
+            )
         if not self._db_available or not self.state.sqlite_writable:
             return False, ["SQLite write unavailable; workspace alias not written."]
-        alias_key = _normalize_alias_key(alias)
-        if not alias_key:
-            return False, ["alias must be a non-empty workspace string."]
-        canonical = _coerce_ws(canonical)
-        if not canonical:
-            return False, ["canonical must be a non-empty workspace string."]
-        if status not in {"confirmed", "rejected"}:
-            return False, [f"status={status!r} invalid; expected confirmed|rejected."]
-        now = utc_now_iso()
         try:
             # write_transaction (BEGIN IMMEDIATE) so the read-then-write of the
             # predecessor state is serialized: concurrent writers block here
             # instead of both reading the same old_canonical and writing an
             # event log whose predecessor snapshot can't reconstruct the chain.
-            with self.write_transaction() as conn:
-                prev = conn.execute(
-                    "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
-                    (alias_key,),
-                ).fetchone()
-                old_canonical = prev["canonical"] if prev else None
-                old_status = prev["status"] if prev else None
-                # Guard: do not silently reverse a user rejection.
-                if (
-                    prev is not None
-                    and old_status == "rejected"
-                    and status == "confirmed"
-                    and not force
-                ):
-                    return False, [
-                        f"workspace {alias_key!r} was explicitly rejected as an alias of "
-                        f"{old_canonical!r}; refusing to confirm it silently. Pass an "
-                        "authorized override to change this decision."
-                    ]
-                conn.execute(
-                    """INSERT INTO workspace_aliases
-                         (alias_workspace, canonical, relation, status, source, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(alias_workspace) DO UPDATE SET
-                         canonical=excluded.canonical,
-                         relation=excluded.relation,
-                         status=excluded.status,
-                         source=excluded.source,
-                         updated_at=excluded.updated_at""",
-                    (alias_key, canonical, relation, status, source, now),
+            with self.write_transaction() as txn_conn:
+                return self.upsert_workspace_alias_on_conn(
+                    txn_conn,
+                    alias,
+                    canonical,
+                    relation=relation,
+                    status=status,
+                    source=source,
+                    action=action,
+                    judge_type=judge_type,
+                    reason=reason,
+                    force=force,
                 )
-                conn.execute(
-                    """INSERT INTO workspace_alias_events
-                         (alias_workspace, old_canonical, new_canonical,
-                          old_status, new_status, action, judge_type, reason, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (alias_key, old_canonical, canonical, old_status, status,
-                     action, judge_type, reason, now),
-                )
-                # Register the target canonical for confirmed aliases so the
-                # resolver's confirmed-alias short-circuit never returns a name
-                # that has no row in workspace_canonicals (which would silently
-                # disable KNN fuzzy-merge and let a later near-miss re-split).
-                # Rejected aliases don't register — a rejection doesn't create
-                # a workspace, it only records that this key is NOT that name.
-                if status == "confirmed":
-                    conn.execute(
-                        "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
-                        (canonical, now),
-                    )
-            return True, []
         except sqlite3.Error as exc:
             return False, [f"upsert_workspace_alias failed: {exc}"]
 
@@ -628,8 +669,60 @@ class WorkspaceStore:
         except sqlite3.Error as exc:
             return 0, [f"migrate_workspace failed: {exc}"]
 
+    def prepare_workspace_canonical_embedding(self, canonical: str, embedder: Any = None) -> Optional[list[float]]:
+        """Compute canonical embedding before caller takes a SQLite write lock."""
+        canonical = _coerce_ws(canonical)
+        if embedder is not None and self.state.sqlite_vec_available and canonical:
+            try:
+                er = embedder.embed_text(prefix="", body=canonical)
+                return list(er.embedding) if er and er.embedding else None
+            except Exception:
+                return None
+        return None
+
+    def set_memory_workspace_canonical_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: int,
+        canonical: str,
+        *,
+        precomputed_embedding: Optional[list[float]] = None,
+    ) -> Tuple[bool, list[str]]:
+        canonical = _coerce_ws(canonical)
+        if not canonical:
+            return False, ["canonical must be a non-empty workspace string."]
+        cur = conn.execute(
+            "UPDATE memories SET workspace_canonical = ? WHERE id = ?",
+            (canonical, int(memory_id)),
+        )
+        if (cur.rowcount or 0) == 0:
+            return False, ["memory id not found."]
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+            (canonical, utc_now_iso()),
+        )
+        if precomputed_embedding is not None:
+            row = conn.execute(
+                "SELECT id FROM workspace_canonicals WHERE name = ?", (canonical,)
+            ).fetchone()
+            if row is not None:
+                try:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
+                        (int(row["id"]), json.dumps(precomputed_embedding)),
+                    )
+                except sqlite3.Error:
+                    pass  # vec table may be absent; canonical row still written
+        return True, []
+
     def set_memory_workspace_canonical(
-        self, memory_id: int, canonical: str, embedder: Any = None
+        self,
+        memory_id: int,
+        canonical: str,
+        embedder: Any = None,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+        precomputed_embedding: Optional[list[float]] = None,
     ) -> Tuple[bool, list[str]]:
         """Directly set a memory's workspace_canonical column.
 
@@ -640,6 +733,13 @@ class WorkspaceStore:
         an embedder + sqlite-vec are available — so the resolver's KNN can later
         fuzzy-match this canonical instead of re-splitting it into a sibling.
         """
+        if conn is not None:
+            return self.set_memory_workspace_canonical_on_conn(
+                conn,
+                memory_id,
+                canonical,
+                precomputed_embedding=precomputed_embedding,
+            )
         if not self._db_available or not self.state.sqlite_writable:
             return False, ["SQLite write unavailable; workspace_canonical not set."]
         canonical = _coerce_ws(canonical)
@@ -647,37 +747,16 @@ class WorkspaceStore:
             return False, ["canonical must be a non-empty workspace string."]
         # Compute the canonical embedding OUTSIDE the write txn (embedder calls
         # can be slow / must not hold the write lock).
-        embedding = None
-        if embedder is not None and self.state.sqlite_vec_available:
-            try:
-                er = embedder.embed_text(prefix="", body=canonical)
-                embedding = list(er.embedding) if er and er.embedding else None
-            except Exception:
-                embedding = None
+        embedding = precomputed_embedding
+        if embedding is None:
+            embedding = self.prepare_workspace_canonical_embedding(canonical, embedder)
         try:
-            with self.write_transaction() as conn:
-                cur = conn.execute(
-                    "UPDATE memories SET workspace_canonical = ? WHERE id = ?",
-                    (canonical, int(memory_id)),
+            with self.write_transaction() as txn_conn:
+                return self.set_memory_workspace_canonical_on_conn(
+                    txn_conn,
+                    memory_id,
+                    canonical,
+                    precomputed_embedding=embedding,
                 )
-                if (cur.rowcount or 0) == 0:
-                    return False, ["memory id not found."]
-                conn.execute(
-                    "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
-                    (canonical, utc_now_iso()),
-                )
-                if embedding is not None:
-                    row = conn.execute(
-                        "SELECT id FROM workspace_canonicals WHERE name = ?", (canonical,)
-                    ).fetchone()
-                    if row is not None:
-                        try:
-                            conn.execute(
-                                "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
-                                (int(row["id"]), json.dumps(embedding)),
-                            )
-                        except sqlite3.Error:
-                            pass  # vec table may be absent; canonical row still written
-            return True, []
         except sqlite3.Error as exc:
             return False, [f"set_memory_workspace_canonical failed: {exc}"]

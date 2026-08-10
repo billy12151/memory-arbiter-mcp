@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, TYPE_CHECKING
 
+from ..acl import raw_workspace
 from ..conflict_judgments import ConflictJudgmentStore
 
 if TYPE_CHECKING:
@@ -70,6 +71,11 @@ class ConflictSignalPipeline:
             summaries: dict[int, dict[str, Any]] = {}
             if all_peer_ids:
                 summaries = self.db.get_memory_summaries(list(all_peer_ids))
+            for rec in results:
+                try:
+                    summaries.setdefault(int(rec["id"]), rec)
+                except (KeyError, TypeError, ValueError):
+                    pass
 
             # Attach signals.
             result_id_set = set(result_ids)
@@ -142,12 +148,47 @@ class ConflictSignalPipeline:
         else:
             conflict_source = "open_table"
         judgment_request = None
-        if conflict_source == "structured_claim_candidate":
+        peer_visible = True
+        if self.settings.isolation == "strict":
+            result_summary = summaries.get(memory_id, {})
+            caller_ws = raw_workspace(result_summary)
+            # Result records themselves are already workspace-scoped under strict.
+            # Summaries include the peer workspace; redact the peer if it differs.
+            peer_visible = bool(peer_summary) and raw_workspace(peer_summary) == caller_ws
+        if conflict_source == "structured_claim_candidate" and peer_visible:
             judgment_request = self.db.judgments.build_conflict_judgment_request(int(primary["id"]))
         resolution_kind = primary.get("resolution_kind") or primary.get("judgment_resolution_kind")
         conflict_scope = primary.get("conflict_scope") or primary.get("judgment_conflict_scope")
         recommended_resolution_action = ConflictJudgmentStore.resolution_action(resolution_kind)
         supersede_candidate = ConflictJudgmentStore.is_supersede_candidate(resolution_kind)
+        if self.settings.isolation == "strict" and not peer_visible:
+            return {
+                "conflict_source": conflict_source,
+                "conflict_id": int(primary["id"]),
+                "conflict_status": primary.get("status"),
+                "conflict_type": primary.get("conflict_type"),
+                "resolution_kind": resolution_kind,
+                "conflict_scope": conflict_scope,
+                "recommended_resolution_action": recommended_resolution_action,
+                "supersede_candidate": supersede_candidate,
+                "verification_status": "redacted_workspace_acl",
+                "action_required": None,
+                "conflict_judgment_request": None,
+                "judgment": None,
+                "redacted_fields": [
+                    "conflict_point", "suggested_winner", "confidence_hint",
+                    "judgment", "judge_ref", "conflict_peer",
+                ],
+                "related_conflict_count": len(conflicts),
+                "open_conflict_count": sum(1 for c in conflicts if c.get("status") == "open"),
+                "conflict_peer": {
+                    "id": None,
+                    "subject": None,
+                    "status": None,
+                    "snippet": None,
+                    "redaction_reason": "workspace_acl",
+                },
+            }
         return {
             # v0.8.8: route by row source — write-hint rows are advisory, NOT
             # verified; presenting them as open_table would cry-wolf. (漏洞#1)
@@ -185,12 +226,18 @@ class ConflictSignalPipeline:
             } if primary.get("active_judgment_id") is not None else None),
             "related_conflict_count": len(conflicts),
             "open_conflict_count": sum(1 for c in conflicts if c.get("status") == "open"),
-            "conflict_peer": {
+            "conflict_peer": ({
                 "id": peer_id,
                 "subject": peer_summary.get("subject"),
                 "status": peer_summary.get("status"),
                 "snippet": peer_summary.get("snippet"),
-            },
+            } if peer_visible else {
+                "id": None,
+                "subject": None,
+                "status": None,
+                "snippet": None,
+                "redaction_reason": "workspace_acl",
+            }),
         }
 
     def _compute_runtime_hint(

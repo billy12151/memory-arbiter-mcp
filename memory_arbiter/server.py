@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import atexit
+import signal
 import sys
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from .config import Settings
 from .tools import MemoryTools
 
 
-def build_server() -> Any:
+class ServerBundle(NamedTuple):
+    app: Any
+    tools: MemoryTools
+
+
+def build_runtime() -> ServerBundle:
     try:
         from mcp.server.fastmcp import FastMCP
     except Exception as exc:
@@ -554,7 +561,11 @@ The publish stage provenance is fixed to "agent" (the rules path runs internally
             batch_size=batch_size,
         )
 
-    return app
+    return ServerBundle(app=app, tools=tools)
+
+
+def build_server() -> Any:
+    return build_runtime().app
 
 
 def main() -> None:
@@ -569,7 +580,20 @@ def main() -> None:
         from .console_cli import run_cli as run_console
         raise SystemExit(run_console(sys.argv[2:]))
     try:
-        build_server().run()
+        bundle = build_runtime()
+
+        def shutdown_runtime(*_: Any) -> None:
+            bundle.tools.shutdown(timeout=30.0)
+
+        atexit.register(shutdown_runtime)
+
+        def handle_signal(signum: int, _frame: Any) -> None:
+            shutdown_runtime()
+            raise SystemExit(128 + int(signum))
+
+        signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+        bundle.app.run()
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2)

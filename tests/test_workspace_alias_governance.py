@@ -337,8 +337,58 @@ def test_confirm_pending_refuses_rejected_alias(tmp_path):
 
 # ── full-review round: canonical registration & rejection integrity ─────────
 
-def test_accept_alias_registers_target_canonical(tmp_path):
-    # A confirmed alias must ensure its target canonical is registered so the
+def test_confirm_pending_rolls_back_alias_when_canonical_step_raises(monkeypatch, tmp_path):
+    t = make_tools(tmp_path, isolation="strict")
+    w = t.memory_write(content="rollback note", workspace="RollbackWS", source_type="agent_generated", subject="test")
+    mid = w["data"]["id"]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("canonical write exploded")
+
+    monkeypatch.setattr(t.db, "set_memory_workspace_canonical_on_conn", boom)
+    r = t.memory_govern("confirm_pending_workspace", {"memory_id": mid, "canonical": "CanonicalWS"})
+
+    assert r["ok"] is False
+    assert t.db.get_workspace_alias("RollbackWS") is None
+    record = t.db.get_memory(mid)
+    assert record["status"] == MemoryStatus.PENDING.value
+    assert record["workspace_canonical"] == "RollbackWS"
+
+
+def test_confirm_pending_precomputes_embedding_before_write_lock(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    from memory_arbiter.embedder import EmbedResult
+
+    t = make_tools(tmp_path, isolation="strict")
+    t.db.state.sqlite_vec_available = True
+    w = t.memory_write(content="embed order", workspace="SlowWS", source_type="agent_generated", subject="test")
+    mid = w["data"]["id"]
+    in_write_txn = {"value": False}
+    calls = []
+    original_write_transaction = t.db.write_transaction
+
+    @contextmanager
+    def spy_write_transaction():
+        with original_write_transaction() as conn:
+            in_write_txn["value"] = True
+            try:
+                yield conn
+            finally:
+                in_write_txn["value"] = False
+
+    class SpyEmbedder:
+        def embed_text(self, prefix="", body="", max_body_chars=None):
+            calls.append((body, in_write_txn["value"]))
+            return EmbedResult(embedding=[0.1, 0.2], truncated=False, original_tokens=0, used_tokens=0)
+
+    monkeypatch.setattr(t.db, "write_transaction", spy_write_transaction)
+    monkeypatch.setattr(t, "_ensure_embedder", lambda: (SpyEmbedder(), []))
+
+    r = t.memory_govern("confirm_pending_workspace", {"memory_id": mid, "canonical": "CanonicalSlow"})
+
+    assert r["ok"] is True
+    assert calls == [("CanonicalSlow", False)]
+
     # resolver's KNN can fuzzy-merge later near-misses. Otherwise a near-string
     # falls through to a fresh sibling canonical, defeating the alias intent.
     t = make_tools(tmp_path)

@@ -1,4 +1,6 @@
 from pathlib import Path
+import threading
+import time
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
@@ -147,15 +149,40 @@ def test_semantic_notice_db_and_repair_control(tmp_path: Path):
 
 
 class _FakeSemanticBackend:
+    def __init__(self):
+        self.disabled = False
+        self.unload_calls = 0
+        self.maybe_unload_calls = 0
+
+    def load(self):
+        pass
+
     def classify_pair(self, left, right):
         from memory_arbiter.semantic_conflict import ModelSignal
+        if self.disabled:
+            return ModelSignal(False, "backend_unavailable", None, "", None, "disabled")
         return ModelSignal(True, "replacement", 0.9, "{}", {"reason_code": "replacement"})
 
-    def status(self):
-        return {"backend": "fake", "model_state": "resident"}
+    def suggest_workspace_candidate(self, ws_raw, evidence, candidates):
+        from memory_arbiter.semantic_conflict import WorkspaceCandidateSignal
+        if self.disabled:
+            return WorkspaceCandidateSignal(None, "uncertain", None, "", "", "disabled")
+        return WorkspaceCandidateSignal(candidates[0] if candidates else None, "alias", 0.9, "fake")
 
-    def unload(self):
-        pass
+    def status(self):
+        return {"backend": "fake", "model_state": "resident", "disabled": self.disabled}
+
+    def unload(self, timeout=30.0, disable=False):
+        self.unload_calls += 1
+        self.disabled = self.disabled or bool(disable)
+        return {"ok": True, "unloaded": True, "timeout": False, "inflight": 0, "retry_hint": None, "generation": self.unload_calls}
+
+    def maybe_unload_if_idle(self):
+        self.maybe_unload_calls += 1
+        return {"ok": True, "unloaded": True, "inflight": 0, "generation": self.maybe_unload_calls}
+
+    def set_disabled(self, disabled):
+        self.disabled = bool(disabled)
 
 
 def test_process_semantic_job_writes_notice_with_fake_backend(tmp_path: Path):
@@ -404,17 +431,38 @@ class _SlowFakeBackend:
 
     def __init__(self):
         self.calls = 0
+        self.disabled = False
+        self.unload_calls = 0
+        self.maybe_unload_calls = 0
+
+    def load(self):
+        pass
 
     def classify_pair(self, left, right):
         from memory_arbiter.semantic_conflict import ModelSignal
         self.calls += 1
+        if self.disabled:
+            return ModelSignal(False, "backend_unavailable", None, "", None, "disabled")
         return ModelSignal(True, "replacement", 0.9, "{}", {"reason_code": "replacement"})
 
-    def status(self):
-        return {"backend": "fake", "model_state": "resident"}
+    def suggest_workspace_candidate(self, ws_raw, evidence, candidates):
+        from memory_arbiter.semantic_conflict import WorkspaceCandidateSignal
+        return WorkspaceCandidateSignal(None, "uncertain", None, "", "", "disabled" if self.disabled else None)
 
-    def unload(self):
-        pass
+    def status(self):
+        return {"backend": "fake", "model_state": "resident", "disabled": self.disabled}
+
+    def unload(self, timeout=30.0, disable=False):
+        self.unload_calls += 1
+        self.disabled = self.disabled or bool(disable)
+        return {"ok": True, "unloaded": True, "timeout": False, "inflight": 0, "retry_hint": None, "generation": self.unload_calls}
+
+    def maybe_unload_if_idle(self):
+        self.maybe_unload_calls += 1
+        return {"ok": True, "unloaded": True, "inflight": 0, "generation": self.maybe_unload_calls}
+
+    def set_disabled(self, disabled):
+        self.disabled = bool(disabled)
 
 
 def test_budget_guard_stops_before_starting_inference_below_floor(tmp_path: Path):
@@ -526,6 +574,7 @@ class _BlockingPreloadBackend:
     def __init__(self, ready, release):
         self.ready = ready
         self.release = release
+        self.disabled = False
 
     def load(self):
         self.ready.set()
@@ -535,11 +584,22 @@ class _BlockingPreloadBackend:
         from memory_arbiter.semantic_conflict import ModelSignal
         return ModelSignal(False, "unrelated", None, "{}", {})
 
-    def status(self):
-        return {"backend": "blocking", "model_state": "loading"}
+    def suggest_workspace_candidate(self, ws_raw, evidence, candidates):
+        from memory_arbiter.semantic_conflict import WorkspaceCandidateSignal
+        return WorkspaceCandidateSignal(None, "uncertain", None, "", "", None)
 
-    def unload(self):
-        pass
+    def status(self):
+        return {"backend": "blocking", "model_state": "loading", "disabled": self.disabled}
+
+    def unload(self, timeout=30.0, disable=False):
+        self.disabled = self.disabled or bool(disable)
+        return {"ok": True, "unloaded": True, "timeout": False, "inflight": 0, "retry_hint": None, "generation": 1}
+
+    def maybe_unload_if_idle(self):
+        return {"ok": True, "unloaded": False, "inflight": 0, "generation": 1}
+
+    def set_disabled(self, disabled):
+        self.disabled = bool(disabled)
 
 
 def test_semantic_preload_runs_in_background(tmp_path: Path):
@@ -613,3 +673,170 @@ def test_activate_pending_requeues_semantic_check(tmp_path: Path):
     assert activated["activated"] is True
     assert activated["record"]["status"] == "active"
     assert activated["semantic_conflict_check"]["status"] == "queued"
+
+
+class _FakeLlama:
+    def __init__(self, ready=None, release=None, raw='{"should_surface": true, "reason_code": "replacement", "confidence": 0.9}'):
+        self.ready = ready
+        self.release = release
+        self.raw = raw
+        self.calls = 0
+
+    def create_chat_completion(self, **_kwargs):
+        self.calls += 1
+        if self.ready is not None:
+            self.ready.set()
+        if self.release is not None:
+            self.release.wait(2)
+        return {"choices": [{"message": {"content": self.raw}}]}
+
+
+def _local_backend_with_llm(tmp_path: Path, llm):
+    from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
+    model = tmp_path / "model.gguf"
+    model.write_text("fake", encoding="utf-8")
+    backend = LocalGGUFSemanticBackend(model)
+    with backend._cond:
+        backend._llm = llm
+        backend._loaded_at = time.time()
+    return backend
+
+
+def test_local_backend_unload_waits_for_inflight_barrier(tmp_path: Path):
+    ready = threading.Event()
+    release = threading.Event()
+    llm = _FakeLlama(ready=ready, release=release)
+    backend = _local_backend_with_llm(tmp_path, llm)
+    signal_holder = {}
+
+    t = threading.Thread(target=lambda: signal_holder.setdefault("signal", backend.classify_pair({"content": "旧设计"}, {"content": "新设计"})))
+    t.start()
+    assert ready.wait(1)
+    started = time.monotonic()
+    unload_holder = {}
+    u = threading.Thread(target=lambda: unload_holder.setdefault("result", backend.unload(timeout=1.0)))
+    u.start()
+    time.sleep(0.05)
+    assert u.is_alive()
+    assert backend.status()["inflight"] == 1
+    release.set()
+    t.join(1)
+    u.join(1)
+    assert unload_holder["result"]["ok"] is True
+    assert unload_holder["result"]["timeout"] is False
+    assert backend.status()["model_state"] == "unloaded"
+    assert time.monotonic() - started >= 0.05
+    assert signal_holder["signal"].candidate is True
+
+
+def test_local_backend_unload_timeout_keeps_llm_until_retry(tmp_path: Path):
+    ready = threading.Event()
+    release = threading.Event()
+    llm = _FakeLlama(ready=ready, release=release)
+    backend = _local_backend_with_llm(tmp_path, llm)
+    t = threading.Thread(target=lambda: backend.classify_pair({"content": "旧设计"}, {"content": "新设计"}))
+    t.start()
+    assert ready.wait(1)
+    result = backend.unload(timeout=0.01)
+    assert result["ok"] is False
+    assert result["timeout"] is True
+    assert result["inflight"] == 1
+    assert backend.status()["model_state"] == "resident"
+    release.set()
+    t.join(1)
+    retry = backend.unload(timeout=1.0)
+    assert retry["ok"] is True
+    assert backend.status()["model_state"] == "unloaded"
+
+
+def test_local_backend_disable_then_enable_restores_jobs(tmp_path: Path):
+    backend = _local_backend_with_llm(tmp_path, _FakeLlama())
+    disabled = backend.unload(timeout=1.0, disable=True)
+    assert disabled["ok"] is True
+    signal = backend.classify_pair({"content": "a"}, {"content": "b"})
+    assert signal.candidate is False
+    assert signal.candidate_type == "backend_unavailable"
+    backend.set_disabled(False)
+    with backend._cond:
+        backend._llm = _FakeLlama()
+    signal2 = backend.classify_pair({"content": "旧设计"}, {"content": "新设计"})
+    assert signal2.candidate is True
+
+
+def test_local_backend_suggest_workspace_lifecycle_disable(tmp_path: Path):
+    backend = _local_backend_with_llm(tmp_path, _FakeLlama(raw='{"candidate": "金营项目", "relation": "alias", "confidence": 0.9, "evidence": "同项目"}'))
+    sig = backend.suggest_workspace_candidate("金营", {"title": "t", "key_sentences": ["k"]}, ["金营项目"])
+    assert sig.candidate == "金营项目"
+    backend.unload(timeout=1.0, disable=True)
+    disabled = backend.suggest_workspace_candidate("金营", {}, ["金营项目"])
+    assert disabled.candidate is None
+    assert disabled.error == "disabled"
+
+
+def test_semantic_control_disable_enable_toggles_backend(tmp_path: Path):
+    tools = _tools(tmp_path)
+    backend = _FakeSemanticBackend()
+    tools._semantic_backend = backend
+    disabled = tools.memory_repair(task="semantic_control", data={"action": "disable", "timeout": 1})["data"]
+    assert disabled["outcome"] == "runtime_disabled"
+    assert disabled["unload"]["ok"] is True
+    assert backend.disabled is True
+    enabled = tools.memory_repair(task="semantic_control", data={"action": "enable"})["data"]
+    assert enabled["outcome"] == "enabled"
+    assert backend.disabled is False
+
+
+def test_worker_shutdown_discards_pending_and_waits_only_inflight(tmp_path: Path):
+    tools = _tools(tmp_path)
+    worker = tools._semantic_worker
+    with worker._cond:
+        worker._pending[1] = {"memory_id": 1}
+        worker._pending[2] = {"memory_id": 2}
+    result = worker.shutdown(discard_pending=True)
+    assert result["discarded_pending"] == 2
+    assert worker.wait_drained(0.1) is True
+    assert worker.enqueue(3, {"memory_id": 3})["status"] == "shutdown"
+
+
+def test_memory_tools_shutdown_is_idempotent_and_unloads_backend(tmp_path: Path):
+    tools = _tools(tmp_path)
+    backend = _FakeSemanticBackend()
+    tools._semantic_backend = backend
+    first = tools.shutdown(timeout=1)
+    second = tools.shutdown(timeout=1)
+    assert first["ok"] is True
+    assert first["backend_unload"]["ok"] is True
+    assert backend.unload_calls == 1
+    assert second == {"ok": True, "already_shutdown": True}
+
+
+def test_resident_false_uses_nonblocking_idle_cleanup(tmp_path: Path):
+    settings = Settings(
+        db_path=tmp_path / "m.sqlite3",
+        backup_jsonl=tmp_path / "m.jsonl",
+        semantic_conflict_enabled=True,
+        semantic_conflict_model_path=tmp_path / "missing.gguf",
+        semantic_conflict_resident=False,
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    tools.memory_write(content="旧设计：vector scan 主路径。", subject="x", tags=["mema", "vector"])
+    new = tools.memory_write(content="新设计：vector scan 下线。", subject="x update", tags=["mema", "vector"])["data"]
+    record = tools.db.get_memory(new["id"])
+    backend = _FakeSemanticBackend()
+    tools._semantic_backend = backend
+    snapshot = {
+        "memory_id": new["id"],
+        "version": record["version"],
+        "claim_revision": record["claim_revision"],
+        "content_hash": __import__("hashlib").sha256(record["content"].encode("utf-8")).hexdigest(),
+    }
+    tools._process_semantic_conflict_job(new["id"], snapshot)
+    assert backend.maybe_unload_calls >= 1
+    assert backend.unload_calls == 0
+
+
+def test_managed_embedder_has_no_unload_reload_or_llm_surface():
+    from memory_arbiter.embedder import ManagedEmbedder
+    assert not hasattr(ManagedEmbedder, "unload")
+    assert not hasattr(ManagedEmbedder, "reload")
+    assert not hasattr(ManagedEmbedder, "_llm")

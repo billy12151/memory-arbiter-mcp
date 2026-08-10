@@ -8,13 +8,15 @@ import time
 from importlib import resources
 from typing import Any, Callable, Optional, Tuple
 
+from .acl import CallerWorkspace, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, redact_judgment, visible_memory
 from .arbitration import compare_memories
 from .claims import extract_claims
 from .conflict_judgments import ConflictJudgmentStore
 from .config import Settings
 from .constants import strict_ws
-from .db import MemoryDB, _canon_entity, _canon_scope
+from .db import MemoryDB
 from .embedder import ManagedEmbedder
+from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
 from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
 from .semantic_conflict import (
@@ -79,6 +81,9 @@ class MemoryTools:
         self._semantic_backend: Optional[SemanticBackend] = None
         self._semantic_backend_lock = threading.Lock()
         self._semantic_worker = SemanticConflictWorker(self)
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_started = False
+        self._shutdown_complete = False
         self._last_pair_duration_ms: Optional[int] = None
         # v0.6.0: initialise vec index state on startup
         self._init_vec_state()
@@ -141,6 +146,45 @@ class MemoryTools:
 
     def wait_split_worker_drained(self, timeout: float = 5.0) -> bool:
         return self._split_worker.wait_drained(timeout)
+
+    def wait_semantic_worker_drained(self, timeout: float = 30.0) -> bool:
+        return self._semantic_worker.wait_drained(timeout)
+
+    def _get_semantic_backend_ref(self) -> Optional[SemanticBackend]:
+        with self._semantic_backend_lock:
+            return self._semantic_backend
+
+    def shutdown(self, timeout: float = 30.0) -> dict[str, Any]:
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return {"ok": True, "already_shutdown": True}
+            if self._shutdown_started:
+                return {"ok": False, "already_shutdown": False, "shutdown_in_progress": True}
+            self._shutdown_started = True
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        worker_shutdown = self._semantic_worker.shutdown(discard_pending=True)
+        remaining = max(0.0, deadline - time.monotonic())
+        semantic_drained = self._semantic_worker.wait_drained(remaining)
+        remaining = max(0.0, deadline - time.monotonic())
+        split_drained = self._split_worker.wait_drained(remaining)
+        backend = self._get_semantic_backend_ref()
+        unload_result: dict[str, Any] = {"ok": True, "unloaded": False, "reason": "no_backend"}
+        if backend is not None:
+            remaining = max(0.0, deadline - time.monotonic())
+            unload_result = backend.unload(timeout=remaining, disable=True)
+        ok = bool(semantic_drained and split_drained and unload_result.get("ok", False))
+        with self._shutdown_lock:
+            self._shutdown_complete = ok
+            self._shutdown_started = False
+        return {
+            "ok": ok,
+            "already_shutdown": False,
+            "semantic_worker": worker_shutdown,
+            "semantic_drained": semantic_drained,
+            "split_drained": split_drained,
+            "backend_unload": unload_result,
+        }
 
     def _init_vec_state(self) -> None:
         """Initialise _vec_index_meta based on current embedder availability."""
@@ -261,6 +305,143 @@ class MemoryTools:
             self._embedder_loaded = True  # cache only on successful build
             return self._embedder, warnings
 
+    def _caller_workspace(self, explicit_workspace: Optional[str] = None) -> CallerWorkspace:
+        """Resolve the caller workspace for strict read ACLs.
+
+        Explicit payload/query/console workspace wins. Without one, fall back to
+        settings.workspace and surface the source/warning in responses.
+        """
+        isolation = getattr(self.settings, "isolation", "none")
+        explicit = str(explicit_workspace or "").strip()
+        if explicit:
+            source = "explicit"
+            workspace = explicit
+        else:
+            source = "settings"
+            workspace = str(getattr(self.settings, "workspace", "") or "").strip()
+        warnings: list[str] = []
+        canonical: Optional[str] = None
+        if isolation != "none" and workspace:
+            embedder, ensure_warnings = self._ensure_embedder()
+            warnings.extend(ensure_warnings)
+            try:
+                resolved = self.db.resolve_workspace_canonical(workspace, embedder, register_new=False)
+                canonical = str(resolved.get("canonical") or workspace)
+            except Exception:
+                canonical = workspace
+        elif isolation == "strict":
+            warnings.append("isolation=strict has no caller workspace; read denied")
+        if isolation == "strict" and source == "settings":
+            warnings.append(f"strict read ACL using settings.workspace={workspace or '<empty>'!r}")
+        return CallerWorkspace(
+            isolation=isolation,
+            workspace=workspace or None,
+            canonical=canonical if isolation != "none" else None,
+            source=source,
+            warnings=tuple(warnings),
+        )
+
+    def _strict_acl_unavailable(self, caller: CallerWorkspace) -> Optional[dict[str, Any]]:
+        if caller.isolation == "strict" and not caller.canonical:
+            return self.db.state.response(
+                forbidden_payload("workspace", workspace=caller, reason="missing_caller_workspace"),
+                ok=False,
+                extra_warnings=list(caller.warnings),
+            )
+        return None
+
+    def _get_memory_visible(self, memory_id: int, caller: Optional[CallerWorkspace] = None) -> Optional[dict[str, Any]]:
+        caller = caller or self._caller_workspace(None)
+        if caller.isolation == "strict":
+            if not caller.canonical:
+                return None
+            return self.db.get_memory_for_workspace(int(memory_id), caller.canonical)
+        return self.db.get_memory(int(memory_id))
+
+    def _memory_acl_response_fields(self, caller: CallerWorkspace) -> dict[str, Any]:
+        return caller.response_fields() if caller.isolation == "strict" else {}
+
+    def _strict_filter_records(self, records: list[dict[str, Any]], caller: CallerWorkspace) -> list[dict[str, Any]]:
+        if caller.isolation != "strict" or not caller.canonical:
+            return records
+        return [r for r in records if raw_workspace(r) == caller.canonical]
+
+    def _conflict_detail_for_workspace(self, conflict_id: int, caller: Optional[CallerWorkspace] = None) -> Optional[dict[str, Any]]:
+        """ACL-aware conflict detail with any-side-current visibility.
+
+        Returns None when the conflict row is absent or neither side is visible.
+        """
+        caller = caller or self._caller_workspace(None)
+        try:
+            with self.db.connection() as conn:
+                row = conn.execute(
+                    "SELECT c.*, j.verdict AS judgment_verdict, "
+                    "j.recommended_use AS judgment_recommended_use, "
+                    "j.suggested_winner AS judgment_suggested_winner, "
+                    "j.confidence_hint AS judgment_confidence_hint, "
+                    "j.reason AS judgment_reason, j.judge_type AS judgment_judge_type, "
+                    "j.judge_ref AS judgment_judge_ref, j.resolution_kind AS judgment_resolution_kind, "
+                    "j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
+                    "FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
+                    "WHERE c.id=?",
+                    (int(conflict_id),),
+                ).fetchone()
+                if row is None:
+                    return None
+                conflict = {k: row[k] for k in row.keys()}
+                left_id = conflict.get("left_id")
+                right_id = conflict.get("right_id")
+                if left_id is None or right_id is None:
+                    return None
+                left = self.db._fetch_memory(conn, int(left_id))
+                right = self.db._fetch_memory(conn, int(right_id))
+                jrows = conn.execute(
+                    "SELECT * FROM conflict_judgments WHERE conflict_id=? ORDER BY created_at DESC, id DESC",
+                    (int(conflict_id),),
+                ).fetchall()
+                judgments = [{k: jr[k] for k in jr.keys()} for jr in jrows]
+        except Exception:
+            return None
+        left_visible = visible_memory(left, caller.canonical if caller.isolation == "strict" else None)
+        right_visible = visible_memory(right, caller.canonical if caller.isolation == "strict" else None)
+        if caller.isolation == "strict" and not (left_visible or right_visible):
+            return None
+        both_visible = left_visible and right_visible
+        public_conflict = dict(conflict) if caller.isolation != "strict" or both_visible else redacted_conflict_shell(conflict, left_visible, right_visible)
+        winner_side = public_conflict.get("winner_side")
+        if winner_side is None:
+            winner = conflict.get("suggested_winner") or conflict.get("winner_id") or conflict.get("judgment_suggested_winner")
+            try:
+                winner_int = int(winner) if winner is not None else None
+                left_id = conflict.get("left_id")
+                right_id = conflict.get("right_id")
+                left_id_int = int(left_id) if left_id is not None else None
+                right_id_int = int(right_id) if right_id is not None else None
+                if winner_int is not None and winner_int == left_id_int:
+                    winner_side = "left"
+                elif winner_int is not None and winner_int == right_id_int:
+                    winner_side = "right"
+            except (TypeError, ValueError):
+                winner_side = None
+        if caller.isolation != "strict":
+            public_judgments = [dict(j, visible=True, redacted_fields=[]) for j in judgments]
+        else:
+            public_judgments = [redact_judgment(j, visible=both_visible) for j in judgments]
+        detail = {
+            "conflict": self._with_resolution_guidance(public_conflict),
+            "left": memory_public_stub(conflict.get("left_id"), visible=left_visible, memory=left if left_visible else None),
+            "right": memory_public_stub(conflict.get("right_id"), visible=right_visible, memory=right if right_visible else None),
+            "winner_side": winner_side,
+            "judgments": public_judgments,
+            "judgments_visible": bool(caller.isolation != "strict" or both_visible),
+        }
+        if caller.isolation == "strict":
+            detail.update(caller.response_fields())
+        return detail
+
+    def _conflict_visible(self, conflict_id: int, caller: Optional[CallerWorkspace] = None) -> bool:
+        return self._conflict_detail_for_workspace(conflict_id, caller) is not None
+
     @staticmethod
     def _embedding_text(record: dict[str, Any]) -> str:
         subject = record.get("subject") or ""
@@ -308,11 +489,18 @@ class MemoryTools:
             return backend.suggest_workspace_candidate(ws_raw, evidence, candidates)
         except Exception:
             return None
+        finally:
+            if not self.settings.semantic_conflict_resident and hasattr(backend, "maybe_unload_if_idle"):
+                try:
+                    backend.maybe_unload_if_idle()
+                except Exception:
+                    pass
 
     def _semantic_status(self) -> dict[str, Any]:
+        backend = self._get_semantic_backend_ref()
         backend_status = (
-            self._semantic_backend.status()
-            if self._semantic_backend is not None else
+            backend.status()
+            if backend is not None else
             {
                 "backend": self.settings.semantic_conflict_backend,
                 "model_path": str(self.settings.semantic_conflict_model_path or ""),
@@ -347,7 +535,11 @@ class MemoryTools:
         }
 
     def _semantic_control(self, action: str) -> dict[str, Any]:
+        return self._semantic_control_with_timeout(action, timeout=30.0)
+
+    def _semantic_control_with_timeout(self, action: str, timeout: float = 30.0) -> dict[str, Any]:
         action = str(action or "status").strip().lower()
+        timeout = max(0.0, float(timeout))
         if action == "status":
             return self._semantic_status()
         if action == "pause":
@@ -363,21 +555,41 @@ class MemoryTools:
             self._semantic_worker.resume()
             return {"outcome": "resumed", "semantic_conflict": self._semantic_status()}
         if action == "enable":
+            backend = self._get_semantic_backend_ref()
+            if backend is not None:
+                backend.set_disabled(False)
             self._semantic_worker.enable_runtime()
             return {"outcome": "enabled", "semantic_conflict": self._semantic_status()}
         if action == "unload":
-            if self._semantic_backend is not None:
-                self._semantic_backend.unload()
-            return {"outcome": "unloaded", "semantic_conflict": self._semantic_status()}
+            backend = self._get_semantic_backend_ref()
+            unload_result = (
+                backend.unload(timeout=timeout, disable=False)
+                if backend is not None else
+                {"ok": True, "unloaded": False, "timeout": False, "inflight": 0, "retry_hint": None, "generation": None, "reason": "no_backend"}
+            )
+            outcome = "unloaded" if unload_result.get("ok") else "unload_timeout"
+            result: dict[str, Any] = {"outcome": outcome, "unload": unload_result, "semantic_conflict": self._semantic_status()}
+            if unload_result.get("timeout"):
+                result["warnings"] = ["semantic backend still has in-flight inference; model was not unloaded"]
+            return result
         if action == "disable":
             self._semantic_worker.disable_runtime()
-            if self._semantic_backend is not None:
-                self._semantic_backend.unload()
-            return {
-                "outcome": "runtime_disabled",
+            backend = self._get_semantic_backend_ref()
+            unload_result = (
+                backend.unload(timeout=timeout, disable=True)
+                if backend is not None else
+                {"ok": True, "unloaded": False, "timeout": False, "inflight": 0, "retry_hint": None, "generation": None, "reason": "no_backend"}
+            )
+            outcome = "runtime_disabled" if unload_result.get("ok") else "runtime_disabled_unload_timeout"
+            disable_result: dict[str, Any] = {
+                "outcome": outcome,
+                "unload": unload_result,
                 "note": "This disables the current runtime only; set semantic_conflict.enabled=false in config to persist it.",
                 "semantic_conflict": self._semantic_status(),
             }
+            if unload_result.get("timeout"):
+                disable_result["warnings"] = ["semantic backend disabled for new jobs, but current inference is still in flight"]
+            return disable_result
         return {"outcome": "invalid_action", "valid_actions": ["status", "pause", "resume", "enable", "unload", "disable"]}
 
     def _enqueue_semantic_conflict_check(self, memory_id: Optional[int], record: Any) -> dict[str, Any]:
@@ -473,8 +685,10 @@ class MemoryTools:
             call_start = time.monotonic()
             signal = backend.classify_pair(record, peer_record)
             self._last_pair_duration_ms = int((time.monotonic() - call_start) * 1000)
-            if not self.settings.semantic_conflict_resident and self._semantic_backend is not None:
-                self._semantic_backend.unload()
+            if not self.settings.semantic_conflict_resident:
+                cleanup = getattr(backend, "maybe_unload_if_idle", None)
+                if callable(cleanup):
+                    cleanup()
             if not signal.candidate:
                 continue
             gate = pair_text_gate(

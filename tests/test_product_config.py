@@ -685,3 +685,36 @@ def test_embedding_model_path_without_provider_defaults_to_gguf(tmp_path: Path, 
 
 
 
+
+
+def test_server_build_runtime_exposes_tools_for_shutdown(tmp_path: Path, monkeypatch) -> None:
+    class FakeFastMCP:
+        def __init__(self, _name: str) -> None:
+            self.tools = {}
+
+        def tool(self):
+            def decorator(func):
+                self.tools[func.__name__] = func
+                return func
+
+            return decorator
+
+    fake_fastmcp = types.ModuleType("mcp.server.fastmcp")
+    fake_fastmcp.FastMCP = FakeFastMCP
+    fake_server = types.ModuleType("mcp.server")
+    fake_mcp = types.ModuleType("mcp")
+    fake_server.fastmcp = fake_fastmcp
+    fake_mcp.server = fake_server
+    monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
+    monkeypatch.setitem(sys.modules, "mcp.server", fake_server)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fake_fastmcp)
+    monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
+    monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
+    monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")
+
+    from memory_arbiter.server import build_runtime
+
+    bundle = build_runtime()
+    assert bundle.app.tools["memory"] is not None
+    assert bundle.tools.shutdown(timeout=1)["ok"] is True
+    assert bundle.tools.shutdown(timeout=1) == {"ok": True, "already_shutdown": True}

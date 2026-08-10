@@ -106,7 +106,7 @@ def test_memories_expired_invalid_offset_defaults_to_zero(tmp_path: Path) -> Non
     assert result["items"] == []
 
 
-def test_memories_preserves_tool_error_for_strict_isolation(tmp_path: Path) -> None:
+def test_memories_strict_without_query_requires_explicit_workspace(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "console.sqlite3",
         backup_jsonl=tmp_path / "console.jsonl",
@@ -118,7 +118,11 @@ def test_memories_preserves_tool_error_for_strict_isolation(tmp_path: Path) -> N
     api = ConsoleAPI(MemoryTools(settings))
     result = api.memories(status="active")
     assert "error" in result
-    assert "workspace" in result["error"]
+    assert result["_http_status"] == 400
+
+    ok = api.memories(status="active", workspace="console-ws")
+    assert "error" not in ok
+    assert ok["workspace_source"] == "explicit"
 
 
 def test_settings_view_handles_missing_config_file(tmp_path: Path, monkeypatch) -> None:

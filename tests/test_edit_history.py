@@ -232,9 +232,55 @@ def test_edit_partial_replacement(tmp_path: Path) -> None:
     # version unchanged after the failed edit
     assert tools.db.get_memory(memory_id)["version"] == 2
 
+def test_edit_partial_replacement_stale_version_does_not_overwrite(tmp_path: Path) -> None:
+    """Partial edit validates intent against the current row inside the txn."""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="alpha beta gamma",
+        subject="s",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+    first = tools.memory_edit(memory_id=memory_id, old_text="beta", new_text="delta")
+    assert first["ok"] is True
 
-def test_edit_requires_authorization_for_locked(tmp_path: Path) -> None:
-    """user_confirmed/locked records require authorized=True to edit."""
+    stale = tools.memory_edit(
+        memory_id=memory_id,
+        old_text="beta",
+        new_text="epsilon",
+        expected_version=1,
+    )
+
+    assert stale["ok"] is False
+    assert "stale_edit" in stale["data"]["error"] or "old_text not found" in stale["data"]["error"]
+    current = tools.db.get_memory(memory_id)
+    assert current["content"] == "alpha delta gamma"
+    assert current["version"] == 2
+
+
+def test_edit_full_path_rechecks_protection_without_prefetch(monkeypatch, tmp_path: Path) -> None:
+    """Full edit must not depend on a transaction-external memory snapshot."""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="normal fact",
+        subject="s",
+        source_type="agent_generated",
+        event_time="2026-01-01T00:00:00Z",
+    )
+    memory_id = written["data"]["id"]
+    assert tools.db.update_memory(memory_id, {"protection_level": "locked"}) is True
+
+    def forbidden_prefetch(_memory_id):
+        raise AssertionError("content edit path must not prefetch get_memory outside edit transaction")
+
+    monkeypatch.setattr(tools.db, "get_memory", forbidden_prefetch)
+    rejected = tools.memory_edit(memory_id=memory_id, new_content="tampered", authorized=False)
+
+    assert rejected["ok"] is False
+    assert "authorized" in rejected["data"]["error"]
+
+
     tools = make_tools(tmp_path)
     written = tools.memory_write(
         content="confirmed fact",

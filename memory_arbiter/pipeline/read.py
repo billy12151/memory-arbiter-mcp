@@ -77,28 +77,17 @@ class ReadPipeline:
                         )
                 except Exception as exc:
                     extra_warnings.append(f"auto-embedding query failed: {exc}")
-        # v0.9.7: workspace isolation on the read path.
+        # v0.9.7/v0.12.5: workspace isolation on the read path.
         isolation = self.settings.isolation
-        ws_canonical = None
-        if isolation != "none" and (workspace or "").strip():
-            embedder, _ = self._ensure_embedder()
-            resolved = self.db.resolve_workspace_canonical(
-                workspace, embedder, register_new=False,
-            )
-            ws_canonical = resolved["canonical"]
-        elif isolation != "none":
-            # weak allows an empty workspace (full-library recall); strict does not.
-            if isolation == "strict":
-                return self.db.state.response(
-                    {
-                        "error": "isolation=strict requires a workspace on every search; "
-                                 "an empty workspace would bypass isolation.",
-                        "results": [],
-                        "count": 0,
-                    },
-                    ok=False,
-                    extra_warnings=extra_warnings,
-                )
+        caller = self._caller_workspace(workspace)
+        ws_canonical = caller.canonical if isolation != "none" else None
+        workspace = caller.workspace if isolation != "none" else workspace
+        if isolation == "strict" and not ws_canonical:
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                data = denied.get("data") or {}
+                data.update({"results": [], "count": 0})
+                return denied
         # v0.9.4: search_memories now uses status_filter instead of include_superseded
         outcome = self._search_memories(
             self.db, query, workspace, tags, limit,
@@ -216,9 +205,11 @@ class ReadPipeline:
             elif strong_signal and strong_signal.get("action_required"):
                 response_data["action_required"] = strong_signal.get("action_required")
                 response_data["verification_status"] = strong_signal.get("verification_status")
+        if caller.isolation == "strict":
+            response_data.update(caller.response_fields())
         return self.db.state.response(
             response_data,
-            extra_warnings=extra_warnings + warnings,
+            extra_warnings=extra_warnings + warnings + list(caller.warnings),
         )
 
     def memory_search_expired(
@@ -288,28 +279,22 @@ class ReadPipeline:
         superseded_limit_cap = self.settings.superseded_limit
         effective_limit = min(max(1, limit_requested), max(1, int(superseded_limit_cap)), 50)
 
-        # v0.12.3: expired recall must honor the same workspace isolation
-        # boundary as active recall. Expired includes pending/conflicted records,
-        # so strict mode without a workspace must fail closed instead of browsing
-        # the global audit/history domain.
+        # v0.12.5: expired recall uses the shared caller-workspace resolver.
         isolation = self.settings.isolation
-        ws_canonical = None
-        if isolation != "none" and (workspace or "").strip():
-            embedder, _ = self._ensure_embedder()
-            resolved = self.db.resolve_workspace_canonical(
-                workspace, embedder, register_new=False,
-            )
-            ws_canonical = resolved["canonical"]
-        elif isolation == "strict":
+        caller = self._caller_workspace(workspace)
+        ws_canonical = caller.canonical if isolation != "none" else None
+        workspace = caller.workspace if isolation != "none" else workspace
+        if isolation == "strict" and not ws_canonical:
             return self.db.state.response(
                 {
-                    "error": "isolation=strict requires a workspace on every expired search; "
-                             "an empty workspace would bypass isolation.",
+                    "error": "forbidden_strict_workspace",
+                    "reason": "missing_caller_workspace",
                     "results": [],
                     "count": 0,
+                    **caller.response_fields(),
                 },
                 ok=False,
-                extra_warnings=extra_warnings,
+                extra_warnings=extra_warnings + list(caller.warnings),
             )
 
         outcome = self._search_memories(
@@ -334,8 +319,9 @@ class ReadPipeline:
         # v0.6.0: attach section enhancement to active-split results
         results = self._attach_sections(results, query_embedding, extra_warnings)
 
-        # v0.7.6: attach conflict signals
-        if include_conflict_signal and retrieval_mode == "direct" and results:
+        # v0.7.6: attach conflict signals (strict expired results are non-active
+        # and may lack safe workspace summaries; fail closed by omitting signals).
+        if include_conflict_signal and isolation != "strict" and retrieval_mode == "direct" and results:
             results = self._attach_conflict_signals(results, extra_warnings)
 
         attention_required = False
@@ -404,9 +390,11 @@ class ReadPipeline:
             elif strong_signal and strong_signal.get("action_required"):
                 response_data["action_required"] = strong_signal.get("action_required")
                 response_data["verification_status"] = strong_signal.get("verification_status")
+        if caller.isolation == "strict":
+            response_data.update(caller.response_fields())
         return self.db.state.response(
             response_data,
-            extra_warnings=extra_warnings + warnings,
+            extra_warnings=extra_warnings + warnings + list(caller.warnings),
         )
 
     # v0.8 split-status values the new flow may write. Anything else is a
@@ -439,12 +427,21 @@ class ReadPipeline:
                 {"error": "sections must be one of none|catalog|all (matched is not valid without a search context)"},
                 ok=False,
             )
-        memory = self.db.get_memory(memory_id_int)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        memory = self._get_memory_visible(memory_id_int, caller)
         if not memory:
-            return self.db.state.response({"error": f"memory id {memory_id_int} not found"}, ok=False)
+            error_data: dict[str, Any] = {"error": f"memory id {memory_id_int} not found"}
+            if caller.isolation == "strict":
+                error_data.update(caller.response_fields())
+            return self.db.state.response(error_data, ok=False, extra_warnings=list(caller.warnings))
 
         content = memory.get("content") or ""
         data: dict[str, Any] = {"memory": memory}
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
 
         # ---- split sub-object ----
         raw_status = memory.get("split_status")
@@ -505,15 +502,38 @@ class ReadPipeline:
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         limit = max(1, min(int(limit), 100))
-        # v0.7.4 (M3): workspace is reserved metadata; memory_recent lists
-        # across the whole library (shared memory layer). The parameter stays
-        # in the signature for interface stability but does not filter.
-        results = self.db.list_memories(limit=limit)
-        return self.db.state.response({"results": results, "count": len(results)})
+        caller = self._caller_workspace(workspace)
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        if caller.isolation == "strict" and caller.canonical:
+            results = self.db.list_memories_for_workspace(caller.canonical, limit=limit)
+        else:
+            results = self.db.list_memories(limit=limit)
+        data = {"results": results, "count": len(results)}
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     def memory_compare(self, left_id: Optional[int] = None, right_id: Optional[int] = None, left: Optional[dict[str, Any]] = None, right: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
-        left_record = left or (self.db.get_memory(int(left_id)) if left_id is not None else None)
-        right_record = right or (self.db.get_memory(int(right_id)) if right_id is not None else None)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        left_record = left or (self._get_memory_visible(int(left_id), caller) if left_id is not None else None)
+        right_record = right or (self._get_memory_visible(int(right_id), caller) if right_id is not None else None)
+        if caller.isolation == "strict" and (left is not None or right is not None):
+            # Caller-supplied records may be stale/untrusted. Require by-id ACL in strict.
+            if left_id is None or right_id is None:
+                return self.db.state.response({"error": "strict memory_compare requires left_id and right_id", **caller.response_fields()}, ok=False, extra_warnings=list(caller.warnings))
+            left_record = self._get_memory_visible(int(left_id), caller)
+            right_record = self._get_memory_visible(int(right_id), caller)
         if not left_record or not right_record:
-            return self.db.state.response({"error": "left and right records are required"}, ok=False)
-        return self.db.state.response({"comparison": self._compare_memories(left_record, right_record), "left": left_record, "right": right_record})
+            data = {"error": "left and right records are required"}
+            if caller.isolation == "strict":
+                data.update(caller.response_fields())
+            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
+        compare_data: dict[str, Any] = {"comparison": self._compare_memories(left_record, right_record), "left": left_record, "right": right_record}
+        if caller.isolation == "strict":
+            compare_data.update(caller.response_fields())
+        return self.db.state.response(compare_data, extra_warnings=list(caller.warnings))

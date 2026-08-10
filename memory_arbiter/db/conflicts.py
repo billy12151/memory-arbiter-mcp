@@ -30,39 +30,83 @@ class ConflictStore:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._db, name)
 
-    def record_conflict(self, left_id: int, right_id: int, subject: Optional[str], reason: str, winner_id: Optional[int], status: str = "open") -> Optional[int]:
+    def record_conflict_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        left_id: int,
+        right_id: int,
+        subject: Optional[str],
+        reason: str,
+        winner_id: Optional[int],
+        status: str = "open",
+    ) -> int:
+        cur = conn.execute(
+            """
+            INSERT INTO conflicts(left_id, right_id, subject, status, reason, winner_id, created_at, resolved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (left_id, right_id, subject, status, reason, winner_id, utc_now_iso(), utc_now_iso() if status != "open" else None),
+        )
+        if cur.lastrowid is None:
+            raise sqlite3.Error("conflict insert did not return an id")
+        return int(cur.lastrowid)
+
+    def record_conflict(
+        self,
+        left_id: int,
+        right_id: int,
+        subject: Optional[str],
+        reason: str,
+        winner_id: Optional[int],
+        status: str = "open",
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Optional[int]:
+        if conn is not None:
+            return self.record_conflict_on_conn(conn, left_id, right_id, subject, reason, winner_id, status)
         if not self._db_available or not self.state.sqlite_writable:
             return None
-        with self.connection() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO conflicts(left_id, right_id, subject, status, reason, winner_id, created_at, resolved_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (left_id, right_id, subject, status, reason, winner_id, utc_now_iso(), utc_now_iso() if status != "open" else None),
-            )
-            conn.commit()
-            return int(cur.lastrowid)
+        try:
+            with self.connection() as txn_conn:
+                conflict_id = self.record_conflict_on_conn(txn_conn, left_id, right_id, subject, reason, winner_id, status)
+                txn_conn.commit()
+                return conflict_id
+        except sqlite3.Error:
+            return None
 
-    def resolve_conflicts_for(self, memory_id: int) -> int:
+    def resolve_conflicts_for_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> int:
+        cur = conn.execute(
+            "UPDATE conflicts SET status='resolved', resolved_at=? "
+            "WHERE status='open' AND (left_id=? OR right_id=?)",
+            (utc_now_iso(), memory_id, memory_id),
+        )
+        # v0.8.8: a memory resolved-away (supersede) also obsoletes any
+        # not_a_conflict (advisory dismissal) rows touching it — the
+        # dismissal has no referent once the memory is superseded.
+        conn.execute(
+            "DELETE FROM conflicts WHERE status='not_a_conflict' "
+            "AND (left_id=? OR right_id=?)",
+            (memory_id, memory_id),
+        )
+        return int(cur.rowcount)
+
+    def resolve_conflicts_for(
+        self,
+        memory_id: int,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> int:
+        if conn is not None:
+            return self.resolve_conflicts_for_on_conn(conn, memory_id)
         if not self._db_available or not self.state.sqlite_writable:
             return 0
-        with self.connection() as conn:
-            cur = conn.execute(
-                "UPDATE conflicts SET status='resolved', resolved_at=? "
-                "WHERE status='open' AND (left_id=? OR right_id=?)",
-                (utc_now_iso(), memory_id, memory_id),
-            )
-            # v0.8.8: a memory resolved-away (supersede) also obsoletes any
-            # not_a_conflict (advisory dismissal) rows touching it — the
-            # dismissal has no referent once the memory is superseded.
-            conn.execute(
-                "DELETE FROM conflicts WHERE status='not_a_conflict' "
-                "AND (left_id=? OR right_id=?)",
-                (memory_id, memory_id),
-            )
-            conn.commit()
-            return int(cur.rowcount)
+        try:
+            with self.connection() as txn_conn:
+                resolved = self.resolve_conflicts_for_on_conn(txn_conn, memory_id)
+                txn_conn.commit()
+                return resolved
+        except sqlite3.Error:
+            return 0
 
     def list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None) -> list[dict[str, Any]]:
         if not self._db_available:
