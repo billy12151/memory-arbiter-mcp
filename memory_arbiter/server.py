@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import atexit
+from functools import wraps
 import signal
 import sys
-from typing import Any, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional, cast
 
 from .config import Settings
 from .tools import MemoryTools
@@ -30,14 +31,30 @@ def build_runtime() -> ServerBundle:
     tools.start_semantic_worker()
     legacy_enabled = tools.settings.tool_profile in {"full", "legacy_full"}
 
-    def legacy_tool():
+    def legacy_tool() -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         if legacy_enabled:
-            return app.tool()
+            def enabled_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+                @wraps(func)
+                def with_system_notices(*args: Any, **kwargs: Any) -> dict[str, Any]:
+                    response = cast(dict[str, Any], func(*args, **kwargs))
+                    if not response.get("ok"):
+                        return response
+                    try:
+                        notices = tools._consume_notices()
+                    except Exception:
+                        notices = []
+                    if notices:
+                        response.setdefault("notices", []).extend(notices)
+                    return response
 
-        def decorator(func):
+                return app.tool()(with_system_notices)
+
+            return enabled_decorator
+
+        def disabled_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             return func
 
-        return decorator
+        return disabled_decorator
 
     @app.tool()
     def memory(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -51,7 +68,7 @@ def build_runtime() -> ServerBundle:
         memory or retire it unless the user explicitly asks for whole-memory
         retirement. If unsure about fields, call action=help.
         """
-        return tools.memory(action=action, data=data or {})
+        return tools.memory(action=action, data={} if data is None else data)
 
     @app.tool()
     def memory_review(view: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -62,7 +79,7 @@ def build_runtime() -> ServerBundle:
         history, expired memories, audit summaries, or entity coverage. If
         unsure about fields, call view=help.
         """
-        return tools.memory_review(view=view, data=data or {})
+        return tools.memory_review(view=view, data={} if data is None else data)
 
     @app.tool()
     def memory_govern(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -79,7 +96,7 @@ def build_runtime() -> ServerBundle:
         and pending workspace confirmation also belong here. If unsure about
         fields, call action=help.
         """
-        return tools.memory_govern(action=action, data=data or {})
+        return tools.memory_govern(action=action, data={} if data is None else data)
 
     @app.tool()
     def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -90,7 +107,7 @@ def build_runtime() -> ServerBundle:
         requires it. This is for maintenance, not fact governance; use memory_govern
         for user-authorized fact decisions. If unsure about fields, call task=help.
         """
-        return tools.memory_repair(task=task, data=data or {})
+        return tools.memory_repair(task=task, data={} if data is None else data)
 
     @legacy_tool()
     def memory_write(

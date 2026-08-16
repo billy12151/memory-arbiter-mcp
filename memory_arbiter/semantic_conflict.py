@@ -46,12 +46,15 @@ _STOPWORDS = {
 }
 
 _PAIR_PROMPT = """你是 mema 的高召回候选发现器，只输出 JSON，不要解释。
-字段：should_surface, same_fact_slot, reason_code, confidence。
+必填字段：should_surface(boolean), same_fact_slot(boolean), reason_code(enum), confidence(number 0..1)；允许附加解释字段。
 目标：发现可能影响事实使用的 pair，宁可作为候选多捞，不做最终裁决。
 true 条件：同一事实槽位值不同；旧口径/新口径；采用/不采用；公开/不公开；todo 被完成；新内容替换旧内容。
 false 条件：明显 duplicate、compatible、same_topic_only、unrelated。
 reason_code 只能是 value_diff, replacement, todo_resolved, duplicate, compatible, same_topic_only, unrelated, uncertain_same_slot。
-注意：如果 reason_code 是 value_diff/replacement/todo_resolved/uncertain_same_slot，should_surface 必须是 true。"""
+一致性规则：
+- action reason（value_diff/replacement/todo_resolved/uncertain_same_slot）必须 should_surface=true 且 same_fact_slot=true。
+- duplicate/compatible 必须 should_surface=false；same_fact_slot 可为 true 或 false。
+- same_topic_only/unrelated 必须 should_surface=false 且 same_fact_slot=false。"""
 
 
 _WORKSPACE_PROMPT = """你是 mema 的 workspace 归一候选建议器，只输出 JSON，不要解释。
@@ -318,22 +321,58 @@ def model_signal_from_text(raw: str) -> ModelSignal:
     snippet = _extract_first_json_object(raw or "")
     if not snippet:
         return ModelSignal(False, "invalid_json", None, raw or "", None, "missing_json")
+    protocol_fields = {"should_surface", "same_fact_slot", "reason_code", "confidence"}
+
+    def reject_duplicate_protocol_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        decoded_object: dict[str, Any] = {}
+        seen_protocol_fields: set[str] = set()
+        for key, value in pairs:
+            if key in protocol_fields:
+                if key in seen_protocol_fields:
+                    raise ValueError(f"duplicate protocol field: {key}")
+                seen_protocol_fields.add(key)
+            decoded_object[key] = value
+        return decoded_object
+
     try:
-        parsed = json.loads(snippet)
+        decoded = json.loads(snippet, object_pairs_hook=reject_duplicate_protocol_fields)
     except Exception as exc:
         return ModelSignal(False, "invalid_json", None, raw or "", None, str(exc))
-    reason = str(parsed.get("reason_code") or parsed.get("candidate_type") or "").strip()
-    should = parsed.get("should_surface") is True or parsed.get("candidate") is True
-    if reason in {"value_diff", "replacement", "todo_resolved", "uncertain_same_slot"}:
-        should = True
-    if reason in {"duplicate", "compatible", "same_topic_only", "unrelated"}:
-        should = False
-    confidence_raw = parsed.get("confidence")
-    try:
-        confidence = float(confidence_raw) if confidence_raw is not None else None
-    except (TypeError, ValueError):
-        confidence = None
-    return ModelSignal(should, reason or "unknown", confidence, raw or "", parsed)
+    if not isinstance(decoded, dict):
+        return ModelSignal(False, "invalid_schema", None, raw or "", None, "invalid_schema")
+    parsed = decoded
+
+    required = {"should_surface", "same_fact_slot", "reason_code", "confidence"}
+    reason = parsed.get("reason_code")
+    should = parsed.get("should_surface")
+    same_slot = parsed.get("same_fact_slot")
+    confidence = parsed.get("confidence")
+    action_reasons = {"value_diff", "replacement", "todo_resolved", "uncertain_same_slot"}
+    non_action_reasons = {"duplicate", "compatible", "same_topic_only", "unrelated"}
+    valid_reasons = action_reasons | non_action_reasons
+    schema_valid = (
+        required.issubset(parsed)
+        and type(should) is bool
+        and type(same_slot) is bool
+        and isinstance(reason, str)
+        and reason in valid_reasons
+        and isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+        and math.isfinite(confidence)
+        and 0.0 <= confidence <= 1.0
+    )
+    if schema_valid and reason in action_reasons:
+        schema_valid = should is True and same_slot is True
+    elif schema_valid and reason in {"duplicate", "compatible"}:
+        schema_valid = should is False
+    elif schema_valid and reason in {"same_topic_only", "unrelated"}:
+        schema_valid = should is False and same_slot is False
+    if not schema_valid:
+        return ModelSignal(False, "invalid_schema", None, raw or "", parsed, "invalid_schema")
+    assert type(should) is bool
+    assert isinstance(reason, str)
+    assert isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+    return ModelSignal(should, reason, float(confidence), raw or "", parsed)
 
 
 _WS_RELATIONS = {"alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain"}

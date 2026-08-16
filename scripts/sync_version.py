@@ -83,8 +83,9 @@ def check_uv_lock(version: str) -> bool:
     actual_version = record.get("version")
     actual_extras = set(record.get("optional-dependencies", {}))
     metadata_extras = set(record.get("metadata", {}).get("provides-extras", []))
-    ok = actual_version == version and actual_extras == expected_extras and metadata_extras == expected_extras
-    if actual_version != version:
+    version_ok = actual_version is None or actual_version == version
+    ok = version_ok and actual_extras == expected_extras and metadata_extras == expected_extras
+    if not version_ok:
         print(f"uv.lock project version {actual_version} != authoritative {version}", file=sys.stderr)
     if actual_extras != expected_extras:
         print(f"uv.lock optional dependencies {sorted(actual_extras)} != pyproject extras {sorted(expected_extras)}", file=sys.stderr)

@@ -68,14 +68,16 @@ Use `tags_filter`, `source_type`, `after_time`, and `before_time` when precision
 There is no periodic or incremental vector conflict scanner.
 
 1. **Deterministic structured claims (default).** After a write/edit, the server extracts conservative explicit claims and compares the same canonical `entity + attribute + scope`. A collision is persisted as `pending_llm` with memory-version and claim-revision snapshot pins.
-2. **Optional semantic notices.** An async worker performs metadata-overlap coarse recall, local GGUF pair classification, then a deterministic pair-text gate. Passing candidates become `semantic_notices`; they are review hints, not conflict judgments.
+2. **Optional semantic notices.** After a successful write, an async worker performs specific bounded candidate recall with subject/tag ranking, bounded pair selection, local Qwen GGUF classification, then a deterministic pair-text gate. Noisy/common tags are suppressed, specific tags and subject fallback remain eligible, and ranking occurs before `pair_limit`. Model output must satisfy the strict semantic JSON schema. The `medium` pair-text gate is the default; `strong` is the conservative option, selected with `semantic_conflict.pair_text_gate` or `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE`. Passing candidates become open `semantic_notices`; they are review hints, not conflict judgments.
 3. **Manual/on-demand review.** Agents may inspect `memory_review(view="conflicts")`, compare evidence through compatibility tools, and record/resolve conflicts explicitly.
 
 When a product response returns `action_required=judge_conflict_before_use`, call `memory(action="judge")` with all returned pins before using the affected claim. The judgment receipt records guidance only and never edits or supersedes either memory. If it returns `pending_user`/`ask_user`, the user is the final authority. State-changing governance remains separately authorized.
 
-The semantic worker is strictly serial in one child process. The write path is fail-open and asynchronous. The 5 s default job budget only decides whether another pair may begin; each started inference has a 30 s hard timeout, and loading has a separate 120 s timeout. A timed-out generation is terminated before another process generation starts.
+The semantic worker is strictly serial in one child process. The write path is fail-open and asynchronous. Historical jobs with stale memory/version/claim snapshots are skipped. The 5 s default job budget only decides whether another pair may begin; each started inference has a 30 s hard timeout, and loading has a separate 120 s timeout. A timed-out generation is terminated before another process generation starts.
 
-`memory_repair(task="notice", data={"action":"list"})` lists notices; dismiss/resolve notices through the same repair task. These notice operations do not require governance authorization because they manage advisory notices, not memory facts. Runtime `pause`, `resume`, `enable`, `unload`, `disable`, and `status` use `semantic_control` and also do not require governance authorization.
+On the next successful call to any of the four product tools, the server may append at most one compact semantic stub to top-level `notices`; existing update/onboarding/backup notices may appear alongside it. The stub instructs the Agent to call `memory_repair(task="notice", data={"action":"read", "notice_id": ...})`. Read the full notice, then execute its returned `left_read_call` and `right_read_call` to read both full memories. Only after both reads succeed, assess the advisory candidate and tell the user if it appears credible without calling it a confirmed conflict; dismiss false positives and resolve already-handled notices. Delivery is the state transition `open → open + delivered_at`; public `dismiss`/`resolve` calls make terminal transitions, while stale undelivered snapshots may transition internally to `stale`. Dismiss/resolve reasons are persisted, and an opposite repeated terminal action returns `already_terminal` rather than success. Stale cleanup scans a bounded batch per claim; if no fresh row is found in that batch, delivery returns no semantic stub. Under strict isolation, claim/list/read/dismiss/resolve require both notice memories to be visible in the caller's canonical workspace; omitted caller workspace falls back to `settings.workspace`. `none` and `weak` retain their existing unscoped notice behavior. The database claim is atomic best effort, but transport does not guarantee exactly-once delivery.
+
+Semantic notices never automatically create a conflict, submit a judgment, edit a memory, or supersede either side. `list`, `read`, `dismiss`, and `resolve` use `memory_repair(task="notice", ...)`; these operations do not require governance authorization because they manage advisory notices, not memory facts. Runtime `pause`, `resume`, `enable`, `unload`, `disable`, and `status` use `semantic_control` and also do not require governance authorization.
 
 ### Pattern C — Workspace-aware sharing
 
@@ -177,14 +179,16 @@ Python 3.13 若没有匹配的 `llama-cpp-python` wheel，`[semantic-local]` 可
 系统不再有 periodic/incremental vector conflict scanner。
 
 1. **确定性结构化 claims（默认）**：写入/编辑后提取保守显式 claim，比较相同 canonical `entity + attribute + scope`；碰撞持久化为 `pending_llm`，携 memory version 与 claim revision pins。
-2. **可选语义 notice**：异步 worker 走 metadata-overlap 粗召回、本地 GGUF pair 分类、确定性 pair-text gate；通过者写入 `semantic_notices`，只是审阅提示，不是 conflict judgment。
+2. **可选语义 notice**：写入成功后，异步 worker 走 specific bounded candidate recall（具体且有界的候选召回）与 subject/tag 排序、有界 pair 选择、本地 Qwen GGUF 分类、确定性 pair-text gate。常见/嘈杂 tag 会被压制，具体 tag 与 subject fallback 仍可入选，排序发生在 `pair_limit` 截断前。模型输出必须包含全部必填字段，字段类型与 `reason_code` enum 必须严格匹配；允许附加解释字段。pair-text gate 默认 `medium`，保守档为 `strong`，通过 `semantic_conflict.pair_text_gate` 或 `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE` 选择。通过者写为 open `semantic_notices`，只是审阅提示，不是 conflict judgment。
 3. **人工/按需审查**：Agent 可用 `memory_review(view="conflicts")` 查看，通过兼容工具比较证据，并显式落表/关闭冲突。
 
 产品响应返回 `action_required=judge_conflict_before_use` 时，必须携全部 pins 调 `memory(action="judge")`，再使用受影响 claim。judgment receipt 只记录 guidance，不编辑或 supersede 任何一侧。若返回 `pending_user`/`ask_user`，最终权在用户；改变事实状态的治理仍需单独授权。
 
-语义 worker 在单子进程内严格串行；写路径 fail-open、异步。默认 5 秒 job budget 只决定是否开始下一 pair；单次推理硬超时 30 秒，加载另有 120 秒。超时代际必须终止后才能启动新代际。
+语义 worker 在单子进程内严格串行；写路径 fail-open、异步。memory/version/claim snapshot 已 stale 的历史 job 会跳过。默认 5 秒 job budget 只决定是否开始下一 pair；单次推理硬超时 30 秒，加载另有 120 秒。超时代际必须终止后才能启动新代际。
 
-`memory_repair(task="notice", data={"action":"list"})` 查看 notice；关闭/解决也走该 repair task。notice 只是 advisory，不改变 memory fact，因此无需 governance 授权。`semantic_control` 的 `pause`、`resume`、`enable`、`unload`、`disable`、`status` 同样无需治理授权。
+四个产品工具的下一次成功调用都可能在顶层 `notices` 附加至多 1 个紧凑 semantic stub；现有 update/onboarding/backup notice 可与它并存。stub 指示 Agent 调用 `memory_repair(task="notice", data={"action":"read", "notice_id": ...})`。先读取完整 notice，再执行返回的 `left_read_call` 与 `right_read_call` 读取两侧完整记忆；只有两次读取都成功后，才判断 advisory candidate，并在看起来可信时提示用户，但不得称为已确认冲突。误报 dismiss，已处理 notice resolve。投递状态迁移为 `open → open + delivered_at`；公开的 `dismiss`/`resolve` 才进入终态，未投递 stale snapshot 可由内部迁移到 `stale`。本地数据库 claim 是原子 best effort，transport 不保证 exactly-once delivery。
+
+semantic notice 不会自动创建 conflict、提交 judgment、编辑 memory 或 supersede 任一侧。`list`、`read`、`dismiss`、`resolve` 都走 `memory_repair(task="notice", ...)`；它们只管理 advisory notice，不需要 governance 授权。`semantic_control` 的 `pause`、`resume`、`enable`、`unload`、`disable`、`status` 同样无需治理授权。
 
 ### 模式 C —— Workspace 共享与隔离
 

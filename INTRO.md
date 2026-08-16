@@ -19,11 +19,13 @@
 冲突发现有两条当前实现路径：
 
 - 默认开启的确定性结构化 claim 检测，在写入/编辑后比较同一 `entity + attribute + scope` 的显式 key/value、表格、数字单位和 semver claim；
-- 可选本地 GGUF 写入时语义 notice，通过 metadata-overlap 粗召回、模型候选信号和 pair-text gate 提示可能的语义冲突。
+- 可选本地 GGUF 写入时语义 notice，通过 specific bounded candidate recall（具体且有界的候选召回）与 subject/tag 排序、模型候选信号和 pair-text gate 提示可能的语义冲突；pair-text gate 默认 `medium`，保守低打扰档为 `strong`。
 
 旧的 `memory_scan_conflict_candidates` 向量扫描器和 periodic vector scan 已移除。sqlite-vec 仍可用于语义召回、section 召回和 workspace 候选，但不再向冲突扫描器供数。
 
 结构化碰撞会持久化为 `pending_llm`，响应返回 `action_required=judge_conflict_before_use` 和 snapshot pins。宿主 LLM 必须调用 `memory(action="judge")` 提交判断 receipt，之后才能使用受影响 claim。judgment 只记录 guidance，不会自动编辑、覆盖或 supersede 任一记忆；不确定、双保护或高影响用途会升级为 `pending_user`。整条记忆过期、冲突关闭、workspace alias 决策等治理操作仍由用户最终授权。
+
+四个产品工具的成功响应可投递至多一个紧凑 semantic notice stub。Agent 先 `memory_repair(task="notice", data={"action":"read", ...})`，再执行返回的 `left_read_call` 与 `right_read_call` 读取两侧完整记忆；只有两次读取成功后，才在候选看起来可信时提示用户，且不得称为已确认冲突。投递只做 `open → open + delivered_at` 状态迁移；公开 `dismiss`/`resolve` 才进入终态，未投递 stale snapshot 可由内部迁移到 `stale`。数据库 claim 是原子 best effort，transport 不保证 exactly-once delivery。
 
 ### 3. 用户确认事实与演进历史
 

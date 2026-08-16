@@ -11,6 +11,10 @@ if TYPE_CHECKING:
     from .core import MemoryDB
 
 
+NOTICE_STATUSES = frozenset({"open", "dismissed", "resolved", "stale"})
+CLAIM_SCAN_LIMIT = 25
+
+
 class SemanticNoticeStore:
     def __init__(self, db: "MemoryDB"):
         self._db = db
@@ -70,34 +74,235 @@ class SemanticNoticeStore:
                     return {"outcome": "error", "reason": "integrity_constraint"}
                 return {"outcome": "deduped", "notice_id": int(row["id"])}
 
-    def list_semantic_notices(self, status: str = "open", limit: int = 10) -> list[dict[str, Any]]:
+    @staticmethod
+    def _decode_notice(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        notice = dict(row)
+        try:
+            notice["payload"] = json.loads(notice.get("payload") or "{}")
+        except Exception:
+            notice["payload"] = {}
+        return notice
+
+    @staticmethod
+    def _freshness(notice: dict[str, Any], memories: dict[int, dict[str, Any]]) -> dict[str, Any]:
+        checks: list[dict[str, Any]] = []
+        pairs = (
+            ("left", notice.get("memory_id"), notice.get("left_version"), notice.get("left_claim_revision")),
+            ("right", notice.get("peer_id"), notice.get("right_version"), notice.get("right_claim_revision")),
+        )
+        fresh = True
+        for side, memory_id, expected_version, expected_revision in pairs:
+            memory = memories.get(int(memory_id)) if memory_id is not None else None
+            side_fresh = bool(
+                memory is not None
+                and memory.get("status") == "active"
+                and expected_version is not None
+                and expected_revision is not None
+                and int(memory.get("version") or 0) == int(expected_version)
+                and int(memory.get("claim_revision") or 0) == int(expected_revision)
+            )
+            checks.append({
+                "side": side,
+                "memory_id": memory_id,
+                "exists": memory is not None,
+                "status": memory.get("status") if memory else None,
+                "expected_version": expected_version,
+                "current_version": memory.get("version") if memory else None,
+                "expected_claim_revision": expected_revision,
+                "current_claim_revision": memory.get("claim_revision") if memory else None,
+                "fresh": side_fresh,
+            })
+            fresh = fresh and side_fresh
+        return {"fresh": fresh, "checks": checks}
+
+    @staticmethod
+    def _notice_memories_in_connection(
+        conn: sqlite3.Connection, notice: dict[str, Any],
+    ) -> dict[int, dict[str, Any]]:
+        ids = [int(value) for value in (notice.get("memory_id"), notice.get("peer_id")) if value is not None]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT id, status, version, claim_revision, workspace, workspace_canonical "
+            f"FROM memories WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        return {int(row["id"]): dict(row) for row in rows}
+
+    def _freshness_in_connection(self, conn: sqlite3.Connection, notice: dict[str, Any]) -> dict[str, Any]:
+        return self._freshness(notice, self._notice_memories_in_connection(conn, notice))
+
+    @staticmethod
+    def _read_call(memory: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+        if memory is None:
+            return None
+        data: dict[str, Any] = {"memory_id": int(memory["id"])}
+        workspace = str(memory.get("workspace_canonical") or memory.get("workspace") or "").strip()
+        if workspace:
+            data["workspace"] = workspace
+        return {"tool": "memory", "action": "read", "data": data}
+
+    def _with_review_calls(
+        self, conn: sqlite3.Connection, notice: dict[str, Any],
+    ) -> dict[str, Any]:
+        memories = self._notice_memories_in_connection(conn, notice)
+        notice["left_read_call"] = self._read_call(memories.get(int(notice["memory_id"])))
+        peer_id = notice.get("peer_id")
+        notice["right_read_call"] = self._read_call(
+            memories.get(int(peer_id)) if peer_id is not None else None
+        )
+        notice["agent_instruction"] = (
+            "Execute left_read_call and right_read_call and read both full memories. "
+            "Only after both reads succeed, assess the advisory candidate and tell the user if it appears credible. "
+            "Do not present it as a confirmed conflict. Dismiss false positives or resolve notices already handled."
+        )
+        return notice
+
+    @staticmethod
+    def _workspace_clause(workspace_canonical: Optional[str], alias: str = "semantic_notices") -> tuple[str, list[Any]]:
+        if workspace_canonical is None:
+            return "", []
+        visible = "COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
+        return (
+            f" AND EXISTS (SELECT 1 FROM memories m WHERE m.id={alias}.memory_id AND {visible})"
+            f" AND EXISTS (SELECT 1 FROM memories m WHERE m.id={alias}.peer_id AND {visible})",
+            [workspace_canonical, workspace_canonical],
+        )
+
+    def _mark_stale_in_connection(self, conn: sqlite3.Connection, notice_id: int) -> bool:
+        """Internal-only freshness transition; public status updates cannot set stale."""
+        cur = conn.execute(
+            "UPDATE semantic_notices SET status='stale', resolved_at=? "
+            "WHERE id=? AND status='open' AND delivered_at IS NULL",
+            (utc_now_iso(), int(notice_id)),
+        )
+        return cur.rowcount == 1
+
+    def claim_next_semantic_notice(self, workspace_canonical: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """Atomically claim one fresh notice, scanning at most CLAIM_SCAN_LIMIT rows."""
+        db = self._db
+        if not db._db_available or not db.state.sqlite_writable:
+            return None
+        workspace_sql, workspace_args = self._workspace_clause(workspace_canonical)
+        from_sql = (
+            " FROM semantic_notices INDEXED BY idx_semantic_notices_open_undelivered_priority "
+            "WHERE status='open' AND delivered_at IS NULL"
+            + workspace_sql
+        )
+        order_sql = (
+            " ORDER BY CASE lower(severity) "
+            "WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'warning' THEN 2 "
+            "WHEN 'normal' THEN 3 WHEN 'info' THEN 4 ELSE 5 END, created_at ASC, id ASC LIMIT ?"
+        )
+        # Empty queues are the common path. Probe only the indexed identity with
+        # a reader so successful product calls avoid both row payload reads and
+        # serialization behind BEGIN IMMEDIATE.
+        with db.connection() as probe_conn:
+            if probe_conn.execute(
+                "SELECT id" + from_sql + order_sql,
+                (*workspace_args, 1),
+            ).fetchone() is None:
+                return None
+        with db.write_transaction() as conn:
+            # Re-read only claim/freshness fields under the writer lock:
+            # concurrent callers may have claimed the probed row, and only this
+            # snapshot is eligible for CAS delivery.
+            rows = conn.execute(
+                "SELECT id, severity, notice_type, memory_id, peer_id, "
+                "left_version, right_version, left_claim_revision, right_claim_revision"
+                + from_sql + order_sql,
+                (*workspace_args, CLAIM_SCAN_LIMIT),
+            ).fetchall()
+            for row in rows:
+                notice = self._decode_notice(row)
+                if not self._freshness_in_connection(conn, notice)["fresh"]:
+                    self._mark_stale_in_connection(conn, int(notice["id"]))
+                    continue
+                now = utc_now_iso()
+                cur = conn.execute(
+                    "UPDATE semantic_notices SET delivered_at=? "
+                    "WHERE id=? AND status='open' AND delivered_at IS NULL",
+                    (now, int(notice["id"])),
+                )
+                if cur.rowcount != 1:
+                    continue
+                read_data: dict[str, Any] = {
+                    "action": "read",
+                    "notice_id": int(notice["id"]),
+                }
+                if workspace_canonical is not None:
+                    read_data["workspace"] = workspace_canonical
+                return {
+                    "notice_id": int(notice["id"]),
+                    "severity": notice["severity"],
+                    "type": notice["notice_type"],
+                    "action_required": "read_semantic_notice",
+                    "agent_instruction": (
+                        "Read this notice explicitly. After reviewing both sides, if the candidate seems credible, "
+                        "tell the user clearly; dismiss false positives and resolve notices already handled. "
+                        "Do not claim this notice is a confirmed conflict."
+                    ),
+                    "read_call": {
+                        "tool": "memory_repair",
+                        "task": "notice",
+                        "data": read_data,
+                    },
+                }
+        return None
+
+    def read_semantic_notice(
+        self, notice_id: int, workspace_canonical: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        db = self._db
+        if not db._db_available:
+            return None
+        workspace_sql, workspace_args = self._workspace_clause(workspace_canonical)
+        with db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM semantic_notices WHERE id=?" + workspace_sql,
+                (int(notice_id), *workspace_args),
+            ).fetchone()
+            if row is None:
+                return None
+            notice = self._decode_notice(row)
+            notice["freshness"] = self._freshness_in_connection(conn, notice)
+            return self._with_review_calls(conn, notice)
+
+    def list_semantic_notices(
+        self, status: str = "open", limit: int = 10, workspace_canonical: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         db = self._db
         if not db._db_available:
             return []
-        try:
-            with db.connection() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM semantic_notices WHERE status=? ORDER BY created_at DESC, id DESC LIMIT ?",
-                    (str(status or "open"), max(1, min(100, int(limit)))),
-                ).fetchall()
-            notices = [dict(row) for row in rows]
+        normalized = str(status or "").strip().lower()
+        if normalized not in NOTICE_STATUSES:
+            raise ValueError("invalid_notice_status")
+        workspace_sql, workspace_args = self._workspace_clause(workspace_canonical)
+        with db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM semantic_notices WHERE status=?" + workspace_sql
+                + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                (normalized, *workspace_args, max(1, min(100, int(limit)))),
+            ).fetchall()
+            notices = [self._decode_notice(row) for row in rows]
             for notice in notices:
-                try:
-                    notice["payload"] = json.loads(notice.get("payload") or "{}")
-                except Exception:
-                    notice["payload"] = {}
+                notice["freshness"] = self._freshness_in_connection(conn, notice)
             return notices
-        except Exception:
-            return []
 
-    def semantic_notice_counts(self) -> dict[str, int]:
+    def semantic_notice_counts(
+        self, workspace_canonical: Optional[str] = None,
+    ) -> dict[str, int]:
         db = self._db
         if not db._db_available:
             return {}
+        workspace_sql, workspace_args = self._workspace_clause(workspace_canonical)
         try:
             with db.connection() as conn:
                 rows = conn.execute(
-                    "SELECT status, COUNT(*) AS count FROM semantic_notices GROUP BY status"
+                    "SELECT status, COUNT(*) AS count FROM semantic_notices WHERE 1=1"
+                    + workspace_sql + " GROUP BY status",
+                    workspace_args,
                 ).fetchall()
             return {str(row["status"]): int(row["count"] or 0) for row in rows}
         except Exception:
@@ -150,41 +355,46 @@ class SemanticNoticeStore:
                         and int(rcr) == int(right_claim_revision)
                     ):
                         return True
-                else:
-                    if (
-                        int(lv) == int(right_version)
-                        and int(rv) == int(left_version)
-                        and int(lcr) == int(right_claim_revision)
-                        and int(rcr) == int(left_claim_revision)
-                    ):
-                        return True
+                elif (
+                    int(lv) == int(right_version)
+                    and int(rv) == int(left_version)
+                    and int(lcr) == int(right_claim_revision)
+                    and int(rcr) == int(left_claim_revision)
+                ):
+                    return True
         except Exception:
             return False
         return False
 
-    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "") -> dict[str, Any]:
+    def update_semantic_notice_status(
+        self,
+        notice_id: int,
+        status: str,
+        reason: str = "",
+        workspace_canonical: Optional[str] = None,
+    ) -> dict[str, Any]:
         db = self._db
         if not db._db_available or not db.state.sqlite_writable:
             return {"outcome": "unavailable"}
         status = str(status or "").strip().lower()
-        if status not in {"open", "delivered", "dismissed", "resolved", "stale"}:
+        if status not in {"dismissed", "resolved"}:
             return {"outcome": "invalid_status"}
-        column = {
-            "delivered": "delivered_at",
-            "dismissed": "dismissed_at",
-            "resolved": "resolved_at",
-            "stale": "resolved_at",
-        }.get(status)
+        workspace_sql, workspace_args = self._workspace_clause(workspace_canonical)
+        column = "dismissed_at" if status == "dismissed" else "resolved_at"
         now = utc_now_iso()
         with db.write_transaction() as conn:
-            if column:
-                cur = conn.execute(
-                    f"UPDATE semantic_notices SET status=?, {column}=? WHERE id=?",
-                    (status, now, int(notice_id)),
-                )
-            else:
-                cur = conn.execute(
-                    "UPDATE semantic_notices SET status=? WHERE id=?",
-                    (status, int(notice_id)),
-                )
-        return {"outcome": "updated" if cur.rowcount else "not_found", "reason": reason}
+            row = conn.execute(
+                "SELECT status FROM semantic_notices WHERE id=?" + workspace_sql,
+                (int(notice_id), *workspace_args),
+            ).fetchone()
+            if row is None:
+                return {"outcome": "not_found"}
+            current = str(row["status"])
+            if current != "open":
+                return {"outcome": "already_terminal", "status": current}
+            cur = conn.execute(
+                f"UPDATE semantic_notices SET status=?, {column}=?, resolution_reason=? "
+                "WHERE id=? AND status='open'",
+                (status, now, str(reason or ""), int(notice_id)),
+            )
+        return {"outcome": "updated" if cur.rowcount else "already_terminal", "status": status}

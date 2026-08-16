@@ -3,6 +3,18 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.13.1] — 2026-08-17
+
+### Changed
+
+- **Write-time semantic candidate quality tightened** — successful writes enqueue Qwen classification asynchronously; strict model-output validation now fails closed, and semantic candidates use specific bounded candidate recall with subject/tag ranking before `pair_limit`, suppressing noisy/common tags while retaining specific tags and subject fallback. The deterministic pair-text gate remains authoritative: `medium` is the default, while `strong` is the conservative option configurable through `semantic_conflict.pair_text_gate` or `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE`.
+- **Semantic notice review instructions completed** — after `notice/read`, Agents execute the returned `left_read_call` and `right_read_call`, read both full memories, and only then tell the user when the advisory candidate appears credible; false positives can be dismissed and already-handled notices resolved.
+- **Notice lifecycle and transport boundaries clarified** — attaching a stub performs the `open → open + delivered_at` state transition; `dismiss` and `resolve` are the only public terminal transitions, while stale undelivered snapshots may transition internally to `stale`. Delivery does not create a conflict, submit a judgment, edit a memory, or supersede either side. The database claim is atomic best effort and does not promise transport-level exactly-once delivery.
+
+### Fixed
+
+- **Restored 0.13.0 semantic notice delivery** — the next successful response from any of the four product tools again attaches at most one compact semantic stub when an eligible open notice exists, while update/onboarding/backup notices can coexist.
+
 ## [0.13.0] — 2026-08-16
 
 Release hardening for bounded backup replay, strict product validation, subprocess-isolated local semantic inference, governance safety, startup diagnostics, and reproducible publishing.

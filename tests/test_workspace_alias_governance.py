@@ -408,7 +408,7 @@ def test_confirm_pending_rolls_back_alias_when_canonical_step_raises(monkeypatch
     assert record["workspace_canonical"] == "RollbackWS"
 
 
-def test_confirm_pending_precomputes_embedding_before_write_lock(monkeypatch, tmp_path):
+def test_confirm_pending_does_not_embed_canonical(monkeypatch, tmp_path):
     from contextlib import contextmanager
     from memory_arbiter.embedder import EmbedResult
 
@@ -440,7 +440,11 @@ def test_confirm_pending_precomputes_embedding_before_write_lock(monkeypatch, tm
     r = t.memory_govern("confirm_pending_workspace", {"authorized": True, "memory_id": mid, "canonical": "CanonicalSlow"})
 
     assert r["ok"] is True
-    assert calls == [("CanonicalSlow", False)]
+    # memory_govern's outer notice-delivery scope may resolve the configured
+    # caller workspace after the operation, but confirm-pending itself must not
+    # embed the selected canonical or run any model under the write lock.
+    assert ("CanonicalSlow", False) not in calls
+    assert all(in_txn is False for _, in_txn in calls)
 
     # resolver's KNN can fuzzy-merge later near-misses. Otherwise a near-string
     # falls through to a fresh sibling canonical, defeating the alias intent.
@@ -700,6 +704,116 @@ def test_case_only_rename_preserves_forwarding_alias(tmp_path):
     assert resolved["is_new"] is False
     assert resolved["matched_by"] == "confirmed_alias"
 
+def _make_vec_tools(tmp_path):
+    import pytest
 
+    settings = Settings(
+        db_path=tmp_path / "alias-vector.sqlite3",
+        backup_jsonl=tmp_path / "alias-vector.jsonl",
+        client="codex",
+        agent_id="agent-a",
+        workspace="default",
+        enable_sqlite_vec=True,
+        vec_dim=2,
+        isolation="weak",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    if not tools.db.state.sqlite_vec_available:
+        pytest.skip("sqlite-vec unavailable")
+    return tools
+
+
+def test_self_alias_write_backfills_missing_canonical_vector(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    tools = _make_vec_tools(tmp_path)
+    calls = []
+
+    class Embedder:
+        def embed_text(self, prefix="", body=""):
+            calls.append(body)
+            return SimpleNamespace(embedding=[1.0, 0.0])
+
+    tools.db.upsert_workspace_alias("SelfProject", "SelfProject")
+    monkeypatch.setattr(tools, "_ensure_embedder", lambda: (Embedder(), []))
+
+    result = tools.memory_write(content="first", subject="self", workspace="SelfProject")
+
+    assert result["ok"] is True
+    assert result["data"]["workspace_matched_by"] == "confirmed_alias"
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT v.id FROM workspace_canonicals c "
+            "JOIN workspace_canonicals_vec v ON v.id = c.id WHERE c.name = ?",
+            ("SelfProject",),
+        ).fetchone()
+    assert row is not None
+    assert calls.count("SelfProject") == 1
+
+
+def test_nonself_alias_write_backfills_canonical_vector_without_reembedding_existing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    tools = _make_vec_tools(tmp_path)
+    calls = []
+
+    class Embedder:
+        def embed_text(self, prefix="", body=""):
+            calls.append(body)
+            return SimpleNamespace(embedding=[0.0, 1.0])
+
+    tools.db.upsert_workspace_alias("Project Raw", "Project Canonical")
+    monkeypatch.setattr(tools, "_ensure_embedder", lambda: (Embedder(), []))
+
+    first = tools.memory_write(content="first", subject="alias", workspace="Project Raw")
+    second = tools.memory_write(content="second", subject="alias", workspace="Project Raw")
+
+    assert first["ok"] is True and second["ok"] is True
+    assert first["data"]["workspace_canonical"] == "Project Canonical"
+    assert second["data"]["workspace_matched_by"] == "confirmed_alias"
+    assert calls.count("Project Canonical") == 1
+
+
+def test_confirmed_alias_vector_backfill_failure_surfaces_pending_retry(tmp_path, monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    tools = _make_vec_tools(tmp_path)
+
+    class Embedder:
+        def embed_text(self, prefix="", body=""):
+            return SimpleNamespace(embedding=[1.0, 0.0])
+
+    tools.db.upsert_workspace_alias("Retry Raw", "Retry Canonical")
+    monkeypatch.setattr(tools, "_ensure_embedder", lambda: (Embedder(), []))
+    original_write_transaction = tools.db.workspaces.write_transaction
+
+    class FailingConnection:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            if "INSERT OR IGNORE INTO workspace_canonicals_vec" in sql:
+                raise sqlite3.OperationalError("injected alias vector failure")
+            return self._conn.execute(sql, params)
+
+    @contextmanager
+    def failing_write_transaction():
+        with original_write_transaction() as conn:
+            yield FailingConnection(conn)
+
+    monkeypatch.setattr(tools.db.workspaces, "write_transaction", failing_write_transaction)
+
+    result = tools.memory_write(content="retry", subject="alias", workspace="Retry Raw")
+
+    assert result["ok"] is True
+    publish = result["data"]["workspace_vector_publish"]
+    assert publish["status"] == "pending_retry"
+    assert publish["canonical"] == "Retry Canonical"
+    assert any(
+        "workspace canonical vector publish failed for 'Retry Canonical'" in warning
+        for warning in result["warnings"]
+    )
 
 

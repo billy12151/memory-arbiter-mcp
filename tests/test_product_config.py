@@ -181,13 +181,33 @@ def test_server_legacy_full_profile_exposes_low_level_tools(tmp_path: Path, monk
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
 
-    from memory_arbiter.server import build_server
+    from memory_arbiter.server import build_runtime
 
-    app = build_server()
+    bundle = build_runtime()
+    app = bundle.app
 
     assert "memory" in app.tools
     assert "memory_write" in app.tools
     assert "memory_supersede" in app.tools
+
+    system_notice = {"type": "update_available", "latest_version": "9.9.9"}
+    bundle.tools._consume_notices = lambda: [dict(system_notice)]
+    response = app.tools["memory_status"]()
+    assert response["notices"] == [system_notice]
+
+    consume_calls = 0
+
+    def pending_notice():
+        nonlocal consume_calls
+        consume_calls += 1
+        return [dict(system_notice)]
+
+    bundle.tools._consume_notices = pending_notice
+    failed = app.tools["memory_get"](-1)
+    assert failed["ok"] is False
+    assert "notices" not in failed
+    assert consume_calls == 0
+    bundle.tools.shutdown(timeout=1)
 
 
 
@@ -787,3 +807,43 @@ def test_server_build_runtime_exposes_tools_for_shutdown(tmp_path: Path, monkeyp
     assert bundle.app.tools["memory"] is not None
     assert bundle.tools.shutdown(timeout=1)["ok"] is True
     assert bundle.tools.shutdown(timeout=1) == {"ok": True, "already_shutdown": True}
+
+
+def test_real_server_product_wrappers_preserve_non_object_data(tmp_path: Path, monkeypatch) -> None:
+    class FakeFastMCP:
+        def __init__(self, _name: str) -> None:
+            self.tools = {}
+
+        def tool(self):
+            def decorator(func):
+                self.tools[func.__name__] = func
+                return func
+            return decorator
+
+    fake_fastmcp = types.ModuleType("mcp.server.fastmcp")
+    fake_fastmcp.FastMCP = FakeFastMCP
+    fake_server = types.ModuleType("mcp.server")
+    fake_mcp = types.ModuleType("mcp")
+    fake_server.fastmcp = fake_fastmcp
+    fake_mcp.server = fake_server
+    monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
+    monkeypatch.setitem(sys.modules, "mcp.server", fake_server)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fake_fastmcp)
+    monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "wrapper.sqlite3"))
+    monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "wrapper.jsonl"))
+    monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")
+
+    from memory_arbiter.server import build_runtime
+
+    bundle = build_runtime()
+    calls = [
+        ("memory", {"action": "remember", "data": []}),
+        ("memory_review", {"view": "audit", "data": "bad"}),
+        ("memory_govern", {"action": "retire", "data": 1}),
+        ("memory_repair", {"task": "notice", "data": False}),
+    ]
+    for name, kwargs in calls:
+        result = bundle.app.tools[name](**kwargs)
+        assert result["ok"] is False
+        assert "data must be a JSON object" in result["data"]["error"]
+    bundle.tools.shutdown(timeout=1)

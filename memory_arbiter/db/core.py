@@ -659,11 +659,25 @@ class MemoryDB:
             source=source,
         )
 
-    def list_semantic_notices(self, status: str = "open", limit: int = 10) -> list[dict[str, Any]]:
-        return self.semantic_notices.list_semantic_notices(status=status, limit=limit)
+    def claim_next_semantic_notice(self, workspace_canonical: Optional[str] = None) -> Optional[dict[str, Any]]:
+        return self.semantic_notices.claim_next_semantic_notice(workspace_canonical)
 
-    def semantic_notice_counts(self) -> dict[str, int]:
-        return self.semantic_notices.semantic_notice_counts()
+    def read_semantic_notice(
+        self, notice_id: int, workspace_canonical: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        return self.semantic_notices.read_semantic_notice(notice_id, workspace_canonical)
+
+    def list_semantic_notices(
+        self, status: str = "open", limit: int = 10, workspace_canonical: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        return self.semantic_notices.list_semantic_notices(
+            status=status, limit=limit, workspace_canonical=workspace_canonical,
+        )
+
+    def semantic_notice_counts(
+        self, workspace_canonical: Optional[str] = None,
+    ) -> dict[str, int]:
+        return self.semantic_notices.semantic_notice_counts(workspace_canonical)
 
     def is_semantic_pair_closed(
         self,
@@ -680,8 +694,16 @@ class MemoryDB:
             left_claim_revision, right_claim_revision,
         )
 
-    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "") -> dict[str, Any]:
-        return self.semantic_notices.update_semantic_notice_status(notice_id, status, reason)
+    def update_semantic_notice_status(
+        self,
+        notice_id: int,
+        status: str,
+        reason: str = "",
+        workspace_canonical: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return self.semantic_notices.update_semantic_notice_status(
+            notice_id, status, reason, workspace_canonical,
+        )
 
     @property
     def scan_log_path(self) -> Path:
@@ -745,6 +767,21 @@ class MemoryDB:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         return self.memories.find_metadata_overlap_candidates(subject, tags, exclude_id, limit)
+
+    def find_semantic_overlap_candidates(
+        self,
+        subject: Optional[str],
+        tags: list[str],
+        exclude_id: int,
+        limit: int = 50,
+        canonical_workspace: Optional[str] = None,
+        isolation: str = "none",
+    ) -> list[dict[str, Any]]:
+        return self.memories.find_semantic_overlap_candidates(
+            subject, tags, exclude_id, limit,
+            canonical_workspace=canonical_workspace,
+            isolation=isolation,
+        )
 
     def edit_memory(
         self,

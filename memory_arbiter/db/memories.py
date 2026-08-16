@@ -568,6 +568,177 @@ class MemoriesStore:
             return []
         return list(candidates.values())
 
+    def find_semantic_overlap_candidates(
+        self,
+        subject: Optional[str],
+        tags: list[str],
+        exclude_id: int,
+        limit: int = 50,
+        canonical_workspace: Optional[str] = None,
+        isolation: str = "none",
+    ) -> list[dict[str, Any]]:
+        """Return a bounded, metadata-only shortlist for semantic classification.
+
+        The SQL uses the same subject/tag overlap channels as write hints, but
+        ranks and limits them before rows leave SQLite. Content is intentionally
+        excluded; callers fetch it only for the selected pairs.
+        """
+        if not self._db_available or limit <= 0:
+            return []
+
+        # Every query tag is preserved. A single JSON value carries the complete
+        # set into SQL, so a distinctive tag near the end cannot disappear behind
+        # an arbitrary Python slice and parameter counts stay constant.
+        query_tags = list(dict.fromkeys(
+            tag.strip().casefold() for tag in tags
+            if isinstance(tag, str) and tag.strip()
+            and tag.strip().casefold() not in {"todo", "待办"}
+            and len(tag.strip()) > 1
+        ))
+        # Punctuation must delimit ASCII subject words (``parser: behavior``),
+        # rather than becoming part of a broad LIKE token.
+        clean_subject = "".join(
+            char if char.isalnum() or char == "_" else " " for char in (subject or "")
+        )
+        subject_tokens = list(dict.fromkeys(
+            token.casefold() for token in _subject_tokens(clean_subject) if len(token) >= 2
+        ))[:4]
+        if not query_tags and not subject_tokens:
+            return []
+
+        isolation = str(isolation or "none").strip().lower()
+        canonical_workspace = str(canonical_workspace or "").strip() or None
+        if isolation != "none" and not canonical_workspace:
+            return []
+        workspace_clause = ""
+        workspace_params: list[Any] = []
+        if isolation != "none":
+            workspace_clause = (
+                " AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
+            )
+            workspace_params.append(canonical_workspace)
+
+        # Only this bounded pool is expanded with json_each and scored. The cap is
+        # independent of caller input: candidate_limit controls returned rows, not
+        # how much of a large workspace may be materialized for expensive scoring.
+        pool_limit = min(500, max(64, int(limit) * 8))
+        tag_json = json.dumps(query_tags, ensure_ascii=False)
+        subject_json = json.dumps(subject_tokens, ensure_ascii=False)
+
+        subject_score = " + ".join(
+            "CASE WHEN lower(pool.subject) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
+            for _ in subject_tokens
+        ) or "0"
+        subject_params = [
+            "%" + token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            for token in subject_tokens
+        ]
+
+        # FTS is the indexed channel. Its query is assembled inside SQLite from
+        # the same JSON tag argument (plus bounded subject tokens), avoiding one
+        # SQL statement/parameter per tag. A recent metadata channel protects
+        # recall when FTS is unavailable or tokenization is unhelpful.
+        if self.state.fts5_available:
+            indexed_pool = f"""
+                indexed_ids AS MATERIALIZED (
+                    SELECT m.id, m.subject, m.tags, m.created_at
+                    FROM memories_fts
+                    JOIN memories m ON m.id=memories_fts.rowid
+                    WHERE m.status='active' AND m.id != ?{workspace_clause}
+                      AND memories_fts MATCH (
+                          SELECT group_concat(term, ' OR ') FROM (
+                              SELECT 'tags : "' || replace(tag, '"', '""') || '"' AS term
+                              FROM input_tags
+                              UNION ALL
+                              SELECT 'subject : "' || replace(token, '"', '""') || '"' AS term
+                              FROM input_subject
+                          )
+                      )
+                    ORDER BY bm25(memories_fts), m.created_at DESC, m.id DESC
+                    LIMIT ?
+                ),
+            """
+            indexed_params: list[Any] = [int(exclude_id), *workspace_params, pool_limit]
+        else:
+            indexed_pool = "indexed_ids AS MATERIALIZED (SELECT NULL AS id, NULL AS subject, NULL AS tags, NULL AS created_at WHERE 0),"
+            indexed_params = []
+
+        recent_where = "m.status='active' AND m.id != ?" + workspace_clause
+        sql = f"""
+            WITH
+            input_tags(tag) AS MATERIALIZED (
+                SELECT DISTINCT lower(value) FROM json_each(?) WHERE type='text'
+            ),
+            input_subject(token) AS MATERIALIZED (
+                SELECT DISTINCT lower(value) FROM json_each(?) WHERE type='text'
+            ),
+            {indexed_pool}
+            recent_ids AS MATERIALIZED (
+                SELECT m.id, m.subject, m.tags, m.created_at
+                FROM memories m
+                WHERE {recent_where}
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT ?
+            ),
+            pool AS MATERIALIZED (
+                SELECT id, subject, tags, created_at FROM (
+                    SELECT *, 0 AS source_rank FROM indexed_ids
+                    UNION ALL
+                    SELECT *, 1 AS source_rank FROM recent_ids
+                )
+                GROUP BY id
+                ORDER BY MIN(source_rank), created_at DESC, id DESC
+                LIMIT ?
+            ),
+            tag_hits AS MATERIALIZED (
+                SELECT pool.id, input_tags.tag
+                FROM pool
+                JOIN json_each(pool.tags) stored_tag ON stored_tag.type='text'
+                JOIN input_tags ON lower(stored_tag.value)=input_tags.tag
+                GROUP BY pool.id, input_tags.tag
+            ),
+            useful_tags AS MATERIALIZED (
+                SELECT input_tags.tag
+                FROM input_tags
+                LEFT JOIN tag_hits ON tag_hits.tag=input_tags.tag
+                GROUP BY input_tags.tag
+                HAVING NOT (
+                    COUNT(tag_hits.id) + 1 >= 3
+                    AND CAST(COUNT(tag_hits.id) + 1 AS REAL) /
+                        ((SELECT COUNT(*) FROM pool) + 1) >= 0.5
+                )
+            ),
+            tag_scores AS MATERIALIZED (
+                SELECT tag_hits.id, COUNT(*) AS tag_overlap
+                FROM tag_hits JOIN useful_tags ON useful_tags.tag=tag_hits.tag
+                GROUP BY tag_hits.id
+            ),
+            scored AS (
+                SELECT pool.id, pool.subject, pool.tags, pool.created_at,
+                       COALESCE(tag_scores.tag_overlap, 0) AS tag_overlap,
+                       ({subject_score}) AS subject_overlap
+                FROM pool LEFT JOIN tag_scores ON tag_scores.id=pool.id
+            )
+            SELECT id, subject, tags, tag_overlap, subject_overlap
+            FROM scored
+            WHERE tag_overlap > 0 OR subject_overlap > 0
+            ORDER BY (tag_overlap > 0 AND subject_overlap > 0) DESC,
+                     tag_overlap DESC, subject_overlap DESC,
+                     created_at DESC, id DESC
+            LIMIT ?
+        """
+        params = [
+            tag_json, subject_json, *indexed_params,
+            int(exclude_id), *workspace_params, pool_limit, pool_limit,
+            *subject_params, int(limit),
+        ]
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        except sqlite3.Error:
+            return []
+        return [_row_to_dict(row) for row in rows]
+
     def edit_memory_intent_on_conn(
         self,
         conn: sqlite3.Connection,
