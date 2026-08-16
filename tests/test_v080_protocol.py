@@ -1200,6 +1200,7 @@ def test_rules_split_handles_crlf_line_endings(tmp_path: Path) -> None:
     tools = _vec_tools(tmp_path)
     content = "# 第一章\r\n" + ("alpha 内容 " * 30) + "\r\n# 第二章\r\n" + ("beta 内容 " * 30)
     mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     mem = tools.db.get_memory(mid)
     assert mem["split_status"] == "active"
     secs = tools.db.get_sections_by_memory(mid)
