@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import types
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -808,6 +809,5 @@ def test_count_matches_post_filter(tmp_path: Path) -> None:
     assert res["data"]["total_estimate"] == 8
     assert len(res["data"]["results"]) == 8
     assert res["data"]["has_more"] is False
-
 
 

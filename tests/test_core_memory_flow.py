@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -69,6 +70,43 @@ def make_vec_tools(tmp_path: Path) -> MemoryTools:
         split_threshold=1,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def test_concurrent_first_start_does_not_false_degrade_on_column_migration(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "concurrent-init.sqlite3",
+        backup_jsonl=tmp_path / "concurrent-init.jsonl",
+        enable_sqlite_vec=False,
+    )
+    barrier = threading.Barrier(8)
+    results: list[MemoryDB | Exception] = []
+    result_lock = threading.Lock()
+
+    def initialize() -> None:
+        barrier.wait()
+        try:
+            result: MemoryDB | Exception = MemoryDB(settings)
+        except Exception as exc:  # pragma: no cover - captured for assertion detail
+            result = exc
+        with result_lock:
+            results.append(result)
+
+    threads = [threading.Thread(target=initialize) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert len(results) == len(threads)
+    assert all(not isinstance(result, Exception) for result in results)
+    databases = [result for result in results if isinstance(result, MemoryDB)]
+    assert all(db.db_available for db in databases)
+    assert all(db.state.mode != "jsonl_backup" for db in databases)
+    assert not any(
+        "duplicate column name" in warning
+        for db in databases
+        for warning in db.state.warnings
+    )
 
 
 def clear_config_env(monkeypatch) -> None:
@@ -853,6 +891,5 @@ try:
     _VEC_AVAILABLE = True
 except Exception:
     _VEC_AVAILABLE = False
-
 
 

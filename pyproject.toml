@@ -24,6 +24,7 @@ test = ["pytest>=8.0.0"]
 memory-arbiter-mcp = "memory_arbiter.server:main"
 memory-arbiter = "memory_arbiter.server:main"
 mema = "memory_arbiter.server:main"
+mema-production-smoke = "memory_arbiter.post_release_smoke:main"
 # Subcommands (no separate console script; dispatched in server.main): doctor, setup, console
 
 [tool.setuptools.packages.find]
@@ -38,3 +39,6 @@ version = { attr = "memory_arbiter.__version__" }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

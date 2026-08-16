@@ -20,7 +20,7 @@ from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
 from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
 from .semantic_conflict import (
-    LocalGGUFSemanticBackend,
+    IsolatedGGUFSemanticBackend,
     SemanticBackend,
     ModelSignal,
     notice_dedupe_key,
@@ -80,11 +80,14 @@ class MemoryTools:
         self._operations = OperationsPipeline(self)
         self._semantic_backend: Optional[SemanticBackend] = None
         self._semantic_backend_lock = threading.Lock()
+        self._semantic_runtime_disabled = False
         self._semantic_worker = SemanticConflictWorker(self)
         self._shutdown_lock = threading.Lock()
         self._shutdown_started = False
         self._shutdown_complete = False
         self._last_pair_duration_ms: Optional[int] = None
+        self._last_backup_notice_signature: Optional[tuple[int, int, int, bool]] = None
+        self._last_backup_source_signature: Optional[tuple[int, int, int]] = None
         # v0.6.0: initialise vec index state on startup
         self._init_vec_state()
 
@@ -104,11 +107,53 @@ class MemoryTools:
         self._semantic_worker.start()
 
     def _consume_notices(self) -> list[dict[str, Any]]:
-        if self._update_monitor is None:
-            return []
         notices: list[dict[str, Any]] = []
-        notices.extend(self._update_monitor.consume_agent_onboarding_notice(self.settings.agent_id))
-        notices.extend(self._update_monitor.consume_notices())
+        if self._update_monitor is not None:
+            notices.extend(self._update_monitor.consume_agent_onboarding_notice(self.settings.agent_id))
+            notices.extend(self._update_monitor.consume_notices())
+        try:
+            source_signature = self.db.backup_replay.state_signature()
+            if source_signature == self._last_backup_source_signature:
+                return notices
+            self._last_backup_source_signature = source_signature
+            inspection = self.db.backup_replay.inspect(limit=10_000, offset=0)
+            signature = (
+                int(inspection.get("importable") or 0),
+                int(inspection.get("invalid") or 0),
+                int(inspection.get("conflicts") or 0),
+                bool(inspection.get("has_more")),
+            )
+            if signature != (0, 0, 0, False) and signature != self._last_backup_notice_signature:
+                notices.append({
+                    "type": "backup_replay_pending",
+                    "severity": "warning",
+                    "pending_records": signature[0],
+                    "invalid_records": signature[1],
+                    "conflicting_receipts": signature[2],
+                    "additional_pages": signature[3],
+                    "action_required": "preview_backup_replay",
+                    "suggested_call": {
+                        "tool": "memory_repair", "task": "replay_backup",
+                        "data": {"dry_run": True},
+                    },
+                })
+                self._last_backup_notice_signature = signature
+            elif signature == (0, 0, 0, False):
+                self._last_backup_notice_signature = None
+        except Exception as exc:
+            degradation_signature = (-1, -1, -1, True)
+            if self._last_backup_notice_signature != degradation_signature:
+                notices.append({
+                    "type": "backup_replay_notice_degraded",
+                    "severity": "warning",
+                    "reason": str(exc),
+                    "action_required": "inspect_backup_replay_manually",
+                    "suggested_call": {
+                        "tool": "memory_repair", "task": "replay_backup",
+                        "data": {"dry_run": True, "limit": 200, "offset": 0},
+                    },
+                })
+                self._last_backup_notice_signature = degradation_signature
         return notices
 
     def _enqueue_pending_rule_splits(self, limit: int = 100) -> None:
@@ -164,6 +209,13 @@ class MemoryTools:
         timeout = max(0.0, float(timeout))
         deadline = time.monotonic() + timeout
         worker_shutdown = self._semantic_worker.shutdown(discard_pending=True)
+        # Shutdown also closes synchronous workspace-suggestion admission before
+        # waiting; otherwise a new call can race the worker drain/unload phase.
+        with self._semantic_backend_lock:
+            self._semantic_runtime_disabled = True
+            admitted_backend = self._semantic_backend
+            if admitted_backend is not None:
+                admitted_backend.set_disabled(True)
         remaining = max(0.0, deadline - time.monotonic())
         semantic_drained = self._semantic_worker.wait_drained(remaining)
         remaining = max(0.0, deadline - time.monotonic())
@@ -173,6 +225,10 @@ class MemoryTools:
         if backend is not None:
             remaining = max(0.0, deadline - time.monotonic())
             unload_result = backend.unload(timeout=remaining, disable=True)
+            if not unload_result.get("ok"):
+                force_terminate = getattr(backend, "force_terminate", None)
+                if callable(force_terminate):
+                    unload_result = force_terminate()
         ok = bool(semantic_drained and split_drained and unload_result.get("ok", False))
         with self._shutdown_lock:
             self._shutdown_complete = ok
@@ -459,14 +515,18 @@ class MemoryTools:
         if not self._semantic_configured():
             return None
         with self._semantic_backend_lock:
+            if self._semantic_runtime_disabled:
+                return None
             if self._semantic_backend is not None:
                 return self._semantic_backend
             assert self.settings.semantic_conflict_model_path is not None
-            self._semantic_backend = LocalGGUFSemanticBackend(
+            self._semantic_backend = IsolatedGGUFSemanticBackend(
                 self.settings.semantic_conflict_model_path,
                 n_ctx=self.settings.semantic_conflict_n_ctx,
                 n_threads=self.settings.semantic_conflict_n_threads,
                 n_batch=self.settings.semantic_conflict_n_batch,
+                hard_timeout_ms=self.settings.semantic_conflict_inference_timeout_ms,
+                load_timeout_ms=self.settings.semantic_conflict_load_timeout_ms,
             )
             return self._semantic_backend
 
@@ -521,13 +581,14 @@ class MemoryTools:
             "max_concurrency": 1,
             "max_concurrency_note": "reserved; MVP semantic worker is single-threaded (configured values are clamped to 1)",
             "job_timeout_ms": int(self.settings.semantic_conflict_job_timeout_ms),
+            "inference_timeout_ms": int(self.settings.semantic_conflict_inference_timeout_ms),
+            "load_timeout_ms": int(self.settings.semantic_conflict_load_timeout_ms),
             "min_pair_budget_ms": int(self.settings.semantic_conflict_min_pair_budget_ms),
             "last_pair_duration_ms": self._last_pair_duration_ms,
             "job_deadline_behavior": (
-                "The deadline gates BETWEEN pairs only. A model call (synchronous C inference) "
-                "cannot be interrupted mid-call; when remaining budget drops below "
-                "min_pair_budget_ms the job stops early instead of starting another inference. "
-                "A single stuck call still stalls the worker until process-level isolation lands."
+                "The job budget gates between pairs. Each production GGUF inference runs "
+                "in one strictly serial resident child process and has a hard timeout; a "
+                "timed-out child is terminated and the next request starts a new generation."
             ),
             "worker": self._semantic_worker.status(),
             "backend": backend_status,
@@ -555,9 +616,11 @@ class MemoryTools:
             self._semantic_worker.resume()
             return {"outcome": "resumed", "semantic_conflict": self._semantic_status()}
         if action == "enable":
-            backend = self._get_semantic_backend_ref()
-            if backend is not None:
-                backend.set_disabled(False)
+            with self._semantic_backend_lock:
+                self._semantic_runtime_disabled = False
+                backend = self._semantic_backend
+                if backend is not None:
+                    backend.set_disabled(False)
             self._semantic_worker.enable_runtime()
             return {"outcome": "enabled", "semantic_conflict": self._semantic_status()}
         if action == "unload":
@@ -573,8 +636,15 @@ class MemoryTools:
                 result["warnings"] = ["semantic backend still has in-flight inference; model was not unloaded"]
             return result
         if action == "disable":
+            # Close both admissions before waiting for an in-flight request. The
+            # backend gate covers synchronous workspace suggestions, which do not
+            # pass through the semantic worker queue.
             self._semantic_worker.disable_runtime()
-            backend = self._get_semantic_backend_ref()
+            with self._semantic_backend_lock:
+                self._semantic_runtime_disabled = True
+                backend = self._semantic_backend
+                if backend is not None:
+                    backend.set_disabled(True)
             unload_result = (
                 backend.unload(timeout=timeout, disable=True)
                 if backend is not None else
@@ -823,7 +893,9 @@ class MemoryTools:
         return self._read_pipeline.memory_compare(left_id, right_id, left, right, **_)
 
     def memory_arbitrate(self, left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, **_: Any) -> dict[str, Any]:
-        return self._operations.memory_arbitrate(left_id, right_id, mark_conflict, authorized, **_)
+        return self._operations.memory_arbitrate(
+            left_id, right_id, mark_conflict, self._is_truthy(authorized), **_,
+        )
 
     def _with_resolution_guidance(self, conflict: dict[str, Any]) -> dict[str, Any]:
         return self._operations._with_resolution_guidance(conflict)
@@ -852,7 +924,9 @@ class MemoryTools:
         return self._operations.memory_resolve_conflict(conflict_id, reason, status, **_)
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
-        return self._operations.memory_confirm(memory_id, source_ref, confidence, authorized, **_)
+        return self._operations.memory_confirm(
+            memory_id, source_ref, confidence, self._is_truthy(authorized), **_,
+        )
 
     def memory_accept_workspace_alias(
         self, alias: str, canonical: str, relation: str = "alias",
@@ -883,12 +957,14 @@ class MemoryTools:
         self, memory_id: int, canonical: str, reason: Optional[str] = None,
         authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_confirm_pending_workspace(memory_id, canonical, reason, authorized, **_)
+        return self._operations.memory_confirm_pending_workspace(
+            memory_id, canonical, reason, self._is_truthy(authorized), **_,
+        )
 
     def memory_activate(
         self, memory_id: int, authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_activate(memory_id, authorized, **_)
+        return self._operations.memory_activate(memory_id, self._is_truthy(authorized), **_)
 
     def memory_supersede(
         self,
@@ -898,7 +974,9 @@ class MemoryTools:
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_supersede(memory_id, reason, superseded_by, authorized, **_)
+        return self._operations.memory_supersede(
+            memory_id, reason, superseded_by, self._is_truthy(authorized), **_,
+        )
 
     def _split_capability(self, vec_state: dict[str, Any]) -> dict[str, Any]:
         return self._operations._split_capability(vec_state)
@@ -916,7 +994,9 @@ class MemoryTools:
         self, memory_id: int, entity: Optional[str] = None, scope: Optional[str] = None,
         clear: bool = False, authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_set_entity(memory_id, entity, scope, clear, authorized, **_)
+        return self._operations.memory_set_entity(
+            memory_id, entity, scope, clear, self._is_truthy(authorized), **_,
+        )
 
     def memory_list_entities(
         self, limit: int = 50, include_unassigned: bool = True, **_: Any,
@@ -981,7 +1061,7 @@ class MemoryTools:
             conflict_id, verdict, recommended_use, suggested_winner, reason,
             expected_judgment_id, expected_left_version, expected_right_version,
             expected_left_claim_revision, expected_right_claim_revision,
-            authorized, judge_ref, resolution_kind, conflict_scope, **_,
+            self._is_truthy(authorized), judge_ref, resolution_kind, conflict_scope, **_,
         )
 
     def memory_list_conflict_judgments(self, conflict_id: int, **_: Any) -> dict[str, Any]:
@@ -1007,7 +1087,7 @@ class MemoryTools:
     ) -> dict[str, Any]:
         return self._operations.memory_edit(
             memory_id, new_content, old_text, new_text, new_subject, new_tags,
-            reason, authorized, tags_only, add_tags, remove_tags, **_,
+            reason, self._is_truthy(authorized), tags_only, add_tags, remove_tags, **_,
         )
 
     def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:
@@ -1020,7 +1100,9 @@ class MemoryTools:
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_cleanup_history(memory_id, older_than_days, authorized, **_)
+        return self._operations.memory_cleanup_history(
+            memory_id, older_than_days, self._is_truthy(authorized), **_,
+        )
 
     def memory_cleanup_inactive_vectors(
         self,
@@ -1028,7 +1110,17 @@ class MemoryTools:
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_cleanup_inactive_vectors(dry_run, authorized, **_)
+        return self._operations.memory_cleanup_inactive_vectors(
+            dry_run, self._is_truthy(authorized), **_,
+        )
+
+    def memory_replay_backup(
+        self, dry_run: bool = True, authorized: bool = False,
+        limit: int = 1_000, offset: int = 0, **_: Any,
+    ) -> dict[str, Any]:
+        return self._operations.memory_replay_backup(
+            dry_run, self._is_truthy(authorized), limit, offset, **_,
+        )
 
     def _count_orphan_vectors(self) -> dict[str, int]:
         return self._operations._count_orphan_vectors()

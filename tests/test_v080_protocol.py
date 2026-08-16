@@ -445,6 +445,7 @@ def test_write_rules_split_ignores_fenced_code_headings(tmp_path: Path) -> None:
     content = _content_with_fenced_fake_heading()
     r = tools.memory_write(content=content, subject="doc")
     assert r["ok"] is True
+    assert tools.wait_split_worker_drained(5)
     sections = tools.db.get_sections_by_memory(r["data"]["id"])
     assert len(sections) == 2, f"rules split must yield 2 real headings, got {len(sections)}"
     titles = [s["title"] for s in sections]
@@ -467,6 +468,7 @@ def test_write_rules_split_boundary_at_real_heading_not_fence(tmp_path: Path) ->
     content = _content_with_colliding_heading_in_fence()
     r = tools.memory_write(content=content, subject="doc")
     assert r["ok"] is True
+    assert tools.wait_split_worker_drained(5)
     mem = tools.db.get_memory(r["data"]["id"])
     assert mem["split_status"] == "active"
     sections = tools.db.get_sections_by_memory(mem["id"])
@@ -497,6 +499,7 @@ def test_write_rules_split_boundary_at_real_heading_not_body(tmp_path: Path) -> 
     content = _content_with_colliding_heading_in_body()
     r = tools.memory_write(content=content, subject="doc")
     assert r["ok"] is True
+    assert tools.wait_split_worker_drained(5)
     mem = tools.db.get_memory(r["data"]["id"])
     assert mem["split_status"] == "active"
     sections = tools.db.get_sections_by_memory(mem["id"])
@@ -952,6 +955,9 @@ def test_edit_content_to_unstructured_returns_split_request(tmp_path: Path) -> N
     """G4: editing an active-split doc to unstructured long → clears sections, split_request."""
     tools = _vec_tools(tmp_path)
     mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    # Rules publication is explicitly asynchronous. Wait on the worker's queue /
+    # inflight condition instead of racing the immediate DB read (or sleeping).
+    assert tools.wait_split_worker_drained(5)
     assert tools.db.get_memory(mid)["split_status"] == "active"
     assert len(tools.db.get_sections_by_memory(mid)) == 2
     r = tools.memory_edit(memory_id=mid, new_content="无标题纯文本 " * 400)
@@ -969,6 +975,7 @@ def test_tags_only_edit_preserves_active_split_index(tmp_path: Path) -> None:
     """G5: tags-only edit on an already-split memory leaves sections/revision untouched."""
     tools = _vec_tools(tmp_path)
     mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     before = tools.db.get_memory(mid)
     before_rev = before["split_revision"]
     before_secs = tools.db.get_sections_by_memory(mid)
@@ -1123,6 +1130,7 @@ def test_get_catalog_and_all_expose_embedding_diagnostics(tmp_path: Path) -> Non
     budget fields, unlike ordinary search matched_sections."""
     tools = _vec_tools(tmp_path)
     mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     assert tools.db.get_memory(mid)["split_status"] == "active"
     diag_keys = ("embedding_truncated", "embedding_original_tokens", "embedding_used_tokens")
     cat = tools.memory_get(memory_id=mid, sections="catalog")["data"]["section_catalog"]
@@ -1168,6 +1176,7 @@ def test_rules_split_preamble_folded_into_first_section(tmp_path: Path) -> None:
     tools = _vec_tools(tmp_path)
     content = "这是前言 preamble\n# 第一章\n" + ("alpha 内容 " * 30) + "\n# 第二章\n" + ("beta 内容 " * 30)
     mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     secs = tools.db.get_sections_by_memory(mid)
     assert len(secs) == 2
     assert secs[0]["start_offset"] == 0
@@ -1180,6 +1189,7 @@ def test_rules_split_title_path_for_nested_headings(tmp_path: Path) -> None:
     tools = _vec_tools(tmp_path)
     content = "# 父级\n" + ("alpha 内容 " * 30) + "\n## 子级\n" + ("beta 内容 " * 30)
     mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     secs = tools.db.get_sections_by_memory(mid)
     assert len(secs) == 2
     # section 1 is the nested ## 子级 under # 父级
@@ -1192,6 +1202,7 @@ def test_rules_split_handles_crlf_line_endings(tmp_path: Path) -> None:
     tools = _vec_tools(tmp_path)
     content = "# 第一章\r\n" + ("alpha 内容 " * 30) + "\r\n# 第二章\r\n" + ("beta 内容 " * 30)
     mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     mem = tools.db.get_memory(mid)
     assert mem["split_status"] == "active"
     secs = tools.db.get_sections_by_memory(mid)

@@ -54,7 +54,7 @@ def run_eval_semantic(encode_fn) -> dict:
         t0 = time.time()
         outcome = search_memories(
             db, g["query"], workspace=None, tags=None, limit=10,
-            include_superseded=False, debug_ranking=True, query_embedding=qemb,
+            debug_ranking=True, query_embedding=qemb,
         )
         rows = outcome.results
         warnings = outcome.warnings

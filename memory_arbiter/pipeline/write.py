@@ -67,6 +67,7 @@ class WritePipeline:
             ws_is_new = False
             ws_matched_by = "fallback"
             ws_similar: list[dict[str, Any]] = []
+            ws_vector_publish_pending = False
             # Resolve canonical alias only under weak/strict — in `none` the
             # workspace is fully ignored (no embedder call, no canonical write),
             # so we don't perturb the write path or its embedder-call invariants.
@@ -86,6 +87,8 @@ class WritePipeline:
                 ws_is_new = resolved["is_new"]
                 ws_matched_by = resolved["matched_by"]
                 ws_similar = resolved.get("similar") or []
+                embedding_warnings.extend(resolved.get("warnings") or [])
+                ws_vector_publish_pending = bool(resolved.get("vector_publish_pending"))
                 # Rule-first decision layer (636 §5): vector produced candidates;
                 # rules decide AUTO/KEEP/ASK. KEEP overrides a vector merge back
                 # to the raw workspace; ASK is surfaced as a hint below.
@@ -134,6 +137,13 @@ class WritePipeline:
             data = {"id": memory_id, "backup_only": memory_id is None, "record": {**record.__dict__, "id": memory_id}}
             data["workspace_canonical"] = ws_canonical
             data["workspace_matched_by"] = ws_matched_by
+            if ws_vector_publish_pending:
+                data["workspace_vector_publish"] = {
+                    "status": "pending_retry",
+                    "canonical": ws_canonical,
+                    "retry": "After sqlite-vec and embedding configuration recover, write another memory using this workspace to retry publication.",
+                    "repair_task_available": False,
+                }
             if strict_block:
                 data.update({
                     "attention_required": True,

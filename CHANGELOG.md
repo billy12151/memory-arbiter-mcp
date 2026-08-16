@@ -3,6 +3,37 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.13.0] — 2026-08-16
+
+Release hardening for bounded backup replay, strict product validation, subprocess-isolated local semantic inference, governance safety, startup diagnostics, and reproducible publishing.
+
+### Added
+
+- **Bounded, resumable backup replay** — replay reads oversized JSONL records without materializing unbounded lines, rejects unsupported legacy/invalid envelopes and duplicate replay keys, caps mutating pages, reports processed/remaining state, and records post-processing status so interrupted imports can safely resume claim/vector/section work.
+- **Semantic subprocess hard timeouts** — local GGUF load and inference run behind a single-flight subprocess boundary with configurable load/inference deadlines, forced termination/restart on timeout, admission gates during disable/shutdown, and observable timeout/restart status.
+- **Release artifact smoke coverage** — CI and publish workflows now install the built wheel in a clean environment and verify package import/version, all console entry points, and packaged `AGENT_ONBOARDING.md` data.
+
+### Changed
+
+- **Product input validation is fail-closed for protected fields** — product surfaces strip harmless unknown fields with a warning, reject likely misspellings of protected fields with `did_you_mean`, normalize controlled numeric strings before dispatch, enforce bounded text/revision/offset values, validate section modes, and require finite bounded semantic-control timeouts.
+- **Workspace/governance replay behavior is safer** — replay no longer treats registry presence alone as workspace confirmation, keeps pending workspace visibility rules, and exposes post-processing warnings rather than silently presenting a partially indexed import as complete.
+- **Startup and shutdown observability improved** — backup replay notice failures degrade to an explicit warning and suggested inspection call; semantic disable/shutdown closes synchronous and worker admissions before draining in-flight work.
+- **Release consistency checks expanded** — `sync_version.py --check` is read-only and validates `server.json`, the newest CHANGELOG release, and the editable project version/extras in `uv.lock` against the authoritative package version.
+- **CI/publish hardening** — the existing Python 3.11/3.12/3.13 core matrix and sqlite-vec job remain; quality builds and smokes the wheel, release tags must equal the package version, and manual publishing no longer defaults to an obsolete tag.
+
+### Fixed
+
+- Backup replay now detects incomplete post-processing, safely retries already-imported receipts, limits live replay batches, preserves workspace canonicalization, and reports degraded startup inspection instead of failing invisibly.
+- The strict mypy baseline check now invokes mypy with the running `sys.executable`, checks its return code, and requires a parseable summary consistent with emitted errors, preventing missing/crashed mypy runs from passing green.
+- Semantic runtime disable/unload/shutdown races no longer admit new synchronous workspace suggestions while another inference is draining or a timed-out child is being replaced.
+
+### Compatibility and limitations
+
+- MCP product tool names and the legacy/full compatibility profile remain available; valid numeric strings continue to coerce where documented. Harmless unknown fields are stripped with warnings, while protected-field typos, oversized, non-finite, and out-of-range inputs fail validation instead of reaching storage/runtime code.
+- The default install remains free of local-model binaries. `semantic-local` still requires `llama-cpp-python` plus a separately supplied GGUF model; because platform wheel/build availability is variable, installation is an observable manual/release check rather than a normal-CI green gate.
+- Subprocess timeouts can terminate a stuck local-model call but cannot make inference deterministic or bundle model files. Backup replay is bounded and resumable, not atomic across an entire JSONL file; warnings require follow-up until post-processing reaches `complete`.
+- Production smoke remains an explicit post-release/manual operation against the configured database and is not run by ordinary CI; it creates a uniquely marked record and attempts cleanup on every exit path.
+
 ## [0.12.5] — 2026-08-10
 
 Strict workspace isolation, workspace-governance, and semantic-notice release hardening.

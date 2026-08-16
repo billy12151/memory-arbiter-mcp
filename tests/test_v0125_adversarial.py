@@ -54,11 +54,11 @@ def test_confirm_pending_workspace_is_caller_scoped_under_strict(tmp_path: Path)
 
     denied = tools.memory_govern(
         "confirm_pending_workspace",
-        {"memory_id": pending_id, "canonical": "projA", "workspace": "projA"},
+        {"authorized": True, "memory_id": pending_id, "canonical": "projA", "workspace": "projA"},
     )
     ok = tools.memory_govern(
         "confirm_pending_workspace",
-        {"memory_id": pending_id, "canonical": "projB", "workspace": "projB"},
+        {"authorized": True, "memory_id": pending_id, "canonical": "projB", "workspace": "projB"},
     )
 
     assert denied["ok"] is False
@@ -94,11 +94,13 @@ def test_strict_structured_claim_pairs_do_not_cross_workspaces(tmp_path: Path):
 
 def test_activate_pending_reindexes_structured_claims(tmp_path: Path):
     tools = _tools(tmp_path, structured="beta_all")
+    event_time = "2026-08-16T12:00:00+00:00"
     first = _active(
         tools,
         "projA",
         "服务端口是 5432。",
         subject="svc port",
+        event_time=event_time,
         metadata={"entity": "svc", "scope": "prod"},
     )
     tools.memory_rebuild_claims(memory_ids=[first], dry_run=False, workspace="projA")
@@ -106,6 +108,7 @@ def test_activate_pending_reindexes_structured_claims(tmp_path: Path):
         content="服务端口是 3306。",
         subject="svc port",
         workspace="projA",
+        event_time=event_time,
         metadata={"entity": "svc", "scope": "prod"},
         status="pending",
     )["data"]["id"]

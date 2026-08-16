@@ -68,6 +68,10 @@ def build_runtime() -> ServerBundle:
     def memory_govern(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         """User-authorized Memory Arbiter governance. Use action=retire/resolve_conflict/confirm/correct_judgment/accept_workspace_alias/reject_workspace_alias/rename_workspace_canonical/migrate_workspace/confirm_pending_workspace/help.
 
+        Every state-changing action requires authorized=true. Set it only after
+        the user explicitly confirms that specific action; never infer authorization
+        from prior preferences or from the action seeming harmless. Without it,
+        the tool returns action_required=ask_user_for_authorization with the impact.
         Use only for explicit governance decisions. Do not use retire for
         ordinary updates, partial conflicts, or source-of-truth replacement;
         use memory(action="update") instead. Retire is only for whole-memory
@@ -79,7 +83,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Memory Arbiter maintenance and repair. Use task=split/rebuild_claims/rebuild_embeddings/cleanup_history/cleanup_vectors/resync_vectors/set_entity/activate_pending/semantic_control/notice/help.
+        """Memory Arbiter maintenance and repair. Use task=split/rebuild_claims/rebuild_embeddings/cleanup_history/cleanup_vectors/resync_vectors/set_entity/activate_pending/replay_backup/semantic_control/notice/help.
 
         Prefer dry_run first where available. Cleanup, activation, and protected-memory
         metadata changes still require authorized=true when the underlying operation

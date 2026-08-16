@@ -18,6 +18,19 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
 
+    def end_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; connect-src 'self'; "
+            "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; "
+            "form-action 'self'",
+        )
+        super().end_headers()
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib hook name
         self._handle(send_body=True)
 
@@ -91,13 +104,18 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._json(self.api.settings_view(), send_body=send_body)
                 return
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND, send_body=send_body)
-        except Exception as exc:
-            self._json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR, send_body=send_body)
+        except Exception:
+            self._json(
+                {"error": "internal server error"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                send_body=send_body,
+            )
 
     def _html(self, text: str, send_body: bool = True) -> None:
         body = text.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if send_body:

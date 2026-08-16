@@ -25,6 +25,7 @@ from .vectors import VectorStore
 from .workspaces import WorkspaceStore, _coerce_ws, _normalize_alias_key
 from .conflicts import ConflictStore
 from .memories import MemoriesStore
+from .backup_replay import BackupReplayStore
 
 # Explicit export list. The pre-split db.py surfaced its top-level imports
 # (json/re/sqlite3/…) as module attributes; the package facade re-exports them
@@ -64,6 +65,8 @@ __all__ = [
 ]
 
 _BUSY_TIMEOUT_MS = 5000
+_INIT_BUSY_RETRIES = 5
+_INIT_RETRY_BASE_SECONDS = 0.05
 
 
 class MemoryDB:
@@ -99,6 +102,7 @@ class MemoryDB:
         self.workspaces = WorkspaceStore(self)
         self.conflicts = ConflictStore(self)
         self.memories = MemoriesStore(self)
+        self.backup_replay = BackupReplayStore(self)
         self._claim_store = self.claims
         self._judgment_store = self.judgments
         self._init_database()
@@ -199,23 +203,34 @@ class MemoryDB:
 
     def _init_database(self) -> None:
         self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            conn = self._new_connection(init=True)
+        last_error: Optional[sqlite3.Error] = None
+        for attempt in range(_INIT_BUSY_RETRIES):
+            conn: Optional[sqlite3.Connection] = None
             try:
+                conn = self._new_connection(init=True)
                 self._init_schema(conn)
                 self._probe_features(conn)
                 self._db_available = True
+                return
+            except sqlite3.Error as exc:
+                last_error = exc
+                message = str(exc).lower()
+                transient = "locked" in message or "busy" in message
+                if not transient or attempt + 1 >= _INIT_BUSY_RETRIES:
+                    break
             finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            self._db_available = False
-            self.state.sqlite_writable = False
-            self.state.mode = "jsonl_backup"
-            self.state.jsonl_backup_active = True
-            self.state.warn(
-                f"SQLite unavailable or not writable: {exc}. "
-                "Using JSONL append-only backup when possible."
-            )
+                if conn is not None:
+                    conn.close()
+            time.sleep(_INIT_RETRY_BASE_SECONDS * (2 ** attempt))
+
+        self._db_available = False
+        self.state.sqlite_writable = False
+        self.state.mode = "jsonl_backup"
+        self.state.jsonl_backup_active = True
+        self.state.warn(
+            f"SQLite unavailable or not writable: {last_error or 'unknown initialization error'}. "
+            "Using JSONL append-only backup when possible."
+        )
 
     # ------------------------------------------------------------------
     #  Schema
@@ -420,6 +435,12 @@ class MemoryDB:
         self, record: MemoryRecord, workspace_canonical: Optional[str] = None
     ) -> Tuple[Optional[int], list[str]]:
         return self.memories.insert_memory(record, workspace_canonical)
+
+    def insert_memory_on_conn(
+        self, conn: sqlite3.Connection, record: MemoryRecord,
+        workspace_canonical: Optional[str] = None,
+    ) -> int:
+        return self.memories.insert_memory_on_conn(conn, record, workspace_canonical)
 
     def _append_backup(self, record: MemoryRecord) -> None:
         return self.memories._append_backup(record)
@@ -934,4 +955,3 @@ def _subject_tokens(subject: str) -> list[str]:
     """
     from ..text import subject_tokens
     return subject_tokens(subject)
-

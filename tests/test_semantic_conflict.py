@@ -62,6 +62,9 @@ def test_semantic_config_defaults_and_env(monkeypatch, tmp_path: Path):
     assert settings.semantic_conflict_enabled is False
     assert settings.semantic_conflict_pair_text_gate == "medium"
     assert settings.semantic_conflict_backend == "local_gguf"
+    assert settings.semantic_conflict_job_timeout_ms == 5000
+    assert settings.semantic_conflict_inference_timeout_ms == 30000
+    assert settings.semantic_conflict_load_timeout_ms == 120000
 
     monkeypatch.setenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED", "true")
     monkeypatch.setenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE", "strong")
@@ -781,6 +784,26 @@ def test_local_backend_suggest_workspace_lifecycle_disable(tmp_path: Path):
     disabled = backend.suggest_workspace_candidate("金营", {}, ["金营项目"])
     assert disabled.candidate is None
     assert disabled.error == "disabled"
+
+
+class _TimeoutDisableBackend(_FakeSemanticBackend):
+    def unload(self, timeout=30.0, disable=False):
+        self.unload_calls += 1
+        return {"ok": False, "unloaded": False, "timeout": True, "inflight": 1, "retry_hint": "busy", "generation": 1}
+
+
+def test_semantic_control_disable_timeout_still_blocks_workspace_suggestion(tmp_path: Path):
+    tools = _tools(tmp_path)
+    backend = _TimeoutDisableBackend()
+    tools._semantic_backend = backend
+
+    result = tools.memory_repair(task="semantic_control", data={"action": "disable", "timeout": 0})["data"]
+    assert result["outcome"] == "runtime_disabled_unload_timeout"
+    assert backend.disabled is True
+    assert tools._ensure_semantic_backend() is None
+    assert tools._suggest_workspace_candidate(
+        "raw", {"title": "t"}, [{"name": "canonical"}],
+    ) is None
 
 
 def test_semantic_control_disable_enable_toggles_backend(tmp_path: Path):

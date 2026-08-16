@@ -118,6 +118,13 @@ class SchemaStore:
                   FOREIGN KEY(memory_id) REFERENCES memories(id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, changed_at);
+                CREATE TABLE IF NOT EXISTS backup_replay_log (
+                  replay_key TEXT PRIMARY KEY,
+                  memory_id INTEGER NOT NULL,
+                  payload_hash TEXT NOT NULL,
+                  replayed_at TEXT NOT NULL,
+                  FOREIGN KEY(memory_id) REFERENCES memories(id)
+                );
 
                 -- v0.6.0: section-split derived index (no body column; zero redundancy)
                 CREATE TABLE IF NOT EXISTS memory_sections (
@@ -206,6 +213,12 @@ class SchemaStore:
                                  "TEXT")
         self._migrate_add_column(conn, "memories", "split_revision",
                                  "INTEGER NOT NULL DEFAULT 0")
+        self._migrate_add_column(conn, "backup_replay_log", "postprocess_status",
+                                 "TEXT NOT NULL DEFAULT 'complete'")
+        self._migrate_add_column(conn, "backup_replay_log", "postprocess_stages",
+                                 "TEXT NOT NULL DEFAULT '{}'")
+        self._migrate_add_column(conn, "backup_replay_log", "postprocess_error_code",
+                                 "TEXT")
         # v0.7.5: conflict-scan enrichment columns on the conflicts table.
         # conflict_type / conflict_point carry the *what* (agent LLM judgement);
         # suggested_winner / confidence_hint / source carry the *suggestion*
@@ -357,13 +370,27 @@ class SchemaStore:
         column: str,
         decl: str,
     ) -> None:
-        """Add *column* to *table* if it does not yet exist (idempotent)."""
+        """Add *column* idempotently, including concurrent first starts.
+
+        SQLite has no ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``. Two
+        processes can therefore both observe a missing column before either
+        ALTER commits. If the loser gets ``duplicate column name``, re-read the
+        schema and accept the race only when the requested column now exists.
+        """
         cols = {
             str(row["name"])
             for row in conn.execute(f"PRAGMA table_info({table})")
         }
         if column not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError as exc:
+                current_cols = {
+                    str(row["name"])
+                    for row in conn.execute(f"PRAGMA table_info({table})")
+                }
+                if "duplicate column name" not in str(exc).lower() or column not in current_cols:
+                    raise
 
     # ------------------------------------------------------------------
     #  Feature probing
@@ -373,7 +400,7 @@ class SchemaStore:
         # sqlite-vec
         if self.settings.enable_sqlite_vec:
             try:
-                import sqlite_vec  # type: ignore[import-untyped]
+                import sqlite_vec  # type: ignore[import-not-found]
 
                 conn.enable_load_extension(True)
                 sqlite_vec.load(conn)

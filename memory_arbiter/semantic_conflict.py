@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import multiprocessing
 import re
 import threading
 import time
@@ -640,6 +641,287 @@ class LocalGGUFSemanticBackend:
                 "unloading": self._unloading,
                 "disabled": self._disabled,
                 "generation": self._generation,
+            }
+
+
+def _semantic_inference_process(conn: Any, config: dict[str, Any]) -> None:
+    """Child entry point. It owns only llama.cpp state, never MemoryDB state."""
+    backend = LocalGGUFSemanticBackend(
+        Path(config["model_path"]),
+        n_ctx=int(config["n_ctx"]),
+        n_threads=int(config["n_threads"]),
+        n_batch=int(config["n_batch"]),
+    )
+    try:
+        while True:
+            request = conn.recv()
+            command = request.get("command")
+            if command == "shutdown":
+                return
+            try:
+                if command == "load":
+                    backend.load()
+                    result: Any = {"loaded": True}
+                elif command == "classify_pair":
+                    result = backend.classify_pair(request["left"], request["right"])
+                elif command == "suggest_workspace_candidate":
+                    result = backend.suggest_workspace_candidate(
+                        request["workspace"], request["evidence"], request["candidates"],
+                    )
+                else:
+                    raise ValueError(f"unknown semantic child command: {command}")
+                conn.send({"ok": True, "result": result})
+            except BaseException as exc:
+                conn.send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    except (EOFError, BrokenPipeError, OSError):
+        return
+    finally:
+        conn.close()
+
+
+class IsolatedGGUFSemanticBackend:
+    """Single-flight process supervisor with a real inference hard timeout."""
+
+    def __init__(
+        self,
+        model_path: Path,
+        *,
+        n_ctx: int = 1024,
+        n_threads: int = 4,
+        n_batch: int = 128,
+        hard_timeout_ms: int = 30_000,
+        load_timeout_ms: int = 120_000,
+        process_target: Any = _semantic_inference_process,
+    ) -> None:
+        self.model_path = Path(model_path).expanduser()
+        self.n_ctx = int(n_ctx)
+        self.n_threads = int(n_threads)
+        self.n_batch = int(n_batch)
+        self.hard_timeout_ms = max(1, int(hard_timeout_ms))
+        self.load_timeout_ms = max(1, int(load_timeout_ms))
+        self._process_target = process_target
+        self._ctx = multiprocessing.get_context("spawn")
+        self._request_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._process: Any = None
+        self._conn: Any = None
+        self._disabled = False
+        self._generation = 0
+        self._restarts = 0
+        self._timed_out = 0
+        self._last_error: Optional[str] = None
+        self._loaded_at: Optional[float] = None
+        self._inflight_started: Optional[float] = None
+        self._child_loaded = False
+
+    def _start_locked(self) -> None:
+        if self._disabled:
+            raise RuntimeError("semantic backend disabled")
+        if self._process is not None and self._process.is_alive():
+            return
+        if self._process is not None:
+            self._terminate_locked(count_restart=True)
+        parent, child = self._ctx.Pipe(duplex=True)
+        process = self._ctx.Process(
+            target=self._process_target,
+            args=(child, {
+                "model_path": str(self.model_path),
+                "n_ctx": self.n_ctx,
+                "n_threads": self.n_threads,
+                "n_batch": self.n_batch,
+            }),
+            name="memory-arbiter-semantic-inference",
+            daemon=True,
+        )
+        try:
+            process.start()
+        except BaseException:
+            parent.close()
+            child.close()
+            try:
+                process.close()
+            except (AttributeError, ValueError):
+                pass
+            raise
+        child.close()
+        self._process = process
+        self._conn = parent
+        self._generation += 1
+        self._child_loaded = False
+
+    def _terminate_locked(self, *, count_restart: bool) -> None:
+        process, conn = self._process, self._conn
+        self._process = None
+        self._conn = None
+        self._loaded_at = None
+        self._child_loaded = False
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        if process is not None:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=2.0)
+            if process.is_alive():  # pragma: no cover - defensive OS fallback
+                process.kill()
+                process.join(timeout=1.0)
+            try:
+                process.close()
+            except (AttributeError, ValueError):
+                pass
+            if count_restart:
+                self._restarts += 1
+
+    def _request(self, command: str, **payload: Any) -> Any:
+        # Fast rejection matters for synchronous workspace suggestions while a
+        # prior inference owns the single-flight lock. Re-check after acquiring
+        # it to close the race with disable.
+        with self._state_lock:
+            if self._disabled:
+                raise RuntimeError("semantic backend disabled")
+        with self._request_lock:  # Strict max_concurrency=1, including load.
+            with self._state_lock:
+                self._start_locked()
+                conn = self._conn
+                process = self._process
+                self._inflight_started = time.monotonic()
+            try:
+                if command != "load" and not self._child_loaded:
+                    self._exchange(conn, "load", self.load_timeout_ms)
+                    self._child_loaded = True
+                    self._loaded_at = time.time()
+                result = self._exchange(
+                    conn, command,
+                    self.load_timeout_ms if command == "load" else self.hard_timeout_ms,
+                    **payload,
+                )
+                if command == "load":
+                    self._child_loaded = True
+                    self._loaded_at = time.time()
+                self._last_error = None
+                return result
+            except (EOFError, BrokenPipeError, OSError) as exc:
+                with self._state_lock:
+                    self._last_error = f"semantic child exited: {exc}"
+                    self._terminate_locked(count_restart=True)
+                raise RuntimeError(self._last_error) from exc
+            finally:
+                with self._state_lock:
+                    self._inflight_started = None
+                    if process is not None and self._process is process and not process.is_alive():
+                        self._terminate_locked(count_restart=True)
+
+    def _exchange(self, conn: Any, command: str, timeout_ms: int, **payload: Any) -> Any:
+        try:
+                conn.send({"command": command, **payload})
+                timeout = max(0.001, timeout_ms / 1000.0)
+                deadline = time.monotonic() + timeout
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        with self._state_lock:
+                            self._timed_out += 1
+                            phase = "load" if command == "load" else "inference"
+                            self._last_error = f"semantic {phase} hard timeout after {timeout_ms}ms"
+                            if self._conn is conn:
+                                self._terminate_locked(count_restart=True)
+                        raise TimeoutError(self._last_error)
+                    if conn.poll(min(remaining, 0.05)):
+                        break
+                    with self._state_lock:
+                        if self._conn is not conn:
+                            raise EOFError("semantic child connection was closed")
+                response = conn.recv()
+                if not response.get("ok"):
+                    self._last_error = str(response.get("error") or "semantic child error")
+                    raise RuntimeError(self._last_error)
+                return response.get("result")
+        except TimeoutError:
+            raise
+
+    def load(self) -> None:
+        self._request("load")
+
+    def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
+        try:
+            result = self._request("classify_pair", left=left, right=right)
+            return result if isinstance(result, ModelSignal) else ModelSignal(False, "backend_error", None, "", None, "invalid child response")
+        except Exception as exc:
+            return ModelSignal(False, "backend_error", None, "", None, str(exc))
+
+    def suggest_workspace_candidate(
+        self, ws_raw: str, evidence: dict[str, Any], candidates: list[str],
+    ) -> WorkspaceCandidateSignal:
+        try:
+            result = self._request(
+                "suggest_workspace_candidate",
+                workspace=ws_raw, evidence=evidence, candidates=candidates,
+            )
+            return result if isinstance(result, WorkspaceCandidateSignal) else WorkspaceCandidateSignal(None, "uncertain", None, "", "", "invalid child response")
+        except Exception as exc:
+            return WorkspaceCandidateSignal(None, "uncertain", None, "", "", str(exc))
+
+    def unload(self, timeout: float = 30.0, disable: bool = False) -> dict[str, Any]:
+        if disable:
+            # Admission closes before waiting on the single-flight lock. A timed
+            # out unload must still leave queued/new callers unable to start.
+            with self._state_lock:
+                self._disabled = True
+        acquired = self._request_lock.acquire(timeout=max(0.0, float(timeout)))
+        if not acquired:
+            return {"ok": False, "unloaded": False, "timeout": True, "inflight": 1, "retry_hint": "retry after inference completes", "generation": self._generation}
+        try:
+            with self._state_lock:
+                self._terminate_locked(count_restart=False)
+                return {"ok": True, "unloaded": True, "timeout": False, "inflight": 0, "retry_hint": None, "generation": self._generation}
+        finally:
+            self._request_lock.release()
+
+    def maybe_unload_if_idle(self) -> dict[str, Any]:
+        if not self._request_lock.acquire(blocking=False):
+            return {"ok": False, "unloaded": False, "reason": "busy", "inflight": 1, "generation": self._generation}
+        try:
+            with self._state_lock:
+                was_loaded = self._process is not None
+                self._terminate_locked(count_restart=False)
+                return {"ok": True, "unloaded": was_loaded, "reason": "idle" if was_loaded else "already_unloaded", "inflight": 0, "generation": self._generation}
+        finally:
+            self._request_lock.release()
+
+    def set_disabled(self, disabled: bool) -> None:
+        with self._state_lock:
+            self._disabled = bool(disabled)
+
+    def force_terminate(self) -> dict[str, Any]:
+        """Process-exit cleanup; may interrupt the sole in-flight request."""
+        with self._state_lock:
+            self._disabled = True
+            self._terminate_locked(count_restart=False)
+            return {"ok": True, "unloaded": True, "forced": True, "generation": self._generation}
+
+    def status(self) -> dict[str, Any]:
+        with self._state_lock:
+            process = self._process
+            age_ms = None
+            if self._inflight_started is not None:
+                age_ms = int((time.monotonic() - self._inflight_started) * 1000)
+            return {
+                "backend": "local_gguf_process",
+                "model_path": str(self.model_path),
+                "model_exists": self.model_path.exists(),
+                "model_state": "resident" if process is not None and process.is_alive() else "unloaded",
+                "loaded_at": self._loaded_at,
+                "last_error": self._last_error,
+                "inflight": 1 if self._inflight_started is not None else 0,
+                "inflight_age_ms": age_ms,
+                "disabled": self._disabled,
+                "generation": self._generation,
+                "child_pid": process.pid if process is not None and process.is_alive() else None,
+                "child_restarts": self._restarts,
+                "timed_out_jobs": self._timed_out,
+                "max_concurrency": 1,
             }
 
 

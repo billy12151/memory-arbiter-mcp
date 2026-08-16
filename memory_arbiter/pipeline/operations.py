@@ -33,6 +33,7 @@ class OperationsPipeline:
         return getattr(tools_mod, "compare_memories")(*args, **kwargs)
 
     def memory_arbitrate(self, left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, **_: Any) -> dict[str, Any]:
+        authorized = self._is_truthy(authorized)
         if _.get("apply") is not None:
             return self.db.state.response(
                 {"error": "the 'apply' parameter was renamed to 'authorized' in v0.8.5 and no longer takes effect; pass authorized=True to auto-supersede the non-protected loser", "applied": False},
@@ -211,6 +212,7 @@ class OperationsPipeline:
         return self.db.state.response(result, extra_warnings=list(caller.warnings))
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
+        authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
                 {"error": "authorized=True is required to confirm a memory", "confirmed": False},
@@ -329,11 +331,30 @@ class OperationsPipeline:
         updated, warnings = self.db.migrate_workspace(
             from_ws, to_ws, judge_type="user", reason=reason, embedder=embedder,
         )
-        # Only migrate's own warnings gate ok; embedder-init warnings (e.g. vec
-        # disabled) are informational and flow through extra_warnings.
+        vector_publish_pending = any("workspace canonical vector publish failed" in warning for warning in warnings)
+        operation_warnings = [
+            warning for warning in warnings
+            if "workspace canonical vector publish failed" not in warning
+        ]
+        data: dict[str, Any] = {
+            "migrated": not operation_warnings,
+            "from": from_ws,
+            "to": to_ws,
+            "memories_updated": updated,
+        }
+        if vector_publish_pending:
+            data["workspace_vector_publish"] = {
+                "status": "pending_retry",
+                "canonical": to_ws,
+                "retry": "After sqlite-vec and embedding configuration recover, write another memory using this workspace to retry publication.",
+                "repair_task_available": False,
+            }
+        # Embedder-init and vector-publication warnings are observable degraded
+        # indexing, not a rollback of the completed workspace migration.
         return self.db.state.response(
-            {"migrated": True, "from": from_ws, "to": to_ws, "memories_updated": updated},
-            ok=not warnings, extra_warnings=list(ensure_warnings) + list(warnings),
+            data,
+            ok=not operation_warnings,
+            extra_warnings=list(ensure_warnings) + list(warnings),
         )
 
     def memory_confirm_pending_workspace(
@@ -348,6 +369,7 @@ class OperationsPipeline:
         fails (ok=False) unless authorized=true — a rejection is a user
         decision and must not be silently reversed by a confirm-pending flow.
         """
+        authorized = self._is_truthy(authorized)
         explicit_workspace = _.get("workspace")
         caller = self._caller_workspace(explicit_workspace) if explicit_workspace else None
         if caller is not None:
@@ -431,6 +453,13 @@ class OperationsPipeline:
             "canonical": canonical,
             "record": updated,
         }
+        if any("workspace canonical vector publish failed" in warning for warning in warnings):
+            data["workspace_vector_publish"] = {
+                "status": "pending_retry",
+                "canonical": canonical,
+                "retry": "After sqlite-vec and embedding configuration recover, write another memory using this workspace to retry publication.",
+                "repair_task_available": False,
+            }
         if caller is not None and caller.isolation == "strict":
             data.update(caller.response_fields())
         if activated:
@@ -456,6 +485,7 @@ class OperationsPipeline:
         flips it to active — without the trust/protection promotion that
         memory_confirm applies. Requires authorized=true.
         """
+        authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
                 {"error": "authorized=True is required to activate a pending memory", "activated": False},
@@ -516,6 +546,7 @@ class OperationsPipeline:
         conflicts involving this memory are resolved, and an audit row is appended
         to the conflicts table (reason prefixed with ``USER-AUTHORIZED SUPERSEDE``).
         """
+        authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
                 {"error": "authorized=True is required to supersede a memory", "superseded": False},
@@ -703,6 +734,7 @@ class OperationsPipeline:
         **_: Any,
     ) -> dict[str, Any]:
         """Set canonical metadata.entity/scope without creating content history."""
+        authorized = self._is_truthy(authorized)
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
@@ -963,6 +995,7 @@ class OperationsPipeline:
         conflict_scope: Optional[str] = None,
         **_: Any,
     ) -> dict[str, Any]:
+        authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
                 {"error": "authorized=True is required for human judgment correction"}, ok=False,
@@ -1099,6 +1132,8 @@ class OperationsPipeline:
         ``user_confirmed`` records require ``authorized=True`` (mirrors
         ``memory_supersede``). Records already superseded/deleted are rejected.
         """
+        authorized = self._is_truthy(authorized)
+        tags_only = self._is_truthy(tags_only)
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
@@ -1329,6 +1364,7 @@ class OperationsPipeline:
         SAFETY: this tool only ever deletes from memory_history. The memories
         table (active records) is never touched, regardless of arguments.
         """
+        authorized = self._is_truthy(authorized)
         full_cleanup = memory_id is None and older_than_days is None
         if older_than_days is not None and int(older_than_days) < 0:
             return self.db.state.response(
@@ -1390,6 +1426,8 @@ class OperationsPipeline:
         ``dry_run=True`` (default) only reports counts.
         Actual orphan purge requires ``dry_run=False`` AND ``authorized=True``.
         """
+        authorized = self._is_truthy(authorized)
+        dry_run = self._is_truthy(dry_run)
         mismatches = self._count_vec_parent_status_mismatch()
         orphan_counts = self._count_orphan_vectors()
         if dry_run:
@@ -1428,6 +1466,248 @@ class OperationsPipeline:
         if warnings:
             resp["warnings"] = warnings
         return self.db.state.response(resp, ok=not warnings)
+
+    @staticmethod
+    def _replay_stage_done(value: Any) -> bool:
+        return str(value or "") in {"complete", "skipped", "warning", "queued"}
+
+    def _checkpoint_replay_stage(
+        self,
+        replay_key: str,
+        stages: dict[str, str],
+        stage: str,
+        outcome: str,
+        error_code: Optional[str] = None,
+    ) -> None:
+        stages[stage] = outcome
+        self.db.backup_replay.set_postprocess_state(
+            replay_key, "pending", stages, error_code,
+        )
+
+    def _postprocess_replayed_memory(
+        self,
+        replay_key: str,
+        memory_id: int,
+        prior_stages: Optional[dict[str, Any]] = None,
+    ) -> tuple[str, dict[str, str], Optional[str], list[str]]:
+        stages = {
+            str(key): str(value)
+            for key, value in (prior_stages or {}).items()
+            if isinstance(key, str)
+        }
+        warnings: list[str] = []
+        retry_code: Optional[str] = None
+        record = self.db.get_memory(memory_id) or {}
+
+        if not self._replay_stage_done(stages.get("claims")):
+            self.db.backup_replay.mark_postprocess_retry(replay_key, "claims_in_progress")
+            structured = self._index_and_reconcile_claims(memory_id)
+            diagnostic = structured.get("diagnostic") or {}
+            claim_warnings = list(structured.get("warnings") or [])
+            warnings.extend(claim_warnings)
+            if diagnostic.get("skipped_reason") == "structured_enrichment_error":
+                stages["claims"] = "retry_pending"
+                retry_code = "claims_failed"
+            elif claim_warnings:
+                self._checkpoint_replay_stage(
+                    replay_key, stages, "claims", "warning", "claims_warning",
+                )
+            else:
+                self._checkpoint_replay_stage(replay_key, stages, "claims", "complete")
+
+        if not self._replay_stage_done(stages.get("embedding")):
+            if not self.settings.embedding_auto_write or not self._embedding_configured():
+                self._checkpoint_replay_stage(replay_key, stages, "embedding", "skipped")
+            elif self.db.get_embedding(memory_id) is not None:
+                self._checkpoint_replay_stage(replay_key, stages, "embedding", "complete")
+            else:
+                self.db.backup_replay.mark_postprocess_retry(
+                    replay_key, "embedding_in_progress",
+                )
+                embedder, ensure_warnings = self._ensure_embedder()
+                warnings.extend(ensure_warnings)
+                if embedder is None:
+                    stages["embedding"] = "retry_pending"
+                    retry_code = retry_code or "embedding_unavailable"
+                else:
+                    embedded = embedder.embed_text(
+                        prefix=str(record.get("subject") or ""),
+                        body=str(record.get("content") or ""),
+                    )
+                    if not embedded.embedding:
+                        stages["embedding"] = "retry_pending"
+                        retry_code = retry_code or "embedding_empty"
+                    else:
+                        stored, store_warnings = self.db.store_embedding(
+                            memory_id, embedded.embedding,
+                        )
+                        warnings.extend(store_warnings)
+                        if stored:
+                            outcome = "warning" if store_warnings else "complete"
+                            self._checkpoint_replay_stage(
+                                replay_key, stages, "embedding", outcome,
+                                "embedding_warning" if store_warnings else None,
+                            )
+                        else:
+                            stages["embedding"] = "retry_pending"
+                            retry_code = retry_code or "embedding_store_failed"
+
+        if not self._replay_stage_done(stages.get("split")):
+            self.db.backup_replay.mark_postprocess_retry(replay_key, "split_in_progress")
+            split_block, split_request, split_warnings = self._after_write_split(memory_id)
+            warnings.extend(split_warnings)
+            if split_block.get("reindex_pending"):
+                self._checkpoint_replay_stage(replay_key, stages, "split", "queued")
+            elif split_request is not None:
+                warnings.append(
+                    f"replayed memory {memory_id} requires section split follow-up"
+                )
+                self._checkpoint_replay_stage(
+                    replay_key, stages, "split", "warning", "split_agent_required",
+                )
+            elif split_warnings:
+                self._checkpoint_replay_stage(
+                    replay_key, stages, "split", "warning", "split_unavailable",
+                )
+            else:
+                self._checkpoint_replay_stage(replay_key, stages, "split", "complete")
+
+        if not self._replay_stage_done(stages.get("semantic")):
+            self.db.backup_replay.mark_postprocess_retry(
+                replay_key, "semantic_enqueue_in_progress",
+            )
+            semantic = self._enqueue_semantic_conflict_check(memory_id, record)
+            semantic_status = str(semantic.get("status") or "unknown")
+            if semantic_status == "queued":
+                self._checkpoint_replay_stage(replay_key, stages, "semantic", "queued")
+            elif semantic_status in {"disabled", "off"}:
+                self._checkpoint_replay_stage(replay_key, stages, "semantic", "skipped")
+            elif semantic_status in {"queue_full", "runtime_disabled", "shutdown", "paused"}:
+                stages["semantic"] = "retry_pending"
+                retry_code = retry_code or f"semantic_{semantic_status}"
+            else:
+                stages["semantic"] = "retry_pending"
+                retry_code = retry_code or f"semantic_{semantic_status}"
+
+        if retry_code is not None:
+            status = "pending"
+        elif any(value == "warning" for value in stages.values()):
+            status = "warning"
+        else:
+            status = "complete"
+        self.db.backup_replay.set_postprocess_state(
+            replay_key, status, stages, retry_code,
+        )
+        return status, stages, retry_code, warnings
+
+    def memory_replay_backup(
+        self,
+        dry_run: bool = True,
+        authorized: bool = False,
+        limit: int = 1_000,
+        offset: int = 0,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Inspect or deterministically replay backup-only memory records."""
+        dry_run = self._is_truthy(dry_run)
+        authorized = self._is_truthy(authorized)
+        requested_limit = max(1, min(int(limit), 10_000))
+        page_limit = requested_limit if dry_run else min(requested_limit, 200)
+        inspection = self.db.backup_replay.inspect(
+            limit=page_limit, offset=max(0, int(offset)),
+        )
+        public = {key: value for key, value in inspection.items() if key != "entries"}
+        if dry_run:
+            return self.db.state.response({"dry_run": True, **public})
+        if not authorized:
+            return self.db.state.response(
+                {
+                    "error": "authorized=True is required to replay backup records",
+                    "action_required": "ask_user_for_authorization",
+                    "dry_run": False,
+                    **public,
+                },
+                ok=False,
+            )
+        imported: list[dict[str, Any]] = []
+        already_replayed: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for entry in inspection["entries"]:
+            if entry["status"] == "already_replayed" and entry.get("postprocess_status") in {"complete", "warning"}:
+                already_replayed.append({
+                    "replay_key": entry["replay_key"],
+                    "memory_id": entry["memory_id"],
+                    "postprocess_status": entry.get("postprocess_status"),
+                    "postprocess_stages": entry.get("postprocess_stages") or {},
+                    "postprocess_error_code": entry.get("postprocess_error_code"),
+                })
+                continue
+            if entry["status"] not in {"importable", "already_replayed"}:
+                conflicts.append({"replay_key": entry["replay_key"], "outcome": entry["status"]})
+                continue
+            try:
+                replayed = self.db.backup_replay.replay_one(entry)
+            except Exception as exc:
+                conflicts.append({"replay_key": entry["replay_key"], "outcome": "error", "reason": str(exc)})
+                continue
+            outcome = replayed.get("outcome")
+            needs_postprocess = outcome == "imported" or (
+                outcome == "already_replayed"
+                and replayed.get("postprocess_status") not in {"complete", "warning"}
+            )
+            if needs_postprocess:
+                memory_id = int(replayed["memory_id"])
+                if outcome == "imported":
+                    receipt_result = {"replay_key": entry["replay_key"], "memory_id": memory_id, "postprocess_status": "pending"}
+                    imported.append(receipt_result)
+                else:
+                    receipt_result = {"replay_key": entry["replay_key"], "memory_id": memory_id, "postprocess_status": replayed.get("postprocess_status")}
+                    already_replayed.append(receipt_result)
+                try:
+                    final_status, stages, error_code, postprocess_warnings = (
+                        self._postprocess_replayed_memory(
+                            entry["replay_key"], memory_id,
+                            replayed.get("postprocess_stages"),
+                        )
+                    )
+                    receipt_result["postprocess_status"] = final_status
+                    receipt_result["postprocess_stages"] = stages
+                    if error_code is not None:
+                        receipt_result["postprocess_error_code"] = error_code
+                    warnings.extend(postprocess_warnings)
+                except Exception as exc:
+                    # Earlier stage checkpoints may already be durable. Keep
+                    # them and only mark the receipt retryable here.
+                    self.db.backup_replay.mark_postprocess_retry(
+                        entry["replay_key"], "postprocess_exception",
+                    )
+                    receipt_result["postprocess_status"] = "pending"
+                    receipt_result["postprocess_stages"] = replayed.get("postprocess_stages") or {}
+                    receipt_result["postprocess_error_code"] = "postprocess_exception"
+                    warnings.append(f"replayed memory {memory_id} committed; derived post-processing failed and will retry: {exc}")
+            elif outcome == "already_replayed":
+                already_replayed.append({"replay_key": entry["replay_key"], "memory_id": replayed.get("memory_id"), "postprocess_status": "complete"})
+            else:
+                conflicts.append({"replay_key": entry["replay_key"], "outcome": outcome})
+        return self.db.state.response(
+            {
+                "dry_run": False,
+                "imported": imported,
+                "imported_count": len(imported),
+                "already_replayed": already_replayed,
+                "already_replayed_count": len(already_replayed),
+                "invalid_entries": inspection["invalid_entries"],
+                "conflicts": conflicts,
+                "offset": inspection["offset"],
+                "next_offset": inspection["next_offset"],
+                "has_more": inspection["has_more"],
+                "processed": len(inspection["entries"]) + len(inspection["invalid_entries"]),
+                "remaining": inspection["has_more"],
+            },
+            ok=not conflicts,
+            extra_warnings=warnings,
+        )
 
     def _count_orphan_vectors(self) -> dict[str, int]:
         """Read-only count of truly orphan vec rows (no parent row in DB)."""

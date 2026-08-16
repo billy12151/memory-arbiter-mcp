@@ -223,7 +223,8 @@ def test_product_memory_review_and_govern_wrappers(tmp_path: Path) -> None:
         },
     )
     assert denied["ok"] is False
-    assert "authorized" in denied["data"]["error"]
+    assert denied["data"]["action_required"] == "ask_user_for_authorization"
+    assert denied["data"]["governance_action"] == "retire"
 
     retired = tools.memory_govern(
         action="retire",
@@ -249,18 +250,18 @@ def test_product_wrappers_validate_aliases_and_bad_inputs(tmp_path: Path) -> Non
 
     bad_history = tools.memory_review(view="history", data={"id": "abc"})
     assert bad_history["ok"] is False
-    assert "memory_id" in bad_history["data"]["error"]
+    assert bad_history["data"].get("field") == "memory_id" or "memory_id" in bad_history["data"]["error"]
 
     for label, result in {
         "retire": tools.memory_govern(action="retire", data={"id": "abc", "reason": "x", "authorized": True}),
         "confirm": tools.memory_govern(action="confirm", data={"id": "abc", "authorized": True}),
-        "resolve": tools.memory_govern(action="resolve_conflict", data={"id": "abc"}),
+        "resolve": tools.memory_govern(action="resolve_conflict", data={"id": "abc", "authorized": True}),
         "split": tools.memory_repair(task="split", data={"id": "abc"}),
         "activate": tools.memory_repair(task="activate_pending", data={"id": "abc", "authorized": True}),
         "cleanup": tools.memory_repair(task="cleanup_history", data={"id": "abc", "authorized": True}),
     }.items():
         assert result["ok"] is False, label
-        assert "integer" in result["data"]["error"]
+        assert "integer" in result["data"].get("reason", result["data"]["error"])
 
     judge_missing = tools.memory(action="judge", data={"id": 1})
     assert judge_missing["ok"] is False
@@ -288,7 +289,6 @@ def test_product_repair_cleanup_history_id_alias_is_not_full_cleanup(tmp_path: P
     assert tools.memory_review(view="history", data={"id": first})["data"]["count"] == 0
     assert tools.memory_review(view="history", data={"id": second})["data"]["count"] == 1
 
-
     tools = make_tools(tmp_path)
     help_result = tools.memory_repair(task="help", data={"task": "rebuild_claims"})
     assert help_result["ok"] is True
@@ -297,6 +297,82 @@ def test_product_repair_cleanup_history_id_alias_is_not_full_cleanup(tmp_path: P
     dry = tools.memory_repair(task="rebuild_claims", data={"dry_run": True})
     assert dry["ok"] is True
     assert dry["data"]["dry_run"] is True
+
+
+def test_string_false_authorized_fails_closed_across_product_surfaces(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    memory_id = tools.memory(action="remember", data={
+        "content": "protected fact", "subject": "protected",
+        "source_type": "user_confirmed", "protection_level": "locked",
+    })["data"]["id"]
+
+    for false_value in ("false", "0", "no", "off", "maybe", "", None):
+        edited = tools.memory(action="update", data={
+            "memory_id": memory_id,
+            "new_content": "tampered",
+            "authorized": false_value,
+        })
+        assert edited["ok"] is False, false_value
+
+        retired = tools.memory_govern(action="retire", data={
+            "memory_id": memory_id,
+            "reason": "not actually authorized",
+            "authorized": false_value,
+        })
+        assert retired["ok"] is False, false_value
+
+    record = tools.memory(action="read", data={"memory_id": memory_id})["data"]["memory"]
+    assert record["content"] == "protected fact"
+    assert record["status"] == "active"
+
+
+def test_string_true_authorized_remains_compatible(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    memory_id = tools.memory(action="remember", data={
+        "content": "protected fact", "subject": "protected",
+        "source_type": "user_confirmed", "protection_level": "locked",
+    })["data"]["id"]
+
+    edited = tools.memory(action="update", data={
+        "memory_id": memory_id,
+        "new_content": "authorized correction",
+        "authorized": "true",
+    })
+
+    assert edited["ok"] is True
+    assert edited["data"]["record"]["content"] == "authorized correction"
+
+
+def test_all_governance_actions_require_explicit_user_authorization(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    valid_payloads = {
+        "retire": {"memory_id": 1, "reason": "retire whole memory"},
+        "resolve_conflict": {"conflict_id": 1},
+        "confirm": {"memory_id": 1},
+        "correct_judgment": {
+            "conflict_id": 1, "verdict": "evolution", "recommended_use": "merge",
+            "suggested_winner": None, "reason": "correction", "expected_judgment_id": 1,
+            "expected_left_version": 1, "expected_right_version": 1,
+            "expected_left_claim_revision": 1, "expected_right_claim_revision": 1,
+            "authorized": False,
+        },
+        "accept_workspace_alias": {"alias": "alias", "canonical": "canonical"},
+        "reject_workspace_alias": {"alias": "alias", "canonical": "canonical"},
+        "rename_workspace_canonical": {"old": "old", "new": "new"},
+        "migrate_workspace": {"from": "old", "to": "new"},
+        "confirm_pending_workspace": {"memory_id": 1, "canonical": "canonical"},
+    }
+
+    for action, payload in valid_payloads.items():
+        for false_value in (None, False, "false", "0", "no", "maybe"):
+            call_payload = dict(payload)
+            if false_value is not None:
+                call_payload["authorized"] = false_value
+            result = tools.memory_govern(action=action, data=call_payload)
+            assert result["ok"] is False, (action, false_value)
+            assert result["data"]["action_required"] == "ask_user_for_authorization"
+            assert result["data"]["governance_action"] == action
+            assert result["data"]["impact"]
 
 
 
@@ -386,7 +462,7 @@ def test_product_forwards_handle_bad_secondary_int_args(tmp_path: Path) -> None:
 
     def assert_clean(label: str, result: dict) -> None:
         assert result["ok"] is False, f"{label} unexpectedly succeeded: {result}"
-        assert "help" in result["data"], f"{label} must attach help"
+        assert "error" in result["data"], f"{label} must attach an error"
 
     # retire: non-int superseded_by (primary memory_id coerced, secondary not)
     old = tools.memory(action="remember", data={"content": "old", "subject": "s"})["data"]["id"]
@@ -489,24 +565,17 @@ def test_product_non_dict_data_returns_error(tmp_path: Path) -> None:
     assert tools.memory(action="find", data=None)["ok"] is True
 
 
-def test_memory_write_tags_non_list_does_not_split_chars(tmp_path: Path) -> None:
-    """v0.11.1: tags as a string must not be split into characters.
-
-    ``MemoryRecord.from_input`` previously did ``list(payload.get("tags") or [])``,
-    so ``tags="todo"`` became ``['t','o','d','o']`` — silent data corruption
-    in the tag index. Non-list tags now coerce to ``[]``.
-    """
+def test_product_memory_write_rejects_non_list_tags(tmp_path: Path) -> None:
+    """The product schema rejects wrong tag types instead of coercing them."""
     tools = make_tools(tmp_path)
 
-    # string → [] (not character split)
     r = tools.memory(action="remember", data={"content": "a", "subject": "s", "tags": "todo"})
-    assert r["ok"] is True
-    assert r["data"]["record"]["tags"] == []
+    assert r["ok"] is False
+    assert r["data"]["field"] == "tags"
 
-    # int → []
     r = tools.memory(action="remember", data={"content": "b", "subject": "s", "tags": 123})
-    assert r["ok"] is True
-    assert r["data"]["record"]["tags"] == []
+    assert r["ok"] is False
+    assert r["data"]["field"] == "tags"
 
     # None → []
     r = tools.memory(action="remember", data={"content": "c", "subject": "s"})
@@ -518,10 +587,10 @@ def test_memory_write_tags_non_list_does_not_split_chars(tmp_path: Path) -> None
     assert r["ok"] is True
     assert r["data"]["record"]["tags"] == ["todo", "project"]
 
-    # tuple also accepted (JSON arrays deserialize to lists, but be lenient)
+    # Product JSON accepts arrays only; Python tuples are rejected at the boundary.
     r = tools.memory(action="remember", data={"content": "e", "subject": "s", "tags": ("a", "b")})
-    assert r["ok"] is True
-    assert r["data"]["record"]["tags"] == ["a", "b"]
+    assert r["ok"] is False
+    assert r["data"]["field"] == "tags"
 
 
 

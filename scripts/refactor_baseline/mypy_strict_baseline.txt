@@ -1,175 +1,103 @@
-memory_arbiter/arbitration.py:37: error: Argument 1 to "get" of "dict" has incompatible type "Any | None"; expected "str" 
-memory_arbiter/arbitration.py:38: error: Argument 1 to "get" of "dict" has incompatible type "Any | None"; expected "str" 
-memory_arbiter/claims_db.py:330: error: Returning Any from function declared to return "list[dict[str, Any]]" 
-memory_arbiter/claims_db.py:408: error: Missing type arguments for generic type "dict" 
-memory_arbiter/claims_db.py:409: error: Missing type arguments for generic type "list" 
-memory_arbiter/conflict_judgments.py:302: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/console_api.py:130: error: Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/console_api.py:132: error: Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/console_api.py:28: error: Incompatible return value type (got "Any | dict[str, Any] | None", expected "dict[str, Any]") 
-memory_arbiter/console_server.py:33: error: Argument 2 to "_host_allowed" has incompatible type "Any | str"; expected "int" 
-memory_arbiter/console_server.py:33: error: Value of type "tuple[Any, ...] | str | Buffer" is not indexable 
-memory_arbiter/db.py:154: error: Unused "type: ignore" comment 
-memory_arbiter/db.py:1620: error: Dict entry 0 has incompatible type "str": "str"; expected "str": "int" 
-memory_arbiter/db.py:1949: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/db.py:2172: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/db.py:2553: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/db.py:2793: error: Missing type arguments for generic type "set" 
-memory_arbiter/db.py:2804: error: Missing type arguments for generic type "set" 
-memory_arbiter/db.py:2905: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/db.py:3042: error: Missing type arguments for generic type "list" 
-memory_arbiter/db.py:3217: error: Missing type arguments for generic type "dict" 
-memory_arbiter/db.py:3218: error: Missing type arguments for generic type "list" 
-memory_arbiter/db.py:3345: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/db.py:3612: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/db.py:532: error: Unused "type: ignore" comment 
-memory_arbiter/db.py:594: error: Unused "type: ignore" comment 
-memory_arbiter/doctor.py:102: error: Function is missing a type annotation for one or more parameters 
-memory_arbiter/doctor.py:102: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:1057: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:112: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:1229: error: Dict entry 0 has incompatible type "str": "list[Any]"; expected "str": "int" 
-memory_arbiter/doctor.py:1229: error: Dict entry 1 has incompatible type "str": "list[int]"; expected "str": "int" 
-memory_arbiter/doctor.py:1355: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:141: error: Function is missing a type annotation for one or more parameters 
-memory_arbiter/doctor.py:141: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:1589: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:1602: error: Incompatible return value type (got "None", expected "Finding") 
-memory_arbiter/doctor.py:1613: error: Incompatible return value type (got "None", expected "Finding") 
-memory_arbiter/doctor.py:1751: error: Function is missing a return type annotation 
-memory_arbiter/doctor.py:1760: error: Unused "type: ignore" comment 
-memory_arbiter/doctor.py:467: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:56: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:66: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor.py:980: error: Missing type arguments for generic type "dict" 
-memory_arbiter/doctor_cli.py:69: error: Missing type arguments for generic type "list" 
-memory_arbiter/embedder.py:178: error: Argument 1 to "float" has incompatible type "float | list[float]"; expected "str | Buffer | SupportsFloat | SupportsIndex" 
-memory_arbiter/search.py:1024: error: Argument 5 to "SearchOutcome" has incompatible type "str"; expected "Literal['direct', 'recent_fallback', 'recent_browse', 'empty', 'unavailable']" 
-memory_arbiter/search.py:376: error: Missing type arguments for generic type "dict" 
-memory_arbiter/semantic_conflict.py:383: error: Unused "type: ignore" comment 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "BaseLlamaTokenizer | None" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "LlamaChatCompletionHandler | None" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "LlamaDraftModel | None" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "bool | None" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "bool | int" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "bool" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "dict[str, bool | int | float | str] | None" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "float" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "int | None" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "int" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "list[float] | None" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "str | None" 
-memory_arbiter/semantic_conflict.py:392: error: Argument 1 to "Llama" has incompatible type "**dict[str, object]"; expected "str" 
-memory_arbiter/server.py:126: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:126: error: Untyped decorator makes function "memory_search" untyped 
-memory_arbiter/server.py:162: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "bool" 
-memory_arbiter/server.py:162: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "int" 
-memory_arbiter/server.py:162: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "list[float] | None" 
-memory_arbiter/server.py:162: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "list[str] | None" 
-memory_arbiter/server.py:162: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "str | None" 
-memory_arbiter/server.py:162: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "str" 
-memory_arbiter/server.py:164: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:164: error: Untyped decorator makes function "memory_search_expired" untyped 
-memory_arbiter/server.py:206: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:206: error: Untyped decorator makes function "memory_resync_vec_parent_status" untyped 
-memory_arbiter/server.py:229: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:229: error: Untyped decorator makes function "memory_get" untyped 
-memory_arbiter/server.py:247: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:247: error: Untyped decorator makes function "memory_store_embedding" untyped 
-memory_arbiter/server.py:252: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:252: error: Untyped decorator makes function "memory_recent" untyped 
-memory_arbiter/server.py:257: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:257: error: Untyped decorator makes function "memory_compare" untyped 
-memory_arbiter/server.py:262: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:262: error: Untyped decorator makes function "memory_arbitrate" untyped 
-memory_arbiter/server.py:267: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:267: error: Untyped decorator makes function "memory_list_conflicts" untyped 
-memory_arbiter/server.py:26: error: Function is missing a return type annotation 
-memory_arbiter/server.py:272: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:272: error: Untyped decorator makes function "memory_record_conflict" untyped 
-memory_arbiter/server.py:298: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:298: error: Untyped decorator makes function "memory_resolve_conflict" untyped 
-memory_arbiter/server.py:303: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:303: error: Untyped decorator makes function "memory_submit_conflict_judgment" untyped 
-memory_arbiter/server.py:30: error: Function is missing a type annotation 
-memory_arbiter/server.py:340: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:340: error: Untyped decorator makes function "memory_correct_conflict_judgment" untyped 
-memory_arbiter/server.py:370: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:370: error: Untyped decorator makes function "memory_list_conflict_judgments" untyped 
-memory_arbiter/server.py:375: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:375: error: Untyped decorator makes function "memory_set_entity" untyped 
-memory_arbiter/server.py:389: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:389: error: Untyped decorator makes function "memory_list_entities" untyped 
-memory_arbiter/server.py:394: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:394: error: Untyped decorator makes function "memory_rebuild_claims" untyped 
-memory_arbiter/server.py:405: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:405: error: Untyped decorator makes function "memory_confirm" untyped 
-memory_arbiter/server.py:410: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:410: error: Untyped decorator makes function "memory_activate" untyped 
-memory_arbiter/server.py:415: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:415: error: Untyped decorator makes function "memory_supersede" untyped 
-memory_arbiter/server.py:430: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:430: error: Untyped decorator makes function "memory_status" untyped 
-memory_arbiter/server.py:435: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:435: error: Untyped decorator makes function "memory_audit_summary" untyped 
-memory_arbiter/server.py:440: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:440: error: Untyped decorator makes function "memory_doctor_overview" untyped 
-memory_arbiter/server.py:445: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:445: error: Untyped decorator makes function "memory_edit" untyped 
-memory_arbiter/server.py:474: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:474: error: Untyped decorator makes function "memory_history" untyped 
-memory_arbiter/server.py:479: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:479: error: Untyped decorator makes function "memory_cleanup_history" untyped 
-memory_arbiter/server.py:492: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:492: error: Untyped decorator makes function "memory_cleanup_inactive_vectors" untyped 
-memory_arbiter/server.py:510: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:510: error: Untyped decorator makes function "memory_split" untyped 
-memory_arbiter/server.py:518: error: Missing type arguments for generic type "dict" 
-memory_arbiter/server.py:544: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:544: error: Untyped decorator makes function "memory_rebuild_embeddings" untyped 
-memory_arbiter/server.py:83: error: Call to untyped function "legacy_tool" in typed context 
-memory_arbiter/server.py:83: error: Untyped decorator makes function "memory_write" untyped 
-memory_arbiter/setup_cli.py:116: error: Skipping analyzing "sqlite_vec": module is installed, but missing library stubs or py.typed marker 
-memory_arbiter/tools.py:1260: error: Incompatible types in assignment (expression has type "str", target has type "dict[str, Any] | int | None") 
-memory_arbiter/tools.py:1261: error: Incompatible types in assignment (expression has type "str", target has type "dict[str, Any] | int | None") 
-memory_arbiter/tools.py:1265: error: Dict entry 1 has incompatible type "str": "str"; expected "str": "dict[str, Any] | int | None" 
-memory_arbiter/tools.py:1266: error: Dict entry 2 has incompatible type "str": "str"; expected "str": "dict[str, Any] | int | None" 
-memory_arbiter/tools.py:1272: error: Dict entry 5 has incompatible type "str": "str"; expected "str": "dict[str, Any] | int | None" 
-memory_arbiter/tools.py:1280: error: Unsupported target for indexed assignment ("dict[str, Any] | int") 
-memory_arbiter/tools.py:128: error: Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/tools.py:1300: error: Unsupported target for indexed assignment ("dict[str, Any] | int") 
-memory_arbiter/tools.py:1342: error: Argument 1 to "list" has incompatible type "int | Iterable[str] | None"; expected "Iterable[str]" 
-memory_arbiter/tools.py:1498: error: Item "None" of "dict[str, Any] | None" has no attribute "get" 
-memory_arbiter/tools.py:1954: error: Incompatible types in assignment (expression has type "list[str]", variable has type "dict[str, Any]") 
-memory_arbiter/tools.py:2168: error: Incompatible types in assignment (expression has type "list[str]", variable has type "dict[str, Any]") 
-memory_arbiter/tools.py:3294: error: Incompatible types in assignment (expression has type "list[str] | None", variable has type "list[str]") 
-memory_arbiter/tools.py:3615: error: Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/tools.py:3616: error: Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/tools.py:3661: error: Missing type arguments for generic type "tuple" 
-memory_arbiter/tools.py:3755: error: Missing type arguments for generic type "set" 
-memory_arbiter/tools.py:3825: error: Missing type arguments for generic type "dict" 
-memory_arbiter/tools.py:3893: error: Missing type arguments for generic type "dict" 
-memory_arbiter/tools.py:3895: error: Missing type arguments for generic type "dict" 
-memory_arbiter/tools.py:3899: error: Argument 2 to "_fetch_memory" of "MemoryDB" has incompatible type "Any | None"; expected "int" 
-memory_arbiter/tools.py:3904: error: Invalid index type "Any | None" for "dict[int, dict[Any, Any]]"; expected type "int" 
-memory_arbiter/tools.py:3905: error: Argument 2 to "_get_sections" of "MemoryDB" has incompatible type "Any | None"; expected "int" 
-memory_arbiter/tools.py:3905: error: Invalid index type "Any | None" for "dict[int, list[dict[Any, Any]]]"; expected type "int" 
-memory_arbiter/tools.py:3906: error: Argument 2 to "_get_section_vec_ids" of "MemoryDB" has incompatible type "Any | None"; expected "int" 
-memory_arbiter/tools.py:3906: error: Invalid index type "Any | None" for "dict[int, set[int]]"; expected type "int" 
-memory_arbiter/tools.py:3926: error: Missing type arguments for generic type "dict" 
-memory_arbiter/tools.py:3961: error: Argument 2 to "section_vec_distance_match" of "MemoryDB" has incompatible type "list[float] | None"; expected "list[float]" 
-memory_arbiter/tools.py:3970: error: Missing type arguments for generic type "dict" 
-memory_arbiter/tools.py:4519: error: Missing type arguments for generic type "dict" 
-memory_arbiter/tools.py:4606: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/tools.py:4637: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/tools.py:4638: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/tools.py:4700: error: Incompatible types in assignment (expression has type "list[str]", variable has type "dict[str, Any]") 
-memory_arbiter/tools.py:4753: error: Missing type arguments for generic type "dict" 
-memory_arbiter/tools.py:486: error: Returning Any from function declared to return "dict[str, Any]" 
-memory_arbiter/tools.py:639: error: Incompatible types in assignment (expression has type "list[str]", variable has type "dict[str, Any] | None") 
-memory_arbiter/tools.py:682: error: Argument "limit" to "list_conflicts" of "MemoryDB" has incompatible type "int | None"; expected "int" 
-memory_arbiter/tools.py:683: error: Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc" 
-memory_arbiter/tools.py:701: error: Argument "conflict_id" to "memory_list_conflict_judgments" of "MemoryTools" has incompatible type "int | None"; expected "int" 
-memory_arbiter/tools.py:709: error: Argument "memory_id" to "memory_history" of "MemoryTools" has incompatible type "int | None"; expected "int" 
-memory_arbiter/tools.py:957: error: Item "None" of "Path | None" has no attribute "exists" 
-memory_arbiter/update_monitor.py:76: error: Returning Any from function declared to return "str" 
+memory_arbiter/arbitration.py:37: error: Argument 1 to "get" of "dict" has incompatible type "Any | None"; expected "str"
+memory_arbiter/arbitration.py:38: error: Argument 1 to "get" of "dict" has incompatible type "Any | None"; expected "str"
+memory_arbiter/claims_db.py:339: error: Returning Any from function declared to return "list[dict[str, Any]]"
+memory_arbiter/claims_db.py:417: error: Missing type arguments for generic type "dict"
+memory_arbiter/claims_db.py:418: error: Missing type arguments for generic type "list"
+memory_arbiter/conflict_judgments.py:302: error: Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+memory_arbiter/console_api.py:28: error: Incompatible return value type (got "Any | dict[str, Any] | None", expected "dict[str, Any]")
+memory_arbiter/console_server.py:46: error: Argument 2 to "_host_allowed" has incompatible type "Any | str"; expected "int"
+memory_arbiter/console_server.py:46: error: Value of type "tuple[Any, ...] | str | Buffer" is not indexable
+memory_arbiter/db/core.py:191: error: Unused "type: ignore" comment
+memory_arbiter/db/core.py:617: error: Missing type arguments for generic type "set"
+memory_arbiter/db/core.py:694: error: Missing type arguments for generic type "list"
+memory_arbiter/db/core.py:725: error: Missing type arguments for generic type "dict"
+memory_arbiter/db/core.py:726: error: Missing type arguments for generic type "list"
+memory_arbiter/db/semantic_notices.py:145: error: Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+memory_arbiter/doctor.py:142: error: Missing type arguments for generic type "dict"
+memory_arbiter/doctor.py:155: error: Incompatible return value type (got "None", expected "Finding")
+memory_arbiter/doctor.py:166: error: Incompatible return value type (got "None", expected "Finding")
+memory_arbiter/doctor.py:304: error: Function is missing a return type annotation
+memory_arbiter/doctor_cli.py:69: error: Missing type arguments for generic type "list"
+memory_arbiter/embedder.py:181: error: Returning Any from function declared to return "list[int]"
+memory_arbiter/pipeline/operations.py:252: error: Name "data" already defined on line 227
+memory_arbiter/pipeline/operations.py:257: error: Incompatible types in assignment (expression has type "bool", target has type "str")
+memory_arbiter/pipeline/operations.py:258: error: Incompatible types in assignment (expression has type "bool", target has type "str")
+memory_arbiter/pipeline/operations.py:492: error: Name "warnings" already defined on line 477
+memory_arbiter/pipeline/read.py:508: error: Dict entry 1 has incompatible type "str": "int"; expected "str": "str"
+memory_arbiter/pipeline/read.py:508: error: Dict entry 2 has incompatible type "str": "int"; expected "str": "str"
+memory_arbiter/search.py:337: error: Missing type arguments for generic type "dict"
+memory_arbiter/search.py:973: error: Argument 5 to "SearchOutcome" has incompatible type "str"; expected "Literal['direct', 'recent_fallback', 'recent_browse', 'empty', 'unavailable']"
+memory_arbiter/server.py:138: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:138: error: Untyped decorator makes function "memory_search" untyped
+memory_arbiter/server.py:174: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "bool"
+memory_arbiter/server.py:174: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "int"
+memory_arbiter/server.py:174: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "list[float] | None"
+memory_arbiter/server.py:174: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "list[str] | None"
+memory_arbiter/server.py:174: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "str | None"
+memory_arbiter/server.py:174: error: Argument 1 to "memory_search" of "MemoryTools" has incompatible type "**dict[str, int | str | list[float] | list[str] | None]"; expected "str"
+memory_arbiter/server.py:176: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:176: error: Untyped decorator makes function "memory_search_expired" untyped
+memory_arbiter/server.py:218: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:218: error: Untyped decorator makes function "memory_resync_vec_parent_status" untyped
+memory_arbiter/server.py:241: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:241: error: Untyped decorator makes function "memory_get" untyped
+memory_arbiter/server.py:259: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:259: error: Untyped decorator makes function "memory_store_embedding" untyped
+memory_arbiter/server.py:264: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:264: error: Untyped decorator makes function "memory_recent" untyped
+memory_arbiter/server.py:269: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:269: error: Untyped decorator makes function "memory_compare" untyped
+memory_arbiter/server.py:274: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:274: error: Untyped decorator makes function "memory_arbitrate" untyped
+memory_arbiter/server.py:279: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:279: error: Untyped decorator makes function "memory_list_conflicts" untyped
+memory_arbiter/server.py:284: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:284: error: Untyped decorator makes function "memory_record_conflict" untyped
+memory_arbiter/server.py:310: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:310: error: Untyped decorator makes function "memory_resolve_conflict" untyped
+memory_arbiter/server.py:315: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:315: error: Untyped decorator makes function "memory_submit_conflict_judgment" untyped
+memory_arbiter/server.py:33: error: Function is missing a return type annotation
+memory_arbiter/server.py:352: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:352: error: Untyped decorator makes function "memory_correct_conflict_judgment" untyped
+memory_arbiter/server.py:37: error: Function is missing a type annotation
+memory_arbiter/server.py:382: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:382: error: Untyped decorator makes function "memory_list_conflict_judgments" untyped
+memory_arbiter/server.py:387: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:387: error: Untyped decorator makes function "memory_set_entity" untyped
+memory_arbiter/server.py:401: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:401: error: Untyped decorator makes function "memory_list_entities" untyped
+memory_arbiter/server.py:406: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:406: error: Untyped decorator makes function "memory_rebuild_claims" untyped
+memory_arbiter/server.py:417: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:417: error: Untyped decorator makes function "memory_confirm" untyped
+memory_arbiter/server.py:422: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:422: error: Untyped decorator makes function "memory_activate" untyped
+memory_arbiter/server.py:427: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:427: error: Untyped decorator makes function "memory_supersede" untyped
+memory_arbiter/server.py:442: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:442: error: Untyped decorator makes function "memory_status" untyped
+memory_arbiter/server.py:447: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:447: error: Untyped decorator makes function "memory_audit_summary" untyped
+memory_arbiter/server.py:452: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:452: error: Untyped decorator makes function "memory_doctor_overview" untyped
+memory_arbiter/server.py:457: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:457: error: Untyped decorator makes function "memory_edit" untyped
+memory_arbiter/server.py:486: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:486: error: Untyped decorator makes function "memory_history" untyped
+memory_arbiter/server.py:491: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:491: error: Untyped decorator makes function "memory_cleanup_history" untyped
+memory_arbiter/server.py:504: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:504: error: Untyped decorator makes function "memory_cleanup_inactive_vectors" untyped
+memory_arbiter/server.py:522: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:522: error: Untyped decorator makes function "memory_split" untyped
+memory_arbiter/server.py:530: error: Missing type arguments for generic type "dict"
+memory_arbiter/server.py:556: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:556: error: Untyped decorator makes function "memory_rebuild_embeddings" untyped
+memory_arbiter/server.py:95: error: Call to untyped function "legacy_tool" in typed context
+memory_arbiter/server.py:95: error: Untyped decorator makes function "memory_write" untyped
+memory_arbiter/setup_cli.py:116: error: Skipping analyzing "sqlite_vec": module is installed, but missing library stubs or py.typed marker
+memory_arbiter/tools.py:1129: error: Missing type arguments for generic type "set"
+memory_arbiter/tools.py:1136: error: Missing type arguments for generic type "dict"
+memory_arbiter/tools.py:1208: error: Missing type arguments for generic type "dict"
+memory_arbiter/update_monitor.py:72: error: Returning Any from function declared to return "str"

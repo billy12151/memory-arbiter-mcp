@@ -8,155 +8,108 @@
 
 ## English
 
-Memory Arbiter is a token-optimization middleware: it replaces full-file memory loading with precise retrieval. This document describes three typical usage patterns and one real-world cross-tool delegation example.
+Memory Arbiter is a local fact-governance and targeted-retrieval layer for MCP clients. The default surface has four product tools: `memory`, `memory_review`, `memory_govern`, and `memory_repair`. Low-level compatibility tools are available under `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`/`full`, except for the removed vector conflict scanner.
 
-> **v0.11 product-tool surface**: the default MCP surface is now four task-oriented tools — `memory`, `memory_review`, `memory_govern`, `memory_repair`. The low-level tool names used in the examples below (`memory_search`, `memory_write`, `memory_list_conflicts`, …) are still available by setting `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`, and are also reachable through the product tools (e.g. `memory(action="find")` forwards to `memory_search`).
+### Configuration and dependency boundary
 
-### Configuration
+Resolution order is `MEMORY_ARBITER_CONFIG` → `~/.config/memory-arbiter/config.json` → environment/defaults. Keep shared database/vector/model settings in the user-owned config file and per-client identity in each MCP env block.
 
-Configuration is read in this order:
+The default core needs no model. Lexical recall, structured-claim detection, governance, history, and repair work without sqlite-vec or GGUF. Optional dependencies:
 
-1. `MEMORY_ARBITER_CONFIG` if set.
-2. `~/.config/memory-arbiter/config.json`.
-3. Environment variables and defaults.
+```bash
+pip install 'memory-arbiter-mcp[vec]'             # sqlite-vec semantic/section/workspace candidate recall
+pip install 'memory-arbiter-mcp[semantic-local]'  # local GGUF runtime
+```
 
-No config file is required for lexical recall. For semantic recall, prefer the config file for shared paths and vec/model settings because it is user-owned XDG config and will not be overwritten by pip installs or MCP client reinstall/migration. Each row below shows the JSON path and its env fallback (config file wins when both are set). Keep per-client identity (`MEMORY_ARBITER_CLIENT`, `MEMORY_ARBITER_AGENT_ID`) in each MCP client's env block so tools do not all collapse to one global identity.
+On Python 3.13, `[semantic-local]` may compile `llama-cpp-python` if no matching wheel is available; install a C/C++ toolchain and CMake when needed.
 
-**Config file fields** (`~/.config/memory-arbiter/config.json`) — paths, vector, and embedding settings:
+Key configuration:
 
-| JSON path | Env fallback | Default | Purpose |
+| JSON path | Env fallback | Default | Meaning |
 |---|---|---|---|
-| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | SQLite database location. Set to a shared path if multiple tools must see the same store. |
-| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | Append-only JSONL backup, used only when SQLite is read-only. |
-| `policy_path` | `MEMORY_ARBITER_POLICY` | _(none)_ | Path to a JSON policy file for per-client enable/disable and agent allow/deny lists. |
-| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | Enable sqlite-vec for semantic recall. Off by default (lexical recall works without it). Requires `pip install memory-arbiter-mcp[vec]`. Falls back gracefully if the package is missing. |
-| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | Embedding dimension. **Must match** the model you backfill with (e.g. bge-small-zh=512, bge-base=768). Changing it requires dropping and recreating `memories_vec`. |
-| `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | Max candidates pooled across all recall channels before soft-rerank. Raise to 100–200 when your store exceeds ~100 entries to avoid losing matches at the pool edge. |
-| `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | Max candidates the content-LIKE补漏 channel contributes. Raise if many same-topic memories exist. |
-| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | v0.9 real-time deterministic claim detection. Use `off` only as an emergency kill switch; scheduled scan is unaffected. |
-| `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | inferred as `gguf` only when `embedding.model_path` is set | Only `gguf` is supported in v0.5.0. Without a model path, auto-embedding stays off. |
-| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` (or legacy `MEMORY_ARBITER_GGUF`) | _(none)_ | Path to the GGUF embedding model for v0.5.0 auto-embedding. |
-| `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | Auto-encode plain-text queries so semantic recall works without explicit `query_embedding`. |
-| `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | Auto-embed new writes/edits so they enter semantic recall immediately. |
+| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | Shared SQLite location. |
+| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | Schema-1 append fallback when SQLite is unavailable or unwritable. |
+| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | Deterministic write/edit claim gate; `off` is an emergency kill switch. There is no periodic vector scan fallback. |
+| `isolation` | `MEMORY_ARBITER_ISOLATION` | `none` | `none`, `weak`, or `strict`. |
+| `workspace_match_distance` | `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | Cosine-distance cutoff for optional workspace candidates, not final authority. |
+| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | Enable sqlite-vec. |
+| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | Must match the embedding model. |
+| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` | none | Local embedding GGUF; provider is inferred as `gguf`. |
+| `embedding.auto_query` / `auto_write` | matching env vars | `true` / `true` | Automatically embed queries/writes when the embedding path is configured and vec is ready. |
+| `semantic_conflict.enabled` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED` | `false` | Optional write-time semantic notices. A configured model path auto-enables unless explicitly false. |
+| `semantic_conflict.model_path` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH` | none | Local classifier GGUF. Current backend: `local_gguf`. |
+| `semantic_conflict.pair_text_gate` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE` | `medium` | `medium` or lower-noise `strong`. |
+| `semantic_conflict.on_write` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_ON_WRITE` | `async` | `async` or `off`; writes do not wait. |
+| `semantic_conflict.queue_max_size` | matching env var | `100` | Bounded queue; same-memory jobs coalesce. |
+| `semantic_conflict.candidate_limit` / `pair_limit` | matching env vars | `30` / `10` | Metadata recall bound and pair bound per job. |
+| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | matching env vars | `1024` / `4` / `128` | Local GGUF sizing. |
+| `semantic_conflict.resident` / `preload` | matching env vars | `true` / `false` | Retain after use / load at startup. |
+| `semantic_conflict.job_timeout_ms` | matching env var | `5000` | Between-pair job budget. It does not interrupt an inference already started. |
+| `semantic_conflict.inference_timeout_ms` | matching env var | `30000` | Hard timeout for one started inference. |
+| `semantic_conflict.load_timeout_ms` | matching env var | `120000` | Separate model startup/load timeout. |
+| `semantic_conflict.min_pair_budget_ms` | matching env var | `1000` | Minimum remaining job budget before starting another pair. |
 
-**Environment variables** — keep per-client identity in each MCP client's env block. Some fields also have config-file equivalents, but config wins; use env here when the value must differ by client/session.
+`semantic_conflict.max_concurrency` is reserved and clamped to `1`. Runtime/backend status, generation, PID/in-flight state, timeout/restart counters, and budgets are exposed through `memory(action="status")` and `memory_repair(task="semantic_control", data={"action":"status"})`.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `MEMORY_ARBITER_CLIENT` | `codex` | Client identifier (e.g. `codex`, `claude-code`, `cursor`, `zcode`). Used for policy checks. |
-| `MEMORY_ARBITER_AGENT_ID` | `default` | Agent identity within a client. |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | Default record/caller workspace. Under `isolation=strict`, used as the fallback caller workspace for search/read/detail filtering when a request does not pass `workspace`. |
-| `MEMORY_ARBITER_CONFIG` | _(none)_ | Optional path to an alternate JSON config file. If set, memory-arbiter reads that file instead of the default `~/.config/memory-arbiter/config.json`; file values still override other env fallbacks. |
-| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid` (wide recall + soft rerank, default) or `bm25` (legacy v0.2.6 single-FTS). No config-file equivalent. |
-| `MEMORY_ARBITER_GGUF` | _(none)_ | Legacy GGUF model path fallback. Prefer `embedding.model_path` in the config file for v0.5.0 auto-embedding. |
+See [`examples/memory-arbiter.config.example.json`](../examples/memory-arbiter.config.example.json) for the complete sample.
 
-**When to tune**: if you notice relevant memories missing from results as the store grows, the first knob to turn is `MEMORY_ARBITER_RECALL_POOL_CAP`. The default `50` is conservative; `100` is a safe bump for stores up to a few hundred entries.
+### Pattern A — Targeted retrieval
 
-For a full config-file template, see [`examples/memory-arbiter.config.example.json`](../examples/memory-arbiter.config.example.json).
-
-### Pattern A — Per-turn retrieval (replace full-file loading)
-
-The default in most AI clients is to load the entire `MEMORY.md` (+ `memory/*.md`) into the system prompt every turn. With Memory Arbiter, the client searches **only when needed** and loads **only what matches**.
-
-```
+```text
 user asks a question
-  → memory(action="find", data={"query": question keywords})   # 3–5 relevant entries, 200–800 tokens
-  → answer with just those memories
+  → memory(action="find", data={"query": "specific subject/version/decision"})
+  → use only the returned active facts
 ```
 
-Compare: the traditional way loads the whole `MEMORY.md` into the system prompt every turn, even when most of it is irrelevant to the current question. Memory Arbiter keeps the index in the prompt (small) and pulls details on demand.
+Use `tags_filter`, `source_type`, `after_time`, and `before_time` when precision matters. Under `strict`, always send the caller workspace; by-ID/detail paths are also workspace-filtered.
 
-**When to use**: every conversational turn. This is the default pattern and where the ~80%+ token saving comes from.
+### Pattern B — Write-time conflict handling
 
-### Pattern B — Scheduled audit (cron / scheduled task)
+There is no periodic or incremental vector conflict scanner.
 
-Run periodically (e.g. daily) to catch conflicts and drift without burning model tokens on a full scan.
+1. **Deterministic structured claims (default).** After a write/edit, the server extracts conservative explicit claims and compares the same canonical `entity + attribute + scope`. A collision is persisted as `pending_llm` with memory-version and claim-revision snapshot pins.
+2. **Optional semantic notices.** An async worker performs metadata-overlap coarse recall, local GGUF pair classification, then a deterministic pair-text gate. Passing candidates become `semantic_notices`; they are review hints, not conflict judgments.
+3. **Manual/on-demand review.** Agents may inspect `memory_review(view="conflicts")`, compare evidence through compatibility tools, and record/resolve conflicts explicitly.
 
-```
-scheduled trigger
-  → memory_audit_summary()                 # cheap per-workspace overview, decide if a deep dive is needed
-  → memory_list_conflicts(status="open")   # unresolved conflicts
-  → memory_recent(workspace="xxx")         # browse latest memories for anomalies
-  → spot a suspicious pair → memory_compare(id1, id2)
-  → confirmed conflict     → memory_arbitrate(mark_conflict=true)
-  → generate a report and notify the user
-```
+When a product response returns `action_required=judge_conflict_before_use`, call `memory(action="judge")` with all returned pins before using the affected claim. The judgment receipt records guidance only and never edits or supersedes either memory. If it returns `pending_user`/`ask_user`, the user is the final authority. State-changing governance remains separately authorized.
 
-`memory_audit_summary` is the cheapest entry point — pure SQL aggregation, no semantic work. Use it to decide whether a deeper, model-assisted review is worth it.
+The semantic worker is strictly serial in one child process. The write path is fail-open and asynchronous. The 5 s default job budget only decides whether another pair may begin; each started inference has a 30 s hard timeout, and loading has a separate 120 s timeout. A timed-out generation is terminated before another process generation starts.
 
-**Conflict discovery**: there are two conflict-candidate sources, and they compose rather than compete.
+`memory_repair(task="notice", data={"action":"list"})` lists notices; dismiss/resolve notices through the same repair task. These notice operations do not require governance authorization because they manage advisory notices, not memory facts. Runtime `pause`, `resume`, `enable`, `unload`, `disable`, and `status` use `semantic_control` and also do not require governance authorization.
 
-- **Write-time semantic notices (automated).** Enable `semantic_conflict` to run a local Qwen2.5-0.5B candidate signal plus pair-text gates (`medium` by default, `strong` for low-noise) after each write. Candidates that pass the gate become rows in `semantic_notices`, viewable and dismissible via `memory_repair(task="notice", ...)`. This is the only automated, always-on candidate source; it is intentionally high-recall and gated, not a final verdict.
-- **Manual / scheduled LLM review (on demand).** An agent can still compare two memories with `memory_compare`, persist a verdict with `memory_record_conflict` (`refresh=true` updates enrichment in place when versions/models changed), and close false positives with `memory_resolve_conflict`. There is no longer an automated vector scanner feeding this loop: the legacy `memory_scan_conflict_candidates` vector-candidate workflow has been removed. Build scheduled review on `memory_search` conflict signals and `memory_list_conflicts`, not on the removed scanner.
+### Pattern C — Workspace-aware sharing
 
-`embedding`/`sqlite-vec` still powers semantic recall, section recall, and workspace alias support; it is no longer a conflict-candidate path.
+| Isolation | Behavior |
+|---|---|
+| `none` | Workspace is stored but ignored for recall. |
+| `weak` | Same canonical workspace is boosted; cross-workspace results are demoted; unresolved candidates become hints. |
+| `strict` | Caller workspace is required for isolated paths; searches/details hard-filter; an unresolved new canonical is stored as `pending`. |
 
-**v0.7.6 consuming conflict signals**: when `memory_search` returns a result with a `conflict_signal` field, read `conflict_source` to decide:
-- `open_table`: the conflict is scan/record-verified. Mention to the user "this memory has an unresolved conflict" and optionally guide them to `memory_list_conflicts` for details. Use `suggested_winner`/`confidence_hint` to decide who to trust.
-- `runtime_metadata_hint`: advisory only, not LLM-verified. Surface as a low-confidence hint ("there may be a duplicate"), don't auto-delete or auto-supersede based on it alone.
+For weak/strict writes, resolution checks exact canonicals and confirmed/rejected aliases first. If embeddings are ready, vector similarity supplies only a shortlist. Rules decide `AUTO`/`KEEP`/`ASK`; an optional GGUF model may suggest among candidates but is never the final authority. Busy, unavailable, or uncertain inference falls back to `ASK`. Weak mode auto-merges only high-confidence identity-grade relations; strict mode keeps unresolved workspaces pending. User-authorized alias acceptance/rejection and pending confirmation are durable and final.
 
-**Batch arbitration workflow** (v0.7.6): when the user says "handle these conflicts" or "arbitrate by suggestion":
-1. `memory_list_conflicts(status="open")` → filter to `confidence_hint == "high"` with a `suggested_winner`.
-2. For each conflict, the loser is the side that is NOT `suggested_winner`. Check the loser's `protection_level`/`source_type` — skip `locked`/`user_confirmed` losers unless the user explicitly confirms.
-3. `memory_supersede(memory_id=loser_id, superseded_by=suggested_winner, authorized=true, reason="batch arbitrate: conflict #N")` for safe losers.
-4. Low-confidence (`confidence_hint == "low"`) conflicts are always skipped — leave for manual review.
+### Pattern D — Long-document section split
 
-**When to use**: scheduled maintenance, knowledge-base hygiene, before handing off to a new agent.
+The original row commits first. If vec is ready and a long document has safe Markdown headings, a background worker asynchronously applies the rule-based split. If headings are absent/unsafe or limits are exceeded, the response includes `split_request`; the Agent uses its own model to prepare section metadata and calls `memory_repair(task="split")`. `memory(action="read")` supports `sections=none|catalog|all` and specific `section_ids`.
 
-### Pattern C — Write-time conflict check
+### Backup-only replay
 
-Detect conflicts at the moment a new memory is written, before it silently diverges from existing knowledge.
+SQLite unavailable **or unwritable** triggers the JSONL fallback. A successful fallback writes one `backup_schema=1` envelope using a single `O_APPEND` write; if the JSONL path is unavailable/unwritable or the write is short, the memory write fails rather than claiming a backup. Backup-only rows have no SQLite `memory_id` and are not searchable.
 
-```
-write new knowledge via memory_write(...)
-  → action_required=judge_conflict_before_use?
-      → host LLM reads both evidence sides and calls memory_submit_conflict_judgment
-      → pending_user? ask the user; otherwise use returned guidance for this output
-  → inspect advisory write_hints for duplicate/evolution cleanup
-  → done (periodic semantic scan still catches claims outside the whitelist)
+Once SQLite is usable, an Agent may run dry-run without authorization:
+
+```text
+memory_repair(task="replay_backup", data={"dry_run": true, "limit": 1000, "offset": 0})
 ```
 
-**v0.9**: the server first extracts conservative explicit claims (key/value, table rows, number+unit, semver) and compares records with the same canonical `entity + attribute + scope`. Give important memories `metadata.entity` (and `metadata.scope` when environments differ); subject and then tags are fallbacks. A collision is persisted as `pending_llm` with exact version/claim-revision CAS pins. Submitting a judgment records guidance only—it never edits or supersedes either memory. Uncertain, protected-vs-protected, and high-impact code/config/write/external-action cases become `pending_user`; a later authorized human correction is append-only. Claim publication and conflict reconciliation use separate revision markers: if collision reconciliation fails after a successful publish, `memory_rebuild_claims` will still select it and doctor reports it as unreconciled. Scheduled vector scan remains necessary for semantic conflicts outside the deterministic whitelist. Structured and scan detection timestamps coexist on one conflict row, so doctor can measure structured-only / scan-only / both coverage and real-time lead time without allowing a later scan refresh to erase structured CAS pins.
+Formal replay requires explicit user authorization and `dry_run=false, authorized=true`. It processes at most 200 physical entries per call and reports pagination. The main memory row and replay receipt commit atomically; repeated runs are idempotent by replay key/hash. Claims, embeddings, split, and semantic enqueue run after commit and may leave a retryable receipt warning without rolling back the recovered row. Invalid entries do not block valid ones. The original JSONL is retained. Only schema 1 is supported; legacy flat rows are reported as unsupported and are not converted automatically. Under `strict`, the backed-up canonical is preserved and an unconfirmed canonical remains `pending`.
 
-### Real-world example — Cross-tool task delegation
+### Product input validation
 
-**Scenario**: the user runs both OpenClaw (personal assistant, planning) and ZCode (coding tool, execution). OpenClaw drafts the task spec; ZCode implements it.
+Known fields are validated before authorization/business execution. Main limits: content 2 MiB UTF-8; subject 2,000 chars; query 32,000 chars; 100 tags × 256 chars; metadata 256 KiB serialized JSON; workspace/source references 2,000 chars; batch IDs 1,000. Invalid enums/timestamps and NaN/Inf are rejected. Harmless unknown fields are stripped with warnings; likely misspellings of protected fields are rejected with `did_you_mean`. Controlled coercion remains for IDs and bounded integer/timeout numeric strings; booleans are not accepted as IDs.
 
-**The old way hurts**:
-- OpenClaw writes the spec to a file → ZCode reads the file: requires agreed paths, manual sync, version drift.
-- Or the user copy-pastes the spec into ZCode: information loss + wasted tokens.
+### CI and production smoke
 
-**The Memory Arbiter way**:
-
-```
-Step 1  OpenClaw calls memory_write with the full task spec
-        → memory_search("v0.2.1 release task") finds it later
-
-Step 2  User switches to ZCode and says "memory_search the xxx task"
-        → ZCode reads the complete spec, zero file handoff
-
-Step 3  ZCode logs problems/progress with memory_write during execution
-        → OpenClaw can memory_search to see ZCode's progress
-
-Step 4  ZCode writes the result with memory_write when done
-        → OpenClaw verifies, then memory_confirm locks it
-```
-
-**Token comparison**:
-- **Old way**: OpenClaw writes a 2000-word spec doc → ZCode loads the whole doc into context ≈ 3000 tokens.
-- **Memory Arbiter way**: ZCode `memory_search` gets the structured data ≈ 500 tokens (only the relevant content).
-- **Saving**: ~83%.
-
-**Why it works**:
-1. **Structured storage** — task specs carry `subject`/`tags`/`workspace`, far easier to retrieve precisely than a bare file.
-2. **Bidirectional visibility** — OpenClaw and ZCode read/write the same SQLite; no intermediary protocol.
-3. **Built-in audit trail** — every write records `agent_id` + `ingest_time`; who wrote what and when is unambiguous.
-4. **Conflict-safe** — if two tools record different understandings of the same task, `memory_compare` surfaces it and `memory_arbitrate` resolves it.
-
-**Applicable to**:
-- AI assistant + coding tool collaboration (OpenClaw ↔ ZCode / Cursor / Claude Code).
-- Multi-agent division of labor (planner agent + executor agents).
-- Team knowledge sharing (each member uses their own AI tool, memories interop).
+The GitHub Actions workflow contains required jobs for the Python 3.11/3.12/3.13 core matrix, Python 3.12 sqlite-vec tests, quality/security checks, and build + twine validation. The post-release `mema-production-smoke --expected-version X.Y.Z` is manual and optional; it is not a CI, publish, or release gate.
 
 ---
 
@@ -164,154 +117,105 @@ Step 4  ZCode writes the result with memory_write when done
 
 ## 中文
 
-Memory Arbiter 是一层 token 优化中间件：用精准检索替代全文加载。本文档介绍三种典型使用模式和一个真实的跨工具委派案例。
+Memory Arbiter 是 MCP 客户端下面的一层本地事实治理与精准召回层。默认工具面只有 `memory`、`memory_review`、`memory_govern`、`memory_repair` 四个产品工具。`MEMORY_ARBITER_TOOL_PROFILE=legacy_full`/`full` 可暴露兼容低层工具，但不会恢复已经移除的向量冲突扫描器。
 
-> **v0.11 产品工具面**：默认 MCP 工具面改为四个任务型工具 —— `memory`、`memory_review`、`memory_govern`、`memory_repair`。下文示例中的低层工具名（`memory_search`、`memory_write`、`memory_list_conflicts` 等）仍可通过设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` 暴露，也可通过产品工具访问（如 `memory(action="find")` 转发到 `memory_search`）。
+### 配置与依赖边界
 
-### 配置
+读取顺序为 `MEMORY_ARBITER_CONFIG` → `~/.config/memory-arbiter/config.json` → 环境变量/default。共享数据库、向量和模型设置放用户配置文件；每客户端身份放各自 MCP env。
 
-配置读取顺序：
+默认核心无需模型：字面召回、结构化 claim 检测、治理、历史和修复都不要求 sqlite-vec/GGUF。可选依赖：
 
-1. 如果设置了 `MEMORY_ARBITER_CONFIG`，先读它。
-2. 再读 `~/.config/memory-arbiter/config.json`。
-3. 最后用环境变量和默认值兜底。
+```bash
+pip install 'memory-arbiter-mcp[vec]'             # sqlite-vec 语义/section/workspace 候选召回
+pip install 'memory-arbiter-mcp[semantic-local]'  # 本地 GGUF runtime
+```
 
-纯字面检索不需要配置文件。开启语义检索时，建议把共享路径和 vec/model 配置放在配置文件里，因为这是用户自己的 XDG 配置目录，不会被 pip 安装或 MCP 客户端重装/迁移覆盖。下面每行同时给出 JSON 路径和对应的 env 兜底（两者都设时配置文件优先）。每客户端身份（`MEMORY_ARBITER_CLIENT`、`MEMORY_ARBITER_AGENT_ID`）仍放各 MCP 客户端 env，避免所有工具被全局 config 覆盖成同一个身份。
+Python 3.13 若没有匹配的 `llama-cpp-python` wheel，`[semantic-local]` 可能本机编译，需要 C/C++ toolchain 和 CMake。
 
-**配置文件字段**（`~/.config/memory-arbiter/config.json`）——路径、向量、embedding 设置：
+关键配置：
 
-| JSON 路径 | env 兜底 | 默认值 | 用途 |
+| JSON 路径 | env 兜底 | 默认值 | 含义 |
 |---|---|---|---|
-| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | SQLite 数据库路径。多个工具要共享记忆时设成同一路径。 |
-| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | 追加式 JSONL 备份，仅在 SQLite 只读时启用。 |
-| `policy_path` | `MEMORY_ARBITER_POLICY` | _(无)_ | 策略 JSON 文件路径，可按客户端开关、按 agent 允许/拒绝。 |
-| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | 启用 sqlite-vec 走语义检索。默认关闭（纯字面检索不需要它）。需要 `pip install memory-arbiter-mcp[vec]`，包缺失时优雅降级。 |
-| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | embedding 维度。**必须和你灌向量用的模型一致**（bge-small-zh=512、bge-base=768）。改维度要重建 `memories_vec` 表。 |
-| `recall_pool_cap` | `MEMORY_ARBITER_RECALL_POOL_CAP` | `50` | 多路召回合并进候选池的上限，之后才走软重排。记忆超过约 100 条时建议调到 100–200，避免边界漏召回。 |
-| `content_like_cap` | `MEMORY_ARBITER_CONTENT_LIKE_CAP` | `30` | content LIKE 补漏路最多贡献的候选数。同主题记忆多时调大。 |
-| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | v0.9 实时确定性 claim 检测。`off` 仅作紧急熔断，不影响定期 scan。 |
-| `embedding.provider` | `MEMORY_ARBITER_EMBEDDING_PROVIDER` | 仅在设置 `embedding.model_path` 时推断为 `gguf` | v0.5.0 只支持 `gguf`。没有模型路径时，自动向量化保持关闭。 |
-| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH`（或 legacy `MEMORY_ARBITER_GGUF`） | _(无)_ | GGUF embedding 模型路径，用于 v0.5.0 自动向量化。 |
-| `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | 自动 encode 纯文本查询，不传 `query_embedding` 也能触发语义检索。 |
-| `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | 新写入/编辑自动灌向量，立即进语义召回。 |
+| `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | 共享 SQLite 路径。 |
+| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | SQLite 不可用或不可写时的 schema-1 追加备份。 |
+| `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | 确定性写入/编辑 claim 门禁；`off` 仅作熔断，没有 periodic vector scan 兜底。 |
+| `isolation` | `MEMORY_ARBITER_ISOLATION` | `none` | `none`、`weak`、`strict`。 |
+| `workspace_match_distance` | `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | 可选 workspace 候选余弦距离阈值，不是最终裁决。 |
+| `vec.enabled` | `MEMORY_ARBITER_ENABLE_SQLITE_VEC` | `false` | 启用 sqlite-vec。 |
+| `vec.dim` | `MEMORY_ARBITER_VEC_DIM` | `768` | 必须和 embedding 模型一致。 |
+| `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` | 无 | 本地 embedding GGUF；provider 推断为 `gguf`。 |
+| `embedding.auto_query` / `auto_write` | 对应 env | `true` / `true` | 配置模型且 vec ready 时自动向量化查询/写入。 |
+| `semantic_conflict.enabled` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED` | `false` | 可选写入时语义 notice；设置模型路径后自动启用，除非显式 false。 |
+| `semantic_conflict.model_path` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH` | 无 | 本地分类 GGUF；当前 backend 只有 `local_gguf`。 |
+| `semantic_conflict.pair_text_gate` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE` | `medium` | `medium` 或低打扰 `strong`。 |
+| `semantic_conflict.on_write` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_ON_WRITE` | `async` | `async` 或 `off`；写入不等待。 |
+| `semantic_conflict.queue_max_size` | 对应 env | `100` | 有界队列；同 memory job 合并。 |
+| `semantic_conflict.candidate_limit` / `pair_limit` | 对应 env | `30` / `10` | 每 job 的 metadata 候选与 pair 上限。 |
+| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | 对应 env | `1024` / `4` / `128` | 本地 GGUF 参数。 |
+| `semantic_conflict.resident` / `preload` | 对应 env | `true` / `false` | 使用后常驻 / 启动时预加载。 |
+| `semantic_conflict.job_timeout_ms` | 对应 env | `5000` | pair 之间的 job budget，不中断已启动推理。 |
+| `semantic_conflict.inference_timeout_ms` | 对应 env | `30000` | 单次已启动推理硬超时。 |
+| `semantic_conflict.load_timeout_ms` | 对应 env | `120000` | 独立模型启动/加载超时。 |
+| `semantic_conflict.min_pair_budget_ms` | 对应 env | `1000` | 开始下一 pair 所需最小剩余预算。 |
 
-**环境变量**——每客户端身份建议放在各自 MCP env 段。部分字段也有配置文件对应项，但 config 优先；当某个值必须按客户端/会话变化时再放 env。
+`semantic_conflict.max_concurrency` 是保留字段，固定钳制为 `1`。`memory(action="status")` 和 `memory_repair(task="semantic_control", data={"action":"status"})` 可查看 runtime/backend、generation、PID/in-flight、超时/重启计数和预算。
 
-| 变量 | 默认值 | 用途 |
-|---|---|---|
-| `MEMORY_ARBITER_CLIENT` | `codex` | 客户端标识（如 `codex`、`claude-code`、`cursor`、`zcode`），用于策略判断。 |
-| `MEMORY_ARBITER_AGENT_ID` | `default` | 客户端内的 agent 身份。 |
-| `MEMORY_ARBITER_WORKSPACE` | `default` | 默认记录 / caller workspace；`isolation=strict` 下，请求未传 `workspace` 时会作为搜索、读取和详情过滤的 fallback caller workspace。 |
-| `MEMORY_ARBITER_CONFIG` | _(无)_ | 可选：指定另一个 JSON 配置文件路径。设置后读取该文件，而不是默认的 `~/.config/memory-arbiter/config.json`；配置文件里的字段仍然优先于其他 env 兜底值。 |
-| `MEMORY_ARBITER_RANKING_MODE` | `hybrid` | `hybrid`（宽召回 + 软重排，默认）或 `bm25`（legacy v0.2.6 单 FTS）。无配置文件对应。 |
-| `MEMORY_ARBITER_GGUF` | _(无)_ | 旧版 GGUF 模型路径兜底。v0.5.0 自动向量化建议改用配置文件里的 `embedding.model_path`。 |
+完整样例见 [`examples/memory-arbiter.config.example.json`](../examples/memory-arbiter.config.example.json)。
 
-**什么时候调**：记忆库变大后，如果发现相关记忆从结果里消失了，第一个该调的就是 `MEMORY_ARBITER_RECALL_POOL_CAP`。默认 `50` 偏保守，记忆到几百条时调到 `100` 比较稳。
+### 模式 A —— 精准召回
 
-完整配置文件模板见 [`examples/memory-arbiter.config.example.json`](../examples/memory-arbiter.config.example.json)。
-
-### 模式 A — 每轮对话按需检索（替代全文加载）
-
-多数 AI 客户端的默认做法是每轮把整个 `MEMORY.md`（+ `memory/*.md`）塞进 system prompt。用 Memory Arbiter，客户端**只在需要时检索**，**只加载命中的内容**。
-
-```
+```text
 用户提问
-  → memory(action="find", data={"query": 提问关键词})   # 命中 3–5 条相关记忆，200–800 tokens
-  → 只带这些记忆回答
+  → memory(action="find", data={"query": "具体主题/版本/决策"})
+  → 只使用返回的 active 事实
 ```
 
-对比：传统方式每轮都把整个 `MEMORY.md` 塞进 system prompt，哪怕大部分内容和当前问题无关。Memory Arbiter 把索引留在 prompt 里（很小），细节按需拉取。
+需要更精确时加 `tags_filter`、`source_type`、`after_time`、`before_time`。`strict` 下始终传 caller workspace；按 ID/detail 路径也会隔离。
 
-**适用时机**：每一轮对话。这是默认模式，80%+ 的 token 节省主要来自这里。
+### 模式 B —— 写入时冲突处理
 
-### 模式 B — 定时审查（cron / scheduled task）
+系统不再有 periodic/incremental vector conflict scanner。
 
-定期跑（比如每天一次），用很低的成本发现冲突和漂移，不必让模型扫全库。
+1. **确定性结构化 claims（默认）**：写入/编辑后提取保守显式 claim，比较相同 canonical `entity + attribute + scope`；碰撞持久化为 `pending_llm`，携 memory version 与 claim revision pins。
+2. **可选语义 notice**：异步 worker 走 metadata-overlap 粗召回、本地 GGUF pair 分类、确定性 pair-text gate；通过者写入 `semantic_notices`，只是审阅提示，不是 conflict judgment。
+3. **人工/按需审查**：Agent 可用 `memory_review(view="conflicts")` 查看，通过兼容工具比较证据，并显式落表/关闭冲突。
 
-```
-定时触发
-  → memory_audit_summary()                 # 廉价的按 workspace 概览，先决定要不要深入
-  → memory_list_conflicts(status="open")   # 未解决的冲突
-  → memory_recent(workspace="xxx")         # 浏览最新记忆找异常
-  → 发现可疑对 → memory_compare(id1, id2)
-  → 确认冲突 → memory_arbitrate(mark_conflict=true)
-  → 生成报告通知用户
-```
+产品响应返回 `action_required=judge_conflict_before_use` 时，必须携全部 pins 调 `memory(action="judge")`，再使用受影响 claim。judgment receipt 只记录 guidance，不编辑或 supersede 任何一侧。若返回 `pending_user`/`ask_user`，最终权在用户；改变事实状态的治理仍需单独授权。
 
-`memory_audit_summary` 是最廉价的入口——纯 SQL 聚合，不做任何语义判断。用它决定是否值得做一次需要模型介入的深入审查。
+语义 worker 在单子进程内严格串行；写路径 fail-open、异步。默认 5 秒 job budget 只决定是否开始下一 pair；单次推理硬超时 30 秒，加载另有 120 秒。超时代际必须终止后才能启动新代际。
 
-**冲突发现**：有两个冲突候选来源，二者互补而非互斥。
+`memory_repair(task="notice", data={"action":"list"})` 查看 notice；关闭/解决也走该 repair task。notice 只是 advisory，不改变 memory fact，因此无需 governance 授权。`semantic_control` 的 `pause`、`resume`、`enable`、`unload`、`disable`、`status` 同样无需治理授权。
 
-- **写入时语义 notice（自动）**。启用 `semantic_conflict` 后，每次写入运行本地 Qwen2.5-0.5B 候选信号 + pair 文本 gate（默认 `medium`，低打扰可用 `strong`）。通过 gate 的候选落进 `semantic_notices`，用 `memory_repair(task="notice", ...)` 查看/关闭。这是当前**唯一的自动、常驻候选来源**；设计上是高召回 + 门控，不是最终裁决。
-- **手动 / 定时 LLM 审查（按需）**。agent 仍可用 `memory_compare` 比对两条记忆、用 `memory_record_conflict` 落表（`refresh=true` 可在版本/模型变化后原地更新富化字段）、用 `memory_resolve_conflict` 关闭误报。但这条循环**不再有自动向量扫描器喂数据**：旧的 `memory_scan_conflict_candidates` 向量候选流程已移除。定时审查应基于 `memory_search` 的 conflict_signal 和 `memory_list_conflicts`，而不是已移除的 scanner。
+### 模式 C —— Workspace 共享与隔离
 
-`embedding`/`sqlite-vec` 仍用于语义召回、分段召回和 workspace alias，但不再是冲突候选路径。
+| isolation | 行为 |
+|---|---|
+| `none` | workspace 存储但召回忽略。 |
+| `weak` | 同 canonical 加权，跨 workspace 降权；未决候选作为 hint。 |
+| `strict` | 隔离路径要求 caller workspace；搜索/detail 硬过滤；未决新 canonical 写为 `pending`。 |
 
-**v0.7.6 消费冲突信号**：当 `memory_search` 返回结果带 `conflict_signal` 字段时，按 `conflict_source` 决定怎么处理：
-- `open_table`：经 scan/record 验证过的冲突。可以提示用户"这条记忆有未解决冲突"，并引导到 `memory_list_conflicts` 看详情；用 `suggested_winner`/`confidence_hint` 判断该信哪一边。
-- `runtime_metadata_hint`：仅运行时启发式提示，未经 LLM 验证。当作低置信线索（"可能有重复"）处理，不要据此单独 auto-delete 或 auto-supersede。
+weak/strict 写入先查 exact canonical 和 confirmed/rejected alias。embedding ready 时，向量只提供 shortlist；规则决定 `AUTO`/`KEEP`/`ASK`，可选 GGUF 只能在候选中建议，忙、不可用或不确定时 fallback 到 `ASK`。weak 只对高置信身份级关系自动合并；strict 保持未决 workspace pending。用户授权的 alias accept/reject 和 pending confirm 会持久化，并拥有最终权。
 
-**批量仲裁工作流**（v0.7.6）：当用户说"处理一下这些冲突"或"按建议仲裁"时：
-1. `memory_list_conflicts(status="open")` → 筛出 `confidence_hint == "high"` 且有 `suggested_winner` 的。
-2. 每条冲突的败方 = 不是 `suggested_winner` 的那一侧。检查败方的 `protection_level`/`source_type`——`locked`/`user_confirmed` 的败方跳过，除非用户明确确认。
-3. 对安全的败方：`memory_supersede(memory_id=败方id, superseded_by=suggested_winner, authorized=true, reason="批量仲裁: 冲突 #N")`。
-4. 低置信（`confidence_hint == "low"`）的冲突一律跳过，留作人工审查。
+### 模式 D —— 长文档分段
 
-**适用时机**：定时维护、知识库保洁、向新 agent 交接前。
+原始 row 先提交。vec ready 且长文 Markdown 标题安全时，后台 worker 异步执行规则分段；没有安全标题或超出限制时响应返回 `split_request`，Agent 用自己的模型准备 section metadata 后调用 `memory_repair(task="split")`。`memory(action="read")` 支持 `sections=none|catalog|all` 和指定 `section_ids`。
 
-### 模式 C — 写入时冲突检测
+### Backup-only replay
 
-在写入新记忆的那一刻就检测冲突，避免它悄悄偏离已有知识。
+SQLite 不可用**或不可写**都会触发 JSONL fallback。成功 fallback 使用单次 `O_APPEND` 写一个 `backup_schema=1` envelope；路径不可用/不可写或 short write 时，memory write 失败，不会虚报备份。backup-only 记录没有 SQLite `memory_id`，恢复前不可搜索。
 
-```
-memory_write(...) 写入新知识
-  → action_required=judge_conflict_before_use？
-      → 宿主 LLM 阅读两侧证据并调用 memory_submit_conflict_judgment
-      → pending_user？询问用户；否则按返回 guidance 处理本次产出
-  → 再检查 advisory write_hints，处理疑似重复/演进
-  → 完成（白名单之外仍由定期语义 scan 兜底）
+SQLite 可用后，Agent 可无需授权执行 dry-run：
+
+```text
+memory_repair(task="replay_backup", data={"dry_run": true, "limit": 1000, "offset": 0})
 ```
 
-**v0.9**：server 先抽取保守的显式 claim（key/value、表格行、数字+单位、semver），比较相同规范 `entity + attribute + scope` 的记录。重要记忆建议提供 `metadata.entity`（环境不同时再给 `metadata.scope`）；subject、tag 依次兜底。碰撞以 `pending_llm` 持久化，并携带精确 version/claim-revision CAS。提交判断只记录 guidance，绝不编辑或 supersede 任何记忆。不确定、双保护以及会驱动代码/配置/记忆写入/外部动作的高影响场景转为 `pending_user`；之后的授权人工纠正以追加方式保留完整历史。claim 发布与冲突对账使用独立 revision 标记：发布成功但对账失败时仍会被 `memory_rebuild_claims` 选中，doctor 也会报告 unreconciled。白名单外的语义冲突仍需定期向量 scan；同一 conflict 行可同时保留 structured/scan 首次发现时间，doctor 据此统计 structured-only / scan-only / both 和实时提前量，scan refresh 不得清空 structured CAS pins。
+正式 replay 需要用户明确授权并传 `dry_run=false, authorized=true`。单次最多处理 200 个物理条目并返回分页。主 memory row 与 replay receipt 同事务提交，按 replay key/hash 幂等。claims、embedding、split、semantic enqueue 在提交后执行；失败可留下 receipt warning 供重试，不回滚主记录。坏行不阻断其他有效条目，原 JSONL 保留。只支持 schema 1；旧 flat row 明确报告 unsupported，不自动转换。`strict` 下保留备份 canonical，未确认 canonical 保持 `pending`。
 
-**适用时机**：工具学到可能与既有知识矛盾的内容时（配置变更、策略更新、纠正事实）。
+### 产品输入校验
 
-### 最佳实践案例 — 跨工具任务委派
+已知字段在授权与业务执行前校验。主要上限：正文 2 MiB UTF-8、subject 2,000 字符、query 32,000 字符、100 个 tag × 256 字符、metadata 序列化 JSON 256 KiB、workspace/source reference 2,000 字符、批量 ID 1,000 个。非法 enum/时间和 NaN/Inf 会拒绝。普通未知字段剥离并 warning；疑似受保护字段拼写错误拒绝并给 `did_you_mean`。ID 和有界整数/timeout 的数字字符串保留受控 coercion，bool 不能作为 ID。
 
-**场景**：用户同时使用 OpenClaw（个人助手，负责规划）和 ZCode（编程工具，负责执行）。OpenClaw 出任务规格，ZCode 实现。
+### CI 与 production smoke
 
-**传统方式的问题**：
-- OpenClaw 把任务规格写成文件 → ZCode 读文件：需要约定路径、手动同步、版本混乱。
-- 或者用户把规格口述/复制粘贴给 ZCode：信息损耗 + 浪费 token。
-
-**memory-arbiter 方式**：
-
-```
-Step 1  OpenClaw 用 memory_write 写入完整任务规格
-        → 之后 memory_search("v0.2.1 发版任务") 即可找到
-
-Step 2  用户切到 ZCode，说 "memory_search 查一下 xxx 任务"
-        → ZCode 直接读到完整规格，零文件传递
-
-Step 3  ZCode 执行过程中用 memory_write 记录问题/进展
-        → OpenClaw 可以 memory_search 查到 ZCode 的进展
-
-Step 4  ZCode 完成后用 memory_write 写入结果
-        → OpenClaw 验证后用 memory_confirm 锁定
-```
-
-**Token 消耗对比**：
-- **传统方式**：OpenClaw 写 2000 字规格文档 → ZCode 加载整个文档到 context ≈ 3000 tokens。
-- **memory-arbiter 方式**：ZCode `memory_search` 拿到结构化数据 ≈ 500 tokens（只有相关内容）。
-- **节省**：~83%。
-
-**为什么有效**：
-1. **结构化存储**：任务规格带 `subject`/`tags`/`workspace`，比裸文件更容易精确检索。
-2. **双向可见**：OpenClaw 和 ZCode 读写同一个 SQLite，不需要中间协议。
-3. **天然审计**：每次写入都记录 `agent_id` + `ingest_time`，谁写的、什么时候写的，一清二楚。
-4. **冲突安全**：两个工具对同一任务写了不同理解时，`memory_compare` 能发现，`memory_arbitrate` 能裁决。
-
-**适用场景**：
-- AI 助手 + 编程工具协同（OpenClaw ↔ ZCode / Cursor / Claude Code）。
-- 多 agent 分工（主 agent 规划 + 子 agent 执行）。
-- 团队多成员共享知识（每人用自己的 AI 工具，记忆互通）。
+GitHub Actions workflow 包含 Python 3.11/3.12/3.13 core matrix、Python 3.12 sqlite-vec 测试、质量/安全检查和 build + twine 校验。发版后 `mema-production-smoke --expected-version X.Y.Z` 是人工可选检查，不是 CI、publish 或 release 门禁。
