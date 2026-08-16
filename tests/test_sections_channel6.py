@@ -824,6 +824,7 @@ def test_v080_provenance_is_explicit_not_inferred(tmp_path: Path) -> None:
         "## beta\n" + ("y" * 60)
     )
     md_mid = tools.memory_write(content=md_content, subject="md-doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     md_sections = tools.db.get_sections_by_memory(md_mid)
     assert len(md_sections) == 2, "write should auto-split the heading doc"
     assert all(s["provenance"] == "parser" for s in md_sections)
