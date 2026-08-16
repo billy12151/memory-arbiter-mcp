@@ -91,11 +91,10 @@ def backfill(tools: MemoryTools, encode_fn) -> tuple[int, float]:
     (store_embedding deletes-then-inserts), so this is idempotent.
     """
     db: MemoryDB = tools.db
-    if db.conn is None:
-        raise RuntimeError("DB connection unavailable")
-    rows = db.conn.execute(
-        "SELECT id, subject, content FROM memories WHERE status = 'active' ORDER BY id"
-    ).fetchall()
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT id, subject, content FROM memories WHERE status = 'active' ORDER BY id"
+        ).fetchall()
     t0 = time.time()
     count = 0
     for row in rows:

@@ -952,6 +952,9 @@ def test_edit_content_to_unstructured_returns_split_request(tmp_path: Path) -> N
     """G4: editing an active-split doc to unstructured long → clears sections, split_request."""
     tools = _vec_tools(tmp_path)
     mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    # Rules publication is explicitly asynchronous. Wait on the worker's queue /
+    # inflight condition instead of racing the immediate DB read (or sleeping).
+    assert tools.wait_split_worker_drained(5)
     assert tools.db.get_memory(mid)["split_status"] == "active"
     assert len(tools.db.get_sections_by_memory(mid)) == 2
     r = tools.memory_edit(memory_id=mid, new_content="无标题纯文本 " * 400)

@@ -156,7 +156,7 @@ def run_eval(ranking_mode: str) -> dict:
     for g in GOLDEN_QUERIES:
         outcome = search_memories(
             db, g["query"], workspace=None, tags=None, limit=10,
-            include_superseded=False, debug_ranking=True,
+            debug_ranking=True,
         )
         rows = outcome.results
         warnings = outcome.warnings

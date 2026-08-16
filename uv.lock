@@ -340,8 +340,42 @@ wheels = [
 ]
 
 [[package]]
+name = "diskcache"
+version = "5.6.3"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "jinja2"
+version = "3.1.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markupsafe" },
+]
+
+[[package]]
+name = "llama-cpp-python"
+version = "0.3.32"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "diskcache" },
+    { name = "jinja2" },
+    { name = "numpy" },
+    { name = "typing-extensions" },
+]
+
+[[package]]
+name = "markupsafe"
+version = "3.0.2"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "numpy"
+version = "2.3.3"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
 name = "memory-arbiter-mcp"
-version = "0.9.10"
+version = "0.13.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -349,6 +383,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+semantic-local = [
+    { name = "llama-cpp-python", version = "0.3.32", source = { registry = "https://pypi.org/simple" } },
+]
 test = [
     { name = "pytest" },
 ]
@@ -358,12 +395,13 @@ vec = [
 
 [package.metadata]
 requires-dist = [
+    { name = "llama-cpp-python", marker = "extra == 'semantic-local'", specifier = ">=0.3.0" },
     { name = "mcp", specifier = ">=1.2.0,<2" },
     { name = "pydantic", specifier = ">=2.6.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
     { name = "sqlite-vec", marker = "extra == 'vec'", specifier = ">=0.1.6" },
 ]
-provides-extras = ["vec", "test"]
+provides-extras = ["semantic-local", "test", "vec"]
 
 [[package]]
 name = "packaging"

@@ -1,10 +1,10 @@
 # Memory Arbiter MCP
 
-### 你的 AI 工具记不住彼此说过的话。
+### 让多个 AI 工具共享一层可检索、可追溯、可治理的本地事实库
 
-你用 ZCode 写了一个架构决策，转头打开 Codex，它一脸茫然。你在 Cursor 里踩过的坑，换到 ZCode 又踩一遍。每个工具都有自己的记忆系统，彼此隔离，互不相通。
+你在 ZCode 里确认的架构决策，切换到 Codex 或 Cursor 后不应重新解释；不同 Agent 写下互相矛盾的结论时，也不应靠 last-write-wins 静默覆盖。Memory Arbiter（迷码，短命令 `mema`）以标准 MCP Server 连接多个客户端，让它们读写同一个本地 SQLite，并把来源、时间、版本、冲突和 workspace 边界显式化。
 
-**Memory Arbiter MCP 就是为了解决这个问题。**
+核心默认无需模型：字面召回、结构化 claim 检测、历史、治理和修复都能独立运行。sqlite-vec、本地 GGUF embedding 和本地 GGUF 语义冲突 notice 都是可选增强。
 
 ---
 
@@ -12,259 +12,142 @@
 
 ### 1. 多工具记忆孤岛
 
-你同时在用 ZCode、Codex、Cursor、Claude Code……每个工具都号称有"记忆"，但它们的记忆互不相通：
+不同客户端通常有各自的记忆文件。Memory Arbiter 让它们通过同一协议按需检索同一份事实库，并记录 `agent_id`、`workspace`、`source_type`、`event_time` 和 `ingest_time`。共享数据库路径是跨工具可见的前提；`strict` workspace 隔离则会主动限制可见范围。
 
-- 你在 ZCode 里定下了"这个项目用 REST 不用 GraphQL"
-- 打开 Codex，它完全不知道这个约定，继续给你生成 GraphQL
-- 你在 Codex 里排查了一个依赖冲突的根因
-- 换到 Cursor，同样的问题从头再来一遍
+### 2. 记忆冲突不是自动裁决
 
-Memory Arbiter 让所有工具共享同一个记忆库。你在任何一个工具里告诉它的事，其他工具都能查到。
+冲突发现有两条当前实现路径：
 
-### 2. 记忆冲突，谁说了算
+- 默认开启的确定性结构化 claim 检测，在写入/编辑后比较同一 `entity + attribute + scope` 的显式 key/value、表格、数字单位和 semver claim；
+- 可选本地 GGUF 写入时语义 notice，通过 metadata-overlap 粗召回、模型候选信号和 pair-text gate 提示可能的语义冲突。
 
-不同工具（或不同 Agent）可能记下互相矛盾的信息：
+旧的 `memory_scan_conflict_candidates` 向量扫描器和 periodic vector scan 已移除。sqlite-vec 仍可用于语义召回、section 召回和 workspace 候选，但不再向冲突扫描器供数。
 
-- ZCode 记录："数据库用 PostgreSQL"
-- Codex 记录："数据库用 MySQL"
+结构化碰撞会持久化为 `pending_llm`，响应返回 `action_required=judge_conflict_before_use` 和 snapshot pins。宿主 LLM 必须调用 `memory(action="judge")` 提交判断 receipt，之后才能使用受影响 claim。judgment 只记录 guidance，不会自动编辑、覆盖或 supersede 任一记忆；不确定、双保护或高影响用途会升级为 `pending_user`。整条记忆过期、冲突关闭、workspace alias 决策等治理操作仍由用户最终授权。
 
-Memory Arbiter 内置仲裁机制：按用户确认 > 事件发生时间 > 来源可信度 > 录入时间的优先级自动判定，给出可解释的裁决理由，而不是默默留两条矛盾记录。
+### 3. 用户确认事实与演进历史
 
-### 3. 用户确认的事实不该被覆盖
-
-你在对话中明确确认过的事情（"对，这个接口就用 v2 版本"），不应该被某个 Agent 的推测覆盖。Memory Arbiter 支持 `user_confirmed` 标记和 `locked` 保护级别——确认即锁定，谁都不能自动推翻。
-
----
-
-## 核心创新：多客户端记忆共享
-
-这是 Memory Arbiter 和其他记忆方案最大的不同。
-
-| | 传统方案 | Memory Arbiter |
-|---|---|---|
-| 记忆存储 | 每个工具各自存储 | 一个 SQLite，所有工具共享 |
-| 跨工具查询 | 不支持 | 任意工具可搜全量记忆 |
-| 冲突处理 | 无（各记各的） | 双时间轴仲裁 + 自动降级 |
-| 来源追踪 | 无 | 每条记忆标记来源工具和 Agent |
-| 用户确认保护 | 无 | 锁定后禁止自动覆盖 |
-| 云依赖 | 通常需要 | 完全本地，零云依赖 |
-
-**工作原理一句话**：作为一个标准 MCP Server 运行在每个工具的侧边，所有工具通过同一个协议读写同一个本地数据库，冲突由结构化规则仲裁，不依赖大模型判断。
-
----
-
-## 适合谁
-
-- **同时使用多个 AI 编程工具的开发者**（ZCode + Codex + Cursor + Claude Code 等）
-- 希望工具之间共享项目知识、决策、踩坑经验
-- 受够了每个工具都要重新解释一遍项目背景
-- 对记忆冲突有治理需求（而不是放任不管）
+`user_confirmed` 和 `locked` 让权威事实可见并阻止普通自动覆盖。新 source-of-truth 替换旧 current 内容时，应更新已有记忆；只有用户明确要求整条旧记忆退役时才调用治理工具。版本快照、judgment 历史和 supersede 链保留变化依据。
 
 ---
 
 ## 快速开始
 
-### 安装
-
-需要 Python 3.11+。
+需要 Python 3.11+；CI 覆盖 3.11、3.12、3.13。
 
 ```bash
-# 克隆或进入项目目录
-cd ~/OpenClawProject/memory-arbiter-mcp
-
-# 创建虚拟环境（3.11 / 3.12 / 3.13 任一即可）
 python3.11 -m venv .venv
 source .venv/bin/activate
-
-# 安装本包（运行时依赖从 pyproject.toml 读取）
 pip install -e .
 
-# 可选：启用语义召回增强（sqlite-vec）
+# 可选：sqlite-vec 语义召回
 pip install -e '.[vec]'
+
+mema
 ```
 
-验证安装：
+也可使用发布包：
 
 ```bash
-memory-arbiter-mcp
-# 输出 MCP Server running in stdio mode... 即正常
+uvx --from memory-arbiter-mcp mema
 ```
 
-### 接入 ZCode（示例）
+配置助手：
 
-ZCode 的 MCP 配置文件在 `~/.zcode/v2/` 下。编辑（或创建）MCP 配置：
+```bash
+mema setup
+```
+
+它会生成 `~/.config/memory-arbiter/config.json` 并检查环境，但不会自动安装依赖或下载模型。
+
+### 接入 MCP 客户端
 
 ```json
 {
   "mcpServers": {
     "memory-arbiter": {
-      "command": "/Users/zhangzhiwei17/OpenClawProject/memory-arbiter-mcp/.venv/bin/memory-arbiter-mcp",
+      "command": "/absolute/path/to/.venv/bin/memory-arbiter-mcp",
       "env": {
         "MEMORY_ARBITER_CLIENT": "zcode",
         "MEMORY_ARBITER_AGENT_ID": "zcode-default",
-        "MEMORY_ARBITER_DB_PATH": "~/.local/share/memory-arbiter/memory.sqlite3"
+        "MEMORY_ARBITER_WORKSPACE": "default"
       }
     }
   }
 }
 ```
 
-> **注意**：`command` 建议写虚拟环境的绝对路径（`.venv/bin/memory-arbiter-mcp`），避免客户端找不到 PATH 里的可执行文件。
-
-### 接入其他工具
-
-同样的结构，改一下 `MEMORY_ARBITER_CLIENT` 标识即可：
-
-| 客户端 | `MEMORY_ARBITER_CLIENT` | 配置文件位置 |
-|---|---|---|
-| ZCode | `"zcode"` | `~/.zcode/v2/` 下 MCP 配置 |
-| Codex | `"codex"` | `~/.codex/` 下 MCP 配置 |
-| Claude Code | `"claude-code"` | 项目根目录 `.mcp.json` |
-| Cursor | `"cursor"` | `~/.cursor/mcp.json` |
-
-所有客户端共享同一个 `MEMORY_ARBITER_DB_PATH`，这才是跨工具记忆共享的关键。
-
-完整配置示例见 `examples/` 目录。
-
-### ⚠️ 重要：必须新建会话
-
-MCP Server 在客户端启动时加载。**已经打开的会话不会自动识别新添加的 MCP Server**，这是客户端的限制，不是 Memory Arbiter 的问题。
-
-正确操作：
-
-1. 关闭当前会话（或直接新开一个）
-2. 确认客户端已加载 `memory-arbiter` MCP Server
-3. 在新会话中正常使用
-
-如果工具列表里看不到 `memory`、`memory_review`、`memory_govern`、`memory_repair` 四个产品工具，大概率就是当前会话启动时还没配置好 MCP，**新建一个会话**即可。
+共享数据库、向量和模型设置建议放在 `~/.config/memory-arbiter/config.json`；每客户端身份放各自 MCP env。MCP Server 通常在客户端会话启动时加载，改完配置后需要新建会话。
 
 ---
 
-## 数据迁移：换电脑怎么办
+## 默认产品工具
 
-所有记忆数据都在一个 SQLite 文件里，迁移非常简单：
-
-### 1. 拷贝数据库文件
-
-```bash
-# 默认路径
-scp ~/.local/share/memory-arbiter/memory.sqlite3 新电脑:~/.local/share/memory-arbiter/
-```
-
-### 2. 重新安装项目
-
-```bash
-cd ~/OpenClawProject/memory-arbiter-mcp
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-> `.venv` 不要直接拷贝，里面包含绝对路径，换机器会失效。新电脑上重建即可。
-
-### 3. 配置 MCP Server
-
-在新电脑的客户端里配好 `mcpServers`，指向相同的 `MEMORY_ARBITER_DB_PATH`，新建会话即可使用。
-
-### 后续：云同步
-
-本地版够用时不用折腾。如果后续需要多设备实时同步，计划通过 Turso（云端 libSQL）实现，改动很小——加一个 `MEMORY_ARBITER_REMOTE_URL` 环境变量即可开启，不影响纯本地模式。
-
----
-
-## 支持的 MCP 工具
-
-v0.11 起默认 MCP 工具面改为任务型接口。新客户端默认只看到 4 个产品工具：
-
-| 产品工具 | 用途 |
-|---|---|
-| `memory` | 日常操作：`remember` 写新事实、`find` 搜活跃事实、`read` 按 ID 取记忆、`update` 更新已有 current 记忆、`judge` 提交冲突判断、`status` 看运行状态。不确定字段时用 `action=help`。 |
-| `memory_review` | 只读审计：overview / doctor / conflicts / conflict_detail / judgments / history / expired / audit / entities。 |
-| `memory_govern` | 用户授权治理：整条记忆过期（retire）、关闭冲突（resolve_conflict）、确认记忆（confirm）、纠正 judgment（correct_judgment）。不要用于普通更新。 |
-| `memory_repair` | 维护修复：分段（split）、重建 claims/embeddings、清理（cleanup_history/cleanup_vectors）、向量状态同步（resync_vectors）、entity 回灌（set_entity）、pending 激活（activate_pending）。优先 dry-run。 |
-
-产品工具内部复用了原来的低层工具实现，但默认不再把它们的 schema 暴露给 Agent。需要旧低层工具面时，设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`（或 `full`）即可同时暴露：
-
-**低层工具（仅在 `legacy_full` 下暴露）**
+v0.11 起默认只暴露四个任务型工具：
 
 | 工具 | 用途 |
 |---|---|
-| `memory_write` | 写入一条记忆（`source_type=user_confirmed` 自动锁定） |
-| `memory_search` | 搜索记忆（FTS5 → LIKE 自动降级），支持 tags/时间/来源过滤 |
-| `memory_get` | 按 ID 取单条记忆，可取分段目录 / 全文 / 指定段落 |
-| `memory_recent` | 列出最近记忆，关键词不确定时浏览库存 |
-| `memory_edit` | 原地编辑正文或仅改 tags（`tags_only=true` 低副作用） |
-| `memory_history` | 查看一条记忆的版本演化轨迹 |
-| `memory_confirm` | 提升为 `user_confirmed` + `locked` 权威事实 |
-| `memory_supersede` | 显式废弃一条记忆，可突破锁定（需 `authorized=true`） |
-| `memory_cleanup_history` | 清理历史快照（**绝不碰活跃记录**） |
-| `memory_scan_conflict_candidates` | 向量召回候选冲突对（无 LLM，增量扫描） |
-| `memory_record_conflict` | 落表冲突裁决（幂等，带 `refresh=true` 重判） |
-| `memory_resolve_conflict` | 关闭单条误报冲突 |
-| `memory_list_conflicts` | 列出未解决冲突 |
-| `memory_compare` | 比较两条记忆，只返回解释，不落记录 |
-| `memory_arbitrate` | 兼容保留的手动仲裁 |
-| `memory_split` | Agent 侧续接 / 修复分段 |
-| `memory_store_embedding` | 手动存 / 替换某条记忆的向量 |
-| `memory_rebuild_embeddings` | 切换 embedding 模型后批量重建全部向量 |
-| `memory_status` | 运行状态、模式、`split_capability` |
-| `memory_audit_summary` | 各 workspace 记忆统计概览（纯 SQL 聚合） |
-| `memory_doctor_overview` | 只读健康体检（覆盖配置/向量链/分段/一致性/容量） |
+| `memory` | `remember`、`find`、`read`、`update`、`judge`、`status`。 |
+| `memory_review` | 只读 overview、doctor、conflicts、conflict_detail、judgments、history、expired、audit、entities。 |
+| `memory_govern` | 需要用户明确授权的 retire、resolve、confirm、judgment correction 和 workspace 治理。 |
+| `memory_repair` | split、claims/embedding 重建、清理、向量同步、entity 修复、backup replay、semantic runtime/notice 维护。 |
+
+低层实现仍被内部复用，但默认不暴露 schema。兼容需要时可设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`（或 `full`）；已移除的向量冲突 scanner 不会因此恢复。
+
+### 长文档分段
+
+分段能力绑定 vec readiness。满足阈值且 Markdown 标题安全时，原文先提交，再由后台 worker 异步执行规则分段；结构不适合规则分段时返回 `split_request`，由 Agent 使用自己的 LLM 生成 section metadata 后调用 `memory_repair(task="split")`。短文不会触发分段。
+
+### 可选本地语义冲突 notice
+
+安装运行时并配置分类 GGUF：
+
+```bash
+pip install 'memory-arbiter-mcp[semantic-local]'
+```
+
+设置 `semantic_conflict.model_path` 后会自动启用，除非显式 `enabled=false`。当前仅支持 `local_gguf`。写入 job 异步入队，GGUF 推理全局严格串行；默认 5 秒 job budget 只控制是否开始下一 pair，单次推理硬超时为 30 秒，模型加载超时为 120 秒。超时子进程终止后才会启动新代际。状态可通过 `memory(action="status")` 或 `memory_repair(task="semantic_control", data={"action":"status"})` 查看。
+
+Python 3.13 上若没有匹配的 `llama-cpp-python` wheel，安装 `[semantic-local]` 可能本机编译，需要 C/C++ toolchain 和 CMake。
+
+### Workspace 规则
+
+- `none`：workspace 仅存储，不过滤召回；
+- `weak`：同 canonical workspace 加权，跨 workspace 降权；未决候选以 hint 提示；
+- `strict`：搜索/按 ID 读取硬过滤；新且未确认的 canonical 写成 `pending`，确认前不进入 active recall。
+
+`weak`/`strict` 先使用 exact canonical 和已确认/拒绝 alias。向量相似度只提供候选 shortlist；规则决定 `AUTO`/`KEEP`/`ASK`，可选 GGUF 只能建议候选，忙或不可用时 fallback 到 `ASK`。只有 weak 下高置信身份级关系可自动合并；用户 accept/reject alias 和 confirm pending workspace 拥有最终权并持久化。
 
 ---
 
-## 仲裁规则
+## SQLite 降级与 JSONL 恢复
 
-冲突发生时，按以下优先级逐级判定：
+SQLite 不可用或不可写时，写入尝试追加一个 `backup_schema=1` envelope。JSONL 采用单次 `O_APPEND` 写；追加失败时本次写入失败，不会声称已备份。backup-only 记录没有 SQLite `memory_id`，恢复前不可搜索。
 
-1. **保护级别（protection_level）**：`locked` / `user_confirmed` 的记忆最优先，不可被自动覆盖
-2. **事件发生时间（event_time）**：越接近事实发生时间点越可信
-3. **来源可信度（source_type）**：`user_confirmed` > `document_extracted` > `agent_generated` > `unknown`
-4. **置信度（confidence）**：以上仍相同时，写入时标注的置信度高的优先
-5. **录入时间（ingest_time）**：全部相同时，先录入的优先
+SQLite 恢复后可直接执行只读预览：
 
-裁决结果可解释：每次仲裁都输出结构化理由，包含胜方、败方、判定依据。
+```text
+memory_repair(task="replay_backup", data={"dry_run": true})
+```
 
----
-
-## 降级策略
-
-零依赖崩溃，逐级降级：
-
-| 层级 | 条件 | 行为 |
-|---|---|---|
-| 1. sqlite-vec | 可用 | 语义召回增强（可选） |
-| 2. FTS5 | sqlite-vec 缺失 | 全文搜索（默认主模式） |
-| 3. LIKE | FTS5 缺失 | 关键词模糊匹配 |
-| 4. JSONL | SQLite 不可写 | append-only 文件备份 |
-
-降级状态通过 `memory_status` 查询，所有响应都会带 `warnings` 和 `degraded` 标记。
+正式 replay 必须先取得用户授权，再传 `dry_run=false, authorized=true`。主 memory row 与 replay receipt 在同一事务提交；重复执行按 `replay_key + payload_hash` 幂等。claims、embedding、split 和 semantic enqueue 是提交后的可重试后处理，不会因其失败回滚主记录。正式单次最多处理 200 条并返回分页信息。原 JSONL 保留；旧 flat JSONL 不自动兼容，会明确报告 unsupported legacy entry。`strict` replay 对未确认 canonical 保持 `pending`。
 
 ---
 
-## 设计原则
+## 输入校验边界
 
-- **本地优先**：所有数据存在本地 SQLite，不依赖任何云服务
-- **轻量**：不跑大模型、不启 Web 服务、不需要 Postgres/Redis
-- **可降级**：sqlite-vec → FTS5 → 关键词 → JSONL 备份，不会崩
-- **MCP 标准**：任何支持 MCP 的客户端都能接入
-- **零侵入**：不修改工具本身，只通过 MCP 协议旁路接入
+四个产品工具会拒绝非法已知字段类型、enum、ISO 时间、NaN/Inf 和超限资源。主要上限：
 
----
+- content：2 MiB UTF-8；subject：2,000 字符；query：32,000 字符；
+- tags：最多 100 个，单 tag 最多 256 字符；metadata JSON：256 KiB；
+- workspace/source_ref 等文本字段：2,000 字符；批量 ID：1,000 个。
 
-## 兼容性
-
-支持所有兼容 MCP stdio 协议的客户端：
-
-- ✅ ZCode
-- ✅ Codex CLI
-- ✅ Claude Code
-- ✅ Cursor
-- ✅ Cline / Roo Code
-- ✅ 任何支持 `mcpServers` 配置的工具
+未知普通字段会从 payload 剥离并返回 warning；疑似受保护字段的拼写错误会拒绝并给 `did_you_mean`。ID 和有界整数/timeout 保留受控数字字符串 coercion，bool 不能冒充 ID。
 
 ---
 
-## License
+## CI、发布后 smoke 与 License
 
-MIT
+CI workflow 包含 Python 3.11/3.12/3.13 core matrix、Python 3.12 sqlite-vec 全套测试、质量/安全检查以及 build + twine 校验。`mema-production-smoke --expected-version X.Y.Z` 是发版后对指定正式环境的人工可选检查，不是 CI 或发布门禁。
+
+当前项目使用 Apache License 2.0。0.8.2 起的版本按 Apache-2.0 提供；此前已经按 MIT 分发的副本继续保有原 MIT 授权，包括 0.8.0、0.8.1 及更早版本。

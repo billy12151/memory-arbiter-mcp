@@ -6,7 +6,7 @@ from importlib import resources
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from .conflict_judgments import ConflictJudgmentStore
-from .validation import validate_product_payload
+from .validation import _controlled_integer, validate_product_payload
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
@@ -185,10 +185,10 @@ class ProductSurfaces:
     def _int_product_arg(
         self, surface: str, value: Any, name: str, topic: Optional[str] = None,
     ) -> Optional[int | dict[str, Any]]:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
+        parsed = _controlled_integer(value)
+        if parsed is None:
             return self._invalid_product_call(surface, f"{name} must be an integer", topic)
+        return parsed
 
     def _require_id(
         self, surface: str, payload: dict[str, Any], name: str, topic: Optional[str] = None,

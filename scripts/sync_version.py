@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Single source of truth for the package version.
+"""Synchronize and validate release version metadata.
 
-The authoritative version lives in ``memory_arbiter/__init__.py`` as
-``__version__``. ``pyproject.toml`` reads it dynamically via
-``[tool.setuptools.dynamic]``. Files that cannot reference Python
-(``server.json``, the MCP registry manifest) are kept in sync by this script.
-
-Usage:
-    python scripts/sync_version.py           # rewrite server.json to match __version__
-    python scripts/sync_version.py --check    # exit non-zero if anything is out of sync
+``memory_arbiter.__version__`` is authoritative. Normal mode updates the MCP
+registry manifest. ``--check`` is read-only and also validates the newest
+CHANGELOG release and the editable project record/extras in ``uv.lock``.
 """
 from __future__ import annotations
 
@@ -16,11 +11,15 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT = ROOT / "memory_arbiter" / "__init__.py"
 SERVER_JSON = ROOT / "server.json"
+CHANGELOG = ROOT / "CHANGELOG.md"
+PYPROJECT = ROOT / "pyproject.toml"
+UV_LOCK = ROOT / "uv.lock"
 
 
 def read_authoritative_version() -> str:
@@ -33,52 +32,86 @@ def read_authoritative_version() -> str:
 
 def collect_server_json_versions(data: dict) -> list[str]:
     versions = [data.get("version")]
-    for package in data.get("packages", []):
-        versions.append(package.get("version"))
-    return [v for v in versions if v is not None]
+    versions.extend(package.get("version") for package in data.get("packages", []))
+    return [value for value in versions if value is not None]
 
 
 def sync_server_json(version: str, *, check: bool) -> bool:
     data = json.loads(SERVER_JSON.read_text(encoding="utf-8"))
     current = collect_server_json_versions(data)
-    in_sync = all(v == version for v in current)
+    expected_count = 1 + len(data.get("packages", []))
+    in_sync = len(current) == expected_count and all(value == version for value in current)
     if check:
         if not in_sync:
-            print(
-                f"server.json version(s) {current} != authoritative {version}",
-                file=sys.stderr,
-            )
+            print(f"server.json version(s) {current} != authoritative {version}", file=sys.stderr)
         return in_sync
     if in_sync:
         return True
     data["version"] = version
     for package in data.get("packages", []):
-        if "version" in package:
-            package["version"] = version
-    SERVER_JSON.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+        package["version"] = version
+    SERVER_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"updated server.json -> {version}")
     return True
 
 
+def check_changelog(version: str) -> bool:
+    text = CHANGELOG.read_text(encoding="utf-8")
+    first_release = re.search(r"^## \[([^]]+)]\s+[—-]\s+\d{4}-\d{2}-\d{2}\s*$", text, re.MULTILINE)
+    ok = first_release is not None and first_release.group(1) == version
+    if not ok:
+        found = first_release.group(1) if first_release else "missing"
+        print(f"CHANGELOG newest release {found} != authoritative {version}", file=sys.stderr)
+    return ok
+
+
+def _project_lock_record(lock_data: dict) -> dict | None:
+    for package in lock_data.get("package", []):
+        if package.get("name") == "memory-arbiter-mcp" and package.get("source", {}).get("editable") == ".":
+            return package
+    return None
+
+
+def check_uv_lock(version: str) -> bool:
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    expected_extras = set(project.get("optional-dependencies", {}))
+    lock_data = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
+    record = _project_lock_record(lock_data)
+    if record is None:
+        print("uv.lock has no editable memory-arbiter-mcp project record", file=sys.stderr)
+        return False
+    actual_version = record.get("version")
+    actual_extras = set(record.get("optional-dependencies", {}))
+    metadata_extras = set(record.get("metadata", {}).get("provides-extras", []))
+    ok = actual_version == version and actual_extras == expected_extras and metadata_extras == expected_extras
+    if actual_version != version:
+        print(f"uv.lock project version {actual_version} != authoritative {version}", file=sys.stderr)
+    if actual_extras != expected_extras:
+        print(f"uv.lock optional dependencies {sorted(actual_extras)} != pyproject extras {sorted(expected_extras)}", file=sys.stderr)
+    if metadata_extras != expected_extras:
+        print(f"uv.lock provides-extras {sorted(metadata_extras)} != pyproject extras {sorted(expected_extras)}", file=sys.stderr)
+    return ok
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="verify sync without writing; non-zero exit if out of sync",
-    )
+    parser.add_argument("--check", action="store_true", help="verify all release metadata without writing")
     args = parser.parse_args()
 
     version = read_authoritative_version()
-    ok = sync_server_json(version, check=args.check)
-    if args.check:
-        if ok:
-            print(f"version in sync: {version}")
-            return 0
-        return 1
-    return 0
+    if not args.check:
+        sync_server_json(version, check=False)
+        return 0
+
+    checks = (
+        sync_server_json(version, check=True),
+        check_changelog(version),
+        check_uv_lock(version),
+    )
+    if all(checks):
+        print(f"release metadata in sync: {version}")
+        return 0
+    return 1
 
 
 if __name__ == "__main__":

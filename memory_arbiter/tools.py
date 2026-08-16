@@ -80,6 +80,7 @@ class MemoryTools:
         self._operations = OperationsPipeline(self)
         self._semantic_backend: Optional[SemanticBackend] = None
         self._semantic_backend_lock = threading.Lock()
+        self._semantic_runtime_disabled = False
         self._semantic_worker = SemanticConflictWorker(self)
         self._shutdown_lock = threading.Lock()
         self._shutdown_started = False
@@ -139,8 +140,20 @@ class MemoryTools:
                 self._last_backup_notice_signature = signature
             elif signature == (0, 0, 0, False):
                 self._last_backup_notice_signature = None
-        except Exception:
-            pass
+        except Exception as exc:
+            degradation_signature = (-1, -1, -1, True)
+            if self._last_backup_notice_signature != degradation_signature:
+                notices.append({
+                    "type": "backup_replay_notice_degraded",
+                    "severity": "warning",
+                    "reason": str(exc),
+                    "action_required": "inspect_backup_replay_manually",
+                    "suggested_call": {
+                        "tool": "memory_repair", "task": "replay_backup",
+                        "data": {"dry_run": True, "limit": 200, "offset": 0},
+                    },
+                })
+                self._last_backup_notice_signature = degradation_signature
         return notices
 
     def _enqueue_pending_rule_splits(self, limit: int = 100) -> None:
@@ -196,6 +209,13 @@ class MemoryTools:
         timeout = max(0.0, float(timeout))
         deadline = time.monotonic() + timeout
         worker_shutdown = self._semantic_worker.shutdown(discard_pending=True)
+        # Shutdown also closes synchronous workspace-suggestion admission before
+        # waiting; otherwise a new call can race the worker drain/unload phase.
+        with self._semantic_backend_lock:
+            self._semantic_runtime_disabled = True
+            admitted_backend = self._semantic_backend
+            if admitted_backend is not None:
+                admitted_backend.set_disabled(True)
         remaining = max(0.0, deadline - time.monotonic())
         semantic_drained = self._semantic_worker.wait_drained(remaining)
         remaining = max(0.0, deadline - time.monotonic())
@@ -495,6 +515,8 @@ class MemoryTools:
         if not self._semantic_configured():
             return None
         with self._semantic_backend_lock:
+            if self._semantic_runtime_disabled:
+                return None
             if self._semantic_backend is not None:
                 return self._semantic_backend
             assert self.settings.semantic_conflict_model_path is not None
@@ -503,7 +525,8 @@ class MemoryTools:
                 n_ctx=self.settings.semantic_conflict_n_ctx,
                 n_threads=self.settings.semantic_conflict_n_threads,
                 n_batch=self.settings.semantic_conflict_n_batch,
-                hard_timeout_ms=self.settings.semantic_conflict_job_timeout_ms,
+                hard_timeout_ms=self.settings.semantic_conflict_inference_timeout_ms,
+                load_timeout_ms=self.settings.semantic_conflict_load_timeout_ms,
             )
             return self._semantic_backend
 
@@ -558,6 +581,8 @@ class MemoryTools:
             "max_concurrency": 1,
             "max_concurrency_note": "reserved; MVP semantic worker is single-threaded (configured values are clamped to 1)",
             "job_timeout_ms": int(self.settings.semantic_conflict_job_timeout_ms),
+            "inference_timeout_ms": int(self.settings.semantic_conflict_inference_timeout_ms),
+            "load_timeout_ms": int(self.settings.semantic_conflict_load_timeout_ms),
             "min_pair_budget_ms": int(self.settings.semantic_conflict_min_pair_budget_ms),
             "last_pair_duration_ms": self._last_pair_duration_ms,
             "job_deadline_behavior": (
@@ -591,9 +616,11 @@ class MemoryTools:
             self._semantic_worker.resume()
             return {"outcome": "resumed", "semantic_conflict": self._semantic_status()}
         if action == "enable":
-            backend = self._get_semantic_backend_ref()
-            if backend is not None:
-                backend.set_disabled(False)
+            with self._semantic_backend_lock:
+                self._semantic_runtime_disabled = False
+                backend = self._semantic_backend
+                if backend is not None:
+                    backend.set_disabled(False)
             self._semantic_worker.enable_runtime()
             return {"outcome": "enabled", "semantic_conflict": self._semantic_status()}
         if action == "unload":
@@ -609,8 +636,15 @@ class MemoryTools:
                 result["warnings"] = ["semantic backend still has in-flight inference; model was not unloaded"]
             return result
         if action == "disable":
+            # Close both admissions before waiting for an in-flight request. The
+            # backend gate covers synchronous workspace suggestions, which do not
+            # pass through the semantic worker queue.
             self._semantic_worker.disable_runtime()
-            backend = self._get_semantic_backend_ref()
+            with self._semantic_backend_lock:
+                self._semantic_runtime_disabled = True
+                backend = self._semantic_backend
+                if backend is not None:
+                    backend.set_disabled(True)
             unload_result = (
                 backend.unload(timeout=timeout, disable=True)
                 if backend is not None else

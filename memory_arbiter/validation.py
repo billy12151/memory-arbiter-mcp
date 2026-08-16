@@ -17,7 +17,12 @@ MAX_TAGS = 100
 MAX_TAG_CHARS = 256
 MAX_METADATA_BYTES = 256 * 1024
 MAX_TEXT_FIELD_CHARS = 2_000
+MAX_REPLACEMENT_TEXT_CHARS = 1_000_000
 MAX_BATCH_IDS = 1_000
+MAX_SPLIT_SECTIONS = 500
+MAX_SPLIT_SECTION_TEXT_CHARS = 2_000
+MAX_REVISION = 2_147_483_647
+SEMANTIC_CONTROL_MAX_TIMEOUT = 600.0
 MAX_RESULT_LIMIT = 100
 MAX_OFFSET = 10_000
 
@@ -28,7 +33,7 @@ _SENSITIVE_FIELDS = {
 }
 
 _COMMON = {"topic", "workspace"}
-_ALLOWED: dict[tuple[str, str], set[str]] = {
+PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory", "help"): {"topic", "action"},
     ("memory", "status"): set(),
     ("memory", "remember"): {
@@ -96,7 +101,7 @@ _ALLOWED: dict[tuple[str, str], set[str]] = {
     ("memory_repair", "set_entity"): {"id", "memory_id", "entity", "scope", "clear", "authorized", "workspace"},
     ("memory_repair", "activate_pending"): {"id", "memory_id", "authorized", "workspace"},
     ("memory_repair", "semantic_control"): {"action", "timeout"},
-    ("memory_repair", "notice"): {"action", "limit", "id", "notice_id", "reason", "authorized"},
+    ("memory_repair", "notice"): {"action", "limit", "id", "notice_id", "reason"},
     ("memory_repair", "replay_backup"): {"dry_run", "authorized", "limit", "offset"},
     ("memory_repair", "help"): {"topic", "task"},
 }
@@ -116,9 +121,26 @@ def _json_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+def _controlled_integer(value: Any) -> int | None:
+    """Accept JSON integers and canonical decimal strings, never floats/bools."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or not stripped.isascii():
+            return None
+        digits = stripped[1:] if stripped[:1] in {"+", "-"} else stripped
+        if not digits.isdigit():
+            return None
+        return int(stripped)
+    return None
+
+
 def validate_product_payload(surface: str, operation: str, payload: dict[str, Any], *, vec_dim: int) -> ValidationResult:
     result = ValidationResult()
-    allowed = _ALLOWED.get((surface, operation))
+    allowed = PRODUCT_FIELD_REGISTRY.get((surface, operation))
     if allowed is not None:
         unknown_keys: list[str] = []
         for key in payload:
@@ -142,7 +164,7 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
                 result.error = _error(key, "is required and must be a non-empty string")
                 return result
 
-    for key in ("id", "memory_id", "conflict_id", "notice_id", "superseded_by"):
+    for key in ("id", "memory_id", "conflict_id", "notice_id", "superseded_by", "suggested_winner"):
         if key not in payload:
             continue
         if key in {"id", "conflict_id"} and (
@@ -150,19 +172,24 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             or (surface, operation) == ("memory_govern", "correct_judgment")
         ):
             # Their dispatchers intentionally report all missing receipt fields
-            # before coercing the primary id.
+            # before coercing the primary id. The dispatcher uses the same strict
+            # integer policy, so skipping here does not admit floats.
             continue
         value = payload[key]
-        try:
-            parsed_id = int(value)
-        except (TypeError, ValueError):
+        if value is None and key in {"superseded_by", "suggested_winner"}:
+            continue
+        parsed_id = _controlled_integer(value)
+        if parsed_id is None:
             field_name = "memory_id" if key == "id" and operation in {"read", "update", "history", "split", "set_entity", "activate_pending", "cleanup_history", "confirm_pending_workspace"} else key
             result.error = _error(field_name, "must be a positive integer")
             return result
-        if isinstance(value, bool) or parsed_id <= 0:
+        if parsed_id <= 0:
             field_name = "memory_id" if key == "id" and operation in {"read", "update", "history", "split", "set_entity", "activate_pending", "cleanup_history", "confirm_pending_workspace"} else key
             result.error = _error(field_name, "must be a positive integer")
             return result
+        # Preserve controlled numeric-string compatibility, but make the value
+        # consumed by dispatch exactly the value that passed validation.
+        payload[key] = parsed_id
 
     for key in ("content", "new_content"):
         value = payload.get(key)
@@ -174,15 +201,30 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             if actual > MAX_CONTENT_BYTES:
                 result.error = {"error": "resource_limit_exceeded", "field": key, "actual_bytes": actual, "max_bytes": MAX_CONTENT_BYTES}
                 return result
-    for key, maximum in (("subject", MAX_SUBJECT_CHARS), ("new_subject", MAX_SUBJECT_CHARS), ("query", MAX_QUERY_CHARS)):
+    bounded_strings = {
+        "subject": MAX_SUBJECT_CHARS,
+        "new_subject": MAX_SUBJECT_CHARS,
+        "query": MAX_QUERY_CHARS,
+        "old_text": MAX_REPLACEMENT_TEXT_CHARS,
+        "new_text": MAX_REPLACEMENT_TEXT_CHARS,
+        "workspace": MAX_TEXT_FIELD_CHARS,
+        "source_ref": MAX_TEXT_FIELD_CHARS,
+        "agent_id": MAX_TEXT_FIELD_CHARS,
+        "client": MAX_TEXT_FIELD_CHARS,
+        "reason": MAX_TEXT_FIELD_CHARS,
+        "alias": MAX_TEXT_FIELD_CHARS,
+        "canonical": MAX_TEXT_FIELD_CHARS,
+        "old": MAX_TEXT_FIELD_CHARS,
+        "new": MAX_TEXT_FIELD_CHARS,
+        "from": MAX_TEXT_FIELD_CHARS,
+        "to": MAX_TEXT_FIELD_CHARS,
+        "entity": MAX_TEXT_FIELD_CHARS,
+        "scope": MAX_TEXT_FIELD_CHARS,
+    }
+    for key, maximum in bounded_strings.items():
         value = payload.get(key)
         if value is not None and (not isinstance(value, str) or len(value) > maximum):
             result.error = _error(key, f"must be a string of at most {maximum} characters")
-            return result
-    for key in ("workspace", "source_ref", "agent_id", "client"):
-        value = payload.get(key)
-        if value is not None and (not isinstance(value, str) or len(value) > MAX_TEXT_FIELD_CHARS):
-            result.error = _error(key, f"must be a string of at most {MAX_TEXT_FIELD_CHARS} characters")
             return result
 
     for key in ("tags", "tags_filter", "new_tags", "add_tags", "remove_tags"):
@@ -213,29 +255,96 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         if not isinstance(value, list) or len(value) > MAX_BATCH_IDS:
             result.error = _error(key, f"must be a list with at most {MAX_BATCH_IDS} items")
             return result
-        if any(isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in value):
-            result.error = _error(key, "must contain positive integer ids")
-            return result
+        parsed_items: list[int] = []
+        for item in value:
+            parsed_item = _controlled_integer(item)
+            if parsed_item is None or parsed_item <= 0:
+                result.error = _error(key, "must contain positive integer ids")
+                return result
+            parsed_items.append(parsed_item)
+        payload[key] = parsed_items
 
     integer_limits = {
         "limit": (1, 10_000 if (surface, operation) == ("memory_repair", "replay_backup") else MAX_RESULT_LIMIT),
-        "offset": (0, MAX_OFFSET),
+        "offset": (0, MAX_REVISION if (surface, operation) == ("memory_repair", "replay_backup") else MAX_OFFSET),
         "batch_size": (1, 500),
         "older_than_days": (0, 365_000),
-        "expected_version": (1, 2_147_483_647),
+        "expected_version": (1, MAX_REVISION),
+        "expected_judgment_id": (1, MAX_REVISION),
+        "expected_left_version": (1, MAX_REVISION),
+        "expected_right_version": (1, MAX_REVISION),
+        "expected_left_claim_revision": (0, MAX_REVISION),
+        "expected_right_claim_revision": (0, MAX_REVISION),
+        "decision_memory_version": (1, MAX_REVISION),
+        "decision_split_revision": (0, MAX_REVISION),
     }
     for key, (minimum, maximum) in integer_limits.items():
         if key not in payload or payload[key] is None:
             continue
         value = payload[key]
+        parsed = _controlled_integer(value)
+        if parsed is None:
+            result.error = _error(key, f"must be an integer between {minimum} and {maximum}")
+            return result
+        if parsed < minimum or parsed > maximum:
+            result.error = _error(key, f"must be an integer between {minimum} and {maximum}")
+            return result
+        payload[key] = parsed
+
+    if "timeout" in payload:
+        value = payload["timeout"]
         try:
-            parsed = int(value)
+            parsed_timeout = float(value)
         except (TypeError, ValueError):
-            result.error = _error(key, f"must be an integer between {minimum} and {maximum}")
+            result.error = _error("timeout", f"must be a finite number between 0 and {SEMANTIC_CONTROL_MAX_TIMEOUT:g}")
             return result
-        if isinstance(value, bool) or parsed < minimum or parsed > maximum:
-            result.error = _error(key, f"must be an integer between {minimum} and {maximum}")
+        if isinstance(value, bool) or not math.isfinite(parsed_timeout) or not 0.0 <= parsed_timeout <= SEMANTIC_CONTROL_MAX_TIMEOUT:
+            result.error = _error("timeout", f"must be a finite number between 0 and {SEMANTIC_CONTROL_MAX_TIMEOUT:g}")
             return result
+        payload["timeout"] = parsed_timeout
+
+    if "sections" in payload:
+        sections = payload["sections"]
+        if (surface, operation) == ("memory", "read"):
+            if not isinstance(sections, str) or sections not in {"none", "catalog", "all"}:
+                result.error = _error("sections", "must be one of none, catalog, all")
+                return result
+        elif (surface, operation) == ("memory_repair", "split"):
+            if not isinstance(sections, list) or len(sections) > MAX_SPLIT_SECTIONS:
+                result.error = _error("sections", f"must be a list of at most {MAX_SPLIT_SECTIONS} section objects")
+                return result
+            allowed_section_fields = {
+                "title", "summary", "anchor_text", "occurrence_index", "title_path",
+            }
+            for index, section in enumerate(sections):
+                field_name = f"sections[{index}]"
+                if not isinstance(section, dict):
+                    result.error = _error(field_name, "must be a section object")
+                    return result
+                unknown = set(section) - allowed_section_fields
+                if unknown:
+                    result.error = _error(field_name, "contains unknown fields", unknown_fields=sorted(map(str, unknown)))
+                    return result
+                for text_key in ("title", "summary", "anchor_text", "title_path"):
+                    text = section.get(text_key)
+                    if text is not None and (
+                        not isinstance(text, str) or len(text) > MAX_SPLIT_SECTION_TEXT_CHARS
+                    ):
+                        result.error = _error(
+                            f"{field_name}.{text_key}",
+                            f"must be a string of at most {MAX_SPLIT_SECTION_TEXT_CHARS} characters",
+                        )
+                        return result
+                if "occurrence_index" in section:
+                    occurrence = _controlled_integer(section["occurrence_index"])
+                    if occurrence is None or not 0 <= occurrence <= MAX_REVISION:
+                        result.error = _error(
+                            f"{field_name}.occurrence_index",
+                            f"must be an integer between 0 and {MAX_REVISION}",
+                        )
+                        return result
+                    section["occurrence_index"] = occurrence
+
     embedding = payload.get("query_embedding")
     if embedding is None:
         embedding = payload.get("embedding")

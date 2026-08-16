@@ -12,7 +12,7 @@ _FALSE_STRINGS = {"0", "false", "no", "off"}
 
 @dataclass
 class AgentPolicy:
-    # Per-client overrides. Any client *not* listed here defaults to enabled.
+    # Per-client overrides. Unlisted clients use ``default_enabled``.
     client_defaults: dict[str, bool] = field(default_factory=dict)
     default_enabled: bool = True
     allow_agents: list[str] = field(default_factory=list)
@@ -26,8 +26,7 @@ class AgentPolicy:
         normalized = (client or "").lower()
         if normalized in self.client_defaults:
             return self.client_defaults[normalized]
-        # Default-allow: any unrecognised client is enabled.
-        return True
+        return self.default_enabled
 
 
 @dataclass
@@ -84,6 +83,8 @@ class Settings:
     semantic_conflict_resident: bool = True
     semantic_conflict_preload: bool = False
     semantic_conflict_job_timeout_ms: int = 5000
+    semantic_conflict_inference_timeout_ms: int = 30000
+    semantic_conflict_load_timeout_ms: int = 120000
     semantic_conflict_min_pair_budget_ms: int = 1000
     config_warnings: list[str] = field(default_factory=list)
 
@@ -381,6 +382,14 @@ class Settings:
             semantic_conflict_job_timeout_ms=clamp_int(
                 pick_int_field(semantic_cfg.get("job_timeout_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_JOB_TIMEOUT_MS", 5000, name="semantic_conflict.job_timeout_ms"),
                 100, 600000, name="semantic_conflict.job_timeout_ms", warnings=config_warnings,
+            ),
+            semantic_conflict_inference_timeout_ms=clamp_int(
+                pick_int_field(semantic_cfg.get("inference_timeout_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_INFERENCE_TIMEOUT_MS", 30000, name="semantic_conflict.inference_timeout_ms"),
+                100, 600000, name="semantic_conflict.inference_timeout_ms", warnings=config_warnings,
+            ),
+            semantic_conflict_load_timeout_ms=clamp_int(
+                pick_int_field(semantic_cfg.get("load_timeout_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_LOAD_TIMEOUT_MS", 120000, name="semantic_conflict.load_timeout_ms"),
+                100, 600000, name="semantic_conflict.load_timeout_ms", warnings=config_warnings,
             ),
             semantic_conflict_min_pair_budget_ms=clamp_int(
                 pick_int_field(semantic_cfg.get("min_pair_budget_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_MIN_PAIR_BUDGET_MS", 1000, name="semantic_conflict.min_pair_budget_ms"),

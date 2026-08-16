@@ -102,6 +102,7 @@ class MemoriesStore:
 
     def _append_backup(self, record: MemoryRecord, workspace_canonical: Optional[str] = None) -> None:
         from datetime import datetime, timezone
+        import os
 
         self.settings.backup_jsonl.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -111,19 +112,28 @@ class MemoriesStore:
             "workspace_canonical": workspace_canonical or record.workspace,
             "record": record.__dict__.copy(),
         }
-        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
-        with self.settings.backup_jsonl.open("a", encoding="utf-8") as fh:
+        line = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        fd = os.open(
+            self.settings.backup_jsonl,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            os.fchmod(fd, 0o600)
             try:
                 import fcntl
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                fcntl.flock(fd, fcntl.LOCK_EX)
             except ImportError:  # pragma: no cover - non-POSIX fallback
                 fcntl = None  # type: ignore[assignment]
             try:
-                fh.write(line)
-                fh.flush()
+                written = os.write(fd, line)
+                if written != len(line):
+                    raise OSError(f"short JSONL backup write: {written} of {len(line)} bytes")
             finally:
                 if fcntl is not None:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
         self.state.jsonl_backup_active = True
 
     @staticmethod

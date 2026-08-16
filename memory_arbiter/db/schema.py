@@ -213,6 +213,12 @@ class SchemaStore:
                                  "TEXT")
         self._migrate_add_column(conn, "memories", "split_revision",
                                  "INTEGER NOT NULL DEFAULT 0")
+        self._migrate_add_column(conn, "backup_replay_log", "postprocess_status",
+                                 "TEXT NOT NULL DEFAULT 'complete'")
+        self._migrate_add_column(conn, "backup_replay_log", "postprocess_stages",
+                                 "TEXT NOT NULL DEFAULT '{}'")
+        self._migrate_add_column(conn, "backup_replay_log", "postprocess_error_code",
+                                 "TEXT")
         # v0.7.5: conflict-scan enrichment columns on the conflicts table.
         # conflict_type / conflict_point carry the *what* (agent LLM judgement);
         # suggested_winner / confidence_hint / source carry the *suggestion*
@@ -394,7 +400,7 @@ class SchemaStore:
         # sqlite-vec
         if self.settings.enable_sqlite_vec:
             try:
-                import sqlite_vec  # type: ignore[import-untyped]
+                import sqlite_vec  # type: ignore[import-not-found]
 
                 conn.enable_load_extension(True)
                 sqlite_vec.load(conn)

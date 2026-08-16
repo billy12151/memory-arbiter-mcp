@@ -154,6 +154,57 @@ def test_confirm_pending_workspace_activates_and_aliases(tmp_path):
     assert resolved["matched_by"] == "confirmed_alias"
 
 
+def test_confirm_pending_workspace_surfaces_vector_publish_retry(tmp_path, monkeypatch):
+    t = make_tools(tmp_path, isolation="strict")
+    written = t.memory_write(
+        content="gamma note", workspace="BrandNew", source_type="agent_generated", subject="test"
+    )
+    memory_id = written["data"]["id"]
+    original = t.db.set_memory_workspace_canonical_on_conn
+
+    def publish_warning(*args, **kwargs):
+        updated, warnings = original(*args, **kwargs)
+        return updated, warnings + [
+            "workspace canonical vector publish failed for 'BrandNew'; retry a write using this workspace after sqlite-vec and embedding configuration recover: injected"
+        ]
+
+    monkeypatch.setattr(t.db, "set_memory_workspace_canonical_on_conn", publish_warning)
+    result = t.memory_govern(
+        "confirm_pending_workspace",
+        {"authorized": True, "memory_id": memory_id, "canonical": "BrandNew"},
+    )
+    assert result["ok"] is True
+    assert result["data"]["confirmed"] is True
+    assert result["data"]["activated"] is True
+    publish = result["data"]["workspace_vector_publish"]
+    assert publish["status"] == "pending_retry"
+    assert publish["repair_task_available"] is False
+
+
+def test_migrate_workspace_surfaces_vector_publish_retry_without_false_failure(tmp_path, monkeypatch):
+    t = make_tools(tmp_path)
+    t.memory_write(content="beta note", workspace="Sub2", source_type="agent_generated", subject="test")
+    original = t.db.migrate_workspace
+
+    def migrate_with_warning(*args, **kwargs):
+        updated, warnings = original(*args, **kwargs)
+        return updated, warnings + [
+            "workspace canonical vector publish failed for 'Main'; retry a write using this workspace after sqlite-vec and embedding configuration recover: injected"
+        ]
+
+    monkeypatch.setattr(t.db, "migrate_workspace", migrate_with_warning)
+    result = t.memory_govern(
+        "migrate_workspace",
+        {"authorized": True, "from": "Sub2", "to": "Main"},
+    )
+    assert result["ok"] is True
+    assert result["data"]["migrated"] is True
+    assert result["data"]["memories_updated"] >= 1
+    publish = result["data"]["workspace_vector_publish"]
+    assert publish["status"] == "pending_retry"
+    assert publish["repair_task_available"] is False
+
+
 # ── review hardening: non-string inputs must not crash (tools.py 698/2474/2499)
 
 def test_nonstring_alias_returns_structured_error_not_crash(tmp_path):

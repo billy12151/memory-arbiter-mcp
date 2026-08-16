@@ -83,6 +83,8 @@ class WorkspaceStore:
             "distance": None,
             "similar": [],
             "rejected_canonicals": [],
+            "warnings": [],
+            "vector_publish_pending": False,
         }
         if not raw:
             result["canonical"] = "default"
@@ -131,6 +133,28 @@ class WorkspaceStore:
                 ).fetchone()
                 if exact:
                     result.update({"canonical": exact["name"], "is_new": False, "matched_by": "exact", "distance": 0.0})
+                    # A prior new-canonical write may have registered the canonical
+                    # while vector publication was unavailable. A later write to the
+                    # exact same workspace is the executable retry path once vec and
+                    # the embedder are healthy again.
+                    if register_new and self.state.sqlite_writable and self.state.sqlite_vec_available and embedder is not None:
+                        try:
+                            er = embedder.embed_text(prefix="", body=raw)
+                            exact_embedding = list(er.embedding) if er and er.embedding else None
+                        except Exception:
+                            exact_embedding = None
+                        if exact_embedding:
+                            try:
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
+                                    (int(exact["id"]), json.dumps(exact_embedding)),
+                                )
+                                conn.commit()
+                            except sqlite3.Error as exc:
+                                result["vector_publish_pending"] = True
+                                result["warnings"].append(
+                                    f"workspace canonical vector publish failed for {raw!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
+                                )
                     return result
 
                 # 2. Vector nearest-canonical (only when embedding is available).
@@ -196,13 +220,19 @@ class WorkspaceStore:
                             "SELECT id FROM workspace_canonicals WHERE name = ?", (raw,)
                         ).fetchone()
                         if row and embedding and self.state.sqlite_vec_available:
-                            conn.execute(
-                                "INSERT OR REPLACE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
-                                (int(row["id"]), json.dumps(embedding)),
-                            )
+                            try:
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
+                                    (int(row["id"]), json.dumps(embedding)),
+                                )
+                            except sqlite3.Error as exc:
+                                result["vector_publish_pending"] = True
+                                result["warnings"].append(
+                                    f"workspace canonical vector publish failed for {raw!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
+                                )
                         conn.commit()
-                    except sqlite3.Error:
-                        pass  # registration best-effort; canonical still returned
+                    except sqlite3.Error as exc:
+                        result["warnings"].append(f"workspace canonical registration failed for {raw!r}: {exc}")
                 return result
         except sqlite3.Error:
             return result
@@ -560,6 +590,7 @@ class WorkspaceStore:
                 to_embedding = list(er.embedding) if er and er.embedding else None
             except Exception:
                 to_embedding = None
+        publish_warnings: list[str] = []
         try:
             # Single transaction: move the memories AND record the confirming
             # alias together, so a crash can't leave memories relocated with no
@@ -598,8 +629,10 @@ class WorkspaceStore:
                                 "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
                                 (int(row["id"]), json.dumps(to_embedding)),
                             )
-                        except sqlite3.Error:
-                            pass
+                        except sqlite3.Error as exc:
+                            publish_warnings.append(
+                                f"workspace canonical vector publish failed for {to_ws!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
+                            )
 
                 # (4) Delete the phantom `from_ws` canonical + its vec row.
                 #     migrate subsumes from_ws into to_ws; leaving from_ws in the
@@ -665,7 +698,7 @@ class WorkspaceStore:
                            VALUES (?, ?, ?, ?, 'confirmed', 'migrate', ?, ?, ?)""",
                         (alias_key, fwd_prev_canonical, to_ws, fwd_prev_status, judge_type, reason, now),
                     )
-            return updated, []
+            return updated, publish_warnings
         except sqlite3.Error as exc:
             return 0, [f"migrate_workspace failed: {exc}"]
 
@@ -711,8 +744,10 @@ class WorkspaceStore:
                         "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
                         (int(row["id"]), json.dumps(precomputed_embedding)),
                     )
-                except sqlite3.Error:
-                    pass  # vec table may be absent; canonical row still written
+                except sqlite3.Error as exc:
+                    return True, [
+                        f"workspace canonical vector publish failed for {canonical!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
+                    ]
         return True, []
 
     def set_memory_workspace_canonical(

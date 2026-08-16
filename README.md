@@ -27,7 +27,7 @@ memory(action="find", data={"query": "auth migration plan"})  → 3 laser-releva
 
 **Shared memory is the starting point. Fact governance is the moat.**
 
-Fully local by default: one SQLite database, no Postgres, no Redis, no hosted memory service, and no server-side LLM calls. Optional semantic recall uses your own local GGUF embedding model; optional update checks can be disabled.
+The core is fully local and model-free by default: one SQLite database, no Postgres, no Redis, no hosted memory service, and no model call is required for lexical recall, structured-claim detection, governance, or repair. Optional semantic recall and semantic conflict notices use your own local GGUF models; optional update checks can be disabled.
 
 ### The problem
 
@@ -53,8 +53,8 @@ The model still does semantic reasoning. Arbiter keeps the input side cleaner.
 | Targeted recall | A flat `MEMORY.md` or large vector blob returns too much context. | `memory(action="find")` returns a small set of relevant, ranked entries instead of loading full files. |
 | Source trust | User-confirmed facts, document extracts, and AI guesses look the same. | `source_type`, `confidence`, `user_confirmed`, and locked records make trust visible. |
 | Time and evolution | Old decisions stay next to new decisions, and the model may follow the stale one. | `event_time`, `ingest_time`, `version`, history (`memory_review`), and supersede (`memory_govern`) preserve the evolution chain. |
-| Conflicts | Two memories can disagree and both still be retrieved. | Conflict scan, conflict records, conflict signals, and explicit resolve/supersede tools make disagreement visible. |
-| Write-time safety | Last-write-wins silently overwrites or piles up contradictory facts. | v0.9 structured claim gates detect deterministic claim collisions and require host-LLM judgment before use. |
+| Conflicts | Two memories can disagree and both still be retrieved. | Deterministic structured-claim collisions, optional write-time semantic notices, conflict records/signals, and explicit governance make disagreement visible; there is no periodic vector scanner. |
+| Write-time safety | Last-write-wins silently overwrites or piles up contradictory facts. | Structured claim gates persist explicit collisions as `pending_llm` and require the host LLM to submit a snapshot-pinned judgment before the affected claim is used. The judgment is guidance, not an automatic edit or supersede. |
 | Long documents | The relevant paragraph is buried inside a 10K+ character memory. | Section split returns the matched sections instead of forcing the model to scan the whole document. |
 | Project boundaries | Global memory can leak facts across unrelated projects. | Workspace isolation supports `none`, `weak`, and `strict` modes with alias canonicalization. |
 | Long-running health | Users only notice memory problems after bad answers. | `doctor` reports config, vector readiness, split health, consistency, capacity, and conflict buildup. |
@@ -80,7 +80,7 @@ Memory Arbiter does not compete by saying that other tools cannot share memory. 
 | Plain markdown memory | Targeted recall instead of full prompt loading, plus history and conflict state. |
 | Vector memory | Not just similar recall, but source trust, stale/superseded state, and conflict-aware recall. |
 | Graph memory | Not just what is connected, but what is current, trusted, conflicting, or safe to use. |
-| Hosted memory | Local SQLite, caller-owned policy, no hosted database, and no server-side LLM calls. |
+| Hosted memory | Local SQLite, caller-owned policy, no hosted database, and a model-free default core; optional local GGUF features remain local. |
 | Generic MCP memory | A fact-governance layer: trust labels, time evolution, structured claim gates, doctor, and repair tools. |
 
 Graph-like signals exist where they help governance: event time, ingest time, entity/scope, conflict edges, supersede chains, sections, and workspace boundaries. Memory Arbiter treats original facts as the primary asset and derived indexes as support structures.
@@ -119,15 +119,15 @@ For concrete usage patterns and a cross-tool walkthrough, see [`docs/INTEGRATION
 - **Targeted retrieval** — return the relevant entries instead of loading full memory files every turn.
 - **Trust levels** — separate user-confirmed facts, document extracts, AI-generated notes, and unknown sources.
 - **Temporal history** — track event time, ingest time, versions, history snapshots, and supersede chains.
-- **Conflict arbitration** — discover, record, inspect, resolve, or supersede contradictory memories.
-- **Structured claim gates** — v0.9 write/edit-time deterministic claim detection with required host-LLM judgment before use.
-- **Long-document section split** — split long memories into searchable sections and return matched paragraphs.
+- **Conflict governance** — deterministic claim collisions and optional semantic notices discover candidates; agents/users inspect, judge, resolve, or supersede explicitly. No periodic vector scanner runs.
+- **Structured claim gates** — write/edit-time deterministic claim detection with required, snapshot-pinned host-LLM judgment before the affected claim is used; the receipt does not mutate either memory.
+- **Long-document section split** — asynchronously split safe Markdown headings into searchable sections; ambiguous prose returns an Agent continuation request.
 - **Workspace isolation** — choose `none`, `weak`, or `strict` isolation with workspace alias canonicalization.
 - **Smart tag ranking and filters** — tags act as discrete ranking/filter labels, not weak text fragments.
 - **Semantic recall** — optional local GGUF embeddings for meaning-based recall, while lexical recall remains the default.
 - **Doctor diagnostics** — read-only health checks for config, vector readiness, split, claims, consistency, capacity, and conflicts.
-- **Graceful degradation** — sqlite-vec → FTS5 → LIKE → JSONL backup, so the server keeps working when optional pieces are unavailable.
-- **Local-first storage** — pure SQLite, no hosted database, no Redis/Postgres requirement, no server-side LLM dependency.
+- **Graceful degradation** — sqlite-vec → FTS5 → LIKE for recall; when SQLite is unavailable or unwritable, writes attempt a schema-1 JSONL backup and report failure if that append fails.
+- **Local-first storage** — pure SQLite, no hosted database, no Redis/Postgres requirement, and no model dependency for the core; local GGUF features are opt-in.
 
 > **What it is not:** Memory Arbiter is not an LLM and does not replace your AI client. It is a structured storage, retrieval, arbitration, and diagnostics layer underneath the model.
 
@@ -275,21 +275,21 @@ Advanced compatibility: set `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`
 
 Memory Arbiter can optionally run a local Qwen2.5-0.5B model after writes to produce **semantic conflict notices** — lightweight, reviewable hints that a new memory may semantically conflict with an existing one. The model is only a candidate signal, never the final judge: whether a candidate becomes a visible notice is decided by pair-text gates (`medium` by default for balanced recall; `strong` for lower-noise, higher-confidence notices).
 
-Pipeline: metadata-overlap coarse recall (subject + tags) → 0.5B pair classification → pair-text gate → `semantic_notices` row. Notices are viewed and dismissed via `memory_repair(task="notice", ...)`, and runtime control is via `memory_repair(task="semantic_control", ...)`. This is currently the only automated conflict-candidate source: the legacy vector conflict-candidate scan has been removed from the tool surface. `embedding`/`sqlite-vec` remain supported for semantic recall, section recall, and workspace aliasing, but no longer feed a conflict scanner.
+Pipeline: metadata-overlap coarse recall (subject + tags) → 0.5B pair classification → pair-text gate → `semantic_notices` row. Notices are viewed/dismissed/resolved via `memory_repair(task="notice", ...)`, and runtime control is via `memory_repair(task="semantic_control", ...)`; neither advisory-notice operation requires governance authorization. This complements the default deterministic structured-claim gate. The legacy vector conflict-candidate scan has been removed. `embedding`/`sqlite-vec` remain supported for semantic recall, section recall, and workspace candidate shortlists, but no longer feed a conflict scanner.
 
-GGUF classification is strictly serial (`max_concurrency=1`) in one resident child process. Each inference has a hard timeout; a stuck child is terminated and the next queued request starts a fresh process generation. Memory writes remain fail-open and never wait for semantic classification.
+GGUF classification is strictly serial (`max_concurrency=1`) in one child process. Write-time jobs are queued asynchronously and memory writes remain fail-open. The default 5 s job budget only decides whether another pair may start; each started inference has its own 30 s hard timeout, while model loading has a separate 120 s timeout. A timed-out child is terminated before a later request can start a fresh generation. `memory(action="status")` and `memory_repair(task="semantic_control", data={"action":"status"})` expose worker/backend state, generation, PID/in-flight details, timeout/restart counters, and configured budgets.
 
 #### Backup-only replay
 
-When SQLite is unavailable, a successful write may return `backup_only=true`; the record is preserved in the configured JSONL file but is not searchable yet. Memory Arbiter emits a compact `backup_replay_pending` notice when replayable entries exist. Preview without changing state:
+When SQLite is unavailable **or unwritable**, a write attempts one append-only schema-1 JSONL envelope and returns `backup_only=true` only if that backup succeeds; an unavailable/unwritable JSONL path makes the write fail rather than claim durability. Backup-only records have no SQLite `memory_id` and are not searchable yet. Once SQLite is usable, Memory Arbiter can attach a compact `backup_replay_pending` notice. Preview without changing state:
 
 ```text
 memory_repair(task="replay_backup", data={"dry_run": true})
 ```
 
-After the user confirms, replay with `dry_run=false, authorized=true`. Each memory and its replay receipt commit atomically, repeated runs are idempotent, invalid lines do not block valid entries, and the source JSONL is retained.
+After the user confirms, replay with `dry_run=false, authorized=true`. Each main memory row and replay receipt commit atomically and repeated runs are idempotent. Derived claims, embeddings, section split, and semantic enqueue run after that commit; warnings remain retryable through the replay receipt instead of rolling back the recovered row. A formal call processes at most 200 entries and reports `next_offset`/`has_more`. Invalid lines do not block valid entries, the source JSONL is retained, and only the schema-1 envelope is replayable—legacy flat JSONL rows are reported as unsupported and are not converted automatically. Under `strict`, replay preserves the backed-up canonical workspace and writes an unconfirmed canonical as `pending`.
 
-Product-tool inputs use strict types for known fields. Harmless unknown fields are ignored with a warning; likely misspellings of protected fields are rejected with `did_you_mean`. A single memory body is limited to 2 MiB of UTF-8 text.
+Product-tool validation rejects malformed known fields and enforces these main limits: content 2 MiB UTF-8; subject 2,000 characters; query 32,000 characters; at most 100 tags of 256 characters each; metadata 256 KiB JSON; workspace/source references 2,000 characters; batch IDs 1,000. IDs and bounded integer/timeout fields retain controlled numeric-string coercion; booleans are not accepted as IDs. Unknown harmless fields are stripped with a warning, while likely misspellings of protected fields are rejected with `did_you_mean`; invalid enums/timestamps and NaN/Inf are rejected.
 
 After a PyPI release, the optional production smoke can be run from the dedicated Python 3.13 environment with `mema-production-smoke --expected-version X.Y.Z`. It writes, reads, searches, retires, and verifies one uniquely marked record in the configured database; it is not a release gate.
 
@@ -299,13 +299,13 @@ The model is **not bundled** with the default PyPI/uvx package. Install the loca
 pip install "memory-arbiter-mcp[semantic-local]"   # pulls llama-cpp-python
 ```
 
-Then set `semantic_conflict.model_path` (or `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH`) and enable `semantic_conflict.enabled`. The feature is off by default. Processing is local-only; no memory content leaves the machine unless a remote backend is explicitly configured in a future version.
+Then set `semantic_conflict.model_path` (or `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH`). A configured model path auto-enables the feature unless `enabled=false` is explicit; without a path it remains off by default. Processing is local-only; the current implementation supports only the `local_gguf` backend.
 
 ### Optional: Semantic Recall
 
 By default, Memory Arbiter uses lexical recall: FTS5 trigram + BM25 + soft rerank. This is local, lightweight, and enough for many projects.
 
-For meaning-based recall, enable sqlite-vec and bring your own embedding model. The built-in automatic path supports local GGUF models through `llama-cpp-python`; remote embedding APIs can also be used by your own scripts through `memory_repair(task="resync_vectors")` (or the legacy `memory_store_embedding` under `legacy_full`).
+For meaning-based recall, enable sqlite-vec and bring your own embedding model. The built-in automatic path supports local GGUF models through `llama-cpp-python`. The default product surface does not accept externally generated embedding values: `memory_repair(task="resync_vectors")` only synchronizes existing vectors' parent-status metadata and does not write embeddings. A custom remote-embedding script must use the low-level `memory_store_embedding` tool exposed by `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`), or call the equivalent library API directly.
 
 ```bash
 pip install memory-arbiter-mcp[vec]
@@ -343,7 +343,7 @@ Under `strict`, by-id/detail paths (read, history, conflict detail, judgments, a
 
 Use `weak` when unsure. `strict` trades recallability for isolation: a wrong workspace can make memories silently unrecallable.
 
-Workspace aliases are canonicalized by embedding similarity. The default cosine cutoff is `0.25`.
+For `weak`/`strict`, exact canonicals and confirmed/rejected aliases are checked first. If local embeddings are ready, vector similarity (default cosine-distance cutoff `0.25`) supplies at most a shortlist; rules decide `AUTO`/`KEEP`/`ASK`, and the optional local GGUF backend may only suggest among those candidates. A busy/unavailable model falls back to `ASK`. Weak mode may auto-merge only high-confidence identity-grade relations; strict mode keeps unresolved new workspaces `pending`. User `accept_workspace_alias` / `reject_workspace_alias` decisions are persistent and authoritative.
 
 ### Optional: Long-document Section Split
 
@@ -377,7 +377,7 @@ Configuration is read from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbit
 | JSON path | Env fallback | Default | Use |
 |---|---|---|---|
 | `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | Shared SQLite path. |
-| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | Append-only backup when SQLite is read-only. |
+| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | Schema-1 append fallback when SQLite is unavailable or unwritable. |
 | `policy_path` | `MEMORY_ARBITER_POLICY` | none | Optional JSON policy file. |
 
 #### Search tuning
@@ -410,6 +410,27 @@ Configuration is read from `MEMORY_ARBITER_CONFIG`, then `~/.config/memory-arbit
 | `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` | none | GGUF embedding model path. |
 | `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | Auto-encode plain-text queries. |
 | `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | Auto-embed writes/edits. |
+
+#### Semantic conflict notices
+
+| JSON path | Env fallback | Default | Use |
+|---|---|---|---|
+| `semantic_conflict.enabled` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED` | `false` | Optional local semantic notices; setting `model_path` auto-enables unless explicitly false. |
+| `semantic_conflict.backend` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_BACKEND` | `local_gguf` | Only supported backend in this release. |
+| `semantic_conflict.model_path` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH` | none | Local classifier GGUF path. |
+| `semantic_conflict.pair_text_gate` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE` | `medium` | `medium` or lower-noise `strong`. |
+| `semantic_conflict.on_write` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_ON_WRITE` | `async` | `async` or `off`; writes never wait for classification. |
+| `semantic_conflict.queue_max_size` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_QUEUE_MAX_SIZE` | `100` | Bounded worker queue; same-memory jobs coalesce. |
+| `semantic_conflict.candidate_limit` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_CANDIDATE_LIMIT` | `30` | Metadata-overlap candidates fetched before pair limiting. |
+| `semantic_conflict.pair_limit` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_PAIR_LIMIT` | `10` | Maximum pairs considered per write-time job. |
+| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | matching `MEMORY_ARBITER_SEMANTIC_CONFLICT_*` vars | `1024` / `4` / `128` | Local GGUF runtime sizing. |
+| `semantic_conflict.resident` / `preload` | matching `MEMORY_ARBITER_SEMANTIC_CONFLICT_*` vars | `true` / `false` | Keep loaded after use / begin loading at startup. |
+| `semantic_conflict.job_timeout_ms` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_JOB_TIMEOUT_MS` | `5000` | Between-pair job budget, not an inference timeout. |
+| `semantic_conflict.inference_timeout_ms` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_INFERENCE_TIMEOUT_MS` | `30000` | Hard deadline for one started inference. |
+| `semantic_conflict.load_timeout_ms` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_LOAD_TIMEOUT_MS` | `120000` | Separate model startup/load deadline. |
+| `semantic_conflict.min_pair_budget_ms` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_MIN_PAIR_BUDGET_MS` | `1000` | Do not start another pair below this remaining job budget. |
+
+`semantic_conflict.max_concurrency` is reserved and clamped to `1`.
 
 #### Long-document split
 
@@ -464,6 +485,8 @@ python3.11 -m pip install -r requirements.txt
 python3.11 -m pytest
 ```
 
+CI treats the core test matrix on Python 3.11/3.12/3.13, the Python 3.12 sqlite-vec job, quality/security checks, and build/twine validation as required workflow jobs. `mema-production-smoke` is intentionally manual after release and is not a CI or publication gate. On Python 3.13, installing `[semantic-local]` may compile `llama-cpp-python` locally when no matching wheel is available, so a C/C++ toolchain and CMake may be required.
+
 ### License
 
 Apache License 2.0. Copyright (c) 2026 张志维 (billy12151).
@@ -489,7 +512,7 @@ memory(action="find", data={"query": "认证迁移方案"})  → 3 条精准结�
 
 **共享记忆只是起点，事实治理才是护城河。**
 
-默认完全本地：一个 SQLite 数据库，不需要 Postgres、Redis、托管 memory 服务，也不在 server 内调用大模型。可选语义召回使用你自己的本地 GGUF embedding 模型；可选更新检查可以关闭。
+核心默认完全本地且无需模型：一个 SQLite 数据库，不需要 Postgres、Redis、托管 memory 服务；字面召回、结构化 claim 检测、治理和修复都不要求模型调用。可选语义召回与语义冲突 notice 使用你自己的本地 GGUF 模型；可选更新检查可以关闭。
 
 ### 它解决什么问题
 
@@ -515,8 +538,8 @@ memory-arbiter 把这些风险变成显式的数据结构：来源标签、可�
 | 精准召回 | 扁平 `MEMORY.md` 或大块向量记忆容易返回过多上下文。 | `memory(action="find")` 只返回少量相关、排序后的条目，而不是加载全文。 |
 | 来源可信度 | 用户确认、文档提取、AI 猜测看起来一样。 | `source_type`、`confidence`、`user_confirmed` 和 locked 记录让可信度可见。 |
 | 时间演进 | 旧决策和新决策并存，模型可能跟着旧口径走。 | `event_time`、`ingest_time`、`version`、history（`memory_review`）、supersede（`memory_govern`）保留演进链。 |
-| 冲突处理 | 两条记忆可以互相矛盾，却同时被召回。 | 冲突扫描、冲突记录、冲突信号、resolve/supersede 工具让矛盾可见、可处理。 |
-| 写入安全 | last-write-wins 会静默覆盖，或继续堆积矛盾事实。 | v0.9 结构化 claim 门禁检测确定性事实碰撞，使用前要求宿主 LLM 判断。 |
+| 冲突处理 | 两条记忆可以互相矛盾，却同时被召回。 | 确定性结构化 claim 碰撞、可选写入时语义 notice、冲突记录/信号和显式治理让矛盾可见；系统不再运行定期向量扫描器。 |
+| 写入安全 | last-write-wins 会静默覆盖，或继续堆积矛盾事实。 | 结构化 claim 门禁把显式碰撞持久化为 `pending_llm`，受影响 claim 在使用前必须由宿主 LLM 携 snapshot pins 提交 judgment。judgment 只是 guidance，不会自动编辑或废弃记忆。 |
 | 长文档 | 相关段落埋在 10K+ 字符的长记忆里。 | 分段索引返回命中段落，而不是让模型扫整篇文档。 |
 | 项目边界 | 全局记忆容易把无关项目事实串在一起。 | workspace 隔离支持 `none`、`weak`、`strict` 三档，并做别名归一。 |
 | 长期健康 | 用户往往等到回答变差才发现记忆库有问题。 | `doctor` 检查配置、向量链、分段、claims、一致性、容量和冲突积压。 |
@@ -542,7 +565,7 @@ memory-arbiter 不靠“别人不能共享，我们能共享”来做差异化�
 | 普通 markdown memory | 不全文加载 prompt，而是精准召回，并保留历史和冲突状态。 |
 | 向量 memory | 不只找相似内容，还要知道来源可信度、过期状态、废弃状态和冲突状态。 |
 | 图 memory | 不只知道什么和什么有关，还要知道什么是当前的、可信的、冲突的、可安全使用的。 |
-| 托管 memory | 本地 SQLite、调用方自有策略、无托管数据库、无 server 侧 LLM 调用。 |
+| 托管 memory | 本地 SQLite、调用方自有策略、无托管数据库、默认核心无需模型；可选本地 GGUF 能力仍留在本机。 |
 | 通用 MCP memory | 事实治理层：可信度标签、时间演进、结构化 claim 门禁、doctor 和修复工具。 |
 
 memory-arbiter 有轻量图关系信号：事实时间、写入时间、entity/scope、冲突边、废弃链、分段和 workspace 边界。但它不把产品定位成重型图数据库；原文事实是主资产，派生索引用来辅助治理。
@@ -581,15 +604,15 @@ memory-arbiter 有轻量图关系信号：事实时间、写入时间、entity/s
 - **精准召回** —— 返回相关条目，而不是每轮加载完整 memory 文件。
 - **可信度分层** —— 区分用户确认、文档提取、AI 生成和未知来源。
 - **时间历史** —— 跟踪事实时间、写入时间、版本、历史快照和废弃链。
-- **冲突仲裁** —— 发现、记录、查看、关闭或废弃矛盾记忆。
-- **结构化 claim 门禁** —— v0.9 在写入/编辑时检测确定性 claim 冲突，使用前要求宿主 LLM 判断。
-- **长文档分段** —— 把长记忆拆成可搜索段落，返回命中段而不是整篇。
+- **冲突治理** —— 确定性 claim 碰撞和可选语义 notice 发现候选，agent/用户再显式查看、判断、关闭或废弃；没有定期向量扫描器。
+- **结构化 claim 门禁** —— 写入/编辑时检测确定性 claim 冲突，受影响 claim 使用前要求携 snapshot pins 的宿主 LLM judgment；receipt 不修改任何一侧记忆。
+- **长文档分段** —— 后台异步把安全 Markdown 标题拆成可搜索段落；结构不明确的长文返回 Agent 续接请求。
 - **workspace 隔离** —— 支持 `none`、`weak`、`strict` 三档和别名归一。
 - **tag 精排与过滤** —— tag 是离散标签信号，不是弱文本片段。
 - **语义召回** —— 可选本地 GGUF embedding；默认仍是轻量字面检索。
 - **doctor 体检** —— 只读检查配置、向量链、分段、claims、一致性、容量和冲突。
-- **逐级降级** —— sqlite-vec → FTS5 → LIKE → JSONL 备份，缺可选组件也继续工作。
-- **本地优先** —— 纯 SQLite，无托管数据库，无 Redis/Postgres 要求，无 server 侧 LLM 依赖。
+- **逐级降级** —— 召回按 sqlite-vec → FTS5 → LIKE 降级；SQLite 不可用或不可写时尝试 schema-1 JSONL 备份，追加失败会明确报错，不会虚报已持久化。
+- **本地优先** —— 纯 SQLite，无托管数据库，无 Redis/Postgres 要求，核心无需模型；本地 GGUF 能力按需开启。
 
 > **它不是什么：** memory-arbiter 不是 LLM，也不替代你的 AI 客户端。它是模型下面的一层结构化存储、检索、仲裁和诊断工具。
 
@@ -736,21 +759,21 @@ v0.11.0 起默认 MCP 工具面改为任务型接口。新客户端默认只看�
 
 memory-arbiter 可以可选地在写入后运行本地 Qwen2.5-0.5B 模型，生成**语义冲突 notice**——一种可审阅的轻量提示，表示新写入的记忆可能与某条已有记忆在语义上冲突。模型只做候选信号，不做最终裁决；是否变成可见 notice 由 pair 文本 gate 决定（默认 `medium` 平衡召回，`strong` 更低打扰、更高置信）。
 
-链路：metadata-overlap 粗召回（subject + tags）→ 0.5B pair 分类 → pair 文本 gate → `semantic_notices` 行。notice 通过 `memory_repair(task="notice", ...)` 查看/关闭，运行时控制走 `memory_repair(task="semantic_control", ...)`。这是当前**唯一的自动冲突候选来源**：旧的向量冲突候选 scan 已从工具面移除。`embedding`/`sqlite-vec` 仍用于语义召回、分段召回和 workspace alias，但不再喂给任何冲突扫描器。
+链路：metadata-overlap 粗召回（subject + tags）→ 0.5B pair 分类 → pair 文本 gate → `semantic_notices` 行。notice 通过 `memory_repair(task="notice", ...)` 查看/dismiss/resolve，运行时控制走 `memory_repair(task="semantic_control", ...)`；二者都不需要治理授权。这是默认确定性 structured-claim 门禁之外的可选补充。旧的向量冲突候选 scan 已移除。`embedding`/`sqlite-vec` 仍用于语义召回、分段召回和 workspace 候选 shortlist，但不再喂给任何冲突扫描器。
 
-GGUF 分类严格串行（`max_concurrency=1`），由一个常驻子进程执行。每次推理都有硬超时；卡住的子进程会被终止，队列中的下一项使用新进程代际继续。主记忆写入始终 fail-open，不等待语义分类。
+GGUF 分类严格串行（`max_concurrency=1`），由单个子进程执行。写入时 job 异步入队，主记忆写入始终 fail-open。默认 5 秒 job budget 只决定是否开始下一对；已经开始的单次推理由独立 30 秒硬超时保护，模型加载另有 120 秒超时。超时子进程会先被终止，后续请求才能启动新代际。`memory(action="status")` 和 `memory_repair(task="semantic_control", data={"action":"status"})` 会暴露 worker/backend 状态、generation、PID/in-flight、超时/重启计数和当前预算。
 
 #### Backup-only 恢复
 
-SQLite 不可用时，成功写入可能返回 `backup_only=true`：原始记录已进入配置的 JSONL，但尚不可搜索。发现可恢复记录时，Memory Arbiter 会返回紧凑的 `backup_replay_pending` notice。先执行只读预览：
+SQLite **不可用或不可写**时，写入会尝试追加一个 schema-1 JSONL envelope；只有追加成功才返回 `backup_only=true`。JSONL 路径不可用/不可写时本次写入失败，不会声称已备份。backup-only 记录没有 SQLite `memory_id`，也尚不可搜索。SQLite 恢复可用后，Memory Arbiter 可附带紧凑的 `backup_replay_pending` notice。先执行只读预览：
 
 ```text
 memory_repair(task="replay_backup", data={"dry_run": true})
 ```
 
-用户确认后，再用 `dry_run=false, authorized=true` 正式恢复。主记忆与 replay receipt 原子提交，重复执行保持幂等，坏行不会阻断其他有效记录，原 JSONL 保留不删除。
+用户确认后，再用 `dry_run=false, authorized=true` 正式恢复。主 memory row 与 replay receipt 原子提交，重复执行保持幂等。claims、embedding、分段和 semantic enqueue 是提交后的派生后处理；失败写入 receipt 状态供后续重试，不回滚已经恢复的主记录。正式单次最多处理 200 条，并返回 `next_offset`/`has_more`。坏行不阻断其他有效记录，原 JSONL 保留不删除。只支持 schema-1 envelope；旧 flat JSONL 会明确报告不支持，不自动转换。`strict` 下恢复沿用备份的 canonical workspace，未确认 canonical 写为 `pending`。
 
-产品工具对已知字段执行严格类型校验。普通多余字段会被忽略并返回 warning；疑似受保护字段拼写错误会拒绝并返回 `did_you_mean`。单条 memory 正文上限为 2 MiB UTF-8。
+产品工具校验已知字段，并执行主要资源上限：正文 2 MiB UTF-8、subject 2,000 字符、query 32,000 字符、最多 100 个 tag 且单个 256 字符、metadata JSON 256 KiB、workspace/source_ref 2,000 字符、批量 ID 1,000 个。ID 和有界整数/timeout 保留受控数字字符串 coercion，但 bool 不能冒充 ID。普通未知字段会剥离并返回 warning；疑似受保护字段拼写错误会拒绝并返回 `did_you_mean`；非法 enum/时间和 NaN/Inf 会被拒绝。
 
 PyPI 发版后，可在独立 Python 3.13 正式环境中按需运行 `mema-production-smoke --expected-version X.Y.Z`。它会在正式配置库中写入、读取、搜索、过期并核验一条唯一标记记录；该检查不是发布门。
 
@@ -760,13 +783,13 @@ PyPI 发版后，可在独立 Python 3.13 正式环境中按需运行 `mema-prod
 pip install "memory-arbiter-mcp[semantic-local]"   # 拉取 llama-cpp-python
 ```
 
-再设置 `semantic_conflict.model_path`（或 `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH`）并开启 `semantic_conflict.enabled`。该功能默认关闭。处理完全本地，除非未来版本显式配置远程后端，否则记忆内容不会离开本机。
+再设置 `semantic_conflict.model_path`（或 `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH`）。配置模型路径后会自动启用，除非显式设 `enabled=false`；没有路径时默认关闭。处理完全本地，当前版本只支持 `local_gguf` backend。
 
 ### 可选：语义召回
 
 默认使用字面召回：FTS5 trigram + BM25 + 软重排。它完全本地、轻量，对很多项目已经够用。
 
-需要“按意思找”时，启用 sqlite-vec 并自带 embedding 模型。内置自动路径支持通过 `llama-cpp-python` 使用本地 GGUF；远程 embedding API 也可以由你自己的脚本调用，再通过 `memory_repair(task="resync_vectors")` 写入（或在 `legacy_full` 下用 `memory_store_embedding`）。
+需要“按意思找”时，启用 sqlite-vec 并自带 embedding 模型。内置自动路径支持通过 `llama-cpp-python` 使用本地 GGUF。默认产品工具面不接收外部生成的 embedding 值：`memory_repair(task="resync_vectors")` 只同步已有向量的父记录状态元数据，不写入 embedding。自定义远程 embedding 脚本必须设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`（或 `full`）后调用低层 `memory_store_embedding`，或直接调用等价的 library API。
 
 ```bash
 pip install memory-arbiter-mcp[vec]
@@ -804,7 +827,7 @@ tag 被当作离散标签，而不是一句普通文本。带有 `v0.7.2` 和 `r
 
 不确定时用 `weak`。`strict` 是用召回性换隔离性：workspace 传错会让记忆静默不可召回。
 
-workspace 别名通过 embedding 相似度归一，默认余弦阈值是 `0.25`。
+`weak`/`strict` 会先查 exact canonical 和已确认/已拒绝 alias。若本地 embedding 可用，向量相似度（默认余弦距离阈值 `0.25`）只提供候选 shortlist；规则层决定 `AUTO`/`KEEP`/`ASK`，可选本地 GGUF 也只能在候选中给建议。模型忙或不可用时 fallback 为 `ASK`。`weak` 只会对高置信身份级关系自动合并；`strict` 对未决新 workspace 保持 `pending`。用户通过 `accept_workspace_alias` / `reject_workspace_alias` 作出的决定会持久化，并拥有最终权。
 
 ### 可选：长文档分段
 
@@ -838,7 +861,7 @@ memory(action="read", data={"memory_id": id, "sections": "catalog" | "all"})
 | JSON 路径 | env 兜底 | 默认值 | 用途 |
 |---|---|---|---|
 | `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | 共享 SQLite 路径。 |
-| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | SQLite 只读时的追加备份。 |
+| `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | SQLite 不可用或不可写时的 schema-1 追加兜底。 |
 | `policy_path` | `MEMORY_ARBITER_POLICY` | 无 | 可选策略 JSON。 |
 
 #### 检索调优
@@ -871,6 +894,27 @@ memory(action="read", data={"memory_id": id, "sections": "catalog" | "all"})
 | `embedding.model_path` | `MEMORY_ARBITER_EMBEDDING_MODEL_PATH` | 无 | GGUF embedding 模型路径。 |
 | `embedding.auto_query` | `MEMORY_ARBITER_EMBEDDING_AUTO_QUERY` | `true` | 自动向量化纯文本查询。 |
 | `embedding.auto_write` | `MEMORY_ARBITER_EMBEDDING_AUTO_WRITE` | `true` | 写入/编辑时自动灌向量。 |
+
+#### 语义冲突 notice
+
+| JSON 路径 | env 兜底 | 默认值 | 用途 |
+|---|---|---|---|
+| `semantic_conflict.enabled` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED` | `false` | 可选本地语义 notice；设置 `model_path` 后自动启用，除非显式 false。 |
+| `semantic_conflict.backend` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_BACKEND` | `local_gguf` | 当前版本唯一支持的 backend。 |
+| `semantic_conflict.model_path` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_MODEL_PATH` | 无 | 本地分类 GGUF 路径。 |
+| `semantic_conflict.pair_text_gate` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE` | `medium` | `medium` 或低打扰的 `strong`。 |
+| `semantic_conflict.on_write` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_ON_WRITE` | `async` | `async` 或 `off`；写入不等待分类。 |
+| `semantic_conflict.queue_max_size` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_QUEUE_MAX_SIZE` | `100` | 有界 worker 队列；同 memory job 合并。 |
+| `semantic_conflict.candidate_limit` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_CANDIDATE_LIMIT` | `30` | pair 限制前读取的 metadata-overlap 候选数。 |
+| `semantic_conflict.pair_limit` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_PAIR_LIMIT` | `10` | 每个写入 job 最多考虑的 pair 数。 |
+| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | 对应 `MEMORY_ARBITER_SEMANTIC_CONFLICT_*` | `1024` / `4` / `128` | 本地 GGUF 运行参数。 |
+| `semantic_conflict.resident` / `preload` | 对应 `MEMORY_ARBITER_SEMANTIC_CONFLICT_*` | `true` / `false` | 使用后常驻 / 启动时预加载。 |
+| `semantic_conflict.job_timeout_ms` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_JOB_TIMEOUT_MS` | `5000` | pair 之间的 job budget，不是单次推理超时。 |
+| `semantic_conflict.inference_timeout_ms` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_INFERENCE_TIMEOUT_MS` | `30000` | 已启动单次推理的硬超时。 |
+| `semantic_conflict.load_timeout_ms` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_LOAD_TIMEOUT_MS` | `120000` | 独立模型启动/加载超时。 |
+| `semantic_conflict.min_pair_budget_ms` | `MEMORY_ARBITER_SEMANTIC_CONFLICT_MIN_PAIR_BUDGET_MS` | `1000` | 剩余 job budget 低于此值不再启动下一 pair。 |
+
+`semantic_conflict.max_concurrency` 为保留字段，固定钳制为 `1`。
 
 #### 长文档分段
 
@@ -924,6 +968,8 @@ doctor 只读，并且在 MCP server 外运行，所以 MCP 进程挂了也能�
 python3.11 -m pip install -r requirements.txt
 python3.11 -m pytest
 ```
+
+CI 中 core Python 3.11/3.12/3.13 matrix、Python 3.12 sqlite-vec job、质量/安全检查和 build/twine 校验都是正式 workflow job。`mema-production-smoke` 只在发版后人工按需执行，不是 CI 或发布门禁。Python 3.13 安装 `[semantic-local]` 时，如果没有匹配的 `llama-cpp-python` wheel，可能需要本机编译，因此应准备 C/C++ toolchain 和 CMake。
 
 ### License
 

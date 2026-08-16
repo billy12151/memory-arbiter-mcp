@@ -689,7 +689,7 @@ class IsolatedGGUFSemanticBackend:
         n_ctx: int = 1024,
         n_threads: int = 4,
         n_batch: int = 128,
-        hard_timeout_ms: int = 5_000,
+        hard_timeout_ms: int = 30_000,
         load_timeout_ms: int = 120_000,
         process_target: Any = _semantic_inference_process,
     ) -> None:
@@ -697,8 +697,8 @@ class IsolatedGGUFSemanticBackend:
         self.n_ctx = int(n_ctx)
         self.n_threads = int(n_threads)
         self.n_batch = int(n_batch)
-        self.hard_timeout_ms = int(hard_timeout_ms)
-        self.load_timeout_ms = max(int(load_timeout_ms), self.hard_timeout_ms)
+        self.hard_timeout_ms = max(1, int(hard_timeout_ms))
+        self.load_timeout_ms = max(1, int(load_timeout_ms))
         self._process_target = process_target
         self._ctx = multiprocessing.get_context("spawn")
         self._request_lock = threading.Lock()
@@ -733,7 +733,16 @@ class IsolatedGGUFSemanticBackend:
             name="memory-arbiter-semantic-inference",
             daemon=True,
         )
-        process.start()
+        try:
+            process.start()
+        except BaseException:
+            parent.close()
+            child.close()
+            try:
+                process.close()
+            except (AttributeError, ValueError):
+                pass
+            raise
         child.close()
         self._process = process
         self._conn = parent
@@ -758,10 +767,20 @@ class IsolatedGGUFSemanticBackend:
             if process.is_alive():  # pragma: no cover - defensive OS fallback
                 process.kill()
                 process.join(timeout=1.0)
+            try:
+                process.close()
+            except (AttributeError, ValueError):
+                pass
             if count_restart:
                 self._restarts += 1
 
     def _request(self, command: str, **payload: Any) -> Any:
+        # Fast rejection matters for synchronous workspace suggestions while a
+        # prior inference owns the single-flight lock. Re-check after acquiring
+        # it to close the race with disable.
+        with self._state_lock:
+            if self._disabled:
+                raise RuntimeError("semantic backend disabled")
         with self._request_lock:  # Strict max_concurrency=1, including load.
             with self._state_lock:
                 self._start_locked()
@@ -791,20 +810,29 @@ class IsolatedGGUFSemanticBackend:
             finally:
                 with self._state_lock:
                     self._inflight_started = None
-                    if process is not None and not process.is_alive() and self._process is process:
+                    if process is not None and self._process is process and not process.is_alive():
                         self._terminate_locked(count_restart=True)
 
     def _exchange(self, conn: Any, command: str, timeout_ms: int, **payload: Any) -> Any:
         try:
                 conn.send({"command": command, **payload})
                 timeout = max(0.001, timeout_ms / 1000.0)
-                if not conn.poll(timeout):
+                deadline = time.monotonic() + timeout
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        with self._state_lock:
+                            self._timed_out += 1
+                            phase = "load" if command == "load" else "inference"
+                            self._last_error = f"semantic {phase} hard timeout after {timeout_ms}ms"
+                            if self._conn is conn:
+                                self._terminate_locked(count_restart=True)
+                        raise TimeoutError(self._last_error)
+                    if conn.poll(min(remaining, 0.05)):
+                        break
                     with self._state_lock:
-                        self._timed_out += 1
-                        phase = "load" if command == "load" else "inference"
-                        self._last_error = f"semantic {phase} hard timeout after {timeout_ms}ms"
-                        self._terminate_locked(count_restart=True)
-                    raise TimeoutError(self._last_error)
+                        if self._conn is not conn:
+                            raise EOFError("semantic child connection was closed")
                 response = conn.recv()
                 if not response.get("ok"):
                     self._last_error = str(response.get("error") or "semantic child error")
@@ -836,13 +864,16 @@ class IsolatedGGUFSemanticBackend:
             return WorkspaceCandidateSignal(None, "uncertain", None, "", "", str(exc))
 
     def unload(self, timeout: float = 30.0, disable: bool = False) -> dict[str, Any]:
+        if disable:
+            # Admission closes before waiting on the single-flight lock. A timed
+            # out unload must still leave queued/new callers unable to start.
+            with self._state_lock:
+                self._disabled = True
         acquired = self._request_lock.acquire(timeout=max(0.0, float(timeout)))
         if not acquired:
             return {"ok": False, "unloaded": False, "timeout": True, "inflight": 1, "retry_hint": "retry after inference completes", "generation": self._generation}
         try:
             with self._state_lock:
-                if disable:
-                    self._disabled = True
                 self._terminate_locked(count_restart=False)
                 return {"ok": True, "unloaded": True, "timeout": False, "inflight": 0, "retry_hint": None, "generation": self._generation}
         finally:

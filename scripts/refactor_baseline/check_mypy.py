@@ -20,35 +20,39 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 BASELINE = Path(__file__).resolve().parent / "mypy_strict_baseline.txt"
-PY = Path(sys.executable)
-
-
 _LINE_RE = re.compile(r"(memory_arbiter/[a-z_0-9/]+\.py):\d+:")
+_SUMMARY_RE = re.compile(
+    r"^(?:Found (?P<errors>\d+) errors? in \d+ files? \(checked \d+ source files?\)|"
+    r"Success: no issues found in \d+ source files?)$",
+    re.MULTILINE,
+)
 
 _OPTIONAL_IMPORTS = ('module named "llama_cpp"', 'module named "sqlite_vec"')
 
 
 def _strip_lineno(err: str) -> str:
-    """Normalise an error to file + message, dropping the line number.
-
-    Move commits shorten/lengthen functions, shifting the line an error is
-    reported on without changing the error itself. Comparing by full
-    ``file:line: message`` would flag pure line-drift as a NEW error. We only
-    care whether the *kind* of error at a *file* is new.
-    """
+    """Normalise location and mypy-version-only diagnostic wording drift."""
     out = _LINE_RE.sub(r"\1:@:", err)
+    out = re.sub(r" on line \d+", " on line @", out)
+    out = out.replace(" | SupportsTrunc", "")
+    out = re.sub(
+        r'Value of type ".+" is not indexable',
+        'Value is not indexable',
+        out,
+    )
     return out.strip()
 
 
 def current_errors() -> list[str]:
     proc = subprocess.run(
-        [str(PY), "-m", "mypy", "--strict", "memory_arbiter/"],
+        [sys.executable, "-m", "mypy", "--strict", "memory_arbiter/"],
         cwd=ROOT, capture_output=True, text=True,
     )
     out = proc.stdout + proc.stderr
-    if proc.returncode not in {0, 1} or "No module named mypy" in out:
+    summary = _SUMMARY_RE.search(out)
+    if proc.returncode not in {0, 1} or "No module named mypy" in out or summary is None:
         raise RuntimeError(
-            f"mypy execution failed (exit={proc.returncode}):\n{out.strip()}"
+            f"mypy execution failed or emitted no parseable summary (exit={proc.returncode}):\n{out.strip()}"
         )
     lines = [
         ln for ln in out.splitlines()
@@ -57,6 +61,12 @@ def current_errors() -> list[str]:
             and any(module in ln for module in _OPTIONAL_IMPORTS)
         )
     ]
+    reported_errors = int(summary.group("errors") or 0)
+    if proc.returncode != (1 if reported_errors else 0) or reported_errors < len(lines):
+        raise RuntimeError(
+            "mypy return code/summary/error output disagree "
+            f"(exit={proc.returncode}, summary={reported_errors}, parsed={len(lines)})"
+        )
     return sorted(_strip_lineno(re.sub(r" \[[a-z-]+\]$", "", ln)) for ln in lines)
 
 
