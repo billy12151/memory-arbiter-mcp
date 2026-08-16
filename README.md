@@ -67,7 +67,7 @@ Most agents only need four product tools (the default MCP surface):
 1. **`memory`** — daily operations: `remember` new facts, `find` active facts, `read` a memory by ID, `update` an existing current memory, `judge` conflicts, and `status`. Call `action=help` for field examples.
 2. **`memory_review`** — read-only inspection: overview, doctor, conflicts, conflict detail, judgments, history, expired memories, audit, and entities.
 3. **`memory_govern`** — explicit user-authorized governance: retire a whole memory, resolve a conflict, confirm a memory, or correct a judgment. Not for ordinary updates.
-4. **`memory_repair`** — maintenance: section split, rebuild claims/embeddings, cleanup, vector resync, entity backfill, and pending activation. Prefer dry-run first.
+4. **`memory_repair`** — maintenance: section split, rebuild claims/embeddings, cleanup, vector resync, entity backfill, pending activation, and backup replay. Prefer dry-run first.
 
 Low-level tool implementations remain in the codebase and are reused by the product tools, but their schemas are not exposed by default. Set `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`) to expose them alongside the product tools.
 
@@ -264,7 +264,7 @@ v0.11.0 introduces a task-oriented default MCP surface. New clients see four pro
 | `memory` | Daily memory operations: remember, find, read, update, submit conflict judgment, and status. Use `action=help` for command-specific fields. |
 | `memory_review` | Read-only inspection: overview, doctor, conflicts, conflict detail, judgments, history, expired memories, audit, and entities. |
 | `memory_govern` | Explicit user-authorized governance: retire a whole memory, resolve a conflict, confirm a memory, correct a judgment, and govern workspace aliases / pending workspaces. Do not use for ordinary updates. |
-| `memory_repair` | Maintenance and repair: split, rebuild claims/embeddings, cleanup, vector resync, entity backfill, and pending activation. Prefer dry-run first. |
+| `memory_repair` | Maintenance and repair: split, rebuild claims/embeddings, cleanup, vector resync, entity backfill, pending activation, and backup replay. Prefer dry-run first. |
 
 Low-level tool implementations remain inside Memory Arbiter and are reused by the product tools, but their schemas are not exposed by default. This keeps ordinary Agent context smaller and makes the daily path easier to choose.
 
@@ -276,6 +276,22 @@ Advanced compatibility: set `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`
 Memory Arbiter can optionally run a local Qwen2.5-0.5B model after writes to produce **semantic conflict notices** — lightweight, reviewable hints that a new memory may semantically conflict with an existing one. The model is only a candidate signal, never the final judge: whether a candidate becomes a visible notice is decided by pair-text gates (`medium` by default for balanced recall; `strong` for lower-noise, higher-confidence notices).
 
 Pipeline: metadata-overlap coarse recall (subject + tags) → 0.5B pair classification → pair-text gate → `semantic_notices` row. Notices are viewed and dismissed via `memory_repair(task="notice", ...)`, and runtime control is via `memory_repair(task="semantic_control", ...)`. This is currently the only automated conflict-candidate source: the legacy vector conflict-candidate scan has been removed from the tool surface. `embedding`/`sqlite-vec` remain supported for semantic recall, section recall, and workspace aliasing, but no longer feed a conflict scanner.
+
+GGUF classification is strictly serial (`max_concurrency=1`) in one resident child process. Each inference has a hard timeout; a stuck child is terminated and the next queued request starts a fresh process generation. Memory writes remain fail-open and never wait for semantic classification.
+
+#### Backup-only replay
+
+When SQLite is unavailable, a successful write may return `backup_only=true`; the record is preserved in the configured JSONL file but is not searchable yet. Memory Arbiter emits a compact `backup_replay_pending` notice when replayable entries exist. Preview without changing state:
+
+```text
+memory_repair(task="replay_backup", data={"dry_run": true})
+```
+
+After the user confirms, replay with `dry_run=false, authorized=true`. Each memory and its replay receipt commit atomically, repeated runs are idempotent, invalid lines do not block valid entries, and the source JSONL is retained.
+
+Product-tool inputs use strict types for known fields. Harmless unknown fields are ignored with a warning; likely misspellings of protected fields are rejected with `did_you_mean`. A single memory body is limited to 2 MiB of UTF-8 text.
+
+After a PyPI release, the optional production smoke can be run from the dedicated Python 3.13 environment with `mema-production-smoke --expected-version X.Y.Z`. It writes, reads, searches, retires, and verifies one uniquely marked record in the configured database; it is not a release gate.
 
 The model is **not bundled** with the default PyPI/uvx package. Install the local runtime extra and point it at a GGUF file:
 
@@ -513,7 +529,7 @@ memory-arbiter 把这些风险变成显式的数据结构：来源标签、可�
 1. **`memory`** —— 日常操作：`remember` 写新事实、`find` 搜活跃事实、`read` 按 ID 取记忆、`update` 更新已有 current 记忆、`judge` 提交冲突判断、`status` 看运行状态。不确定字段时用 `action=help`。
 2. **`memory_review`** —— 只读审计：overview、doctor、conflicts、conflict_detail、judgments、history、expired、audit、entities。
 3. **`memory_govern`** —— 用户授权治理：整条记忆过期、关闭冲突、确认记忆、纠正 judgment。不要用于普通更新。
-4. **`memory_repair`** —— 维护修复：分段、重建 claims/embeddings、清理、向量状态同步、entity 回灌、pending 激活。优先 dry-run。
+4. **`memory_repair`** —— 维护修复：分段、重建 claims/embeddings、清理、向量状态同步、entity 回灌、pending 激活、备份恢复。优先 dry-run。
 
 低层工具实现仍保留在代码库内并由产品工具复用，但默认不暴露它们的 schema。设置 `MEMORY_ARBITER_TOOL_PROFILE=legacy_full`（或 `full`）可同时暴露低层工具。
 
@@ -710,7 +726,7 @@ v0.11.0 起默认 MCP 工具面改为任务型接口。新客户端默认只看�
 | `memory` | 日常记忆操作：remember、find、read、update、judge、status。需要参数示例时用 `action=help`。 |
 | `memory_review` | 只读审计：overview、doctor、conflicts、conflict_detail、judgments、history、expired、audit、entities。 |
 | `memory_govern` | 用户授权治理：整条记忆过期、关闭冲突、确认记忆、纠正 judgment，以及 workspace 别名 / pending workspace 治理。不要用于普通更新。 |
-| `memory_repair` | 维护修复：分段、重建 claims/embeddings、清理、向量状态同步、entity 回灌、pending 激活。优先 dry-run。 |
+| `memory_repair` | 维护修复：分段、重建 claims/embeddings、清理、向量状态同步、entity 回灌、pending 激活、备份恢复。优先 dry-run。 |
 
 低层工具实现仍保留在 Memory Arbiter 内部，并由上述产品工具复用，但默认不再把它们的 schema 暴露给 Agent。这样可以减少常驻 MCP 工具 token，也让日常路径更容易选择。
 
@@ -721,6 +737,22 @@ v0.11.0 起默认 MCP 工具面改为任务型接口。新客户端默认只看�
 memory-arbiter 可以可选地在写入后运行本地 Qwen2.5-0.5B 模型，生成**语义冲突 notice**——一种可审阅的轻量提示，表示新写入的记忆可能与某条已有记忆在语义上冲突。模型只做候选信号，不做最终裁决；是否变成可见 notice 由 pair 文本 gate 决定（默认 `medium` 平衡召回，`strong` 更低打扰、更高置信）。
 
 链路：metadata-overlap 粗召回（subject + tags）→ 0.5B pair 分类 → pair 文本 gate → `semantic_notices` 行。notice 通过 `memory_repair(task="notice", ...)` 查看/关闭，运行时控制走 `memory_repair(task="semantic_control", ...)`。这是当前**唯一的自动冲突候选来源**：旧的向量冲突候选 scan 已从工具面移除。`embedding`/`sqlite-vec` 仍用于语义召回、分段召回和 workspace alias，但不再喂给任何冲突扫描器。
+
+GGUF 分类严格串行（`max_concurrency=1`），由一个常驻子进程执行。每次推理都有硬超时；卡住的子进程会被终止，队列中的下一项使用新进程代际继续。主记忆写入始终 fail-open，不等待语义分类。
+
+#### Backup-only 恢复
+
+SQLite 不可用时，成功写入可能返回 `backup_only=true`：原始记录已进入配置的 JSONL，但尚不可搜索。发现可恢复记录时，Memory Arbiter 会返回紧凑的 `backup_replay_pending` notice。先执行只读预览：
+
+```text
+memory_repair(task="replay_backup", data={"dry_run": true})
+```
+
+用户确认后，再用 `dry_run=false, authorized=true` 正式恢复。主记忆与 replay receipt 原子提交，重复执行保持幂等，坏行不会阻断其他有效记录，原 JSONL 保留不删除。
+
+产品工具对已知字段执行严格类型校验。普通多余字段会被忽略并返回 warning；疑似受保护字段拼写错误会拒绝并返回 `did_you_mean`。单条 memory 正文上限为 2 MiB UTF-8。
+
+PyPI 发版后，可在独立 Python 3.13 正式环境中按需运行 `mema-production-smoke --expected-version X.Y.Z`。它会在正式配置库中写入、读取、搜索、过期并核验一条唯一标记记录；该检查不是发布门。
 
 模型**不随默认 PyPI/uvx 包内置**。安装本地运行 extra 并指向一个 GGUF 文件：
 

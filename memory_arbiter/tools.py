@@ -20,7 +20,7 @@ from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
 from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
 from .semantic_conflict import (
-    LocalGGUFSemanticBackend,
+    IsolatedGGUFSemanticBackend,
     SemanticBackend,
     ModelSignal,
     notice_dedupe_key,
@@ -85,6 +85,8 @@ class MemoryTools:
         self._shutdown_started = False
         self._shutdown_complete = False
         self._last_pair_duration_ms: Optional[int] = None
+        self._last_backup_notice_signature: Optional[tuple[int, int, int, bool]] = None
+        self._last_backup_source_signature: Optional[tuple[int, int, int]] = None
         # v0.6.0: initialise vec index state on startup
         self._init_vec_state()
 
@@ -104,11 +106,41 @@ class MemoryTools:
         self._semantic_worker.start()
 
     def _consume_notices(self) -> list[dict[str, Any]]:
-        if self._update_monitor is None:
-            return []
         notices: list[dict[str, Any]] = []
-        notices.extend(self._update_monitor.consume_agent_onboarding_notice(self.settings.agent_id))
-        notices.extend(self._update_monitor.consume_notices())
+        if self._update_monitor is not None:
+            notices.extend(self._update_monitor.consume_agent_onboarding_notice(self.settings.agent_id))
+            notices.extend(self._update_monitor.consume_notices())
+        try:
+            source_signature = self.db.backup_replay.state_signature()
+            if source_signature == self._last_backup_source_signature:
+                return notices
+            self._last_backup_source_signature = source_signature
+            inspection = self.db.backup_replay.inspect(limit=10_000, offset=0)
+            signature = (
+                int(inspection.get("importable") or 0),
+                int(inspection.get("invalid") or 0),
+                int(inspection.get("conflicts") or 0),
+                bool(inspection.get("has_more")),
+            )
+            if signature != (0, 0, 0, False) and signature != self._last_backup_notice_signature:
+                notices.append({
+                    "type": "backup_replay_pending",
+                    "severity": "warning",
+                    "pending_records": signature[0],
+                    "invalid_records": signature[1],
+                    "conflicting_receipts": signature[2],
+                    "additional_pages": signature[3],
+                    "action_required": "preview_backup_replay",
+                    "suggested_call": {
+                        "tool": "memory_repair", "task": "replay_backup",
+                        "data": {"dry_run": True},
+                    },
+                })
+                self._last_backup_notice_signature = signature
+            elif signature == (0, 0, 0, False):
+                self._last_backup_notice_signature = None
+        except Exception:
+            pass
         return notices
 
     def _enqueue_pending_rule_splits(self, limit: int = 100) -> None:
@@ -173,6 +205,10 @@ class MemoryTools:
         if backend is not None:
             remaining = max(0.0, deadline - time.monotonic())
             unload_result = backend.unload(timeout=remaining, disable=True)
+            if not unload_result.get("ok"):
+                force_terminate = getattr(backend, "force_terminate", None)
+                if callable(force_terminate):
+                    unload_result = force_terminate()
         ok = bool(semantic_drained and split_drained and unload_result.get("ok", False))
         with self._shutdown_lock:
             self._shutdown_complete = ok
@@ -462,11 +498,12 @@ class MemoryTools:
             if self._semantic_backend is not None:
                 return self._semantic_backend
             assert self.settings.semantic_conflict_model_path is not None
-            self._semantic_backend = LocalGGUFSemanticBackend(
+            self._semantic_backend = IsolatedGGUFSemanticBackend(
                 self.settings.semantic_conflict_model_path,
                 n_ctx=self.settings.semantic_conflict_n_ctx,
                 n_threads=self.settings.semantic_conflict_n_threads,
                 n_batch=self.settings.semantic_conflict_n_batch,
+                hard_timeout_ms=self.settings.semantic_conflict_job_timeout_ms,
             )
             return self._semantic_backend
 
@@ -524,10 +561,9 @@ class MemoryTools:
             "min_pair_budget_ms": int(self.settings.semantic_conflict_min_pair_budget_ms),
             "last_pair_duration_ms": self._last_pair_duration_ms,
             "job_deadline_behavior": (
-                "The deadline gates BETWEEN pairs only. A model call (synchronous C inference) "
-                "cannot be interrupted mid-call; when remaining budget drops below "
-                "min_pair_budget_ms the job stops early instead of starting another inference. "
-                "A single stuck call still stalls the worker until process-level isolation lands."
+                "The job budget gates between pairs. Each production GGUF inference runs "
+                "in one strictly serial resident child process and has a hard timeout; a "
+                "timed-out child is terminated and the next request starts a new generation."
             ),
             "worker": self._semantic_worker.status(),
             "backend": backend_status,
@@ -1042,6 +1078,14 @@ class MemoryTools:
     ) -> dict[str, Any]:
         return self._operations.memory_cleanup_inactive_vectors(
             dry_run, self._is_truthy(authorized), **_,
+        )
+
+    def memory_replay_backup(
+        self, dry_run: bool = True, authorized: bool = False,
+        limit: int = 1_000, offset: int = 0, **_: Any,
+    ) -> dict[str, Any]:
+        return self._operations.memory_replay_backup(
+            dry_run, self._is_truthy(authorized), limit, offset, **_,
         )
 
     def _count_orphan_vectors(self) -> dict[str, int]:

@@ -83,7 +83,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Memory Arbiter maintenance and repair. Use task=split/rebuild_claims/rebuild_embeddings/cleanup_history/cleanup_vectors/resync_vectors/set_entity/activate_pending/semantic_control/notice/help.
+        """Memory Arbiter maintenance and repair. Use task=split/rebuild_claims/rebuild_embeddings/cleanup_history/cleanup_vectors/resync_vectors/set_entity/activate_pending/replay_backup/semantic_control/notice/help.
 
         Prefer dry_run first where available. Cleanup, activation, and protected-memory
         metadata changes still require authorized=true when the underlying operation

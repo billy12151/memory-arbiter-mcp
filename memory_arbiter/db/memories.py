@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
@@ -47,7 +48,7 @@ class MemoriesStore:
         if not record.subject or not str(record.subject).strip():
             raise ValueError("subject is required")
         if not self._db_available or not self.state.sqlite_writable:
-            self._append_backup(record)
+            self._append_backup(record, workspace_canonical)
             warnings.append("SQLite write unavailable; wrote append-only JSONL backup.")
             return None, warnings
         # Double-store: raw workspace stays in `workspace`; resolved canonical
@@ -55,7 +56,16 @@ class MemoriesStore:
         # Fall back to the raw workspace so the column is never NULL on new rows.
         canonical = (workspace_canonical or record.workspace or "").strip() or record.workspace
         with self.connection() as conn:
-            cur = conn.execute(
+            memory_id = self.insert_memory_on_conn(conn, record, canonical)
+            conn.commit()
+        return memory_id, warnings
+
+    def insert_memory_on_conn(
+        self, conn: sqlite3.Connection, record: MemoryRecord,
+        workspace_canonical: Optional[str] = None,
+    ) -> int:
+        canonical = (workspace_canonical or record.workspace or "").strip() or record.workspace
+        cur = conn.execute(
                 """
                 INSERT INTO memories
                 (content, agent_id, workspace, workspace_canonical, tags, source_type, source_ref,
@@ -80,21 +90,40 @@ class MemoriesStore:
                     utc_now_iso(),
                 ),
             )
-            memory_id = int(cur.lastrowid)
-            if self.state.fts5_available:
-                conn.execute(
-                    "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
-                    (memory_id, record.content, " ".join(record.tags), record.subject or ""),
-                )
-            conn.commit()
-        return memory_id, warnings
+        if cur.lastrowid is None:
+            raise sqlite3.Error("memory insert did not return an id")
+        memory_id = int(cur.lastrowid)
+        if self.state.fts5_available:
+            conn.execute(
+                "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
+                (memory_id, record.content, " ".join(record.tags), record.subject or ""),
+            )
+        return memory_id
 
-    def _append_backup(self, record: MemoryRecord) -> None:
+    def _append_backup(self, record: MemoryRecord, workspace_canonical: Optional[str] = None) -> None:
+        from datetime import datetime, timezone
+
         self.settings.backup_jsonl.parent.mkdir(parents=True, exist_ok=True)
-        payload = record.__dict__.copy()
-        payload["backup_written_at"] = utc_now_iso()
+        payload = {
+            "backup_schema": 1,
+            "replay_key": str(uuid.uuid4()),
+            "backup_written_at": datetime.now(timezone.utc).isoformat(),
+            "workspace_canonical": workspace_canonical or record.workspace,
+            "record": record.__dict__.copy(),
+        }
+        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
         with self.settings.backup_jsonl.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            try:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except ImportError:  # pragma: no cover - non-POSIX fallback
+                fcntl = None  # type: ignore[assignment]
+            try:
+                fh.write(line)
+                fh.flush()
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         self.state.jsonl_backup_active = True
 
     @staticmethod

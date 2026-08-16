@@ -250,7 +250,7 @@ def test_product_wrappers_validate_aliases_and_bad_inputs(tmp_path: Path) -> Non
 
     bad_history = tools.memory_review(view="history", data={"id": "abc"})
     assert bad_history["ok"] is False
-    assert "memory_id" in bad_history["data"]["error"]
+    assert bad_history["data"].get("field") == "memory_id" or "memory_id" in bad_history["data"]["error"]
 
     for label, result in {
         "retire": tools.memory_govern(action="retire", data={"id": "abc", "reason": "x", "authorized": True}),
@@ -261,7 +261,7 @@ def test_product_wrappers_validate_aliases_and_bad_inputs(tmp_path: Path) -> Non
         "cleanup": tools.memory_repair(task="cleanup_history", data={"id": "abc", "authorized": True}),
     }.items():
         assert result["ok"] is False, label
-        assert "integer" in result["data"]["error"]
+        assert "integer" in result["data"].get("reason", result["data"]["error"])
 
     judge_missing = tools.memory(action="judge", data={"id": 1})
     assert judge_missing["ok"] is False
@@ -462,7 +462,7 @@ def test_product_forwards_handle_bad_secondary_int_args(tmp_path: Path) -> None:
 
     def assert_clean(label: str, result: dict) -> None:
         assert result["ok"] is False, f"{label} unexpectedly succeeded: {result}"
-        assert "help" in result["data"], f"{label} must attach help"
+        assert "error" in result["data"], f"{label} must attach an error"
 
     # retire: non-int superseded_by (primary memory_id coerced, secondary not)
     old = tools.memory(action="remember", data={"content": "old", "subject": "s"})["data"]["id"]
@@ -565,24 +565,17 @@ def test_product_non_dict_data_returns_error(tmp_path: Path) -> None:
     assert tools.memory(action="find", data=None)["ok"] is True
 
 
-def test_memory_write_tags_non_list_does_not_split_chars(tmp_path: Path) -> None:
-    """v0.11.1: tags as a string must not be split into characters.
-
-    ``MemoryRecord.from_input`` previously did ``list(payload.get("tags") or [])``,
-    so ``tags="todo"`` became ``['t','o','d','o']`` — silent data corruption
-    in the tag index. Non-list tags now coerce to ``[]``.
-    """
+def test_product_memory_write_rejects_non_list_tags(tmp_path: Path) -> None:
+    """The product schema rejects wrong tag types instead of coercing them."""
     tools = make_tools(tmp_path)
 
-    # string → [] (not character split)
     r = tools.memory(action="remember", data={"content": "a", "subject": "s", "tags": "todo"})
-    assert r["ok"] is True
-    assert r["data"]["record"]["tags"] == []
+    assert r["ok"] is False
+    assert r["data"]["field"] == "tags"
 
-    # int → []
     r = tools.memory(action="remember", data={"content": "b", "subject": "s", "tags": 123})
-    assert r["ok"] is True
-    assert r["data"]["record"]["tags"] == []
+    assert r["ok"] is False
+    assert r["data"]["field"] == "tags"
 
     # None → []
     r = tools.memory(action="remember", data={"content": "c", "subject": "s"})
@@ -594,10 +587,10 @@ def test_memory_write_tags_non_list_does_not_split_chars(tmp_path: Path) -> None
     assert r["ok"] is True
     assert r["data"]["record"]["tags"] == ["todo", "project"]
 
-    # tuple also accepted (JSON arrays deserialize to lists, but be lenient)
+    # Product JSON accepts arrays only; Python tuples are rejected at the boundary.
     r = tools.memory(action="remember", data={"content": "e", "subject": "s", "tags": ("a", "b")})
-    assert r["ok"] is True
-    assert r["data"]["record"]["tags"] == ["a", "b"]
+    assert r["ok"] is False
+    assert r["data"]["field"] == "tags"
 
 
 

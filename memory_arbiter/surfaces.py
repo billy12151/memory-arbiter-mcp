@@ -6,6 +6,7 @@ from importlib import resources
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from .conflict_judgments import ConflictJudgmentStore
+from .validation import validate_product_payload
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
@@ -111,12 +112,13 @@ class ProductSurfaces:
             },
             "memory_repair": {
                 "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-                "tasks": ["split", "rebuild_claims", "rebuild_embeddings", "cleanup_history", "cleanup_vectors", "resync_vectors", "set_entity", "activate_pending", "semantic_control", "notice", "help"],
+                "tasks": ["split", "rebuild_claims", "rebuild_embeddings", "cleanup_history", "cleanup_vectors", "resync_vectors", "set_entity", "activate_pending", "replay_backup", "semantic_control", "notice", "help"],
                 "examples": {
                     "rebuild_claims": {"task": "rebuild_claims", "data": {"dry_run": True, "memory_ids": [123]}},
                     "cleanup_vectors": {"task": "cleanup_vectors", "data": {"dry_run": True}},
                     "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
                     "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
+                    "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
                     "notice": {"task": "notice", "data": {"action": "list", "limit": 5}},
                 },
             },
@@ -261,6 +263,46 @@ class ProductSurfaces:
             if name in payload:
                 payload[name] = self._is_truthy(payload[name])
 
+    def _validated_product_call(
+        self,
+        surface: str,
+        operation: str,
+        data: Optional[dict[str, Any]],
+        dispatch: Callable[[str, Optional[dict[str, Any]]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        if data is not None and not isinstance(data, dict):
+            return dispatch(operation, data)
+        payload = dict(data or {})
+        validation = validate_product_payload(
+            surface, operation, payload, vec_dim=int(self.settings.vec_dim),
+        )
+        if validation.error is not None:
+            return self.db.state.response(validation.error, ok=False)
+        response = dispatch(operation, payload)
+        if validation.warnings:
+            warnings = response.setdefault("warnings", [])
+            for warning in validation.warnings:
+                if warning not in warnings:
+                    warnings.append(warning)
+            response["degraded"] = bool(warnings) or response.get("mode") != "sqlite_vec"
+        return response
+
+    def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+        operation = str(action or "help").strip().lower()
+        return self._validated_product_call("memory", operation, data, self._memory)
+
+    def memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+        operation = str(view or "help").strip().lower()
+        return self._validated_product_call("memory_review", operation, data, self._memory_review)
+
+    def memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+        operation = str(action or "help").strip().lower()
+        return self._validated_product_call("memory_govern", operation, data, self._memory_govern)
+
+    def memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+        operation = str(task or "help").strip().lower()
+        return self._validated_product_call("memory_repair", operation, data, self._memory_repair)
+
     def _governance_authorization_required(self, action: str) -> dict[str, Any]:
         return self.db.state.response(
             {
@@ -285,7 +327,7 @@ class ProductSurfaces:
             return self._governance_authorization_required(action)
         return None
 
-    def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def _memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         """Task-oriented daily memory tool: remember/find/read/update/judge/status.
 
         Use help when unsure about fields. For current source-of-truth updates,
@@ -345,7 +387,7 @@ class ProductSurfaces:
             return self.memory_status()
         return self._invalid_product_call("memory", f"unknown action: {action}", action)
 
-    def memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def _memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         """Read-only memory inspection: health, conflicts, history, expired recall, audit, and entities."""
         payload = self._payload_dict(data)
         if data is not None and not isinstance(data, dict):
@@ -408,7 +450,7 @@ class ProductSurfaces:
             return self._forward("memory_review", view, self.memory_list_entities, **payload)
         return self._invalid_product_call("memory_review", f"unknown view: {view}", view)
 
-    def memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def _memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         """Explicit user-authorized governance: retire, resolve conflicts, confirm, or correct judgments.
 
         Do not use this for ordinary updates or current source-of-truth replacement;
@@ -533,7 +575,7 @@ class ProductSurfaces:
             return self._forward("memory_govern", action, self.memory_confirm_pending_workspace, **payload)
         return self._invalid_product_call("memory_govern", f"unknown action: {action}", action)
 
-    def memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def _memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         """Maintenance and repair: split, rebuild indexes, cleanup, vector resync, entity backfill."""
         payload = self._payload_dict(data)
         if data is not None and not isinstance(data, dict):
@@ -571,6 +613,8 @@ class ProductSurfaces:
             if invalid_id is not None:
                 return invalid_id
             return self._forward("memory_repair", task, self.memory_activate, **payload)
+        if task == "replay_backup":
+            return self._forward("memory_repair", task, self.memory_replay_backup, **payload)
         if task == "semantic_control":
             timeout_raw = payload.get("timeout")
             timeout_value = 30.0 if timeout_raw is None else float(timeout_raw)

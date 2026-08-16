@@ -1441,6 +1441,96 @@ class OperationsPipeline:
             resp["warnings"] = warnings
         return self.db.state.response(resp, ok=not warnings)
 
+    def memory_replay_backup(
+        self,
+        dry_run: bool = True,
+        authorized: bool = False,
+        limit: int = 1_000,
+        offset: int = 0,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Inspect or deterministically replay backup-only memory records."""
+        dry_run = self._is_truthy(dry_run)
+        authorized = self._is_truthy(authorized)
+        inspection = self.db.backup_replay.inspect(
+            limit=max(1, min(int(limit), 10_000)), offset=max(0, int(offset)),
+        )
+        public = {key: value for key, value in inspection.items() if key != "entries"}
+        if dry_run:
+            return self.db.state.response({"dry_run": True, **public})
+        if not authorized:
+            return self.db.state.response(
+                {
+                    "error": "authorized=True is required to replay backup records",
+                    "action_required": "ask_user_for_authorization",
+                    "dry_run": False,
+                    **public,
+                },
+                ok=False,
+            )
+        imported: list[dict[str, Any]] = []
+        already_replayed: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for entry in inspection["entries"]:
+            if entry["status"] == "already_replayed":
+                already_replayed.append({"replay_key": entry["replay_key"], "memory_id": entry["memory_id"]})
+                continue
+            if entry["status"] != "importable":
+                conflicts.append({"replay_key": entry["replay_key"], "outcome": entry["status"]})
+                continue
+            try:
+                replayed = self.db.backup_replay.replay_one(entry)
+            except Exception as exc:
+                conflicts.append({"replay_key": entry["replay_key"], "outcome": "error", "reason": str(exc)})
+                continue
+            outcome = replayed.get("outcome")
+            if outcome == "imported":
+                memory_id = int(replayed["memory_id"])
+                imported.append({"replay_key": entry["replay_key"], "memory_id": memory_id})
+                try:
+                    structured = self._index_and_reconcile_claims(memory_id)
+                    warnings.extend(structured.get("warnings") or [])
+                    record = self.db.get_memory(memory_id) or {}
+                    if self.settings.embedding_auto_write and self._embedding_configured():
+                        embedder, ensure_warnings = self._ensure_embedder()
+                        warnings.extend(ensure_warnings)
+                        if embedder is not None:
+                            embedded = embedder.embed_text(
+                                prefix=str(record.get("subject") or ""),
+                                body=str(record.get("content") or ""),
+                            )
+                            if embedded.embedding:
+                                _stored, store_warnings = self.db.store_embedding(memory_id, embedded.embedding)
+                                warnings.extend(store_warnings)
+                    split_block, _request, split_warnings = self._after_write_split(memory_id)
+                    warnings.extend(split_warnings)
+                    if split_block.get("action_required"):
+                        warnings.append(f"replayed memory {memory_id} requires section split follow-up")
+                    self._enqueue_semantic_conflict_check(memory_id, record)
+                except Exception as exc:
+                    warnings.append(f"replayed memory {memory_id} committed; derived post-processing failed: {exc}")
+            elif outcome == "already_replayed":
+                already_replayed.append({"replay_key": entry["replay_key"], "memory_id": replayed.get("memory_id")})
+            else:
+                conflicts.append({"replay_key": entry["replay_key"], "outcome": outcome})
+        return self.db.state.response(
+            {
+                "dry_run": False,
+                "imported": imported,
+                "imported_count": len(imported),
+                "already_replayed": already_replayed,
+                "already_replayed_count": len(already_replayed),
+                "invalid_entries": inspection["invalid_entries"],
+                "conflicts": conflicts,
+                "offset": inspection["offset"],
+                "next_offset": inspection["next_offset"],
+                "has_more": inspection["has_more"],
+            },
+            ok=not conflicts,
+            extra_warnings=warnings,
+        )
+
     def _count_orphan_vectors(self) -> dict[str, int]:
         """Read-only count of truly orphan vec rows (no parent row in DB)."""
         if not self.db._db_available or not self.db.state.sqlite_vec_available:

@@ -25,6 +25,7 @@ from .vectors import VectorStore
 from .workspaces import WorkspaceStore, _coerce_ws, _normalize_alias_key
 from .conflicts import ConflictStore
 from .memories import MemoriesStore
+from .backup_replay import BackupReplayStore
 
 # Explicit export list. The pre-split db.py surfaced its top-level imports
 # (json/re/sqlite3/…) as module attributes; the package facade re-exports them
@@ -101,6 +102,7 @@ class MemoryDB:
         self.workspaces = WorkspaceStore(self)
         self.conflicts = ConflictStore(self)
         self.memories = MemoriesStore(self)
+        self.backup_replay = BackupReplayStore(self)
         self._claim_store = self.claims
         self._judgment_store = self.judgments
         self._init_database()
@@ -433,6 +435,12 @@ class MemoryDB:
         self, record: MemoryRecord, workspace_canonical: Optional[str] = None
     ) -> Tuple[Optional[int], list[str]]:
         return self.memories.insert_memory(record, workspace_canonical)
+
+    def insert_memory_on_conn(
+        self, conn: sqlite3.Connection, record: MemoryRecord,
+        workspace_canonical: Optional[str] = None,
+    ) -> int:
+        return self.memories.insert_memory_on_conn(conn, record, workspace_canonical)
 
     def _append_backup(self, record: MemoryRecord) -> None:
         return self.memories._append_backup(record)

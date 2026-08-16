@@ -118,6 +118,13 @@ class SchemaStore:
                   FOREIGN KEY(memory_id) REFERENCES memories(id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, changed_at);
+                CREATE TABLE IF NOT EXISTS backup_replay_log (
+                  replay_key TEXT PRIMARY KEY,
+                  memory_id INTEGER NOT NULL,
+                  payload_hash TEXT NOT NULL,
+                  replayed_at TEXT NOT NULL,
+                  FOREIGN KEY(memory_id) REFERENCES memories(id)
+                );
 
                 -- v0.6.0: section-split derived index (no body column; zero redundancy)
                 CREATE TABLE IF NOT EXISTS memory_sections (
