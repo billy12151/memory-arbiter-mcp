@@ -445,6 +445,7 @@ def test_write_rules_split_ignores_fenced_code_headings(tmp_path: Path) -> None:
     content = _content_with_fenced_fake_heading()
     r = tools.memory_write(content=content, subject="doc")
     assert r["ok"] is True
+    assert tools.wait_split_worker_drained(5)
     sections = tools.db.get_sections_by_memory(r["data"]["id"])
     assert len(sections) == 2, f"rules split must yield 2 real headings, got {len(sections)}"
     titles = [s["title"] for s in sections]
@@ -467,6 +468,7 @@ def test_write_rules_split_boundary_at_real_heading_not_fence(tmp_path: Path) ->
     content = _content_with_colliding_heading_in_fence()
     r = tools.memory_write(content=content, subject="doc")
     assert r["ok"] is True
+    assert tools.wait_split_worker_drained(5)
     mem = tools.db.get_memory(r["data"]["id"])
     assert mem["split_status"] == "active"
     sections = tools.db.get_sections_by_memory(mem["id"])
@@ -497,6 +499,7 @@ def test_write_rules_split_boundary_at_real_heading_not_body(tmp_path: Path) -> 
     content = _content_with_colliding_heading_in_body()
     r = tools.memory_write(content=content, subject="doc")
     assert r["ok"] is True
+    assert tools.wait_split_worker_drained(5)
     mem = tools.db.get_memory(r["data"]["id"])
     assert mem["split_status"] == "active"
     sections = tools.db.get_sections_by_memory(mem["id"])
@@ -1171,6 +1174,7 @@ def test_rules_split_preamble_folded_into_first_section(tmp_path: Path) -> None:
     tools = _vec_tools(tmp_path)
     content = "这是前言 preamble\n# 第一章\n" + ("alpha 内容 " * 30) + "\n# 第二章\n" + ("beta 内容 " * 30)
     mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     secs = tools.db.get_sections_by_memory(mid)
     assert len(secs) == 2
     assert secs[0]["start_offset"] == 0
@@ -1183,6 +1187,7 @@ def test_rules_split_title_path_for_nested_headings(tmp_path: Path) -> None:
     tools = _vec_tools(tmp_path)
     content = "# 父级\n" + ("alpha 内容 " * 30) + "\n## 子级\n" + ("beta 内容 " * 30)
     mid = tools.memory_write(content=content, subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     secs = tools.db.get_sections_by_memory(mid)
     assert len(secs) == 2
     # section 1 is the nested ## 子级 under # 父级
