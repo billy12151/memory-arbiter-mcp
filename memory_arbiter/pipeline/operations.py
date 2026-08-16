@@ -33,6 +33,7 @@ class OperationsPipeline:
         return getattr(tools_mod, "compare_memories")(*args, **kwargs)
 
     def memory_arbitrate(self, left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, **_: Any) -> dict[str, Any]:
+        authorized = self._is_truthy(authorized)
         if _.get("apply") is not None:
             return self.db.state.response(
                 {"error": "the 'apply' parameter was renamed to 'authorized' in v0.8.5 and no longer takes effect; pass authorized=True to auto-supersede the non-protected loser", "applied": False},
@@ -211,6 +212,7 @@ class OperationsPipeline:
         return self.db.state.response(result, extra_warnings=list(caller.warnings))
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
+        authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
                 {"error": "authorized=True is required to confirm a memory", "confirmed": False},
@@ -348,6 +350,7 @@ class OperationsPipeline:
         fails (ok=False) unless authorized=true — a rejection is a user
         decision and must not be silently reversed by a confirm-pending flow.
         """
+        authorized = self._is_truthy(authorized)
         explicit_workspace = _.get("workspace")
         caller = self._caller_workspace(explicit_workspace) if explicit_workspace else None
         if caller is not None:
@@ -456,6 +459,7 @@ class OperationsPipeline:
         flips it to active — without the trust/protection promotion that
         memory_confirm applies. Requires authorized=true.
         """
+        authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
                 {"error": "authorized=True is required to activate a pending memory", "activated": False},
@@ -516,6 +520,7 @@ class OperationsPipeline:
         conflicts involving this memory are resolved, and an audit row is appended
         to the conflicts table (reason prefixed with ``USER-AUTHORIZED SUPERSEDE``).
         """
+        authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
                 {"error": "authorized=True is required to supersede a memory", "superseded": False},
@@ -703,6 +708,7 @@ class OperationsPipeline:
         **_: Any,
     ) -> dict[str, Any]:
         """Set canonical metadata.entity/scope without creating content history."""
+        authorized = self._is_truthy(authorized)
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
@@ -963,6 +969,7 @@ class OperationsPipeline:
         conflict_scope: Optional[str] = None,
         **_: Any,
     ) -> dict[str, Any]:
+        authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
                 {"error": "authorized=True is required for human judgment correction"}, ok=False,
@@ -1099,6 +1106,8 @@ class OperationsPipeline:
         ``user_confirmed`` records require ``authorized=True`` (mirrors
         ``memory_supersede``). Records already superseded/deleted are rejected.
         """
+        authorized = self._is_truthy(authorized)
+        tags_only = self._is_truthy(tags_only)
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
@@ -1329,6 +1338,7 @@ class OperationsPipeline:
         SAFETY: this tool only ever deletes from memory_history. The memories
         table (active records) is never touched, regardless of arguments.
         """
+        authorized = self._is_truthy(authorized)
         full_cleanup = memory_id is None and older_than_days is None
         if older_than_days is not None and int(older_than_days) < 0:
             return self.db.state.response(
@@ -1390,6 +1400,8 @@ class OperationsPipeline:
         ``dry_run=True`` (default) only reports counts.
         Actual orphan purge requires ``dry_run=False`` AND ``authorized=True``.
         """
+        authorized = self._is_truthy(authorized)
+        dry_run = self._is_truthy(dry_run)
         mismatches = self._count_vec_parent_status_mismatch()
         orphan_counts = self._count_orphan_vectors()
         if dry_run:

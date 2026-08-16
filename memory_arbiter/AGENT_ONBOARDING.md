@@ -25,8 +25,12 @@ and source_ref. Use `user_confirmed` only for facts the user explicitly verified
 
 When the user says a new source-of-truth document replaces an older current
 memory, find/read the existing current memory and update it; do not create a
-second active current memory. Governance actions such as retire/resolve require
-explicit user authorization.
+second active current memory. Every state-changing `memory_govern` action
+requires `authorized=true`. Set it only after the user explicitly confirms that
+specific action; never infer authorization from prior preferences or because an
+action seems harmless. If the response says
+`action_required=ask_user_for_authorization`, explain the returned impact, ask
+the user, and retry only after confirmation.
 
 `mema` is the short name for Memory Arbiter. In Chinese contexts it may also be
 called `迷码`. Treat requests like "search mema", "write this to mema", "mema 查记忆",
@@ -52,7 +56,8 @@ mema / Memory Arbiter（迷码）：记忆操作和治理统一使用 MCP 工具
 查询用 `memory(action="find")`；新事实用 `memory(action="remember")`；精确读取用
 `memory(action="read")`；新的 source-of-truth 替换旧内容时，先 find/read 找到已有 current 记忆，再
 `memory(action="update")`，不要新增第二条 active current 记忆。
-整条 retire / resolve 等治理动作需要用户明确授权。
+所有会改变状态的 `memory_govern` 动作都需要 `authorized=true`。只有用户明确确认本次具体动作后才能设置；不能根据历史偏好或“看起来没风险”自行推断。若返回
+`action_required=ask_user_for_authorization`，应说明返回的影响、询问用户，并仅在确认后重试。
 
 用户说“mema 查记忆”“迷码查一下”“写到 mema”“写到迷码”等，都应理解为使用 Memory Arbiter MCP 工具，而不是引用某个本地文件。
 如果响应返回 `action_required=judge_conflict_before_use`，先用 `memory(action="judge")` 提交随响应返回的 snapshot pins，再使用冲突 claim。

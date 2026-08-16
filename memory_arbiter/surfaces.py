@@ -27,6 +27,18 @@ def _agent_onboarding_guide() -> str:
 
 
 class ProductSurfaces:
+    _GOVERNANCE_IMPACTS: dict[str, str] = {
+        "retire": "Marks a whole memory superseded and removes it from active recall.",
+        "resolve_conflict": "Closes the conflict and may suppress future warnings for the same snapshot.",
+        "confirm": "Promotes the memory to user_confirmed and locks it against ordinary changes.",
+        "correct_judgment": "Replaces the active conflict guidance while preserving judgment history.",
+        "accept_workspace_alias": "Makes future reads and writes resolve the alias to the canonical workspace.",
+        "reject_workspace_alias": "Suppresses this workspace alias candidate in future normalization.",
+        "rename_workspace_canonical": "Renames a canonical workspace and reroutes all affected memories.",
+        "migrate_workspace": "Bulk-moves memories to another canonical workspace and records the alias.",
+        "confirm_pending_workspace": "Assigns the canonical workspace and activates the pending memory for recall.",
+    }
+
     def __init__(self, tools: "MemoryTools"):
         self._tools = tools
 
@@ -83,17 +95,19 @@ class ProductSurfaces:
                 },
             },
             "memory_govern": {
-                "description": "Explicit user-authorized governance. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
+                "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
                 "actions": ["retire", "resolve_conflict", "confirm", "correct_judgment", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"],
                 "examples": {
                     "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
-                    "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "status": "not_a_conflict", "reason": "User confirmed this is not a conflict."}},
-                    "accept_workspace_alias": {"action": "accept_workspace_alias", "data": {"alias": "金营二期", "canonical": "金营项目", "reason": "User confirmed these are the same project."}},
-                    "reject_workspace_alias": {"action": "reject_workspace_alias", "data": {"alias": "金营培训", "canonical": "金营项目", "reason": "User confirmed these are distinct workspaces."}},
-                    "migrate_workspace": {"action": "migrate_workspace", "data": {"from": "金营二期", "to": "金营项目", "reason": "Merge subprojects."}},
-                    "confirm_pending_workspace": {"action": "confirm_pending_workspace", "data": {"memory_id": 123, "canonical": "金营项目"}},
+                    "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "status": "not_a_conflict", "reason": "User confirmed this is not a conflict.", "authorized": True}},
+                    "accept_workspace_alias": {"action": "accept_workspace_alias", "data": {"alias": "金营二期", "canonical": "金营项目", "reason": "User confirmed these are the same project.", "authorized": True}},
+                    "reject_workspace_alias": {"action": "reject_workspace_alias", "data": {"alias": "金营培训", "canonical": "金营项目", "reason": "User confirmed these are distinct workspaces.", "authorized": True}},
+                    "rename_workspace_canonical": {"action": "rename_workspace_canonical", "data": {"old": "旧项目名", "new": "新项目名", "reason": "User confirmed the rename.", "authorized": True}},
+                    "migrate_workspace": {"action": "migrate_workspace", "data": {"from": "金营二期", "to": "金营项目", "reason": "User confirmed the merge.", "authorized": True}},
+                    "confirm_pending_workspace": {"action": "confirm_pending_workspace", "data": {"memory_id": 123, "canonical": "金营项目", "authorized": True}},
                 },
-                "safety_note": "Retire only whole memories after explicit user authorization. For partial updates or current-document replacement, update the existing memory instead.",
+                "safety_note": "Set authorized=true only after the user explicitly confirms the specific governance action. Retire only whole memories; for partial updates or current-document replacement, update the existing memory instead.",
+                "authorization_rule": "All state-changing actions require authorized=true. Without it, the response returns action_required=ask_user_for_authorization and an impact description.",
             },
             "memory_repair": {
                 "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
@@ -239,6 +253,38 @@ class ProductSurfaces:
                 )
         return None
 
+    def _normalize_boolean_fields(
+        self, payload: dict[str, Any], *names: str,
+    ) -> None:
+        """Normalize loosely typed MCP booleans with an explicit allow-list."""
+        for name in names:
+            if name in payload:
+                payload[name] = self._is_truthy(payload[name])
+
+    def _governance_authorization_required(self, action: str) -> dict[str, Any]:
+        return self.db.state.response(
+            {
+                "error": "explicit user authorization required",
+                "action_required": "ask_user_for_authorization",
+                "governance_action": action,
+                "impact": self._GOVERNANCE_IMPACTS[action],
+                "authorized": False,
+                "retry": {
+                    "tool": "memory_govern",
+                    "action": action,
+                    "set_after_user_confirmation": {"authorized": True},
+                },
+            },
+            ok=False,
+        )
+
+    def _governance_authorization_error(
+        self, action: str, payload: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not payload.get("authorized"):
+            return self._governance_authorization_required(action)
+        return None
+
     def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         """Task-oriented daily memory tool: remember/find/read/update/judge/status.
 
@@ -251,6 +297,10 @@ class ProductSurfaces:
         if data is not None and not isinstance(data, dict):
             return self._invalid_product_call("memory", "data must be a JSON object", action)
         action = str(action or "help").strip().lower()
+        self._normalize_boolean_fields(
+            payload, "authorized", "tags_only", "debug_ranking",
+            "include_linked_open_items", "include_conflict_signal",
+        )
         if action == "help":
             return self.db.state.response(self._product_help("memory", self._help_topic(payload, "action")))
         if action == "remember":
@@ -301,6 +351,10 @@ class ProductSurfaces:
         if data is not None and not isinstance(data, dict):
             return self._invalid_product_call("memory_review", "data must be a JSON object", view)
         view = str(view or "help").strip().lower()
+        self._normalize_boolean_fields(
+            payload, "deep", "debug_ranking", "include_unassigned",
+            "include_conflict_signal",
+        )
         if view == "help":
             return self.db.state.response(self._product_help("memory_review", self._help_topic(payload, "view")))
         if view == "overview":
@@ -365,6 +419,7 @@ class ProductSurfaces:
         if data is not None and not isinstance(data, dict):
             return self._invalid_product_call("memory_govern", "data must be a JSON object", action)
         action = str(action or "help").strip().lower()
+        self._normalize_boolean_fields(payload, "authorized")
         if action == "help":
             return self.db.state.response(self._product_help("memory_govern", self._help_topic(payload, "action")))
         if action == "retire":
@@ -378,16 +433,25 @@ class ProductSurfaces:
                 if isinstance(superseded_by_int, dict):
                     return superseded_by_int
                 payload["superseded_by"] = superseded_by_int
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_supersede, **payload)
         if action == "resolve_conflict":
             invalid_id = self._coerce_product_id("memory_govern", payload, "conflict_id", action)
             if invalid_id is not None:
                 return invalid_id
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_resolve_conflict, **payload)
         if action == "confirm":
             invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
             if invalid_id is not None:
                 return invalid_id
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_confirm, **payload)
         if action == "correct_judgment":
             if "conflict_id" not in payload and "id" in payload:
@@ -410,6 +474,9 @@ class ProductSurfaces:
             invalid_id = self._coerce_product_id("memory_govern", payload, "conflict_id", action)
             if invalid_id is not None:
                 return invalid_id
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_correct_conflict_judgment, **payload)
         if action == "accept_workspace_alias":
             if not payload.get("alias") or not payload.get("canonical"):
@@ -417,6 +484,9 @@ class ProductSurfaces:
             bad = self._require_ws_strings(payload, ("alias", "canonical"), "memory_govern", action)
             if bad is not None:
                 return bad
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_accept_workspace_alias, **payload)
         if action == "reject_workspace_alias":
             if not payload.get("alias") or not payload.get("canonical"):
@@ -424,6 +494,9 @@ class ProductSurfaces:
             bad = self._require_ws_strings(payload, ("alias", "canonical"), "memory_govern", action)
             if bad is not None:
                 return bad
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_reject_workspace_alias, **payload)
         if action == "rename_workspace_canonical":
             if not payload.get("old") or not payload.get("new"):
@@ -431,6 +504,9 @@ class ProductSurfaces:
             bad = self._require_ws_strings(payload, ("old", "new"), "memory_govern", action)
             if bad is not None:
                 return bad
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_rename_workspace_canonical, **payload)
         if action == "migrate_workspace":
             if not payload.get("from") or not payload.get("to"):
@@ -438,6 +514,9 @@ class ProductSurfaces:
             bad = self._require_ws_strings(payload, ("from", "to"), "memory_govern", action)
             if bad is not None:
                 return bad
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_migrate_workspace, **payload)
         if action == "confirm_pending_workspace":
             invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
@@ -448,6 +527,9 @@ class ProductSurfaces:
             bad = self._require_ws_strings(payload, ("canonical",), "memory_govern", action)
             if bad is not None:
                 return bad
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
             return self._forward("memory_govern", action, self.memory_confirm_pending_workspace, **payload)
         return self._invalid_product_call("memory_govern", f"unknown action: {action}", action)
 
@@ -457,6 +539,7 @@ class ProductSurfaces:
         if data is not None and not isinstance(data, dict):
             return self._invalid_product_call("memory_repair", "data must be a JSON object", task)
         task = str(task or "help").strip().lower()
+        self._normalize_boolean_fields(payload, "authorized", "dry_run", "clear")
         if task == "help":
             return self.db.state.response(self._product_help("memory_repair", self._help_topic(payload, "task")))
         if task == "split":

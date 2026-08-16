@@ -22,6 +22,11 @@ class DummyAPI:
         return {"error": "strict isolation requires workspace", "_http_status": 400}
 
 
+class ExplodingAPI(DummyAPI):
+    def health(self):
+        raise RuntimeError("secret /Users/example/private.sqlite3")
+
+
 def test_console_server_rejects_non_localhost() -> None:
     try:
         build_http_server("0.0.0.0", 8766)
@@ -141,10 +146,33 @@ def test_console_server_handles_head_and_options() -> None:
             assert resp.code == 200
             assert int(resp.headers.get("Content-Length", "0")) > 0
             assert resp.read() == b""
+            assert resp.headers["X-Content-Type-Options"] == "nosniff"
+            assert resp.headers["X-Frame-Options"] == "DENY"
+            assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
         options = urllib.request.Request(f"http://127.0.0.1:{port}/api/health", method="OPTIONS")
         with urllib.request.urlopen(options, timeout=2) as resp:
             assert resp.code == 204
             assert "GET" in (resp.headers.get("Allow") or "")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_console_server_does_not_echo_internal_exception_details() -> None:
+    server = build_http_server("127.0.0.1", 0, api=ExplodingAPI())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 500
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload == {"error": "internal server error"}
+            assert "private.sqlite3" not in json.dumps(payload)
+        else:
+            raise AssertionError("expected HTTPError")
     finally:
         server.shutdown()
         server.server_close()

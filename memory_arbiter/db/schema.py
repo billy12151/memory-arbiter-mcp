@@ -357,13 +357,27 @@ class SchemaStore:
         column: str,
         decl: str,
     ) -> None:
-        """Add *column* to *table* if it does not yet exist (idempotent)."""
+        """Add *column* idempotently, including concurrent first starts.
+
+        SQLite has no ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``. Two
+        processes can therefore both observe a missing column before either
+        ALTER commits. If the loser gets ``duplicate column name``, re-read the
+        schema and accept the race only when the requested column now exists.
+        """
         cols = {
             str(row["name"])
             for row in conn.execute(f"PRAGMA table_info({table})")
         }
         if column not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError as exc:
+                current_cols = {
+                    str(row["name"])
+                    for row in conn.execute(f"PRAGMA table_info({table})")
+                }
+                if "duplicate column name" not in str(exc).lower() or column not in current_cols:
+                    raise
 
     # ------------------------------------------------------------------
     #  Feature probing

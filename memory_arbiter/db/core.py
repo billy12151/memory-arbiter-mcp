@@ -64,6 +64,8 @@ __all__ = [
 ]
 
 _BUSY_TIMEOUT_MS = 5000
+_INIT_BUSY_RETRIES = 5
+_INIT_RETRY_BASE_SECONDS = 0.05
 
 
 class MemoryDB:
@@ -199,23 +201,34 @@ class MemoryDB:
 
     def _init_database(self) -> None:
         self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            conn = self._new_connection(init=True)
+        last_error: Optional[sqlite3.Error] = None
+        for attempt in range(_INIT_BUSY_RETRIES):
+            conn: Optional[sqlite3.Connection] = None
             try:
+                conn = self._new_connection(init=True)
                 self._init_schema(conn)
                 self._probe_features(conn)
                 self._db_available = True
+                return
+            except sqlite3.Error as exc:
+                last_error = exc
+                message = str(exc).lower()
+                transient = "locked" in message or "busy" in message
+                if not transient or attempt + 1 >= _INIT_BUSY_RETRIES:
+                    break
             finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            self._db_available = False
-            self.state.sqlite_writable = False
-            self.state.mode = "jsonl_backup"
-            self.state.jsonl_backup_active = True
-            self.state.warn(
-                f"SQLite unavailable or not writable: {exc}. "
-                "Using JSONL append-only backup when possible."
-            )
+                if conn is not None:
+                    conn.close()
+            time.sleep(_INIT_RETRY_BASE_SECONDS * (2 ** attempt))
+
+        self._db_available = False
+        self.state.sqlite_writable = False
+        self.state.mode = "jsonl_backup"
+        self.state.jsonl_backup_active = True
+        self.state.warn(
+            f"SQLite unavailable or not writable: {last_error or 'unknown initialization error'}. "
+            "Using JSONL append-only backup when possible."
+        )
 
     # ------------------------------------------------------------------
     #  Schema
@@ -934,4 +947,3 @@ def _subject_tokens(subject: str) -> list[str]:
     """
     from ..text import subject_tokens
     return subject_tokens(subject)
-

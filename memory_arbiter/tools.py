@@ -823,7 +823,9 @@ class MemoryTools:
         return self._read_pipeline.memory_compare(left_id, right_id, left, right, **_)
 
     def memory_arbitrate(self, left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, **_: Any) -> dict[str, Any]:
-        return self._operations.memory_arbitrate(left_id, right_id, mark_conflict, authorized, **_)
+        return self._operations.memory_arbitrate(
+            left_id, right_id, mark_conflict, self._is_truthy(authorized), **_,
+        )
 
     def _with_resolution_guidance(self, conflict: dict[str, Any]) -> dict[str, Any]:
         return self._operations._with_resolution_guidance(conflict)
@@ -852,7 +854,9 @@ class MemoryTools:
         return self._operations.memory_resolve_conflict(conflict_id, reason, status, **_)
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
-        return self._operations.memory_confirm(memory_id, source_ref, confidence, authorized, **_)
+        return self._operations.memory_confirm(
+            memory_id, source_ref, confidence, self._is_truthy(authorized), **_,
+        )
 
     def memory_accept_workspace_alias(
         self, alias: str, canonical: str, relation: str = "alias",
@@ -883,12 +887,14 @@ class MemoryTools:
         self, memory_id: int, canonical: str, reason: Optional[str] = None,
         authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_confirm_pending_workspace(memory_id, canonical, reason, authorized, **_)
+        return self._operations.memory_confirm_pending_workspace(
+            memory_id, canonical, reason, self._is_truthy(authorized), **_,
+        )
 
     def memory_activate(
         self, memory_id: int, authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_activate(memory_id, authorized, **_)
+        return self._operations.memory_activate(memory_id, self._is_truthy(authorized), **_)
 
     def memory_supersede(
         self,
@@ -898,7 +904,9 @@ class MemoryTools:
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_supersede(memory_id, reason, superseded_by, authorized, **_)
+        return self._operations.memory_supersede(
+            memory_id, reason, superseded_by, self._is_truthy(authorized), **_,
+        )
 
     def _split_capability(self, vec_state: dict[str, Any]) -> dict[str, Any]:
         return self._operations._split_capability(vec_state)
@@ -916,7 +924,9 @@ class MemoryTools:
         self, memory_id: int, entity: Optional[str] = None, scope: Optional[str] = None,
         clear: bool = False, authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_set_entity(memory_id, entity, scope, clear, authorized, **_)
+        return self._operations.memory_set_entity(
+            memory_id, entity, scope, clear, self._is_truthy(authorized), **_,
+        )
 
     def memory_list_entities(
         self, limit: int = 50, include_unassigned: bool = True, **_: Any,
@@ -981,7 +991,7 @@ class MemoryTools:
             conflict_id, verdict, recommended_use, suggested_winner, reason,
             expected_judgment_id, expected_left_version, expected_right_version,
             expected_left_claim_revision, expected_right_claim_revision,
-            authorized, judge_ref, resolution_kind, conflict_scope, **_,
+            self._is_truthy(authorized), judge_ref, resolution_kind, conflict_scope, **_,
         )
 
     def memory_list_conflict_judgments(self, conflict_id: int, **_: Any) -> dict[str, Any]:
@@ -1007,7 +1017,7 @@ class MemoryTools:
     ) -> dict[str, Any]:
         return self._operations.memory_edit(
             memory_id, new_content, old_text, new_text, new_subject, new_tags,
-            reason, authorized, tags_only, add_tags, remove_tags, **_,
+            reason, self._is_truthy(authorized), tags_only, add_tags, remove_tags, **_,
         )
 
     def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:
@@ -1020,7 +1030,9 @@ class MemoryTools:
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_cleanup_history(memory_id, older_than_days, authorized, **_)
+        return self._operations.memory_cleanup_history(
+            memory_id, older_than_days, self._is_truthy(authorized), **_,
+        )
 
     def memory_cleanup_inactive_vectors(
         self,
@@ -1028,7 +1040,9 @@ class MemoryTools:
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_cleanup_inactive_vectors(dry_run, authorized, **_)
+        return self._operations.memory_cleanup_inactive_vectors(
+            dry_run, self._is_truthy(authorized), **_,
+        )
 
     def _count_orphan_vectors(self) -> dict[str, int]:
         return self._operations._count_orphan_vectors()

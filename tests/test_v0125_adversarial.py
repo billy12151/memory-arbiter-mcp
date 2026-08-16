@@ -54,11 +54,11 @@ def test_confirm_pending_workspace_is_caller_scoped_under_strict(tmp_path: Path)
 
     denied = tools.memory_govern(
         "confirm_pending_workspace",
-        {"memory_id": pending_id, "canonical": "projA", "workspace": "projA"},
+        {"authorized": True, "memory_id": pending_id, "canonical": "projA", "workspace": "projA"},
     )
     ok = tools.memory_govern(
         "confirm_pending_workspace",
-        {"memory_id": pending_id, "canonical": "projB", "workspace": "projB"},
+        {"authorized": True, "memory_id": pending_id, "canonical": "projB", "workspace": "projB"},
     )
 
     assert denied["ok"] is False
