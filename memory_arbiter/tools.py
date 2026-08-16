@@ -92,12 +92,18 @@ class MemoryTools:
         self._init_vec_state()
 
     def start_update_monitor(self, monitor: Optional[UpdateMonitor] = None) -> None:
+        # Product notice delivery is owned by the four outer product wrappers,
+        # not DegradeState.response(): nested responses must never consume it.
+        self.db.state.notice_provider = None
         try:
             self._update_monitor = monitor or UpdateMonitor(enabled=self.settings.update_check_enabled)
-            self.db.state.notice_provider = self._consume_notices
-            self._update_monitor.maybe_start_check_if_due()
         except Exception:
             self._update_monitor = None
+            return
+        try:
+            self._update_monitor.maybe_start_check_if_due()
+        except Exception:
+            pass
 
     def start_split_worker(self) -> None:
         self._split_worker.start()
@@ -556,7 +562,13 @@ class MemoryTools:
                 except Exception:
                     pass
 
-    def _semantic_status(self) -> dict[str, Any]:
+    def _semantic_notice_workspace_scope(self, workspace: Any = None) -> Optional[str]:
+        """Use the shared read-only caller resolver for notice API/count scope."""
+        if self.settings.isolation != "strict":
+            return None
+        return self._caller_workspace(workspace).canonical
+
+    def _semantic_status(self, workspace_canonical: Optional[str] = None) -> dict[str, Any]:
         backend = self._get_semantic_backend_ref()
         backend_status = (
             backend.status()
@@ -592,29 +604,32 @@ class MemoryTools:
             ),
             "worker": self._semantic_worker.status(),
             "backend": backend_status,
-            "notices": self.db.semantic_notice_counts(),
+            "notices": self.db.semantic_notice_counts(workspace_canonical),
         }
 
     def _semantic_control(self, action: str) -> dict[str, Any]:
         return self._semantic_control_with_timeout(action, timeout=30.0)
 
-    def _semantic_control_with_timeout(self, action: str, timeout: float = 30.0) -> dict[str, Any]:
+    def _semantic_control_with_timeout(
+        self, action: str, timeout: float = 30.0, workspace: Any = None,
+    ) -> dict[str, Any]:
         action = str(action or "status").strip().lower()
         timeout = max(0.0, float(timeout))
+        notice_scope = self._semantic_notice_workspace_scope(workspace)
         if action == "status":
-            return self._semantic_status()
+            return self._semantic_status(notice_scope)
         if action == "pause":
             self._semantic_worker.pause()
-            return {"outcome": "paused", "semantic_conflict": self._semantic_status()}
+            return {"outcome": "paused", "semantic_conflict": self._semantic_status(notice_scope)}
         if action == "resume":
             worker_state = self._semantic_worker.status().get("runtime_state")
             if worker_state == "disabled":
                 return {
                     "outcome": "runtime_disabled_use_enable",
-                    "semantic_conflict": self._semantic_status(),
+                    "semantic_conflict": self._semantic_status(notice_scope),
                 }
             self._semantic_worker.resume()
-            return {"outcome": "resumed", "semantic_conflict": self._semantic_status()}
+            return {"outcome": "resumed", "semantic_conflict": self._semantic_status(notice_scope)}
         if action == "enable":
             with self._semantic_backend_lock:
                 self._semantic_runtime_disabled = False
@@ -622,7 +637,7 @@ class MemoryTools:
                 if backend is not None:
                     backend.set_disabled(False)
             self._semantic_worker.enable_runtime()
-            return {"outcome": "enabled", "semantic_conflict": self._semantic_status()}
+            return {"outcome": "enabled", "semantic_conflict": self._semantic_status(notice_scope)}
         if action == "unload":
             backend = self._get_semantic_backend_ref()
             unload_result = (
@@ -631,7 +646,7 @@ class MemoryTools:
                 {"ok": True, "unloaded": False, "timeout": False, "inflight": 0, "retry_hint": None, "generation": None, "reason": "no_backend"}
             )
             outcome = "unloaded" if unload_result.get("ok") else "unload_timeout"
-            result: dict[str, Any] = {"outcome": outcome, "unload": unload_result, "semantic_conflict": self._semantic_status()}
+            result: dict[str, Any] = {"outcome": outcome, "unload": unload_result, "semantic_conflict": self._semantic_status(notice_scope)}
             if unload_result.get("timeout"):
                 result["warnings"] = ["semantic backend still has in-flight inference; model was not unloaded"]
             return result
@@ -655,7 +670,7 @@ class MemoryTools:
                 "outcome": outcome,
                 "unload": unload_result,
                 "note": "This disables the current runtime only; set semantic_conflict.enabled=false in config to persist it.",
-                "semantic_conflict": self._semantic_status(),
+                "semantic_conflict": self._semantic_status(notice_scope),
             }
             if unload_result.get("timeout"):
                 disable_result["warnings"] = ["semantic backend disabled for new jobs, but current inference is still in flight"]
@@ -689,11 +704,13 @@ class MemoryTools:
                 tags = parsed if isinstance(parsed, list) else []
             except Exception:
                 tags = []
-        candidates = self.db.find_metadata_overlap_candidates(
+        candidates = self.db.find_semantic_overlap_candidates(
             subject=record.get("subject"),
             tags=[str(t) for t in tags if isinstance(t, str)],
             exclude_id=int(memory_id),
             limit=int(self.settings.semantic_conflict_candidate_limit),
+            canonical_workspace=record.get("workspace_canonical") or record.get("workspace"),
+            isolation=self.settings.isolation,
         )
         return candidates[: int(self.settings.semantic_conflict_pair_limit)]
 
@@ -767,9 +784,12 @@ class MemoryTools:
                     cleanup()
             if not signal.candidate:
                 continue
+            # Gate only the authored claims. Fixed field labels and broad metadata
+            # (especially common tags) otherwise manufacture lexical overlap and
+            # can turn unrelated production records into false conflicts.
             gate = pair_text_gate(
-                f"subject: {record.get('subject') or ''}\ntags: {', '.join(record.get('tags') or []) if isinstance(record.get('tags'), list) else ''}\ncontent: {record.get('content') or ''}",
-                f"subject: {peer_record.get('subject') or ''}\ntags: {', '.join(peer_record.get('tags') or []) if isinstance(peer_record.get('tags'), list) else ''}\ncontent: {peer_record.get('content') or ''}",
+                str(record.get("content") or ""),
+                str(peer_record.get("content") or ""),
                 mode=self.settings.semantic_conflict_pair_text_gate,
             )
             if not gate.passed:

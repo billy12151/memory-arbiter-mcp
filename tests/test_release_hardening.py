@@ -84,6 +84,25 @@ def test_sync_version_detects_manifest_changelog_and_lock_drift(monkeypatch, tmp
     assert not sync.check_uv_lock("0.13.0")
 
 
+def test_uv_lock_dynamic_version_record_is_valid(monkeypatch, tmp_path):
+    sync = _load_script("sync_version_dynamic_lock", "scripts/sync_version.py")
+    pyproject = tmp_path / "pyproject.toml"
+    lock = tmp_path / "uv.lock"
+    pyproject.write_text(
+        '[project]\nname="memory-arbiter-mcp"\n[project.optional-dependencies]\ntest=[]\nvec=[]\nsemantic-local=[]\n',
+        encoding="utf-8",
+    )
+    lock.write_text(
+        'version=1\n[[package]]\nname="memory-arbiter-mcp"\nsource={editable="."}\n'
+        '[package.optional-dependencies]\ntest=[]\nvec=[]\nsemantic-local=[]\n'
+        '[package.metadata]\nprovides-extras=["test","vec","semantic-local"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sync, "PYPROJECT", pyproject)
+    monkeypatch.setattr(sync, "UV_LOCK", lock)
+    assert sync.check_uv_lock("0.13.1")
+
+
 def test_mypy_check_rejects_unparseable_success(monkeypatch):
     checker = _load_script("check_mypy_test", "scripts/refactor_baseline/check_mypy.py")
     monkeypatch.setattr(

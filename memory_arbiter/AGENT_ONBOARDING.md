@@ -39,9 +39,22 @@ or "写到迷码" as requests to use Memory Arbiter MCP tools, not a local file.
 If a response returns `action_required=judge_conflict_before_use`, call
 `memory(action="judge")` with every included snapshot pin before using the
 affected claim. This judgment records guidance; it does not edit or supersede
-either memory. If it escalates to `pending_user`, ask the user. Semantic notices
-are advisory and may be listed/dismissed with `memory_repair(task="notice")`
-without governance authorization; there is no periodic vector conflict scanner.
+either memory. If it escalates to `pending_user`, ask the user.
+
+A successful response from any product tool may include one compact semantic
+notice stub alongside existing system notices. Call `memory_repair(task="notice",
+data={"action":"read","notice_id": id})`, then execute the returned
+`left_read_call` and `right_read_call` to read both full memories. Only after both
+reads succeed, tell the user if the advisory candidate appears credible; do not
+present it as a confirmed conflict. Dismiss false positives and resolve notices
+already handled. Delivery is only the `open -> open + delivered_at` state
+transition; public dismiss/resolve calls are terminal, while stale undelivered
+snapshots may transition internally to `stale`. The database claim is atomic best
+effort, but transport does not guarantee exactly-once delivery. Semantic notices
+do not automatically create a conflict, submit a judgment, edit, or supersede
+memory. Candidate recall is specific and bounded; the pair-text gate defaults to
+`medium`, while `strong` is conservative. There is no periodic vector conflict
+scanner.
 
 If `backup_replay_pending` appears, an Agent may run `replay_backup` with
 `dry_run=true` directly. Explain the preview and ask the user before retrying with
@@ -68,7 +81,8 @@ mema / Memory Arbiter（迷码）：记忆操作和治理统一使用 MCP 工具
 `action_required=ask_user_for_authorization`，应说明返回的影响、询问用户，并仅在确认后重试。
 
 用户说“mema 查记忆”“迷码查一下”“写到 mema”“写到迷码”等，都应理解为使用 Memory Arbiter MCP 工具，而不是引用某个本地文件。
-如果响应返回 `action_required=judge_conflict_before_use`，先用 `memory(action="judge")` 提交全部 snapshot pins，再使用受影响 claim；judgment 只记录 guidance，不会编辑或废弃任一记忆。升级为 `pending_user` 时询问用户。semantic notice 是 advisory，可无需治理授权通过 `memory_repair(task="notice")` 查看/关闭；系统没有定期向量冲突 scanner。
+如果响应返回 `action_required=judge_conflict_before_use`，先用 `memory(action="judge")` 提交全部 snapshot pins，再使用受影响 claim；judgment 只记录 guidance，不会编辑或废弃任一记忆。升级为 `pending_user` 时询问用户。
+成功的产品工具响应可能在现有系统 notices 旁附带 1 个紧凑 semantic notice stub。先调用 `memory_repair(task="notice", data={"action":"read","notice_id": id})`，再执行返回的 `left_read_call` 与 `right_read_call` 读取两侧完整记忆。只有两次读取都成功后，才在 advisory candidate 看起来可信时提示用户，且不得称为已确认冲突；误报 dismiss，已处理 notice resolve。投递只做 `open → open + delivered_at` 状态迁移；公开 dismiss/resolve 才进入终态，未投递 stale snapshot 可由内部迁移到 `stale`。数据库 claim 是原子 best effort，transport 不保证 exactly-once delivery。候选召回 specific 且 bounded；pair-text gate 默认 `medium`，`strong` 为保守档。semantic notice 不会自动创建 conflict、提交 judgment、编辑或废弃记忆；系统没有定期向量冲突 scanner。
 若收到 `backup_replay_pending`，Agent 可直接执行 `replay_backup(dry_run=true)`；说明预览并取得用户授权后，才能用 `dry_run=false, authorized=true` 正式恢复，禁止自动 replay。
 
 完整指南：`memory(action="help", data={"topic": "agent_onboarding"})` 或已安装的

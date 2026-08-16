@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_ref:
-        description: "Release tag to build (for example: v0.13.0)"
+        description: "Release tag to build (for example: v0.13.1)"
         required: true
       publish:
         description: "Publish the built distributions to PyPI"

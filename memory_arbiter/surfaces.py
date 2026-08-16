@@ -119,8 +119,13 @@ class ProductSurfaces:
                     "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
                     "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
                     "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
-                    "notice": {"task": "notice", "data": {"action": "list", "limit": 5}},
+                    "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
+                    "notice_read": {"task": "notice", "data": {"action": "read", "notice_id": 1}},
+                    "notice_dismiss": {"task": "notice", "data": {"action": "dismiss", "notice_id": 1, "reason": "Reviewed; not actionable."}},
+                    "notice_resolve": {"task": "notice", "data": {"action": "resolve", "notice_id": 1, "reason": "Reviewed and handled."}},
                 },
+                "semantic_notice_delivery": "After Qwen write-time async candidate processing, a successful response from any product tool may include at most one compact semantic stub alongside existing system notices. Read it with notice/read, then execute the returned left_read_call and right_read_call to read both full memories. Only after both reads succeed, tell the user if the advisory candidate appears credible; do not call it a confirmed conflict. Dismiss false positives or resolve notices already handled. Delivery is the state transition open -> open + delivered_at; public dismiss/resolve calls are terminal, while stale undelivered snapshots may transition internally to stale. Semantic notices never automatically create a conflict, submit a judgment, edit, or supersede memory. The local database claim is atomic best effort; transport does not guarantee exactly-once delivery.",
+                "semantic_candidate_policy": "Model output is strict-schema validated. Specific bounded candidate recall ranks subject/tag candidates before pair_limit; noisy/common tags are suppressed. pair_text_gate defaults to medium; strong is conservative. Configure semantic_conflict.pair_text_gate or MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE.",
             },
         }
         if topic == AGENT_ONBOARDING_TOPIC:
@@ -287,21 +292,63 @@ class ProductSurfaces:
             response["degraded"] = bool(warnings) or response.get("mode") != "sqlite_vec"
         return response
 
+    def _notice_workspace_scope(
+        self, response: dict[str, Any], data: Optional[dict[str, Any]],
+    ) -> Optional[str]:
+        if self.settings.isolation != "strict":
+            return None
+        response_data = response.get("data")
+        if isinstance(response_data, dict):
+            canonical = response_data.get("caller_workspace_canonical")
+            if isinstance(canonical, str) and canonical.strip():
+                return canonical.strip()
+        raw = data.get("workspace") if isinstance(data, dict) else None
+        return self._caller_workspace(raw).canonical
+
+    def _deliver_product_notices(
+        self, response: dict[str, Any], data: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Attach notices only after success, scoped to this product caller."""
+        if not response.get("ok"):
+            return response
+        notices: list[dict[str, Any]] = []
+        # Consume existing update/onboarding/backup notices without slicing them;
+        # semantic delivery has its own one-per-response limit.
+        try:
+            notices.extend(self._tools._consume_notices())
+        except Exception:
+            pass
+        try:
+            semantic = self.db.claim_next_semantic_notice(
+                self._notice_workspace_scope(response, data),
+            )
+        except Exception:
+            semantic = None
+        if semantic is not None:
+            notices.append(semantic)
+        if notices:
+            response.setdefault("notices", []).extend(notices)
+        return response
+
     def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         operation = str(action or "help").strip().lower()
-        return self._validated_product_call("memory", operation, data, self._memory)
+        response = self._validated_product_call("memory", operation, data, self._memory)
+        return self._deliver_product_notices(response, data)
 
     def memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         operation = str(view or "help").strip().lower()
-        return self._validated_product_call("memory_review", operation, data, self._memory_review)
+        response = self._validated_product_call("memory_review", operation, data, self._memory_review)
+        return self._deliver_product_notices(response, data)
 
     def memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         operation = str(action or "help").strip().lower()
-        return self._validated_product_call("memory_govern", operation, data, self._memory_govern)
+        response = self._validated_product_call("memory_govern", operation, data, self._memory_govern)
+        return self._deliver_product_notices(response, data)
 
     def memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         operation = str(task or "help").strip().lower()
-        return self._validated_product_call("memory_repair", operation, data, self._memory_repair)
+        response = self._validated_product_call("memory_repair", operation, data, self._memory_repair)
+        return self._deliver_product_notices(response, data)
 
     def _governance_authorization_required(self, action: str) -> dict[str, Any]:
         return self.db.state.response(
@@ -384,7 +431,7 @@ class ProductSurfaces:
                 return invalid_id
             return self._forward("memory", action, self.memory_submit_conflict_judgment, **payload)
         if action == "status":
-            return self.memory_status()
+            return self.memory_status(workspace=payload.get("workspace"))
         return self._invalid_product_call("memory", f"unknown action: {action}", action)
 
     def _memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
@@ -400,7 +447,10 @@ class ProductSurfaces:
         if view == "help":
             return self.db.state.response(self._product_help("memory_review", self._help_topic(payload, "view")))
         if view == "overview":
-            return self.db.state.response({"status": self.memory_status().get("data"), "audit": self.memory_audit_summary(**payload).get("data")})
+            return self.db.state.response({
+                "status": self.memory_status(workspace=payload.get("workspace")).get("data"),
+                "audit": self.memory_audit_summary(**payload).get("data"),
+            })
         if view == "doctor":
             return self._forward("memory_review", view, self.memory_doctor_overview, **payload)
         if view == "audit":
@@ -621,20 +671,48 @@ class ProductSurfaces:
             return self.db.state.response(self._semantic_control_with_timeout(
                 str(payload.get("action") or "status"),
                 timeout=timeout_value,
+                workspace=payload.get("workspace"),
             ))
         if task == "notice":
-            action = str(payload.get("action") or "list").strip().lower()
+            action_value = payload.get("action", "list")
+            if not isinstance(action_value, str):
+                return self._invalid_product_call("memory_repair", "notice action must be a string", task)
+            action = action_value.strip().lower()
+            if action not in {"list", "read", "dismiss", "resolve"}:
+                return self._invalid_product_call("memory_repair", f"unknown notice action: {action}", task)
+            caller = self._caller_workspace(payload.get("workspace"))
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+            workspace = caller.canonical if caller.isolation == "strict" else None
             if action == "list":
                 try:
                     notice_limit = int(payload.get("limit") or 10)
                 except (TypeError, ValueError):
-                    notice_limit = 10
-                return self.db.state.response({"notices": self.db.list_semantic_notices(limit=notice_limit)})
-            if action in {"dismiss", "resolve"}:
-                invalid_id = self._coerce_product_id("memory_repair", payload, "notice_id", task)
-                if invalid_id is not None:
-                    return invalid_id
-                status = "dismissed" if action == "dismiss" else "resolved"
-                result = self.db.update_semantic_notice_status(int(payload["notice_id"]), status, str(payload.get("reason") or ""))
-                return self.db.state.response(result, ok=result.get("outcome") == "updated")
+                    return self._invalid_product_call("memory_repair", "notice limit must be an integer", task)
+                status_value = payload.get("status", "open")
+                if not isinstance(status_value, str):
+                    return self._invalid_product_call("memory_repair", "notice status must be a string", task)
+                status = status_value.strip().lower()
+                if status not in {"open", "dismissed", "resolved", "stale"}:
+                    return self._invalid_product_call("memory_repair", f"invalid notice status: {status}", task)
+                notices = self.db.list_semantic_notices(
+                    status=status, limit=notice_limit, workspace_canonical=workspace,
+                )
+                return self.db.state.response({"notices": notices}, extra_warnings=list(caller.warnings))
+            invalid_id = self._coerce_product_id("memory_repair", payload, "notice_id", task)
+            if invalid_id is not None:
+                return invalid_id
+            if action == "read":
+                notice = self.db.read_semantic_notice(int(payload["notice_id"]), workspace)
+                if notice is None:
+                    return self.db.state.response({"outcome": "not_found"}, ok=False)
+                return self.db.state.response({"notice": notice}, extra_warnings=list(caller.warnings))
+            status = "dismissed" if action == "dismiss" else "resolved"
+            result = self.db.update_semantic_notice_status(
+                int(payload["notice_id"]), status, str(payload.get("reason") or ""), workspace,
+            )
+            return self.db.state.response(
+                result, ok=result.get("outcome") == "updated", extra_warnings=list(caller.warnings),
+            )
         return self._invalid_product_call("memory_repair", f"unknown task: {task}", task)

@@ -92,6 +92,7 @@ class SchemaStore:
                   delivered_at TEXT,
                   dismissed_at TEXT,
                   resolved_at TEXT,
+                  resolution_reason TEXT,
                   FOREIGN KEY(memory_id) REFERENCES memories(id),
                   FOREIGN KEY(peer_id) REFERENCES memories(id),
                   FOREIGN KEY(conflict_id) REFERENCES conflicts(id)
@@ -105,6 +106,23 @@ class SchemaStore:
                 CREATE INDEX IF NOT EXISTS idx_conflicts_status_right ON conflicts(status, right_id);
                 CREATE INDEX IF NOT EXISTS idx_conflicts_status_created ON conflicts(status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_semantic_notices_status_created ON semantic_notices(status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_semantic_notices_open_undelivered_priority
+                  ON semantic_notices(
+                    CASE lower(severity)
+                      WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'warning' THEN 2
+                      WHEN 'normal' THEN 3 WHEN 'info' THEN 4 ELSE 5 END,
+                    created_at,
+                    id,
+                    severity,
+                    notice_type,
+                    memory_id,
+                    peer_id,
+                    left_version,
+                    right_version,
+                    left_claim_revision,
+                    right_claim_revision
+                  )
+                  WHERE status='open' AND delivered_at IS NULL;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_notices_dedupe ON semantic_notices(dedupe_key) WHERE dedupe_key IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS memory_history (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,6 +231,28 @@ class SchemaStore:
                                  "TEXT")
         self._migrate_add_column(conn, "memories", "split_revision",
                                  "INTEGER NOT NULL DEFAULT 0")
+        notice_columns_before = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(semantic_notices)")
+        }
+        self._migrate_add_column(conn, "semantic_notices", "resolution_reason", "TEXT")
+        # Legacy delivery used status='delivered'. Delivery is now orthogonal:
+        # keep the notice open and preserve the delivery timestamp. Legacy rows
+        # without complete snapshot pins cannot be freshness-checked, so make
+        # that ambiguity explicit instead of re-delivering them.
+        conn.execute(
+            "UPDATE semantic_notices SET status='open', delivered_at=COALESCE(delivered_at, created_at) "
+            "WHERE status='delivered'"
+        )
+        conn.execute(
+            "UPDATE semantic_notices SET status='stale', resolved_at=COALESCE(resolved_at, created_at) "
+            "WHERE status='open' AND (left_version IS NULL OR right_version IS NULL "
+            "OR left_claim_revision IS NULL OR right_claim_revision IS NULL)"
+        )
+        if "reason" in notice_columns_before:
+            conn.execute(
+                "UPDATE semantic_notices SET resolution_reason=reason "
+                "WHERE resolution_reason IS NULL AND reason IS NOT NULL"
+            )
         self._migrate_add_column(conn, "backup_replay_log", "postprocess_status",
                                  "TEXT NOT NULL DEFAULT 'complete'")
         self._migrate_add_column(conn, "backup_replay_log", "postprocess_stages",

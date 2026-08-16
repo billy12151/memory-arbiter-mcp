@@ -377,11 +377,9 @@ class OperationsPipeline:
             if denied is not None:
                 return denied
         warnings: list[str] = list(caller.warnings) if caller is not None else []
-        # Compute the canonical embedding before BEGIN IMMEDIATE. Embedder calls
-        # may be slow and must not run while holding SQLite's write lock.
-        embedder, ensure_warnings = self._ensure_embedder()
-        warnings.extend(ensure_warnings)
-        precomputed_embedding = self.db.prepare_workspace_canonical_embedding(canonical, embedder)
+        # Confirmation assigns an already user-selected canonical. It must not
+        # invoke embedding/model work; a later ordinary write can publish the
+        # canonical vector through the normal retry path.
         activated = False
         updated: Optional[dict[str, Any]] = None
         try:
@@ -409,7 +407,7 @@ class OperationsPipeline:
                     raise ValueError("; ".join(alias_warnings) or "workspace alias not written")
                 warnings.extend(alias_warnings)
                 canonical_set, canonical_warnings = self.db.set_memory_workspace_canonical_on_conn(
-                    conn, int(memory_id), canonical, precomputed_embedding,
+                    conn, int(memory_id), canonical,
                 )
                 if not canonical_set:
                     raise ValueError("; ".join(canonical_warnings) or "workspace_canonical not set")
@@ -689,7 +687,9 @@ class OperationsPipeline:
                 # v0.8: split capability is bound to vec readiness, not a toggle.
                 "split_capability": self._split_capability(vec_state),
                 "vec_index_state": vec_state,
-                "semantic_conflict": self._semantic_status(),
+                "semantic_conflict": self._semantic_status(
+                    self._semantic_notice_workspace_scope(_.get("workspace")),
+                ),
                 "policy": {
                     "client_defaults": self.settings.policy.client_defaults,
                     "default_enabled": self.settings.policy.default_enabled,

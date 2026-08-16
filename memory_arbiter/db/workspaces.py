@@ -48,6 +48,71 @@ class WorkspaceStore:
         # extraction close to a pure move; later hardening can tighten the seam.
         return getattr(self._db, name)
 
+    def _publish_missing_workspace_canonical_vector(
+        self,
+        canonical: str,
+        embedder: Any,
+        result: dict[str, Any],
+    ) -> None:
+        """Idempotently backfill a missing canonical vector on write paths.
+
+        The existence probe and embedding happen before the short write
+        transaction. The transaction rechecks the vector row so concurrent
+        retries cannot replace an already-published vector.
+        """
+        if not (
+            canonical
+            and embedder is not None
+            and self.state.sqlite_writable
+            and self.state.sqlite_vec_available
+        ):
+            return
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT c.id, v.id AS vector_id "
+                    "FROM workspace_canonicals c "
+                    "LEFT JOIN workspace_canonicals_vec v ON v.id = c.id "
+                    "WHERE c.name = ?",
+                    (canonical,),
+                ).fetchone()
+        except sqlite3.Error:
+            return
+        if row is not None and row["vector_id"] is not None:
+            return
+
+        try:
+            er = embedder.embed_text(prefix="", body=canonical)
+            embedding = list(er.embedding) if er and er.embedding else None
+        except Exception:
+            embedding = None
+        if not embedding:
+            return
+
+        try:
+            with self.write_transaction() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                    (canonical, utc_now_iso()),
+                )
+                canonical_row = conn.execute(
+                    "SELECT c.id, v.id AS vector_id "
+                    "FROM workspace_canonicals c "
+                    "LEFT JOIN workspace_canonicals_vec v ON v.id = c.id "
+                    "WHERE c.name = ?",
+                    (canonical,),
+                ).fetchone()
+                if canonical_row is not None and canonical_row["vector_id"] is None:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
+                        (int(canonical_row["id"]), json.dumps(embedding)),
+                    )
+        except sqlite3.Error as exc:
+            result["vector_publish_pending"] = True
+            result["warnings"].append(
+                f"workspace canonical vector publish failed for {canonical!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
+            )
+
     def resolve_workspace_canonical(
         self,
         ws_raw: Optional[str],
@@ -120,6 +185,10 @@ class WorkspaceStore:
                             "matched_by": "confirmed_alias",
                             "distance": 0.0,
                         })
+                        if register_new:
+                            self._publish_missing_workspace_canonical_vector(
+                                str(arow["canonical"]), embedder, result,
+                            )
                         return result
                     if str(arow["status"]) == "rejected":
                         # Do not auto-merge to this canonical; remember it so the

@@ -35,7 +35,7 @@ _SENSITIVE_FIELDS = {
 _COMMON = {"topic", "workspace"}
 PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory", "help"): {"topic", "action"},
-    ("memory", "status"): set(),
+    ("memory", "status"): {"workspace"},
     ("memory", "remember"): {
         "content", "agent_id", "workspace", "tags", "source_type", "source_ref",
         "event_time", "ingest_time", "confidence", "protection_level", "status",
@@ -100,8 +100,8 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_repair", "resync_vectors"): {"dry_run", "authorized", "workspace"},
     ("memory_repair", "set_entity"): {"id", "memory_id", "entity", "scope", "clear", "authorized", "workspace"},
     ("memory_repair", "activate_pending"): {"id", "memory_id", "authorized", "workspace"},
-    ("memory_repair", "semantic_control"): {"action", "timeout"},
-    ("memory_repair", "notice"): {"action", "limit", "id", "notice_id", "reason"},
+    ("memory_repair", "semantic_control"): {"action", "timeout", "workspace"},
+    ("memory_repair", "notice"): {"action", "status", "limit", "id", "notice_id", "reason", "workspace"},
     ("memory_repair", "replay_backup"): {"dry_run", "authorized", "limit", "offset"},
     ("memory_repair", "help"): {"topic", "task"},
 }

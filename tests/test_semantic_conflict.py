@@ -1,6 +1,9 @@
+import json
 from pathlib import Path
 import threading
 import time
+
+import pytest
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
@@ -131,16 +134,25 @@ def test_semantic_notice_db_and_repair_control(tmp_path: Path):
     assert first["semantic_conflict_check"]["status"] == "queued"
     assert second["semantic_conflict_check"]["status"] == "queued"
 
+    first_row = tools.db.get_memory(first["id"])
+    second_row = tools.db.get_memory(second["id"])
+    assert first_row and second_row
+    notice_pins = {
+        "left_version": second_row["version"],
+        "right_version": first_row["version"],
+        "left_claim_revision": second_row["claim_revision"],
+        "right_claim_revision": first_row["claim_revision"],
+    }
     result = tools.db.record_semantic_notice(
         memory_id=second["id"], peer_id=first["id"], severity="normal",
         notice_type="semantic_pair", title="test", message="msg",
-        payload={"x": 1}, dedupe_key="k1",
+        payload={"x": 1}, dedupe_key="k1", **notice_pins,
     )
     assert result["outcome"] == "created"
     assert tools.db.record_semantic_notice(
         memory_id=second["id"], peer_id=first["id"], severity="normal",
         notice_type="semantic_pair", title="test", message="msg",
-        payload={"x": 1}, dedupe_key="k1",
+        payload={"x": 1}, dedupe_key="k1", **notice_pins,
     )["outcome"] == "deduped"
 
     listed = tools.memory_repair(task="notice", data={"action": "list"})["data"]["notices"]
@@ -215,6 +227,33 @@ def test_process_semantic_job_writes_notice_with_fake_backend(tmp_path: Path):
     assert notices[0]["memory_id"] == new["id"]
     assert notices[0]["peer_id"] == old["id"]
     assert notices[0]["severity"] in {"normal", "high"}
+
+
+def test_production_gate_uses_real_content_not_fixed_metadata_template(tmp_path: Path):
+    tools = _tools(tmp_path)
+    tools.settings.semantic_conflict_pair_text_gate = "strong"
+    tools.memory_write(
+        content="甲方记录只描述苹果库存。",
+        subject="shared production subject",
+        tags=["common", "production"],
+    )
+    new = tools.memory_write(
+        content="乙方记录只描述火星天气。",
+        subject="shared production subject",
+        tags=["common", "production"],
+    )["data"]
+    record = tools.db.get_memory(new["id"])
+    tools._semantic_backend = _FakeSemanticBackend()
+    snapshot = {
+        "memory_id": new["id"],
+        "version": record["version"],
+        "claim_revision": record["claim_revision"],
+        "content_hash": __import__("hashlib").sha256(record["content"].encode("utf-8")).hexdigest(),
+    }
+
+    tools._process_semantic_conflict_job(new["id"], snapshot)
+
+    assert tools.db.list_semantic_notices() == []
 
 
 def test_gate_vetoes_model_candidate_so_no_notice_is_written(tmp_path: Path):
@@ -370,30 +409,417 @@ def test_worker_resume_method_does_not_clear_disabled(tmp_path: Path):
     assert tools._semantic_worker.status()["runtime_state"] == "disabled"
 
 
-def test_model_signal_parses_nested_json_object():
-    # A non-greedy {.*?} regex truncates nested objects and would drop this
-    # candidate. Brace-balanced extraction must recover the full payload.
-    nested = 'noise {"should_surface": true, "reason_code": "value_diff", "parsed": {"k": 1, "list": [1, 2]}} tail'
+def test_model_signal_accepts_strict_schema_and_preserves_extra_fields():
+    nested = (
+        'noise {"should_surface": true, "same_fact_slot": true, '
+        '"reason_code": "value_diff", "confidence": 0.75, '
+        '"parsed": {"k": 1, "list": [1, 2]}} tail'
+    )
     signal = model_signal_from_text(nested)
     assert signal.candidate is True
     assert signal.candidate_type == "value_diff"
-    assert signal.parsed == {"should_surface": True, "reason_code": "value_diff", "parsed": {"k": 1, "list": [1, 2]}}
+    assert signal.confidence == 0.75
+    assert signal.parsed["parsed"] == {"k": 1, "list": [1, 2]}
     assert signal.error is None
 
 
 def test_model_signal_extracts_first_object_when_two_present():
-    raw = '{"should_surface": false, "reason_code": "duplicate"} ... {"reason_code": "replacement"}'
+    raw = (
+        '{"should_surface": false, "same_fact_slot": true, '
+        '"reason_code": "duplicate", "confidence": 0.2} ... '
+        '{"should_surface": true, "same_fact_slot": true, '
+        '"reason_code": "replacement", "confidence": 0.9}'
+    )
     signal = model_signal_from_text(raw)
-    # First balanced object wins, and duplicate forces candidate=False.
     assert signal.candidate is False
     assert signal.candidate_type == "duplicate"
+    assert signal.error is None
+
+
+@pytest.mark.parametrize("field", [
+    "should_surface", "same_fact_slot", "reason_code", "confidence",
+])
+def test_model_signal_rejects_duplicate_protocol_json_keys(field):
+    values = {
+        "should_surface": "true",
+        "same_fact_slot": "true",
+        "reason_code": '"value_diff"',
+        "confidence": "0.8",
+    }
+    pairs = [f'"{key}": {value}' for key, value in values.items()]
+    pairs.append(f'"{field}": {values[field]}')
+    signal = model_signal_from_text("{" + ", ".join(pairs) + "}")
+    assert signal.candidate is False
+    assert signal.candidate_type == "invalid_json"
+    assert "duplicate protocol field" in (signal.error or "")
+
+
+def test_model_signal_allows_duplicate_extra_explanation_key():
+    raw = (
+        '{"should_surface": true, "same_fact_slot": true, '
+        '"reason_code": "value_diff", "confidence": 0.8, '
+        '"explanation": "first", "explanation": "last"}'
+    )
+    signal = model_signal_from_text(raw)
+    assert signal.candidate is True
+    assert signal.parsed["explanation"] == "last"
 
 
 def test_model_signal_braces_inside_strings_do_not_affect_depth():
-    raw = '{"reason_code": "value_diff", "note": "has } and { inside"}'
+    raw = (
+        '{"should_surface": true, "same_fact_slot": true, '
+        '"reason_code": "value_diff", "confidence": 1, '
+        '"note": "has } and { inside"}'
+    )
     signal = model_signal_from_text(raw)
     assert signal.candidate is True
     assert signal.candidate_type == "value_diff"
+
+
+@pytest.mark.parametrize("payload", [
+    {"should_surface": True, "same_fact_slot": True, "reason_code": "value_diff"},
+    {"should_surface": True, "same_fact_slot": True, "reason_code": "value_diff", "confidence": "0.9"},
+    {"should_surface": True, "same_fact_slot": True, "reason_code": "value_diff", "confidence": True},
+    {"should_surface": True, "same_fact_slot": True, "reason_code": "value_diff", "confidence": float("nan")},
+    {"should_surface": True, "same_fact_slot": True, "reason_code": "value_diff", "confidence": 1.01},
+    {"should_surface": 1, "same_fact_slot": True, "reason_code": "value_diff", "confidence": 0.9},
+    {"should_surface": True, "same_fact_slot": "true", "reason_code": "value_diff", "confidence": 0.9},
+    {"candidate": True, "same_fact_slot": True, "candidate_type": "value_diff", "confidence": 0.9},
+    {"should_surface": True, "same_fact_slot": True, "reason_code": "changed", "confidence": 0.9},
+    {"should_surface": False, "same_fact_slot": True, "reason_code": "replacement", "confidence": 0.9},
+    {"should_surface": True, "same_fact_slot": False, "reason_code": "replacement", "confidence": 0.9},
+    {"should_surface": True, "same_fact_slot": True, "reason_code": "duplicate", "confidence": 0.9},
+])
+def test_model_signal_invalid_schema_fails_closed(payload):
+    signal = model_signal_from_text(json.dumps(payload))
+    assert signal.candidate is False
+    assert signal.candidate_type == "invalid_schema"
+    assert signal.confidence is None
+    assert signal.error == "invalid_schema"
+
+
+@pytest.mark.parametrize("reason", ["duplicate", "compatible", "same_topic_only", "unrelated"])
+def test_model_signal_non_action_requires_and_accepts_should_false(reason):
+    signal = model_signal_from_text(json.dumps({
+        "should_surface": False,
+        "same_fact_slot": False,
+        "reason_code": reason,
+        "confidence": 0,
+    }))
+    assert signal.candidate is False
+    assert signal.candidate_type == reason
+    assert signal.error is None
+
+
+@pytest.mark.parametrize("reason", ["duplicate", "compatible"])
+def test_model_signal_duplicate_and_compatible_allow_same_slot(reason):
+    signal = model_signal_from_text(json.dumps({
+        "should_surface": False,
+        "same_fact_slot": True,
+        "reason_code": reason,
+        "confidence": 0.2,
+        "explanation": "same slot but no action",
+    }))
+    assert signal.candidate is False
+    assert signal.candidate_type == reason
+    assert signal.error is None
+
+
+@pytest.mark.parametrize("reason", ["same_topic_only", "unrelated"])
+def test_model_signal_topic_only_and_unrelated_reject_same_slot(reason):
+    signal = model_signal_from_text(json.dumps({
+        "should_surface": False,
+        "same_fact_slot": True,
+        "reason_code": reason,
+        "confidence": 0.2,
+    }))
+    assert signal.candidate_type == "invalid_schema"
+    assert signal.error == "invalid_schema"
+
+
+def test_semantic_recall_suppresses_noisy_tags_but_keeps_specific_single_tag(tmp_path: Path):
+    tools = _tools(tmp_path)
+    specific = tools.memory_write(
+        content="specific tag peer", subject="unrelated peer", tags=["release-2026-08"]
+    )["data"]["id"]
+    todo_only = tools.memory_write(
+        content="todo peer", subject="other item", tags=["todo"]
+    )["data"]["id"]
+    one_char_only = tools.memory_write(
+        content="one char peer", subject="another item", tags=["x"]
+    )["data"]["id"]
+    common_ids = [
+        tools.memory_write(content=f"common {i}", subject=f"noise {i}", tags=["common"])["data"]["id"]
+        for i in range(3)
+    ]
+    query = tools.memory_write(
+        content="query", subject="distinct query", tags=["release-2026-08", "todo", "x", "common"]
+    )["data"]
+
+    query_record = tools.db.get_memory(query["id"])
+    semantic_ids = [row["id"] for row in tools._semantic_candidate_memories(query["id"], query_record)]
+    assert semantic_ids == [specific]
+    assert todo_only not in semantic_ids
+    assert one_char_only not in semantic_ids
+    assert not set(common_ids) & set(semantic_ids)
+
+    default_ids = {
+        row["id"] for row in tools.db.find_metadata_overlap_candidates(
+            query_record["subject"], query_record["tags"], query["id"], limit=50
+        )
+    }
+    assert {specific, todo_only, one_char_only, *common_ids} <= default_ids
+
+
+def test_semantic_recall_ranks_before_pair_limit_and_supports_subject_fallback(tmp_path: Path):
+    tools = _tools(tmp_path)
+    tools.settings.semantic_conflict_pair_limit = 4
+    stable_first = tools.memory_write(
+        content="stable first", subject="Qwen parser behavior", tags=["qwen-parser"]
+    )["data"]["id"]
+    stable_second = tools.memory_write(
+        content="stable second", subject="Qwen parser behavior", tags=["qwen-parser"]
+    )["data"]["id"]
+    dual_two_tags = tools.memory_write(
+        content="dual two", subject="Qwen parser behavior", tags=["qwen-parser", "schema-v2"]
+    )["data"]["id"]
+    subject_only = tools.memory_write(
+        content="subject fallback", subject="Qwen parser behavior", tags=["other-specific"]
+    )["data"]["id"]
+    tag_only = tools.memory_write(
+        content="tag only", subject="unrelated", tags=["qwen-parser"]
+    )["data"]["id"]
+    query = tools.memory_write(
+        content="query", subject="Qwen parser behavior", tags=["qwen-parser", "schema-v2"]
+    )["data"]
+
+    query_record = tools.db.get_memory(query["id"])
+    ids = [row["id"] for row in tools._semantic_candidate_memories(query["id"], query_record)]
+    assert ids == [dual_two_tags, subject_only, stable_second, stable_first]
+    assert tag_only not in ids  # its only overlapping tag is high-DF and its subject does not match
+    subject_candidates = tools.db.find_semantic_overlap_candidates(
+        subject="Qwen parser behavior", tags=[], exclude_id=query["id"], limit=10
+    )
+    assert subject_only in [row["id"] for row in subject_candidates]
+
+
+def test_semantic_recall_filters_workspace_before_pair_limit(tmp_path: Path):
+    settings = Settings(
+        db_path=tmp_path / "m.sqlite3",
+        backup_jsonl=tmp_path / "m.jsonl",
+        semantic_conflict_enabled=True,
+        semantic_conflict_model_path=tmp_path / "missing.gguf",
+        isolation="weak",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    wanted = tools.memory_write(
+        content="wanted", subject="Qwen parser", tags=["parser"], workspace="alpha"
+    )["data"]["id"]
+    for i in range(8):
+        tools.memory_write(
+            content=f"noise {i}", subject="Qwen parser", tags=["parser"], workspace="beta"
+        )
+    query = tools.memory_write(
+        content="query", subject="Qwen parser", tags=["parser"], workspace="alpha"
+    )["data"]
+    tools.settings.semantic_conflict_pair_limit = 1
+    record = tools.db.get_memory(query["id"])
+
+    candidates = tools._semantic_candidate_memories(query["id"], record)
+    assert [candidate["id"] for candidate in candidates] == [wanted]
+
+
+def test_semantic_recall_query_is_bounded_and_metadata_only(monkeypatch, tmp_path: Path):
+    tools = _tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    for i in range(20):
+        tools.memory_write(content=f"body {i}", subject="bounded parser", tags=["bounded"])
+    query = tools.memory_write(content="query body", subject="bounded parser", tags=["bounded"])["data"]
+    statements = []
+    original_connection = tools.db.connection
+
+    class _SpyConnection:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            statements.append((" ".join(sql.split()).lower(), tuple(params)))
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    class _SpyContext:
+        def __init__(self, context):
+            self._context = context
+
+        def __enter__(self):
+            return _SpyConnection(self._context.__enter__())
+
+        def __exit__(self, *args):
+            return self._context.__exit__(*args)
+
+    monkeypatch.setattr(tools.db, "connection", lambda: _SpyContext(original_connection()))
+    rows = tools.db.find_semantic_overlap_candidates(
+        subject="bounded parser", tags=["bounded"], exclude_id=query["id"], limit=3,
+        canonical_workspace="default", isolation="none",
+    )
+
+    assert len(rows) == 3
+    recall_statements = [item for item in statements if "with input_tags(tag)" in item[0]]
+    assert len(recall_statements) == 1
+    candidate_sql, params = recall_statements[0]
+    assert "m.content" not in candidate_sql
+    assert " limit ?" in candidate_sql
+    assert len(params) <= 12
+    assert "json_each(pool.tags)" in candidate_sql
+    assert "pool as materialized" in candidate_sql
+    assert sum(value == 64 for value in params if isinstance(value, int)) >= 2
+
+
+def test_semantic_recall_hundred_tags_has_bounded_sql_and_parameters(monkeypatch, tmp_path: Path):
+    tools = _tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer = tools.memory_write(
+        content="peer body", subject="completely unrelated subject", tags=["TAG-99"]
+    )["data"]["id"]
+    query = tools.memory_write(content="query body", subject="no lexical overlap", tags=[])["data"]
+    statements = []
+    original_connection = tools.db.connection
+
+    class _SpyConnection:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            statements.append((" ".join(sql.split()).lower(), tuple(params)))
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    class _SpyContext:
+        def __init__(self, context):
+            self._context = context
+
+        def __enter__(self):
+            return _SpyConnection(self._context.__enter__())
+
+        def __exit__(self, *args):
+            return self._context.__exit__(*args)
+
+    monkeypatch.setattr(tools.db, "connection", lambda: _SpyContext(original_connection()))
+    rows = tools.db.find_semantic_overlap_candidates(
+        subject="wholly different query", tags=[f"tag-{i}" for i in range(100)],
+        exclude_id=query["id"], limit=1,
+    )
+
+    assert [row["id"] for row in rows] == [peer]
+    recall_statements = [
+        item for item in statements
+        if "with input_tags(tag)" in item[0]
+        and item[1] and len(json.loads(item[1][0])) == 100
+    ]
+    assert len(recall_statements) == 1
+    sql, params = recall_statements[0]
+    assert "content" not in sql
+    assert len(params) <= 12
+    assert len(json.loads(params[0])) == 100
+    assert json.loads(params[0])[-1] == "tag-99"
+
+
+def test_semantic_recall_large_workspace_keeps_expensive_pool_under_hard_cap(monkeypatch, tmp_path: Path):
+    tools = _tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    for i in range(550):
+        tools.memory_write(
+            content=f"bulk body {i}", subject="large pool subject", tags=["large-pool"]
+        )
+    query = tools.memory_write(
+        content="query", subject="large pool subject", tags=["large-pool"]
+    )["data"]
+    statements = []
+    original_connection = tools.db.connection
+
+    class _SpyConnection:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            statements.append((" ".join(sql.split()).lower(), tuple(params)))
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    class _SpyContext:
+        def __init__(self, context):
+            self._context = context
+
+        def __enter__(self):
+            return _SpyConnection(self._context.__enter__())
+
+        def __exit__(self, *args):
+            return self._context.__exit__(*args)
+
+    monkeypatch.setattr(tools.db, "connection", lambda: _SpyContext(original_connection()))
+    rows = tools.db.find_semantic_overlap_candidates(
+        subject="large pool subject", tags=["large-pool"],
+        exclude_id=query["id"], limit=500,
+    )
+
+    assert len(rows) == 500
+    sql, params = next(item for item in statements if "with input_tags(tag)" in item[0])
+    assert "pool as materialized" in sql
+    assert "json_each(pool.tags)" in sql
+    assert "json_each(base.tags)" not in sql
+    # Both source channels and the merged pool are independently capped; no
+    # caller candidate_limit can raise the expensive scoring pool above 500.
+    assert sum(value == 500 for value in params if isinstance(value, int)) >= 4
+
+
+def test_semantic_recall_equal_scores_prefer_recent_before_pair_limit(tmp_path: Path):
+    tools = _tools(tmp_path)
+    tools.settings.semantic_conflict_candidate_limit = 20
+    tools.settings.semantic_conflict_pair_limit = 2
+    older = [
+        tools.memory_write(content=f"old {i}", subject="parser policy", tags=["specific"])["data"]["id"]
+        for i in range(4)
+    ]
+    recent = tools.memory_write(
+        content="recent true candidate", subject="parser policy", tags=["specific"]
+    )["data"]["id"]
+    query = tools.memory_write(
+        content="query", subject="parser policy", tags=["specific"]
+    )["data"]
+
+    record = tools.db.get_memory(query["id"])
+    ids = [row["id"] for row in tools._semantic_candidate_memories(query["id"], record)]
+    assert ids == [recent, older[-1]]
+
+
+def test_semantic_recall_subject_punctuation_is_tokenized(tmp_path: Path):
+    tools = _tools(tmp_path)
+    peer = tools.memory_write(
+        content="peer", subject="Qwen parser behavior", tags=["other"]
+    )["data"]["id"]
+    query = tools.memory_write(
+        content="query", subject="Qwen parser: behavior!", tags=[]
+    )["data"]
+    record = tools.db.get_memory(query["id"])
+
+    candidates = tools._semantic_candidate_memories(query["id"], record)
+    assert peer in [candidate["id"] for candidate in candidates]
+
+
+def test_pair_text_gate_formula_and_thresholds_are_frozen():
+    left, right = "系统采用方案甲甲甲甲。", "系统采用方案乙乙乙乙。"
+    evidence = pair_text_evidence(left, right)
+    assert evidence.replacement is True
+    assert evidence.char_cosine >= 0.25
+    assert len(evidence.common_tokens) == 0
+    assert pair_text_gate(left, right, mode="medium").passed is True
+    assert pair_text_gate(left, right, mode="strong").passed is False
 
 
 def test_todo_done_is_direction_agnostic_with_common_tokens():
@@ -689,7 +1115,7 @@ def test_activate_pending_requeues_semantic_check(tmp_path: Path):
 
 
 class _FakeLlama:
-    def __init__(self, ready=None, release=None, raw='{"should_surface": true, "reason_code": "replacement", "confidence": 0.9}'):
+    def __init__(self, ready=None, release=None, raw='{"should_surface": true, "same_fact_slot": true, "reason_code": "replacement", "confidence": 0.9}'):
         self.ready = ready
         self.release = release
         self.raw = raw
