@@ -975,6 +975,7 @@ def test_tags_only_edit_preserves_active_split_index(tmp_path: Path) -> None:
     """G5: tags-only edit on an already-split memory leaves sections/revision untouched."""
     tools = _vec_tools(tmp_path)
     mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     before = tools.db.get_memory(mid)
     before_rev = before["split_revision"]
     before_secs = tools.db.get_sections_by_memory(mid)
@@ -1129,6 +1130,7 @@ def test_get_catalog_and_all_expose_embedding_diagnostics(tmp_path: Path) -> Non
     budget fields, unlike ordinary search matched_sections."""
     tools = _vec_tools(tmp_path)
     mid = tools.memory_write(content=_two_heading_doc(), subject="doc")["data"]["id"]
+    assert tools.wait_split_worker_drained(5)
     assert tools.db.get_memory(mid)["split_status"] == "active"
     diag_keys = ("embedding_truncated", "embedding_original_tokens", "embedding_used_tokens")
     cat = tools.memory_get(memory_id=mid, sections="catalog")["data"]["section_catalog"]
