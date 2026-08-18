@@ -251,7 +251,11 @@ def run_cli(argv: list[str] | None = None) -> int:
             _remove_sidecars(target)
             os.replace(staging, target)
             _remove_sidecars(staging)
-            result.update({"target": str(target), "final_sync": True})
+            result.update({
+                "target": str(target),
+                "final_sync": True,
+                "next_step": "verify the target in normal use, then switch db_path; keep the source for rollback",
+            })
         else:
             result["staging"] = str(staging)
     else:

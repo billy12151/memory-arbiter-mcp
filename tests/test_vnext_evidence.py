@@ -292,6 +292,46 @@ def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, m
     assert second["data"]["id"] in [row["id"] for row in searched["data"]["results"]]
 
 
+def test_final_sync_next_step_does_not_request_another_final_sync(tmp_path: Path, monkeypatch, capsys) -> None:
+    pytest.importorskip("sqlite_vec")
+    source_settings = Settings(
+        db_path=tmp_path / "source.sqlite3",
+        backup_jsonl=tmp_path / "source.jsonl",
+    )
+    source_tools = MemoryTools(source_settings, MemoryDB(source_settings))
+    source_tools.memory_write(content="migration source", subject="migration")
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=source_settings.db_path,
+        backup_jsonl=tmp_path / "migration.jsonl",
+        enable_sqlite_vec=True,
+        vec_dim=2,
+        embedding_provider="gguf",
+        embedding_model_path=model,
+    )
+    original_init = MemoryTools.__init__
+
+    def patched_init(self, settings=None, db=None):
+        original_init(self, settings=settings, db=db)
+        self._embedder = FakeEmbedder()
+        self._embedder_loaded = True
+        self.db.init_vec_index_state("fake-vnext-space", True)
+
+    monkeypatch.setattr(MemoryTools, "__init__", patched_init)
+    monkeypatch.setattr(Settings, "from_env", classmethod(lambda cls: settings))
+    from memory_arbiter.vnext_migration import run_cli
+
+    target = tmp_path / "target.sqlite3"
+    assert run_cli([
+        "--source", str(source_settings.db_path), "--target", str(target),
+        "--execute", "--final-sync",
+    ]) == 0
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["final_sync"] is True
+    assert "run --final-sync" not in payload["next_step"]
+
+
 def test_update_remember_fields_get_explicit_recovery_hint(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     result = tools.memory("update", {"memory_id": 1, "content": "wrong field"})
