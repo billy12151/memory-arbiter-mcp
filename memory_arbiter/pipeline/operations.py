@@ -657,6 +657,18 @@ class OperationsPipeline:
 
     def memory_status(self, **_: Any) -> dict[str, Any]:
         vec_state = self.db.get_vec_index_state()
+        evidence_status: dict[str, Any] = {
+            "storage_profile": getattr(self.settings, "storage_profile", "legacy"),
+            "available": False,
+        }
+        if self._vnext_storage_enabled():
+            try:
+                evidence_status.update({"available": True, **self.db.evidence.coverage()})
+                with self.db.connection() as conn:
+                    rows = conn.execute("SELECT key,value FROM migration_state").fetchall()
+                evidence_status["migration"] = {str(row["key"]): str(row["value"]) for row in rows}
+            except Exception as exc:
+                evidence_status["error"] = str(exc)
         return self.db.state.response(
             {
                 "arbiter_version": __version__,
@@ -674,6 +686,8 @@ class OperationsPipeline:
                 "embedding_auto_query": self.settings.embedding_auto_query,
                 "embedding_auto_write": self.settings.embedding_auto_write,
                 "structured_claim_mode": self.settings.structured_claim_mode,
+                "local_text_evidence": evidence_status,
+                "local_text_index_worker": self._evidence_worker.status(),
                 "isolation": self.settings.isolation,
                 "tool_surface": {
                     "profile": self.settings.tool_profile,
@@ -1259,32 +1273,36 @@ class OperationsPipeline:
         embedding_stored: Optional[bool] = None
         if self.settings.embedding_auto_write and self._embedding_configured():
             embedding_stored = False
-            embedder, ensure_warnings = self._ensure_embedder()
-            embedding_warnings.extend(ensure_warnings)
-            if embedder is None:
-                _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
-                embedding_warnings.extend(delete_warnings)
-                embedding_warnings.append("re-embedding on edit skipped because embedder unavailable; deleted stale embedding to avoid dirty recall.")
-            elif updated is not None:
-                try:
-                    embedding_result = embedder.embed_text(
-                        prefix=updated.get("subject") or "",
-                        body=updated.get("content") or "",
-                    )
-                    if not embedding_result.embedding:
-                        raise RuntimeError(
-                            f"encode returned empty embedding: {getattr(embedder, 'last_encode_error', None) or 'unknown'}"
-                        )
-                    embedding_stored, store_warnings = self.db.store_embedding(memory_id_int, embedding_result.embedding)
-                    embedding_warnings.extend(store_warnings)
-                    if not embedding_stored:
-                        _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
-                        embedding_warnings.extend(delete_warnings)
-                        embedding_warnings.append("re-embedding on edit failed; deleted stale embedding to avoid dirty recall.")
-                except Exception as exc:
+            if self._vnext_storage_enabled():
+                evidence = self._enqueue_local_text_index(memory_id_int, updated)
+                embedding_stored = evidence.get("status") == "queued"
+            else:
+                embedder, ensure_warnings = self._ensure_embedder()
+                embedding_warnings.extend(ensure_warnings)
+                if embedder is None:
                     _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
                     embedding_warnings.extend(delete_warnings)
-                    embedding_warnings.append(f"re-embedding on edit failed: {exc}; deleted stale embedding to avoid dirty recall.")
+                    embedding_warnings.append("re-embedding on edit skipped because embedder unavailable; deleted stale embedding to avoid dirty recall.")
+                elif updated is not None:
+                    try:
+                        embedding_result = embedder.embed_text(
+                            prefix=updated.get("subject") or "",
+                            body=updated.get("content") or "",
+                        )
+                        if not embedding_result.embedding:
+                            raise RuntimeError(
+                                f"encode returned empty embedding: {getattr(embedder, 'last_encode_error', None) or 'unknown'}"
+                            )
+                        embedding_stored, store_warnings = self.db.store_embedding(memory_id_int, embedding_result.embedding)
+                        embedding_warnings.extend(store_warnings)
+                        if not embedding_stored:
+                            _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
+                            embedding_warnings.extend(delete_warnings)
+                            embedding_warnings.append("re-embedding on edit failed; deleted stale embedding to avoid dirty recall.")
+                    except Exception as exc:
+                        _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
+                        embedding_warnings.extend(delete_warnings)
+                        embedding_warnings.append(f"re-embedding on edit failed: {exc}; deleted stale embedding to avoid dirty recall.")
         data = {
             "edited": True,
             "memory_id": memory_id_int,
@@ -1300,19 +1318,42 @@ class OperationsPipeline:
         # publishable rule plan it is re-split synchronously (revision bumps
         # again); otherwise a split_request is returned. tags-only edits
         # return early above and never reach here.
-        split_block, split_request, split_warnings = self._after_write_split(memory_id_int)
+        if self._vnext_storage_enabled():
+            split_block = {
+                "required": False,
+                "applied": False,
+                "mode": "local_text_evidence",
+                "status": None,
+                "reason": "vnext_uses_local_text_evidence",
+                "action_required": None,
+                "extra_llm_call_required": False,
+            }
+            split_request = None
+            split_warnings = []
+        else:
+            split_block, split_request, split_warnings = self._after_write_split(memory_id_int)
         data["split"] = split_block
         if split_request is not None:
             data["split_request"] = split_request
         embedding_warnings.extend(split_warnings)
-        structured = self._index_and_reconcile_claims(memory_id_int)
-        data["realtime_conflict_check"] = structured["diagnostic"]
-        data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
-        data["claim_reconciled"] = bool(
-            structured["diagnostic"].get("claim_reconciled")
-        )
-        embedding_warnings.extend(structured.get("warnings") or [])
-        self._apply_structured_gate(data, structured)
+        if self._vnext_storage_enabled():
+            data["realtime_conflict_check"] = {
+                "claim_indexed": False,
+                "claim_reconciled": False,
+                "skipped_reason": "vnext_storage_profile_claims_retired",
+                "mode": "retired",
+            }
+            data["claim_indexed"] = False
+            data["claim_reconciled"] = False
+        else:
+            structured = self._index_and_reconcile_claims(memory_id_int)
+            data["realtime_conflict_check"] = structured["diagnostic"]
+            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
+            data["claim_reconciled"] = bool(
+                structured["diagnostic"].get("claim_reconciled")
+            )
+            embedding_warnings.extend(structured.get("warnings") or [])
+            self._apply_structured_gate(data, structured)
         data["record"] = self.db.get_memory(memory_id_int)
         data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(memory_id_int, data["record"] or {})
         return self.db.state.response(

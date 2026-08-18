@@ -149,6 +149,18 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
                 return result
             if key in allowed:
                 continue
+            update_aliases = {
+                "content": "new_content",
+                "subject": "new_subject",
+                "tags": "new_tags",
+            }
+            if (surface, operation) == ("memory", "update") and key in update_aliases:
+                result.error = _error(
+                    key,
+                    "remember field is not valid for update",
+                    did_you_mean=update_aliases[key],
+                )
+                return result
             suggestion = difflib.get_close_matches(key, allowed, n=1, cutoff=0.78)
             if suggestion and suggestion[0] in _SENSITIVE_FIELDS:
                 result.error = _error(key, "unknown field resembles a protected field", did_you_mean=suggestion[0])

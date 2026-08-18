@@ -107,8 +107,10 @@ class ReadPipeline:
         has_more = outcome.has_more
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
-        # v0.6.0: attach section enhancement to active-split results
-        results = self._attach_sections(results, query_embedding, extra_warnings)
+        # vNext uses local-text evidence hits directly. Existing section rows
+        # remain available through memory(read), but section vectors are retired.
+        if not self._vnext_storage_enabled():
+            results = self._attach_sections(results, query_embedding, extra_warnings)
         # v0.7.6: attach conflict signals (open_table + runtime_metadata_hint),
         # only on genuine query hits (direct mode). Failures degrade silently.
         if include_conflict_signal and retrieval_mode == "direct" and results:

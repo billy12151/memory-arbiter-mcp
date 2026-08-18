@@ -16,6 +16,7 @@ from .config import Settings
 from .constants import strict_ws
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
+from .evidence import evidence_content_hash, local_text_units
 from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
 from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
@@ -23,13 +24,14 @@ from .semantic_conflict import (
     IsolatedGGUFSemanticBackend,
     SemanticBackend,
     ModelSignal,
+    decide_evidence,
     notice_dedupe_key,
     pair_text_gate,
 )
 from .update_monitor import UpdateMonitor
 from . import __version__
 from . import workspace_rules
-from .workers import SemanticConflictWorker, SplitReindexWorker
+from .workers import LocalTextIndexWorker, SemanticConflictWorker, SplitReindexWorker
 from .surfaces import ProductSurfaces
 from .pipeline.signals import ConflictSignalPipeline
 from .pipeline.sections import SectionPipeline
@@ -72,6 +74,7 @@ class MemoryTools:
         self._embedder_warnings: list[str] = list(self.settings.config_warnings)
         self._update_monitor: Optional[UpdateMonitor] = None
         self._split_worker = SplitReindexWorker(self)
+        self._evidence_worker = LocalTextIndexWorker(self)
         self._surfaces = ProductSurfaces(self)
         self._signals = ConflictSignalPipeline(self)
         self._sections = SectionPipeline(self)
@@ -108,6 +111,12 @@ class MemoryTools:
     def start_split_worker(self) -> None:
         self._split_worker.start()
         self._enqueue_pending_rule_splits(limit=100)
+
+    def start_evidence_worker(self): self._evidence_worker.start()
+    def wait_evidence_worker_drained(self, timeout=30.0): return self._evidence_worker.wait_drained(timeout)
+    def _enqueue_local_text_index(self, memory_id, record=None):
+        current=record or self.db.get_memory(int(memory_id)) or {}
+        return self._evidence_worker.enqueue(int(memory_id), {"version":int(current.get("version") or 1)})
 
     def start_semantic_worker(self) -> None:
         self._semantic_worker.start()
@@ -333,6 +342,22 @@ class MemoryTools:
 
     def _embedding_configured(self) -> bool:
         return self.settings.embedding_provider == "gguf" and self.settings.embedding_model_path is not None
+
+    def _vnext_storage_enabled(self) -> bool:
+        return self.settings.storage_profile == "vnext"
+
+    def _index_local_text_evidence(self, memory_id, record=None):
+        current = record or self.db.get_memory(int(memory_id))
+        embedder, warnings = self._ensure_embedder()
+        if not current or embedder is None: return {"status":"skipped","warnings":warnings}
+        units = local_text_units(current.get("subject") or "", current.get("content") or "")
+        embeddings=[]
+        for unit in units:
+            result=embedder.embed_text(prefix="",body=unit.text)
+            if not result.embedding: return {"status":"failed"}
+            embeddings.append(result.embedding)
+        published=self.db.evidence.publish(memory_id,int(current.get("version") or 1),evidence_content_hash(current.get("content") or ""),units,embeddings)
+        return {"status":"indexed" if published.get("published") else "failed",**published}
 
     def _ensure_embedder(self) -> Tuple[Optional[ManagedEmbedder], list[str]]:
         if self._embedder_loaded:
@@ -677,9 +702,11 @@ class MemoryTools:
             return disable_result
         return {"outcome": "invalid_action", "valid_actions": ["status", "pause", "resume", "enable", "unload", "disable"]}
 
-    def _enqueue_semantic_conflict_check(self, memory_id: Optional[int], record: Any) -> dict[str, Any]:
+    def _enqueue_semantic_conflict_check(self, memory_id: Optional[int], record: Any, *, after_evidence: bool=False) -> dict[str, Any]:
         if memory_id is None:
             return {"status": "skipped", "reason": "backup_only"}
+        if self._vnext_storage_enabled() and not after_evidence:
+            return {"status":"deferred","reason":"waiting_for_evidence_index"}
         if not self.settings.semantic_conflict_enabled:
             return {"status": "disabled"}
         if self.settings.semantic_conflict_on_write == "off":
@@ -715,6 +742,8 @@ class MemoryTools:
         return candidates[: int(self.settings.semantic_conflict_pair_limit)]
 
     def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> None:
+        if self._vnext_storage_enabled():
+            return self._process_vnext_evidence_job(memory_id, snapshot)
         if not self._semantic_configured():
             return
         record = self.db.get_memory(int(memory_id))
@@ -792,43 +821,33 @@ class MemoryTools:
                 str(peer_record.get("content") or ""),
                 mode=self.settings.semantic_conflict_pair_text_gate,
             )
-            if not gate.passed:
-                continue
-            dedupe = notice_dedupe_key(
-                int(memory_id), int(peer_record["id"]), left_version, right_version,
-                "semantic_pair", left_claim_revision, right_claim_revision,
-            )
-            title = f"Possible semantic memory conflict with #{peer_record['id']}"
-            message = "; ".join(gate.reasons) or signal.candidate_type
-            self.db.record_semantic_notice(
-                memory_id=int(memory_id),
-                peer_id=int(peer_record["id"]),
-                severity=gate.severity,
-                notice_type="semantic_pair",
-                title=title,
-                message=message,
-                payload={
-                    "model_signal": {
-                        "candidate_type": signal.candidate_type,
-                        "confidence": signal.confidence,
-                        "parsed": signal.parsed,
-                        "error": signal.error,
-                    },
-                    "gate": {
-                        "mode": gate.mode,
-                        "severity": gate.severity,
-                        "reasons": gate.reasons,
-                        "evidence": gate.evidence.__dict__,
-                    },
-                    "left": {"id": int(memory_id), "subject": record.get("subject")},
-                    "right": {"id": int(peer_record["id"]), "subject": peer_record.get("subject")},
-                },
-                dedupe_key=dedupe,
-                left_version=left_version,
-                right_version=right_version,
-                left_claim_revision=int(record.get("claim_revision") or 1),
-                right_claim_revision=int(peer_record.get("claim_revision") or 1),
-            )
+
+    def _process_vnext_evidence_job(self, memory_id: int, snapshot: dict[str, Any]) -> None:
+        record=self.db.get_memory(int(memory_id))
+        if not record or int(record.get("version") or 1)!=int(snapshot.get("version") or 1): return
+        embedder,_=self._ensure_embedder()
+        if embedder is None:return
+        workspace=(record.get("workspace_canonical") or record.get("workspace")) if self.settings.isolation=="strict" else None
+        candidates=[]
+        for unit in local_text_units(record.get("subject") or "",record.get("content") or ""):
+            if unit.kind!="text":continue
+            er=embedder.embed_text(prefix="",body=unit.text)
+            for hit in self.db.evidence_knn(er.embedding,k=5,workspace=workspace,exclude_memory_id=memory_id):
+                if hit.get("kind")!="text":continue
+                decision=decide_evidence(unit.text,hit.get("text") or "")
+                if decision.action!="ignore":candidates.append((decision.action=="notify",hit,unit,decision))
+        candidates.sort(key=lambda x:x[0],reverse=True); seen=set()
+        backend=self._ensure_semantic_backend() if self._semantic_configured() else None
+        for direct,hit,unit,decision in candidates:
+            peer=int(hit["memory_id"])
+            if peer in seen or len(seen)>=2:continue
+            if not direct:
+                if backend is None:continue
+                signal=backend.classify_pair({"content":unit.text},{"content":hit.get("text") or ""})
+                if not signal.candidate:continue
+            seen.add(peer); peer_row=self.db.get_memory(peer)
+            lv=int(record.get("version") or 1);rv=int(peer_row.get("version") or 1)
+            self.db.record_semantic_notice(memory_id=memory_id,peer_id=peer,severity="high" if direct else "normal",notice_type="semantic_evidence",title=f"Possible memory change with #{peer}",message=decision.reason,payload={"decision":decision.__dict__,"left_evidence":{"text":unit.text},"right_evidence":{"text":hit.get("text")},"qwen_signal":{"status":"skipped"} if direct else {"status":"candidate"}},dedupe_key=notice_dedupe_key(memory_id,peer,lv,rv,"semantic_evidence"),left_version=lv,right_version=rv,left_claim_revision=int(record.get("claim_revision") or 1),right_claim_revision=int(peer_row.get("claim_revision") or 1),source="semantic_evidence")
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         return self._write_pipeline.memory_write(**payload)

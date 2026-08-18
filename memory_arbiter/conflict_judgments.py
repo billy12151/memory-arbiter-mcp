@@ -9,7 +9,9 @@ from __future__ import annotations
 import sqlite3
 from typing import TYPE_CHECKING, Any, Optional
 
-from .claims_db import is_protected_memory
+
+def is_protected_memory(memory: dict[str, Any]) -> bool:
+    return memory.get("protection_level") == "locked" or memory.get("source_type") == "user_confirmed"
 from .models import utc_now_iso
 
 if TYPE_CHECKING:
@@ -220,6 +222,20 @@ class ConflictJudgmentStore:
                 "content_truncated": len(content) > 2000,
             }
 
+        judge_data = {
+            "conflict_id": int(conflict["id"]),
+            "expected_left_version": int(conflict["left_version"]),
+            "expected_right_version": int(conflict["right_version"]),
+            "expected_left_claim_revision": int(conflict["left_claim_revision"]),
+            "expected_right_claim_revision": int(conflict["right_claim_revision"]),
+            "verdict": None,
+            "recommended_use": None,
+            "suggested_winner": None,
+            "confidence_hint": None,
+            "affects_current_output": None,
+            "usage_context": None,
+            "reason": None,
+        }
         return {
             "conflict_id": int(conflict["id"]),
             "verification_status": conflict.get("judgment_status") or "pending_llm",
@@ -238,7 +254,8 @@ class ConflictJudgmentStore:
                 "LLM/host agent must classify resolution_kind/conflict_scope. "
                 "Arbiter validates consistency but never auto-edits or supersedes."
             ),
-            "required_tool": "memory_submit_conflict_judgment",
+            "required_tool": "memory(action='judge')",
+            "judge_call": {"action": "judge", "data": judge_data},
         }
 
     @staticmethod

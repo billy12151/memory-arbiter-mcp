@@ -82,7 +82,7 @@ class ProductSurfaces:
                     "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
                     "read": {"action": "read", "data": {"memory_id": 123, "sections": "catalog"}},
                     "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
-                    "judge": {"action": "judge", "data": {"conflict_id": 1, "verdict": "evolution", "recommended_use": "merge", "resolution_kind": "partial_update", "conflict_scope": "field", "reason": "Only one field changed."}},
+                    "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_left_version": 1, "expected_right_version": 2, "expected_left_claim_revision": 1, "expected_right_claim_revision": 1, "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None, "confidence_hint": "medium", "affects_current_output": True, "usage_context": "Current answer depends on this field.", "resolution_kind": "partial_update", "conflict_scope": "field", "reason": "Only one field changed."}},
                 },
                 "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
             },

@@ -28,6 +28,8 @@ def build_runtime() -> ServerBundle:
     tools = MemoryTools(Settings.from_env())
     tools.start_update_monitor()
     tools.start_split_worker()
+    tools.start_evidence_worker()
+    tools.start_evidence_worker()
     tools.start_semantic_worker()
     legacy_enabled = tools.settings.tool_profile in {"full", "legacy_full"}
 
@@ -601,6 +603,9 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "console":
         from .console_cli import run_cli as run_console
         raise SystemExit(run_console(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] in {"migrate-vnext", "migrate_vnext"}:
+        from .vnext_migration import run_cli as run_vnext_migration
+        raise SystemExit(run_vnext_migration(sys.argv[2:]))
     try:
         bundle = build_runtime()
 

@@ -504,6 +504,10 @@ def _soft_rerank(
         # disambiguates the recall source.
         if rec.get("_section_vec_candidate"):
             notes.append("section-vec recall candidate (Channel 6)")
+        if rec.get("_evidence_vec_candidate"):
+            if match_reason == "subject_or_tag_match":
+                match_reason = "evidence_vec_recall"
+            notes.append("local-text evidence recall candidate (vNext)")
 
         rec_copy = dict(rec)
         rec_copy["_final_score"] = final_score
@@ -679,6 +683,74 @@ def _wide_recall(
                     pass
     finally:
         conn.close()
+
+    # vNext Channel: local-text evidence KNN. This replaces memory/section vec
+    # channels when storage_profile=vnext, aggregating multiple evidence hits
+    # into one memory candidate so long documents cannot occupy many result slots.
+    if (
+        query_embedding
+        and db.state.sqlite_vec_available
+        and getattr(db.settings, "storage_profile", "legacy") == "vnext"
+        and len(pool) < pool_cap
+    ):
+        need = max(pool_cap - len(pool), 10)
+        evidence_rows = db.evidence_knn(
+            query_embedding,
+            k=need * 8,
+            parent_status_filter=status_filter,
+            workspace=ws_canonical,
+        )
+        by_memory: dict[int, dict[str, Any]] = {}
+        for row in evidence_rows:
+            rid = row.get("memory_id")
+            if rid is None or rid in pool:
+                continue
+            mid = int(rid)
+            entry = by_memory.setdefault(mid, {"row": row, "hits": []})
+            distance = row.get("distance")
+            try:
+                score = 1.0 - float(distance)
+            except (TypeError, ValueError):
+                score = 0.0
+            entry["hits"].append({
+                "evidence_id": row.get("id"),
+                "kind": row.get("kind"),
+                "text": row.get("text"),
+                "start_offset": row.get("start_offset"),
+                "end_offset": row.get("end_offset"),
+                "distance": distance,
+                "score": score,
+            })
+        ranked: list[tuple[float, int, dict[str, Any]]] = []
+        for mid, entry in by_memory.items():
+            hits = sorted(entry["hits"], key=lambda h: float(h.get("score") or 0.0), reverse=True)
+            best = float(hits[0].get("score") or 0.0) if hits else 0.0
+            support = 0.0
+            seen_kinds: set[str] = set()
+            for hit in hits[1:4]:
+                kind = str(hit.get("kind") or "")
+                if kind in seen_kinds:
+                    continue
+                seen_kinds.add(kind)
+                support += max(0.0, float(hit.get("score") or 0.0) - 0.45)
+            ranked.append((best + 0.08 * support, mid, entry["row"]))
+        ranked.sort(reverse=True, key=lambda item: item[0])
+        for _score, mid, row in ranked[:need]:
+            if mid in pool:
+                continue
+            d = dict(row)
+            d["id"] = mid
+            d["_vec_candidate"] = True
+            d["_evidence_vec_candidate"] = True
+            d["_evidence_hits"] = sorted(
+                by_memory[mid]["hits"],
+                key=lambda h: float(h.get("score") or 0.0),
+                reverse=True,
+            )[:3]
+            pool[mid] = d
+
+    if getattr(db.settings, "storage_profile", "legacy") == "vnext":
+        return list(pool.values())[:pool_cap]
 
     # Channel 5 (v0.3.1): vec0 KNN — optional semantic recall. Only runs when
     # the caller supplied a query_embedding AND sqlite-vec is available. This

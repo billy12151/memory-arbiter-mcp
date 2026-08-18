@@ -190,6 +190,19 @@ class WritePipeline:
                     }
                     data["write_hints"] = hints
             if memory_id is not None and self.settings.embedding_auto_write and self._embedding_configured():
+                if self._vnext_storage_enabled():
+                    data["evidence_index"] = self._enqueue_local_text_index(memory_id)
+                else:
+                    data["embedding_stored"] = False
+                    embedder, ensure_warnings = self._ensure_embedder()
+                    embedding_warnings.extend(ensure_warnings)
+                    if embedder is not None:
+                        try:
+                            er = embedder.embed_text(prefix=record.subject or "", body=record.content)
+                            data["embedding_stored"], store_warnings = self.db.store_embedding(memory_id, er.embedding)
+                            embedding_warnings.extend(store_warnings)
+                        except Exception as exc: embedding_warnings.append(str(exc))
+            elif False:
                 data["embedding_stored"] = False
                 embedder, ensure_warnings = self._ensure_embedder()
                 embedding_warnings.extend(ensure_warnings)
@@ -247,6 +260,10 @@ class WritePipeline:
         if memory_id is None:
             return data
         try:
+            if self._vnext_storage_enabled():
+                data["realtime_conflict_check"]={"mode":"retired","claim_indexed":False,"claim_reconciled":False}
+                data["claim_indexed"]=False; data["claim_reconciled"]=False
+                return data
             structured = self._index_and_reconcile_claims(memory_id)
             data["realtime_conflict_check"] = structured["diagnostic"]
             data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))

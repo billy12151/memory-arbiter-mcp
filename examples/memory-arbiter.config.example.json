@@ -8,6 +8,7 @@
   "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
   "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
   "tool_profile": "product",
+  "storage_profile": "vnext",
   "isolation": "none",
   "workspace_match_distance": 0.25,
   "vec": {

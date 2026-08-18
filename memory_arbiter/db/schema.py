@@ -286,6 +286,18 @@ class SchemaStore:
         self._migrate_add_column(conn, "conflicts", "refreshed_at", "TEXT")
         conn.commit()
         self._migrate_v090_claims(conn)
+        if self.settings.storage_profile == "vnext":
+            conn.executescript("""
+            CREATE TABLE IF NOT EXISTS memory_evidence (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id INTEGER NOT NULL,
+              memory_version INTEGER NOT NULL, content_hash TEXT NOT NULL,
+              unit_index INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL,
+              start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL, created_at TEXT NOT NULL,
+              FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+              UNIQUE(memory_id, unit_index));
+            CREATE TABLE IF NOT EXISTS migration_state (key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            """)
+            conn.commit()
 
     def _migrate_v090_claims(self, conn: sqlite3.Connection) -> None:
         """Install the complete v0.9 claim/judgment schema atomically."""
@@ -451,6 +463,10 @@ class SchemaStore:
                 self._ensure_vec_table(conn)
                 self._ensure_section_vec_table(conn)
                 self._ensure_workspace_vec_table(conn)
+                if self.settings.storage_profile == "vnext":
+                    dim = int(self.settings.vec_dim or 768)
+                    conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_evidence_vec USING vec0(id INTEGER PRIMARY KEY,parent_status TEXT,embedding float[{dim}])")
+                    conn.commit()
                 # v0.9.4: migrate vec0 tables to include parent_status metadata column
                 self._migrate_vec_parent_status(conn)
             except Exception as exc:  # pragma: no cover

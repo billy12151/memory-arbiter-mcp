@@ -112,6 +112,15 @@ class ModelSignal:
     error: Optional[str] = None
 
 
+@dataclass
+class EvidenceDecision:
+    action: str
+    reason: str
+    anchors: list[str] = field(default_factory=list)
+    left_value: Optional[str] = None
+    right_value: Optional[str] = None
+
+
 class SemanticBackend(Protocol):
     def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
         ...
@@ -158,6 +167,89 @@ def _cosine(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
     return len(left & right) / math.sqrt(len(left) * len(right))
+
+
+_EVIDENCE_ALIASES = {
+    "pgsql": "postgresql",
+    "postgres": "postgresql",
+    "sqlite_vec": "sqlite-vec",
+}
+_EXPLICIT_SCOPES = (
+    ("测试环境", "生产环境"),
+    ("移动端", "管理后台"),
+    ("公开api", "内部api"),
+    ("中国区", "海外区"),
+)
+_VALUE_RE = re.compile(
+    r"(?<![\w.])v?\d+(?:\.\d+){0,2}\s*(?:ms|s|秒|分钟|小时|天|%|mb|gb|kb|条|次|核|g)?",
+    re.IGNORECASE,
+)
+
+
+def _normalize_evidence_text(text: str) -> str:
+    value = (text or "").casefold()
+    value = re.sub(r"qwen\s*([0-9]+(?:\.[0-9]+)*)", r"qwen\1", value)
+    value = re.sub(r"(\d+(?:\.\d+)?)\s*秒", r"\1s", value)
+    for alias, canonical in _EVIDENCE_ALIASES.items():
+        value = re.sub(rf"\b{re.escape(alias)}\b", canonical, value)
+    value = re.sub(r"[\s_\-]+", "", value)
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff.%]+", "", value)
+
+
+def _normalized_values(text: str) -> list[str]:
+    values: list[str] = []
+    for match in _VALUE_RE.finditer((text or "").casefold()):
+        value = re.sub(r"\s+", "", match.group(0)).replace("秒", "s")
+        if value.startswith("v") and len(value) > 1 and value[1].isdigit():
+            value = value[1:]
+        values.append(value)
+    return values
+
+
+def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
+    """Classify a short pair using only narrow, explainable evidence."""
+    left_norm = _normalize_evidence_text(left_text)
+    right_norm = _normalize_evidence_text(right_text)
+    if left_norm and left_norm == right_norm:
+        return EvidenceDecision("ignore", "equivalent_value")
+
+    left_lower = (left_text or "").casefold()
+    right_lower = (right_text or "").casefold()
+    for left_scope, right_scope in _EXPLICIT_SCOPES:
+        if (
+            (left_scope in left_lower and right_scope in right_lower)
+            or (right_scope in left_lower and left_scope in right_lower)
+        ):
+            return EvidenceDecision("ignore", "explicit_scope_mismatch")
+
+    left_values = _normalized_values(left_text)
+    right_values = _normalized_values(right_text)
+    left_skeleton = _VALUE_RE.sub("", left_lower)
+    right_skeleton = _VALUE_RE.sub("", right_lower)
+    common = sorted(_tokens(left_skeleton) & _tokens(right_skeleton))
+    char_similarity = _cosine(_char_ngrams(left_skeleton), _char_ngrams(right_skeleton))
+    if left_values and right_values and left_values != right_values and (
+        common or char_similarity >= 0.45
+    ):
+        return EvidenceDecision(
+            "notify", "numeric_value_changed", common,
+            ", ".join(left_values), ", ".join(right_values),
+        )
+
+    evidence = pair_text_evidence(left_text, right_text)
+    if evidence.todo_done:
+        return EvidenceDecision("notify", "todo_resolved", evidence.common_tokens)
+    if evidence.contains_diff:
+        return EvidenceDecision("notify", "polarity_changed", evidence.common_tokens)
+    if evidence.polarity_diff and evidence.char_cosine >= 0.45:
+        return EvidenceDecision("notify", "polarity_changed", evidence.common_tokens)
+    if evidence.duplicate_guard:
+        return EvidenceDecision("ignore", "equivalent_value")
+    if evidence.compatible_guard:
+        return EvidenceDecision("ignore", "compatible_evidence")
+    if evidence.char_cosine >= 0.20 or evidence.token_cosine > 0 or evidence.common_tokens:
+        return EvidenceDecision("check", "semantic_similarity_only", evidence.common_tokens)
+    return EvidenceDecision("ignore", "insufficient_local_evidence")
 
 
 def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:

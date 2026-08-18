@@ -227,18 +227,28 @@ class MemoriesStore:
         values.append(int(memory_id))
         conn.execute(f"UPDATE memories SET {sql} WHERE id = ?", values)
         if status_changed and self.state.sqlite_vec_available:
-            try:
-                conn.execute(
-                    "UPDATE memories_vec SET parent_status = ? WHERE id = ?",
-                    (str(new_status or "deleted"), int(memory_id)),
-                )
-                conn.execute(
-                    "UPDATE memory_sections_vec SET parent_status = ? WHERE id IN "
-                    "(SELECT id FROM memory_sections WHERE memory_id = ?)",
-                    (str(new_status or "deleted"), int(memory_id)),
-                )
-            except sqlite3.Error:
-                pass
+            if getattr(self.settings, "storage_profile", "legacy") == "vnext":
+                try:
+                    conn.execute(
+                        "UPDATE memory_evidence_vec SET parent_status=? WHERE id IN "
+                        "(SELECT id FROM memory_evidence WHERE memory_id=?)",
+                        (str(new_status or "deleted"), int(memory_id)),
+                    )
+                except sqlite3.Error:
+                    pass
+            else:
+                try:
+                    conn.execute(
+                        "UPDATE memories_vec SET parent_status = ? WHERE id = ?",
+                        (str(new_status or "deleted"), int(memory_id)),
+                    )
+                    conn.execute(
+                        "UPDATE memory_sections_vec SET parent_status = ? WHERE id IN "
+                        "(SELECT id FROM memory_sections WHERE memory_id = ?)",
+                        (str(new_status or "deleted"), int(memory_id)),
+                    )
+                except sqlite3.Error:
+                    pass
         return True
 
     def update_memory(
@@ -455,15 +465,9 @@ class MemoriesStore:
                     return {"outcome": "no_change", "memory_id": memory_id, "tags": old_tags}
 
                 new_tags_json = json.dumps(new_tags_list, ensure_ascii=False)
-                from ..claims import resolve_entity
-                old_entity, _ = resolve_entity(current)
-                new_record = dict(current)
-                new_record["tags"] = new_tags_list
-                new_entity, _ = resolve_entity(new_record)
-                claim_semantics_changed = old_entity != new_entity
                 conn.execute(
-                    "UPDATE memories SET tags=?, claim_revision=claim_revision+? WHERE id=?",
-                    (new_tags_json, 1 if claim_semantics_changed else 0, memory_id),
+                    "UPDATE memories SET tags=? WHERE id=?",
+                    (new_tags_json, memory_id),
                 )
                 if self.state.fts5_available:
                     old_content = current["content"]
@@ -482,7 +486,7 @@ class MemoriesStore:
                     "outcome": "updated",
                     "memory_id": memory_id,
                     "tags": new_tags_list,
-                    "claim_semantics_changed": claim_semantics_changed,
+                    "claim_semantics_changed": False,
                 }
         except sqlite3.Error:
             return {"outcome": "error", "memory_id": memory_id}

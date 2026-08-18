@@ -68,6 +68,7 @@ class Settings:
     workspace_match_distance: float = 0.25
     update_check_enabled: bool = True
     tool_profile: str = "product"
+    storage_profile: str = "vnext"
     semantic_conflict_enabled: bool = False
     semantic_conflict_backend: str = "local_gguf"
     semantic_conflict_model_path: Optional[Path] = None
@@ -114,6 +115,16 @@ class Settings:
             config_warnings.append(f"semantic_conflict={semantic_cfg!r} invalid; using env/defaults")
             semantic_cfg = {}
         semantic_cfg = {str(k): v for k, v in semantic_cfg.items() if not str(k).startswith("_")}
+        storage_profile = str(
+            cfg.get("storage_profile")
+            or os.getenv("MEMORY_ARBITER_STORAGE_PROFILE")
+            or "vnext"
+        ).strip().lower()
+        if storage_profile not in {"legacy", "vnext"}:
+            config_warnings.append(
+                f"storage_profile={storage_profile!r} invalid; using vnext"
+            )
+            storage_profile = "vnext"
         update_cfg_raw = cfg.get("update_check", {})
         update_check_enabled = True
         if isinstance(update_cfg_raw, dict):
@@ -339,6 +350,7 @@ class Settings:
             ),
             update_check_enabled=update_check_enabled,
             tool_profile=tool_profile,
+            storage_profile=storage_profile,
             semantic_conflict_enabled=pick_bool_field(
                 semantic_cfg.get("enabled"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED",
                 "true" if _semantic_auto_enable else "false",

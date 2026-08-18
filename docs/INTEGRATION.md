@@ -23,12 +23,38 @@ pip install 'memory-arbiter-mcp[semantic-local]'  # local GGUF runtime
 
 On Python 3.13, `[semantic-local]` may compile `llama-cpp-python` if no matching wheel is available; install a C/C++ toolchain and CMake when needed.
 
+### vNext side-by-side migration
+
+The local-text evidence index is opt-in through `storage_profile=vnext`. Do not
+enable it against an existing legacy database in place. Build and verify a new
+database first:
+
+```bash
+memory-arbiter migrate-vnext                         # dry-run
+memory-arbiter migrate-vnext --execute              # side-by-side build
+# Stop writers before final synchronization:
+memory-arbiter migrate-vnext --execute --final-sync
+```
+
+The migration uses SQLite's backup API, rebuilds `memory_evidence` and
+`memory_evidence_vec`, verifies source/target fingerprints, and retires the old
+memory/section vector tables only in the target. The source database is never
+modified. Keep it for rollback. Once new writes reach the vNext database, a
+lossless rollback requires freezing writes and reverse-syncing those changes.
+
+After verification, update `db_path` and `storage_profile` together. A vNext
+database uses local `subject`/`heading`/`text` units for semantic recall and
+does not produce new structured claims. Conflict evidence routes through
+`notify` / `check` / `ignore`: `notify` does not require Qwen, `check` fails
+closed when Qwen is unavailable, and `ignore` is not surfaced.
+
 Key configuration:
 
 | JSON path | Env fallback | Default | Meaning |
 |---|---|---|---|
 | `db_path` | `MEMORY_ARBITER_DB_PATH` | `./memory_arbiter.sqlite3` | Shared SQLite location. |
 | `backup_jsonl` | `MEMORY_ARBITER_BACKUP_JSONL` | `./memory_arbiter.backup.jsonl` | Schema-1 append fallback when SQLite is unavailable or unwritable. |
+| `storage_profile` | `MEMORY_ARBITER_STORAGE_PROFILE` | `legacy` | Set to `vnext` only with a database built and verified by `migrate-vnext`. |
 | `structured_claim_mode` | `MEMORY_ARBITER_STRUCTURED_CLAIM_MODE` | `beta_all` | Deterministic write/edit claim gate; `off` is an emergency kill switch. There is no periodic vector scan fallback. |
 | `isolation` | `MEMORY_ARBITER_ISOLATION` | `none` | `none`, `weak`, or `strict`. |
 | `workspace_match_distance` | `MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE` | `0.25` | Cosine-distance cutoff for optional workspace candidates, not final authority. |

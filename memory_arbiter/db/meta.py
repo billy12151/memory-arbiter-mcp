@@ -79,12 +79,21 @@ class MetaStore:
             if state in {"mismatch", "failed"} and target_space_id == embedding_space_id:
                 return
 
-            mem_vec_count = conn.execute("SELECT COUNT(*) AS c FROM memories_vec").fetchone()["c"]
+            if getattr(db.settings, "storage_profile", "legacy") == "vnext":
+                try:
+                    mem_vec_count = conn.execute(
+                        "SELECT COUNT(*) AS c FROM memory_evidence_vec"
+                    ).fetchone()["c"]
+                except sqlite3.Error:
+                    mem_vec_count = 0
+            else:
+                mem_vec_count = conn.execute("SELECT COUNT(*) AS c FROM memories_vec").fetchone()["c"]
             sec_vec_count = 0
-            try:
-                sec_vec_count = conn.execute("SELECT COUNT(*) AS c FROM memory_sections_vec").fetchone()["c"]
-            except sqlite3.Error:
-                pass
+            if getattr(db.settings, "storage_profile", "legacy") != "vnext":
+                try:
+                    sec_vec_count = conn.execute("SELECT COUNT(*) AS c FROM memory_sections_vec").fetchone()["c"]
+                except sqlite3.Error:
+                    pass
 
             if not active_space_id and mem_vec_count == 0 and sec_vec_count == 0:
                 self.set_meta(conn, "state", "ready")

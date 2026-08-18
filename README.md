@@ -273,7 +273,9 @@ Advanced compatibility: set `MEMORY_ARBITER_TOOL_PROFILE=legacy_full` (or `full`
 
 #### Optional: write-time semantic conflict check
 
-Memory Arbiter can optionally run a local Qwen2.5-0.5B model **after a successful write** to discover semantic-conflict candidates asynchronously. The write does not wait for classification and remains fail-open. The model is only a candidate signal, never the final judge: its output must include all required fields with exact boolean/number types and an allowed `reason_code` enum (additional explanation fields are allowed), and a deterministic pair-text gate has veto power. `medium` is the default balanced gate; `strong` is the more conservative, lower-noise option. Configure it with `semantic_conflict.pair_text_gate` or `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE`.
+In the legacy storage profile, Memory Arbiter can optionally run a local Qwen2.5-0.5B model **after a successful write** to discover semantic-conflict candidates asynchronously. The write does not wait for classification and remains fail-open. The model is only a candidate signal, never the final judge: its output must include all required fields with exact boolean/number types and an allowed `reason_code` enum (additional explanation fields are allowed), and a deterministic pair-text gate has veto power. `medium` is the default balanced gate; `strong` is the more conservative, lower-noise option. Configure it with `semantic_conflict.pair_text_gate` or `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE`.
+
+The vNext storage profile is built side-by-side with `memory-arbiter migrate-vnext`; never point `storage_profile=vnext` at an unconverted legacy database. It replaces memory/section vectors with one local-text evidence index (`subject`, `heading`, `text`), stops producing new structured claims, and uses `notify` / `check` / `ignore` routing. `notify` is deterministic and cannot be vetoed by Qwen; `check` requires a short-pair Qwen candidate and degrades to `ignore` when Qwen is unavailable. Keep the source database for rollback.
 
 Pipeline: specific bounded candidate recall with subject/tag ranking → bounded pair selection → 0.5B pair classification → pair-text gate → open `semantic_notices` row. Candidate ranking suppresses noisy/common tags, preserves specific tags and subject fallback, and happens before `pair_limit`. Historical jobs whose memory/version/claim snapshot is stale are skipped; stale undelivered notices are also marked stale and skipped during delivery.
 
@@ -761,7 +763,9 @@ v0.11.0 起默认 MCP 工具面改为任务型接口。新客户端默认只看�
 
 #### 可选：写入时语义冲突检测
 
-memory-arbiter 可以在**写入成功后**可选地异步运行本地 Qwen2.5-0.5B 模型，发现语义冲突候选。写入不等待分类，并保持 fail-open。模型只提供候选信号，不做最终裁决：输出必须包含全部必填字段，字段类型与 `reason_code` enum 必须严格匹配（允许附加解释字段）；确定性的 pair-text gate 拥有否决权。`medium` 是默认的平衡档；`strong` 是更保守、低打扰的档位。通过 `semantic_conflict.pair_text_gate` 或 `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE` 配置。
+在 legacy 存储模式下，memory-arbiter 可以在**写入成功后**可选地异步运行本地 Qwen2.5-0.5B 模型，发现语义冲突候选。写入不等待分类，并保持 fail-open。模型只提供候选信号，不做最终裁决：输出必须包含全部必填字段，字段类型与 `reason_code` enum 必须严格匹配（允许附加解释字段）；确定性的 pair-text gate 拥有否决权。`medium` 是默认的平衡档；`strong` 是更保守、低打扰的档位。通过 `semantic_conflict.pair_text_gate` 或 `MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE` 配置。
+
+vNext 存储模式必须先用 `memory-arbiter migrate-vnext` 旁路构建，禁止把旧库原地改成 `storage_profile=vnext`。它用一套局部文本向量（`subject`、`heading`、`text`）替代 memory/section 双向量，不再生成新 claims，并按 `notify` / `check` / `ignore` 路由证据：`notify` 不受 Qwen 否决，`check` 需要短文本 Qwen 候选，Qwen 不可用时降级为 `ignore`。旧库默认保留用于回滚。
 
 链路：specific bounded candidate recall（具体且有界的候选召回）与 subject/tag 排序 → 有界 pair 选择 → 0.5B pair 分类 → pair-text gate → open `semantic_notices` 行。排序会压制嘈杂/常见 tag，保留具体 tag 和 subject fallback，并在 `pair_limit` 截断前完成。memory/version/claim snapshot 已过期的历史 job 会跳过；未投递但已经 stale 的 notice 也会在投递时标为 stale 并跳过。
 
