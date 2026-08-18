@@ -130,9 +130,10 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     monkeypatch.setenv("MEMORY_ARBITER_WORKSPACE", "repo-a")
     monkeypatch.setenv("MEMORY_ARBITER_AGENT_ID", "agent-a")
 
-    from memory_arbiter.server import build_server
+    from memory_arbiter.server import build_runtime
 
-    app = build_server()
+    bundle = build_runtime()
+    app = bundle.app
     assert set(app.tools) == {"memory", "memory_review", "memory_govern", "memory_repair"}
     written = app.tools["memory"](
         action="remember",
@@ -154,9 +155,10 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     assert edited["ok"] is True
     assert edited["data"]["record"]["content"] == "edited content"
     assert edited["data"]["record"]["tags"] == ["keep-me"]
+    bundle.tools.shutdown(timeout=1)
 
 
-def test_server_legacy_full_profile_exposes_low_level_tools(tmp_path: Path, monkeypatch) -> None:
+def test_server_always_exposes_only_product_tools(tmp_path: Path, monkeypatch) -> None:
     class FakeFastMCP:
         def __init__(self, _name: str) -> None:
             self.tools = {}
@@ -186,27 +188,7 @@ def test_server_legacy_full_profile_exposes_low_level_tools(tmp_path: Path, monk
     bundle = build_runtime()
     app = bundle.app
 
-    assert "memory" in app.tools
-    assert "memory_write" in app.tools
-    assert "memory_supersede" in app.tools
-
-    system_notice = {"type": "update_available", "latest_version": "9.9.9"}
-    bundle.tools._consume_notices = lambda: [dict(system_notice)]
-    response = app.tools["memory_status"]()
-    assert response["notices"] == [system_notice]
-
-    consume_calls = 0
-
-    def pending_notice():
-        nonlocal consume_calls
-        consume_calls += 1
-        return [dict(system_notice)]
-
-    bundle.tools._consume_notices = pending_notice
-    failed = app.tools["memory_get"](-1)
-    assert failed["ok"] is False
-    assert "notices" not in failed
-    assert consume_calls == 0
+    assert set(app.tools) == {"memory", "memory_review", "memory_govern", "memory_repair"}
     bundle.tools.shutdown(timeout=1)
 
 
@@ -310,11 +292,11 @@ def test_product_repair_cleanup_history_id_alias_is_not_full_cleanup(tmp_path: P
     assert tools.memory_review(view="history", data={"id": second})["data"]["count"] == 1
 
     tools = make_tools(tmp_path)
-    help_result = tools.memory_repair(task="help", data={"task": "rebuild_claims"})
+    help_result = tools.memory_repair(task="help", data={"task": "rebuild_evidence"})
     assert help_result["ok"] is True
-    assert "rebuild_claims" in help_result["data"]["tasks"]
+    assert "rebuild_evidence" in help_result["data"]["tasks"]
 
-    dry = tools.memory_repair(task="rebuild_claims", data={"dry_run": True})
+    dry = tools.memory_repair(task="rebuild_evidence", data={"dry_run": True})
     assert dry["ok"] is True
     assert dry["data"]["dry_run"] is True
 
@@ -464,7 +446,8 @@ def test_product_help_exposes_agent_onboarding_topic(tmp_path: Path) -> None:
     assert help_doc["topic"] == "agent_onboarding"
     assert help_doc["notice"] == "agent-onboarding:v1"
     assert help_doc["guide_file"] == "memory_arbiter/AGENT_ONBOARDING.md"
-    assert "Compact rule to save" in help_doc["content"]
+    assert "Compact Rule" in help_doc["content"]
+    assert "notify" in help_doc["content"]
     assert "memory(action=\"find\")" in help_doc["content"]
 
 
@@ -618,7 +601,8 @@ def test_tool_profile_env_and_validation(tmp_path: Path, monkeypatch) -> None:
     clear_config_env(monkeypatch)
     monkeypatch.setenv("MEMORY_ARBITER_TOOL_PROFILE", "legacy_full")
     settings = Settings.from_env()
-    assert settings.tool_profile == "legacy_full"
+    assert settings.tool_profile == "product"
+    assert any("tool_profile" in warning for warning in settings.config_warnings)
 
     monkeypatch.setenv("MEMORY_ARBITER_TOOL_PROFILE", "invalid")
     settings = Settings.from_env()

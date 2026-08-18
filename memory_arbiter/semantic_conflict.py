@@ -1,8 +1,7 @@
-"""Write-time semantic conflict helpers.
+"""Local Qwen protocol parsing and isolated GGUF process supervision.
 
-This module intentionally keeps the first implementation local and conservative:
-small-model output is only a recall signal, while pair-text evidence gates decide
-whether a user-visible semantic notice is created.
+The model filters only short evidence pairs routed as ``check``. Deterministic
+``notify`` decisions bypass it, and the Agent remains the terminal reviewer.
 """
 from __future__ import annotations
 
@@ -45,16 +44,20 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
-_PAIR_PROMPT = """你是 mema 的高召回候选发现器，只输出 JSON，不要解释。
-必填字段：should_surface(boolean), same_fact_slot(boolean), reason_code(enum), confidence(number 0..1)；允许附加解释字段。
-目标：发现可能影响事实使用的 pair，宁可作为候选多捞，不做最终裁决。
-true 条件：同一事实槽位值不同；旧口径/新口径；采用/不采用；公开/不公开；todo 被完成；新内容替换旧内容。
-false 条件：明显 duplicate、compatible、same_topic_only、unrelated。
-reason_code 只能是 value_diff, replacement, todo_resolved, duplicate, compatible, same_topic_only, unrelated, uncertain_same_slot。
-一致性规则：
-- action reason（value_diff/replacement/todo_resolved/uncertain_same_slot）必须 should_surface=true 且 same_fact_slot=true。
-- duplicate/compatible 必须 should_surface=false；same_fact_slot 可为 true 或 false。
-- same_topic_only/unrelated 必须 should_surface=false 且 same_fact_slot=false。"""
+_PAIR_PROMPT = """你是 mema 的候选降噪器，只输出 JSON，不要解释。
+字段：label(conflict|not_conflict|uncertain), same_fact_slot(boolean), confidence(number 0..1)。
+
+核心规则：默认 not_conflict。只有两句在同一时间和范围内回答同一个具体问题，且答案不能同时成立，才是 conflict。
+同主题不等于同事实槽位；一个说技术选型、另一个说连接池、参数或能力，是 not_conflict。
+同义词、重复、兼容补充、不同环境或范围也是 not_conflict。
+旧口径明确替换新口径、采用与不采用、公开与不公开、同一数值不同、todo 与已完成，是 conflict。
+确实同槽位但证据不足才用 uncertain。
+
+例1 A=数据库使用 PostgreSQL。 B=PostgreSQL 连接池上限为20。 -> {"label":"not_conflict","same_fact_slot":false,"confidence":0.95}
+例2 A=系统支持 memory find。 B=系统支持 memory read。 -> {"label":"not_conflict","same_fact_slot":false,"confidence":0.9}
+例3 A=数据库使用 pgsql。 B=数据库使用 PostgreSQL。 -> {"label":"not_conflict","same_fact_slot":true,"confidence":0.98}
+例4 A=旧方案采用 Redis。 B=新方案不再采用 Redis，改用 SQLite。 -> {"label":"conflict","same_fact_slot":true,"confidence":0.95}
+例5 A=TODO 完成数据库迁移。 B=数据库迁移已经完成。 -> {"label":"conflict","same_fact_slot":true,"confidence":0.95}"""
 
 
 _WORKSPACE_PROMPT = """你是 mema 的 workspace 归一候选建议器，只输出 JSON，不要解释。
@@ -91,15 +94,6 @@ class PairEvidence:
     compatible_guard: bool
     only_left: list[str] = field(default_factory=list)
     only_right: list[str] = field(default_factory=list)
-
-
-@dataclass
-class GateResult:
-    passed: bool
-    severity: str
-    mode: str
-    reasons: list[str]
-    evidence: PairEvidence
 
 
 @dataclass
@@ -269,7 +263,7 @@ def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
     # Direction-agnostic: a todo on one side marked done on the other. The pair
     # is unordered at the gate (the caller may pass new/old either way), so we
     # accept both orientations. The common-token guard below (applied in
-    # pair_text_gate) prevents two unrelated todo/done statements from pairing.
+    # The common-token guard prevents unrelated todo/done statements pairing.
     todo_done = bool(common) and (
         (left_is_todo and right_done) or (right_is_todo and left_done)
     )
@@ -329,46 +323,6 @@ def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
     )
 
 
-def pair_text_gate(left_text: str, right_text: str, mode: str = "medium") -> GateResult:
-    mode = (mode or "medium").strip().lower()
-    if mode not in {"medium", "strong"}:
-        mode = "medium"
-    evidence = pair_text_evidence(left_text, right_text)
-    reasons: list[str] = []
-    if evidence.duplicate_guard:
-        return GateResult(False, "none", mode, ["duplicate_guard"], evidence)
-    if evidence.compatible_guard:
-        return GateResult(False, "none", mode, ["compatible_guard"], evidence)
-    if evidence.todo_done:
-        reasons.append("todo_done")
-    if evidence.contains_diff:
-        reasons.append("contains_diff")
-    if evidence.replacement:
-        reasons.append("replacement")
-    if evidence.polarity_diff:
-        reasons.append("polarity_diff")
-    if evidence.list_value_diff:
-        reasons.append("list_value_diff")
-    strong = (
-        evidence.todo_done
-        or evidence.contains_diff
-        or (evidence.replacement and (evidence.polarity_diff or len(evidence.common_tokens) >= 1))
-        or (evidence.polarity_diff and len(evidence.common_tokens) >= 2)
-        or (evidence.list_value_diff and len(evidence.common_tokens) >= 2)
-    )
-    medium = (
-        strong
-        or (evidence.replacement and evidence.char_cosine >= 0.25)
-        or (evidence.list_value_diff and evidence.char_cosine >= 0.34)
-        or (evidence.polarity_diff and evidence.char_cosine >= 0.30)
-    )
-    passed = strong if mode == "strong" else medium
-    severity = "high" if strong else ("normal" if passed else "none")
-    if passed and not reasons:
-        reasons.append("medium_similarity")
-    return GateResult(passed, severity, mode, reasons, evidence)
-
-
 def _extract_first_json_object(raw: str) -> Optional[str]:
     """Return the first balanced top-level ``{...}`` object in *raw*, or None.
 
@@ -413,7 +367,7 @@ def model_signal_from_text(raw: str) -> ModelSignal:
     snippet = _extract_first_json_object(raw or "")
     if not snippet:
         return ModelSignal(False, "invalid_json", None, raw or "", None, "missing_json")
-    protocol_fields = {"should_surface", "same_fact_slot", "reason_code", "confidence"}
+    protocol_fields = {"label", "same_fact_slot", "confidence"}
 
     def reject_duplicate_protocol_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         decoded_object: dict[str, Any] = {}
@@ -434,37 +388,27 @@ def model_signal_from_text(raw: str) -> ModelSignal:
         return ModelSignal(False, "invalid_schema", None, raw or "", None, "invalid_schema")
     parsed = decoded
 
-    required = {"should_surface", "same_fact_slot", "reason_code", "confidence"}
-    reason = parsed.get("reason_code")
-    should = parsed.get("should_surface")
+    required = {"label", "same_fact_slot", "confidence"}
+    label = parsed.get("label")
     same_slot = parsed.get("same_fact_slot")
     confidence = parsed.get("confidence")
-    action_reasons = {"value_diff", "replacement", "todo_resolved", "uncertain_same_slot"}
-    non_action_reasons = {"duplicate", "compatible", "same_topic_only", "unrelated"}
-    valid_reasons = action_reasons | non_action_reasons
     schema_valid = (
         required.issubset(parsed)
-        and type(should) is bool
         and type(same_slot) is bool
-        and isinstance(reason, str)
-        and reason in valid_reasons
+        and isinstance(label, str)
+        and label in {"conflict", "not_conflict", "uncertain"}
         and isinstance(confidence, (int, float))
         and not isinstance(confidence, bool)
         and math.isfinite(confidence)
         and 0.0 <= confidence <= 1.0
     )
-    if schema_valid and reason in action_reasons:
-        schema_valid = should is True and same_slot is True
-    elif schema_valid and reason in {"duplicate", "compatible"}:
-        schema_valid = should is False
-    elif schema_valid and reason in {"same_topic_only", "unrelated"}:
-        schema_valid = should is False and same_slot is False
+    if schema_valid and label in {"conflict", "uncertain"}:
+        schema_valid = same_slot is True
     if not schema_valid:
         return ModelSignal(False, "invalid_schema", None, raw or "", parsed, "invalid_schema")
-    assert type(should) is bool
-    assert isinstance(reason, str)
+    assert isinstance(label, str)
     assert isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
-    return ModelSignal(should, reason, float(confidence), raw or "", parsed)
+    return ModelSignal(label in {"conflict", "uncertain"}, label, float(confidence), raw or "", parsed)
 
 
 _WS_RELATIONS = {"alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain"}
@@ -1062,16 +1006,11 @@ def notice_dedupe_key(
     left_version: int,
     right_version: int,
     notice_type: str,
-    left_claim_revision: int | None = None,
-    right_claim_revision: int | None = None,
 ) -> str:
-    left = (int(left_id), int(left_version), left_claim_revision)
-    right = (int(right_id), int(right_version), right_claim_revision)
-    (a_id, a_version, a_claim_revision), (b_id, b_version, b_claim_revision) = sorted(
+    left = (int(left_id), int(left_version))
+    right = (int(right_id), int(right_version))
+    (a_id, a_version), (b_id, b_version) = sorted(
         [left, right], key=lambda item: item[0]
     )
-    revision_part = ""
-    if a_claim_revision is not None or b_claim_revision is not None:
-        revision_part = f":{int(a_claim_revision or 0)}:{int(b_claim_revision or 0)}"
-    raw = f"semantic:{a_id}:{a_version}{revision_part}:{b_id}:{b_version}:{notice_type}"
+    raw = f"semantic:{a_id}:{a_version}:{b_id}:{b_version}:{notice_type}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

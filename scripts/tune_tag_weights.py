@@ -191,7 +191,6 @@ class Memory:
     status: str = "active"
     protection_level: str = "normal"
     confidence: float = 0.5
-    split_status: Optional[str] = None  # for long_content_penalty exemption test
     # ground-truth bucket: HIGH / MEDIUM / NONE
     gt: str = "NONE"
     # archetype label for diagnosis
@@ -458,8 +457,7 @@ def _score_one(mem: Memory, query: str, tw: TagWeights,
     # long_content_penalty: subject+tags weak-or-none, content long, not split-active
     subject_tags_weak = subj_level in ("none", "weak") and tag_level in ("none", "weak")
     content_long = len(content) > 2000
-    is_split_active = mem.split_status == "active"
-    if subject_tags_weak and content_long and content_score > 0 and not is_split_active:
+    if subject_tags_weak and content_long and content_score > 0:
         relevance -= _LONG_CONTENT_PENALTY
 
     # vec floor not applicable (synthetic memories aren't vec candidates)

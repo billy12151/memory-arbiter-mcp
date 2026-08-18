@@ -111,17 +111,6 @@ def test_strict_console_memory_detail_uses_workspace_acl(tmp_path):
     assert ok["memory"]["id"] == b_id
 
 
-def test_strict_memory_split_prepare_filters_workspace_before_content(tmp_path):
-    tools = make_tools(tmp_path, "strict")
-    tools.settings.split_threshold = 10
-    b_id = _active_write(tools, "beta split secret content long enough", "projB")
-
-    r = tools.memory_split(memory_id=b_id, workspace="projA")
-
-    assert r["ok"] is False
-    assert "beta split secret" not in str(r)
-
-
 def test_strict_search_conflict_signal_redacts_cross_workspace_peer(tmp_path):
     tools = make_tools(tmp_path, "strict")
     a_id = _active_write(tools, "alpha searchable conflict", "projA", subject="same")
@@ -563,7 +552,7 @@ except Exception:
 
 
 @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not installed")
-def test_strict_vec_knn_excludes_closer_cross_workspace_vector(tmp_path):
+def test_strict_evidence_knn_excludes_closer_cross_workspace_vector(tmp_path):
     """Adversarial vector channel: a cross-workspace memory whose vector is
     CLOSER to the query than the same-workspace hit must still be excluded
     under strict. Verifies vec_knn's workspace_predicate is wired and its
@@ -576,15 +565,16 @@ def test_strict_vec_knn_excludes_closer_cross_workspace_vector(tmp_path):
     tools.memory_activate(memory_id=a_mid, authorized=True)
     b_mid = _write(tools, "beta cross ws exact", "projB")["data"]["id"]
     tools.memory_activate(memory_id=b_mid, authorized=True)
-    db.store_embedding(a_mid, [0.9, 0.1])
-    db.store_embedding(b_mid, [1.0, 0.0])
+    from memory_arbiter.evidence import EvidenceUnit, evidence_content_hash
+    db.evidence.publish(a_mid, 2, evidence_content_hash("alpha same ws"), [EvidenceUnit("text", "alpha same ws", 0, 13, 0)], [[0.9, 0.1]])
+    db.evidence.publish(b_mid, 2, evidence_content_hash("beta cross ws exact"), [EvidenceUnit("text", "beta cross ws exact", 0, 19, 0)], [[1.0, 0.0]])
     res = tools.memory_search(query="x", workspace="projA", limit=10, query_embedding=[1.0, 0.0])
     rows = _results(res)
     assert {r["workspace"] for r in rows} == {"projA"}, (
         f"vec_knn leaked closer cross-workspace vector: {[r['workspace'] for r in rows]}"
     )
-    # direct vec_knn call confirms the predicate (not just the search wrapper)
-    knn_a = db.vec_knn([1.0, 0.0], k=10, parent_status_filter="active", ws_canonical="projA")
+    # Direct evidence KNN confirms the predicate (not just the search wrapper).
+    knn_a = db.evidence_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projA")
     assert all(r.get("workspace") == "projA" for r in knn_a)
-    knn_b = db.vec_knn([1.0, 0.0], k=10, parent_status_filter="active", ws_canonical="projB")
+    knn_b = db.evidence_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projB")
     assert all(r.get("workspace") == "projB" for r in knn_b)

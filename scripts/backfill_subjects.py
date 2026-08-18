@@ -200,7 +200,7 @@ def main() -> int:
     ok, fail = 0, 0
     failed_ids: list[int] = []
     for mid in plan:
-        got = tools.memory_get(memory_id=mid, sections="none")
+        got = tools.memory_get(memory_id=mid)
         if not got["ok"]:
             print(f"  [fail] {mid}: memory_get failed: {got['data'].get('error')}")
             fail += 1

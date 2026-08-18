@@ -80,9 +80,9 @@ class ProductSurfaces:
                 "examples": {
                     "remember": {"action": "remember", "data": {"content": "Fact to remember", "subject": "Short subject", "tags": ["project"]}},
                     "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
-                    "read": {"action": "read", "data": {"memory_id": 123, "sections": "catalog"}},
+                    "read": {"action": "read", "data": {"memory_id": 123}},
                     "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
-                    "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_left_version": 1, "expected_right_version": 2, "expected_left_claim_revision": 1, "expected_right_claim_revision": 1, "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None, "confidence_hint": "medium", "affects_current_output": True, "usage_context": "Current answer depends on this field.", "resolution_kind": "partial_update", "conflict_scope": "field", "reason": "Only one field changed."}},
+                    "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_left_version": 1, "expected_right_version": 2, "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None, "confidence_hint": "medium", "affects_current_output": True, "usage_context": "Current answer depends on this field.", "resolution_kind": "partial_update", "conflict_scope": "field", "reason": "Only one field changed."}},
                 },
                 "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
             },
@@ -112,10 +112,9 @@ class ProductSurfaces:
             },
             "memory_repair": {
                 "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-                "tasks": ["split", "rebuild_claims", "rebuild_embeddings", "cleanup_history", "cleanup_vectors", "resync_vectors", "set_entity", "activate_pending", "replay_backup", "semantic_control", "notice", "help"],
+                "tasks": ["rebuild_evidence", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "semantic_control", "notice", "help"],
                 "examples": {
-                    "rebuild_claims": {"task": "rebuild_claims", "data": {"dry_run": True, "memory_ids": [123]}},
-                    "cleanup_vectors": {"task": "cleanup_vectors", "data": {"dry_run": True}},
+                    "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
                     "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
                     "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
                     "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
@@ -124,8 +123,7 @@ class ProductSurfaces:
                     "notice_dismiss": {"task": "notice", "data": {"action": "dismiss", "notice_id": 1, "reason": "Reviewed; not actionable."}},
                     "notice_resolve": {"task": "notice", "data": {"action": "resolve", "notice_id": 1, "reason": "Reviewed and handled."}},
                 },
-                "semantic_notice_delivery": "After Qwen write-time async candidate processing, a successful response from any product tool may include at most one compact semantic stub alongside existing system notices. Read it with notice/read, then execute the returned left_read_call and right_read_call to read both full memories. Only after both reads succeed, tell the user if the advisory candidate appears credible; do not call it a confirmed conflict. Dismiss false positives or resolve notices already handled. Delivery is the state transition open -> open + delivered_at; public dismiss/resolve calls are terminal, while stale undelivered snapshots may transition internally to stale. Semantic notices never automatically create a conflict, submit a judgment, edit, or supersede memory. The local database claim is atomic best effort; transport does not guarantee exactly-once delivery.",
-                "semantic_candidate_policy": "Model output is strict-schema validated. Specific bounded candidate recall ranks subject/tag candidates before pair_limit; noisy/common tags are suppressed. pair_text_gate defaults to medium; strong is conservative. Configure semantic_conflict.pair_text_gate or MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE.",
+                "semantic_notice_delivery": "Local-text evidence finds candidates. Deterministic notify routes surface directly; check routes require Qwen and degrade to ignore when Qwen is unavailable. Read both memories before assessing an advisory notice.",
             },
         }
         if topic == AGENT_ONBOARDING_TOPIC:
@@ -411,7 +409,6 @@ class ProductSurfaces:
         if action == "judge":
             required = [
                 "conflict_id", "expected_left_version", "expected_right_version",
-                "expected_left_claim_revision", "expected_right_claim_revision",
                 "verdict", "recommended_use", "suggested_winner",
                 "confidence_hint", "reason", "affects_current_output", "usage_context",
             ]
@@ -551,8 +548,7 @@ class ProductSurfaces:
             required = [
                 "conflict_id", "verdict", "recommended_use", "suggested_winner",
                 "reason", "expected_judgment_id", "expected_left_version",
-                "expected_right_version", "expected_left_claim_revision",
-                "expected_right_claim_revision", "authorized",
+                "expected_right_version", "authorized",
             ]
             missing_fields = [name for name in required if name not in payload]
             if missing_fields:
@@ -626,7 +622,7 @@ class ProductSurfaces:
         return self._invalid_product_call("memory_govern", f"unknown action: {action}", action)
 
     def _memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
-        """Maintenance and repair: split, rebuild indexes, cleanup, vector resync, entity backfill."""
+        """Maintenance and repair for evidence, history, backup, notices, and runtime state."""
         payload = self._payload_dict(data)
         if data is not None and not isinstance(data, dict):
             return self._invalid_product_call("memory_repair", "data must be a JSON object", task)
@@ -634,25 +630,14 @@ class ProductSurfaces:
         self._normalize_boolean_fields(payload, "authorized", "dry_run", "clear")
         if task == "help":
             return self.db.state.response(self._product_help("memory_repair", self._help_topic(payload, "task")))
-        if task == "split":
-            invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
-            if invalid_id is not None:
-                return invalid_id
-            return self._forward("memory_repair", task, self.memory_split, **payload)
-        if task == "rebuild_claims":
-            return self._forward("memory_repair", task, self.memory_rebuild_claims, **payload)
-        if task == "rebuild_embeddings":
-            return self._forward("memory_repair", task, self.memory_rebuild_embeddings, **payload)
+        if task == "rebuild_evidence":
+            return self._forward("memory_repair", task, self.memory_rebuild_evidence, **payload)
         if task == "cleanup_history":
             if "id" in payload or "memory_id" in payload:
                 invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
                 if invalid_id is not None:
                     return invalid_id
             return self._forward("memory_repair", task, self.memory_cleanup_history, **payload)
-        if task == "cleanup_vectors":
-            return self._forward("memory_repair", task, self.memory_cleanup_inactive_vectors, **payload)
-        if task == "resync_vectors":
-            return self._forward("memory_repair", task, self.memory_resync_vec_parent_status, **payload)
         if task == "set_entity":
             invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
             if invalid_id is not None:

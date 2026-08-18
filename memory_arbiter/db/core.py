@@ -3,25 +3,21 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import struct
 import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Optional, Tuple, cast
+from typing import Any, Iterator, Optional, Tuple
 
-from ..claims_db import StructuredClaimStore
 from ..config import Settings
 from ..conflict_judgments import ConflictJudgmentStore
 from ..degrade import DegradeState
 from ..models import MemoryRecord, utc_now_iso
-from .sections_store import SectionStore
 from .semantic_notices import SemanticNoticeStore
 from .audit import AuditStore
 from .meta import MetaStore
 from .schema import SchemaStore
-from .vectors import VectorStore
 from .workspaces import WorkspaceStore, _coerce_ws, _normalize_alias_key
 from .conflicts import ConflictStore
 from .memories import MemoriesStore
@@ -51,14 +47,12 @@ __all__ = [
     "Optional",
     "Path",
     "Settings",
-    "StructuredClaimStore",
     "Tuple",
     "contextmanager",
     "datetime",
     "json",
     "re",
     "sqlite3",
-    "struct",
     "time",
     "timezone",
     "utc_now_iso",
@@ -89,23 +83,16 @@ class MemoryDB:
         self.state = DegradeState()
         self._db_available = False
         self._sqlite_vec_loadable = False
-        # Public sub-store accessors (Phase 3). ``claims``/``judgments`` are the
-        # canonical handles; the underscore aliases are kept for back-compat with
-        # existing internal references.
-        self.claims = StructuredClaimStore(self)
         self.judgments = ConflictJudgmentStore(self)
-        self.sections = SectionStore(self)
         self.semantic_notices = SemanticNoticeStore(self)
         self.audit = AuditStore(self)
         self.meta = MetaStore(self)
         self.schema = SchemaStore(self)
-        self.vectors = VectorStore(self)
         self.workspaces = WorkspaceStore(self)
         self.conflicts = ConflictStore(self)
         self.memories = MemoriesStore(self)
         self.backup_replay = BackupReplayStore(self)
         self.evidence = EvidenceStore(self)
-        self._claim_store = self.claims
         self._judgment_store = self.judgments
         self._init_database()
 
@@ -241,18 +228,6 @@ class MemoryDB:
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         return self.schema._init_schema(conn)
 
-    def _migrate_v090_claims(self, conn: sqlite3.Connection) -> None:
-        return self.schema._migrate_v090_claims(conn)
-
-    @staticmethod
-    def _migrate_add_column(
-        conn: sqlite3.Connection,
-        table: str,
-        column: str,
-        decl: str,
-    ) -> None:
-        return SchemaStore._migrate_add_column(conn, table, column, decl)
-
     def _probe_features(self, conn: sqlite3.Connection) -> None:
         return self.schema._probe_features(conn)
 
@@ -265,24 +240,8 @@ class MemoryDB:
     def _ensure_fts(self, conn: sqlite3.Connection) -> None:
         return self.schema._ensure_fts(conn)
 
-    def _ensure_vec_table(self, conn: sqlite3.Connection) -> None:
-        return self.schema._ensure_vec_table(conn)
-
-    def _ensure_section_vec_table(self, conn: sqlite3.Connection) -> None:
-        return self.schema._ensure_section_vec_table(conn)
-
     def _ensure_workspace_vec_table(self, conn: sqlite3.Connection) -> None:
         return self.schema._ensure_workspace_vec_table(conn)
-
-    def _migrate_vec_parent_status(self, conn: sqlite3.Connection) -> None:
-        return self.schema._migrate_vec_parent_status(conn)
-
-    # ------------------------------------------------------------------
-    #  Embedding operations
-    # ------------------------------------------------------------------
-
-    def store_embedding(self, memory_id: int, embedding: list[float]) -> Tuple[bool, list[str]]:
-        return self.vectors.store_embedding(memory_id, embedding)
 
     def resolve_workspace_canonical(
         self,
@@ -396,42 +355,6 @@ class MemoryDB:
             conn=conn,
             precomputed_embedding=precomputed_embedding,
         )
-
-    def delete_embedding(self, memory_id: int) -> Tuple[bool, list[str]]:
-        return self.vectors.delete_embedding(memory_id)
-
-    def delete_vectors_for_memory(self, memory_id: int) -> Tuple[bool, list[str]]:
-        return self.vectors.delete_vectors_for_memory(memory_id)
-
-    def mark_vectors_for_memory(self, memory_id: int, new_status: str) -> Tuple[bool, list[str]]:
-        return self.vectors.mark_vectors_for_memory(memory_id, new_status)
-
-    def _purge_inactive_vectors(self) -> Tuple[dict[str, int], list[str]]:
-        return self.vectors._purge_inactive_vectors()
-
-    def _count_vec_parent_status_mismatch(self) -> dict[str, int]:
-        return self.vectors._count_vec_parent_status_mismatch()
-
-    def _resync_vec_parent_status(self) -> dict[str, int]:
-        return cast(dict[str, int], self.vectors._resync_vec_parent_status())
-
-    def vec_knn(
-        self,
-        query_embedding: list[float],
-        k: int = 10,
-        parent_status_filter: str = "active",
-        ws_canonical: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
-        return self.vectors.vec_knn(query_embedding, k, parent_status_filter, ws_canonical)
-
-    def section_vec_knn(
-        self,
-        query_embedding: list[float],
-        k: int = 10,
-        parent_status_filter: str = "active",
-        ws_canonical: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
-        return self.vectors.section_vec_knn(query_embedding, k, parent_status_filter, ws_canonical)
 
     def evidence_knn(self, query_embedding, *, k=100, parent_status_filter="active", workspace=None, exclude_memory_id=None):
         return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id)
@@ -564,13 +487,9 @@ class MemoryDB:
         refresh: bool = False,
         left_version: Optional[int] = None,
         right_version: Optional[int] = None,
-        left_claim_revision: Optional[int] = None,
-        right_claim_revision: Optional[int] = None,
         judgment_status: Optional[str] = None,
-        structured_details: Optional[list[dict[str, Any]]] = None,
         scan_prompt_version: Optional[str] = None,
         scan_model: Optional[str] = None,
-        detection_channel: Optional[str] = None,
     ) -> dict[str, Any]:
         return self.conflicts.record_conflict_enriched(
             left_id,
@@ -585,13 +504,9 @@ class MemoryDB:
             refresh=refresh,
             left_version=left_version,
             right_version=right_version,
-            left_claim_revision=left_claim_revision,
-            right_claim_revision=right_claim_revision,
             judgment_status=judgment_status,
-            structured_details=structured_details,
             scan_prompt_version=scan_prompt_version,
             scan_model=scan_model,
-            detection_channel=detection_channel,
         )
 
     def resolve_conflict(
@@ -602,28 +517,11 @@ class MemoryDB:
     def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
         return self.conflicts.is_pair_dismissed(left_id, right_id)
 
-    def is_structured_pair_closed_for_snapshot(
-        self,
-        left_id: int,
-        right_id: int,
-        left_version: int,
-        right_version: int,
-        left_claim_revision: int,
-        right_claim_revision: int,
-    ) -> bool:
-        return self.conflicts.is_structured_pair_closed_for_snapshot(
-            left_id, right_id, left_version, right_version,
-            left_claim_revision, right_claim_revision,
-        )
-
     def get_memory_version(self, memory_id: int) -> Optional[int]:
         return self.conflicts.get_memory_version(memory_id)
 
     def dismissed_pairs_for(self, memory_ids: list[int]) -> set:
         return self.conflicts.dismissed_pairs_for(memory_ids)
-
-    def get_embedding(self, memory_id: int) -> Optional[list[float]]:
-        return self.vectors.get_embedding(memory_id)
 
     # ------------------------------------------------------------------
     #  Semantic write-time notices
@@ -643,9 +541,7 @@ class MemoryDB:
         conflict_id: Optional[int] = None,
         left_version: Optional[int] = None,
         right_version: Optional[int] = None,
-        left_claim_revision: Optional[int] = None,
-        right_claim_revision: Optional[int] = None,
-        source: str = "semantic_write_gate",
+        source: str = "semantic_evidence",
     ) -> dict[str, Any]:
         return self.semantic_notices.record_semantic_notice(
             memory_id=memory_id,
@@ -659,8 +555,6 @@ class MemoryDB:
             conflict_id=conflict_id,
             left_version=left_version,
             right_version=right_version,
-            left_claim_revision=left_claim_revision,
-            right_claim_revision=right_claim_revision,
             source=source,
         )
 
@@ -690,13 +584,10 @@ class MemoryDB:
         right_id: int,
         left_version: Optional[int] = None,
         right_version: Optional[int] = None,
-        notice_type: str = "semantic_pair",
-        left_claim_revision: Optional[int] = None,
-        right_claim_revision: Optional[int] = None,
+        notice_type: str = "semantic_evidence",
     ) -> bool:
         return self.semantic_notices.is_semantic_pair_closed(
             left_id, right_id, left_version, right_version, notice_type,
-            left_claim_revision, right_claim_revision,
         )
 
     def update_semantic_notice_status(
@@ -883,68 +774,6 @@ class MemoryDB:
         has_managed_embedder: bool,
     ) -> None:
         return self.meta.init_vec_index_state(embedding_space_id, has_managed_embedder)
-
-    # ---- Section CRUD ----
-
-    @staticmethod
-    def _insert_section(
-        conn: sqlite3.Connection,
-        memory_id: int,
-        section_index: int,
-        title: Optional[str],
-        title_path: Optional[str],
-        summary: Optional[str],
-        anchor_text: Optional[str],
-        occurrence_index: int,
-        start_offset: int,
-        end_offset: int,
-        provenance: str,
-        embedding_truncated: int,
-        embedding_original_tokens: int,
-        embedding_used_tokens: int,
-    ) -> int:
-        return SectionStore.insert_section(
-            conn, memory_id, section_index, title, title_path, summary,
-            anchor_text, occurrence_index, start_offset, end_offset,
-            provenance, embedding_truncated, embedding_original_tokens,
-            embedding_used_tokens,
-        )
-
-    @staticmethod
-    def _store_section_vec(
-        conn: sqlite3.Connection,
-        section_id: int,
-        embedding: list[float],
-    ) -> None:
-        return SectionStore.store_section_vec(conn, section_id, embedding)
-
-    @staticmethod
-    def _delete_sections_for_memory(conn: sqlite3.Connection, memory_id: int) -> int:
-        return SectionStore.delete_sections_for_memory(conn, memory_id)
-
-    @staticmethod
-    def _get_sections(conn: sqlite3.Connection, memory_id: int) -> list[dict[str, Any]]:
-        return SectionStore.get_sections(conn, memory_id)
-
-    @staticmethod
-    def _get_section_vec_ids(conn: sqlite3.Connection, memory_id: int) -> set[int]:
-        return SectionStore.get_section_vec_ids(conn, memory_id)
-
-    def get_sections_by_memory(self, memory_id: int) -> list[dict[str, Any]]:
-        return self.sections.get_sections_by_memory(memory_id)
-
-    def get_sections_by_ids(
-        self, memory_id: int, section_ids: list[int]
-    ) -> Tuple[list[dict[str, Any]], list[int]]:
-        return self.sections.get_sections_by_ids(memory_id, section_ids)
-
-    def section_vec_distance_match(
-        self,
-        memory_id: int,
-        query_embedding: list[float],
-        threshold: float,
-    ) -> list[dict[str, Any]]:
-        return self.sections.section_vec_distance_match(memory_id, query_embedding, threshold)
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)

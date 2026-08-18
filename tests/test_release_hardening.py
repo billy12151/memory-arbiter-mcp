@@ -103,21 +103,6 @@ def test_uv_lock_dynamic_version_record_is_valid(monkeypatch, tmp_path):
     assert sync.check_uv_lock("0.13.1")
 
 
-def test_mypy_check_rejects_unparseable_success(monkeypatch):
-    checker = _load_script("check_mypy_test", "scripts/refactor_baseline/check_mypy.py")
-    monkeypatch.setattr(
-        checker.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="mypy skipped\n", stderr=""),
-    )
-    try:
-        checker.current_errors()
-    except RuntimeError as exc:
-        assert "no parseable summary" in str(exc)
-    else:
-        raise AssertionError("unparseable mypy output must not pass")
-
-
 def test_production_smoke_version_mismatch_has_no_runtime_side_effect(monkeypatch):
     called = False
 

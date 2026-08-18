@@ -93,32 +93,33 @@ def local_text_units(subject: str, content: str) -> list[EvidenceUnit]:
         if len(text) < 8:
             continue
         sentences = [_clean(item) for item in _SENTENCE_BOUNDARY_RE.split(text) if _clean(item)]
+        sentence_groups: list[str]
         if len(sentences) <= 1:
-            groups = [text]
+            sentence_groups = [text]
         else:
-            groups: list[str] = []
+            sentence_groups = []
             index = 0
             while index < len(sentences):
-                group: list[str] = []
+                sentence_group: list[str] = []
                 chars = 0
                 cursor = index
                 while cursor < len(sentences) and (
-                    chars < 100 or (chars + len(sentences[cursor]) <= 240 and len(group) < 3)
+                    chars < 100 or (chars + len(sentences[cursor]) <= 240 and len(sentence_group) < 3)
                 ):
-                    group.append(sentences[cursor])
+                    sentence_group.append(sentences[cursor])
                     chars += len(sentences[cursor])
                     cursor += 1
-                groups.append(" ".join(group))
+                sentence_groups.append(" ".join(sentence_group))
                 index = max(index + 1, cursor - 1)
 
         search_from = start
-        for group in groups:
-            group_start, group_end = _locate_clean_text(content or "", group, search_from, end)
+        for grouped_text in sentence_groups:
+            group_start, group_end = _locate_clean_text(content or "", grouped_text, search_from, end)
             search_from = max(search_from, group_end)
-            if len(group) <= 400:
-                raw_units.append(("text", group, group_start, group_end))
+            if len(grouped_text) <= 400:
+                raw_units.append(("text", grouped_text, group_start, group_end))
             else:
-                for part, part_start, part_end in _split_long(group, group_start):
+                for part, part_start, part_end in _split_long(grouped_text, group_start):
                     raw_units.append(("text", part, part_start, part_end))
 
     return [

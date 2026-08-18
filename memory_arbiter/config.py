@@ -50,16 +50,8 @@ class Settings:
     # ── Embedding pipeline params (v0.6.0: part of embedding_space_id) ──
     embedding_n_ctx: int = 2048
     embedding_reserved_tokens: int = 64
-    # ── Section split (v0.8.0): capability bound to vec readiness ──
-    # split_enabled and section_zero_match_preview_chars were removed in v0.8;
-    # a residual split.enabled in config is warned + ignored (see from_env).
-    split_threshold: int = 4000
-    section_vec_distance_threshold: float = 0.42
-    section_fulltext_threshold: float = 0.8
-    max_sections: int = 50
+    # Maximum text passed to one embedding call.
     max_section_chars: int = 3600
-    # v0.9 structured claims: emergency kill switch; beta_all is the trusted-user default.
-    structured_claim_mode: str = "beta_all"
     # Workspace isolation level: none (default, ws ignored) | weak (soft rerank) | strict (hard filter).
     isolation: str = "none"
     # Cosine-distance cutoff for workspace alias canonicalization (vec KNN).
@@ -68,16 +60,12 @@ class Settings:
     workspace_match_distance: float = 0.25
     update_check_enabled: bool = True
     tool_profile: str = "product"
-    storage_profile: str = "vnext"
     semantic_conflict_enabled: bool = False
     semantic_conflict_backend: str = "local_gguf"
     semantic_conflict_model_path: Optional[Path] = None
-    semantic_conflict_pair_text_gate: str = "medium"
     semantic_conflict_on_write: str = "async"
     semantic_conflict_max_concurrency: int = 1
     semantic_conflict_queue_max_size: int = 100
-    semantic_conflict_candidate_limit: int = 30
-    semantic_conflict_pair_limit: int = 10
     semantic_conflict_n_ctx: int = 1024
     semantic_conflict_n_threads: int = 4
     semantic_conflict_n_batch: int = 128
@@ -105,26 +93,11 @@ class Settings:
             config_warnings.append(f"embedding={emb_cfg!r} invalid; using env/defaults")
             emb_cfg = {}
         emb_cfg = {str(k): v for k, v in emb_cfg.items() if not str(k).startswith("_")}
-        split_cfg = cfg.get("split") or {}
-        if not isinstance(split_cfg, dict):
-            config_warnings.append(f"split={split_cfg!r} invalid; using env/defaults")
-            split_cfg = {}
-        split_cfg = {str(k): v for k, v in split_cfg.items() if not str(k).startswith("_")}
         semantic_cfg = cfg.get("semantic_conflict") or {}
         if not isinstance(semantic_cfg, dict):
             config_warnings.append(f"semantic_conflict={semantic_cfg!r} invalid; using env/defaults")
             semantic_cfg = {}
         semantic_cfg = {str(k): v for k, v in semantic_cfg.items() if not str(k).startswith("_")}
-        storage_profile = str(
-            cfg.get("storage_profile")
-            or os.getenv("MEMORY_ARBITER_STORAGE_PROFILE")
-            or "vnext"
-        ).strip().lower()
-        if storage_profile not in {"legacy", "vnext"}:
-            config_warnings.append(
-                f"storage_profile={storage_profile!r} invalid; using vnext"
-            )
-            storage_profile = "vnext"
         update_cfg_raw = cfg.get("update_check", {})
         update_check_enabled = True
         if isinstance(update_cfg_raw, dict):
@@ -135,19 +108,6 @@ class Settings:
             update_check_enabled = parse_bool_warn(
                 update_cfg_raw, True, name="update_check", warnings=config_warnings
             )
-        # v0.8: split.enabled and section_zero_match_preview_chars are removed.
-        # A residual value in config is warned + ignored (never blocks startup).
-        if "enabled" in split_cfg:
-            config_warnings.append(
-                "split.enabled is removed in v0.8 (capability is bound to vec readiness); "
-                "the setting is ignored."
-            )
-        if "section_zero_match_preview_chars" in split_cfg:
-            config_warnings.append(
-                "section_zero_match_preview_chars is removed in v0.8 (zero-match returns the "
-                "full memory); the setting is ignored."
-            )
-
         def pick_str(cfg_key: str, env_key: str, default: str) -> str:
             try:
                 if cfg.get(cfg_key) is not None:
@@ -199,15 +159,6 @@ class Settings:
         if embedding_provider and embedding_provider != "gguf":
             config_warnings.append(f"embedding.provider={embedding_provider!r} unsupported; auto-embedding disabled.")
 
-        structured_claim_mode = pick_str(
-            "structured_claim_mode", "MEMORY_ARBITER_STRUCTURED_CLAIM_MODE", "beta_all"
-        ).strip().lower()
-        if structured_claim_mode not in {"off", "beta_all"}:
-            config_warnings.append(
-                f"structured_claim_mode={structured_claim_mode!r} invalid; using beta_all"
-            )
-            structured_claim_mode = "beta_all"
-
         isolation = pick_str(
             "isolation", "MEMORY_ARBITER_ISOLATION", "none"
         ).strip().lower()
@@ -230,7 +181,7 @@ class Settings:
         tool_profile = pick_str(
             "tool_profile", "MEMORY_ARBITER_TOOL_PROFILE", "product"
         ).strip().lower()
-        if tool_profile not in {"product", "full", "legacy_full"}:
+        if tool_profile != "product":
             config_warnings.append(
                 f"tool_profile={tool_profile!r} invalid; using product"
             )
@@ -246,16 +197,6 @@ class Settings:
                 f"semantic_conflict.backend={semantic_backend!r} unsupported; using local_gguf"
             )
             semantic_backend = "local_gguf"
-        semantic_gate = str(
-            semantic_cfg.get("pair_text_gate")
-            or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_GATE")
-            or "medium"
-        ).strip().lower()
-        if semantic_gate not in {"medium", "strong"}:
-            config_warnings.append(
-                f"semantic_conflict.pair_text_gate={semantic_gate!r} invalid; using medium"
-            )
-            semantic_gate = "medium"
         semantic_on_write = str(
             semantic_cfg.get("on_write")
             or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_ON_WRITE")
@@ -322,27 +263,10 @@ class Settings:
                 pick_int_field(emb_cfg.get("reserved_tokens"), "MEMORY_ARBITER_EMBEDDING_RESERVED_TOKENS", 64, name="embedding.reserved_tokens"),
                 0, 4096, name="embedding.reserved_tokens", warnings=config_warnings,
             ),
-            split_threshold=clamp_int(
-                pick_int_field(split_cfg.get("threshold"), "MEMORY_ARBITER_SPLIT_THRESHOLD", 4000, name="split.threshold"),
-                100, 1_000_000, name="split.threshold", warnings=config_warnings,
-            ),
-            section_vec_distance_threshold=clamp_float(
-                pick_float_field(split_cfg.get("section_vec_distance_threshold"), "MEMORY_ARBITER_SECTION_VEC_DISTANCE_THRESHOLD", 0.42, name="split.section_vec_distance_threshold"),
-                0.0, 2.0, name="split.section_vec_distance_threshold", warnings=config_warnings,
-            ),
-            section_fulltext_threshold=clamp_float(
-                pick_float_field(split_cfg.get("section_fulltext_threshold"), "MEMORY_ARBITER_SECTION_FULLTEXT_THRESHOLD", 0.8, name="split.section_fulltext_threshold"),
-                0.0, 1.0, name="split.section_fulltext_threshold", warnings=config_warnings,
-            ),
-            max_sections=clamp_int(
-                pick_int_field(split_cfg.get("max_sections"), "MEMORY_ARBITER_MAX_SECTIONS", 50, name="split.max_sections"),
-                2, 500, name="split.max_sections", warnings=config_warnings,
-            ),
             max_section_chars=clamp_int(
-                pick_int_field(split_cfg.get("max_section_chars"), "MEMORY_ARBITER_MAX_SECTION_CHARS", 3600, name="split.max_section_chars"),
-                100, 1_000_000, name="split.max_section_chars", warnings=config_warnings,
+                pick_int_field(emb_cfg.get("max_unit_chars"), "MEMORY_ARBITER_EMBEDDING_MAX_UNIT_CHARS", 3600, name="embedding.max_unit_chars"),
+                100, 1_000_000, name="embedding.max_unit_chars", warnings=config_warnings,
             ),
-            structured_claim_mode=structured_claim_mode,
             isolation=isolation,
             workspace_match_distance=clamp_float(
                 pick_float_field(cfg.get("workspace_match_distance"), "MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE", 0.25, name="workspace_match_distance"),
@@ -350,7 +274,6 @@ class Settings:
             ),
             update_check_enabled=update_check_enabled,
             tool_profile=tool_profile,
-            storage_profile=storage_profile,
             semantic_conflict_enabled=pick_bool_field(
                 semantic_cfg.get("enabled"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED",
                 "true" if _semantic_auto_enable else "false",
@@ -358,20 +281,11 @@ class Settings:
             ),
             semantic_conflict_backend=semantic_backend,
             semantic_conflict_model_path=Path(str(semantic_model_raw)).expanduser() if semantic_model_raw else None,
-            semantic_conflict_pair_text_gate=semantic_gate,
             semantic_conflict_on_write=semantic_on_write,
             semantic_conflict_max_concurrency=1,
             semantic_conflict_queue_max_size=clamp_int(
                 pick_int_field(semantic_cfg.get("queue_max_size"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_QUEUE_MAX_SIZE", 100, name="semantic_conflict.queue_max_size"),
                 1, 10000, name="semantic_conflict.queue_max_size", warnings=config_warnings,
-            ),
-            semantic_conflict_candidate_limit=clamp_int(
-                pick_int_field(semantic_cfg.get("candidate_limit"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_CANDIDATE_LIMIT", 30, name="semantic_conflict.candidate_limit"),
-                1, 500, name="semantic_conflict.candidate_limit", warnings=config_warnings,
-            ),
-            semantic_conflict_pair_limit=clamp_int(
-                pick_int_field(semantic_cfg.get("pair_limit"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_PAIR_LIMIT", 10, name="semantic_conflict.pair_limit"),
-                1, 100, name="semantic_conflict.pair_limit", warnings=config_warnings,
             ),
             semantic_conflict_n_ctx=clamp_int(
                 pick_int_field(semantic_cfg.get("n_ctx"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_N_CTX", 1024, name="semantic_conflict.n_ctx"),

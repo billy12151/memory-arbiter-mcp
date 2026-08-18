@@ -1,0 +1,93 @@
+import json
+from pathlib import Path
+
+from memory_arbiter.config import Settings
+from memory_arbiter.config_registry import CONFIG_DESCRIPTORS, grouped_descriptors
+from memory_arbiter.models import utc_now_iso
+from memory_arbiter.semantic_conflict import notice_dedupe_key
+from memory_arbiter.tools import MemoryTools
+
+
+def tools(tmp_path: Path) -> MemoryTools:
+    return MemoryTools(Settings(db_path=tmp_path / "memory.db", backup_jsonl=tmp_path / "backup.jsonl"))
+
+
+def write(tool: MemoryTools, content: str) -> int:
+    return tool.memory_write(content=content, subject="subject", workspace="w")["data"]["id"]
+
+
+def test_config_registry_only_describes_current_architecture() -> None:
+    paths = {item["path"] for item in CONFIG_DESCRIPTORS}
+    assert "embedding.max_unit_chars" in paths
+    assert not any("claim" in path or "split" in path or "pair_text_gate" in path for path in paths)
+    assert sum(len(group["items"]) for group in grouped_descriptors()) == len(CONFIG_DESCRIPTORS)
+    assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
+
+
+def test_formal_conflict_and_judgment_use_memory_versions(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    left, right = write(tool, "old"), write(tool, "new")
+    conflict = tool.memory_record_conflict(
+        left, right, "changed", conflict_type="evolution",
+        left_version=1, right_version=1,
+    )["data"]
+    request = tool.db.judgments.build_conflict_judgment_request(conflict["conflict_id"])
+    assert request["judge_call"]["data"]["expected_left_version"] == 1
+    assert "expected_left_claim_revision" not in request["judge_call"]["data"]
+    result = tool.memory_submit_conflict_judgment(
+        conflict["conflict_id"], 1, 1, "evolution", "contextual", None,
+        "high", "new context", False, "answer",
+        resolution_kind="contextual_keep_both", conflict_scope="record",
+    )
+    assert result["ok"] is True
+
+
+def test_stale_formal_judgment_is_rejected(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    left, right = write(tool, "old"), write(tool, "new")
+    cid = tool.memory_record_conflict(left, right, "changed", left_version=1, right_version=1)["data"]["conflict_id"]
+    tool.memory_edit(left, new_content="newer", reason="update")
+    result = tool.memory_submit_conflict_judgment(cid, 1, 1, "compatible", "none", None, "high", "same", False, "answer")
+    assert result["data"]["outcome"] == "stale_snapshot"
+
+
+def test_product_notice_delivery_is_version_pinned(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    left, right = write(tool, "left"), write(tool, "right")
+    created = tool.db.record_semantic_notice(
+        memory_id=left, peer_id=right, severity="normal", notice_type="semantic_evidence",
+        title="candidate", message="check", payload={}, left_version=1, right_version=1,
+        dedupe_key=notice_dedupe_key(left, right, 1, 1, "semantic_evidence"),
+    )
+    response = tool.memory(action="help", data={})
+    assert response["notices"][0]["notice_id"] == created["notice_id"]
+    assert "message" not in response["notices"][0]
+
+
+def test_stale_notice_is_not_delivered(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    left, right = write(tool, "left"), write(tool, "right")
+    tool.db.record_semantic_notice(
+        memory_id=left, peer_id=right, severity="normal", notice_type="semantic_evidence",
+        title="candidate", message="check", payload={}, left_version=1, right_version=1,
+    )
+    tool.memory_edit(left, new_content="changed", reason="update")
+    response = tool.memory(action="help", data={})
+    assert not response.get("notices")
+    assert tool.db.semantic_notice_counts().get("stale") == 1
+
+
+def test_backup_replay_is_authorized_and_idempotent(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    envelope = {
+        "backup_schema": 1, "replay_key": "one", "backup_written_at": utc_now_iso(),
+        "workspace_canonical": "w",
+        "record": {"content": "restored", "subject": "restore", "workspace": "w", "source_type": "agent_generated", "event_time": utc_now_iso()},
+    }
+    tool.settings.backup_jsonl.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+    denied = tool.memory_repair(task="replay_backup", data={"dry_run": False})
+    assert denied["ok"] is False
+    first = tool.memory_repair(task="replay_backup", data={"dry_run": False, "authorized": True})
+    assert first["data"]["imported_count"] == 1
+    second = tool.memory_repair(task="replay_backup", data={"dry_run": False, "authorized": True})
+    assert second["data"]["already_replayed_count"] == 1

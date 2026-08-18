@@ -26,24 +26,18 @@ from .core import (
     row_to_dict,
 )
 
-# Re-export the import side-effects the original single-file db.py exposed, so
-# ``memory_arbiter.db.<name>`` stays attribute-compatible (R6/R8). These are NOT
-# part of the public API; they are surfaced only to keep the symbol surface and
-# any ``db.<name>`` access identical to the pre-split module.
 from .core import (  # noqa: F401
     ConflictJudgmentStore,
     DegradeState,
     MemoryRecord,
     Path,
     Settings,
-    StructuredClaimStore,
     Tuple,
     contextmanager,
     datetime,
     json,
     re,
     sqlite3,
-    struct,
     time,
     timezone,
     utc_now_iso,
@@ -62,9 +56,6 @@ __all__ = [
     "_coerce_ws",
     "_normalize_alias_key",
     "_subject_tokens",
-    # Import side-effects re-exported for byte-identical attribute/symbol parity
-    # with the pre-split db.py (see note above). Listing them here also satisfies
-    # mypy strict's "explicit export" rule so the re-export is not attr-defined.
     "Any",
     "ConflictJudgmentStore",
     "DegradeState",
@@ -73,14 +64,12 @@ __all__ = [
     "Optional",
     "Path",
     "Settings",
-    "StructuredClaimStore",
     "Tuple",
     "contextmanager",
     "datetime",
     "json",
     "re",
     "sqlite3",
-    "struct",
     "time",
     "timezone",
     "utc_now_iso",

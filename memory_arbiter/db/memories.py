@@ -199,12 +199,7 @@ class MemoriesStore:
             for key, value in pairs
         )
         new_status = next((value for key, value in pairs if key == "status"), None)
-        # Claim judgments depend not only on extracted text but also on
-        # trust/protection/status.  Changing any of those must invalidate
-        # the old CAS snapshot.  Metadata only participates when its
-        # canonical entity/scope changes; bookkeeping such as
-        # confirmed_from does not create a second revision bump.
-        judgment_semantics_changed = any(
+        snapshot_semantics_changed = any(
             key in {"source_type", "confidence", "protection_level", "status"}
             and current.get(key) != value
             for key, value in pairs
@@ -213,13 +208,13 @@ class MemoriesStore:
         if isinstance(metadata_update, dict):
             current_md = current.get("metadata") or {}
             current_md = current_md if isinstance(current_md, dict) else {}
-            judgment_semantics_changed = judgment_semantics_changed or (
+            snapshot_semantics_changed = snapshot_semantics_changed or (
                 _canon_entity(current_md.get("entity")) != _canon_entity(metadata_update.get("entity"))
                 or _canon_scope(current_md.get("scope")) != _canon_scope(metadata_update.get("scope"))
             )
         sql = ", ".join(f"{key} = ?" for key, _ in pairs)
-        if judgment_semantics_changed:
-            sql += ", claim_revision = claim_revision + 1"
+        if snapshot_semantics_changed:
+            sql += ", version = version + 1"
         values = [
             json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
             for _, v in pairs
@@ -227,28 +222,16 @@ class MemoriesStore:
         values.append(int(memory_id))
         conn.execute(f"UPDATE memories SET {sql} WHERE id = ?", values)
         if status_changed and self.state.sqlite_vec_available:
-            if getattr(self.settings, "storage_profile", "legacy") == "vnext":
-                try:
-                    conn.execute(
-                        "UPDATE memory_evidence_vec SET parent_status=? WHERE id IN "
-                        "(SELECT id FROM memory_evidence WHERE memory_id=?)",
-                        (str(new_status or "deleted"), int(memory_id)),
-                    )
-                except sqlite3.Error:
-                    pass
-            else:
-                try:
-                    conn.execute(
-                        "UPDATE memories_vec SET parent_status = ? WHERE id = ?",
-                        (str(new_status or "deleted"), int(memory_id)),
-                    )
-                    conn.execute(
-                        "UPDATE memory_sections_vec SET parent_status = ? WHERE id IN "
-                        "(SELECT id FROM memory_sections WHERE memory_id = ?)",
-                        (str(new_status or "deleted"), int(memory_id)),
-                    )
-                except sqlite3.Error:
-                    pass
+            try:
+                conn.execute(
+                    "UPDATE memory_evidence_vec SET parent_status=? WHERE id IN "
+                    "(SELECT id FROM memory_evidence WHERE memory_id=?)",
+                    (str(new_status or "deleted"), int(memory_id)),
+                )
+            except sqlite3.Error:
+                # Governance must remain available while the derived index is
+                # temporarily unavailable; rebuild_evidence repairs it later.
+                pass
         return True
 
     def update_memory(
@@ -397,8 +380,7 @@ class MemoriesStore:
         """v0.7.6: low-side-effect tag-only update.
 
         Unlike ``edit_memory``, this does NOT write ``memory_history``,
-        does NOT bump ``version``, does NOT touch content/subject/sections/
-        split_status/split_revision, and does NOT trigger re-embedding.
+        does NOT bump ``version`` and does not rebuild evidence vectors.
         It only updates the ``tags`` column and re-syncs FTS (tags are
         indexed in FTS5).
 
@@ -486,7 +468,7 @@ class MemoriesStore:
                     "outcome": "updated",
                     "memory_id": memory_id,
                     "tags": new_tags_list,
-                    "claim_semantics_changed": False,
+                    "semantic_content_changed": False,
                 }
         except sqlite3.Error:
             return {"outcome": "error", "memory_id": memory_id}
@@ -498,19 +480,64 @@ class MemoriesStore:
         clear_fields: Optional[list[str]] = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
-        return self._db.claims.update_metadata_fields_low_side_effect(
-            memory_id=memory_id,
-            set_fields=set_fields,
-            clear_fields=clear_fields,
-            authorized=authorized,
-        )
+        if not self._db_available or not self.state.sqlite_writable:
+            return {"outcome": "unavailable", "memory_id": memory_id}
+        with self.write_transaction() as conn:
+            current = self._fetch_memory(conn, int(memory_id))
+            if not current:
+                return {"outcome": "not_found", "memory_id": memory_id}
+            if current.get("status") != "active":
+                return {"outcome": "not_active", "memory_id": memory_id}
+            if (current.get("protection_level") == "locked" or current.get("source_type") == "user_confirmed") and not authorized:
+                return {"outcome": "forbidden", "memory_id": memory_id}
+            metadata = dict(current.get("metadata") or {})
+            before = dict(metadata)
+            for key in clear_fields or []:
+                metadata.pop(str(key), None)
+            metadata.update(set_fields or {})
+            if metadata == before:
+                return {"outcome": "no_change", "memory_id": memory_id, "metadata": metadata}
+            conn.execute(
+                "UPDATE memories SET metadata=?,version=version+1 WHERE id=?",
+                (json.dumps(metadata, ensure_ascii=False), int(memory_id)),
+            )
+            return {"outcome": "updated", "memory_id": memory_id, "metadata": metadata}
 
     def list_entities(
         self,
         limit: int = 50,
         include_unassigned: bool = True,
     ) -> dict[str, Any]:
-        return self._db.claims.list_entities(limit, include_unassigned)
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT id,metadata FROM memories WHERE status='active' ORDER BY id"
+            ).fetchall()
+        counts: dict[str, int] = {}
+        samples: dict[str, int] = {}
+        unassigned: list[int] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            entity = _canon_entity(metadata.get("entity")) if isinstance(metadata, dict) else ""
+            if entity:
+                counts[entity] = counts.get(entity, 0) + 1
+                samples.setdefault(entity, int(row["id"]))
+            elif include_unassigned:
+                unassigned.append(int(row["id"]))
+        cap = max(1, min(500, int(limit)))
+        return {
+            "entities": [
+                {"entity": key, "count": counts[key], "sample_memory_id": samples[key]}
+                for key in sorted(counts, key=lambda value: (-counts[value], value))[:cap]
+            ],
+            "distinct_entities": len(counts),
+            "assigned_count": sum(counts.values()),
+            "total_active": len(rows),
+            "unassigned_count": len(rows) - sum(counts.values()),
+            "unassigned_ids": unassigned[:cap],
+        }
 
     def find_metadata_overlap_candidates(
         self,
@@ -859,8 +886,7 @@ class MemoriesStore:
             raise sqlite3.Error("memory_history insert did not return an id")
         history_id = int(history_cur.lastrowid)
         conn.execute(
-            "UPDATE memories SET content=?, subject=?, tags=?, version=?, "
-            "claim_revision=claim_revision+1 WHERE id=?",
+            "UPDATE memories SET content=?, subject=?, tags=?, version=? WHERE id=?",
             (
                 resolved_content,
                 subject_value,
@@ -869,12 +895,13 @@ class MemoriesStore:
                 int(memory_id),
             ),
         )
-        self._delete_sections_for_memory(conn, int(memory_id))
-        conn.execute(
-            "UPDATE memories SET split_status = NULL, "
-            "split_revision = split_revision + 1 WHERE id = ?",
-            (int(memory_id),),
-        )
+        evidence_ids = [int(row["id"]) for row in conn.execute(
+            "SELECT id FROM memory_evidence WHERE memory_id=?", (int(memory_id),)
+        ).fetchall()]
+        if evidence_ids and self.state.sqlite_vec_available:
+            placeholders = ",".join("?" for _ in evidence_ids)
+            conn.execute(f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})", evidence_ids)
+        conn.execute("DELETE FROM memory_evidence WHERE memory_id=?", (int(memory_id),))
         if self.state.fts5_available:
             conn.execute(
                 "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) VALUES('delete', ?, ?, ?, ?)",
@@ -891,7 +918,7 @@ class MemoriesStore:
             "history_id": history_id,
             "new_version": old_version + 1,
             "record": updated,
-            "claim_semantics_changed": True,
+            "semantic_content_changed": True,
         }
 
     def edit_memory_intent(

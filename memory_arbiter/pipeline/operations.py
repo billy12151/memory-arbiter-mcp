@@ -46,10 +46,10 @@ class OperationsPipeline:
         left = self._get_memory_visible(int(left_id), caller)
         right = self._get_memory_visible(int(right_id), caller)
         if not left or not right:
-            data = {"error": "memory id not found"}
+            missing_data = {"error": "memory id not found"}
             if caller.isolation == "strict":
-                data.update(caller.response_fields())
-            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
+                missing_data.update(caller.response_fields())
+            return self.db.state.response(missing_data, ok=False, extra_warnings=list(caller.warnings))
         comparison = self._compare_memories(left, right)
         conflict_id = None
         if mark_conflict:
@@ -70,10 +70,6 @@ class OperationsPipeline:
                 except sqlite3.Error:
                     applied = False
                     resolved = 0
-                # v0.9.4: vec parent_status sync happens inside update_memory
-                # (it writes both memories_vec + memory_sections_vec in the
-                # same transaction as the status flip). The redundant
-                # mark_vectors_for_memory call is gone — same value, twice.
         result_data = {"comparison": comparison, "conflict_id": conflict_id, "applied": applied, "linked_conflicts_resolved": resolved}
         if caller.isolation == "strict":
             result_data.update(caller.response_fields())
@@ -145,18 +141,14 @@ class OperationsPipeline:
         scan_model: Optional[str] = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """v0.7.5/v0.7.6: persist a conflict with scan-enrichment fields.
-
-        Pairs are canonicalised (left<right). Idempotent: if an open conflict
-        on the same pair already exists, returns ``deduped`` without writing.
-        Pass ``refresh=True`` to update the existing row's enrichment fields
-        in place (returns ``refreshed``); use when the scan task re-runs LLM
-        after a memory version or model change. The ``source`` field (e.g.
-        ``"llm_informed"``) records whether the suggestion came from an LLM
-        that read the content or from a metadata heuristic. ``conflict_type``
-        can be ``contradiction``, ``evolution`` (same-topic change over time;
-        not necessarily a whole-memory supersede), or other.
-        """
+        """Persist an explicitly reviewed formal conflict with version pins."""
+        left_version = left_version or self.db.get_memory_version(int(left_id))
+        right_version = right_version or self.db.get_memory_version(int(right_id))
+        if left_version is None or right_version is None:
+            return self.db.state.response(
+                {"outcome": "memory_not_found", "error": "both conflict memories must exist"},
+                ok=False,
+            )
         result = self.db.record_conflict_enriched(
             int(left_id), int(right_id),
             conflict_type=conflict_type,
@@ -166,11 +158,10 @@ class OperationsPipeline:
             confidence_hint=confidence_hint,
             source=source,
             refresh=refresh,
-            left_version=left_version,
-            right_version=right_version,
+            left_version=int(left_version),
+            right_version=int(right_version),
             scan_prompt_version=scan_prompt_version,
             scan_model=scan_model,
-            detection_channel="scan",
         )
         return self.db.state.response(result)
 
@@ -250,19 +241,11 @@ class OperationsPipeline:
         )
         updated = self.db.get_memory(int(memory_id)) if ok else memory
         data: dict[str, Any] = {"confirmed": ok, "record": updated}
-        warnings: list[str] = []
         if ok:
-            structured = self._index_and_reconcile_claims(int(memory_id))
-            data["realtime_conflict_check"] = structured["diagnostic"]
-            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
-            data["claim_reconciled"] = bool(
-                structured["diagnostic"].get("claim_reconciled")
-            )
-            warnings.extend(structured.get("warnings") or [])
-            self._apply_structured_gate(data, structured)
+            data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), updated)
         if caller.isolation == "strict":
             data.update(caller.response_fields())
-        return self.db.state.response(data, extra_warnings=warnings + list(caller.warnings))
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     # ------------------------------------------------------------------
     #  Workspace alias governance (design 636 §8 / 637). User-authorized
@@ -461,16 +444,8 @@ class OperationsPipeline:
         if caller is not None and caller.isolation == "strict":
             data.update(caller.response_fields())
         if activated:
-            structured = self._index_and_reconcile_claims(int(memory_id))
-            data["realtime_conflict_check"] = structured["diagnostic"]
-            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
-            data["claim_reconciled"] = bool(
-                structured["diagnostic"].get("claim_reconciled")
-            )
-            warnings.extend(structured.get("warnings") or [])
-            self._apply_structured_gate(data, structured)
             data["record"] = self.db.get_memory(int(memory_id))
-            data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), data["record"] or {})
+            data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), data["record"])
         return self.db.state.response(data, ok=True, extra_warnings=warnings)
 
     def memory_activate(
@@ -498,10 +473,10 @@ class OperationsPipeline:
         memory = self._get_memory_visible(int(memory_id), caller) if caller is not None else self.db.get_memory(int(memory_id))
         if not memory:
             data = {"error": "memory id not found", "activated": False}
-            warnings = list(caller.warnings) if caller is not None else []
+            missing_warnings = list(caller.warnings) if caller is not None else []
             if caller is not None and caller.isolation == "strict":
                 data.update(caller.response_fields())
-            return self.db.state.response(data, ok=False, extra_warnings=warnings)
+            return self.db.state.response(data, ok=False, extra_warnings=missing_warnings)
         if memory.get("status") != MemoryStatus.PENDING.value:
             return self.db.state.response(
                 {
@@ -517,16 +492,8 @@ class OperationsPipeline:
         if caller is not None and caller.isolation == "strict":
             data.update(caller.response_fields())
         if ok:
-            structured = self._index_and_reconcile_claims(int(memory_id))
-            data["realtime_conflict_check"] = structured["diagnostic"]
-            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
-            data["claim_reconciled"] = bool(
-                structured["diagnostic"].get("claim_reconciled")
-            )
-            warnings.extend(structured.get("warnings") or [])
-            self._apply_structured_gate(data, structured)
             data["record"] = self.db.get_memory(int(memory_id))
-            data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(int(memory_id), data["record"] or {})
+            data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), data["record"])
         return self.db.state.response(data, extra_warnings=warnings)
 
     def memory_supersede(
@@ -591,11 +558,6 @@ class OperationsPipeline:
                 )
                 if not status_updated:
                     raise ValueError("failed to update memory status")
-                # v0.9.4: vec parent_status sync happens inside update_memory (it
-                # writes both memories_vec + memory_sections_vec in the same
-                # transaction as the status flip, retaining vectors for audit recall
-                # via memory_search_expired). Content/FTS kept for audit; vectors are
-                # a derivative and can be recomputed from content if ever needed.
                 resolved = self.db.resolve_conflicts_for_on_conn(conn, int(memory_id))
                 audit_reason = f"USER-AUTHORIZED SUPERSEDE: {reason}"
                 conflict_id = self.db.record_conflict_on_conn(
@@ -656,19 +618,16 @@ class OperationsPipeline:
         return self._update_monitor.update_status()
 
     def memory_status(self, **_: Any) -> dict[str, Any]:
-        vec_state = self.db.get_vec_index_state()
         evidence_status: dict[str, Any] = {
-            "storage_profile": getattr(self.settings, "storage_profile", "legacy"),
             "available": False,
         }
-        if self._vnext_storage_enabled():
-            try:
-                evidence_status.update({"available": True, **self.db.evidence.coverage()})
-                with self.db.connection() as conn:
-                    rows = conn.execute("SELECT key,value FROM migration_state").fetchall()
-                evidence_status["migration"] = {str(row["key"]): str(row["value"]) for row in rows}
-            except Exception as exc:
-                evidence_status["error"] = str(exc)
+        try:
+            evidence_status.update({"available": True, **self.db.evidence.coverage()})
+            with self.db.connection() as conn:
+                rows = conn.execute("SELECT key,value FROM migration_state").fetchall()
+            evidence_status["migration"] = {str(row["key"]): str(row["value"]) for row in rows}
+        except Exception as exc:
+            evidence_status["error"] = str(exc)
         return self.db.state.response(
             {
                 "arbiter_version": __version__,
@@ -685,7 +644,6 @@ class OperationsPipeline:
                 "embedding_configured": self._embedding_configured(),
                 "embedding_auto_query": self.settings.embedding_auto_query,
                 "embedding_auto_write": self.settings.embedding_auto_write,
-                "structured_claim_mode": self.settings.structured_claim_mode,
                 "local_text_evidence": evidence_status,
                 "local_text_index_worker": self._evidence_worker.status(),
                 "isolation": self.settings.isolation,
@@ -693,14 +651,9 @@ class OperationsPipeline:
                     "profile": self.settings.tool_profile,
                     "default_profile": "product",
                     "product_tools": ["memory", "memory_review", "memory_govern", "memory_repair"],
-                    "legacy_tools_hidden_by_default": True,
-                    "legacy_restore_hint": "Set MEMORY_ARBITER_TOOL_PROFILE=legacy_full for the old low-level MCP tool surface.",
                 },
                 "update_check": self._update_check_status(),
-                "split_reindex_pending": self._split_worker.pending_ids(),
-                # v0.8: split capability is bound to vec readiness, not a toggle.
-                "split_capability": self._split_capability(vec_state),
-                "vec_index_state": vec_state,
+                "vec_index_state": self.db.get_vec_index_state(),
                 "semantic_conflict": self._semantic_status(
                     self._semantic_notice_workspace_scope(_.get("workspace")),
                 ),
@@ -717,8 +670,8 @@ class OperationsPipeline:
     def memory_doctor_overview(self, deep: bool = False, **_: Any) -> dict[str, Any]:
         """Run a read-only health check and return a graded diagnostic report.
 
-        Covers config integrity, the vector-enablement chain, split, data
-        consistency, and capacity. Each finding carries a severity and a
+        Covers config integrity, evidence indexing, data consistency, and
+        capacity. Each finding carries a severity and a
         fix_hint tailored to the current config.json. Read-only: never writes,
         never changes schema. ``deep=true`` additionally loads the GGUF model
         for a dimension probe (seconds-level cost); MCP reuses an
@@ -730,7 +683,7 @@ class OperationsPipeline:
             self.db, self.settings, deep,
             embedder_probe=self._ensure_embedder,
             runtime_state=self.db.state,
-            inflight_ids=set(self._split_worker.pending_ids()),
+            inflight_ids=set(self._evidence_worker.status().get("inflight") or []),
         )
         if self._update_monitor is not None:
             self._update_monitor.record_doctor_run()
@@ -791,24 +744,16 @@ class OperationsPipeline:
                 "unavailable": "database not available",
             }.get(str(outcome), "entity update failed")
             return self.db.state.response({"error": error, **result}, ok=ok)
-        warnings: list[str] = []
         data: dict[str, Any] = {
             "updated": outcome == "updated", "outcome": outcome,
             "memory_id": memory_id_int, "metadata": result.get("metadata"),
         }
-        if result.get("claim_semantics_changed"):
-            structured = self._index_and_reconcile_claims(memory_id_int)
-            data["realtime_conflict_check"] = structured["diagnostic"]
-            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
-            data["claim_reconciled"] = bool(
-                structured["diagnostic"].get("claim_reconciled")
-            )
-            warnings.extend(structured.get("warnings") or [])
-            self._apply_structured_gate(data, structured)
         data["record"] = self.db.get_memory(memory_id_int)
+        if outcome == "updated":
+            data["evidence_index"] = self._enqueue_local_text_index(memory_id_int, data["record"])
         if caller.isolation == "strict":
             data.update(caller.response_fields())
-        return self.db.state.response(data, extra_warnings=warnings + list(caller.warnings))
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     def memory_list_entities(
         self, limit: int = 50, include_unassigned: bool = True, **_: Any,
@@ -829,7 +774,6 @@ class OperationsPipeline:
         sample: dict[str, int] = {}
         unassigned: list[int] = []
         total = 0
-        from ..claims import canon_token
         with self.db.connection() as conn:
             rows = conn.execute(
                 "SELECT id, metadata FROM memories WHERE status='active' "
@@ -844,7 +788,7 @@ class OperationsPipeline:
                     md = {}
             except Exception:
                 md = {}
-            entity = canon_token(md.get("entity"))
+            entity = _canon_entity(md.get("entity"))
             if entity:
                 counts[entity] = counts.get(entity, 0) + 1
                 sample.setdefault(entity, int(row["id"]))
@@ -864,18 +808,13 @@ class OperationsPipeline:
         }
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
-    def memory_rebuild_claims(
+    def memory_rebuild_evidence(
         self,
         memory_ids: Optional[list[int]] = None,
         dry_run: bool = True,
         batch_size: int = 50,
         **_: Any,
     ) -> dict[str, Any]:
-        """Idempotently rebuild the deterministic claim index."""
-        if self.settings.structured_claim_mode == "off" and not dry_run:
-            return self.db.state.response(
-                {"error": "structured_claim_mode=off; enable beta_all before rebuilding"}, ok=False,
-            )
         try:
             batch = max(1, min(500, int(batch_size)))
         except (TypeError, ValueError):
@@ -885,55 +824,47 @@ class OperationsPipeline:
         if denied is not None:
             return denied
         if memory_ids is None:
+            workspace_sql = ""
+            params: list[Any] = []
+            if caller.isolation == "strict":
+                workspace_sql = "AND COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)=? "
+                params.append(caller.canonical)
             with self.db.connection() as conn:
-                ws_clause = ""
-                params: list[Any] = []
-                if caller.isolation == "strict":
-                    ws_clause = "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? "
-                    params.append(caller.canonical)
                 rows = conn.execute(
-                    "SELECT id FROM memories WHERE status='active' "
-                    f"{ws_clause}"
-                    "AND (claims_indexed_revision IS NULL "
-                    "OR claims_indexed_revision<>claim_revision "
-                    "OR claims_reconciled_revision IS NULL "
-                    "OR claims_reconciled_revision<>claim_revision) "
-                    "ORDER BY id LIMIT ?", (*params, batch)
+                    "SELECT m.id FROM memories m WHERE m.status!='deleted' "
+                    f"{workspace_sql}AND NOT EXISTS(SELECT 1 FROM memory_evidence e "
+                    "WHERE e.memory_id=m.id AND e.memory_version=m.version) "
+                    "ORDER BY m.id LIMIT ?",
+                    (*params, batch),
                 ).fetchall()
-                ids = [int(row["id"]) for row in rows]
+            ids = [int(row["id"]) for row in rows]
         else:
             try:
-                requested_ids = list(dict.fromkeys(int(value) for value in memory_ids))[:batch]
+                requested = list(dict.fromkeys(int(value) for value in memory_ids))[:batch]
             except (TypeError, ValueError):
                 return self.db.state.response({"error": "memory_ids must contain integers"}, ok=False)
-            if caller.isolation == "strict":
-                ids = [mid for mid in requested_ids if self._get_memory_visible(mid, caller)]
-            else:
-                ids = requested_ids
+            ids = [mid for mid in requested if caller.isolation != "strict" or self._get_memory_visible(mid, caller)]
         if dry_run:
-            data = {"dry_run": True, "memory_ids": ids, "count": len(ids)}
-            if caller.isolation == "strict":
-                data.update(caller.response_fields())
-            return self.db.state.response(data, extra_warnings=list(caller.warnings))
-        results = []
-        for memory_id in ids:
-            results.append({"memory_id": memory_id, **self._index_and_reconcile_claims(memory_id)})
-        failed = sum(
-            1 for item in results
-            if not item["diagnostic"].get("claim_indexed")
-            or not item["diagnostic"].get("claim_reconciled")
+            return self.db.state.response(
+                {"dry_run": True, "memory_ids": ids, "count": len(ids)},
+                extra_warnings=list(caller.warnings),
+            )
+        results = [
+            {"memory_id": mid, **self._enqueue_local_text_index(mid, self.db.get_memory(mid))}
+            for mid in ids
+        ]
+        failed = sum(item.get("status") != "queued" for item in results)
+        return self.db.state.response(
+            {"dry_run": False, "queued": len(results) - failed, "failed": failed, "results": results},
+            ok=failed == 0,
+            extra_warnings=list(caller.warnings),
         )
-        return self.db.state.response({
-            "dry_run": False, "processed": len(results), "failed": failed, "results": results,
-        }, ok=failed == 0)
 
     def memory_submit_conflict_judgment(
         self,
         conflict_id: int,
         expected_left_version: int,
         expected_right_version: int,
-        expected_left_claim_revision: int,
-        expected_right_claim_revision: int,
         verdict: str,
         recommended_use: str,
         suggested_winner: Optional[int],
@@ -950,8 +881,6 @@ class OperationsPipeline:
             conflict_id_int = int(conflict_id)
             left_version = int(expected_left_version)
             right_version = int(expected_right_version)
-            left_revision = int(expected_left_claim_revision)
-            right_revision = int(expected_right_claim_revision)
             winner = int(suggested_winner) if suggested_winner is not None else None
         except (TypeError, ValueError):
             return self.db.state.response(
@@ -973,7 +902,7 @@ class OperationsPipeline:
                 )
         request_before = self.db.judgments.build_conflict_judgment_request(conflict_id_int)
         result = self.db.judgments.submit_conflict_judgment(
-            conflict_id_int, left_version, right_version, left_revision, right_revision,
+            conflict_id_int, left_version, right_version,
             verdict, recommended_use, winner,
             confidence_hint, reason, bool(affects_current_output), usage_context,
             judge_ref=judge_ref,
@@ -988,7 +917,7 @@ class OperationsPipeline:
                     int(request_before["left"]["id"]),
                     int(request_before["right"]["id"]),
                 ]
-            self.db.log_attention(trigger="structured_claim", source=event, memory_ids=ids)
+            self.db.log_attention(trigger="conflict_judgment", source=event, memory_ids=ids)
         return self.db.state.response(result, ok=result.get("outcome") == "judged")
 
     def memory_correct_conflict_judgment(
@@ -1001,8 +930,6 @@ class OperationsPipeline:
         expected_judgment_id: int,
         expected_left_version: int,
         expected_right_version: int,
-        expected_left_claim_revision: int,
-        expected_right_claim_revision: int,
         authorized: bool = False,
         judge_ref: Optional[str] = None,
         resolution_kind: Optional[str] = None,
@@ -1020,8 +947,6 @@ class OperationsPipeline:
             judgment_id = int(expected_judgment_id)
             left_version = int(expected_left_version)
             right_version = int(expected_right_version)
-            left_revision = int(expected_left_claim_revision)
-            right_revision = int(expected_right_claim_revision)
         except (TypeError, ValueError):
             return self.db.state.response(
                 {"error": "conflict id, judgment id, snapshot pins, and winner must be integers"},
@@ -1044,7 +969,7 @@ class OperationsPipeline:
         result = self.db.judgments.correct_conflict_judgment(
             conflict_id_int, verdict, recommended_use, winner,
             reason, judgment_id, left_version, right_version,
-            left_revision, right_revision, judge_ref=judge_ref,
+            judge_ref=judge_ref,
             resolution_kind=resolution_kind,
             conflict_scope=conflict_scope,
         )
@@ -1182,23 +1107,7 @@ class OperationsPipeline:
                     "tags": result.get("tags"),
                     "record": updated_mem,
                 }
-                claim_warnings: list[str] = []
-                if result.get("claim_semantics_changed"):
-                    structured = self._index_and_reconcile_claims(memory_id_int)
-                    data["realtime_conflict_check"] = structured["diagnostic"]
-                    data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
-                    data["claim_reconciled"] = bool(
-                        structured["diagnostic"].get("claim_reconciled")
-                    )
-                    claim_warnings.extend(structured.get("warnings") or [])
-                    self._apply_structured_gate(data, structured)
-                    data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(memory_id_int, updated_mem or {})
-                else:
-                    data["semantic_conflict_check"] = {
-                        "status": "skipped",
-                        "reason": "tags_only_no_semantic_change",
-                    }
-                return self.db.state.response(data, extra_warnings=claim_warnings)
+                return self.db.state.response(data)
             if outcome == "no_change":
                 return self.db.state.response({
                     "edited": False,
@@ -1269,40 +1178,6 @@ class OperationsPipeline:
             return self.db.state.response({"error": error, "edited": False, **result}, ok=False)
         history_id = int(result["history_id"])
         updated = result.get("record") or self.db.get_memory(memory_id_int)
-        embedding_warnings: list[str] = []
-        embedding_stored: Optional[bool] = None
-        if self.settings.embedding_auto_write and self._embedding_configured():
-            embedding_stored = False
-            if self._vnext_storage_enabled():
-                evidence = self._enqueue_local_text_index(memory_id_int, updated)
-                embedding_stored = evidence.get("status") == "queued"
-            else:
-                embedder, ensure_warnings = self._ensure_embedder()
-                embedding_warnings.extend(ensure_warnings)
-                if embedder is None:
-                    _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
-                    embedding_warnings.extend(delete_warnings)
-                    embedding_warnings.append("re-embedding on edit skipped because embedder unavailable; deleted stale embedding to avoid dirty recall.")
-                elif updated is not None:
-                    try:
-                        embedding_result = embedder.embed_text(
-                            prefix=updated.get("subject") or "",
-                            body=updated.get("content") or "",
-                        )
-                        if not embedding_result.embedding:
-                            raise RuntimeError(
-                                f"encode returned empty embedding: {getattr(embedder, 'last_encode_error', None) or 'unknown'}"
-                            )
-                        embedding_stored, store_warnings = self.db.store_embedding(memory_id_int, embedding_result.embedding)
-                        embedding_warnings.extend(store_warnings)
-                        if not embedding_stored:
-                            _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
-                            embedding_warnings.extend(delete_warnings)
-                            embedding_warnings.append("re-embedding on edit failed; deleted stale embedding to avoid dirty recall.")
-                    except Exception as exc:
-                        _deleted, delete_warnings = self.db.delete_embedding(memory_id_int)
-                        embedding_warnings.extend(delete_warnings)
-                        embedding_warnings.append(f"re-embedding on edit failed: {exc}; deleted stale embedding to avoid dirty recall.")
         data = {
             "edited": True,
             "memory_id": memory_id_int,
@@ -1310,56 +1185,9 @@ class OperationsPipeline:
             "history_id": history_id,
             "record": updated,
         }
-        if embedding_stored is not None:
-            data["embedding_stored"] = embedding_stored
-        # v0.8: a content edit re-runs the post-write split decision. The DB
-        # layer already cleared old sections + reset split_status to NULL and
-        # bumped split_revision (db.edit_memory). If the new content has a
-        # publishable rule plan it is re-split synchronously (revision bumps
-        # again); otherwise a split_request is returned. tags-only edits
-        # return early above and never reach here.
-        if self._vnext_storage_enabled():
-            split_block = {
-                "required": False,
-                "applied": False,
-                "mode": "local_text_evidence",
-                "status": None,
-                "reason": "vnext_uses_local_text_evidence",
-                "action_required": None,
-                "extra_llm_call_required": False,
-            }
-            split_request = None
-            split_warnings = []
-        else:
-            split_block, split_request, split_warnings = self._after_write_split(memory_id_int)
-        data["split"] = split_block
-        if split_request is not None:
-            data["split_request"] = split_request
-        embedding_warnings.extend(split_warnings)
-        if self._vnext_storage_enabled():
-            data["realtime_conflict_check"] = {
-                "claim_indexed": False,
-                "claim_reconciled": False,
-                "skipped_reason": "vnext_storage_profile_claims_retired",
-                "mode": "retired",
-            }
-            data["claim_indexed"] = False
-            data["claim_reconciled"] = False
-        else:
-            structured = self._index_and_reconcile_claims(memory_id_int)
-            data["realtime_conflict_check"] = structured["diagnostic"]
-            data["claim_indexed"] = bool(structured["diagnostic"].get("claim_indexed"))
-            data["claim_reconciled"] = bool(
-                structured["diagnostic"].get("claim_reconciled")
-            )
-            embedding_warnings.extend(structured.get("warnings") or [])
-            self._apply_structured_gate(data, structured)
         data["record"] = self.db.get_memory(memory_id_int)
-        data["semantic_conflict_check"] = self._enqueue_semantic_conflict_check(memory_id_int, data["record"] or {})
-        return self.db.state.response(
-            data,
-            extra_warnings=embedding_warnings,
-        )
+        data["evidence_index"] = self._enqueue_local_text_index(memory_id_int, data["record"])
+        return self.db.state.response(data)
 
     def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:
         """View the version-chain (historical snapshots) of a memory, newest
@@ -1446,68 +1274,6 @@ class OperationsPipeline:
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
-    def memory_cleanup_inactive_vectors(
-        self,
-        dry_run: bool = True,
-        authorized: bool = False,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Purge orphan vec rows (v0.9.4) and optionally resync parent_status.
-
-        v0.9.4: ``_purge_inactive_vectors`` only removes true orphans (vec rows
-        whose parent memory/section row no longer exists in the DB). Superseded
-        vectors are KEPT for ``memory_search_expired`` vec-hybrid recall.
-
-        Resync mode: if ``parent_status`` mismatches are detected (vec.status !=
-        memories.status), ``dry_run`` reports them. Use
-        ``memory_resync_vec_parent_status(dry_run=False)`` to repair drift
-        without authorization; cleanup execution requires ``authorized=True``
-        because it may purge orphan rows after resync.
-
-        ``dry_run=True`` (default) only reports counts.
-        Actual orphan purge requires ``dry_run=False`` AND ``authorized=True``.
-        """
-        authorized = self._is_truthy(authorized)
-        dry_run = self._is_truthy(dry_run)
-        mismatches = self._count_vec_parent_status_mismatch()
-        orphan_counts = self._count_orphan_vectors()
-        if dry_run:
-            resp = {
-                "dry_run": True,
-                "vec_parent_status_mismatches": mismatches,
-                "orphan_vectors": orphan_counts,
-            }
-            if mismatches.get("memory_vec_mismatch", 0) > 0 or mismatches.get("section_vec_mismatch", 0) > 0:
-                resp["hint"] = (
-                    "For non-destructive drift repair, run memory_resync_vec_parent_status(dry_run=False) "
-                    "without authorized. To also purge orphan vector rows, re-run cleanup with "
-                    "dry_run=False and authorized=True."
-                )
-            else:
-                resp["hint"] = "re-run with dry_run=False and authorized=True to purge orphan vector rows"
-            return self.db.state.response(resp)
-        if not authorized:
-            return self.db.state.response(
-                {"error": "authorized=True is required to purge orphan vector rows via cleanup",
-                 "orphan_vectors": orphan_counts,
-                 "vec_parent_status_mismatches": mismatches},
-                ok=False,
-            )
-        # Phase 1: resync parent_status mismatches if any
-        resync_counts = {}
-        if mismatches.get("memory_vec_mismatch", 0) > 0 or mismatches.get("section_vec_mismatch", 0) > 0:
-            resync_counts = self.db._resync_vec_parent_status()
-        # Phase 2: purge orphans
-        purged, warnings = self.db._purge_inactive_vectors()
-        resp = {
-            "dry_run": False,
-            "purged": purged,
-            "resynced": resync_counts,
-        }
-        if warnings:
-            resp["warnings"] = warnings
-        return self.db.state.response(resp, ok=not warnings)
-
     @staticmethod
     def _replay_stage_done(value: Any) -> bool:
         return str(value or "") in {"complete", "skipped", "warning", "queued"}
@@ -1536,110 +1302,23 @@ class OperationsPipeline:
             for key, value in (prior_stages or {}).items()
             if isinstance(key, str)
         }
-        warnings: list[str] = []
-        retry_code: Optional[str] = None
         record = self.db.get_memory(memory_id) or {}
-
-        if not self._replay_stage_done(stages.get("claims")):
-            self.db.backup_replay.mark_postprocess_retry(replay_key, "claims_in_progress")
-            structured = self._index_and_reconcile_claims(memory_id)
-            diagnostic = structured.get("diagnostic") or {}
-            claim_warnings = list(structured.get("warnings") or [])
-            warnings.extend(claim_warnings)
-            if diagnostic.get("skipped_reason") == "structured_enrichment_error":
-                stages["claims"] = "retry_pending"
-                retry_code = "claims_failed"
-            elif claim_warnings:
-                self._checkpoint_replay_stage(
-                    replay_key, stages, "claims", "warning", "claims_warning",
-                )
-            else:
-                self._checkpoint_replay_stage(replay_key, stages, "claims", "complete")
-
-        if not self._replay_stage_done(stages.get("embedding")):
-            if not self.settings.embedding_auto_write or not self._embedding_configured():
-                self._checkpoint_replay_stage(replay_key, stages, "embedding", "skipped")
-            elif self.db.get_embedding(memory_id) is not None:
-                self._checkpoint_replay_stage(replay_key, stages, "embedding", "complete")
-            else:
-                self.db.backup_replay.mark_postprocess_retry(
-                    replay_key, "embedding_in_progress",
-                )
-                embedder, ensure_warnings = self._ensure_embedder()
-                warnings.extend(ensure_warnings)
-                if embedder is None:
-                    stages["embedding"] = "retry_pending"
-                    retry_code = retry_code or "embedding_unavailable"
-                else:
-                    embedded = embedder.embed_text(
-                        prefix=str(record.get("subject") or ""),
-                        body=str(record.get("content") or ""),
-                    )
-                    if not embedded.embedding:
-                        stages["embedding"] = "retry_pending"
-                        retry_code = retry_code or "embedding_empty"
-                    else:
-                        stored, store_warnings = self.db.store_embedding(
-                            memory_id, embedded.embedding,
-                        )
-                        warnings.extend(store_warnings)
-                        if stored:
-                            outcome = "warning" if store_warnings else "complete"
-                            self._checkpoint_replay_stage(
-                                replay_key, stages, "embedding", outcome,
-                                "embedding_warning" if store_warnings else None,
-                            )
-                        else:
-                            stages["embedding"] = "retry_pending"
-                            retry_code = retry_code or "embedding_store_failed"
-
-        if not self._replay_stage_done(stages.get("split")):
-            self.db.backup_replay.mark_postprocess_retry(replay_key, "split_in_progress")
-            split_block, split_request, split_warnings = self._after_write_split(memory_id)
-            warnings.extend(split_warnings)
-            if split_block.get("reindex_pending"):
-                self._checkpoint_replay_stage(replay_key, stages, "split", "queued")
-            elif split_request is not None:
-                warnings.append(
-                    f"replayed memory {memory_id} requires section split follow-up"
-                )
-                self._checkpoint_replay_stage(
-                    replay_key, stages, "split", "warning", "split_agent_required",
-                )
-            elif split_warnings:
-                self._checkpoint_replay_stage(
-                    replay_key, stages, "split", "warning", "split_unavailable",
-                )
-            else:
-                self._checkpoint_replay_stage(replay_key, stages, "split", "complete")
-
-        if not self._replay_stage_done(stages.get("semantic")):
-            self.db.backup_replay.mark_postprocess_retry(
-                replay_key, "semantic_enqueue_in_progress",
-            )
-            semantic = self._enqueue_semantic_conflict_check(memory_id, record)
-            semantic_status = str(semantic.get("status") or "unknown")
-            if semantic_status == "queued":
-                self._checkpoint_replay_stage(replay_key, stages, "semantic", "queued")
-            elif semantic_status in {"disabled", "off"}:
-                self._checkpoint_replay_stage(replay_key, stages, "semantic", "skipped")
-            elif semantic_status in {"queue_full", "runtime_disabled", "shutdown", "paused"}:
-                stages["semantic"] = "retry_pending"
-                retry_code = retry_code or f"semantic_{semantic_status}"
-            else:
-                stages["semantic"] = "retry_pending"
-                retry_code = retry_code or f"semantic_{semantic_status}"
-
-        if retry_code is not None:
-            status = "pending"
-        elif any(value == "warning" for value in stages.values()):
-            status = "warning"
+        stages = {}
+        result = self._enqueue_local_text_index(memory_id, record)
+        outcome = str(result.get("status") or "unknown")
+        if outcome == "queued":
+            stages["evidence"] = "queued"
+            status, retry_code = "complete", None
+        elif outcome == "skipped" and not self._embedding_configured():
+            stages["evidence"] = "skipped"
+            status, retry_code = "complete", None
         else:
-            status = "complete"
+            stages["evidence"] = "retry_pending"
+            status, retry_code = "pending", f"evidence_{outcome}"
         self.db.backup_replay.set_postprocess_state(
             replay_key, status, stages, retry_code,
         )
-        return status, stages, retry_code, warnings
+        return status, stages, retry_code, []
 
     def memory_replay_backup(
         self,
@@ -1748,76 +1427,6 @@ class OperationsPipeline:
             },
             ok=not conflicts,
             extra_warnings=warnings,
-        )
-
-    def _count_orphan_vectors(self) -> dict[str, int]:
-        """Read-only count of truly orphan vec rows (no parent row in DB)."""
-        if not self.db._db_available or not self.db.state.sqlite_vec_available:
-            return {"orphan_memory_vectors": 0, "orphan_section_vectors": 0}
-        try:
-            with self.db.connection() as conn:
-                mem = conn.execute(
-                    "SELECT COUNT(*) AS c FROM memories_vec v "
-                    "WHERE v.id NOT IN (SELECT id FROM memories)"
-                ).fetchone()["c"]
-                sec = conn.execute(
-                    "SELECT COUNT(*) AS c FROM memory_sections_vec v "
-                    "WHERE v.id NOT IN (SELECT id FROM memory_sections)"
-                ).fetchone()["c"]
-                return {"orphan_memory_vectors": int(mem), "orphan_section_vectors": int(sec)}
-        except Exception:
-            return {"orphan_memory_vectors": 0, "orphan_section_vectors": 0}
-
-    def _count_vec_parent_status_mismatch(self) -> dict[str, int]:
-        """Delegate to db layer (v0.9.4)."""
-        return self.db._count_vec_parent_status_mismatch() if self.db._db_available and self.db.state.sqlite_vec_available else {}
-
-    def memory_resync_vec_parent_status(
-        self,
-        dry_run: bool = True,
-        authorized: bool = False,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Repair vec.parent_status to match memories.status (v0.9.4, design §3.5 N16).
-
-        Scans memories_vec and memory_sections_vec for rows where
-        ``parent_status != COALESCE(memories.status, 'deleted')`` and updates
-        them in-place. This fixes drift caused by direct DB edits, migration
-        bugs, or failed transactions.
-
-        ``dry_run=True`` (default) only reports how many rows would be updated.
-        Per design §3.5 N16, resync is a **non-destructive UPDATE** (it only
-        aligns ``parent_status`` to the already-existing ``memories.status``;
-        no memory content is rewritten, no vectors are deleted), so it does
-        NOT require ``authorized=True``. The ``authorized`` parameter is kept
-        as a no-op compatibility placeholder so the signature matches the other
-        repair tools (``memory_cleanup_inactive_vectors`` still requires it,
-        because that path also purges orphan rows).
-
-        Returns:
-            dict with keys:
-              - dry_run: bool
-              - mismatches: dict[str, int] with memory_vec_mismatch, section_vec_mismatch
-              - resynced: dict[str, int] (only if dry_run=False) with resynced_memory_vecs, resynced_section_vecs
-              - warnings: list[str] if any errors occurred
-        """
-        mismatches = self._count_vec_parent_status_mismatch()
-        if dry_run:
-            return self.db.state.response(
-                {
-                    "dry_run": True,
-                    "mismatches": mismatches,
-                    "hint": "re-run with dry_run=False to resync mismatched rows (non-destructive; authorized not required)",
-                }
-            )
-        # N16: non-destructive UPDATE — authorized accepted as compat placeholder, not enforced.
-        resync_counts = self.db._resync_vec_parent_status()
-        return self.db.state.response(
-            {
-                "dry_run": False,
-                "mismatches": mismatches,
-                "resynced": resync_counts,
-            }
         )
 
     # ==================================================================

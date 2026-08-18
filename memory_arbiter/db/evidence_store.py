@@ -61,6 +61,8 @@ class EvidenceStore:
                             int(unit.start_offset), int(unit.end_offset), utc_now_iso(),
                         ),
                     )
+                    if cur.lastrowid is None:
+                        raise sqlite3.Error("evidence insert did not return an id")
                     conn.execute(
                         "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES (?,?,?)",
                         (int(cur.lastrowid), parent_status, json.dumps(embedding)),
@@ -84,7 +86,10 @@ class EvidenceStore:
             memories = int(conn.execute("SELECT COUNT(*) FROM memories WHERE status!='deleted'").fetchone()[0])
             indexed = int(conn.execute("SELECT COUNT(DISTINCT memory_id) FROM memory_evidence").fetchone()[0])
             units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
-            vectors = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
+            try:
+                vectors = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
+            except sqlite3.Error:
+                vectors = 0
         return {"eligible_memories": memories, "indexed_memories": indexed, "units": units, "vectors": vectors}
 
     def knn(
@@ -118,7 +123,7 @@ class EvidenceStore:
                     f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
                                m.workspace, m.workspace_canonical, m.source_type,
                                m.confidence, m.protection_level, m.event_time,
-                               m.ingest_time, m.metadata, m.content, m.split_status
+                               m.ingest_time, m.metadata, m.content
                         FROM memory_evidence_vec v
                         JOIN memory_evidence e ON e.id=v.id
                         JOIN memories m ON m.id=e.memory_id

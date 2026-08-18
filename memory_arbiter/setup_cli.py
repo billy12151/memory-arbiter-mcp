@@ -72,16 +72,10 @@ def _default_config_dict(model_path: Path, db_path: Path, backup_jsonl: Path) ->
             "model_path": str(model_path),
             "auto_query": True,
             "auto_write": True,
+            "max_unit_chars": 3600,
         },
         "recall_pool_cap": 50,
         "content_like_cap": 30,
-        "split": {
-            "threshold": 4000,
-            "section_vec_distance_threshold": 0.42,
-            "section_fulltext_threshold": 0.8,
-            "max_sections": 50,
-            "max_section_chars": 3600,
-        },
     }
 
 
@@ -455,7 +449,7 @@ def run_cli(argv: list[str]) -> int:
 
     # ── Step 3: summary ──
     # In --print-config (dry-run) or --no-config modes we don't make strong
-    # "ready / not ready" claims: the user only asked to preview or to check
+    # Report observed state without overstating readiness.
     # an existing environment. Suppress the missing-items warning there.
     suppress_warning = args.print_config or args.no_config
     out_lines.extend(_render_summary(all_ok, use_color, written, suppress_warning=suppress_warning))

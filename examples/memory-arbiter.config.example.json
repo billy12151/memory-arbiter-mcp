@@ -1,14 +1,12 @@
 {
   "_readme": [
-    "Copy this file to ~/.config/memory-arbiter/config.json, then edit paths.",
-    "Keep per-client identity (MEMORY_ARBITER_CLIENT / AGENT_ID / WORKSPACE) in each MCP client's env block.",
-    "Discovery order: MEMORY_ARBITER_CONFIG env > ~/.config/memory-arbiter/config.json > env/defaults.",
-    "The default core is model-free. vec/embedding and semantic_conflict are optional local enhancements."
+    "Copy to ~/.config/memory-arbiter/config.json and edit local paths.",
+    "The embedding model enables local-text evidence recall.",
+    "The Qwen model is optional and filters only check-route short pairs."
   ],
   "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
   "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
   "tool_profile": "product",
-  "storage_profile": "vnext",
   "isolation": "none",
   "workspace_match_distance": 0.25,
   "vec": {
@@ -21,43 +19,20 @@
     "auto_query": true,
     "auto_write": true,
     "n_ctx": 2048,
-    "reserved_tokens": 64
+    "reserved_tokens": 64,
+    "max_unit_chars": 3600
   },
   "recall_pool_cap": 50,
   "content_like_cap": 30,
   "update_check": {
     "enabled": true
   },
-  "_update_check_readme": [
-    "When enabled, a one-shot background check may attach a low-frequency update notice.",
-    "Set enabled=false to disable network update checks."
-  ],
-  "structured_claim_mode": "beta_all",
-  "_structured_claim_mode_readme": [
-    "Deterministic write/edit-time extraction for explicit key/value, table, numeric-unit, and semver claims.",
-    "A collision is persisted as pending_llm and returned as action_required=judge_conflict_before_use.",
-    "The host LLM submits a snapshot-pinned judgment receipt before using the affected claim.",
-    "Judgment records guidance only; it never edits or supersedes either memory.",
-    "Set off only as an emergency kill switch. There is no periodic vector conflict scanner fallback."
-  ],
   "semantic_conflict": {
-    "_readme": [
-      "Optional local write-time semantic notices. Current backend: local_gguf only.",
-      "Setting model_path auto-enables this block unless enabled=false is explicit.",
-      "Jobs are async/fail-open and inference is strictly serial (max_concurrency is fixed at 1).",
-      "job_timeout_ms is the between-pair budget; inference_timeout_ms is the hard per-request timeout; load_timeout_ms is separate.",
-      "Status is exposed through memory status and memory_repair semantic_control status.",
-      "Notices are advisory and can be listed/dismissed without governance authorization."
-    ],
     "enabled": false,
     "backend": "local_gguf",
-    "model_path": "~/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-    "pair_text_gate": "medium",
+    "model_path": "~/.local/share/memory-arbiter/models/semantic-conflict/Qwen2.5-0.5B-Instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf",
     "on_write": "async",
-    "max_concurrency": 1,
     "queue_max_size": 100,
-    "candidate_limit": 30,
-    "pair_limit": 10,
     "n_ctx": 1024,
     "n_threads": 4,
     "n_batch": 128,
@@ -67,18 +42,5 @@
     "inference_timeout_ms": 30000,
     "load_timeout_ms": 120000,
     "min_pair_budget_ms": 1000
-  },
-  "split": {
-    "_readme": [
-      "Section split is bound to vec readiness; there is no split.enabled toggle.",
-      "The original memory commits first. Safe Markdown-heading plans are queued to a background rule worker.",
-      "Unstructured/unsafe long documents return split_request for Agent-side continuation with the Agent's own LLM.",
-      "A zero section match returns the full memory."
-    ],
-    "threshold": 4000,
-    "section_vec_distance_threshold": 0.42,
-    "section_fulltext_threshold": 0.8,
-    "max_sections": 50,
-    "max_section_chars": 3600
   }
 }

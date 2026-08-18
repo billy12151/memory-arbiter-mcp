@@ -10,34 +10,28 @@ from typing import Any, Callable, Optional, Tuple
 
 from .acl import CallerWorkspace, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, redact_judgment, visible_memory
 from .arbitration import compare_memories
-from .claims import extract_claims
 from .conflict_judgments import ConflictJudgmentStore
 from .config import Settings
 from .constants import strict_ws
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
-from .evidence import evidence_content_hash, local_text_units
 from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
 from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from .search import search_memories, _linked_open_items_for_search
 from .semantic_conflict import (
     IsolatedGGUFSemanticBackend,
     SemanticBackend,
-    ModelSignal,
-    decide_evidence,
-    notice_dedupe_key,
-    pair_text_gate,
 )
 from .update_monitor import UpdateMonitor
 from . import __version__
 from . import workspace_rules
-from .workers import LocalTextIndexWorker, SemanticConflictWorker, SplitReindexWorker
+from .workers import LocalTextIndexWorker, SemanticConflictWorker
 from .surfaces import ProductSurfaces
 from .pipeline.signals import ConflictSignalPipeline
-from .pipeline.sections import SectionPipeline
 from .pipeline.write import WritePipeline
 from .pipeline.read import ReadPipeline
 from .pipeline.operations import OperationsPipeline
+from .pipeline.evidence import EvidencePipeline
 
 
 AGENT_ONBOARDING_TOPIC = "agent_onboarding"
@@ -55,7 +49,6 @@ def _agent_onboarding_guide() -> str:
 
 
 class MemoryTools:
-    _V08_SPLIT_STATUSES = (None, "active", "failed", "declined")
     _TRUST_RANK: dict[str, int] = {
         "user_confirmed": 4,
         "locked": 4,
@@ -73,14 +66,13 @@ class MemoryTools:
         self._embedder_lock = threading.Lock()
         self._embedder_warnings: list[str] = list(self.settings.config_warnings)
         self._update_monitor: Optional[UpdateMonitor] = None
-        self._split_worker = SplitReindexWorker(self)
         self._evidence_worker = LocalTextIndexWorker(self)
         self._surfaces = ProductSurfaces(self)
         self._signals = ConflictSignalPipeline(self)
-        self._sections = SectionPipeline(self)
         self._write_pipeline = WritePipeline(self)
         self._read_pipeline = ReadPipeline(self)
         self._operations = OperationsPipeline(self)
+        self._evidence = EvidencePipeline(self)
         self._semantic_backend: Optional[SemanticBackend] = None
         self._semantic_backend_lock = threading.Lock()
         self._semantic_runtime_disabled = False
@@ -107,10 +99,6 @@ class MemoryTools:
             self._update_monitor.maybe_start_check_if_due()
         except Exception:
             pass
-
-    def start_split_worker(self) -> None:
-        self._split_worker.start()
-        self._enqueue_pending_rule_splits(limit=100)
 
     def start_evidence_worker(self): self._evidence_worker.start()
     def wait_evidence_worker_drained(self, timeout=30.0): return self._evidence_worker.wait_drained(timeout)
@@ -171,42 +159,6 @@ class MemoryTools:
                 self._last_backup_notice_signature = degradation_signature
         return notices
 
-    def _enqueue_pending_rule_splits(self, limit: int = 100) -> None:
-        threshold = self.settings.split_threshold
-        max_sections = self.settings.max_sections
-        max_section_chars = self.settings.max_section_chars
-        if self.db.get_vec_index_state().get("state") != "ready":
-            return
-        try:
-            with self.db.connection() as conn:
-                rows = conn.execute(
-                    "SELECT id, content, version, split_status, split_revision "
-                    "FROM memories "
-                    "WHERE status = 'active' AND split_status IS NULL AND length(content) >= ? "
-                    "ORDER BY id LIMIT ?",
-                    (threshold, int(limit)),
-                ).fetchall()
-        except Exception:
-            return
-        for row in rows:
-            content = row["content"] or ""
-            plan, _reason = self._rule_plan_sections(content, max_sections, max_section_chars)
-            if plan is None:
-                continue
-            memory_id = int(row["id"])
-            self._split_worker.enqueue(memory_id, {
-                "memory_id": memory_id,
-                "content": content,
-                "plan": plan,
-                "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-                "memory_version": int(row["version"] or 1),
-                "split_status": row["split_status"],
-                "split_revision": int(row["split_revision"] or 0),
-            })
-
-    def wait_split_worker_drained(self, timeout: float = 5.0) -> bool:
-        return self._split_worker.wait_drained(timeout)
-
     def wait_semantic_worker_drained(self, timeout: float = 30.0) -> bool:
         return self._semantic_worker.wait_drained(timeout)
 
@@ -224,6 +176,7 @@ class MemoryTools:
         timeout = max(0.0, float(timeout))
         deadline = time.monotonic() + timeout
         worker_shutdown = self._semantic_worker.shutdown(discard_pending=True)
+        evidence_shutdown = self._evidence_worker.shutdown(discard_pending=False)
         # Shutdown also closes synchronous workspace-suggestion admission before
         # waiting; otherwise a new call can race the worker drain/unload phase.
         with self._semantic_backend_lock:
@@ -234,7 +187,7 @@ class MemoryTools:
         remaining = max(0.0, deadline - time.monotonic())
         semantic_drained = self._semantic_worker.wait_drained(remaining)
         remaining = max(0.0, deadline - time.monotonic())
-        split_drained = self._split_worker.wait_drained(remaining)
+        evidence_drained = self._evidence_worker.wait_drained(remaining)
         backend = self._get_semantic_backend_ref()
         unload_result: dict[str, Any] = {"ok": True, "unloaded": False, "reason": "no_backend"}
         if backend is not None:
@@ -244,7 +197,7 @@ class MemoryTools:
                 force_terminate = getattr(backend, "force_terminate", None)
                 if callable(force_terminate):
                     unload_result = force_terminate()
-        ok = bool(semantic_drained and split_drained and unload_result.get("ok", False))
+        ok = bool(semantic_drained and evidence_drained and unload_result.get("ok", False))
         with self._shutdown_lock:
             self._shutdown_complete = ok
             self._shutdown_started = False
@@ -252,8 +205,9 @@ class MemoryTools:
             "ok": ok,
             "already_shutdown": False,
             "semantic_worker": worker_shutdown,
+            "evidence_worker": evidence_shutdown,
             "semantic_drained": semantic_drained,
-            "split_drained": split_drained,
+            "evidence_drained": evidence_drained,
             "backend_unload": unload_result,
         }
 
@@ -343,21 +297,8 @@ class MemoryTools:
     def _embedding_configured(self) -> bool:
         return self.settings.embedding_provider == "gguf" and self.settings.embedding_model_path is not None
 
-    def _vnext_storage_enabled(self) -> bool:
-        return self.settings.storage_profile == "vnext"
-
-    def _index_local_text_evidence(self, memory_id, record=None):
-        current = record or self.db.get_memory(int(memory_id))
-        embedder, warnings = self._ensure_embedder()
-        if not current or embedder is None: return {"status":"skipped","warnings":warnings}
-        units = local_text_units(current.get("subject") or "", current.get("content") or "")
-        embeddings=[]
-        for unit in units:
-            result=embedder.embed_text(prefix="",body=unit.text)
-            if not result.embedding: return {"status":"failed"}
-            embeddings.append(result.embedding)
-        published=self.db.evidence.publish(memory_id,int(current.get("version") or 1),evidence_content_hash(current.get("content") or ""),units,embeddings)
-        return {"status":"indexed" if published.get("published") else "failed",**published}
+    def _index_local_text_evidence(self, memory_id: int, record: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        return self._evidence.index_memory(memory_id, record)
 
     def _ensure_embedder(self) -> Tuple[Optional[ManagedEmbedder], list[str]]:
         if self._embedder_loaded:
@@ -613,7 +554,6 @@ class MemoryTools:
             "enabled": bool(self.settings.semantic_conflict_enabled),
             "configured": self._semantic_configured(),
             "on_write": self.settings.semantic_conflict_on_write,
-            "pair_text_gate": self.settings.semantic_conflict_pair_text_gate,
             "resident": bool(self.settings.semantic_conflict_resident),
             "max_concurrency": 1,
             "max_concurrency_note": "reserved; MVP semantic worker is single-threaded (configured values are clamped to 1)",
@@ -705,10 +645,8 @@ class MemoryTools:
     def _enqueue_semantic_conflict_check(self, memory_id: Optional[int], record: Any, *, after_evidence: bool=False) -> dict[str, Any]:
         if memory_id is None:
             return {"status": "skipped", "reason": "backup_only"}
-        if self._vnext_storage_enabled() and not after_evidence:
+        if not after_evidence:
             return {"status":"deferred","reason":"waiting_for_evidence_index"}
-        if not self.settings.semantic_conflict_enabled:
-            return {"status": "disabled"}
         if self.settings.semantic_conflict_on_write == "off":
             return {"status": "off"}
         stored = self.db.get_memory(int(memory_id)) or {}
@@ -718,165 +656,15 @@ class MemoryTools:
         snapshot = {
             "memory_id": int(memory_id),
             "version": int(stored.get("version") or self.db.get_memory_version(int(memory_id)) or 1),
-            "claim_revision": int(stored.get("claim_revision") or 1),
             "content_hash": hashlib.sha256(str(content or "").encode("utf-8")).hexdigest(),
         }
         return self._semantic_worker.enqueue(int(memory_id), snapshot)
 
-    def _semantic_candidate_memories(self, memory_id: int, record: dict[str, Any]) -> list[dict[str, Any]]:
-        tags = record.get("tags") or []
-        if isinstance(tags, str):
-            try:
-                parsed = json.loads(tags)
-                tags = parsed if isinstance(parsed, list) else []
-            except Exception:
-                tags = []
-        candidates = self.db.find_semantic_overlap_candidates(
-            subject=record.get("subject"),
-            tags=[str(t) for t in tags if isinstance(t, str)],
-            exclude_id=int(memory_id),
-            limit=int(self.settings.semantic_conflict_candidate_limit),
-            canonical_workspace=record.get("workspace_canonical") or record.get("workspace"),
-            isolation=self.settings.isolation,
-        )
-        return candidates[: int(self.settings.semantic_conflict_pair_limit)]
-
     def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> None:
-        if self._vnext_storage_enabled():
-            return self._process_vnext_evidence_job(memory_id, snapshot)
-        if not self._semantic_configured():
-            return
-        record = self.db.get_memory(int(memory_id))
-        if not record or record.get("status") != "active":
-            return
-        if int(record.get("version") or 1) != int(snapshot.get("version") or 1):
-            return
-        if int(record.get("claim_revision") or 1) != int(snapshot.get("claim_revision") or 1):
-            return
-        content_hash = hashlib.sha256((record.get("content") or "").encode("utf-8")).hexdigest()
-        if content_hash != snapshot.get("content_hash"):
-            return
-        backend = self._ensure_semantic_backend()
-        if backend is None:
-            return
-        timeout_ms = float(self.settings.semantic_conflict_job_timeout_ms)
-        deadline = time.monotonic() + (timeout_ms / 1000.0)
-        # The model call is a synchronous, non-interruptible C call; the
-        # deadline can only gate *between* pairs, not abort one in flight.
-        # Reserve a floor so we never start a fresh inference with only a few
-        # ms left (which would blow the budget and stall the worker). 1s is a
-        # conservative lower bound for a 0.5B local model on a single short pair.
-        min_pair_budget = float(self.settings.semantic_conflict_min_pair_budget_ms) / 1000.0
-        isolation = self.settings.isolation
-        for peer in self._semantic_candidate_memories(memory_id, record):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                self._semantic_worker.set_error("semantic conflict job timed out before next pair")
-                return
-            if remaining < min_pair_budget:
-                # Not enough budget to safely start another inference; stop
-                # cleanly so the worker loop stays responsive instead of
-                # launching a call that may overrun and stall it.
-                self._semantic_worker.set_error(
-                    f"semantic conflict job stopped early: remaining budget {remaining:.2f}s below {min_pair_budget:.2f}s floor"
-                )
-                return
-            peer_record = self.db.get_memory(int(peer["id"]))
-            if not peer_record or peer_record.get("status") != "active":
-                continue
-            if isolation != "none":
-                left_ws = record.get("workspace_canonical") or record.get("workspace")
-                right_ws = peer_record.get("workspace_canonical") or peer_record.get("workspace")
-                if left_ws and right_ws and left_ws != right_ws:
-                    continue
-            left_version = self.db.get_memory_version(int(memory_id)) or 1
-            right_version = self.db.get_memory_version(int(peer_record["id"])) or 1
-            left_claim_revision = int(record.get("claim_revision") or 1)
-            right_claim_revision = int(peer_record.get("claim_revision") or 1)
-            try:
-                if self.db.is_pair_dismissed(int(memory_id), int(peer_record["id"])):
-                    continue
-                if self.db.is_semantic_pair_closed(
-                    int(memory_id), int(peer_record["id"]), left_version, right_version,
-                    left_claim_revision=left_claim_revision,
-                    right_claim_revision=right_claim_revision,
-                ):
-                    continue
-            except Exception:
-                pass
-            call_start = time.monotonic()
-            signal = backend.classify_pair(record, peer_record)
-            self._last_pair_duration_ms = int((time.monotonic() - call_start) * 1000)
-            if not self.settings.semantic_conflict_resident:
-                cleanup = getattr(backend, "maybe_unload_if_idle", None)
-                if callable(cleanup):
-                    cleanup()
-            if not signal.candidate:
-                continue
-            # Gate only the authored claims. Fixed field labels and broad metadata
-            # (especially common tags) otherwise manufacture lexical overlap and
-            # can turn unrelated production records into false conflicts.
-            gate = pair_text_gate(
-                str(record.get("content") or ""),
-                str(peer_record.get("content") or ""),
-                mode=self.settings.semantic_conflict_pair_text_gate,
-            )
-
-    def _process_vnext_evidence_job(self, memory_id: int, snapshot: dict[str, Any]) -> None:
-        record=self.db.get_memory(int(memory_id))
-        if not record or int(record.get("version") or 1)!=int(snapshot.get("version") or 1): return
-        embedder,_=self._ensure_embedder()
-        if embedder is None:return
-        workspace=(record.get("workspace_canonical") or record.get("workspace")) if self.settings.isolation=="strict" else None
-        candidates=[]
-        for unit in local_text_units(record.get("subject") or "",record.get("content") or ""):
-            if unit.kind!="text":continue
-            er=embedder.embed_text(prefix="",body=unit.text)
-            for hit in self.db.evidence_knn(er.embedding,k=5,workspace=workspace,exclude_memory_id=memory_id):
-                if hit.get("kind")!="text":continue
-                decision=decide_evidence(unit.text,hit.get("text") or "")
-                if decision.action!="ignore":candidates.append((decision.action=="notify",hit,unit,decision))
-        candidates.sort(key=lambda x:x[0],reverse=True); seen=set()
-        backend=self._ensure_semantic_backend() if self._semantic_configured() else None
-        for direct,hit,unit,decision in candidates:
-            peer=int(hit["memory_id"])
-            if peer in seen or len(seen)>=2:continue
-            if not direct:
-                if backend is None:continue
-                signal=backend.classify_pair({"content":unit.text},{"content":hit.get("text") or ""})
-                if not signal.candidate:continue
-            seen.add(peer); peer_row=self.db.get_memory(peer)
-            lv=int(record.get("version") or 1);rv=int(peer_row.get("version") or 1)
-            self.db.record_semantic_notice(memory_id=memory_id,peer_id=peer,severity="high" if direct else "normal",notice_type="semantic_evidence",title=f"Possible memory change with #{peer}",message=decision.reason,payload={"decision":decision.__dict__,"left_evidence":{"text":unit.text},"right_evidence":{"text":hit.get("text")},"qwen_signal":{"status":"skipped"} if direct else {"status":"candidate"}},dedupe_key=notice_dedupe_key(memory_id,peer,lv,rv,"semantic_evidence"),left_version=lv,right_version=rv,left_claim_revision=int(record.get("claim_revision") or 1),right_claim_revision=int(peer_row.get("claim_revision") or 1),source="semantic_evidence")
+        self._evidence.process_conflicts(memory_id, snapshot)
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         return self._write_pipeline.memory_write(**payload)
-
-    def _enrich_write_response(
-        self, data: dict[str, Any], memory_id: Optional[int], record: MemoryRecord,
-    ) -> dict[str, Any]:
-        return self._write_pipeline._enrich_write_response(data, memory_id, record)
-
-    @staticmethod
-    def _structured_conflict_point(claims: list[dict[str, Any]]) -> str:
-        return WritePipeline._structured_conflict_point(claims)
-
-    @staticmethod
-    def _apply_structured_gate(data: dict[str, Any], structured: dict[str, Any]) -> None:
-        return WritePipeline._apply_structured_gate(data, structured)
-
-    def _index_and_reconcile_claims(self, memory_id: int) -> dict[str, Any]:
-        return self._write_pipeline._index_and_reconcile_claims(memory_id)
-
-    def _index_and_reconcile_claims_impl(
-        self, memory_id: int, started: float,
-    ) -> dict[str, Any]:
-        return self._write_pipeline._index_and_reconcile_claims_impl(memory_id, started)
-
-    def _write_duplicate_hints(
-        self, memory_id: int, record: MemoryRecord,
-    ) -> Optional[dict[str, Any]]:
-        return self._write_pipeline._write_duplicate_hints(memory_id, record)
 
     def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
         return self._read_pipeline.memory_search(
@@ -914,16 +702,13 @@ class MemoryTools:
     def memory_get(
         self,
         memory_id: int,
-        sections: str = "catalog",
+        sections: str = "none",
         section_ids: Optional[list[int]] = None,
         **_: Any,
     ) -> dict[str, Any]:
         return self._read_pipeline.memory_get(
             memory_id=memory_id, sections=sections, section_ids=section_ids, **_,
         )
-
-    def memory_store_embedding(self, memory_id: int, embedding: list[float], **_: Any) -> dict[str, Any]:
-        return self._read_pipeline.memory_store_embedding(memory_id, embedding, **_)
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         return self._read_pipeline.memory_recent(workspace, limit, **_)
@@ -1017,9 +802,6 @@ class MemoryTools:
             memory_id, reason, superseded_by, self._is_truthy(authorized), **_,
         )
 
-    def _split_capability(self, vec_state: dict[str, Any]) -> dict[str, Any]:
-        return self._operations._split_capability(vec_state)
-
     def _update_check_status(self) -> dict[str, Any]:
         return self._operations._update_check_status()
 
@@ -1042,22 +824,17 @@ class MemoryTools:
     ) -> dict[str, Any]:
         return self._operations.memory_list_entities(limit, include_unassigned, **_)
 
-    def memory_rebuild_claims(
-        self,
-        memory_ids: Optional[list[int]] = None,
-        dry_run: bool = True,
-        batch_size: int = 50,
-        **_: Any,
+    def memory_rebuild_evidence(
+        self, memory_ids: Optional[list[int]] = None, dry_run: bool = True,
+        batch_size: int = 50, **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_rebuild_claims(memory_ids, dry_run, batch_size, **_)
+        return self._operations.memory_rebuild_evidence(memory_ids, dry_run, batch_size, **_)
 
     def memory_submit_conflict_judgment(
         self,
         conflict_id: int,
         expected_left_version: int,
         expected_right_version: int,
-        expected_left_claim_revision: int,
-        expected_right_claim_revision: int,
         verdict: str,
         recommended_use: str,
         suggested_winner: Optional[int],
@@ -1072,7 +849,6 @@ class MemoryTools:
     ) -> dict[str, Any]:
         return self._operations.memory_submit_conflict_judgment(
             conflict_id, expected_left_version, expected_right_version,
-            expected_left_claim_revision, expected_right_claim_revision,
             verdict, recommended_use, suggested_winner, confidence_hint,
             reason, affects_current_output, usage_context, judge_ref,
             resolution_kind, conflict_scope, **_,
@@ -1088,8 +864,6 @@ class MemoryTools:
         expected_judgment_id: int,
         expected_left_version: int,
         expected_right_version: int,
-        expected_left_claim_revision: int,
-        expected_right_claim_revision: int,
         authorized: bool = False,
         judge_ref: Optional[str] = None,
         resolution_kind: Optional[str] = None,
@@ -1099,7 +873,6 @@ class MemoryTools:
         return self._operations.memory_correct_conflict_judgment(
             conflict_id, verdict, recommended_use, suggested_winner, reason,
             expected_judgment_id, expected_left_version, expected_right_version,
-            expected_left_claim_revision, expected_right_claim_revision,
             self._is_truthy(authorized), judge_ref, resolution_kind, conflict_scope, **_,
         )
 
@@ -1143,16 +916,6 @@ class MemoryTools:
             memory_id, older_than_days, self._is_truthy(authorized), **_,
         )
 
-    def memory_cleanup_inactive_vectors(
-        self,
-        dry_run: bool = True,
-        authorized: bool = False,
-        **_: Any,
-    ) -> dict[str, Any]:
-        return self._operations.memory_cleanup_inactive_vectors(
-            dry_run, self._is_truthy(authorized), **_,
-        )
-
     def memory_replay_backup(
         self, dry_run: bool = True, authorized: bool = False,
         limit: int = 1_000, offset: int = 0, **_: Any,
@@ -1160,20 +923,6 @@ class MemoryTools:
         return self._operations.memory_replay_backup(
             dry_run, self._is_truthy(authorized), limit, offset, **_,
         )
-
-    def _count_orphan_vectors(self) -> dict[str, int]:
-        return self._operations._count_orphan_vectors()
-
-    def _count_vec_parent_status_mismatch(self) -> dict[str, int]:
-        return self._operations._count_vec_parent_status_mismatch()
-
-    def memory_resync_vec_parent_status(
-        self,
-        dry_run: bool = True,
-        authorized: bool = False,
-        **_: Any,
-    ) -> dict[str, Any]:
-        return self._operations.memory_resync_vec_parent_status(dry_run, authorized, **_)
 
     def _trust_score(self, record: dict[str, Any]) -> int:
         return self._signals._trust_score(record)
@@ -1197,119 +946,3 @@ class MemoryTools:
         result_id_set: set[int],
     ) -> Optional[dict[str, Any]]:
         return self._signals._build_open_table_signal(memory_id, conflicts, summaries, result_id_set)
-
-    def _compute_runtime_hint(
-        self,
-        memory_id: int,
-        rec: dict[str, Any],
-        all_results: list[dict[str, Any]],
-        result_id_set: set[int],
-        dismissed_pairs: Optional[set] = None,
-    ) -> Optional[dict[str, Any]]:
-        return self._signals._compute_runtime_hint(
-            memory_id, rec, all_results, result_id_set, dismissed_pairs,
-        )
-
-    @staticmethod
-    def _catalog_entry(s: dict) -> dict:
-        return SectionPipeline._catalog_entry(s)
-
-    def _attach_sections(
-        self,
-        results: list[dict[str, Any]],
-        query_embedding: Optional[list[float]],
-        warnings: list[str],
-    ) -> list[dict[str, Any]]:
-        return self._sections._attach_sections(results, query_embedding, warnings)
-
-    @staticmethod
-    def _find_nth_occurrence(text: str, anchor: str, occurrence: int) -> int:
-        return SectionPipeline._find_nth_occurrence(text, anchor, occurrence)
-
-    def _compute_offsets(
-        self,
-        content: str,
-        sections_data: list[dict[str, Any]],
-        trust_planner_offsets: bool = False,
-    ) -> Optional[list[dict[str, Any]]]:
-        return self._sections._compute_offsets(content, sections_data, trust_planner_offsets)
-
-    @staticmethod
-    def _rule_plan_sections(content: str, max_sections: int, max_section_chars: int) -> tuple[Optional[list[dict[str, Any]]], str]:
-        return SectionPipeline._rule_plan_sections(content, max_sections, max_section_chars)
-
-    @staticmethod
-    def _split_snapshot_error(
-        memory: dict[str, Any],
-        decision_content_hash: Optional[str],
-        decision_memory_version: Optional[int],
-        decision_split_status: Optional[str],
-        decision_split_revision: Optional[int],
-        allowed_split_statuses: tuple[Optional[str], ...],
-    ) -> Optional[str]:
-        return SectionPipeline._split_snapshot_error(
-            memory, decision_content_hash, decision_memory_version,
-            decision_split_status, decision_split_revision, allowed_split_statuses,
-        )
-
-    def _publish_sections(
-        self,
-        memory_id: int,
-        content: str,
-        sections_data: list[dict[str, Any]],
-        decision_content_hash: str,
-        decision_memory_version: int,
-        decision_split_status: Optional[str],
-        decision_split_revision: int,
-        decision_kind: str,
-        provenance: str,
-    ) -> dict[str, Any]:
-        return self._sections._publish_sections(
-            memory_id, content, sections_data, decision_content_hash,
-            decision_memory_version, decision_split_status, decision_split_revision,
-            decision_kind, provenance,
-        )
-
-    def _after_write_split(
-        self, memory_id: int,
-    ) -> tuple[dict[str, Any], Optional[dict[str, Any]], list[str]]:
-        return self._sections._after_write_split(memory_id)
-
-    def memory_split(
-        self,
-        memory_id: int,
-        split_decision: Optional[str] = None,
-        decision_content_hash: Optional[str] = None,
-        decision_memory_version: Optional[int] = None,
-        decision_split_status: Optional[str] = None,
-        decision_split_revision: Optional[int] = None,
-        sections: Optional[list[dict]] = None,
-        **_: Any,
-    ) -> dict[str, Any]:
-        return self._sections.memory_split(
-            memory_id, split_decision, decision_content_hash, decision_memory_version,
-            decision_split_status, decision_split_revision, sections, **_,
-        )
-
-    def _mark_split_failed(
-        self,
-        mid: int,
-        content_hash: str,
-        version: int,
-        revision: int,
-        expected_status: Optional[str],
-        stage: str,
-        message: str,
-    ) -> None:
-        return self._sections._mark_split_failed(
-            mid, content_hash, version, revision, expected_status, stage, message,
-        )
-
-    def memory_rebuild_embeddings(
-        self,
-        memory_ids: Optional[list[int]] = None,
-        dry_run: bool = True,
-        batch_size: Optional[int] = 50,
-        **_: Any,
-    ) -> dict[str, Any]:
-        return self._sections.memory_rebuild_embeddings(memory_ids, dry_run, batch_size, **_)

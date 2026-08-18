@@ -44,8 +44,6 @@ def make_tools(tmp_path: Path, *, semantic_enabled: bool = False) -> MemoryTools
         embedding_model_path=model,
         embedding_auto_write=True,
         embedding_auto_query=True,
-        storage_profile="vnext",
-        structured_claim_mode="off",
         semantic_conflict_enabled=semantic_enabled,
         semantic_conflict_model_path=model if semantic_enabled else None,
     )
@@ -86,7 +84,7 @@ def test_decide_evidence_has_narrow_notify_check_ignore_contract() -> None:
     assert decide_evidence("服务使用数据库。", "服务迁移到新的存储引擎。").action in {"check", "ignore"}
 
 
-def test_vnext_write_publishes_evidence_and_skips_claims(tmp_path: Path) -> None:
+def test_write_publishes_local_text_evidence(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     result = tools.memory_write(
         content="生产环境数据库使用 PostgreSQL 16。接口超时为 5 秒。",
@@ -97,12 +95,10 @@ def test_vnext_write_publishes_evidence_and_skips_claims(tmp_path: Path) -> None
     memory_id = result["data"]["id"]
     assert result["data"]["evidence_index"]["status"] == "queued"
     assert tools.wait_evidence_worker_drained(timeout=2)
-    assert result["data"]["realtime_conflict_check"]["mode"] == "retired"
     coverage = tools.db.evidence.coverage()
     assert coverage["indexed_memories"] == 1
     assert coverage["units"] >= 2
     with tools.db.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM memory_claims").fetchone()[0] == 0
         row = conn.execute("SELECT content_hash FROM memory_evidence WHERE memory_id=? LIMIT 1", (memory_id,)).fetchone()
     assert row["content_hash"] == evidence_content_hash(result["data"]["record"]["content"])
 
@@ -132,25 +128,24 @@ def test_notify_surfaces_without_qwen_and_check_fails_closed(tmp_path: Path, mon
     snapshot = {
         "memory_id": new["id"],
         "version": record["version"],
-        "claim_revision": record.get("claim_revision", 1),
         "content_hash": evidence_content_hash(record["content"]),
     }
-    tools._process_vnext_evidence_job(new["id"], snapshot)
+    tools._process_semantic_conflict_job(new["id"], snapshot)
     notices = tools.db.list_semantic_notices()
     assert any(notice["peer_id"] == old["id"] for notice in notices)
     notice = next(notice for notice in notices if notice["peer_id"] == old["id"])
-    assert notice["payload"]["decision"]["action"] == "notify"
-    assert notice["payload"]["qwen_signal"]["status"] == "skipped"
+    assert notice["payload"]["route"] == "notify"
+    assert notice["payload"]["qwen_signal"]["status"] == "not_required"
 
     tools.db.update_semantic_notice_status(notice["id"], "dismissed")
     monkeypatch.setattr(
-        "memory_arbiter.tools.decide_evidence",
+            "memory_arbiter.pipeline.evidence.decide_evidence",
         lambda _a, _b: type("D", (), {
             "action": "check", "reason": "semantic_similarity_only", "anchors": [],
             "left_value": None, "right_value": None,
         })(),
     )
-    tools._process_vnext_evidence_job(new["id"], snapshot)
+    tools._process_semantic_conflict_job(new["id"], snapshot)
     assert tools.db.list_semantic_notices(status="open") == []
 
 
@@ -222,7 +217,7 @@ def test_vnext_weak_isolation_does_not_hard_filter_semantic_candidates(tmp_path:
 
     monkeypatch.setattr(tools.db, "evidence_knn", evidence_knn)
     record = tools.db.get_memory(written["id"])
-    tools._process_vnext_evidence_job(written["id"], {
+    tools._process_semantic_conflict_job(written["id"], {
         "version": record["version"],
         "content_hash": evidence_content_hash(record["content"]),
     })
@@ -230,6 +225,7 @@ def test_vnext_weak_isolation_does_not_hard_filter_semantic_candidates(tmp_path:
 
 
 def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, monkeypatch) -> None:
+    pytest.importorskip("sqlite_vec")
     source_settings = Settings(
         db_path=tmp_path / "source.sqlite3",
         backup_jsonl=tmp_path / "source.jsonl",
@@ -266,8 +262,12 @@ def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, m
     monkeypatch.setattr(MemoryTools, "__init__", patched_init)
     result = build(source_settings.db_path, target, migration_settings, progress=False)
     assert result["ok"] is True
+    assert result["switch_ready"] is True
     assert result["row_counts_match"] is True
     assert result["coverage"]["indexed_memories"] == 2
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert not Path(str(target) + "-wal").exists()
+    assert not Path(str(target) + "-shm").exists()
     with sqlite3.connect(target) as migrated:
         assert migrated.execute(
             "SELECT 1 FROM sqlite_master WHERE name='memories_vec'"
@@ -283,8 +283,6 @@ def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, m
         vec_dim=2,
         embedding_provider="gguf",
         embedding_model_path=model,
-        storage_profile="vnext",
-        structured_claim_mode="off",
     )
     target_tools = MemoryTools(target_settings, MemoryDB(target_settings))
     target_tools._embedder = FakeEmbedder()

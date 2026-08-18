@@ -110,7 +110,7 @@ def run_cli(argv: list[str]) -> None:
     if args.db:
         settings = replace(settings, db_path=db_path)
 
-    report = doctor_overview_cli(db_path, settings, deep=args.deep)
+    report = doctor_overview_cli(settings, deep=args.deep)
     update_monitor = UpdateMonitor(enabled=settings.update_check_enabled)
     update_monitor.record_doctor_run()
     update_check = update_monitor.update_status()

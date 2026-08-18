@@ -150,65 +150,6 @@ def test_edit_full_replacement_stores_history_and_updates_fts(tmp_path: Path) ->
     assert tools.db.get_memory(mid2)["content"] == "alpha platypus final"
 
 
-def test_existing_database_is_migrated_to_version_chain_schema(tmp_path: Path) -> None:
-    """Opening a pre-v0.4.0 DB adds version + memory_history idempotently."""
-    db_path = tmp_path / "old.sqlite3"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE memories (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          content TEXT NOT NULL,
-          agent_id TEXT NOT NULL,
-          workspace TEXT NOT NULL,
-          tags TEXT NOT NULL DEFAULT '[]',
-          source_type TEXT NOT NULL,
-          source_ref TEXT,
-          event_time TEXT NOT NULL,
-          ingest_time TEXT NOT NULL,
-          confidence REAL NOT NULL DEFAULT 0.5,
-          protection_level TEXT NOT NULL DEFAULT 'normal',
-          status TEXT NOT NULL DEFAULT 'active',
-          subject TEXT,
-          metadata TEXT NOT NULL DEFAULT '{}',
-          created_at TEXT NOT NULL
-        );
-        INSERT INTO memories
-        (content, agent_id, workspace, tags, source_type, event_time, ingest_time, subject, metadata, created_at)
-        VALUES ('legacy content', 'agent-a', 'repo-a', '["legacy"]', 'agent_generated',
-                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'legacy', '{}',
-                '2026-01-01T00:00:00Z');
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    settings = Settings(
-        db_path=db_path,
-        backup_jsonl=tmp_path / "backup.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="repo-a",
-        enable_sqlite_vec=False,
-    )
-    db = MemoryDB(settings)
-    with db.connection() as schema_conn:
-        cols = {row["name"] for row in schema_conn.execute("PRAGMA table_info(memories)").fetchall()}
-        history_table = schema_conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_history'"
-        ).fetchone()
-    record = db.get_memory(1)
-
-    assert "version" in cols
-    assert history_table is not None
-    assert record["content"] == "legacy content"
-    assert record["version"] == 1
-
-    # Idempotency: reopening the same DB should not fail or alter the row.
-    db2 = MemoryDB(settings)
-    assert db2.get_memory(1)["version"] == 1
-
-
 def test_edit_partial_replacement(tmp_path: Path) -> None:
     """old_text+new_text does an exact substring substitution, not full replace."""
     tools = make_tools(tmp_path)

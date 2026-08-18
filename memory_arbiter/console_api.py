@@ -317,18 +317,18 @@ class ConsoleAPI:
             out.update(caller.response_fields())
         return out
 
-    def memory_detail(self, memory_id: int, sections: str = "catalog", workspace: Optional[str] = None) -> dict[str, Any]:
+    def memory_detail(self, memory_id: int, sections: str = "none", workspace: Optional[str] = None) -> dict[str, Any]:
         missing_ws = self._strict_workspace_required(workspace)
         if missing_ws is not None:
             return missing_ws
-        return self._memory_or_error(memory_id, sections=sections if sections in {"none", "catalog", "all"} else "catalog", workspace=workspace)
+        return self._memory_or_error(memory_id, workspace=workspace)
 
-    def _memory_or_error(self, memory_id: Any, sections: str = "catalog", workspace: Optional[str] = None) -> dict[str, Any]:
+    def _memory_or_error(self, memory_id: Any, sections: str = "none", workspace: Optional[str] = None) -> dict[str, Any]:
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
             return {"error": "memory_id must be an integer", "_http_status": 400}
-        response = self.tools.memory_get(memory_id=memory_id_int, sections=sections, workspace=workspace)
+        response = self.tools.memory_get(memory_id=memory_id_int, workspace=workspace)
         data = self._payload(response)
         if not self._ok(response):
             return {"error": data.get("error") or f"memory id {memory_id_int} not found", "_http_status": 404}
@@ -393,11 +393,7 @@ class ConsoleAPI:
             "embedding.auto_write": self.settings.embedding_auto_write,
             "embedding.n_ctx": self.settings.embedding_n_ctx,
             "embedding.reserved_tokens": self.settings.embedding_reserved_tokens,
-            "split.threshold": self.settings.split_threshold,
-            "split.section_vec_distance_threshold": self.settings.section_vec_distance_threshold,
-            "split.section_fulltext_threshold": self.settings.section_fulltext_threshold,
-            "split.max_sections": self.settings.max_sections,
-            "split.max_section_chars": self.settings.max_section_chars,
+            "embedding.max_unit_chars": self.settings.max_section_chars,
             "update_check.enabled": self.settings.update_check_enabled,
         }
         value = mapping.get(path)

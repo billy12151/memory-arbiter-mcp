@@ -119,7 +119,6 @@ def test_integer_id_and_cas_fields_reject_floats_and_non_finite_values() -> None
         ("memory", "find", "limit"),
         ("memory", "update", "expected_version"),
         ("memory", "judge", "expected_left_version"),
-        ("memory_repair", "split", "decision_split_revision"),
     ]
     for surface, operation, field in cases:
         for value in (1.0, 1.5, math.nan, math.inf, -math.inf):
@@ -134,12 +133,12 @@ def test_integer_id_and_cas_fields_reject_floats_and_non_finite_values() -> None
     assert payload == {"memory_id": 12, "expected_version": 3}
 
     payload = {"memory_ids": ["1", 2]}
-    result = validate_product_payload("memory_repair", "rebuild_claims", payload, vec_dim=2)
+    result = validate_product_payload("memory_repair", "rebuild_evidence", payload, vec_dim=2)
     assert result.error is None
     assert payload["memory_ids"] == [1, 2]
     for value in (1.0, math.nan, math.inf):
         result = validate_product_payload(
-            "memory_repair", "rebuild_claims", {"memory_ids": [value]}, vec_dim=2,
+            "memory_repair", "rebuild_evidence", {"memory_ids": [value]}, vec_dim=2,
         )
         assert result.error is not None
 
@@ -148,7 +147,6 @@ def test_cas_pins_and_semantic_timeout_bounds(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     judge_base = {
         "conflict_id": 1, "expected_left_version": 1, "expected_right_version": 1,
-        "expected_left_claim_revision": 1, "expected_right_claim_revision": 1,
         "verdict": "uncertain", "recommended_use": "ask_user", "suggested_winner": None,
         "confidence_hint": "low", "reason": "test", "affects_current_output": False,
         "usage_context": "unknown",
@@ -164,65 +162,19 @@ def test_cas_pins_and_semantic_timeout_bounds(tmp_path: Path) -> None:
         assert result["data"]["field"] == "timeout"
 
 
-def test_textual_resource_boundaries_and_sections_enum(tmp_path: Path) -> None:
+def test_textual_resource_boundaries(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     memory_id = tools.memory("remember", {"content": "abc", "subject": "s"})["data"]["id"]
     cases = [
         ("memory", "update", {"memory_id": memory_id, "old_text": "x" * (MAX_REPLACEMENT_TEXT_CHARS + 1), "new_text": "y"}, "old_text"),
         ("memory_govern", "accept_workspace_alias", {"alias": "x" * (MAX_TEXT_FIELD_CHARS + 1), "canonical": "c", "authorized": True}, "alias"),
         ("memory_repair", "set_entity", {"memory_id": memory_id, "entity": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "entity"),
-        ("memory", "read", {"memory_id": memory_id, "sections": "matched"}, "sections"),
     ]
     dispatch = {"memory": tools.memory, "memory_govern": tools.memory_govern, "memory_repair": tools.memory_repair}
     for surface, operation, payload, field in cases:
         result = dispatch[surface](operation, payload)
         assert result["ok"] is False
         assert result["data"]["field"] == field
-
-
-def test_public_memory_repair_split_accepts_section_objects_and_enforces_bounds(tmp_path: Path, monkeypatch) -> None:
-    tools = make_tools(tmp_path)
-    captured = {}
-
-    def fake_split(**payload):
-        captured.update(payload)
-        return tools.db.state.response({"accepted": True})
-
-    monkeypatch.setattr(tools, "memory_split", fake_split)
-    sections = [
-        {"title": "first", "summary": "summary"},
-        {
-            "title": "second", "anchor_text": "## second",
-            "occurrence_index": "0", "title_path": "root / second",
-        },
-    ]
-    result = tools.memory_repair("split", {
-        "memory_id": "7", "split_decision": "split", "sections": sections,
-        "decision_memory_version": "2", "decision_split_revision": "0",
-    })
-    assert result["ok"] is True
-    assert captured["memory_id"] == 7
-    assert captured["sections"][1]["occurrence_index"] == 0
-
-    invalid_sections = [
-        [{"title": "x", "unexpected": "field"}],
-        [{"title": "x" * (MAX_SPLIT_SECTION_TEXT_CHARS + 1)}],
-        [{"title": "x", "occurrence_index": 0.0}],
-        ["not-an-object"],
-        [{}] * (MAX_SPLIT_SECTIONS + 1),
-    ]
-    for value in invalid_sections:
-        rejected = tools.memory_repair("split", {"memory_id": 7, "sections": value})
-        assert rejected["ok"] is False
-        assert str(rejected["data"]["field"]).startswith("sections")
-
-
-def test_read_sections_rejects_non_string_values_without_raising(tmp_path: Path) -> None:
-    tools = make_tools(tmp_path)
-    for value in ([], {}, 1, True):
-        result = tools.memory("read", {"memory_id": 1, "sections": value})
-        assert result["ok"] is False
-        assert result["data"]["field"] == "sections"
 
 
 def test_notice_authorized_is_not_registered_and_notice_remains_unauthorized(tmp_path: Path) -> None:
@@ -238,7 +190,7 @@ def test_product_field_registry_covers_all_declared_surface_operations() -> None
         "memory": {"help", "status", "remember", "find", "read", "update", "judge"},
         "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "judgments", "history", "expired", "entities", "help"},
         "memory_govern": {"retire", "resolve_conflict", "confirm", "correct_judgment", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"},
-        "memory_repair": {"split", "rebuild_claims", "rebuild_embeddings", "cleanup_history", "cleanup_vectors", "resync_vectors", "set_entity", "activate_pending", "semantic_control", "notice", "replay_backup", "help"},
+        "memory_repair": {"rebuild_evidence", "cleanup_history", "set_entity", "activate_pending", "semantic_control", "notice", "replay_backup", "help"},
     }
     actual = {
         surface: {operation for registered_surface, operation in PRODUCT_FIELD_REGISTRY if registered_surface == surface}
@@ -247,7 +199,7 @@ def test_product_field_registry_covers_all_declared_surface_operations() -> None
     assert actual == expected
 
 
-def test_workspace_vector_publish_failure_is_observable(tmp_path: Path, monkeypatch) -> None:
+def test_workspace_vector_publish_failure_does_not_fail_memory_write(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
     tools.settings.isolation = "weak"
     tools.db.state.sqlite_vec_available = True
@@ -285,9 +237,4 @@ def test_workspace_vector_publish_failure_is_observable(tmp_path: Path, monkeypa
     monkeypatch.setattr(tools.db.workspaces, "connection", lambda: FailingConnection(original_connection()))
     result = tools.memory("remember", {"content": "fact", "subject": "s", "workspace": "new-project"})
     assert result["ok"] is True
-    publish = result["data"]["workspace_vector_publish"]
-    assert publish["status"] == "pending_retry"
-    assert publish["repair_task_available"] is False
-    assert "write another memory" in publish["retry"]
-    assert "repair_required" not in publish
-    assert any("workspace canonical vector publish failed" in warning for warning in result["warnings"])
+    assert result["data"]["id"] is not None

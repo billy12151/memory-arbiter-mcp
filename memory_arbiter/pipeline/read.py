@@ -2,7 +2,6 @@
 # mypy: disable-error-code=no-any-return
 from __future__ import annotations
 
-import hashlib
 from typing import Any, Optional, TYPE_CHECKING
 
 from ..arbitration import compare_memories
@@ -107,10 +106,6 @@ class ReadPipeline:
         has_more = outcome.has_more
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
-        # vNext uses local-text evidence hits directly. Existing section rows
-        # remain available through memory(read), but section vectors are retired.
-        if not self._vnext_storage_enabled():
-            results = self._attach_sections(results, query_embedding, extra_warnings)
         # v0.7.6: attach conflict signals (open_table + runtime_metadata_hint),
         # only on genuine query hits (direct mode). Failures degrade silently.
         if include_conflict_signal and retrieval_mode == "direct" and results:
@@ -148,7 +143,7 @@ class ReadPipeline:
             # must-surface flag would nag. It stays a per-result signal for the
             # calling agent to judge by content (see memory_search docstring):
             # surface only if the two genuinely contradict, else silently proceed.
-            ot = seen_sources.get("structured_claim_candidate") or seen_sources.get("open_table")
+            ot = seen_sources.get("open_table") or seen_sources.get("conflict_guidance")
             if ot is not None:
                 attention_required = True
                 ot_sig = ot.get("conflict_signal") or {}
@@ -165,7 +160,7 @@ class ReadPipeline:
                     head += f" vs {peer_txt}"
                 n = sum(1 for x in results if (
                     (x.get("conflict_signal") or {}).get("conflict_source") in
-                    {"open_table", "structured_claim_candidate"}
+                    {"open_table", "conflict_guidance"}
                 ))
                 if n > 1:
                     head += f" and {n - 1} more"
@@ -197,14 +192,11 @@ class ReadPipeline:
                 (
                     r.get("conflict_signal") for r in results
                     if (r.get("conflict_signal") or {}).get("conflict_source")
-                    in {"structured_claim_candidate", "open_table"}
+                    in {"open_table", "conflict_guidance"}
                 ),
                 None,
             )
-            if strong_signal and strong_signal.get("conflict_source") == "structured_claim_candidate":
-                response_data["action_required"] = "judge_conflict_before_use"
-                response_data["verification_status"] = "pending_llm"
-            elif strong_signal and strong_signal.get("action_required"):
+            if strong_signal and strong_signal.get("action_required"):
                 response_data["action_required"] = strong_signal.get("action_required")
                 response_data["verification_status"] = strong_signal.get("verification_status")
         if caller.isolation == "strict":
@@ -318,9 +310,6 @@ class ReadPipeline:
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
 
-        # v0.6.0: attach section enhancement to active-split results
-        results = self._attach_sections(results, query_embedding, extra_warnings)
-
         # v0.7.6: attach conflict signals (strict expired results are non-active
         # and may lack safe workspace summaries; fail closed by omitting signals).
         if include_conflict_signal and isolation != "strict" and retrieval_mode == "direct" and results:
@@ -335,7 +324,7 @@ class ReadPipeline:
                 if not sig:
                     continue
                 seen_sources.setdefault(str(sig.get("conflict_source", "conflict")), r)
-            ot = seen_sources.get("structured_claim_candidate") or seen_sources.get("open_table")
+            ot = seen_sources.get("open_table") or seen_sources.get("conflict_guidance")
             if ot is not None:
                 attention_required = True
                 ot_sig = ot.get("conflict_signal") or {}
@@ -352,7 +341,7 @@ class ReadPipeline:
                     head += f" vs {peer_txt}"
                 n = sum(1 for x in results if (
                     (x.get("conflict_signal") or {}).get("conflict_source") in
-                    {"structured_claim_candidate", "open_table"}
+                    {"open_table", "conflict_guidance"}
                 ))
                 if n > 1:
                     head += f" and {n - 1} more"
@@ -382,14 +371,11 @@ class ReadPipeline:
                 (
                     r.get("conflict_signal") for r in results
                     if (r.get("conflict_signal") or {}).get("conflict_source")
-                    in {"structured_claim_candidate", "open_table"}
+                    in {"open_table", "conflict_guidance"}
                 ),
                 None,
             )
-            if strong_signal and strong_signal.get("conflict_source") == "structured_claim_candidate":
-                response_data["action_required"] = "judge_conflict_before_use"
-                response_data["verification_status"] = "pending_llm"
-            elif strong_signal and strong_signal.get("action_required"):
+            if strong_signal and strong_signal.get("action_required"):
                 response_data["action_required"] = strong_signal.get("action_required")
                 response_data["verification_status"] = strong_signal.get("verification_status")
         if caller.isolation == "strict":
@@ -399,34 +385,21 @@ class ReadPipeline:
             extra_warnings=extra_warnings + warnings + list(caller.warnings),
         )
 
-    # v0.8 split-status values the new flow may write. Anything else is a
-    # legacy/unknown status surfaced read-only for repair (design §5.2).
-    _V08_SPLIT_STATUSES = (None, "active", "failed", "declined")
-
     def memory_get(
         self,
         memory_id: int,
-        sections: str = "catalog",
+        sections: str = "none",
         section_ids: Optional[list[int]] = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """通过 ID 获取一条记忆的全文、分段目录或指定 section 原文（只读）。
-
-        v0.8（§6.4）合并了原 get_sections / memory_split_status 的读取能力：
-          sections: none | catalog | all（默认 catalog）。matched 非法（get
-                    没有 search 上下文）。
-          section_ids: 优先于 sections；不存在或不属于该 memory 的 ID 进入
-                       missing_section_ids，不会因单个缺失让整个调用失败。
-        返回 split 子对象（status / legacy_status / revision / section_count /
-        content_hash）。全局 vec 状态留在 memory_status / doctor。
-        """
+        """Return one full memory by id."""
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
             return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
-        if sections not in ("none", "catalog", "all"):
+        if sections not in ("none", None) or section_ids:
             return self.db.state.response(
-                {"error": "sections must be one of none|catalog|all (matched is not valid without a search context)"},
+                {"error": "section reads were removed; read the full memory content"},
                 ok=False,
             )
         caller = self._caller_workspace(_.get("workspace"))
@@ -440,77 +413,10 @@ class ReadPipeline:
                 error_data.update(caller.response_fields())
             return self.db.state.response(error_data, ok=False, extra_warnings=list(caller.warnings))
 
-        content = memory.get("content") or ""
         data: dict[str, Any] = {"memory": memory}
         if caller.isolation == "strict":
             data.update(caller.response_fields())
-
-        # ---- split sub-object ----
-        raw_status = memory.get("split_status")
-        legacy_status = raw_status if raw_status not in self._V08_SPLIT_STATUSES else None
-        all_sections = self.db.get_sections_by_memory(memory_id_int)
-        data["split"] = {
-            "status": raw_status,
-            "legacy_status": legacy_status,
-            "revision": int(memory.get("split_revision") or 0),
-            "section_count": len(all_sections),
-            "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest() if content else None,
-        }
-
-        # ---- section_ids takes precedence over the sections mode ----
-        if section_ids:
-            found, missing = self.db.get_sections_by_ids(memory_id_int, section_ids)
-            data["sections"] = [
-                {**s, "content": content[s["start_offset"]:s["end_offset"]]}
-                for s in found
-            ]
-            data["missing_section_ids"] = missing
-            # When explicit IDs are requested, also surface a catalog so the
-            # caller sees the surrounding sections.
-            data["section_catalog"] = [self._catalog_entry(s) for s in all_sections]
-            return self.db.state.response(data)
-
-        if sections == "none":
-            return self.db.state.response(data)
-        if sections == "catalog":
-            data["section_catalog"] = [self._catalog_entry(s) for s in all_sections]
-            return self.db.state.response(data)
-        # sections == "all"
-        data["section_catalog"] = [self._catalog_entry(s) for s in all_sections]
-        data["sections"] = [
-            {**s, "content": content[s["start_offset"]:s["end_offset"]]}
-            for s in all_sections
-        ]
-        return self.db.state.response(data)
-
-    def memory_store_embedding(self, memory_id: int, embedding: list[float], **_: Any) -> dict[str, Any]:
-        """Store or replace an embedding for a memory (v0.3.1 semantic recall).
-
-        The caller is responsible for generating the embedding with any model
-        of matching dimension. memory-arbiter does not bundle an embedding
-        model by design (local-first, zero cloud, no heavy deps). See
-        docs/semantic_example.py for a backfill script using sentence-transformers.
-        """
-        try:
-            memory_id_int = int(memory_id)
-        except (TypeError, ValueError):
-            return self.db.state.response({"error": "memory_id must be an integer"}, ok=False)
-        if not isinstance(embedding, list) or not embedding:
-            return self.db.state.response({"error": "embedding must be a non-empty list of floats"}, ok=False)
-        caller = self._caller_workspace(_.get("workspace"))
-        denied = self._strict_acl_unavailable(caller)
-        if denied is not None:
-            return denied
-        if not self._get_memory_visible(memory_id_int, caller):
-            data = {"error": f"memory id {memory_id_int} not found"}
-            if caller.isolation == "strict":
-                data.update(caller.response_fields())
-            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
-        ok, store_warnings = self.db.store_embedding(memory_id_int, embedding)
-        data = {"stored": ok, "memory_id": memory_id_int, "dimensions": len(embedding)}
-        if caller.isolation == "strict":
-            data.update(caller.response_fields())
-        return self.db.state.response(data, ok=ok, extra_warnings=store_warnings + list(caller.warnings))
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         limit = max(1, min(int(limit), 100))

@@ -178,18 +178,14 @@ class ConflictStore:
                         f"j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
                         f"FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
                         f"WHERE ("
-                        f"(c.status='open' AND (c.left_claim_revision IS NULL OR ("
-                        f"c.left_claim_revision=(SELECT claim_revision FROM memories WHERE id=c.left_id) AND "
-                        f"c.right_claim_revision=(SELECT claim_revision FROM memories WHERE id=c.right_id) AND "
+                        f"(c.status='open' AND (c.left_version IS NULL OR ("
                         f"c.left_version=(SELECT version FROM memories WHERE id=c.left_id) AND "
                         f"c.right_version=(SELECT version FROM memories WHERE id=c.right_id)))) "
                         f"OR (c.status='resolved' AND c.active_judgment_id IS NOT NULL "
                         f"AND j.verdict IN ('evolution','compatible') "
                         f"AND c.left_version IS NOT NULL AND c.right_version IS NOT NULL "
                         f"AND c.left_version=(SELECT version FROM memories WHERE id=c.left_id) "
-                        f"AND c.right_version=(SELECT version FROM memories WHERE id=c.right_id) "
-                        f"AND (c.left_claim_revision IS NULL OR c.left_claim_revision=(SELECT claim_revision FROM memories WHERE id=c.left_id)) "
-                        f"AND (c.right_claim_revision IS NULL OR c.right_claim_revision=(SELECT claim_revision FROM memories WHERE id=c.right_id)))"
+                        f"AND c.right_version=(SELECT version FROM memories WHERE id=c.right_id))"
                         f") AND (c.left_id IN ({ph}) OR c.right_id IN ({ph}))",
                         (*chunk, *chunk),
                     ).fetchall()
@@ -204,9 +200,8 @@ class ConflictStore:
         return self._db.audit.get_memory_summaries(memory_ids)
 
     # ------------------------------------------------------------------
-    # v0.7.5: conflict-scan enrichment (id=243 path-B).
-    # Three new helpers — none of them touch memories/FTS/embeddings. They
-    # only read/write the conflicts table + memories_vec (read-only KNN).
+    # Explicit conflict persistence. Candidate discovery remains advisory in
+    # semantic_notices until an Agent or user decides governance is needed.
     # ------------------------------------------------------------------
 
     def record_conflict_enriched(
@@ -223,13 +218,9 @@ class ConflictStore:
         refresh: bool = False,
         left_version: Optional[int] = None,
         right_version: Optional[int] = None,
-        left_claim_revision: Optional[int] = None,
-        right_claim_revision: Optional[int] = None,
         judgment_status: Optional[str] = None,
-        structured_details: Optional[list[dict[str, Any]]] = None,
         scan_prompt_version: Optional[str] = None,
         scan_model: Optional[str] = None,
-        detection_channel: Optional[str] = None,
     ) -> dict[str, Any]:
         """Insert a conflict row carrying scan-enrichment fields.
 
@@ -241,41 +232,14 @@ class ConflictStore:
         """
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable"}
-        if detection_channel is None:
-            detection_channel = (
-                "structured" if source == "structured_claim"
-                else "metadata" if source == "metadata_write_hint"
-                else "scan"
-            )
-        if detection_channel not in {"structured", "scan", "metadata"}:
-            return {"outcome": "invalid_detection_channel"}
-        if source == "structured_claim" and any(
-            value is None for value in (
-                left_version, right_version, left_claim_revision, right_claim_revision,
-            )
-        ):
-            return {"outcome": "invalid_structured_snapshot"}
         raw_left, raw_right = int(left_id), int(right_id)
         if raw_left <= raw_right:
             a, b = raw_left, raw_right
         else:
             a, b = raw_right, raw_left
             left_version, right_version = right_version, left_version
-            left_claim_revision, right_claim_revision = right_claim_revision, left_claim_revision
-            if structured_details is not None:
-                swapped_details: list[dict[str, Any]] = []
-                for detail in structured_details:
-                    swapped = dict(detail)
-                    for suffix in ("value", "raw_value", "evidence", "start_offset", "end_offset", "memory_id"):
-                        left_key, right_key = f"left_{suffix}", f"right_{suffix}"
-                        if left_key in swapped or right_key in swapped:
-                            swapped[left_key], swapped[right_key] = swapped.get(right_key), swapped.get(left_key)
-                    swapped_details.append(swapped)
-                structured_details = swapped_details
         subject = conflict_point or reason
         now = utc_now_iso()
-        structured_detected_at = now if detection_channel == "structured" else None
-        scan_detected_at = now if detection_channel == "scan" else None
         with self.write_transaction() as conn:
             existing = conn.execute(
                 "SELECT * FROM conflicts WHERE status='open' AND left_id=? AND right_id=?",
@@ -285,7 +249,6 @@ class ConflictStore:
                 existing_row = _row_to_dict(existing)
                 priority = {
                     "metadata_write_hint": 10,
-                    "structured_claim": 20,
                     "llm_informed": 30,
                     "policy_informed": 35,
                     "human_confirmed": 40,
@@ -293,52 +256,14 @@ class ConflictStore:
                 }
                 incoming_priority = priority.get(source, 25)
                 existing_priority = priority.get(existing_row.get("source"), 25)
-                existing_structured = (
-                    existing_row.get("left_claim_revision") is not None
-                    and existing_row.get("right_claim_revision") is not None
-                )
-                incoming_structured = detection_channel == "structured"
-                # Conflict identity/provenance and judgment snapshot are separate
-                # ownership domains. A scan may enrich an existing structured
-                # conflict, but it must never erase the structured CAS pins or
-                # bypass the mandatory host-LLM receipt.
-                preserve_structured_snapshot = existing_structured and not incoming_structured
-                preserve_judgment_projection = (
-                    preserve_structured_snapshot
-                    and existing_row.get("active_judgment_id") is not None
-                )
-                effective_left_version = (
-                    existing_row.get("left_version")
-                    if preserve_structured_snapshot else left_version
-                )
-                effective_right_version = (
-                    existing_row.get("right_version")
-                    if preserve_structured_snapshot else right_version
-                )
-                effective_left_claim_revision = (
-                    existing_row.get("left_claim_revision")
-                    if preserve_structured_snapshot else left_claim_revision
-                )
-                effective_right_claim_revision = (
-                    existing_row.get("right_claim_revision")
-                    if preserve_structured_snapshot else right_claim_revision
-                )
+                preserve_judgment_projection = existing_row.get("active_judgment_id") is not None
+                effective_left_version = left_version
+                effective_right_version = right_version
                 pins_changed = (
                     effective_left_version != existing_row.get("left_version")
                     or effective_right_version != existing_row.get("right_version")
-                    or effective_left_claim_revision != existing_row.get("left_claim_revision")
-                    or effective_right_claim_revision != existing_row.get("right_claim_revision")
                 )
-                # A source-revision change invalidates an old LLM/policy/human
-                # projection. Historical judgments remain append-only, but the
-                # conflict returns to a structured pending candidate.
-                reset_judgment = incoming_structured and pins_changed
-                effective_structured_detected_at = (
-                    existing_row.get("structured_detected_at") or structured_detected_at
-                )
-                effective_scan_detected_at = (
-                    existing_row.get("scan_detected_at") or scan_detected_at
-                )
+                reset_judgment = pins_changed and existing_row.get("active_judgment_id") is not None
                 should_update = (
                     incoming_priority > existing_priority
                     or (refresh and incoming_priority >= existing_priority)
@@ -374,46 +299,24 @@ class ConflictStore:
                             conflict_type=?, conflict_point=?, reason=?,
                             winner_id=?, suggested_winner=?, confidence_hint=?,
                             source=?, left_version=?, right_version=?,
-                            left_claim_revision=?, right_claim_revision=?,
                             judgment_status=?, active_judgment_id=?,
                             resolution_kind=?, conflict_scope=?,
-                            structured_details=COALESCE(?, structured_details),
-                            scan_prompt_version=?, scan_model=?,
-                            structured_detected_at=?, scan_detected_at=?, refreshed_at=?
+                            scan_prompt_version=?, scan_model=?, refreshed_at=?
                         WHERE id=?
                         """,
                         (
                             conflict_type, conflict_point, effective_reason,
                             effective_winner, effective_winner, effective_confidence,
                             effective_source, effective_left_version, effective_right_version,
-                            effective_left_claim_revision, effective_right_claim_revision,
                             effective_judgment_status, active_judgment_id,
                             effective_resolution_kind, effective_conflict_scope,
-                            (json.dumps(structured_details, ensure_ascii=False)
-                             if structured_details is not None else None),
-                            scan_prompt_version, scan_model,
-                            effective_structured_detected_at, effective_scan_detected_at, now,
+                            scan_prompt_version, scan_model, now,
                             int(existing["id"]),
                         ),
                     )
                     if cur.rowcount == 0:
                         return {"outcome": "not_open", "conflict_id": int(existing["id"])}
                     return {"outcome": "refreshed", "conflict_id": int(existing["id"])}
-                provenance_changed = (
-                    effective_structured_detected_at != existing_row.get("structured_detected_at")
-                    or effective_scan_detected_at != existing_row.get("scan_detected_at")
-                )
-                if provenance_changed:
-                    conn.execute(
-                        "UPDATE conflicts SET structured_detected_at=?, scan_detected_at=?, "
-                        "refreshed_at=? WHERE id=?",
-                        (
-                            effective_structured_detected_at,
-                            effective_scan_detected_at,
-                            now,
-                            int(existing["id"]),
-                        ),
-                    )
                 return {"outcome": "deduped", "conflict_id": int(existing["id"])}
             cur = conn.execute(
                 """
@@ -422,10 +325,9 @@ class ConflictStore:
                     created_at, resolved_at,
                     conflict_type, conflict_point, suggested_winner,
                     confidence_hint, source,
-                    left_version, right_version, scan_prompt_version, scan_model
-                    , left_claim_revision, right_claim_revision, judgment_status,
-                    structured_details, structured_detected_at, scan_detected_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    left_version, right_version, scan_prompt_version, scan_model,
+                    judgment_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     a, b, subject, status, reason, suggested_winner,
@@ -433,10 +335,7 @@ class ConflictStore:
                     conflict_type, conflict_point, suggested_winner,
                     confidence_hint, source,
                     left_version, right_version, scan_prompt_version, scan_model,
-                    left_claim_revision, right_claim_revision, judgment_status,
-                    (json.dumps(structured_details, ensure_ascii=False)
-                     if structured_details is not None else None),
-                    structured_detected_at, scan_detected_at,
+                    judgment_status,
                 ),
             )
             return {"outcome": "inserted", "conflict_id": int(cur.lastrowid)}
@@ -483,47 +382,8 @@ class ConflictStore:
                     "WHERE c.status='not_a_conflict' AND c.left_id=? AND c.right_id=? "
                     "AND (c.left_version IS NULL OR c.left_version = (SELECT version FROM memories WHERE id=c.left_id)) "
                     "AND (c.right_version IS NULL OR c.right_version = (SELECT version FROM memories WHERE id=c.right_id)) "
-                    "AND (c.left_claim_revision IS NULL OR c.left_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.left_id)) "
-                    "AND (c.right_claim_revision IS NULL OR c.right_claim_revision = (SELECT claim_revision FROM memories WHERE id=c.right_id)) "
                     "LIMIT 1",
                     (a, b),
-                ).fetchone()
-                return row is not None
-        except sqlite3.Error:
-            return False
-
-    def is_structured_pair_closed_for_snapshot(
-        self,
-        left_id: int,
-        right_id: int,
-        left_version: int,
-        right_version: int,
-        left_claim_revision: int,
-        right_claim_revision: int,
-    ) -> bool:
-        """Whether this exact structured snapshot already received a terminal close.
-
-        Compatible/evolution judgments resolve the conflict row while the two
-        literal values remain different.  A no-op rebuild must not recreate the
-        same candidate and ring again.  Any content/entity/trust change alters a
-        version or claim revision and therefore naturally re-enables detection.
-        """
-        if not self._db_available:
-            return False
-        a, b = sorted((int(left_id), int(right_id)))
-        lv, rv = int(left_version), int(right_version)
-        lcr, rcr = int(left_claim_revision), int(right_claim_revision)
-        if a != int(left_id):
-            lv, rv = rv, lv
-            lcr, rcr = rcr, lcr
-        try:
-            with self.connection() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM conflicts WHERE left_id=? AND right_id=? "
-                    "AND status IN ('resolved','not_a_conflict') "
-                    "AND left_version=? AND right_version=? "
-                    "AND left_claim_revision=? AND right_claim_revision=? LIMIT 1",
-                    (a, b, lv, rv, lcr, rcr),
                 ).fetchone()
                 return row is not None
         except sqlite3.Error:
@@ -563,9 +423,7 @@ class ConflictStore:
                     "WHERE status='not_a_conflict' "
                     f"AND (left_id IN ({ph}) OR right_id IN ({ph})) "
                     "AND (left_version IS NULL OR left_version = (SELECT version FROM memories WHERE id=conflicts.left_id)) "
-                    "AND (right_version IS NULL OR right_version = (SELECT version FROM memories WHERE id=conflicts.right_id)) "
-                    "AND (left_claim_revision IS NULL OR left_claim_revision = (SELECT claim_revision FROM memories WHERE id=conflicts.left_id)) "
-                    "AND (right_claim_revision IS NULL OR right_claim_revision = (SELECT claim_revision FROM memories WHERE id=conflicts.right_id))",
+                    "AND (right_version IS NULL OR right_version = (SELECT version FROM memories WHERE id=conflicts.right_id))",
                     (*ids, *ids),
                 ).fetchall()
                 for r in rows:

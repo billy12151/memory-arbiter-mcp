@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 class LocalTextIndexWorker:
-    """Coalescing vNext evidence-index worker keyed by memory id."""
+    """Coalescing evidence-index worker keyed by memory id."""
 
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
@@ -24,12 +24,9 @@ class LocalTextIndexWorker:
         self._last_error: Optional[str] = None
 
     def start(self) -> None:
-        if self._tools._vnext_storage_enabled():
-            self._ensure_thread()
+        self._ensure_thread()
 
     def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
-        if not self._tools._vnext_storage_enabled():
-            return {"status": "skipped", "reason": "legacy_storage_profile"}
         with self._cond:
             if self._shutdown:
                 return {"status": "shutdown"}
@@ -106,104 +103,6 @@ class LocalTextIndexWorker:
                     self._cond.notify_all()
 
 
-class SplitReindexWorker:
-    def __init__(self, tools: "MemoryTools"):
-        self._tools = tools
-        self._pending: dict[int, dict[str, Any]] = {}
-        self._inflight: set[int] = set()
-        self._cond = threading.Condition()
-        self._thread: Optional[threading.Thread] = None
-        self._lock = threading.RLock()
-
-    def start(self) -> None:
-        self._ensure_thread()
-
-    def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> None:
-        with self._cond:
-            self._pending[int(memory_id)] = snapshot
-            self._cond.notify_all()
-        self._ensure_thread()
-
-    def pending_ids(self) -> list[int]:
-        with self._cond:
-            return sorted(set(self._pending.keys()) | self._inflight)
-
-    def wait_drained(self, timeout: float = 5.0) -> bool:
-        deadline = time.monotonic() + timeout
-        with self._cond:
-            while self._pending or self._inflight:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._cond.wait(remaining)
-            return True
-
-    def _ensure_thread(self) -> None:
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._thread = threading.Thread(
-                target=self._run,
-                name="memory-arbiter-split-reindex",
-                daemon=True,
-            )
-            self._thread.start()
-
-    def _run(self) -> None:
-        while True:
-            with self._cond:
-                while not self._pending:
-                    self._cond.wait()
-                memory_id = next(iter(self._pending))
-                snapshot = self._pending.pop(memory_id)
-                self._inflight.add(memory_id)
-            try:
-                self._process_one(memory_id, snapshot)
-            except Exception as exc:
-                self._mark_failed_from_snapshot(snapshot, "worker", str(exc))
-            finally:
-                with self._cond:
-                    self._inflight.discard(memory_id)
-                    self._cond.notify_all()
-
-    def _process_one(self, memory_id: int, snapshot: dict[str, Any]) -> None:
-        plan = snapshot.get("plan") or []
-        if not plan:
-            return
-        result = self._tools._publish_sections(
-            memory_id,
-            str(snapshot.get("content") or ""),
-            plan,
-            str(snapshot.get("content_hash") or ""),
-            int(snapshot.get("memory_version") or 1),
-            snapshot.get("split_status"),
-            int(snapshot.get("split_revision") or 0),
-            decision_kind="split",
-            provenance="parser",
-        )
-        if not result.get("ok"):
-            error = (result.get("data") or {}).get("error")
-            if error and error not in {"memory_changed", "split_revision_conflict", "vec_space_changed"}:
-                self._mark_failed_from_snapshot(snapshot, "publish", str(error))
-
-    def _mark_failed_from_snapshot(self, snapshot: dict[str, Any], stage: str, message: str) -> None:
-        try:
-            memory_id = snapshot.get("memory_id")
-            if memory_id is None:
-                raise ValueError("missing memory_id")
-            self._tools._mark_split_failed(
-                int(memory_id),
-                str(snapshot.get("content_hash") or ""),
-                int(snapshot.get("memory_version") or 1),
-                int(snapshot.get("split_revision") or 0),
-                snapshot.get("split_status"),
-                stage,
-                message,
-            )
-        except Exception:
-            pass
-
-
 class SemanticConflictWorker:
     def __init__(self, tools: "MemoryTools"):
         self._tools = tools
@@ -221,20 +120,7 @@ class SemanticConflictWorker:
         self._skipped = 0
 
     def start(self) -> None:
-        if (
-            not self._tools.settings.semantic_conflict_enabled
-            and not self._tools._vnext_storage_enabled()
-        ):
-            return
-        # When on_write is "off", writes never enqueue (see _enqueue_semantic_conflict_check),
-        # so spinning up the worker thread and preloading the model would just burn
-        # resources for a queue that stays empty. Treat "off" like config-disabled here;
-        # resume()/enable_runtime() can still revive the worker if the caller flips
-        # on_write at runtime later and re-enqueues.
-        if (
-            getattr(self._tools.settings, "semantic_conflict_on_write", "async") == "off"
-            and not self._tools._vnext_storage_enabled()
-        ):
+        if self._tools.settings.semantic_conflict_on_write == "off":
             return
         self._ensure_thread()
         if self._tools.settings.semantic_conflict_preload:
@@ -253,11 +139,6 @@ class SemanticConflictWorker:
             self.set_error(str(exc))
 
     def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
-        if (
-            not self._tools.settings.semantic_conflict_enabled
-            and not self._tools._vnext_storage_enabled()
-        ):
-            return {"status": "disabled"}
         with self._cond:
             if self._shutdown:
                 return {"status": "shutdown"}
@@ -275,19 +156,9 @@ class SemanticConflictWorker:
 
     def status(self) -> dict[str, Any]:
         with self._cond:
-            if (
-                not self._tools.settings.semantic_conflict_enabled
-                and not self._tools._vnext_storage_enabled()
-            ):
-                state = "config_disabled"
-            elif self._shutdown:
+            if self._shutdown:
                 state = "shutdown"
-            elif (
-                getattr(self._tools.settings, "semantic_conflict_on_write", "async") == "off"
-                and not self._tools._vnext_storage_enabled()
-            ):
-                # enabled but on_write=off: writes never enqueue and start() does
-                # not spin up the thread, so report disabled rather than "running".
+            elif self._tools.settings.semantic_conflict_on_write == "off":
                 state = "on_write_off"
             elif self._runtime_disabled:
                 state = "disabled"

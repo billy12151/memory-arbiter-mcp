@@ -1,7 +1,8 @@
-"""Side-by-side vNext database builder and verifier."""
+"""Build and verify a clean side-by-side local-text evidence database."""
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -18,236 +19,217 @@ from .evidence import local_text_units
 from .tools import MemoryTools
 
 
+PRESERVED_TABLES = (
+    "memories", "memory_history", "conflicts", "conflict_judgments",
+    "semantic_notices", "workspace_canonicals", "workspace_aliases",
+    "workspace_alias_events", "backup_replay_log",
+)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
+def _counts_on_connection(conn: sqlite3.Connection) -> dict[str, int]:
+    return {
+        table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        if _table_exists(conn, table) else 0
+        for table in PRESERVED_TABLES
+    }
+
+
+def _counts(path: Path) -> dict[str, int]:
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        return _counts_on_connection(conn)
+
+
 def _fingerprint(path: Path) -> dict[str, Any]:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         digest = hashlib.sha256()
-        memory_count = 0
+        count = 0
         for row in conn.execute(
             "SELECT id,version,status,content,subject,tags,workspace,workspace_canonical "
             "FROM memories ORDER BY id"
         ):
-            memory_count += 1
-            digest.update(json.dumps(dict(row), ensure_ascii=False, sort_keys=True).encode("utf-8"))
+            count += 1
+            digest.update(json.dumps(dict(row), ensure_ascii=False, sort_keys=True).encode())
             digest.update(b"\n")
-        table_counts = _counts_on_connection(conn)
-        return {"memory_count": memory_count, "memory_digest": digest.hexdigest(), "counts": table_counts}
-    finally:
-        conn.close()
-
-
-def _counts_on_connection(conn: sqlite3.Connection) -> dict[str, int]:
-    result: dict[str, int] = {}
-    for table in (
-        "memories", "memory_history", "conflicts", "conflict_judgments",
-        "semantic_notices", "workspace_canonicals", "workspace_aliases",
-        "workspace_alias_events", "backup_replay_log", "memory_sections",
-    ):
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
-        result[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) if exists else 0
-    return result
-
-
-def _counts(path: Path) -> dict[str, int]:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        return _counts_on_connection(conn)
+        return {"memory_count": count, "memory_digest": digest.hexdigest()}
     finally:
         conn.close()
 
 
 def inspect(source: Path, target: Path) -> dict[str, Any]:
-    counts = _counts(source)
     conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            "SELECT subject,content FROM memories WHERE status!='deleted'"
-        ).fetchall()
-        evidence_units = sum(
+        units = sum(
             len(local_text_units(str(row["subject"] or ""), str(row["content"] or "")))
-            for row in rows
+            for row in conn.execute("SELECT subject,content FROM memories WHERE status!='deleted'")
         )
     finally:
         conn.close()
-    estimated_vector_bytes = evidence_units * 768 * 4
+    vector_bytes = units * 768 * 4
     free_bytes = shutil.disk_usage(target.parent).free
-    required_bytes = source.stat().st_size + estimated_vector_bytes * 2 + 64 * 1024 * 1024
+    required = source.stat().st_size + vector_bytes * 2 + 64 * 1024 * 1024
     return {
-        "source": str(source),
-        "target": str(target),
-        "source_bytes": source.stat().st_size,
-        "counts": counts,
-        "estimated_evidence_units": evidence_units,
-        "estimated_vector_bytes": estimated_vector_bytes,
-        "free_bytes": free_bytes,
-        "required_bytes": required_bytes,
-        "disk_ok": free_bytes >= required_bytes,
-        "target_exists": target.exists(),
+        "source": str(source), "target": str(target),
+        "source_bytes": source.stat().st_size, "counts": _counts(source),
+        "estimated_evidence_units": units,
+        "estimated_vector_bytes": vector_bytes,
+        "free_bytes": free_bytes, "required_bytes": required,
+        "disk_ok": free_bytes >= required, "target_exists": target.exists(),
     }
 
 
-def _snapshot(source: Path, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
+def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def _copy_preserved_tables(source: Path, db: MemoryDB) -> None:
     src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
-    dst = sqlite3.connect(target)
+    src.row_factory = sqlite3.Row
     try:
-        src.backup(dst, pages=256)
-        dst.commit()
+        with db.write_transaction() as dst:
+            dst.execute("PRAGMA defer_foreign_keys=ON")
+            for table in PRESERVED_TABLES:
+                if not _table_exists(src, table):
+                    continue
+                common = [name for name in _columns(dst, table) if name in _columns(src, table)]
+                if not common:
+                    continue
+                quoted = ",".join(f'"{name}"' for name in common)
+                rows = src.execute(f"SELECT {quoted} FROM {table}").fetchall()
+                if not rows:
+                    continue
+                placeholders = ",".join("?" for _ in common)
+                dst.executemany(
+                    f"INSERT INTO {table}({quoted}) VALUES({placeholders})",
+                    [tuple(row[name] for name in common) for row in rows],
+                )
     finally:
-        dst.close()
         src.close()
 
 
-def _set_migration_state(db: MemoryDB, values: dict[str, str]) -> None:
+def _set_state(db: MemoryDB, values: dict[str, str]) -> None:
     with db.write_transaction() as conn:
         for key, value in values.items():
             conn.execute(
-                "INSERT INTO migration_state(key,value,updated_at) VALUES (?,?,CURRENT_TIMESTAMP) "
+                "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
                 (key, value),
             )
 
 
-def _checkpoint_for_switch(path: Path) -> None:
-    conn = sqlite3.connect(path)
+def _checkpoint(path: Path) -> bool:
+    def connect() -> sqlite3.Connection:
+        conn = sqlite3.connect(path)
+        try:
+            import sqlite_vec  # type: ignore[import-untyped]
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except (ImportError, sqlite3.Error):
+            pass
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
     try:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.execute("PRAGMA journal_mode=DELETE")
-        conn.commit()
-    finally:
-        conn.close()
+        with connect() as conn:
+            result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            conn.commit()
+        # SQLite returns (busy, log, checkpointed). A zero busy count proves all
+        # committed WAL frames are in the main database file.
+        return result is not None and int(result[0]) == 0
+    except sqlite3.Error:
+        return False
 
 
 def _remove_sidecars(path: Path) -> None:
     for suffix in ("-wal", "-shm"):
-        sidecar = Path(str(path) + suffix)
-        if sidecar.exists():
-            sidecar.unlink()
+        candidate = Path(str(path) + suffix)
+        if candidate.exists():
+            candidate.unlink()
 
 
-def _drop_retired_vector_tables(db: MemoryDB) -> None:
-    with db.write_transaction() as conn:
-        conn.execute("DROP TABLE IF EXISTS memories_vec")
-        conn.execute("DROP TABLE IF EXISTS memory_sections_vec")
-
-
-def build(
-    source: Path,
-    target: Path,
-    settings: Settings,
-    *,
-    resume: bool = False,
-    progress: bool = True,
-) -> dict[str, Any]:
+def build(source: Path, target: Path, settings: Settings, *, resume: bool = False, progress: bool = True) -> dict[str, Any]:
     plan = inspect(source, target)
     if not plan["disk_ok"]:
         return {"ok": False, "error": "insufficient_disk_space", "plan": plan}
     if target.exists() and not resume:
         return {"ok": False, "error": "target_exists_use_resume_or_new_path", "plan": plan}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target_settings = replace(settings, db_path=target, semantic_conflict_on_write="off")
     if not target.exists():
-        _snapshot(source, target)
-
-    target_settings = replace(
-        settings,
-        db_path=target,
-        storage_profile="vnext",
-        structured_claim_mode="off",
-        semantic_conflict_on_write="off",
-    )
-    db = MemoryDB(target_settings)
+        db = MemoryDB(target_settings)
+        os.chmod(target, 0o600)
+        _copy_preserved_tables(source, db)
+        with db.connection() as conn:
+            db.schema._rebuild_fts(conn)
+    else:
+        db = MemoryDB(target_settings)
     tools = MemoryTools(settings=target_settings, db=db)
-    _set_migration_state(db, {
-        "phase": "backfill",
-        "source_path": str(source),
-        "source_size": str(source.stat().st_size),
-    })
+    _set_state(db, {"phase": "backfill", "source_path": str(source)})
     with db.connection() as conn:
-        cursor_row = conn.execute(
-            "SELECT value FROM migration_state WHERE key='cursor_memory_id'"
-        ).fetchone()
+        cursor_row = conn.execute("SELECT value FROM migration_state WHERE key='cursor_memory_id'").fetchone()
         cursor = int(cursor_row["value"]) if cursor_row else 0
-        rows = conn.execute(
-            "SELECT * FROM memories WHERE id>? AND status!='deleted' ORDER BY id", (cursor,)
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM memories WHERE id>? AND status!='deleted' ORDER BY id", (cursor,)).fetchall()
     failed: list[dict[str, Any]] = []
     indexed = 0
     for row in rows:
         memory = dict(row)
         result = tools._index_local_text_evidence(int(memory["id"]), memory)
-        if result.get("status") == "indexed":
-            indexed += 1
-            _set_migration_state(db, {"cursor_memory_id": str(memory["id"])})
-        else:
+        if result.get("status") != "indexed":
             failed.append({"memory_id": int(memory["id"]), "result": result})
-        if progress and (indexed % 25 == 0 or failed):
-            print(
-                json.dumps({"indexed": indexed, "remaining": len(rows) - indexed, "failed": len(failed)}),
-                file=sys.stderr,
-                flush=True,
-            )
-        if failed:
             break
+        indexed += 1
+        _set_state(db, {"cursor_memory_id": str(memory["id"])})
+        if progress and indexed % 25 == 0:
+            print(json.dumps({"indexed": indexed, "remaining": len(rows) - indexed}), file=sys.stderr, flush=True)
 
     coverage = db.evidence.coverage()
-    source_counts = _counts(source)
-    target_counts = _counts(target)
-    source_fingerprint = _fingerprint(source)
-    target_fingerprint = _fingerprint(target)
-    row_counts_match = all(
-        source_counts.get(table, 0) == target_counts.get(table, 0)
-        for table in (
-            "memories", "memory_history", "conflicts", "conflict_judgments",
-            "semantic_notices", "workspace_canonicals", "workspace_aliases",
-            "workspace_alias_events", "backup_replay_log", "memory_sections",
-        )
-    )
-    source_stable = source_fingerprint == target_fingerprint
-    complete = (
-        not failed
-        and coverage["indexed_memories"] == coverage["eligible_memories"]
-        and row_counts_match
-        and source_stable
-    )
-    if complete:
-        _drop_retired_vector_tables(db)
-    _set_migration_state(db, {
+    source_counts, target_counts = _counts(source), _counts(target)
+    row_counts_match = source_counts == target_counts
+    source_fp, target_fp = _fingerprint(source), _fingerprint(target)
+    source_stable = source_fp == target_fp
+    complete = not failed and coverage["indexed_memories"] == coverage["eligible_memories"] and row_counts_match and source_stable
+    _set_state(db, {
         "phase": "ready" if complete else "failed",
-        "row_counts_match": "true" if row_counts_match else "false",
+        "row_counts_match": str(row_counts_match).lower(),
         "evidence_coverage": f"{coverage['indexed_memories']}/{coverage['eligible_memories']}",
-        "failed_count": str(len(failed)),
-        "source_stable": "true" if source_stable else "false",
+        "failed_count": str(len(failed)), "source_stable": str(source_stable).lower(),
     })
+    switch_ready = False
+    if complete:
+        del tools
+        del db
+        gc.collect()
+        switch_ready = _checkpoint(target)
+        if switch_ready:
+            _remove_sidecars(target)
+        os.chmod(target, 0o600)
     return {
-        "ok": complete,
-        "target": str(target),
-        "indexed": indexed,
-        "coverage": coverage,
-        "row_counts_match": row_counts_match,
-        "source_stable": source_stable,
-        "source_fingerprint": source_fingerprint,
-        "target_fingerprint": target_fingerprint,
-        "failed": failed,
-        "next_step": (
-            "freeze writes, rerun with --resume for final sync, verify, then switch db_path and storage_profile=vnext"
-            if complete else "fix failures and rerun with --resume"
-        ),
+        "ok": complete, "target": str(target), "indexed": indexed,
+        "coverage": coverage, "row_counts_match": row_counts_match,
+        "source_stable": source_stable, "source_fingerprint": source_fp,
+        "target_fingerprint": target_fp, "failed": failed,
+        "switch_ready": switch_ready,
+        "next_step": "freeze writes and run --final-sync before switching db_path" if complete else "fix failures and rerun with --resume",
     }
 
 
 def run_cli(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build a side-by-side vNext Memory Arbiter database.")
+    parser = argparse.ArgumentParser(description="Build a clean side-by-side Memory Arbiter database.")
     parser.add_argument("--source", type=Path)
     parser.add_argument("--target", type=Path)
-    parser.add_argument("--execute", action="store_true", help="Build the target; default is dry-run.")
+    parser.add_argument("--execute", action="store_true")
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument(
-        "--final-sync", action="store_true",
-        help="Build from a fresh source snapshot into staging and atomically replace the target. Stop writers first.",
-    )
+    parser.add_argument("--final-sync", action="store_true", help="Stop writers first; rebuild staging and atomically replace target.")
     args = parser.parse_args(argv)
     settings = Settings.from_env()
     source = (args.source or settings.db_path).expanduser().resolve()
@@ -255,22 +237,21 @@ def run_cli(argv: list[str] | None = None) -> int:
     if not source.exists():
         print(json.dumps({"ok": False, "error": "source_not_found", "source": str(source)}))
         return 2
-    plan = inspect(source, target)
     if not args.execute:
-        print(json.dumps({"ok": True, "dry_run": True, "plan": plan}, ensure_ascii=False, indent=2))
+        print(json.dumps({"ok": True, "dry_run": True, "plan": inspect(source, target)}, ensure_ascii=False, indent=2))
         return 0
     if args.final_sync:
         staging = target.with_name(target.name + ".finalizing")
         if staging.exists():
             staging.unlink()
-        result = build(source, staging, settings, resume=False)
+        _remove_sidecars(staging)
+        result = build(source, staging, settings)
         if result.get("ok"):
-            _checkpoint_for_switch(staging)
+            _checkpoint(staging)
             _remove_sidecars(target)
             os.replace(staging, target)
             _remove_sidecars(staging)
-            result["target"] = str(target)
-            result["final_sync"] = True
+            result.update({"target": str(target), "final_sync": True})
         else:
             result["staging"] = str(staging)
     else:

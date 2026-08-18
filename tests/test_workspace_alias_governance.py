@@ -416,6 +416,7 @@ def test_confirm_pending_does_not_embed_canonical(monkeypatch, tmp_path):
     t.db.state.sqlite_vec_available = True
     w = t.memory_write(content="embed order", workspace="SlowWS", source_type="agent_generated", subject="test")
     mid = w["data"]["id"]
+    assert t.wait_evidence_worker_drained(timeout=2)
     in_write_txn = {"value": False}
     calls = []
     original_write_transaction = t.db.write_transaction
@@ -815,5 +816,4 @@ def test_confirmed_alias_vector_backfill_failure_surfaces_pending_retry(tmp_path
         "workspace canonical vector publish failed for 'Retry Canonical'" in warning
         for warning in result["warnings"]
     )
-
 

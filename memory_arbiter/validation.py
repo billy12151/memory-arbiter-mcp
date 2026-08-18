@@ -46,7 +46,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "query_embedding", "tags_filter", "after_time", "before_time",
         "source_type", "include_linked_open_items", "include_conflict_signal",
     },
-    ("memory", "read"): {"id", "memory_id", "sections", "section_ids", "workspace"},
+    ("memory", "read"): {"id", "memory_id", "workspace"},
     ("memory", "update"): {
         "id", "memory_id", "new_content", "old_text", "new_text", "new_subject",
         "new_tags", "reason", "authorized", "tags_only", "add_tags", "remove_tags",
@@ -54,7 +54,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     },
     ("memory", "judge"): {
         "id", "conflict_id", "expected_left_version", "expected_right_version",
-        "expected_left_claim_revision", "expected_right_claim_revision", "verdict",
+        "verdict",
         "recommended_use", "suggested_winner", "confidence_hint", "reason",
         "affects_current_output", "usage_context", "judge_ref", "resolution_kind",
         "conflict_scope", "workspace",
@@ -79,7 +79,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_govern", "correct_judgment"): {
         "id", "conflict_id", "verdict", "recommended_use", "suggested_winner", "reason",
         "expected_judgment_id", "expected_left_version", "expected_right_version",
-        "expected_left_claim_revision", "expected_right_claim_revision", "authorized",
+        "authorized",
         "judge_ref", "resolution_kind", "conflict_scope", "workspace",
     },
     ("memory_govern", "accept_workspace_alias"): {"alias", "canonical", "relation", "reason", "source", "authorized"},
@@ -88,16 +88,8 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_govern", "migrate_workspace"): {"from", "to", "reason", "authorized"},
     ("memory_govern", "confirm_pending_workspace"): {"id", "memory_id", "canonical", "reason", "authorized", "workspace"},
     ("memory_govern", "help"): {"topic", "action"},
-    ("memory_repair", "split"): {
-        "id", "memory_id", "split_decision", "decision_content_hash",
-        "decision_memory_version", "decision_split_status", "decision_split_revision",
-        "sections", "workspace",
-    },
-    ("memory_repair", "rebuild_claims"): {"memory_ids", "dry_run", "batch_size", "workspace"},
-    ("memory_repair", "rebuild_embeddings"): {"memory_ids", "dry_run", "batch_size", "workspace"},
+    ("memory_repair", "rebuild_evidence"): {"memory_ids", "dry_run", "batch_size", "workspace"},
     ("memory_repair", "cleanup_history"): {"id", "memory_id", "older_than_days", "authorized", "workspace"},
-    ("memory_repair", "cleanup_vectors"): {"dry_run", "authorized", "workspace"},
-    ("memory_repair", "resync_vectors"): {"dry_run", "authorized", "workspace"},
     ("memory_repair", "set_entity"): {"id", "memory_id", "entity", "scope", "clear", "authorized", "workspace"},
     ("memory_repair", "activate_pending"): {"id", "memory_id", "authorized", "workspace"},
     ("memory_repair", "semantic_control"): {"action", "timeout", "workspace"},
@@ -285,10 +277,6 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         "expected_judgment_id": (1, MAX_REVISION),
         "expected_left_version": (1, MAX_REVISION),
         "expected_right_version": (1, MAX_REVISION),
-        "expected_left_claim_revision": (0, MAX_REVISION),
-        "expected_right_claim_revision": (0, MAX_REVISION),
-        "decision_memory_version": (1, MAX_REVISION),
-        "decision_split_revision": (0, MAX_REVISION),
     }
     for key, (minimum, maximum) in integer_limits.items():
         if key not in payload or payload[key] is None:

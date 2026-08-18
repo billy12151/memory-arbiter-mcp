@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "memory-arbiter-mcp"
 dynamic = ["version"]
-description = "Local MCP memory arbiter with dual timeline conflict handling."
+description = "Local MCP memory with evidence-based recall and explicit conflict governance."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

@@ -241,7 +241,7 @@ class WorkspaceStore:
                         # Full-scan cosine (not MATCH/L2): the canonical table is
                         # tiny (one row per project) and embeddinggemma vectors are
                         # unnormalized, so cosine is the scale-invariant choice —
-                        # mirrors section_vec_distance_match.
+                        # sqlite-vec returns cosine distance for this index.
                         rows = conn.execute(
                             """SELECT c.name AS name,
                                       vec_distance_cosine(v.embedding, ?) AS distance
@@ -831,8 +831,7 @@ class WorkspaceStore:
         """Directly set a memory's workspace_canonical column.
 
         update_memory() intentionally whitelists only trust/status/metadata
-        fields (and bumps claim_revision on those), so it silently drops a
-        workspace_canonical write. This helper writes the column directly and
+        fields, so it silently drops a workspace_canonical write. This helper writes the column directly and
         registers the canonical in workspace_canonicals — AND its vector row when
         an embedder + sqlite-vec are available — so the resolver's KNN can later
         fuzzy-match this canonical instead of re-splitting it into a sibling.

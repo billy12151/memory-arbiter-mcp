@@ -349,14 +349,13 @@ def test_memory_edit_tags_only_removes_from_linked(tmp_path: Path) -> None:
 
 
 def test_memory_edit_tags_only_preserves_content(tmp_path: Path) -> None:
-    """tags-only edit must not alter content/subject/sections/split_status."""
+    """tags-only edit must not alter content or subject."""
     tools = _tools(tmp_path)
     mem_id = _write(tools, content="body text here", subject="s", tags=["todo"])
     tools.memory_edit(memory_id=mem_id, tags_only=True, remove_tags=["todo"])
     mem = tools.db.get_memory(mem_id)
     assert mem["content"] == "body text here"
     assert mem["subject"] == "s"
-    assert mem["split_status"] is None
 
 
 def test_memory_edit_tags_only_add_tags(tmp_path: Path) -> None:
@@ -478,37 +477,25 @@ def test_linked_open_items_duplicate_tag_no_inflation(tmp_path: Path) -> None:
     assert by_id[dup_id]["reason"] == by_id[single_id]["reason"]
 
 
-def test_server_wrapper_passes_include_linked_open_items(tmp_path: Path) -> None:
-    """Design item 17: include_linked_open_items must travel through the MCP
-    server wrapper (@app.tool()), not just when calling tools.* directly.
-
-    Builds the real FastMCP server, extracts the registered memory_search tool
-    function, and calls it with include_linked_open_items=False/True to confirm
-    the param reaches the search layer.
-    """
+def test_product_server_exposes_linked_open_items_option(tmp_path: Path) -> None:
     from unittest.mock import patch
     from memory_arbiter import server as srv
 
     settings = Settings(
         db_path=tmp_path / "m.sqlite3", backup_jsonl=tmp_path / "b.jsonl",
         client="test", agent_id="tester", workspace="ws", enable_sqlite_vec=False,
-        update_check_enabled=False, tool_profile="legacy_full",
+        update_check_enabled=False,
     )
     with patch("memory_arbiter.server.Settings.from_env", return_value=settings):
-        app = srv.build_server()
+        bundle = srv.build_runtime()
+        app = bundle.app
     tools_reg = app._tool_manager._tools  # type: ignore[attr-defined]
-    search_fn = tools_reg["memory_search"].fn
-    # Signature exposes the param.
-    import inspect
-    assert "include_linked_open_items" in str(inspect.signature(search_fn))
-    # Seed data: a doc plus a linked todo sharing a distinctive tag.
-    my_tools = MemoryTools(settings=settings, db=MemoryDB(settings))
-    my_tools.memory_write(content="probe doc", subject="probe", tags=["solo"],
-                          workspace="ws", source_type="agent_generated", agent_id="t")
-    my_tools.memory_write(content="reminder", subject="td", tags=["todo", "solo"],
-                          workspace="ws", source_type="agent_generated", agent_id="t")
-    disabled = search_fn(query="probe", include_linked_open_items=False)
-    enabled = search_fn(query="probe", include_linked_open_items=True)
+    assert set(tools_reg) == {"memory", "memory_review", "memory_govern", "memory_repair"}
+    find = tools_reg["memory"].fn
+    bundle.tools.memory_write(content="probe doc", subject="probe", tags=["solo"], workspace="ws")
+    bundle.tools.memory_write(content="reminder", subject="td", tags=["todo", "solo"], workspace="ws")
+    disabled = find(action="find", data={"query": "probe", "include_linked_open_items": False})
+    enabled = find(action="find", data={"query": "probe", "include_linked_open_items": True})
     assert disabled["data"]["linked_open_items"] == []
-    assert len(enabled["data"]["linked_open_items"]) == 1
-
+    assert enabled["data"]["linked_open_items"]
+    bundle.tools.shutdown(timeout=1)

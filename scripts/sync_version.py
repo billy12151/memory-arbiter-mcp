@@ -100,13 +100,17 @@ def main() -> int:
     args = parser.parse_args()
 
     version = read_authoritative_version()
+    development_version = ".dev" in version
     if not args.check:
+        if development_version:
+            print(f"development version {version}: release manifests unchanged")
+            return 0
         sync_server_json(version, check=False)
         return 0
 
     checks = (
-        sync_server_json(version, check=True),
-        check_changelog(version),
+        True if development_version else sync_server_json(version, check=True),
+        True if development_version else check_changelog(version),
         check_uv_lock(version),
     )
     if all(checks):

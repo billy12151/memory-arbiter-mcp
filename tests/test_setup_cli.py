@@ -61,10 +61,7 @@ def test_config_template_has_required_fields():
     assert cfg["embedding"]["provider"] == "gguf"
     assert cfg["embedding"]["auto_query"] is True
     assert cfg["embedding"]["auto_write"] is True
-    # split section defaults mirror id=271 decision (v0.8 vec-bound split).
-    assert cfg["split"]["threshold"] == 4000
-    assert cfg["split"]["section_vec_distance_threshold"] == 0.42
-    assert cfg["split"]["max_sections"] == 50
+    assert cfg["embedding"]["max_unit_chars"] == 3600
     # Paths must be absolute strings (no ~ left over).
     assert cfg["embedding"]["model_path"] == "/tmp/model.gguf"
     assert cfg["db_path"] == "/tmp/db.sqlite3"
@@ -78,7 +75,7 @@ def test_config_template_has_no_readme_tutorial():
         backup_jsonl=Path("/tmp/b.jsonl"),
     )
     assert "_readme" not in cfg
-    assert "_readme" not in cfg["split"]
+    assert "_readme" not in cfg["embedding"]
 
 
 # ---------------------------------------------------------------------

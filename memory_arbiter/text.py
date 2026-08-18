@@ -2,7 +2,7 @@
 
 Phase 1 (v0.12.4) consolidation. This module owns the ONE implementation of
 text helpers that were previously duplicated across ``db.py``, ``search.py``,
-``anchors.py``, and ``claims.py``. Original locations keep re-export aliases so
+``anchors.py`` and persistence/search modules. Original locations keep re-export aliases so
 existing imports (and tests that import private names) keep working.
 
 CJK: TWO constants are kept deliberately (R11 / test_cjk_characterization.py):
@@ -119,7 +119,7 @@ def subject_tokens(subject: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Canonicalisation (entity/scope) — mirrors claims.py semantics
+# Canonicalisation for optional entity/scope metadata.
 # ---------------------------------------------------------------------------
 
 def canon_token(value: Any) -> str:
