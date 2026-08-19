@@ -23,7 +23,8 @@ def _agent_onboarding_guide() -> str:
             "mema / Memory Arbiter: use MCP tools for memory operations and governance. "
             "Use memory(action='remember'|'find'|'read'|'update'|'judge'), memory_review for read-only inspection, "
             "memory_govern only for explicit user-authorized governance, and memory_repair for maintenance. "
-            "Do not infer conflicts away; if a response says attention_required or action_required=judge_conflict_before_use, handle it before relying on the memory."
+            "Do not infer conflicts away; if a response says attention_required or action_required "
+            "(e.g. read_semantic_notice, ask_user_for_authorization, confirm_new_workspace), handle it before relying on the memory."
         )
 
 

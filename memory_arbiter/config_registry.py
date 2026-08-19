@@ -32,6 +32,7 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.model_path", "semantic", "semantic_conflict_model_path"),
     _item("semantic_conflict.n_ctx", "semantic", "semantic_conflict_n_ctx", 1024),
     _item("semantic_conflict.job_timeout_ms", "semantic", "semantic_conflict_job_timeout_ms", 5000),
+    _item("semantic_conflict.max_notice_pairs", "semantic", "semantic_conflict_max_notice_pairs", 2),
     _item("isolation", "workspace", default="none"), _item("workspace_match_distance", "workspace", default=0.25),
 ]
 
