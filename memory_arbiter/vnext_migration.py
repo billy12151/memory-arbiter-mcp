@@ -15,6 +15,7 @@ from typing import Any
 
 from .config import Settings
 from .db import MemoryDB
+from .db_generation import CURRENT_SCHEMA_GENERATION
 from .evidence import local_text_units
 from .tools import MemoryTools
 
@@ -157,6 +158,29 @@ def _remove_sidecars(path: Path) -> None:
             candidate.unlink()
 
 
+def _target_owned_by_source(target: Path, source: Path) -> bool:
+    """Whether an existing migration artifact was built from this source."""
+    if not target.exists():
+        return True
+    try:
+        conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT value FROM migration_state WHERE key='source_path'"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    try:
+        recorded = Path(str(row[0])).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return recorded == source.expanduser().resolve()
+
+
 def build(source: Path, target: Path, settings: Settings, *, resume: bool = False, progress: bool = True) -> dict[str, Any]:
     plan = inspect(source, target, settings)
     if not plan["disk_ok"]:
@@ -199,6 +223,7 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     source_stable = source_fp == target_fp
     complete = not failed and coverage["indexed_memories"] == coverage["eligible_memories"] and row_counts_match and source_stable
     _set_state(db, {
+        "schema_generation": CURRENT_SCHEMA_GENERATION,
         "phase": "ready" if complete else "failed",
         "row_counts_match": str(row_counts_match).lower(),
         "evidence_coverage": f"{coverage['indexed_memories']}/{coverage['eligible_memories']}",
@@ -223,6 +248,57 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     }
 
 
+def final_sync(
+    source: Path,
+    target: Path,
+    settings: Settings,
+    *,
+    progress: bool = True,
+) -> dict[str, Any]:
+    """Build verified staging and atomically replace the side-by-side target."""
+    if target.exists() and not _target_owned_by_source(target, source):
+        return {
+            "ok": False,
+            "error": "existing_target_not_owned_by_source",
+            "source": str(source),
+            "target": str(target),
+        }
+    staging = target.with_name(target.name + ".finalizing")
+    if staging.exists():
+        if not _target_owned_by_source(staging, source):
+            return {
+                "ok": False,
+                "error": "existing_staging_not_owned_by_source",
+                "source": str(source),
+                "staging": str(staging),
+            }
+        staging.unlink()
+    _remove_sidecars(staging)
+    result = build(source, staging, settings, progress=progress)
+    if not result.get("ok"):
+        result["staging"] = str(staging)
+        return result
+    if not result.get("switch_ready"):
+        result.update({
+            "ok": False,
+            "error": "staging_not_switch_ready",
+            "staging": str(staging),
+        })
+        return result
+    _remove_sidecars(target)
+    os.replace(staging, target)
+    _remove_sidecars(staging)
+    result.update({
+        "target": str(target),
+        "final_sync": True,
+        "next_step": (
+            "verify the target in normal use, then switch db_path; "
+            "keep the source for rollback"
+        ),
+    })
+    return result
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build a clean side-by-side Memory Arbiter database.")
     parser.add_argument("--source", type=Path)
@@ -241,23 +317,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": True, "dry_run": True, "plan": inspect(source, target, settings)}, ensure_ascii=False, indent=2))
         return 0
     if args.final_sync:
-        staging = target.with_name(target.name + ".finalizing")
-        if staging.exists():
-            staging.unlink()
-        _remove_sidecars(staging)
-        result = build(source, staging, settings)
-        if result.get("ok"):
-            _checkpoint(staging)
-            _remove_sidecars(target)
-            os.replace(staging, target)
-            _remove_sidecars(staging)
-            result.update({
-                "target": str(target),
-                "final_sync": True,
-                "next_step": "verify the target in normal use, then switch db_path; keep the source for rollback",
-            })
-        else:
-            result["staging"] = str(staging)
+        result = final_sync(source, target, settings)
     else:
         result = build(source, target, settings, resume=args.resume)
     print(json.dumps(result, ensure_ascii=False, indent=2))

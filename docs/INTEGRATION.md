@@ -42,28 +42,25 @@ Use side-by-side migration for historical databases. Stop writers before `--fina
 
 The current runtime expects the local-text evidence schema. An existing database is not upgraded in place because its derived claim, memory-vector, and section-vector state belongs to a different lifecycle.
 
-1. Upgrade the package, but keep the existing MCP process and database available until migration is planned.
+1. Upgrade the package. If the configured database is legacy, MCP refuses to start, does not modify it, and instructs the user to run `mema upgrade`.
 2. Preview the migration. The command reports source and target paths, row counts, estimated evidence units, vector storage, and free disk space:
 
    ```bash
-   mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3
+   mema upgrade --dry-run
    ```
 
-3. Build the side-by-side target. This copies retained records into a clean schema and rebuilds FTS and evidence vectors. The source database is read-only and remains untouched:
+3. Stop all mema MCP clients. Run the upgrade and confirm the displayed plan. Migration usually takes 1–5 minutes and no MCP service is provided during it:
 
    ```bash
-   mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3 --execute
+   mema upgrade
    ```
 
-4. Stop all MCP writers. Run final sync so the target is rebuilt from the last source snapshot, verified, checkpointed, and atomically replaced:
-
-   ```bash
-   mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3 --execute --final-sync
-   ```
-
-5. Require `ok=true`, `row_counts_match=true`, `source_stable=true`, full evidence coverage, no failed memories, and `switch_ready=true` before switching.
-6. Back up the user configuration, change `db_path` to the new database, restart the MCP server, and run `mema doctor --json`.
+4. `mema upgrade` performs the final snapshot build and requires `ok=true`, `row_counts_match=true`, `source_stable=true`, full evidence coverage, no failed memories, and `switch_ready=true`.
+5. After verification, it backs up and atomically updates the selected standard JSON config. If `MEMORY_ARBITER_DB_PATH` overrides the path, or the JSON config does not point at the migrated source, the command does not edit configuration and prints the manual action instead.
+6. Restart the MCP client and run `mema doctor --json`.
 7. Keep the old database. A direct rollback is lossless only while the new database has accepted no new writes; otherwise newer records must be exported or replayed first.
+
+Options: `--no-switch` builds and verifies without changing configuration; `--yes` accepts the plan non-interactively; `--source` and `--target` override paths. The lower-level `mema migrate-vnext` command remains available for diagnostics and advanced workflows.
 
 Qwen installation is not a migration prerequisite. The evidence index requires sqlite-vec and the configured embedding model; without Qwen, deterministic `notify` remains active and `check` candidates fail closed to `ignore`.
 
@@ -71,4 +68,4 @@ Qwen installation is not a migration prerequisite. The evidence index requires s
 
 集成时只使用四个产品工具。统一 evidence 向量同时承担语义召回和冲突候选召回；`notify` 不依赖 Qwen，`check` 在 Qwen 不可用时降级为忽略。notice 只是候选，Agent 必须读取两侧完整记忆后判断。历史数据库通过旁路迁移生成干净新库。
 
-老用户升级顺序：先执行 `mema migrate-vnext` dry-run；再用 `--execute` 旁路构建；停止所有写入后执行 `--final-sync`；确认行数、fingerprint、evidence coverage、失败列表和 `switch_ready` 全部通过；备份配置并切换 `db_path`；重启后运行 `mema doctor --json`。旧库默认保留。Qwen 不是迁移前提，没有 Qwen 时 `notify` 仍工作，`check` 降级为忽略。
+老用户升级顺序：升级包后，旧库会让 MCP 拒绝启动且不会被修改；先执行 `mema upgrade --dry-run` 查看预估；关闭所有 mema MCP 客户端后运行 `mema upgrade`，迁移期间 1–5 分钟不提供 MCP；命令验证行数、fingerprint、evidence coverage、失败列表和 `switch_ready`，成功后备份并原子切换标准 JSON 配置；环境变量覆盖路径时只输出手工操作；重启后运行 `mema doctor --json`。旧库默认保留。Qwen 不是迁移前提，没有 Qwen 时 `notify` 仍工作，`check` 降级为忽略。

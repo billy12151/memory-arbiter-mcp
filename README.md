@@ -35,20 +35,17 @@ This release moves recall and conflict discovery onto one local-text evidence ar
 Existing databases must be rebuilt side by side; do not point the new runtime directly at an old database:
 
 ```bash
-# 1. Inspect counts, space, and estimated evidence volume.
-mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3
+# Preview only.
+mema upgrade --dry-run
 
-# 2. Build and verify the target while the old database remains untouched.
-mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3 --execute
+# Stop every mema MCP client, then migrate and switch the standard JSON config.
+mema upgrade
 
-# 3. Stop MCP writers, then rebuild from the final source snapshot and atomically replace the target.
-mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3 --execute --final-sync
-
-# 4. Set db_path to memory.vnext.sqlite3, restart, and verify.
+# Restart the MCP client and verify.
 mema doctor --json
 ```
 
-Keep the old database until the new one has run successfully in normal use. If the new database has accepted writes, do not switch back without first accounting for those newer records.
+The command displays memory count, estimated evidence volume, disk requirement, source, and target before asking for confirmation. Migration usually takes 1–5 minutes and MCP remains unavailable during that window. The old database is never deleted. Standard JSON configuration is backed up and switched only after full verification; environment-variable `db_path` overrides are reported as a manual action. Use `--no-switch` to build and verify without editing configuration, or `--yes` for non-interactive execution. Keep the old database until the new one has run successfully in normal use. If the new database has accepted writes, do not switch back without first accounting for those newer records.
 
 ## Install
 
@@ -70,6 +67,7 @@ Available subcommands:
 mema doctor --json
 mema setup
 mema console
+mema upgrade
 mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3 --execute
 ```
 
@@ -149,4 +147,4 @@ Memory Arbiter 是面向 AI Agent 的本地 SQLite 记忆服务。完整原文�
 
 Qwen 不是必需组件：`notify` 由确定性 evidence 独立触发，Qwen 只处理 `check` 灰区；没有 Qwen 时，写入、搜索、强证据 notice 和治理仍可正常工作。数据结构统一为 `memory_evidence` + `memory_evidence_vec`，不再维护 claims、memory vector 和 section vector 三套派生生命周期。
 
-老用户升级时先 dry-run，再旁路构建新库；停止旧 MCP 写入后执行 `--final-sync`，验证成功后修改 `db_path` 并运行 `mema doctor --json`。旧库应继续保留用于回滚；新库产生新写入后，不得直接切回旧库而忽略增量数据。
+老用户升级时先运行 `mema upgrade --dry-run` 查看记忆数量、evidence 规模和磁盘需求；在方便中断服务 1–5 分钟时关闭所有 mema MCP 客户端，再运行 `mema upgrade`。命令会旁路构建并完整验证新库，成功后备份标准 JSON 配置并切换 `db_path`；环境变量覆盖路径时只输出手工修改指引。重启后运行 `mema doctor --json`。旧库始终保留；新库产生新写入后，不得直接切回旧库而忽略增量数据。

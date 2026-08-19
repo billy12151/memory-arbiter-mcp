@@ -8,6 +8,7 @@ import sys
 from typing import Any, NamedTuple, Optional
 
 from .config import Settings
+from .db_generation import require_current_or_new_database
 from .tools import MemoryTools
 
 
@@ -17,13 +18,15 @@ class ServerBundle(NamedTuple):
 
 
 def build_runtime() -> ServerBundle:
+    settings = Settings.from_env()
+    require_current_or_new_database(settings.db_path)
     try:
         from mcp.server.fastmcp import FastMCP
     except Exception as exc:
         raise RuntimeError("MCP Python SDK is not installed") from exc
 
     app = FastMCP("memory-arbiter-mcp")
-    tools = MemoryTools(Settings.from_env())
+    tools = MemoryTools(settings)
     tools.start_update_monitor()
     tools.start_evidence_worker()
     tools.start_semantic_worker()
@@ -97,8 +100,12 @@ def main() -> None:
             from .vnext_migration import run_cli as migrate_main
 
             raise SystemExit(migrate_main(sys.argv[2:]))
+        if command == "upgrade":
+            from .upgrade_cli import run_cli as upgrade_main
+
+            raise SystemExit(upgrade_main(sys.argv[2:]))
         if command in {"-h", "--help", "help"}:
-            print("Usage: mema [doctor|setup|console|migrate-vnext]")
+            print("Usage: mema [doctor|setup|console|upgrade|migrate-vnext]")
             return
 
     try:

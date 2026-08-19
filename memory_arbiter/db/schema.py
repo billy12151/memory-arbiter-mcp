@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     from ..degrade import DegradeState
     from .core import MemoryDB
 
+from ..db_generation import CURRENT_SCHEMA_GENERATION
+
 
 class SchemaStore:
     """Own the single local-text storage schema.
@@ -240,6 +242,12 @@ class SchemaStore:
               SELECT RAISE(ABORT, 'invalid active_judgment_id');
             END;
             """
+        )
+        conn.execute(
+            "INSERT INTO migration_state(key,value,updated_at) "
+            "VALUES('schema_generation',?,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+            (CURRENT_SCHEMA_GENERATION,),
         )
         conn.commit()
 

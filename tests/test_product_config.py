@@ -828,3 +828,52 @@ def test_real_server_product_wrappers_preserve_non_object_data(tmp_path: Path, m
         assert result["ok"] is False
         assert "data must be a JSON object" in result["data"]["error"]
     bundle.tools.shutdown(timeout=1)
+
+
+def test_server_rejects_legacy_database_before_memorydb_init(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import sqlite3
+    from memory_arbiter import server
+
+    legacy = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute("CREATE TABLE memories(id INTEGER PRIMARY KEY, content TEXT)")
+        conn.execute("CREATE TABLE memories_vec(id INTEGER PRIMARY KEY)")
+    settings = Settings(
+        db_path=legacy,
+        backup_jsonl=tmp_path / "backup.jsonl",
+    )
+    monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: settings))
+    constructed = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("MemoryTools must not touch a legacy database")
+
+    monkeypatch.setattr(server, "MemoryTools", forbidden)
+    with pytest.raises(RuntimeError, match="mema upgrade"):
+        server.build_runtime()
+    assert constructed is False
+    with sqlite3.connect(legacy) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='memory_evidence'"
+        ).fetchone() is None
+
+
+def test_memorydb_library_entry_rejects_legacy_database(tmp_path: Path) -> None:
+    import sqlite3
+
+    legacy = tmp_path / "legacy-library.sqlite3"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute("CREATE TABLE memories(id INTEGER PRIMARY KEY, content TEXT)")
+        conn.execute("CREATE TABLE memories_vec(id INTEGER PRIMARY KEY)")
+    settings = Settings(
+        db_path=legacy,
+        backup_jsonl=tmp_path / "backup.jsonl",
+    )
+    before = legacy.read_bytes()
+    with pytest.raises(RuntimeError, match="mema upgrade"):
+        MemoryDB(settings)
+    assert legacy.read_bytes() == before

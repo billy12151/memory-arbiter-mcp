@@ -13,6 +13,7 @@ from typing import Any, Iterator, Optional, Tuple
 from ..config import Settings
 from ..conflict_judgments import ConflictJudgmentStore
 from ..degrade import DegradeState
+from ..db_generation import require_current_or_new_database
 from ..models import MemoryRecord, utc_now_iso
 from .semantic_notices import SemanticNoticeStore
 from .audit import AuditStore
@@ -79,6 +80,7 @@ class MemoryDB:
     """
 
     def __init__(self, settings: Settings):
+        require_current_or_new_database(settings.db_path)
         self.settings = settings
         self.state = DegradeState()
         self._db_available = False
