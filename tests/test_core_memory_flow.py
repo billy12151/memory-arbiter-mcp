@@ -589,9 +589,8 @@ def test_audit_summary_aggregates_per_workspace(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     # This legacy aggregate test creates a protected structured value pair on
     # purpose but only intends to count the manually recorded conflict below.
-    # v0.9 beta_all would correctly add a second pending structured candidate,
-    # so isolate the old audit fixture with the emergency-off mode.
-    tools.settings.structured_claim_mode = "off"
+    # Structured-claim scan paths were retired with vNext; nothing else adds
+    # candidates here, so the old audit fixture needs no isolation anymore.
     tools.memory_write(
         content="Confirmed port 5173",
         subject="dev-port",

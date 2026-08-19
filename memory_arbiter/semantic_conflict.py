@@ -262,8 +262,8 @@ def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
     right_done = any(term in right_text for term in _DONE_TERMS)
     # Direction-agnostic: a todo on one side marked done on the other. The pair
     # is unordered at the gate (the caller may pass new/old either way), so we
-    # accept both orientations. The common-token guard below (applied in
-    # The common-token guard prevents unrelated todo/done statements pairing.
+    # accept both orientations. The common-token guard prevents unrelated
+    # todo/done statements from pairing.
     todo_done = bool(common) and (
         (left_is_todo and right_done) or (right_is_todo and left_done)
     )
@@ -408,7 +408,9 @@ def model_signal_from_text(raw: str) -> ModelSignal:
         return ModelSignal(False, "invalid_schema", None, raw or "", parsed, "invalid_schema")
     assert isinstance(label, str)
     assert isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
-    return ModelSignal(label in {"conflict", "uncertain"}, label, float(confidence), raw or "", parsed)
+    # Spec §9: only an explicit "conflict" surfaces a check-route notice.
+    # "uncertain" parses fine but must fail closed (candidate=False).
+    return ModelSignal(label == "conflict", label, float(confidence), raw or "", parsed)
 
 
 _WS_RELATIONS = {"alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain"}
@@ -474,8 +476,8 @@ class LocalGGUFSemanticBackend:
     def _build_llm(self) -> Any:
         if not self.model_path.exists():
             raise FileNotFoundError(str(self.model_path))
-        from llama_cpp import Llama  # type: ignore
-        kwargs = {
+        from llama_cpp import Llama
+        kwargs: dict[str, Any] = {
             "model_path": str(self.model_path),
             "n_ctx": self.n_ctx,
             "n_threads": self.n_threads,

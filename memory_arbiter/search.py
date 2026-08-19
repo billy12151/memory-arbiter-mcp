@@ -329,7 +329,7 @@ def _score_tags_surface(
     medium_weight: float,
     weak_weight: float,
     cap: float,
-) -> tuple[float, str, dict]:
+) -> tuple[float, str, dict[str, Any]]:
     """Score tags by semantic token overlap with the query (v0.7.3).
 
     Algorithm (design §2.3):
@@ -694,7 +694,7 @@ def _wide_recall(
             entry = by_memory.setdefault(mid, {"row": row, "hits": []})
             distance = row.get("distance")
             try:
-                score = 1.0 - float(distance)
+                score = 1.0 - float(distance) if isinstance(distance, (int, float)) else 0.0
             except (TypeError, ValueError):
                 score = 0.0
             entry["hits"].append({
@@ -927,6 +927,7 @@ def search_memories(
         # Coupling note: the literal lives in _NO_DIRECT_MATCH_PREFIX; matching
         # on the prefix constant (not an inline string) keeps this robust to
         # wording tweaks of the warning's tail.
+        bm_mode: RetrievalMode
         if not query:
             bm_mode = "recent_browse"
         elif not result:

@@ -42,3 +42,11 @@ pythonpath = ["."]
 
 [tool.ruff.lint]
 select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["sqlite_vec", "llama_cpp"]
+ignore_missing_imports = true
+

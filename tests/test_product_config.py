@@ -355,7 +355,6 @@ def test_all_governance_actions_require_explicit_user_authorization(tmp_path: Pa
             "conflict_id": 1, "verdict": "evolution", "recommended_use": "merge",
             "suggested_winner": None, "reason": "correction", "expected_judgment_id": 1,
             "expected_left_version": 1, "expected_right_version": 1,
-            "expected_left_claim_revision": 1, "expected_right_claim_revision": 1,
             "authorized": False,
         },
         "accept_workspace_alias": {"alias": "alias", "canonical": "canonical"},
@@ -514,7 +513,6 @@ def test_product_judge_and_correct_judgment_field_ordering(tmp_path: Path) -> No
     # clean integer error, not a deep invalid_input.
     r = tools.memory(action="judge", data={
         "conflict_id": "abc", "expected_left_version": 1, "expected_right_version": 1,
-        "expected_left_claim_revision": 0, "expected_right_claim_revision": 0,
         "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None,
         "confidence_hint": "medium", "reason": "x", "affects_current_output": True,
         "usage_context": "answer",
@@ -534,7 +532,6 @@ def test_product_judge_and_correct_judgment_field_ordering(tmp_path: Path) -> No
         "conflict_id": "abc", "verdict": "evolution", "recommended_use": "merge",
         "suggested_winner": None, "reason": "fix", "expected_judgment_id": 1,
         "expected_left_version": 1, "expected_right_version": 1,
-        "expected_left_claim_revision": 0, "expected_right_claim_revision": 0,
         "authorized": True,
     })
     assert r["ok"] is False

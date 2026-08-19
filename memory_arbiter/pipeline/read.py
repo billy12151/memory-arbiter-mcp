@@ -41,6 +41,16 @@ class ReadPipeline:
         from .. import tools as tools_mod
         return getattr(tools_mod, "_linked_open_items_for_search")(*args, **kwargs)
 
+    def _vector_lag(self) -> dict[str, int]:
+        """Spec §13.1: search must not pretend the async evidence index is
+        consistent with the write path — surface pending index work."""
+        try:
+            worker = self._evidence_worker.status()
+        except Exception:
+            return {"pending_evidence_index": 0}
+        pending = int(worker.get("queue_depth") or 0) + len(worker.get("inflight") or [])
+        return {"pending_evidence_index": pending}
+
     def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
         if "include_superseded" in _:
             return self.db.state.response(
@@ -184,6 +194,8 @@ class ReadPipeline:
             # v0.7.4: related active todos, separated from the ranking engine.
             "linked_open_items": linked,
             "query_domain": "active",
+            # vNext §13.1: async evidence index lag, never pretend strong consistency.
+            "vector_lag": self._vector_lag(),
         }
         if attention_required:
             response_data["attention_required"] = True
@@ -363,6 +375,7 @@ class ReadPipeline:
             "offset_clamped": effective_offset != offset_requested,
             "limit_capped": effective_limit != limit_requested,
             "pagination_precision": "exact" if not str(query or "").strip() else "best_effort",
+            "vector_lag": self._vector_lag(),
         }
         if attention_required:
             response_data["attention_required"] = True

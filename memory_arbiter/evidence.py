@@ -88,10 +88,20 @@ def local_text_units(subject: str, content: str) -> list[EvidenceUnit]:
         offset += len(line)
     flush(len(content or ""))
 
+    # Spec §4 rule 4/6: merge very short paragraphs with an adjacent one
+    # instead of dropping them — coverage of retrievable text is mandatory.
+    merged: list[tuple[int, int, str]] = []
     for start, end, paragraph in paragraphs:
         text = _clean(paragraph)
-        if len(text) < 8:
-            continue
+        if merged and (len(text) < 8 or len(merged[-1][2]) < 8):
+            prev_start, _, prev_text = merged[-1]
+            merged[-1] = (prev_start, end, _clean(f"{prev_text} {text}"))
+        else:
+            merged.append((start, end, text))
+    paragraphs = [item for item in merged if item[2]]
+
+    for start, end, paragraph in paragraphs:
+        text = _clean(paragraph)
         sentences = [_clean(item) for item in _SENTENCE_BOUNDARY_RE.split(text) if _clean(item)]
         sentence_groups: list[str]
         if len(sentences) <= 1:

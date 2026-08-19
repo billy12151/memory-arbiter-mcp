@@ -25,7 +25,8 @@ class ConsoleAPI:
 
     @staticmethod
     def _payload(response: dict[str, Any]) -> dict[str, Any]:
-        return response.get("data") if isinstance(response, dict) and isinstance(response.get("data"), dict) else response
+        data = response.get("data") if isinstance(response, dict) else None
+        return data if isinstance(data, dict) else response
 
     @staticmethod
     def _ok(response: dict[str, Any]) -> bool:

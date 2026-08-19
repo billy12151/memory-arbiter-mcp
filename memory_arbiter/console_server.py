@@ -43,7 +43,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _handle(self, send_body: bool) -> None:
-        if not _host_allowed(self.headers.get("Host"), self.server.server_address[1]):
+        address = self.server.server_address
+        port = int(address[1]) if isinstance(address, tuple) and len(address) > 1 else 0
+        if not _host_allowed(self.headers.get("Host"), port):
             self._json({"error": "forbidden host"}, status=HTTPStatus.FORBIDDEN, send_body=send_body)
             return
         parsed = urlparse(self.path)

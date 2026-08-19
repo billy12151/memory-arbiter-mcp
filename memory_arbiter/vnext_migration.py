@@ -63,7 +63,7 @@ def _fingerprint(path: Path) -> dict[str, Any]:
         conn.close()
 
 
-def inspect(source: Path, target: Path) -> dict[str, Any]:
+def inspect(source: Path, target: Path, settings: Settings | None = None) -> dict[str, Any]:
     conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -73,7 +73,7 @@ def inspect(source: Path, target: Path) -> dict[str, Any]:
         )
     finally:
         conn.close()
-    vector_bytes = units * 768 * 4
+    vector_bytes = units * int((settings.vec_dim if settings is not None else Settings.vec_dim)) * 4
     free_bytes = shutil.disk_usage(target.parent).free
     required = source.stat().st_size + vector_bytes * 2 + 64 * 1024 * 1024
     return {
@@ -129,7 +129,7 @@ def _checkpoint(path: Path) -> bool:
     def connect() -> sqlite3.Connection:
         conn = sqlite3.connect(path)
         try:
-            import sqlite_vec  # type: ignore[import-untyped]
+            import sqlite_vec
 
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
@@ -158,7 +158,7 @@ def _remove_sidecars(path: Path) -> None:
 
 
 def build(source: Path, target: Path, settings: Settings, *, resume: bool = False, progress: bool = True) -> dict[str, Any]:
-    plan = inspect(source, target)
+    plan = inspect(source, target, settings)
     if not plan["disk_ok"]:
         return {"ok": False, "error": "insufficient_disk_space", "plan": plan}
     if target.exists() and not resume:
@@ -238,7 +238,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": "source_not_found", "source": str(source)}))
         return 2
     if not args.execute:
-        print(json.dumps({"ok": True, "dry_run": True, "plan": inspect(source, target)}, ensure_ascii=False, indent=2))
+        print(json.dumps({"ok": True, "dry_run": True, "plan": inspect(source, target, settings)}, ensure_ascii=False, indent=2))
         return 0
     if args.final_sync:
         staging = target.with_name(target.name + ".finalizing")

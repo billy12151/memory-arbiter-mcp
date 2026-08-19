@@ -66,7 +66,7 @@ def _render_text(report: OverviewReport, use_color: bool, update_check: Optional
     lines.append("")
 
     # Group findings by dimension, preserving order.
-    dims: dict[str, list] = {}
+    dims: dict[str, list[Any]] = {}
     for f in report.findings:
         dims.setdefault(f.dimension, []).append(f)
 

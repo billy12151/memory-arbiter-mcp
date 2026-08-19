@@ -69,7 +69,7 @@ def compare_versions(left: str, right: str) -> int:
 def _default_fetcher(url: str, timeout: float) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": f"{PACKAGE_NAME}/{__version__}"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310: fixed PyPI HTTPS URL
-        return resp.read().decode("utf-8")
+        return str(resp.read().decode("utf-8"))
 
 
 class UpdateMonitor:

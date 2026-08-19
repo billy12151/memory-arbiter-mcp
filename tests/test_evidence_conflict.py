@@ -67,3 +67,10 @@ def test_notice_freshness_uses_only_memory_versions(tmp_path: Path) -> None:
     tools.memory_edit(left, new_content="changed", reason="new")
     notice = tools.db.read_semantic_notice(created["notice_id"])
     assert notice["freshness"]["fresh"] is False
+
+
+def test_qwen_uncertain_label_fails_closed() -> None:
+    signal = model_signal_from_text('{"label":"uncertain","same_fact_slot":true,"confidence":0.9}')
+    assert signal.candidate is False
+    assert signal.candidate_type == "uncertain"
+    assert signal.error is None

@@ -81,6 +81,11 @@ class MemoryTools:
         self._shutdown_started = False
         self._shutdown_complete = False
         self._last_pair_duration_ms: Optional[int] = None
+        # Spec §7: check-route fail-closed degradation must stay observable
+        # (qwen unavailable / per-job budget exhausted), not silently skipped.
+        self._check_degradation_reason: Optional[str] = None
+        self._check_degradation_count = 0
+        self._check_degradation_at: Optional[str] = None
         self._last_backup_notice_signature: Optional[tuple[int, int, int, bool]] = None
         self._last_backup_source_signature: Optional[tuple[int, int, int]] = None
         # v0.6.0: initialise vec index state on startup
@@ -100,11 +105,33 @@ class MemoryTools:
         except Exception:
             pass
 
-    def start_evidence_worker(self): self._evidence_worker.start()
-    def wait_evidence_worker_drained(self, timeout=30.0): return self._evidence_worker.wait_drained(timeout)
-    def _enqueue_local_text_index(self, memory_id, record=None):
-        current=record or self.db.get_memory(int(memory_id)) or {}
-        return self._evidence_worker.enqueue(int(memory_id), {"version":int(current.get("version") or 1)})
+    def start_evidence_worker(self) -> None:
+        self._evidence_worker.start()
+
+    def wait_evidence_worker_drained(self, timeout: float = 30.0) -> bool:
+        return self._evidence_worker.wait_drained(timeout)
+
+    def _record_check_degradation(self, reason: str) -> None:
+        from .models import utc_now_iso
+        self._check_degradation_reason = str(reason)
+        self._check_degradation_count += 1
+        self._check_degradation_at = utc_now_iso()
+
+    def _check_degradation_status(self) -> dict[str, Any]:
+        return {
+            "last_reason": self._check_degradation_reason,
+            "count": self._check_degradation_count,
+            "last_at": self._check_degradation_at,
+            "note": (
+                "check-route candidates are fail-closed (no notice) while Qwen is "
+                "unavailable or the job budget is exhausted; deterministic notify "
+                "decisions are unaffected"
+            ),
+        }
+
+    def _enqueue_local_text_index(self, memory_id: int, record: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        current = record or self.db.get_memory(int(memory_id)) or {}
+        return self._evidence_worker.enqueue(int(memory_id), {"version": int(current.get("version") or 1)})
 
     def start_semantic_worker(self) -> None:
         self._semantic_worker.start()
@@ -562,6 +589,7 @@ class MemoryTools:
             "load_timeout_ms": int(self.settings.semantic_conflict_load_timeout_ms),
             "min_pair_budget_ms": int(self.settings.semantic_conflict_min_pair_budget_ms),
             "last_pair_duration_ms": self._last_pair_duration_ms,
+            "check_degradation": self._check_degradation_status(),
             "job_deadline_behavior": (
                 "The job budget gates between pairs. Each production GGUF inference runs "
                 "in one strictly serial resident child process and has a hard timeout; a "

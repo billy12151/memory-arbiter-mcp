@@ -81,7 +81,9 @@ class EvidencePipeline:
                 priority = 2 if decision.action == "notify" else 1
                 existing_priority = 2 if existing and existing[2].action == "notify" else 1
                 closer = existing is not None and float(hit.get("distance") or 9) < float(existing[0].get("distance") or 9)
-                if existing is None or priority > existing_priority or closer:
+                # A deterministic notify must never be demoted to a weaker
+                # check decision by a merely closer neighbour.
+                if existing is None or priority > existing_priority or (priority == existing_priority and closer):
                     by_peer[peer_id] = (hit, unit, decision)
 
         backend = self._ensure_semantic_backend()
@@ -94,7 +96,15 @@ class EvidencePipeline:
                 float(item[1][0].get("distance") or 9),
             ),
         )
+        # Spec §6.4: at most 1-2 memory pairs may become Agent notices per
+        # write (hard cap 3 for debug/high-recall runs).
+        max_pairs = int(getattr(
+            self.settings, "semantic_conflict_max_notice_pairs", 2,
+        ))
+        surfaced = 0
         for peer_id, (hit, unit, decision) in ordered:
+            if surfaced >= max(1, min(3, max_pairs)):
+                break
             peer = self.db.get_memory(peer_id)
             if not peer or peer.get("status") != "active":
                 continue
@@ -104,7 +114,11 @@ class EvidencePipeline:
                 continue
             qwen: dict[str, Any] = {"status": "not_required"}
             if decision.action == "check":
-                if backend is None or deadline - time.monotonic() < min_budget:
+                if backend is None:
+                    self._tools._record_check_degradation("qwen_unavailable")
+                    continue
+                if deadline - time.monotonic() < min_budget:
+                    self._tools._record_check_degradation("qwen_budget_exhausted")
                     continue
                 started = time.monotonic()
                 signal = backend.classify_pair(
@@ -134,6 +148,8 @@ class EvidencePipeline:
                         "text": hit.get("text"), "start_offset": hit.get("start_offset"),
                         "end_offset": hit.get("end_offset"),
                     },
+                    "left_content_hash": evidence_content_hash(content),
+                    "right_content_hash": evidence_content_hash(str(peer.get("content") or "")),
                     "qwen_signal": qwen,
                 },
                 dedupe_key=notice_dedupe_key(
@@ -142,3 +158,4 @@ class EvidencePipeline:
                 left_version=left_version, right_version=right_version,
                 source="semantic_evidence",
             )
+            surfaced += 1

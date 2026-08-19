@@ -337,3 +337,101 @@ def test_update_remember_fields_get_explicit_recovery_hint(tmp_path: Path) -> No
     result = tools.memory("update", {"memory_id": 1, "content": "wrong field"})
     assert result["ok"] is False
     assert result["data"]["did_you_mean"] == "new_content"
+
+
+def _job_snapshot(tools: MemoryTools, memory_id: int) -> dict:
+    record = tools.db.get_memory(memory_id)
+    return {
+        "memory_id": int(memory_id),
+        "version": record["version"],
+        "content_hash": evidence_content_hash(record["content"]),
+    }
+
+
+def test_same_peer_notify_not_demoted_by_closer_check(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer = tools.memory_write(content="旧值：连接池 10。", subject="pool", tags=[])["data"]
+    new = tools.memory_write(content="新值：连接池 20。", subject="pool2", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    routes = iter(["notify", "check"])
+
+    def fake_decide(_left, _right):
+        return SimpleNamespace(action=next(routes), reason="numeric_value_changed", anchors=[], left_value=None, right_value=None)
+
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.decide_evidence", fake_decide)
+    hits = [
+        {"memory_id": peer["id"], "id": 1, "kind": "text", "text": "旧值：连接池 10。", "start_offset": 0, "end_offset": 9, "distance": 0.50},
+        {"memory_id": peer["id"], "id": 2, "kind": "text", "text": "旧值：连接池 10。", "start_offset": 0, "end_offset": 9, "distance": 0.05},
+    ]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    notices = [n for n in tools.db.list_semantic_notices() if n["peer_id"] == peer["id"]]
+    assert notices and notices[0]["payload"]["route"] == "notify"
+
+
+def test_notice_pairs_capped_per_write(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    peers = [
+        tools.memory_write(content=f"旧值 {i}：连接池 {i}0。", subject=f"pool{i}", tags=[])["data"]
+        for i in range(4)
+    ]
+    new = tools.memory_write(content="新值：连接池 99。", subject="poolx", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    monkeypatch.setattr(
+        "memory_arbiter.pipeline.evidence.decide_evidence",
+        lambda _l, _r: SimpleNamespace(action="notify", reason="numeric_value_changed", anchors=[], left_value=None, right_value=None),
+    )
+    hits = [
+        {"memory_id": p["id"], "id": i, "kind": "text", "text": f"旧值 {i}", "start_offset": 0, "end_offset": 4, "distance": 0.10 + i * 0.05}
+        for i, p in enumerate(peers)
+    ]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+
+    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    created = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
+    assert len(created) == tools.settings.semantic_conflict_max_notice_pairs == 2
+
+    tools.settings.semantic_conflict_max_notice_pairs = 99
+    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    created = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
+    # Re-run dedupes the first two pairs but the cap still limits the run to 3
+    # surfaced pairs total, even when configured above 3.
+    assert len(created) == 3
+
+
+def test_search_surfaces_vector_lag(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    result = tools.memory_search(query="连接池")
+    assert "vector_lag" in result["data"]
+    assert result["data"]["vector_lag"]["pending_evidence_index"] >= 0
+
+
+def test_check_degradation_is_visible_in_semantic_status(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path, semantic_enabled=False)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer = tools.memory_write(content="database connection policy", subject="pool", tags=[])["data"]
+    new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools._ensure_semantic_backend() is None
+    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    assert tools.db.list_semantic_notices(status="open") == []
+    degradation = tools._semantic_status()["check_degradation"]
+    assert degradation["last_reason"] == "qwen_unavailable"
+    assert degradation["count"] >= 1
+
+
+def test_short_paragraphs_merge_instead_of_drop() -> None:
+    from memory_arbiter.evidence import local_text_units as ltu
+    units = ltu("s", "这是一个足够长的第一段内容。\n短。\n这是另一个足够长的段落内容。")
+    merged_texts = [u.text for u in units if u.kind == "text"]
+    assert any("短" in t for t in merged_texts)
+    lone = ltu("s", "仅此。")
+    assert any(u.kind == "text" and u.text for u in lone)

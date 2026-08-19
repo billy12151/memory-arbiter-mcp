@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 class WritePipeline:
     def __init__(self, tools: "MemoryTools") -> None:
-        self._tools = tools
+        self._tools: "MemoryTools" = tools
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._tools, name)
@@ -20,16 +20,16 @@ class WritePipeline:
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         allowed, policy_warnings = self._allowed(payload.get("agent_id"), payload.get("client"))
         if not allowed:
-            return self.db.state.response(
+            return self._tools.db.state.response(
                 {"written": False}, ok=False, extra_warnings=policy_warnings,
             )
         if not str(payload.get("subject") or "").strip():
-            return self.db.state.response(
+            return self._tools.db.state.response(
                 {"written": False, "error": "subject is required"},
                 ok=False, extra_warnings=policy_warnings,
             )
         if self.settings.isolation == "strict" and not str(payload.get("workspace") or "").strip():
-            return self.db.state.response(
+            return self._tools.db.state.response(
                 {"written": False, "error": "isolation=strict requires a workspace on every write"},
                 ok=False, extra_warnings=policy_warnings,
             )
@@ -54,12 +54,12 @@ class WritePipeline:
                 data["semantic_conflict_check"] = {
                     "status": "deferred", "reason": "waiting_for_evidence_index",
                 }
-            return self.db.state.response(
+            return self._tools.db.state.response(
                 data,
                 extra_warnings=policy_warnings + write_warnings + workspace["warnings"],
             )
         except Exception as exc:
-            return self.db.state.response(
+            return self._tools.db.state.response(
                 {"written": False, "error": str(exc)},
                 ok=False, extra_warnings=policy_warnings,
             )

@@ -54,7 +54,7 @@ jobs:
       - run: python scripts/sync_version.py --check
       - run: python -m compileall -q memory_arbiter tests scripts
       - run: ruff check memory_arbiter tests scripts
-      - run: python scripts/refactor_baseline/check_mypy.py
+      - run: python -m mypy --strict memory_arbiter/
       - run: pip-audit -r requirements.txt
       - run: python -m build
       - run: python -m twine check dist/*

@@ -75,6 +75,7 @@ class Settings:
     semantic_conflict_inference_timeout_ms: int = 30000
     semantic_conflict_load_timeout_ms: int = 120000
     semantic_conflict_min_pair_budget_ms: int = 1000
+    semantic_conflict_max_notice_pairs: int = 2
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -286,6 +287,10 @@ class Settings:
             semantic_conflict_queue_max_size=clamp_int(
                 pick_int_field(semantic_cfg.get("queue_max_size"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_QUEUE_MAX_SIZE", 100, name="semantic_conflict.queue_max_size"),
                 1, 10000, name="semantic_conflict.queue_max_size", warnings=config_warnings,
+            ),
+            semantic_conflict_max_notice_pairs=clamp_int(
+                pick_int_field(semantic_cfg.get("max_notice_pairs"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_MAX_NOTICE_PAIRS", 2, name="semantic_conflict.max_notice_pairs"),
+                1, 3, name="semantic_conflict.max_notice_pairs", warnings=config_warnings,
             ),
             semantic_conflict_n_ctx=clamp_int(
                 pick_int_field(semantic_cfg.get("n_ctx"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_N_CTX", 1024, name="semantic_conflict.n_ctx"),

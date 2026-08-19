@@ -246,7 +246,7 @@ class SchemaStore:
     def _probe_features(self, conn: sqlite3.Connection) -> None:
         if self.settings.enable_sqlite_vec:
             try:
-                import sqlite_vec  # type: ignore[import-untyped]
+                import sqlite_vec
 
                 conn.enable_load_extension(True)
                 sqlite_vec.load(conn)
@@ -297,7 +297,7 @@ class SchemaStore:
 
     def _probe_sqlite_vec_loadable(self) -> Optional[bool]:
         try:
-            import sqlite_vec  # type: ignore[import-untyped]
+            import sqlite_vec
 
             probe = sqlite3.connect(":memory:")
             probe.enable_load_extension(True)

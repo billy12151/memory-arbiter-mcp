@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import atexit
+import os
 import signal
 import sys
 from typing import Any, NamedTuple, Optional
@@ -59,26 +60,43 @@ def build_server() -> Any:
     return build_runtime().app
 
 
+def _terminate_after_shutdown(signum: int, shutdown: Any) -> None:
+    """Clean up, then terminate without entering Python finalization.
+
+    FastMCP's stdio reader can be blocked in an AnyIO worker thread. Raising
+    ``SystemExit`` from a signal handler lets interpreter finalization race
+    that thread while it still owns a buffered-I/O lock, which makes CPython
+    abort in ``_enter_buffered_busy``. After application workers are drained,
+    restore the signal's default action and re-deliver it so the OS terminates
+    the process directly instead.
+    """
+    signal.signal(signum, signal.SIG_IGN)
+    shutdown()
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+    os._exit(128 + int(signum))  # pragma: no cover - fallback if kill returns
+
+
 def main() -> None:
     if len(sys.argv) > 1:
         command = sys.argv[1].replace("_", "-")
         if command == "doctor":
-            from .doctor_cli import run_cli
+            from .doctor_cli import run_cli as doctor_main
 
-            run_cli(sys.argv[2:])
+            doctor_main(sys.argv[2:])
             return
         if command == "setup":
-            from .setup_cli import run_cli
+            from .setup_cli import run_cli as setup_main
 
-            raise SystemExit(run_cli(sys.argv[2:]))
+            raise SystemExit(setup_main(sys.argv[2:]))
         if command == "console":
-            from .console_cli import run_cli
+            from .console_cli import run_cli as console_main
 
-            raise SystemExit(run_cli(sys.argv[2:]))
+            raise SystemExit(console_main(sys.argv[2:]))
         if command == "migrate-vnext":
-            from .vnext_migration import run_cli
+            from .vnext_migration import run_cli as migrate_main
 
-            raise SystemExit(run_cli(sys.argv[2:]))
+            raise SystemExit(migrate_main(sys.argv[2:]))
         if command in {"-h", "--help", "help"}:
             print("Usage: mema [doctor|setup|console|migrate-vnext]")
             return
@@ -92,8 +110,7 @@ def main() -> None:
         atexit.register(shutdown_runtime)
 
         def handle_signal(signum: int, _frame: Any) -> None:
-            shutdown_runtime()
-            raise SystemExit(128 + int(signum))
+            _terminate_after_shutdown(signum, shutdown_runtime)
 
         signal.signal(signal.SIGTERM, handle_signal)
         signal.signal(signal.SIGINT, handle_signal)

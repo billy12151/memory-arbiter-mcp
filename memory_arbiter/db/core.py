@@ -113,7 +113,7 @@ class MemoryDB:
             conn.execute("PRAGMA journal_mode=WAL")
         if self._sqlite_vec_loadable:
             conn.enable_load_extension(True)
-            import sqlite_vec  # type: ignore
+            import sqlite_vec
 
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
@@ -177,7 +177,7 @@ class MemoryDB:
         conn.row_factory = sqlite3.Row
         if self._sqlite_vec_loadable:
             conn.enable_load_extension(True)
-            import sqlite_vec  # type: ignore
+            import sqlite_vec
 
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
@@ -356,7 +356,10 @@ class MemoryDB:
             precomputed_embedding=precomputed_embedding,
         )
 
-    def evidence_knn(self, query_embedding, *, k=100, parent_status_filter="active", workspace=None, exclude_memory_id=None):
+    def evidence_knn(
+        self, query_embedding: list[float], *, k: int = 100, parent_status_filter: str = "active",
+        workspace: Optional[str] = None, exclude_memory_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
         return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id)
 
     def insert_memory(
@@ -520,7 +523,7 @@ class MemoryDB:
     def get_memory_version(self, memory_id: int) -> Optional[int]:
         return self.conflicts.get_memory_version(memory_id)
 
-    def dismissed_pairs_for(self, memory_ids: list[int]) -> set:
+    def dismissed_pairs_for(self, memory_ids: list[int]) -> set[tuple[int, int]]:
         return self.conflicts.dismissed_pairs_for(memory_ids)
 
     # ------------------------------------------------------------------
@@ -609,7 +612,7 @@ class MemoryDB:
     def attention_log_path(self) -> Path:
         return self.audit.attention_log_path
 
-    def log_attention(self, *, trigger: str, source: str, memory_ids: list) -> None:
+    def log_attention(self, *, trigger: str, source: str, memory_ids: list[int]) -> None:
         return self.audit.log_attention(trigger=trigger, source=source, memory_ids=memory_ids)
 
     def _scan_log_last_completed(self) -> Optional[dict[str, Any]]:
@@ -640,8 +643,8 @@ class MemoryDB:
     def update_metadata_fields_low_side_effect(
         self,
         memory_id: int,
-        set_fields: Optional[dict] = None,
-        clear_fields: Optional[list] = None,
+        set_fields: Optional[dict[str, Any]] = None,
+        clear_fields: Optional[list[str]] = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
         return self.memories.update_metadata_fields_low_side_effect(

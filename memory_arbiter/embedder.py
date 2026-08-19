@@ -175,7 +175,13 @@ def build_embedder(
 
         def encode(text: str) -> list[float]:
             data = llm.create_embedding(text)["data"][0]["embedding"]
-            return [float(x) for x in data]
+            if not isinstance(data, list):
+                return []
+            out: list[float] = []
+            for x in data:
+                if isinstance(x, (int, float)):
+                    out.append(float(x))
+            return out
 
         def tokenize(text: str) -> list[int]:
             return llm.tokenize(text.encode("utf-8"), add_bos=False)

@@ -215,7 +215,7 @@ class OperationsPipeline:
             return denied
         memory = self._get_memory_visible(int(memory_id), caller)
         if not memory:
-            data = {"error": "memory id not found"}
+            data: dict[str, Any] = {"error": "memory id not found"}
             if caller.isolation == "strict":
                 data.update(caller.response_fields())
             return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
@@ -240,7 +240,7 @@ class OperationsPipeline:
             },
         )
         updated = self.db.get_memory(int(memory_id)) if ok else memory
-        data: dict[str, Any] = {"confirmed": ok, "record": updated}
+        data = {"confirmed": ok, "record": updated}
         if ok:
             data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), updated)
         if caller.isolation == "strict":
@@ -1199,7 +1199,7 @@ class OperationsPipeline:
             return denied
         memory = self._get_memory_visible(int(memory_id), caller)
         if not memory:
-            data = {"error": "memory id not found"}
+            data: dict[str, Any] = {"error": "memory id not found"}
             if caller.isolation == "strict":
                 data.update(caller.response_fields())
             return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))

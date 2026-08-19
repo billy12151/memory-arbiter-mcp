@@ -34,8 +34,8 @@ def compare_memories(left: dict[str, Any], right: dict[str, Any]) -> dict[str, A
         reasons.append(f"{side} has newer event_time; fact occurrence time has priority")
         return decision(left, right, winner, side, reasons)
 
-    left_source = SOURCE_RANK.get(left.get("source_type"), 0)
-    right_source = SOURCE_RANK.get(right.get("source_type"), 0)
+    left_source = SOURCE_RANK.get(str(left.get("source_type") or ""), 0)
+    right_source = SOURCE_RANK.get(str(right.get("source_type") or ""), 0)
     if left_source != right_source:
         winner = left if left_source > right_source else right
         side = "left" if winner is left else "right"
