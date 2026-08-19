@@ -68,6 +68,17 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
     conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
+        required_columns = {
+            "id", "version", "status", "content", "subject", "tags",
+            "workspace", "workspace_canonical",
+        }
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memories)")}
+        if not required_columns.issubset(columns):
+            return {
+                "ok": False, "error": "unsupported_source_schema",
+                "source": str(source),
+                "missing_columns": sorted(required_columns - columns),
+            }
         units = sum(
             len(local_text_units(str(row["subject"] or ""), str(row["content"] or "")))
             for row in conn.execute("SELECT subject,content FROM memories WHERE status!='deleted'")
@@ -183,6 +194,8 @@ def _target_owned_by_source(target: Path, source: Path) -> bool:
 
 def build(source: Path, target: Path, settings: Settings, *, resume: bool = False, progress: bool = True) -> dict[str, Any]:
     plan = inspect(source, target, settings)
+    if plan.get("ok") is False:
+        return dict(plan)
     if not plan["disk_ok"]:
         return {"ok": False, "error": "insufficient_disk_space", "plan": plan}
     if target.exists() and not resume:
@@ -285,6 +298,18 @@ def final_sync(
             "staging": str(staging),
         })
         return result
+    # The build verified the source before checkpoint/replace; a write that
+    # landed since then would be silently absent from the target. Re-verify
+    # the fingerprint immediately before the atomic replace and refuse to
+    # switch on any drift (the caller documents that writers must be stopped).
+    if _fingerprint(source) != result.get("source_fingerprint"):
+        result.update({
+            "ok": False,
+            "error": "source_changed_during_final_sync",
+            "staging": str(staging),
+            "next_step": "stop all writers and rerun the final sync",
+        })
+        return result
     _remove_sidecars(target)
     os.replace(staging, target)
     _remove_sidecars(staging)
@@ -321,4 +346,6 @@ def run_cli(argv: list[str] | None = None) -> int:
     else:
         result = build(source, target, settings, resume=args.resume)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result.get("ok") else 2
+    # A build that completed but could not be checkpointed (switch_ready=False)
+    # is not a success: the target is not sealed for switching.
+    return 0 if result.get("ok") and result.get("switch_ready") else 2

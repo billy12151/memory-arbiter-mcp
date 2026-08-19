@@ -33,7 +33,7 @@ def _finding(check_id: str, ok: bool, detail: str, *, critical: bool = False, ev
     return Finding(check_id, check_id.split(".")[0], severity, "pass" if ok else "warn", check_id, detail, evidence or {})
 
 
-def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: Optional[DegradeState] = None, embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None, inflight_ids: Optional[set[int]] = None) -> OverviewReport:
+def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: Optional[DegradeState] = None, embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None) -> OverviewReport:
     findings: list[Finding] = []
     total = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
     eligible = int(conn.execute("SELECT COUNT(*) FROM memories WHERE status!='deleted'").fetchone()[0])
@@ -51,6 +51,30 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     findings.append(_finding("notices.backlog", open_notices < 100, f"{open_notices} open notices"))
     if settings.config_warnings:
         findings.append(_finding("config.warnings", False, "; ".join(settings.config_warnings)))
+    if deep:
+        # --deep / memory_review(deep=true): actually run the embedder and
+        # compare the live dimension against vec.dim (seconds-level cost).
+        if embedder_probe is None:
+            findings.append(_finding("vector.dimension_probe", False, "deep probe requested but no embedder resolver was provided"))
+        else:
+            try:
+                embedder, _probe_warnings = embedder_probe()
+            except Exception as exc:
+                findings.append(_finding("vector.dimension_probe", False, f"embedder probe failed: {exc}"))
+            else:
+                if embedder is None:
+                    findings.append(_finding("vector.dimension_probe", False, "embedding not configured or embedder unavailable"))
+                else:
+                    try:
+                        er = embedder.embed_text(prefix="", body="dimension probe")
+                        dim = len(er.embedding or [])
+                    except Exception as exc:
+                        findings.append(_finding("vector.dimension_probe", False, f"embedding failed: {exc}"))
+                    else:
+                        findings.append(_finding(
+                            "vector.dimension_probe", dim == int(settings.vec_dim),
+                            f"embedding dim {dim} vs config vec.dim {int(settings.vec_dim)}",
+                        ))
     overall = max((f.severity for f in findings), key=lambda s: {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}[s])
     return OverviewReport(utc_now_iso(), overall, findings, {"mode": runtime_state.mode if runtime_state else "sqlite", "total_memories": total, "evidence_indexed": indexed, "evidence_units": units})
 
@@ -64,7 +88,7 @@ def report_to_dict(report: OverviewReport) -> dict[str, Any]:
 def doctor_overview_mcp(db: Any, settings: Settings, deep: bool = False, **kwargs: Any) -> OverviewReport:
     try:
         with db.diagnostic_connection() as conn:
-            return run_all_checks(conn, settings, deep, kwargs.get("runtime_state"), kwargs.get("embedder_probe"), kwargs.get("inflight_ids"))
+            return run_all_checks(conn, settings, deep, kwargs.get("runtime_state"), kwargs.get("embedder_probe"))
     except Exception as exc:
         return OverviewReport(utc_now_iso(), Severity.CRITICAL, [Finding("database.open", "database", Severity.CRITICAL, "error", "database.open", str(exc))], {"mode": "unavailable", "total_memories": 0})
 

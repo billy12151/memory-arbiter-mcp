@@ -39,6 +39,17 @@ class EvidencePipeline:
             int(memory_id), int(current.get("version") or 1),
             evidence_content_hash(str(current.get("content") or "")), units, embeddings,
         )
+        if published.get("published"):
+            # Self-heal the embedding-space mismatch: once a rebuild has
+            # republished every non-deleted memory in the target space, the
+            # vec channel flips back to ready (spec §19 defers fancier
+            # space-migration tooling; this unblocks the common recovery).
+            vec_state = self.db.get_vec_index_state()
+            if (
+                vec_state.get("state") == "mismatch"
+                and vec_state.get("target_space_id") == embedder.embedding_space_id
+            ):
+                self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
         return {
             "status": "indexed" if published.get("published") else "failed",
             **published,
@@ -131,8 +142,17 @@ class EvidencePipeline:
                     "confidence": signal.confidence,
                 }
                 if not signal.candidate:
+                    # Spec §7: timeout / backend failure / invalid output are
+                    # retryable diagnostics and must surface in check_degradation,
+                    # not masquerade as clean model rejections.
+                    if signal.error and "timeout" in str(signal.error).lower():
+                        self._tools._record_check_degradation("qwen_timeout")
+                    elif signal.candidate_type in {"backend_error", "backend_unavailable"}:
+                        self._tools._record_check_degradation("qwen_backend_error")
+                    elif signal.candidate_type in {"invalid_json", "invalid_schema"}:
+                        self._tools._record_check_degradation("qwen_invalid_output")
                     continue
-            self.db.record_semantic_notice(
+            outcome = self.db.record_semantic_notice(
                 memory_id=memory_id, peer_id=peer_id,
                 severity="high" if decision.action == "notify" else "normal",
                 notice_type="semantic_evidence",
@@ -158,4 +178,8 @@ class EvidencePipeline:
                 left_version=left_version, right_version=right_version,
                 source="semantic_evidence",
             )
-            surfaced += 1
+            # Only a notice actually created consumes the per-write budget:
+            # deduped pairs were already surfaced, and error/unavailable
+            # outcomes must not starve a fresh deterministic notify pair.
+            if outcome.get("outcome") == "created":
+                surfaced += 1

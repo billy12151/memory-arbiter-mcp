@@ -97,7 +97,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     self._json({"error": "memory id must be an integer"}, status=HTTPStatus.BAD_REQUEST, send_body=send_body)
                     return
                 ws = _one(qs, "workspace", "") or None
-                self._json_or_error(self.api.memory_detail(memory_id, sections=_one(qs, "sections", "catalog"), workspace=ws) if ws else self.api.memory_detail(memory_id, sections=_one(qs, "sections", "catalog")), send_body=send_body)
+                self._json_or_error(self.api.memory_detail(memory_id, workspace=ws) if ws else self.api.memory_detail(memory_id), send_body=send_body)
                 return
             if parsed.path == "/api/doctor":
                 self._json(self.api.doctor(), send_body=send_body)

@@ -103,8 +103,8 @@ def test_strict_console_memory_detail_uses_workspace_acl(tmp_path):
     b_id = _active_write(tools, "beta console secret", "projB")
     api = ConsoleAPI(tools=tools)
 
-    denied = api.memory_detail(b_id, sections="all", workspace="projA")
-    ok = api.memory_detail(b_id, sections="all", workspace="projB")
+    denied = api.memory_detail(b_id, workspace="projA")
+    ok = api.memory_detail(b_id, workspace="projB")
 
     assert denied["_http_status"] == 404
     assert "beta console secret" not in str(denied)

@@ -182,11 +182,11 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             continue
         parsed_id = _controlled_integer(value)
         if parsed_id is None:
-            field_name = "memory_id" if key == "id" and operation in {"read", "update", "history", "split", "set_entity", "activate_pending", "cleanup_history", "confirm_pending_workspace"} else key
+            field_name = "memory_id" if key == "id" and operation in {"read", "update", "history", "set_entity", "activate_pending", "cleanup_history", "confirm_pending_workspace"} else key
             result.error = _error(field_name, "must be a positive integer")
             return result
         if parsed_id <= 0:
-            field_name = "memory_id" if key == "id" and operation in {"read", "update", "history", "split", "set_entity", "activate_pending", "cleanup_history", "confirm_pending_workspace"} else key
+            field_name = "memory_id" if key == "id" and operation in {"read", "update", "history", "set_entity", "activate_pending", "cleanup_history", "confirm_pending_workspace"} else key
             result.error = _error(field_name, "must be a positive integer")
             return result
         # Preserve controlled numeric-string compatibility, but make the value

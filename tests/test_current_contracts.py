@@ -91,3 +91,59 @@ def test_backup_replay_is_authorized_and_idempotent(tmp_path: Path) -> None:
     assert first["data"]["imported_count"] == 1
     second = tool.memory_repair(task="replay_backup", data={"dry_run": False, "authorized": True})
     assert second["data"]["already_replayed_count"] == 1
+
+
+def test_doctor_text_renderer_shows_every_dimension_and_current_summary() -> None:
+    from memory_arbiter.doctor import Finding, OverviewReport, Severity
+    from memory_arbiter.doctor_cli import _render_text
+
+    findings = [
+        Finding("config.writable", "config", Severity.INFO, "pass", "config.writable", "ok"),
+        Finding("evidence.coverage", "evidence", Severity.WARNING, "warn", "evidence.coverage", "3/5 memories indexed"),
+        Finding("conflicts.backlog", "conflicts", Severity.INFO, "pass", "conflicts.backlog", "0 open conflicts"),
+        Finding("notices.backlog", "notices", Severity.INFO, "pass", "notices.backlog", "0 open notices"),
+        Finding("future.thing", "future", Severity.WARNING, "warn", "future.thing", "unknown dimension"),
+    ]
+    report = OverviewReport(
+        "2026-08-19T00:00:00+00:00", Severity.WARNING, findings,
+        {"mode": "sqlite", "total_memories": 5, "evidence_indexed": 3, "evidence_units": 40},
+    )
+    text = _render_text(report, use_color=False)
+    for dim in ("config", "evidence", "conflicts", "notices", "future"):
+        assert f"[{dim}]" in text
+    assert "3/5 memories indexed" in text
+    assert "evidence 单元: 40" in text
+    # Retired summary fields must not render as literal None.
+    assert "None" not in text
+    assert "分段能力" not in text and "向量生效" not in text
+    # A warning-level report must not claim all checks passed.
+    assert "所有检查通过" not in text
+
+
+def test_doctor_deep_probe_reports_dimension_mismatch(tmp_path: Path) -> None:
+    import sqlite3 as _sqlite3
+    from memory_arbiter.db.schema import SchemaStore
+    from memory_arbiter.doctor import run_all_checks
+    from memory_arbiter.config import Settings as Cfg
+
+    settings = Cfg(db_path=tmp_path / "d.sqlite3", backup_jsonl=tmp_path / "b.jsonl", vec_dim=2)
+    conn = _sqlite3.connect(settings.db_path)
+    SchemaStore(
+        type("PseudoDB", (), {"settings": settings, "state": None, "_sqlite_vec_loadable": False})()
+    )._init_schema(conn)
+    conn.close()
+
+    class ProbeEmbedder:
+        embedding_space_id = "probe-space"
+
+        def embed_text(self, prefix="", body=""):
+            from memory_arbiter.embedder import EmbedResult
+            return EmbedResult([0.1, 0.2, 0.3], False, 1, 1)
+
+    report = run_all_checks(
+        _sqlite3.connect(settings.db_path), settings, deep=True,
+        embedder_probe=lambda: (ProbeEmbedder(), []),
+    )
+    probe = [f for f in report.findings if f.check_id == "vector.dimension_probe"]
+    assert probe and probe[0].status == "warn"
+    assert "3" in probe[0].detail and "2" in probe[0].detail

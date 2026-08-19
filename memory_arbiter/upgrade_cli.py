@@ -42,7 +42,9 @@ def _render_plan(plan: dict[str, Any]) -> str:
         "",
         f"Memories: {int((plan.get('counts') or {}).get('memories') or 0)}",
         f"Estimated evidence units: {int(plan.get('estimated_evidence_units') or 0)}",
+        f"Estimated vector storage: {_format_bytes(int(plan.get('estimated_vector_bytes') or 0))}",
         f"Estimated additional space: {_format_bytes(int(plan.get('required_bytes') or 0))}",
+        f"Free disk space: {_format_bytes(int(plan.get('free_bytes') or 0))}",
         f"Source database: {plan.get('source')}",
         f"New database: {plan.get('target')}",
     ])
@@ -201,6 +203,15 @@ def run_upgrade(
         return 2
 
     plan = inspect(source, target, settings)
+    if plan.get("ok") is False:
+        error = plan.get("error", "inspect_failed")
+        result = {"ok": False, "error": error, "plan": plan}
+        print(
+            json.dumps(result, ensure_ascii=False, indent=2) if args.json
+            else f"Upgrade cannot continue: {error} (missing columns: {', '.join(plan.get('missing_columns') or [])})",
+            file=sys.stderr,
+        )
+        return 2
     if args.dry_run:
         result = {"ok": bool(plan.get("disk_ok")), "dry_run": True, "plan": plan}
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else _render_plan(plan))

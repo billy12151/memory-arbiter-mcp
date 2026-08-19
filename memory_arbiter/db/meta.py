@@ -47,6 +47,56 @@ class MetaStore:
         }
         return result
 
+    def mark_space_rebuild_started(self) -> None:
+        """Record the epoch of an embedding-space rebuild (idempotent).
+
+        Evidence rows created at or after this timestamp are guaranteed to be
+        in the target embedding space; the vec channel flips back to ready
+        only once every non-deleted memory has fresh-version evidence written
+        after it."""
+        db = self._db
+        if not db._db_available:
+            return
+        with db.write_transaction() as conn:
+            if self.get_meta(conn, "space_rebuild_started_at") is None:
+                from ..models import utc_now_iso
+                self.set_meta(conn, "space_rebuild_started_at", utc_now_iso())
+
+    def maybe_complete_space_rebuild(self, embedding_space_id: str) -> bool:
+        """Flip mismatch -> ready when the whole index is in the target space."""
+        db = self._db
+        if not db._db_available:
+            return False
+        with db.write_transaction() as conn:
+            state = self.get_meta(conn, "state")
+            target = self.get_meta(conn, "target_space_id")
+            started = self.get_meta(conn, "space_rebuild_started_at")
+            if state != "mismatch" or not target or not started or target != embedding_space_id:
+                return False
+            remaining = int(
+                conn.execute(
+                    """SELECT COUNT(*) FROM memories m WHERE m.status!='deleted'
+                       AND NOT EXISTS(
+                         SELECT 1 FROM memory_evidence e
+                         WHERE e.memory_id=m.id AND e.memory_version=m.version
+                           AND e.created_at >= ?
+                       )""",
+                    (started,),
+                ).fetchone()[0]
+            )
+            if remaining:
+                return False
+            self.set_meta(conn, "state", "ready")
+            self.set_meta(conn, "active_space_id", embedding_space_id)
+            for key in (
+                "target_space_id", "space_rebuild_started_at",
+                "migration_cursor", "migration_epoch",
+                "migration_lease_owner", "migration_lease_expires_at",
+                "last_error",
+            ):
+                self.delete_meta(conn, key)
+            return True
+
     def init_vec_index_state(
         self,
         embedding_space_id: Optional[str],

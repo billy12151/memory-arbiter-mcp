@@ -92,7 +92,12 @@ class LocalTextIndexWorker:
                             memory_id, current, after_evidence=True,
                         )
                 with self._cond:
-                    self._last_error = None if result.get("status") in {"indexed", "skipped"} else str(result)
+                    # A stale publish race (edit landed between fetch and
+                    # publish) is routine coalescing, not an error.
+                    clean = result.get("status") in {"indexed", "skipped"} or result.get(
+                        "outcome"
+                    ) in {"stale_snapshot"}
+                    self._last_error = None if clean else str(result)
                     self._processed += 1
             except Exception as exc:
                 with self._cond:
@@ -118,6 +123,9 @@ class SemanticConflictWorker:
         self._error_seq = 0
         self._processed = 0
         self._skipped = 0
+        # Overflow drops kill the whole conflict job (notify included); the
+        # drop must stay observable instead of silently vanishing.
+        self._dropped_queue_full = 0
 
     def start(self) -> None:
         if self._tools.settings.semantic_conflict_on_write == "off":
@@ -148,6 +156,7 @@ class SemanticConflictWorker:
                 return {"status": "paused"}
             max_size = int(getattr(self._tools.settings, "semantic_conflict_queue_max_size", 100))
             if len(self._pending) >= max_size and int(memory_id) not in self._pending:
+                self._dropped_queue_full += 1
                 return {"status": "queue_full"}
             self._pending[int(memory_id)] = snapshot
             self._cond.notify_all()
@@ -172,6 +181,7 @@ class SemanticConflictWorker:
                 "inflight": sorted(self._inflight),
                 "processed": self._processed,
                 "skipped": self._skipped,
+                "dropped_queue_full": self._dropped_queue_full,
                 "shutdown": self._shutdown,
                 "last_error": self._last_error,
             }

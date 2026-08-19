@@ -603,13 +603,6 @@ class OperationsPipeline:
             resp.update(caller.response_fields())
         return self.db.state.response(resp, extra_warnings=list(caller.warnings))
 
-    def _split_capability(self, vec_state: dict[str, Any]) -> dict[str, Any]:
-        """v0.8 §6.5: whether the server can split, and why/why not."""
-        if vec_state.get("state") == "ready":
-            return {"available": True, "reason": "vec_ready"}
-        if self.db.state.sqlite_vec_available and not self._embedding_configured():
-            return {"available": False, "reason": "embedder_unavailable"}
-        return {"available": False, "reason": "vec_not_ready"}
 
     def _update_check_status(self) -> dict[str, Any]:
         if self._update_monitor is None:
@@ -683,7 +676,6 @@ class OperationsPipeline:
             self.db, self.settings, deep,
             embedder_probe=self._ensure_embedder,
             runtime_state=self.db.state,
-            inflight_ids=set(self._evidence_worker.status().get("inflight") or []),
         )
         if self._update_monitor is not None:
             self._update_monitor.record_doctor_run()
@@ -829,11 +821,30 @@ class OperationsPipeline:
             if caller.isolation == "strict":
                 workspace_sql = "AND COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)=? "
                 params.append(caller.canonical)
+            # Embedding-space mismatch is a whole-index condition: existing
+            # rows may be healthy-looking but live in the old space, so the
+            # rebuild must republish EVERYTHING (not just stale rows) before
+            # the vec channel can be re-enabled. Strict-isolation callers
+            # only see their own workspace and therefore cannot complete a
+            # global rebuild; they keep the stale-only selection.
+            vec_state = self.db.get_vec_index_state()
+            mismatch_rebuild = (
+                vec_state.get("state") == "mismatch"
+                and vec_state.get("target_space_id") is not None
+                and not workspace_sql
+            )
+            if mismatch_rebuild:
+                self.db.mark_space_rebuild_started()
+                stale_clause = ""
+            else:
+                stale_clause = (
+                    "AND NOT EXISTS(SELECT 1 FROM memory_evidence e "
+                    "WHERE e.memory_id=m.id AND e.memory_version=m.version) "
+                )
             with self.db.connection() as conn:
                 rows = conn.execute(
                     "SELECT m.id FROM memories m WHERE m.status!='deleted' "
-                    f"{workspace_sql}AND NOT EXISTS(SELECT 1 FROM memory_evidence e "
-                    "WHERE e.memory_id=m.id AND e.memory_version=m.version) "
+                    f"{workspace_sql}{stale_clause}"
                     "ORDER BY m.id LIMIT ?",
                     (*params, batch),
                 ).fetchall()

@@ -739,10 +739,12 @@ def _wide_recall(
                 support += max(0.0, float(hit.get("score") or 0.0) - 0.45)
             ranked.append((best + 0.08 * support, mid, entry["row"]))
         ranked.sort(reverse=True, key=lambda item: item[0])
+        evidence_only: list[int] = []
         for evidence_rank, (_score, mid, row) in enumerate(
             ranked[:evidence_memory_cap], 1,
         ):
-            d = dict(pool.get(mid) or row)
+            lexical_row = pool.get(mid)
+            d = dict(lexical_row or row)
             d["id"] = mid
             d["_vec_candidate"] = True
             d["_evidence_vec_candidate"] = True
@@ -752,7 +754,43 @@ def _wide_recall(
                 key=lambda h: float(h.get("score") or 0.0),
                 reverse=True,
             )[:3]
+            if lexical_row is None:
+                evidence_only.append(mid)
             pool[mid] = d
+        if evidence_only:
+            # Evidence-only candidates must look like every other result row:
+            # real memories columns (version, agent_id, source_ref, ...) with
+            # evidence details confined to _evidence_hits — not raw KNN join
+            # rows carrying evidence fields at the top level.
+            try:
+                conn = db._new_connection()
+                try:
+                    placeholders = ",".join("?" for _ in evidence_only)
+                    mem_rows = {
+                        int(r["id"]): row_to_dict(r)
+                        for r in conn.execute(
+                            f"SELECT * FROM memories WHERE id IN ({placeholders})",
+                            evidence_only,
+                        ).fetchall()
+                    }
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                mem_rows = {}
+            for mid in evidence_only:
+                mem_row = mem_rows.get(mid)
+                if mem_row is None:
+                    pool.pop(mid, None)
+                    continue
+                preserved: dict[str, Any] = {
+                    key: pool[mid][key]
+                    for key in (
+                        "_vec_candidate", "_evidence_vec_candidate",
+                        "_evidence_rank", "_evidence_hits", "id",
+                    )
+                    if key in pool[mid]
+                }
+                pool[mid] = {**mem_row, **preserved}
 
     # Fuse channel ranks, then restore the original bounded pool size. A memory
     # present in both channels naturally receives more support than one present

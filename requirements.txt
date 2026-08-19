@@ -2,7 +2,7 @@ mcp>=1.2.0,<2
 pydantic>=2.6.0
 pytest>=8.0.0
 
-# Optional sqlite-vec enhancement for semantic recall, section recall, and
-# workspace candidate shortlists. It is not a conflict scanner dependency;
+# Optional sqlite-vec enhancement for evidence recall and workspace
+# candidate shortlists. It is not a conflict scanner dependency;
 # the core server runs without it. The packaged [vec] extra currently uses:
 # sqlite-vec>=0.1.6

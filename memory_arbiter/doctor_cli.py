@@ -55,7 +55,7 @@ def _render_text(report: OverviewReport, use_color: bool, update_check: Optional
     s = report.summary
     lines.append(
         f"模式: {s.get('mode')}  |  记忆数: {s.get('total_memories')}  |  "
-        f"向量生效: {s.get('vec_effective')}  |  分段能力: {s.get('split_capability_available')}"
+        f"已建索引: {s.get('evidence_indexed')}  |  evidence 单元: {s.get('evidence_units')}"
     )
     if update_check:
         latest = update_check.get("latest_version") or "unknown"
@@ -70,8 +70,12 @@ def _render_text(report: OverviewReport, use_color: bool, update_check: Optional
     for f in report.findings:
         dims.setdefault(f.dimension, []).append(f)
 
-    dim_order = ["config", "vector", "semantic", "split", "consistency", "capacity"]
-    for dim in dim_order:
+    # Known dimensions render in a stable order first; any dimension the
+    # checks grow later appends after them in first-seen order so a new
+    # finding can never be silently dropped from the text report.
+    dim_order = ["config", "evidence", "conflicts", "notices"]
+    ordered_dims = dim_order + [d for d in dims if d not in dim_order]
+    for dim in ordered_dims:
         items = dims.get(dim)
         if not items:
             continue

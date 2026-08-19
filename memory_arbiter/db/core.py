@@ -777,6 +777,12 @@ class MemoryDB:
     def get_vec_index_state(self) -> dict[str, Any]:
         return self.meta.get_vec_index_state()
 
+    def mark_space_rebuild_started(self) -> None:
+        return self.meta.mark_space_rebuild_started()
+
+    def maybe_complete_space_rebuild(self, embedding_space_id: str) -> bool:
+        return self.meta.maybe_complete_space_rebuild(embedding_space_id)
+
     def init_vec_index_state(
         self,
         embedding_space_id: Optional[str],

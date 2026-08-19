@@ -12,6 +12,7 @@ from memory_arbiter.db_generation import (
     detect_database_generation,
 )
 from memory_arbiter.upgrade_cli import run_upgrade
+from memory_arbiter.upgrade_cli import _preflight
 from memory_arbiter.upgrade_cli import _switch_standard_config
 
 
@@ -368,3 +369,77 @@ def test_final_sync_refuses_unrelated_existing_target(
     assert result["error"] == "existing_target_not_owned_by_source"
     assert called is False
     assert target.read_bytes() == before
+
+
+def test_preflight_rejects_missing_vec_embedding_and_model(tmp_path) -> None:
+    legacy = tmp_path / "legacy.db"
+    _legacy_db(legacy)
+    settings = Settings(
+        db_path=legacy,
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=False,
+    )
+    errors = _preflight(settings, legacy.with_name("t.vnext.db"))
+    assert any("vec.enabled must be true" in e for e in errors)
+
+    settings = Settings(
+        db_path=legacy,
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        embedding_provider="none",
+    )
+    errors = _preflight(settings, legacy.with_name("t.vnext.db"))
+    assert any("GGUF embedding model must be configured" in e for e in errors)
+
+    settings = Settings(
+        db_path=legacy,
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        embedding_provider="gguf",
+        embedding_model_path=tmp_path / "missing.gguf",
+    )
+    errors = _preflight(settings, legacy.with_name("t.vnext.db"))
+    assert any("embedding model not found" in e for e in errors)
+
+
+def test_dry_run_exit_code_tracks_disk_space(tmp_path: Path, monkeypatch) -> None:
+    legacy = tmp_path / "legacy.db"
+    _legacy_db(legacy)
+    config = tmp_path / "config.json"
+    _config(config, legacy)
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(config))
+
+    def tiny_disk(*_args, **_kwargs):
+        return {"disk_ok": False, "counts": {"memories": 1}, "estimated_evidence_units": 1,
+                "estimated_vector_bytes": 1, "free_bytes": 1, "required_bytes": 999}
+
+    monkeypatch.setattr("memory_arbiter.upgrade_cli.inspect", tiny_disk)
+    assert run_upgrade(["--dry-run"]) == 2
+    monkeypatch.setattr(
+        "memory_arbiter.upgrade_cli.inspect",
+        lambda *a, **k: {"disk_ok": True, "counts": {"memories": 1}, "estimated_evidence_units": 1,
+                         "estimated_vector_bytes": 1, "free_bytes": 10**9, "required_bytes": 1},
+    )
+    assert run_upgrade(["--dry-run"]) == 0
+
+
+def test_upgrade_already_current_exits_zero_without_migrating(tmp_path: Path, monkeypatch) -> None:
+    current = tmp_path / "current.db"
+    _current_db(current)
+    config = tmp_path / "config.json"
+    _config(config, current)
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(config))
+    monkeypatch.setattr(
+        "memory_arbiter.upgrade_cli.inspect",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("inspect must not run")),
+    )
+    assert run_upgrade(["--dry-run"]) == 0
+
+
+def test_upgrade_rejects_unsupported_source_schema(tmp_path: Path, monkeypatch) -> None:
+    legacy = tmp_path / "legacy.db"
+    _legacy_db(legacy)
+    config = tmp_path / "config.json"
+    _config(config, legacy)
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(config))
+    assert run_upgrade(["--dry-run", "--json"]) == 2

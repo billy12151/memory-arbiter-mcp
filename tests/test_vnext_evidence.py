@@ -472,9 +472,44 @@ def test_notice_pairs_capped_per_write(tmp_path: Path, monkeypatch) -> None:
     tools.settings.semantic_conflict_max_notice_pairs = 99
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     created = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
-    # Re-run dedupes the first two pairs but the cap still limits the run to 3
-    # surfaced pairs total, even when configured above 3.
-    assert len(created) == 3
+    # Deduped re-records no longer consume budget, so the re-run surfaces the
+    # remaining two peers (hard cap 3 created per run, 2 pre-existing deduped).
+    assert len(created) == 4
+    # The hard cap still applies per run even when configured above 3.
+    assert tools.settings.semantic_conflict_max_notice_pairs == 99
+
+
+def test_deduped_pairs_do_not_starve_fresh_notify(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    tools.settings.semantic_conflict_max_notice_pairs = 2
+    peers = [
+        tools.memory_write(content=f"旧值 {i}：连接池 {i}0。", subject=f"pool{i}", tags=[])["data"]
+        for i in range(3)
+    ]
+    new = tools.memory_write(content="新值：连接池 99。", subject="poolx", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    monkeypatch.setattr(
+        "memory_arbiter.pipeline.evidence.decide_evidence",
+        lambda _l, _r: SimpleNamespace(action="notify", reason="numeric_value_changed", anchors=[], left_value=None, right_value=None),
+    )
+    hits = [
+        {"memory_id": p["id"], "id": i, "kind": "text", "text": f"旧值 {i}", "start_offset": 0, "end_offset": 4, "distance": 0.10 + i * 0.05}
+        for i, p in enumerate(peers)
+    ]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+
+    # First run fills the cap with peers 0 and 1.
+    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 2
+
+    # Re-run: peers 0/1 dedupe without consuming budget, so the fresh notify
+    # pair for peer 2 must still be created within the same cap.
+    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
+    assert sorted(n["peer_id"] for n in notices) == [p["id"] for p in peers]
 
 
 def test_search_surfaces_vector_lag(tmp_path: Path) -> None:
@@ -507,3 +542,163 @@ def test_short_paragraphs_merge_instead_of_drop() -> None:
     assert any("短" in t for t in merged_texts)
     lone = ltu("s", "仅此。")
     assert any(u.kind == "text" and u.text for u in lone)
+
+
+def test_knn_enforces_memory_status_despite_stale_parent(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    # Simulate a vec-disabled process superseding the memory: parent_status
+    # stays 'active' while memories.status is authoritative.
+    tools.db.state.sqlite_vec_available = False
+    assert tools.db.update_memory(written["id"], {"status": "superseded"})
+    tools.db.state.sqlite_vec_available = True
+    hits = tools.db.evidence_knn([0.8, 0.2], k=5, parent_status_filter="active")
+    assert all(h["memory_id"] != written["id"] for h in hits)
+
+
+def test_knn_workspace_overfetch_restores_recall(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    # Workspace A: one long memory whose many units own the global top-k.
+    bulk = "\n".join(f"postgres 配置项 {i}：连接池参数说明 {i}。" for i in range(8))
+    tools.memory_write(content=bulk, subject="pg bulk", tags=[], workspace="wsA")
+    peer = tools.memory_write(content="postgres 端口为 5432。", subject="pg port", tags=[], workspace="wsB")["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    hits = tools.db.evidence_knn([1.0, 0.0], k=5, workspace="wsB", exclude_memory_id=999999)
+    assert any(h["memory_id"] == peer["id"] for h in hits)
+
+
+def test_evidence_only_candidates_carry_memory_row_shape(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="postgresql 连接池上限为 20。", subject="pool limit", tags=["db"], workspace="w")
+    # A memory with zero lexical overlap so it can only be recalled via evidence.
+    tools.memory_write(content="pgsql 的 pool 上限数值是二十，注意与连接数区分。", subject="pool", tags=["db"], workspace="w")
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    result = tools.memory_search(query="连接池 上限")
+    for row in result["data"]["results"]:
+        assert isinstance(row.get("version"), int)
+        assert "kind" not in row and "start_offset" not in row and "content_hash" not in row
+        assert "_evidence_hits" in row or row.get("_match_reason") != "evidence_vec_recall"
+
+
+def test_queue_full_drop_is_counted_and_visible(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_queue_max_size = 1
+    tools._semantic_worker._pending[111] = {"version": 1}
+    outcome = tools._semantic_worker.enqueue(222, {"version": 1})
+    assert outcome == {"status": "queue_full"}
+    status = tools._semantic_status()["worker"]
+    assert status["dropped_queue_full"] == 1
+
+
+def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path, monkeypatch) -> None:
+    from memory_arbiter.semantic_conflict import ModelSignal
+
+    tools = make_tools(tmp_path, semantic_enabled=False)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer = tools.memory_write(content="database connection policy", subject="pool", tags=[])["data"]
+    new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+
+    for error, expected in (("semantic inference hard timeout after 30ms", "qwen_timeout"), ("child exited", "qwen_backend_error")):
+        backend = type(
+            "B", (),
+            {"classify_pair": staticmethod(lambda l, r, _e=error: ModelSignal(False, "backend_error", None, "", None, _e))},
+        )()
+        monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
+        tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+        degradation = tools._semantic_status()["check_degradation"]
+        assert degradation["last_reason"] == expected
+    assert tools.db.list_semantic_notices(status="open") == []
+
+
+def test_failed_migration_target_is_not_current_generation(tmp_path: Path, monkeypatch) -> None:
+    from memory_arbiter.db_generation import detect_database_generation
+    from memory_arbiter.vnext_migration import build
+
+    tools = make_tools(tmp_path)
+    legacy = tmp_path / "legacy.sqlite3"
+    src = MemoryDB(Settings(db_path=legacy, backup_jsonl=tmp_path / "unused.jsonl"))
+    from memory_arbiter.models import MemoryRecord
+    src.insert_memory(
+        MemoryRecord.from_input({"content": "内容", "subject": "s", "workspace": "w"}, tools.settings.defaults()),
+        "w",
+    )
+
+    target = tmp_path / "target.sqlite3"
+    monkeypatch.setattr(
+        "memory_arbiter.vnext_migration.MemoryTools",
+        lambda **kwargs: type("FailingTools", (), {"_index_local_text_evidence": staticmethod(lambda *a, **k: {"status": "failed", "reason": "test"})})(),
+    )
+    result = build(legacy, target, tools.settings)
+    assert result["ok"] is False
+    assert detect_database_generation(target) == "unknown"
+
+
+def test_final_sync_rejects_source_writes_landing_before_replace(tmp_path: Path, monkeypatch) -> None:
+    from memory_arbiter.vnext_migration import final_sync
+
+    from memory_arbiter.models import MemoryRecord
+
+    tools = make_tools(tmp_path)
+    legacy = tmp_path / "legacy.sqlite3"
+    settings = Settings(
+        db_path=legacy, backup_jsonl=tmp_path / "unused.jsonl",
+        enable_sqlite_vec=True, vec_dim=2, embedding_provider="gguf",
+        embedding_model_path=tools.settings.embedding_model_path,
+    )
+    original_init = MemoryTools.__init__
+
+    def patched_init(self, settings=None, db=None):
+        original_init(self, settings=settings, db=db)
+        self._embedder = FakeEmbedder()
+        self._embedder_loaded = True
+        self.db.init_vec_index_state("fake-vnext-space", True)
+
+    monkeypatch.setattr(MemoryTools, "__init__", patched_init)
+    src = MemoryDB(settings)
+    src.insert_memory(
+        MemoryRecord.from_input({"content": "原始内容", "subject": "s", "workspace": "w"}, tools.settings.defaults()),
+        "w",
+    )
+    target = legacy.with_name("legacy.vnext.sqlite3")
+
+    import memory_arbiter.vnext_migration as vm
+    original_checkpoint = vm._checkpoint
+
+    def mutating_checkpoint(path):
+        # A write lands while the target is being checkpointed.
+        with src.write_transaction() as conn:
+            conn.execute("UPDATE memories SET content='并发写入' WHERE id=1")
+        return original_checkpoint(path)
+
+    monkeypatch.setattr(vm, "_checkpoint", mutating_checkpoint)
+    result = final_sync(legacy, target, tools.settings)
+    assert result["ok"] is False
+    assert result["error"] == "source_changed_during_final_sync"
+    assert not target.exists()
+
+
+def test_space_rebuild_flips_mismatch_back_to_ready(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    first = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    # Simulate a model swap: the active space no longer matches the live embedder.
+    tools.db.init_vec_index_state("fake-vnext-space", True)
+    tools.db.init_vec_index_state("new-space-v2", True)
+    state = tools.db.get_vec_index_state()
+    assert state["state"] == "mismatch" and state["target_space_id"] == "new-space-v2"
+
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "new-space-v2"
+    rebuild = tools.memory_repair("rebuild_evidence", {"dry_run": False})
+    assert rebuild["ok"] is True and rebuild["data"]["queued"] >= 1
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    state = tools.db.get_vec_index_state()
+    assert state["state"] == "ready"
+    assert state["active_space_id"] == "new-space-v2"
+    result = tools.memory_search(query="接口超时")
+    assert result["data"]["vector_lag"]["pending_evidence_index"] == 0

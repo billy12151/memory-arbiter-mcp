@@ -318,13 +318,13 @@ class ConsoleAPI:
             out.update(caller.response_fields())
         return out
 
-    def memory_detail(self, memory_id: int, sections: str = "none", workspace: Optional[str] = None) -> dict[str, Any]:
+    def memory_detail(self, memory_id: int, workspace: Optional[str] = None) -> dict[str, Any]:
         missing_ws = self._strict_workspace_required(workspace)
         if missing_ws is not None:
             return missing_ws
         return self._memory_or_error(memory_id, workspace=workspace)
 
-    def _memory_or_error(self, memory_id: Any, sections: str = "none", workspace: Optional[str] = None) -> dict[str, Any]:
+    def _memory_or_error(self, memory_id: Any, workspace: Optional[str] = None) -> dict[str, Any]:
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):

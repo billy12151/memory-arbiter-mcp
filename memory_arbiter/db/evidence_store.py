@@ -101,16 +101,34 @@ class EvidenceStore:
         workspace: str | None = None,
         exclude_memory_id: int | None = None,
     ) -> list[dict[str, Any]]:
+        """KNN over evidence vectors, filtered by parent lifecycle state.
+
+        sqlite-vec pushes only the vec0 auxiliary column (``parent_status``)
+        into the KNN itself; the workspace and exclude predicates filter
+        joined tables *after* the global top-k. To keep per-workspace recall
+        from collapsing when other workspaces own the globally nearest rows,
+        callers with those filters get a bounded over-fetch factor. A full
+        pre-filter would need a workspace partition key on the vec0 table
+        (deferred, spec §19).
+        """
         if not self._db.state.sqlite_vec_available or not query_embedding:
             return []
         if parent_status_filter == "expired":
             status_sql = "v.parent_status NOT IN ('active','deleted')"
+            memory_status_sql = "m.status NOT IN ('active','deleted')"
         elif parent_status_filter == "all":
             status_sql = "v.parent_status != 'deleted'"
+            memory_status_sql = "m.status != 'deleted'"
         else:
             status_sql = "v.parent_status='active'"
-        clauses = [status_sql]
-        params: list[Any] = [json.dumps(query_embedding), max(1, int(k))]
+            memory_status_sql = "m.status='active'"
+        # parent_status is best-effort (a vec-disabled process can skip its
+        # update), so the authoritative memories.status is enforced too.
+        clauses = [status_sql, memory_status_sql]
+        fetch_k = max(1, int(k))
+        if workspace or exclude_memory_id is not None:
+            fetch_k = fetch_k * 4
+        params: list[Any] = [json.dumps(query_embedding), fetch_k]
         if workspace:
             clauses.append("COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)=?")
             params.append(workspace)
@@ -123,7 +141,9 @@ class EvidenceStore:
                     f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
                                m.workspace, m.workspace_canonical, m.source_type,
                                m.confidence, m.protection_level, m.event_time,
-                               m.ingest_time, m.metadata, m.content
+                               m.ingest_time, m.metadata, m.content,
+                               m.version AS memory_row_version, m.agent_id,
+                               m.source_ref, m.created_at AS memory_created_at
                         FROM memory_evidence_vec v
                         JOIN memory_evidence e ON e.id=v.id
                         JOIN memories m ON m.id=e.memory_id
@@ -131,6 +151,9 @@ class EvidenceStore:
                         ORDER BY v.distance""",
                     params,
                 ).fetchall()
-            return [dict(row) for row in rows]
+            results = [dict(row) for row in rows]
+            if workspace or exclude_memory_id is not None:
+                results = results[:max(1, int(k))]
+            return results
         except sqlite3.Error:
             return []

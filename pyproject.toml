@@ -25,7 +25,7 @@ memory-arbiter-mcp = "memory_arbiter.server:main"
 memory-arbiter = "memory_arbiter.server:main"
 mema = "memory_arbiter.server:main"
 mema-production-smoke = "memory_arbiter.post_release_smoke:main"
-# Subcommands (no separate console script; dispatched in server.main): doctor, setup, console
+# Subcommands (no separate console script; dispatched in server.main): doctor, setup, console, upgrade, migrate-vnext
 
 [tool.setuptools.packages.find]
 include = ["memory_arbiter*"]
