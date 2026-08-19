@@ -4,5 +4,6 @@ include server.json
 include .env.example
 include memory_arbiter/AGENT_ONBOARDING.md
 recursive-include docs *.md *.py
+recursive-include docs/assets *
 recursive-include examples *.json
 recursive-include scripts *.py

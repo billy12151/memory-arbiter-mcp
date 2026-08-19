@@ -436,10 +436,33 @@ def test_upgrade_already_current_exits_zero_without_migrating(tmp_path: Path, mo
     assert run_upgrade(["--dry-run"]) == 0
 
 
-def test_upgrade_rejects_unsupported_source_schema(tmp_path: Path, monkeypatch) -> None:
+def test_upgrade_rejects_unsupported_source_schema(tmp_path: Path, monkeypatch, capsys) -> None:
     legacy = tmp_path / "legacy.db"
     _legacy_db(legacy)
     config = tmp_path / "config.json"
     _config(config, legacy)
     monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(config))
     assert run_upgrade(["--dry-run", "--json"]) == 2
+    # Human (non-json) output names the error and the missing columns.
+    assert run_upgrade(["--dry-run"]) == 2
+    err = capsys.readouterr().err
+    assert "unsupported_source_schema" in err
+    assert "workspace_canonical" in err
+
+
+def test_dry_run_plan_text_lists_vector_storage_and_free_space(tmp_path: Path, monkeypatch, capsys) -> None:
+    from memory_arbiter.config import Settings as FullSettings
+    from memory_arbiter.db import MemoryDB
+
+    legacy = tmp_path / "legacy.db"
+    MemoryDB(FullSettings(db_path=legacy, backup_jsonl=tmp_path / "u.jsonl"))
+    conn = sqlite3.connect(legacy)
+    conn.execute("CREATE TABLE memories_vec(id INTEGER PRIMARY KEY)")
+    conn.commit(); conn.close()
+    config = tmp_path / "config.json"
+    _config(config, legacy)
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(config))
+    assert run_upgrade(["--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "Estimated vector storage:" in out
+    assert "Free disk space:" in out

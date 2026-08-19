@@ -66,9 +66,10 @@ def detect_database_generation(path: Path) -> DatabaseGeneration:
     except sqlite3.Error:
         return "unknown"
     if state.get("schema_generation") == CURRENT_SCHEMA_GENERATION:
-        # A side-by-side build whose backfill failed must never start as
-        # "current": the data is incomplete even though the schema is new.
-        if state.get("phase") == "failed":
+        # A side-by-side build whose backfill failed (or crashed mid-backfill)
+        # must never start as "current": the data is incomplete even though
+        # the schema is new.
+        if state.get("phase") in {"failed", "backfill"}:
             return "unknown"
         return "current"
     # Accept clean databases produced by the immediately preceding vNext build;

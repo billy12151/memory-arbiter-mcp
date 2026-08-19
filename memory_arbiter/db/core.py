@@ -780,6 +780,9 @@ class MemoryDB:
     def mark_space_rebuild_started(self) -> None:
         return self.meta.mark_space_rebuild_started()
 
+    def space_rebuild_pending_ids(self, limit: int) -> list[int]:
+        return self.meta.space_rebuild_pending_ids(limit)
+
     def maybe_complete_space_rebuild(self, embedding_space_id: str) -> bool:
         return self.meta.maybe_complete_space_rebuild(embedding_space_id)
 

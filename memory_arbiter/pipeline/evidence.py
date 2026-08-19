@@ -147,7 +147,9 @@ class EvidencePipeline:
                     # not masquerade as clean model rejections.
                     if signal.error and "timeout" in str(signal.error).lower():
                         self._tools._record_check_degradation("qwen_timeout")
-                    elif signal.candidate_type in {"backend_error", "backend_unavailable"}:
+                    elif signal.candidate_type == "backend_unavailable":
+                        self._tools._record_check_degradation("qwen_unavailable")
+                    elif signal.candidate_type == "backend_error":
                         self._tools._record_check_degradation("qwen_backend_error")
                     elif signal.candidate_type in {"invalid_json", "invalid_schema"}:
                         self._tools._record_check_degradation("qwen_invalid_output")

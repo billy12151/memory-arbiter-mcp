@@ -48,19 +48,57 @@ class MetaStore:
         return result
 
     def mark_space_rebuild_started(self) -> None:
-        """Record the epoch of an embedding-space rebuild (idempotent).
+        """Record the evidence-id epoch of an embedding-space rebuild (idempotent).
 
-        Evidence rows created at or after this timestamp are guaranteed to be
-        in the target embedding space; the vec channel flips back to ready
-        only once every non-deleted memory has fresh-version evidence written
-        after it."""
+        memory_evidence ids are AUTOINCREMENT-monotonic, so every row with
+        id > epoch was written after this mark — in the target embedding
+        space for single-process flows. The vec channel flips back to ready
+        only once every non-deleted memory has fresh-version evidence above
+        the epoch (timestamp comparison is deliberately avoided: second
+        granularity would let same-second old-space rows count as rebuilt)."""
         db = self._db
         if not db._db_available:
             return
         with db.write_transaction() as conn:
-            if self.get_meta(conn, "space_rebuild_started_at") is None:
-                from ..models import utc_now_iso
-                self.set_meta(conn, "space_rebuild_started_at", utc_now_iso())
+            if self.get_meta(conn, "space_rebuild_evidence_id") is None:
+                epoch = int(
+                    conn.execute(
+                        "SELECT COALESCE(MAX(id), 0) FROM memory_evidence"
+                    ).fetchone()[0]
+                )
+                self.set_meta(conn, "space_rebuild_evidence_id", str(epoch))
+
+    @staticmethod
+    def _space_rebuild_pending_sql() -> str:
+        return (
+            """SELECT m.id FROM memories m WHERE m.status!='deleted'
+               AND NOT EXISTS(
+                 SELECT 1 FROM memory_evidence e
+                 WHERE e.memory_id=m.id AND e.memory_version=m.version
+                   AND e.id > ?
+               )"""
+        )
+
+    def space_rebuild_pending_ids(self, limit: int) -> list[int]:
+        """Ids still needing republish in the active space rebuild (paged).
+
+        Without a persisted epoch (dry-run preview before any execute) the
+        current MAX(id) stands in read-only, which yields the full non-deleted
+        set — exactly what the first execute would mark and queue."""
+        db = self._db
+        if not db._db_available:
+            return []
+        with db.connection() as conn:
+            epoch = self.get_meta(conn, "space_rebuild_evidence_id")
+            if epoch is None:
+                epoch = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM memory_evidence"
+                ).fetchone()[0]
+            rows = conn.execute(
+                self._space_rebuild_pending_sql() + " ORDER BY m.id LIMIT ?",
+                (int(epoch), max(1, int(limit))),
+            ).fetchall()
+        return [int(row["id"]) for row in rows]
 
     def maybe_complete_space_rebuild(self, embedding_space_id: str) -> bool:
         """Flip mismatch -> ready when the whole index is in the target space."""
@@ -70,18 +108,13 @@ class MetaStore:
         with db.write_transaction() as conn:
             state = self.get_meta(conn, "state")
             target = self.get_meta(conn, "target_space_id")
-            started = self.get_meta(conn, "space_rebuild_started_at")
-            if state != "mismatch" or not target or not started or target != embedding_space_id:
+            epoch = self.get_meta(conn, "space_rebuild_evidence_id")
+            if state != "mismatch" or not target or epoch is None or target != embedding_space_id:
                 return False
             remaining = int(
                 conn.execute(
-                    """SELECT COUNT(*) FROM memories m WHERE m.status!='deleted'
-                       AND NOT EXISTS(
-                         SELECT 1 FROM memory_evidence e
-                         WHERE e.memory_id=m.id AND e.memory_version=m.version
-                           AND e.created_at >= ?
-                       )""",
-                    (started,),
+                    "SELECT COUNT(*) FROM (" + self._space_rebuild_pending_sql() + ")",
+                    (int(epoch),),
                 ).fetchone()[0]
             )
             if remaining:
@@ -89,7 +122,7 @@ class MetaStore:
             self.set_meta(conn, "state", "ready")
             self.set_meta(conn, "active_space_id", embedding_space_id)
             for key in (
-                "target_space_id", "space_rebuild_started_at",
+                "target_space_id", "space_rebuild_evidence_id",
                 "migration_cursor", "migration_epoch",
                 "migration_lease_owner", "migration_lease_expires_at",
                 "last_error",

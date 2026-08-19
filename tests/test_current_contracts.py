@@ -147,3 +147,48 @@ def test_doctor_deep_probe_reports_dimension_mismatch(tmp_path: Path) -> None:
     probe = [f for f in report.findings if f.check_id == "vector.dimension_probe"]
     assert probe and probe[0].status == "warn"
     assert "3" in probe[0].detail and "2" in probe[0].detail
+
+
+def test_doctor_cli_deep_probe_uses_settings_embedder(monkeypatch, tmp_path) -> None:
+    import memory_arbiter.doctor as doctor_mod
+    from memory_arbiter.doctor import doctor_overview_cli, report_to_dict
+    from memory_arbiter.doctor_cli import _render_text
+
+    class ProbeEmbedder:
+        embedding_space_id = "cli-probe"
+
+        def embed_text(self, prefix="", body=""):
+            from memory_arbiter.embedder import EmbedResult
+            return EmbedResult([0.1, 0.2], False, 1, 1)
+
+    def fake_build_embedder(*_args, **_kwargs):
+        return ProbeEmbedder(), []
+
+    # Configured path: the CLI builds the embedder itself and reports a
+    # dimension finding instead of the "no resolver" false warning.
+    settings = Settings(
+        db_path=tmp_path / "d.sqlite3", backup_jsonl=tmp_path / "b.jsonl",
+        vec_dim=2, enable_sqlite_vec=True,
+        embedding_provider="gguf", embedding_model_path=tmp_path / "m.gguf",
+    )
+    (tmp_path / "m.gguf").write_bytes(b"x")
+    import sqlite3 as _sql
+    from memory_arbiter.db.schema import SchemaStore
+    conn = _sql.connect(settings.db_path)
+    SchemaStore(type("P", (), {"settings": settings, "state": None, "_sqlite_vec_loadable": False})())._init_schema(conn)
+    conn.close()
+    monkeypatch.setattr(doctor_mod, "report_to_dict", doctor_mod.report_to_dict, raising=False)
+    import memory_arbiter.embedder as emb
+    monkeypatch.setattr(emb, "build_embedder", fake_build_embedder)
+    report = doctor_overview_cli(settings, deep=True)
+    probes = [f for f in report.findings if f.check_id == "vector.dimension_probe"]
+    assert probes and probes[0].status == "pass"
+    assert "no embedder resolver" not in _render_text(report, use_color=False)
+
+    # Unconfigured path: skip note, not a warning — healthy DB stays INFO.
+    plain = Settings(db_path=tmp_path / "d.sqlite3", backup_jsonl=tmp_path / "b.jsonl")
+    report = doctor_overview_cli(plain, deep=True)
+    probes = [f for f in report.findings if f.check_id == "vector.dimension_probe"]
+    assert probes and probes[0].status == "pass"
+    assert "skipped" in probes[0].detail
+    assert report.overall.value == "info"

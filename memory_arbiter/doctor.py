@@ -54,6 +54,11 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     if deep:
         # --deep / memory_review(deep=true): actually run the embedder and
         # compare the live dimension against vec.dim (seconds-level cost).
+        embedding_configured = (
+            settings.embedding_provider == "gguf"
+            and settings.embedding_model_path is not None
+            and settings.enable_sqlite_vec
+        )
         if embedder_probe is None:
             findings.append(_finding("vector.dimension_probe", False, "deep probe requested but no embedder resolver was provided"))
         else:
@@ -63,7 +68,12 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
                 findings.append(_finding("vector.dimension_probe", False, f"embedder probe failed: {exc}"))
             else:
                 if embedder is None:
-                    findings.append(_finding("vector.dimension_probe", False, "embedding not configured or embedder unavailable"))
+                    if embedding_configured:
+                        findings.append(_finding("vector.dimension_probe", False, "embedding configured but the embedder is currently unavailable"))
+                    else:
+                        # Asking for a probe without embedding configured is a
+                        # no-op, not a health problem — must not force exit 1.
+                        findings.append(_finding("vector.dimension_probe", True, "deep probe skipped: embedding not configured"))
                 else:
                     try:
                         er = embedder.embed_text(prefix="", body="dimension probe")
@@ -101,8 +111,31 @@ def open_ro_connection(path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def doctor_overview_cli(settings: Settings, deep: bool = False) -> OverviewReport:
+    def _cli_embedder_probe() -> tuple[Any, list[str]]:
+        # The CLI ambulance path has no MemoryTools; build the embedder
+        # directly from settings so --deep actually probes the model its
+        # help text promises (read-only; no DB access needed).
+        if (
+            settings.embedding_provider != "gguf"
+            or settings.embedding_model_path is None
+            or not settings.enable_sqlite_vec
+        ):
+            return None, []
+        try:
+            from .embedder import build_embedder
+            return build_embedder(
+                str(settings.embedding_model_path),
+                settings.vec_dim,
+                n_ctx=settings.embedding_n_ctx,
+                reserved_tokens=settings.embedding_reserved_tokens,
+                max_section_chars=settings.max_section_chars,
+            )
+        except Exception:
+            return None, []
+
     try:
-        with open_ro_connection(settings.db_path) as conn: return run_all_checks(conn, settings, deep)
+        with open_ro_connection(settings.db_path) as conn:
+            return run_all_checks(conn, settings, deep, embedder_probe=_cli_embedder_probe if deep else None)
     except Exception as exc:
         return OverviewReport(utc_now_iso(), Severity.CRITICAL, [Finding("database.open", "database", Severity.CRITICAL, "error", "database.open", str(exc))], {"mode": "unavailable", "total_memories": 0})
 

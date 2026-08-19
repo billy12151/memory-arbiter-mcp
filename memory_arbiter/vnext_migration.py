@@ -307,7 +307,12 @@ def final_sync(
             "ok": False,
             "error": "source_changed_during_final_sync",
             "staging": str(staging),
-            "next_step": "stop all writers and rerun the final sync",
+            "next_step": (
+                "stop all writers and rerun the final sync; the fully built "
+                "staging database is kept at the staging path and will be "
+                "rebuilt on the next run (it roughly doubles disk usage "
+                "until then)"
+            ),
         })
         return result
     _remove_sidecars(target)
@@ -339,8 +344,10 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": "source_not_found", "source": str(source)}))
         return 2
     if not args.execute:
-        print(json.dumps({"ok": True, "dry_run": True, "plan": inspect(source, target, settings)}, ensure_ascii=False, indent=2))
-        return 0
+        plan = inspect(source, target, settings)
+        ok = plan.get("ok") is not False
+        print(json.dumps({"ok": ok, "dry_run": True, "plan": plan}, ensure_ascii=False, indent=2))
+        return 0 if ok else 2
     if args.final_sync:
         result = final_sync(source, target, settings)
     else:

@@ -824,31 +824,36 @@ class OperationsPipeline:
             # Embedding-space mismatch is a whole-index condition: existing
             # rows may be healthy-looking but live in the old space, so the
             # rebuild must republish EVERYTHING (not just stale rows) before
-            # the vec channel can be re-enabled. Strict-isolation callers
-            # only see their own workspace and therefore cannot complete a
-            # global rebuild; they keep the stale-only selection.
+            # the vec channel can be re-enabled. The pending set is keyed on
+            # the evidence-id epoch, so republished rows drop out and repeated
+            # calls paginate forward instead of re-selecting the first batch
+            # forever. Strict-isolation callers only see their own workspace
+            # and therefore cannot complete a global rebuild; they keep the
+            # stale-only selection. The epoch mark itself is written only on
+            # the execute path so dry runs stay side-effect-free.
             vec_state = self.db.get_vec_index_state()
             mismatch_rebuild = (
                 vec_state.get("state") == "mismatch"
                 and vec_state.get("target_space_id") is not None
                 and not workspace_sql
             )
-            if mismatch_rebuild:
+            if mismatch_rebuild and not dry_run:
                 self.db.mark_space_rebuild_started()
-                stale_clause = ""
+            if mismatch_rebuild:
+                ids = self.db.space_rebuild_pending_ids(batch)
             else:
                 stale_clause = (
                     "AND NOT EXISTS(SELECT 1 FROM memory_evidence e "
                     "WHERE e.memory_id=m.id AND e.memory_version=m.version) "
                 )
-            with self.db.connection() as conn:
-                rows = conn.execute(
-                    "SELECT m.id FROM memories m WHERE m.status!='deleted' "
-                    f"{workspace_sql}{stale_clause}"
-                    "ORDER BY m.id LIMIT ?",
-                    (*params, batch),
-                ).fetchall()
-            ids = [int(row["id"]) for row in rows]
+                with self.db.connection() as conn:
+                    rows = conn.execute(
+                        "SELECT m.id FROM memories m WHERE m.status!='deleted' "
+                        f"{workspace_sql}{stale_clause}"
+                        "ORDER BY m.id LIMIT ?",
+                        (*params, batch),
+                    ).fetchall()
+                ids = [int(row["id"]) for row in rows]
         else:
             try:
                 requested = list(dict.fromkeys(int(value) for value in memory_ids))[:batch]

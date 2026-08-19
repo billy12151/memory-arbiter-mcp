@@ -123,9 +123,12 @@ class MemoryTools:
             "count": self._check_degradation_count,
             "last_at": self._check_degradation_at,
             "note": (
-                "check-route candidates are fail-closed (no notice) while Qwen is "
-                "unavailable or the job budget is exhausted; deterministic notify "
-                "decisions are unaffected"
+                "check-route candidates are fail-closed (no notice) while Qwen "
+                "is unavailable (qwen_unavailable/qwen_backend_error), times out "
+                "(qwen_timeout), returns invalid output (qwen_invalid_output), "
+                "or the job budget is exhausted; deterministic notify decisions "
+                "are unaffected. Semantic-worker queue overflow shows as "
+                "worker.dropped_queue_full."
             ),
         }
 

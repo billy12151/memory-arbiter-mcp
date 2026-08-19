@@ -193,6 +193,9 @@ def test_exact_subject_match_survives_evidence_fusion(tmp_path: Path, monkeypatc
 
 def test_notify_surfaces_without_qwen_and_check_fails_closed(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path, semantic_enabled=False)
+    # Disable the background semantic job so only this test's explicit
+    # _process_semantic_conflict_job runs (deterministic under suite load).
+    tools.settings.semantic_conflict_on_write = "off"
     old = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=["api"])["data"]
     new = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=["api"])["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
@@ -602,10 +605,16 @@ def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path,
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
 
-    for error, expected in (("semantic inference hard timeout after 30ms", "qwen_timeout"), ("child exited", "qwen_backend_error")):
+    cases = [
+        ("semantic inference hard timeout after 30ms", "backend_error", "qwen_timeout"),
+        ("child exited", "backend_error", "qwen_backend_error"),
+        (None, "backend_unavailable", "qwen_unavailable"),
+        ("missing_json", "invalid_json", "qwen_invalid_output"),
+    ]
+    for error, candidate_type, expected in cases:
         backend = type(
             "B", (),
-            {"classify_pair": staticmethod(lambda l, r, _e=error: ModelSignal(False, "backend_error", None, "", None, _e))},
+            {"classify_pair": staticmethod(lambda l, r, _e=error, _t=candidate_type: ModelSignal(False, _t, None, "", None, _e))},
         )()
         monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
         tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -702,3 +711,111 @@ def test_space_rebuild_flips_mismatch_back_to_ready(tmp_path: Path) -> None:
     assert state["active_space_id"] == "new-space-v2"
     result = tools.memory_search(query="接口超时")
     assert result["data"]["vector_lag"]["pending_evidence_index"] == 0
+
+
+def test_mismatch_rebuild_paginates_across_batches_and_flips_only_at_end(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    ids = [
+        tools.memory_write(content=f"条目 {i}：连接池为 {i}0。", subject=f"item{i}", tags=[])["data"]["id"]
+        for i in range(6)
+    ]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    tools.db.init_vec_index_state("new-space-v2", True)
+    assert tools.db.get_vec_index_state()["state"] == "mismatch"
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "new-space-v2"
+
+    # batch_size 2 over 6 memories: each execute call must select the NEXT
+    # pending batch, never re-select the first one forever.
+    seen: list[int] = []
+    for _round in range(3):
+        result = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 2})
+        assert result["ok"] is True and result["data"]["queued"] == 2
+        assert tools.wait_evidence_worker_drained(timeout=5)
+        batch_ids = sorted(item["memory_id"] for item in result["data"]["results"])
+        assert not set(batch_ids) & set(seen), "rebuild re-selected an already republished memory"
+        seen.extend(batch_ids)
+        if len(seen) < len(ids):
+            assert tools.db.get_vec_index_state()["state"] == "mismatch"
+    assert sorted(seen) == sorted(ids)
+    state = tools.db.get_vec_index_state()
+    assert state["state"] == "ready" and state["active_space_id"] == "new-space-v2"
+
+
+def test_space_rebuild_epoch_ignores_same_second_old_rows(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="旧空间内容甲。", subject="a", tags=[])
+    tools.memory_write(content="旧空间内容乙。", subject="b", tags=[])
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    tools.db.init_vec_index_state("new-space-v2", True)
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "new-space-v2"
+
+    # Start the rebuild (marks the evidence-id epoch) but republish only one
+    # memory in the same second — old-space rows must NOT count as rebuilt.
+    tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 1})
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.db.get_vec_index_state()["state"] == "mismatch"
+    # An ordinary publish of the other memory completes the rebuild.
+    tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 5})
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.db.get_vec_index_state()["state"] == "ready"
+
+
+def test_rebuild_dry_run_has_no_side_effects_in_mismatch_mode(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="内容。", subject="s", tags=[])
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    tools.db.init_vec_index_state("new-space-v2", True)
+    preview = tools.memory_repair("rebuild_evidence", {"dry_run": True})
+    assert preview["data"]["count"] >= 1
+    with tools.db.connection() as conn:
+        epoch = conn.execute(
+            "SELECT value FROM _vec_index_meta WHERE key='space_rebuild_evidence_id'"
+        ).fetchone()
+    assert epoch is None, "dry-run must not persist the rebuild epoch"
+
+
+def test_knn_truncates_to_requested_k_with_filters(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    for i in range(4):
+        tools.memory_write(content=f"postgres 条目 {i}：连接池说明 {i}。", subject=f"pg{i}", tags=[], workspace="w")
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    hits = tools.db.evidence_knn([1.0, 0.0], k=3, workspace="w", exclude_memory_id=999999)
+    assert 0 < len(hits) <= 3
+
+
+def test_stale_publish_race_does_not_pollute_worker_last_error(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(content="内容。", subject="s", tags=[])["data"]
+    tools.settings.semantic_conflict_on_write = "off"
+    monkeypatch.setattr(
+        tools, "_index_local_text_evidence",
+        lambda *a, **k: {"status": "failed", "outcome": "stale_snapshot"},
+    )
+    tools._evidence_worker.enqueue(written["id"], {"version": 1})
+    assert tools._evidence_worker.wait_drained(timeout=2)
+    assert tools._evidence_worker.status()["last_error"] is None
+
+
+def test_migrate_vnext_cli_exit_codes(tmp_path: Path, monkeypatch, capsys) -> None:
+    from memory_arbiter.vnext_migration import run_cli
+
+    # Dry-run on an unsupported source schema exits 2 with ok:false.
+    bad = tmp_path / "bad.sqlite3"
+    conn = sqlite3.connect(bad)
+    conn.execute("CREATE TABLE memories(id INTEGER PRIMARY KEY, content TEXT)")
+    conn.commit(); conn.close()
+    assert run_cli(["--source", str(bad)]) == 2
+    assert '"ok": false' in capsys.readouterr().out
+
+    # Build that completes but cannot be checkpointed (switch_ready False)
+    # also exits 2 on the execute path.
+    good = tmp_path / "good.sqlite3"
+    MemoryDB(Settings(db_path=good, backup_jsonl=tmp_path / "u.jsonl"))
+    monkeypatch.setattr(
+        "memory_arbiter.vnext_migration.build",
+        lambda *a, **k: {"ok": True, "switch_ready": False, "target": "t"},
+    )
+    assert run_cli(["--source", str(good), "--execute"]) == 2
+    capsys.readouterr()

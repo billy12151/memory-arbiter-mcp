@@ -127,7 +127,10 @@ class EvidenceStore:
         clauses = [status_sql, memory_status_sql]
         fetch_k = max(1, int(k))
         if workspace or exclude_memory_id is not None:
-            fetch_k = fetch_k * 4
+            # Bounded over-fetch; the absolute ceiling keeps deep paginated
+            # queries (pool_cap grows with offset) from multiplying into a
+            # full-index KNN scan.
+            fetch_k = min(fetch_k * 4, 2048)
         params: list[Any] = [json.dumps(query_embedding), fetch_k]
         if workspace:
             clauses.append("COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)=?")
