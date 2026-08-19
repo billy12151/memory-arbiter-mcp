@@ -6,7 +6,8 @@ from importlib import resources
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from .conflict_judgments import ConflictJudgmentStore
-from .validation import _controlled_integer, validate_product_payload
+from .models import MemoryStatus, ProtectionLevel, SourceType
+from .validation import PRODUCT_FIELD_REGISTRY, _controlled_integer, validate_product_payload
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
@@ -73,6 +74,61 @@ class ProductSurfaces:
             ],
         }
 
+    @staticmethod
+    def _judge_required_fields() -> list[str]:
+        return [
+            "conflict_id", "expected_left_version", "expected_right_version",
+            "verdict", "recommended_use", "suggested_winner",
+            "confidence_hint", "reason", "affects_current_output", "usage_context",
+        ]
+
+    @staticmethod
+    def _action_required_paths() -> dict[str, str]:
+        return {
+            "read_semantic_notice": (
+                "Read the notice, execute both returned memory read calls, and assess the complete memories. "
+                "Dismiss a false positive; after the credible notice has been handled, resolve the notice. "
+                "A notice is not a formal conflict and cannot be judged or passed to resolve_conflict."
+            ),
+            "judge_conflict_before_use": (
+                "Read the formal conflict and both complete memories, then submit memory(action='judge') "
+                "with the returned conflict_id and left/right version snapshot pins before using the claim."
+            ),
+            "ask_user": (
+                "The formal conflict judgment requires a user decision. Ask the user; do not submit another "
+                "agent judgment as a substitute."
+            ),
+            "confirm_new_workspace": (
+                "Explain the proposed canonical workspace and ask the user to authorize confirmation. After "
+                "approval call memory_govern(action='confirm_pending_workspace') with authorized=true."
+            ),
+            "ask_user_for_authorization": (
+                "Explain the returned impact and ask the user to authorize that specific governance action. "
+                "Only after approval follow the returned retry instructions with authorized=true."
+            ),
+        }
+
+    @staticmethod
+    def _field_reference(surface: str) -> dict[str, list[str]]:
+        return {
+            operation: sorted(fields)
+            for (registered_surface, operation), fields in PRODUCT_FIELD_REGISTRY.items()
+            if registered_surface == surface and not operation.startswith("_")
+        }
+
+    @staticmethod
+    def _memory_value_reference() -> dict[str, Any]:
+        return {
+            "source_type": [item.value for item in SourceType],
+            "protection_level": [item.value for item in ProtectionLevel],
+            "remember_status": [item.value for item in MemoryStatus],
+            "update_modes": {
+                "replace_content": "memory_id plus new_content, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
+                "replace_text": "memory_id plus old_text and new_text, optionally add_tags/remove_tags/reason.",
+                "tags_only": "memory_id plus tags_only=true with add_tags and/or remove_tags; content is unchanged.",
+            },
+        }
+
     def _product_help(self, surface: str, topic: Optional[str] = None) -> dict[str, Any]:
         helps: dict[str, Any] = {
             "memory": {
@@ -86,6 +142,7 @@ class ProductSurfaces:
                     "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_left_version": 1, "expected_right_version": 2, "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None, "confidence_hint": "medium", "affects_current_output": True, "usage_context": "Current answer depends on this field.", "resolution_kind": "partial_update", "conflict_scope": "field", "reason": "Only one field changed."}},
                 },
                 "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
+                "value_reference": self._memory_value_reference(),
             },
             "memory_review": {
                 "description": "Read-only inspection. Never changes memory state.",
@@ -110,6 +167,12 @@ class ProductSurfaces:
                 },
                 "safety_note": "Set authorized=true only after the user explicitly confirms the specific governance action. Retire only whole memories; for partial updates or current-document replacement, update the existing memory instead.",
                 "authorization_rule": "All state-changing actions require authorized=true. Without it, the response returns action_required=ask_user_for_authorization and an impact description.",
+                "confirm_actions": {
+                    "confirm": "Promote one memory to user_confirmed and lock it against ordinary changes.",
+                    "confirm_pending_workspace": (
+                        "Confirm a new canonical workspace under strict isolation and activate its pending memory."
+                    ),
+                },
             },
             "memory_repair": {
                 "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
@@ -125,6 +188,9 @@ class ProductSurfaces:
                     "notice_resolve": {"task": "notice", "data": {"action": "resolve", "notice_id": 1, "reason": "Reviewed and handled."}},
                 },
                 "semantic_notice_delivery": "Local-text evidence finds candidates. Deterministic notify routes surface directly; check routes require Qwen and degrade to ignore when Qwen is unavailable. Read both memories before assessing an advisory notice.",
+                "semantic_control_actions": [
+                    "status", "pause", "resume", "enable", "unload", "disable",
+                ],
             },
         }
         if topic == AGENT_ONBOARDING_TOPIC:
@@ -141,6 +207,18 @@ class ProductSurfaces:
         if surface in {"memory", "memory_govern"} and isinstance(help_doc, dict):
             help_doc = dict(help_doc)
             help_doc["judge_constraints"] = self._judge_constraints()
+        if surface == "memory" and isinstance(help_doc, dict):
+            help_doc = dict(help_doc)
+            help_doc["judge_required_fields"] = self._judge_required_fields()
+        if isinstance(help_doc, dict):
+            help_doc = dict(help_doc)
+            help_doc["action_required_paths"] = self._action_required_paths()
+            help_doc["accepted_fields"] = self._field_reference(surface)
+        if surface == "memory_repair" and isinstance(help_doc, dict):
+            help_doc = dict(help_doc)
+            help_doc.setdefault("semantic_control_actions", [
+                "status", "pause", "resume", "enable", "unload", "disable",
+            ])
         if topic and isinstance(help_doc, dict):
             narrowed = dict(help_doc)
             narrowed["requested_topic"] = topic
@@ -408,11 +486,7 @@ class ProductSurfaces:
                 return missing
             return self._forward("memory", action, self.memory_edit, **payload)
         if action == "judge":
-            required = [
-                "conflict_id", "expected_left_version", "expected_right_version",
-                "verdict", "recommended_use", "suggested_winner",
-                "confidence_hint", "reason", "affects_current_output", "usage_context",
-            ]
+            required = self._judge_required_fields()
             if "conflict_id" not in payload and "id" in payload:
                 payload["conflict_id"] = payload.pop("id")
             missing_fields = [name for name in required if name not in payload]
@@ -654,11 +728,16 @@ class ProductSurfaces:
         if task == "semantic_control":
             timeout_raw = payload.get("timeout")
             timeout_value = 30.0 if timeout_raw is None else float(timeout_raw)
-            return self.db.state.response(self._semantic_control_with_timeout(
+            result = self._semantic_control_with_timeout(
                 str(payload.get("action") or "status"),
                 timeout=timeout_value,
                 workspace=payload.get("workspace"),
-            ))
+            )
+            if result.get("outcome") == "invalid_action":
+                result["error"] = "invalid semantic_control action"
+                result["help"] = self._product_help("memory_repair", "semantic_control")
+                return self.db.state.response(result, ok=False)
+            return self.db.state.response(result)
         if task == "notice":
             action_value = payload.get("action", "list")
             if not isinstance(action_value, str):

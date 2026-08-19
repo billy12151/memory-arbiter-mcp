@@ -26,11 +26,20 @@ available. Qwen is only a filter; it never edits memory or confirms a conflict.
 A successful product response may include one advisory notice stub. Read the
 notice, then execute both returned memory read calls. Only after reading both
 complete memories should you tell the user that the candidate appears credible.
-Dismiss false positives and resolve handled notices. A notice never edits,
-retires, or automatically creates a formal conflict.
+Dismiss false positives and resolve credible notices only after handling them.
+A notice has no formal conflict_id: never pass it to judge or resolve_conflict.
+It never edits, retires, or automatically creates a formal conflict.
 
 Formal conflict judgments use the left and right memory versions as snapshot
-pins. A judgment records guidance only. If it requires user action, ask the user.
+pins. For judge_conflict_before_use, read both memories and submit judge with the
+returned pins before using the claim. A judgment records guidance only. If
+action_required is ask_user, ask the user instead of judging again.
+
+For confirm_new_workspace, ask the user before calling confirm_pending_workspace
+with authorized=true. For ask_user_for_authorization, explain the returned impact
+and retry with authorized=true only after specific approval. Govern confirm
+promotes one memory to user_confirmed; confirm_pending_workspace instead confirms
+a strict-isolation workspace and activates its pending memory.
 
 Preview backup replay with dry_run=true. Apply it only after explicit user
 authorization with dry_run=false and authorized=true. Complete a todo by removing
@@ -55,8 +64,15 @@ source-of-truth 替换旧内容时，先找到现有记忆再 update，不要新
 notify、check、ignore：Qwen 不可用时 notify 继续提醒，check 降级为忽略。
 Qwen 只负责降噪，不编辑记忆，也不确认冲突。
 
-收到 advisory notice 后，先读取两侧完整记忆再判断；误报 dismiss，已处理 resolve。
-正式 conflict judgment 只用左右 memory version 做快照固定，judgment 只记录建议。
+收到 advisory notice 后，先读取两侧完整记忆再判断；误报 dismiss，可信候选处理完后
+resolve。notice 没有正式 conflict_id，不能传给 judge 或 resolve_conflict。
+正式 conflict 的 judge_conflict_before_use 必须先读两侧，再带返回的版本快照调用
+judge；ask_user 表示必须询问用户，不能用再次 judge 代替。
+
+confirm_new_workspace 应先取得用户授权，再用 authorized=true 调
+confirm_pending_workspace；ask_user_for_authorization 应说明返回的 impact，取得本次明确
+授权后才按 retry 重试。govern 的 confirm 是把单条 memory 提升为 user_confirmed，
+confirm_pending_workspace 则确认 strict isolation 的新 workspace 并激活 pending memory。
 
 备份恢复先 dry_run=true 预览，取得用户明确授权后才可正式执行。
 ```

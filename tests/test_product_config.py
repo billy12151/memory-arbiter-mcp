@@ -450,6 +450,60 @@ def test_product_help_exposes_agent_onboarding_topic(tmp_path: Path) -> None:
     assert "memory(action=\"find\")" in help_doc["content"]
 
 
+def test_product_help_exposes_agent_decision_paths(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+
+    memory_help = tools.memory(action="help")["data"]
+    assert memory_help["judge_required_fields"] == [
+        "conflict_id", "expected_left_version", "expected_right_version",
+        "verdict", "recommended_use", "suggested_winner", "confidence_hint",
+        "reason", "affects_current_output", "usage_context",
+    ]
+    paths = memory_help["action_required_paths"]
+    assert "memory(action='judge')" in paths["judge_conflict_before_use"]
+    assert "not a formal conflict" in paths["read_semantic_notice"]
+    assert "authorized=true" in paths["confirm_new_workspace"]
+    assert "returned retry instructions" in paths["ask_user_for_authorization"]
+    assert "add_tags" in memory_help["accepted_fields"]["update"]
+    assert memory_help["value_reference"]["source_type"] == [
+        "user_confirmed", "document_extracted", "agent_generated", "unknown", "pending",
+    ]
+    assert "tags_only" in memory_help["value_reference"]["update_modes"]
+
+    govern_help = tools.memory_govern(action="help")["data"]
+    assert "user_confirmed" in govern_help["confirm_actions"]["confirm"]
+    assert "strict isolation" in govern_help["confirm_actions"]["confirm_pending_workspace"]
+    assert "authorized" in govern_help["accepted_fields"]["confirm_pending_workspace"]
+
+    repair_help = tools.memory_repair(task="help")["data"]
+    assert repair_help["semantic_control_actions"] == [
+        "status", "pause", "resume", "enable", "unload", "disable",
+    ]
+    assert repair_help["action_required_paths"] == paths
+    assert "action" in repair_help["accepted_fields"]["semantic_control"]
+
+
+def test_product_help_exposes_fields_for_read_only_surface(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+
+    review_help = tools.memory_review(view="help")["data"]
+    assert "conflict_id" in review_help["accepted_fields"]["conflict_detail"]
+    assert "memory_id" in review_help["accepted_fields"]["history"]
+    assert "ask_user" in review_help["action_required_paths"]
+
+
+def test_semantic_control_invalid_action_is_a_failed_call_with_help(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+
+    result = tools.memory_repair(task="semantic_control", data={"action": "bogus"})
+    assert result["ok"] is False
+    assert result["data"]["outcome"] == "invalid_action"
+    assert result["data"]["valid_actions"] == [
+        "status", "pause", "resume", "enable", "unload", "disable",
+    ]
+    assert "semantic_control" in result["data"]["help"]["accepted_fields"]
+
+
 
 def test_product_forwards_handle_bad_secondary_int_args(tmp_path: Path) -> None:
     """v0.11.1: secondary int args must not crash the product surface.

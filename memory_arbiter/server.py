@@ -33,22 +33,41 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Daily memory operations: remember, find, read, update, judge, status, help."""
+        """Daily memory operations: remember, find, read, update, judge, status, help.
+
+        Call memory(action="help") to discover accepted fields, judge requirements,
+        value enums, update modes, and action_required paths before relying on a
+        result that requests attention.
+        """
         return tools.memory(action=action, data={} if data is None else data)
 
     @app.tool()
     def memory_review(view: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Read-only inspection: overview, doctor, conflicts, judgments, history, audit, help."""
+        """Read-only inspection: overview, doctor, conflicts, judgments, history, audit, help.
+
+        Use memory_review(view="help") for accepted fields. Use conflict_detail
+        before formal judgments so both sides and snapshot context are visible.
+        """
         return tools.memory_review(view=view, data={} if data is None else data)
 
     @app.tool()
     def memory_govern(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Explicitly authorized governance for memories, conflicts, and workspaces."""
+        """Explicitly authorized governance for memories, conflicts, and workspaces.
+
+        State-changing governance requires the user to authorize that exact action;
+        then retry with authorized=true. Call memory_govern(action="help") for
+        impact notes, accepted fields, and confirm vs confirm_pending_workspace.
+        """
         return tools.memory_govern(action=action, data={} if data is None else data)
 
     @app.tool()
     def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Maintenance: history cleanup, evidence rebuild, backup replay, notices, and runtime control."""
+        """Maintenance: history cleanup, evidence rebuild, backup replay, notices, and runtime control.
+
+        Use memory_repair(task="help") for notice handling and semantic_control
+        actions. Semantic notices are advisory; read both memories before dismiss
+        or resolve, and never pass a notice directly to judge or resolve_conflict.
+        """
         return tools.memory_repair(task=task, data={} if data is None else data)
 
     return ServerBundle(app, tools)
