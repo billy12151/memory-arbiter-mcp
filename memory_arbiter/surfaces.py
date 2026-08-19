@@ -122,9 +122,10 @@ class ProductSurfaces:
             "source_type": [item.value for item in SourceType],
             "protection_level": [item.value for item in ProtectionLevel],
             "memory_status_note": (
-                "Lifecycle values a record can carry. Omit status on remember: new "
-                "memories default to active; pending is set internally under strict "
-                "isolation until confirm_pending_workspace activates the memory."
+                "Lifecycle values a record can carry (seen on reads). On remember, "
+                "status accepts only 'active' (the default - omit it) or 'pending'; "
+                "strict isolation sets pending internally until confirm_pending_workspace "
+                "activates the memory. superseded/conflicted/deleted are rejected as write inputs."
             ),
             "memory_status": [item.value for item in MemoryStatus],
             "update_modes": {

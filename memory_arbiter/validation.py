@@ -19,8 +19,6 @@ MAX_METADATA_BYTES = 256 * 1024
 MAX_TEXT_FIELD_CHARS = 2_000
 MAX_REPLACEMENT_TEXT_CHARS = 1_000_000
 MAX_BATCH_IDS = 1_000
-MAX_SPLIT_SECTIONS = 500
-MAX_SPLIT_SECTION_TEXT_CHARS = 2_000
 MAX_REVISION = 2_147_483_647
 SEMANTIC_CONTROL_MAX_TIMEOUT = 600.0
 MAX_RESULT_LIMIT = 100
@@ -252,7 +250,7 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             result.error = {"error": "resource_limit_exceeded", "field": "metadata", "max_bytes": MAX_METADATA_BYTES}
             return result
 
-    for key in ("memory_ids", "section_ids"):
+    for key in ("memory_ids",):
         value = payload.get(key)
         if value is None:
             continue
@@ -303,48 +301,6 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             return result
         payload["timeout"] = parsed_timeout
 
-    if "sections" in payload:
-        sections = payload["sections"]
-        if (surface, operation) == ("memory", "read"):
-            if not isinstance(sections, str) or sections not in {"none", "catalog", "all"}:
-                result.error = _error("sections", "must be one of none, catalog, all")
-                return result
-        elif (surface, operation) == ("memory_repair", "split"):
-            if not isinstance(sections, list) or len(sections) > MAX_SPLIT_SECTIONS:
-                result.error = _error("sections", f"must be a list of at most {MAX_SPLIT_SECTIONS} section objects")
-                return result
-            allowed_section_fields = {
-                "title", "summary", "anchor_text", "occurrence_index", "title_path",
-            }
-            for index, section in enumerate(sections):
-                field_name = f"sections[{index}]"
-                if not isinstance(section, dict):
-                    result.error = _error(field_name, "must be a section object")
-                    return result
-                unknown = set(section) - allowed_section_fields
-                if unknown:
-                    result.error = _error(field_name, "contains unknown fields", unknown_fields=sorted(map(str, unknown)))
-                    return result
-                for text_key in ("title", "summary", "anchor_text", "title_path"):
-                    text = section.get(text_key)
-                    if text is not None and (
-                        not isinstance(text, str) or len(text) > MAX_SPLIT_SECTION_TEXT_CHARS
-                    ):
-                        result.error = _error(
-                            f"{field_name}.{text_key}",
-                            f"must be a string of at most {MAX_SPLIT_SECTION_TEXT_CHARS} characters",
-                        )
-                        return result
-                if "occurrence_index" in section:
-                    occurrence = _controlled_integer(section["occurrence_index"])
-                    if occurrence is None or not 0 <= occurrence <= MAX_REVISION:
-                        result.error = _error(
-                            f"{field_name}.occurrence_index",
-                            f"must be an integer between 0 and {MAX_REVISION}",
-                        )
-                        return result
-                    section["occurrence_index"] = occurrence
-
     embedding = payload.get("query_embedding")
     if embedding is None:
         embedding = payload.get("embedding")
@@ -375,11 +331,19 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         "source_type": {item.value for item in SourceType},
         "protection_level": {item.value for item in ProtectionLevel},
     }
-    if (surface, operation) == ("memory", "remember"):
-        enums["status"] = {item.value for item in MemoryStatus}
     for key, choices in enums.items():
         value = payload.get(key)
         if value is not None and str(value) not in choices:
             result.error = _error(key, "invalid enum value", allowed=sorted(choices))
+            return result
+    if (surface, operation) == ("memory", "remember") and payload.get("status") is not None:
+        # superseded/conflicted/deleted are lifecycle outcomes owned by
+        # govern/repair operations; they are never caller-supplied write inputs.
+        status_value = payload.get("status")
+        if status_value not in {MemoryStatus.ACTIVE.value, MemoryStatus.PENDING.value}:
+            result.error = _error(
+                "status",
+                "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs",
+            )
             return result
     return result

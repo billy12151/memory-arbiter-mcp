@@ -7,8 +7,6 @@ from memory_arbiter.tools import MemoryTools
 from memory_arbiter.validation import (
     MAX_CONTENT_BYTES,
     MAX_REPLACEMENT_TEXT_CHARS,
-    MAX_SPLIT_SECTIONS,
-    MAX_SPLIT_SECTION_TEXT_CHARS,
     MAX_TEXT_FIELD_CHARS,
     PRODUCT_FIELD_REGISTRY,
     validate_product_payload,
@@ -26,6 +24,30 @@ def test_remember_requires_content_and_subject(tmp_path: Path) -> None:
         result = tools.memory("remember", data)
         assert result["ok"] is False
         assert result["data"]["field"] == field
+
+
+def test_remember_rejects_lifecycle_status_values(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    for status in ("superseded", "conflicted", "deleted", "bogus"):
+        result = tools.memory("remember", {"content": "x", "subject": "s", "status": status})
+        assert result["ok"] is False, status
+        assert result["data"]["error"] == "invalid_input"
+        assert result["data"]["field"] == "status"
+    allowed = tools.memory("remember", {"content": "x", "subject": "s", "status": "active"})
+    assert allowed["ok"] is True
+    assert allowed["data"]["record"]["status"] == "active"
+    pending = tools.memory("remember", {"content": "x", "subject": "s", "status": "pending"})
+    assert pending["ok"] is True
+    assert pending["data"]["record"]["status"] == "pending"
+
+
+def test_memory_write_guard_rejects_lifecycle_status_without_surface_validation(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    result = tools.memory_write(content="x", subject="s", status="deleted")
+    assert result["ok"] is False
+    assert result["data"]["error"] == "invalid_input"
+    assert result["data"]["field"] == "status"
+    assert tools.db.get_memory(result["data"].get("id") or 0) is None
 
 
 def test_content_limit_is_utf8_bytes_and_inclusive(tmp_path: Path) -> None:

@@ -757,11 +757,16 @@ def test_search_active_domain_excludes_non_active_non_superseded_statuses(tmp_pa
         subject="release-domain",
         status="pending",
     )
-    conflicted = tools.memory_write(
+    conflicted_write = tools.memory_write(
         content="release-domain conflicted record",
         subject="release-domain",
-        status="conflicted",
     )
+    conflicted_id = conflicted_write["data"]["id"]
+    # conflicted is a lifecycle outcome, not a write input; seed it the way
+    # arbitration would, via a direct status transition.
+    with tools.db.write_transaction() as conn:
+        assert tools.db.update_memory_on_conn(conn, conflicted_id, {"status": "conflicted"}) is True
+    conflicted = {"data": {"id": conflicted_id}}
 
     found = tools.memory_search(query="release-domain")
     ids = [r["id"] for r in found["data"]["results"]]

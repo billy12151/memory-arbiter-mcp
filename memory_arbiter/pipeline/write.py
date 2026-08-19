@@ -33,6 +33,22 @@ class WritePipeline:
                 {"written": False, "error": "isolation=strict requires a workspace on every write"},
                 ok=False, extra_warnings=policy_warnings,
             )
+        # Authoritative guard for callers that bypass product-surface validation
+        # (console API, direct MemoryTools use): superseded/conflicted/deleted
+        # are lifecycle outcomes, never caller-supplied write inputs.
+        status_value = payload.get("status")
+        if status_value is not None and status_value not in (
+            MemoryStatus.ACTIVE.value, MemoryStatus.PENDING.value,
+        ):
+            return self._tools.db.state.response(
+                {
+                    "written": False,
+                    "error": "invalid_input",
+                    "field": "status",
+                    "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs",
+                },
+                ok=False, extra_warnings=policy_warnings,
+            )
 
         try:
             record = MemoryRecord.from_input(payload, self.settings.defaults())
