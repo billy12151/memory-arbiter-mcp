@@ -16,6 +16,10 @@ def _write_state(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
+def _offline_fetcher(_url: str, _timeout: float) -> str:
+    raise OSError("network disabled in tests")
+
+
 def test_compare_versions_handles_project_versions() -> None:
     assert compare_versions("0.9.5", "0.9.6") < 0
     assert compare_versions("0.10.0", "0.9.9") > 0
@@ -27,6 +31,7 @@ def test_agent_onboarding_notice_is_once_per_agent_and_version(tmp_path: Path) -
     monitor = UpdateMonitor(
         enabled=True,
         state_path=state_path,
+        fetcher=_offline_fetcher,
         current_version="0.9.5",
         now_func=lambda: FIXED_NOW,
     )
@@ -73,6 +78,7 @@ def test_update_notice_uses_cache_and_suppresses_for_seven_days(tmp_path: Path) 
     monitor = UpdateMonitor(
         enabled=True,
         state_path=state_path,
+        fetcher=_offline_fetcher,
         current_version="0.9.5",
         now_func=lambda: FIXED_NOW,
     )
@@ -86,6 +92,7 @@ def test_update_notice_uses_cache_and_suppresses_for_seven_days(tmp_path: Path) 
     monitor_later = UpdateMonitor(
         enabled=True,
         state_path=state_path,
+        fetcher=_offline_fetcher,
         current_version="0.9.5",
         now_func=lambda: later,
     )
@@ -110,6 +117,7 @@ def test_update_notice_stops_after_current_version_catches_up(tmp_path: Path) ->
     monitor = UpdateMonitor(
         enabled=True,
         state_path=state_path,
+        fetcher=_offline_fetcher,
         current_version="0.9.6",
         now_func=lambda: FIXED_NOW,
     )
@@ -133,6 +141,7 @@ def test_observed_upgrade_floors_stale_cached_latest_to_current(tmp_path: Path) 
     monitor = UpdateMonitor(
         enabled=True,
         state_path=state_path,
+        fetcher=_offline_fetcher,
         current_version="0.9.8",
         now_func=lambda: FIXED_NOW,
     )
@@ -153,6 +162,7 @@ def test_post_upgrade_doctor_notice_suppressed_until_doctor_runs(tmp_path: Path)
     monitor = UpdateMonitor(
         enabled=True,
         state_path=state_path,
+        fetcher=_offline_fetcher,
         current_version="0.9.6",
         now_func=lambda: FIXED_NOW,
     )
@@ -165,6 +175,7 @@ def test_post_upgrade_doctor_notice_suppressed_until_doctor_runs(tmp_path: Path)
     monitor_later = UpdateMonitor(
         enabled=True,
         state_path=state_path,
+        fetcher=_offline_fetcher,
         current_version="0.9.6",
         now_func=lambda: later,
     )
