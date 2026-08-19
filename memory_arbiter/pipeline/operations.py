@@ -816,11 +816,6 @@ class OperationsPipeline:
         if denied is not None:
             return denied
         if memory_ids is None:
-            workspace_sql = ""
-            params: list[Any] = []
-            if caller.isolation == "strict":
-                workspace_sql = "AND COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)=? "
-                params.append(caller.canonical)
             # Embedding-space mismatch is a whole-index condition: existing
             # rows may be healthy-looking but live in the old space, so the
             # rebuild must republish EVERYTHING (not just stale rows) before
@@ -835,7 +830,7 @@ class OperationsPipeline:
             mismatch_rebuild = (
                 vec_state.get("state") == "mismatch"
                 and vec_state.get("target_space_id") is not None
-                and not workspace_sql
+                and caller.isolation != "strict"
             )
             if mismatch_rebuild:
                 if not dry_run:
@@ -848,19 +843,10 @@ class OperationsPipeline:
                     if embedder is not None:
                         self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
             else:
-                stale_clause = (
-                    "AND (COALESCE(m.subject,'')!='' OR TRIM(COALESCE(m.content,''))!='') "
-                    "AND NOT EXISTS(SELECT 1 FROM memory_evidence e "
-                    "WHERE e.memory_id=m.id AND e.memory_version=m.version) "
+                ids = self.db.stale_index_ids(
+                    batch,
+                    workspace=caller.canonical if caller.isolation == "strict" else None,
                 )
-                with self.db.connection() as conn:
-                    rows = conn.execute(
-                        "SELECT m.id FROM memories m WHERE m.status!='deleted' "
-                        f"{workspace_sql}{stale_clause}"
-                        "ORDER BY m.id LIMIT ?",
-                        (*params, batch),
-                    ).fetchall()
-                ids = [int(row["id"]) for row in rows]
         else:
             try:
                 requested = list(dict.fromkeys(int(value) for value in memory_ids))[:batch]
@@ -869,7 +855,12 @@ class OperationsPipeline:
             ids = [mid for mid in requested if caller.isolation != "strict" or self._get_memory_visible(mid, caller)]
         if dry_run:
             return self.db.state.response(
-                {"dry_run": True, "memory_ids": ids, "count": len(ids)},
+                {
+                    "dry_run": True,
+                    "memory_ids": ids,
+                    "count": len(ids),
+                    "vec_index_state": self.db.get_vec_index_state(),
+                },
                 extra_warnings=list(caller.warnings),
             )
         results = [
@@ -878,7 +869,16 @@ class OperationsPipeline:
         ]
         failed = sum(item.get("status") != "queued" for item in results)
         return self.db.state.response(
-            {"dry_run": False, "queued": len(results) - failed, "failed": failed, "results": results},
+            {
+                "dry_run": False,
+                "queued": len(results) - failed,
+                "failed": failed,
+                "results": results,
+                # Surfaces a skipped flip (e.g. embedder unavailable with an
+                # empty pending set): without it, "queued=0" is
+                # indistinguishable from a settled mismatch->ready flip.
+                "vec_index_state": self.db.get_vec_index_state(),
+            },
             ok=failed == 0,
             extra_warnings=list(caller.warnings),
         )

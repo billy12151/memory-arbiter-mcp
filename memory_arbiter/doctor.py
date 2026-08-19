@@ -35,16 +35,19 @@ def _finding(check_id: str, ok: bool, detail: str, *, critical: bool = False, ev
 
 def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: Optional[DegradeState] = None, embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None) -> OverviewReport:
     findings: list[Finding] = []
+    from .db.evidence_store import indexable_coverage_counts
+
     total = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
-    eligible = int(conn.execute("SELECT COUNT(*) FROM memories WHERE status!='deleted'").fetchone()[0])
-    indexed = int(conn.execute("SELECT COUNT(DISTINCT memory_id) FROM memory_evidence").fetchone()[0])
+    counts = indexable_coverage_counts(conn)
+    eligible = counts["eligible_memories"]
+    indexed = counts["indexed_memories"]
     units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
     stale = int(conn.execute("SELECT COUNT(*) FROM memory_evidence e JOIN memories m ON m.id=e.memory_id WHERE e.memory_version<>m.version").fetchone()[0])
     orphan = int(conn.execute("SELECT COUNT(*) FROM memory_evidence e WHERE NOT EXISTS(SELECT 1 FROM memories m WHERE m.id=e.memory_id)").fetchone()[0])
     open_notices = int(conn.execute("SELECT COUNT(*) FROM semantic_notices WHERE status='open'").fetchone()[0])
     open_conflicts = int(conn.execute("SELECT COUNT(*) FROM conflicts WHERE status='open'").fetchone()[0])
     findings.append(_finding("config.writable", runtime_state is None or runtime_state.sqlite_writable, "SQLite writable", critical=True))
-    findings.append(_finding("evidence.coverage", indexed == eligible or not settings.embedding_auto_write, f"{indexed}/{eligible} memories indexed", evidence={"indexed": indexed, "eligible": eligible, "units": units}))
+    findings.append(_finding("evidence.coverage", indexed == eligible or not settings.embedding_auto_write, f"{indexed}/{eligible} memories indexed", evidence={"indexed": indexed, "eligible": eligible, "non_indexable": counts["non_indexable_memories"], "units": units}))
     findings.append(_finding("evidence.freshness", stale == 0, f"{stale} stale evidence rows", evidence={"stale": stale}))
     findings.append(_finding("evidence.orphans", orphan == 0, f"{orphan} orphan evidence rows", evidence={"orphan": orphan}))
     findings.append(_finding("conflicts.backlog", open_conflicts < 100, f"{open_conflicts} open conflicts"))

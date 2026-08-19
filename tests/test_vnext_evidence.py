@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 import ast
+import contextlib
 
 import pytest
 
@@ -892,14 +893,14 @@ def test_zero_unit_memory_does_not_block_space_rebuild_flip(tmp_path: Path) -> N
 
 def test_backfill_phase_target_is_not_current_generation(tmp_path: Path) -> None:
     from memory_arbiter.db_generation import detect_database_generation
-    from memory_arbiter.db.schema import CURRENT_SCHEMA_GENERATION
 
     path = tmp_path / "staging.sqlite3"
     MemoryDB(Settings(db_path=path, backup_jsonl=tmp_path / "u.jsonl"))
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "INSERT INTO migration_state(key, value) VALUES ('phase', 'backfill')"
-        )
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO migration_state(key, value) VALUES ('phase', 'backfill')"
+            )
     # A build that crashed mid-backfill must refuse to start as current.
     assert detect_database_generation(path) == "unknown"
 
@@ -922,3 +923,132 @@ def test_empty_batch_execute_settles_flip_without_unrelated_write(tmp_path: Path
     assert result["data"]["queued"] == 0
     state = tools.db.get_vec_index_state()
     assert state["state"] == "ready" and state["active_space_id"] == "space-b"
+
+
+def test_unicode_whitespace_memory_does_not_block_space_rebuild_flip(tmp_path: Path) -> None:
+    # SQLite TRIM strips only ASCII spaces while the extractor's whitespace
+    # semantics are Python's; rows blank only in the Python sense (tab
+    # subject, U+3000 content) must be excluded from every pending set
+    # instead of staying pending forever and blocking the flip.
+    from memory_arbiter.models import utc_now_iso
+
+    tools = make_tools(tmp_path)
+    real_id = tools.memory_write(content="正常内容。", subject="s", tags=[])["data"]["id"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            """INSERT INTO memories(content, agent_id, workspace, tags, source_type,
+               event_time, ingest_time, status, subject, metadata, version, created_at)
+               VALUES ('\u3000\u3000', 'agent', 'default', '[]', 'agent_generated', ?, ?, 'active',
+                       '\t', '{}', 1, ?)""",
+            (utc_now_iso(), utc_now_iso(), utc_now_iso()),
+        )
+
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "space-b"
+    tools.db.init_vec_index_state("space-b", True)
+    dry = tools.memory_repair("rebuild_evidence", {"dry_run": True, "batch_size": 10})
+    assert dry["data"]["memory_ids"] == [real_id]
+    tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    again = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
+    assert again["data"]["queued"] == 0
+    state = tools.db.get_vec_index_state()
+    assert state["state"] == "ready" and state["active_space_id"] == "space-b"
+    coverage = tools.db.evidence.coverage()
+    assert coverage["eligible_memories"] == 1
+    assert coverage["indexed_memories"] == 1
+    assert coverage["non_indexable_memories"] == 1
+
+
+def test_ready_revert_mid_rebuild_purges_foreign_space_rows(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    first = tools.memory_write(content="条目一内容。", subject="a", tags=[])["data"]["id"]
+    second = tools.memory_write(content="条目二内容。", subject="b", tags=[])["data"]["id"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    with tools.db.connection() as conn:
+        second_rows = conn.execute(
+            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (second,)
+        ).fetchone()[0]
+    assert second_rows > 0
+
+    # Partial rebuild into space-b: `first` is republished there (its
+    # original rows are dropped by publish's delete-then-insert).
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "space-b"
+    tools.db.init_vec_index_state("space-b", True)
+    tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 1})
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    with tools.db.connection() as conn:
+        epoch = int(conn.execute(
+            "SELECT value FROM _vec_index_meta WHERE key='space_rebuild_evidence_id'"
+        ).fetchone()["value"])
+
+    # Revert the embedding model to the active space mid-rebuild: the
+    # foreign-space rows above the epoch must not survive in a ready channel.
+    tools._embedder = FakeEmbedder()
+    tools.db.init_vec_index_state("fake-vnext-space", True)
+    state = tools.db.get_vec_index_state()
+    assert state["state"] == "ready" and state["active_space_id"] == "fake-vnext-space"
+    with tools.db.connection() as conn:
+        first_rows = conn.execute(
+            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (first,)
+        ).fetchone()[0]
+        second_now = conn.execute(
+            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (second,)
+        ).fetchone()[0]
+        max_second_id = conn.execute(
+            "SELECT COALESCE(MAX(id),0) FROM memory_evidence WHERE memory_id=?", (second,)
+        ).fetchone()[0]
+        vec_orphans = conn.execute(
+            "SELECT COUNT(*) FROM memory_evidence_vec v "
+            "WHERE NOT EXISTS(SELECT 1 FROM memory_evidence e WHERE e.id=v.id)"
+        ).fetchone()[0]
+    assert first_rows == 0  # purged B-space rows; republished on next rebuild
+    assert second_now == second_rows and max_second_id <= epoch
+    assert vec_orphans == 0
+
+    # The purged memory resurfaces as a stale candidate and re-embeds in the
+    # active space.
+    dry = tools.memory_repair("rebuild_evidence", {"dry_run": True, "batch_size": 10})
+    assert dry["data"]["memory_ids"] == [first]
+    tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    coverage = tools.db.evidence.coverage()
+    assert coverage["indexed_memories"] == coverage["eligible_memories"] == 2
+
+
+def test_rebuild_evidence_response_surfaces_vec_index_state(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="内容。", subject="s", tags=[])
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    # Empty pending set with a live embedder: the execute settles the flip
+    # and the response must say so.
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "space-b"
+    tools.db.init_vec_index_state("space-b", True)
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO _vec_index_meta(key, value) VALUES ('space_rebuild_evidence_id', '0') "
+            "ON CONFLICT(key) DO UPDATE SET value='0'"
+        )
+    result = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
+    assert result["data"]["queued"] == 0
+    assert result["data"]["vec_index_state"]["state"] == "ready"
+
+    # Same empty pending set without an embedder: the flip cannot settle
+    # (the target space is unverifiable) and queued=0 must not read as success.
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "space-c"
+    tools.db.init_vec_index_state("space-c", True)
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO _vec_index_meta(key, value) VALUES ('space_rebuild_evidence_id', '0') "
+            "ON CONFLICT(key) DO UPDATE SET value='0'"
+        )
+    tools._embedder = None
+    tools._embedder_loaded = True
+    result = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
+    assert result["data"]["queued"] == 0
+    assert result["data"]["vec_index_state"]["state"] == "mismatch"

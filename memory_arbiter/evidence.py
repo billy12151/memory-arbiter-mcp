@@ -24,6 +24,32 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+# Cheap SQL prefilter for "might be indexable" rows. Deliberately
+# over-inclusive: SQLite TRIM strips only ASCII spaces and the subject is
+# compared untrimmed, so whitespace-only rows (tab/newline/U+00A0/U+3000
+# legacy artifacts) still pass. Callers pair it with has_indexable_text,
+# which shares the extractor's exact semantics and is authoritative.
+INDEXABLE_PREFILTER_SQL = "(COALESCE(m.subject,'')!='' OR TRIM(COALESCE(m.content,''))!='')"
+
+
+def has_indexable_text(subject: str, content: str) -> bool:
+    """True when local_text_units would publish at least one unit.
+
+    Pending-set, stale-selection, and coverage SQL use the cheap prefilter
+    above and then apply this check, so those sets can never disagree with
+    what the indexer actually publishes (a zero-unit memory has no evidence
+    row to mark it done and would otherwise stay pending forever).
+
+    The fast path uses the extractor's own blank tests verbatim — a subject
+    surviving _clean yields the subject unit, and any line that survives
+    str.strip (the exact check local_text_units applies per line) feeds a
+    paragraph whose cleaned text is non-empty — so it answers the same
+    question without building the full unit list."""
+    if _clean(subject or ""):
+        return True
+    return any(line.strip() for line in (content or "").splitlines())
+
+
 def _locate_clean_text(content: str, cleaned: str, start: int, end: int) -> tuple[int, int]:
     """Locate normalized text without pretending normalized offsets are exact."""
     direct = content.find(cleaned, start, end)

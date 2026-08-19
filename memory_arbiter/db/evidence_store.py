@@ -5,11 +5,45 @@ import json
 import sqlite3
 from typing import Any, TYPE_CHECKING
 
-from ..evidence import EvidenceUnit
+from ..evidence import EvidenceUnit, has_indexable_text, INDEXABLE_PREFILTER_SQL
 from ..models import utc_now_iso
 
 if TYPE_CHECKING:
     from .core import MemoryDB
+
+
+def indexable_coverage_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Single eligibility definition shared by coverage, doctor, and the
+    vNext migration gate: a memory is eligible when the indexer would
+    actually publish units for it. Zero-indexable-text rows (blank /
+    whitespace-only legacy artifacts) are counted as non_indexable instead
+    of staying a permanent coverage gap."""
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE status!='deleted'"
+        ).fetchone()[0]
+    )
+    covered = int(
+        conn.execute(
+            """SELECT COUNT(DISTINCT m.id) FROM memories m
+               WHERE m.status!='deleted'
+                 AND EXISTS(SELECT 1 FROM memory_evidence e WHERE e.memory_id=m.id)"""
+        ).fetchone()[0]
+    )
+    uncovered = 0
+    for row in conn.execute(
+        f"""SELECT m.subject AS subject, m.content AS content FROM memories m
+            WHERE m.status!='deleted' AND {INDEXABLE_PREFILTER_SQL}
+              AND NOT EXISTS(SELECT 1 FROM memory_evidence e WHERE e.memory_id=m.id)"""
+    ):
+        if has_indexable_text(str(row["subject"] or ""), str(row["content"] or "")):
+            uncovered += 1
+    return {
+        "total_memories": total,
+        "eligible_memories": covered + uncovered,
+        "indexed_memories": covered,
+        "non_indexable_memories": total - covered - uncovered,
+    }
 
 
 class EvidenceStore:
@@ -83,14 +117,19 @@ class EvidenceStore:
 
     def coverage(self) -> dict[str, int]:
         with self._db.connection() as conn:
-            memories = int(conn.execute("SELECT COUNT(*) FROM memories WHERE status!='deleted'").fetchone()[0])
-            indexed = int(conn.execute("SELECT COUNT(DISTINCT memory_id) FROM memory_evidence").fetchone()[0])
+            counts = indexable_coverage_counts(conn)
             units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
             try:
                 vectors = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
             except sqlite3.Error:
                 vectors = 0
-        return {"eligible_memories": memories, "indexed_memories": indexed, "units": units, "vectors": vectors}
+        return {
+            "eligible_memories": counts["eligible_memories"],
+            "non_indexable_memories": counts["non_indexable_memories"],
+            "indexed_memories": counts["indexed_memories"],
+            "units": units,
+            "vectors": vectors,
+        }
 
     def knn(
         self,

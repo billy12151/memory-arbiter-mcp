@@ -783,6 +783,9 @@ class MemoryDB:
     def space_rebuild_pending_ids(self, limit: int) -> list[int]:
         return self.meta.space_rebuild_pending_ids(limit)
 
+    def stale_index_ids(self, limit: int, workspace: Optional[str] = None) -> list[int]:
+        return self.meta.stale_index_ids(limit, workspace)
+
     def maybe_complete_space_rebuild(self, embedding_space_id: str) -> bool:
         return self.meta.maybe_complete_space_rebuild(embedding_space_id)
 
