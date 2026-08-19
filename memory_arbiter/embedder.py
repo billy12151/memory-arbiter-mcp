@@ -184,7 +184,7 @@ def build_embedder(
             return out
 
         def tokenize(text: str) -> list[int]:
-            return llm.tokenize(text.encode("utf-8"), add_bos=False)
+            return [int(token) for token in llm.tokenize(text.encode("utf-8"), add_bos=False)]
 
         sample = encode("dimension probe")
         if len(sample) != expected_dim:

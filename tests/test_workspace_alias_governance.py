@@ -3,6 +3,7 @@ table + append-only event log, no CAS. Covers resolver short-circuit, rejected
 suppression, rename/migrate, confirm-pending, and audit-trail append-only.
 """
 from pathlib import Path
+import threading
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB, _normalize_alias_key
@@ -417,22 +418,30 @@ def test_confirm_pending_does_not_embed_canonical(monkeypatch, tmp_path):
     w = t.memory_write(content="embed order", workspace="SlowWS", source_type="agent_generated", subject="test")
     mid = w["data"]["id"]
     assert t.wait_evidence_worker_drained(timeout=2)
-    in_write_txn = {"value": False}
     calls = []
     original_write_transaction = t.db.write_transaction
+    # Track the txn OWNER thread, not a global flag: the async evidence worker
+    # legitimately embeds outside the lock on its own thread, and a global
+    # boolean would false-positive when that overlaps an unrelated main-thread
+    # write transaction (observed as a flaky failure on slower CI runners).
+    txn_owner = {"thread": None}
 
     @contextmanager
     def spy_write_transaction():
         with original_write_transaction() as conn:
-            in_write_txn["value"] = True
+            txn_owner["thread"] = threading.current_thread()
             try:
                 yield conn
             finally:
-                in_write_txn["value"] = False
+                txn_owner["thread"] = None
 
     class SpyEmbedder:
         def embed_text(self, prefix="", body="", max_body_chars=None):
-            calls.append((body, in_write_txn["value"]))
+            under_lock = (
+                txn_owner["thread"] is not None
+                and txn_owner["thread"] is threading.current_thread()
+            )
+            calls.append((body, under_lock))
             return EmbedResult(embedding=[0.1, 0.2], truncated=False, original_tokens=0, used_tokens=0)
 
     monkeypatch.setattr(t.db, "write_transaction", spy_write_transaction)
@@ -445,7 +454,8 @@ def test_confirm_pending_does_not_embed_canonical(monkeypatch, tmp_path):
     # caller workspace after the operation, but confirm-pending itself must not
     # embed the selected canonical or run any model under the write lock.
     assert ("CanonicalSlow", False) not in calls
-    assert all(in_txn is False for _, in_txn in calls)
+    assert t.wait_evidence_worker_drained(timeout=2)
+    assert all(under_lock is False for _, under_lock in calls)
 
     # resolver's KNN can fuzzy-merge later near-misses. Otherwise a near-string
     # falls through to a fresh sibling canonical, defeating the alias intent.
