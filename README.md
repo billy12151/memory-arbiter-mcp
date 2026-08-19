@@ -23,6 +23,33 @@ Conflict candidates follow one route:
 
 Qwen never edits memory, confirms a conflict, or supersedes a record. Formal conflict judgments use only the two memory versions as CAS pins.
 
+## Architecture Upgrade
+
+This release moves recall and conflict discovery onto one local-text evidence architecture:
+
+- Lexical and evidence channels now recall independently, merge by memory with reciprocal-rank fusion, and keep bounded representation from both channels. On a 17-query long-document benchmark, product recall improved from `R@10 52.9% / R@20 52.9%` to `R@10 94.1% / R@20 100%`; average query time increased from about 84ms to 109ms.
+- Conflict discovery now uses evidence KNN followed by deterministic `notify/check/ignore`. On a balanced 24-pair benchmark, recall improved from 8.3% to 75% and F1 from 15.4% to 81.8%.
+- Qwen is optional. Deterministic `notify` works without it; Qwen only filters or recovers `check` candidates. Without Qwen, writes, recall, notices from strong evidence, and governance continue normally.
+- The derived schema is now one `memory_evidence` + `memory_evidence_vec` index. It replaces structured-claim derivation and separate memory/section vector indexes. Notice and formal-conflict freshness use memory version pins.
+
+Existing databases must be rebuilt side by side; do not point the new runtime directly at an old database:
+
+```bash
+# 1. Inspect counts, space, and estimated evidence volume.
+mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3
+
+# 2. Build and verify the target while the old database remains untouched.
+mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3 --execute
+
+# 3. Stop MCP writers, then rebuild from the final source snapshot and atomically replace the target.
+mema migrate-vnext --source old.sqlite3 --target memory.vnext.sqlite3 --execute --final-sync
+
+# 4. Set db_path to memory.vnext.sqlite3, restart, and verify.
+mema doctor --json
+```
+
+Keep the old database until the new one has run successfully in normal use. If the new database has accepted writes, do not switch back without first accounting for those newer records.
+
 ## Install
 
 ```bash
@@ -117,3 +144,9 @@ Memory Arbiter 是面向 AI Agent 的本地 SQLite 记忆服务。完整原文�
 冲突候选只有一条主线：evidence KNN -> `notify/check/ignore` -> `check` 才调用本地 Qwen -> Agent 阅读两侧完整记忆后终审。Qwen 不可用时，`notify` 继续提醒，`check` 降级为忽略，`ignore` 保持忽略。
 
 历史数据库使用 `mema migrate-vnext` 旁路生成干净新库，不原地修改。治理操作只有在用户明确确认本次动作后才能传 `authorized=true`。
+
+本次架构升级将词法召回与局部 evidence 向量独立召回后按 memory 融合。17 条真实长文查询中，产品搜索从 `R@10 52.9% / R@20 52.9%` 提升到 `R@10 94.1% / R@20 100%`，平均查询约从 84ms 增至 109ms。冲突发现改为 evidence KNN + `notify/check/ignore`，24 对平衡样本中 recall 从 8.3% 提升到 75%，F1 从 15.4% 提升到 81.8%。
+
+Qwen 不是必需组件：`notify` 由确定性 evidence 独立触发，Qwen 只处理 `check` 灰区；没有 Qwen 时，写入、搜索、强证据 notice 和治理仍可正常工作。数据结构统一为 `memory_evidence` + `memory_evidence_vec`，不再维护 claims、memory vector 和 section vector 三套派生生命周期。
+
+老用户升级时先 dry-run，再旁路构建新库；停止旧 MCP 写入后执行 `--final-sync`，验证成功后修改 `db_path` 并运行 `mema doctor --json`。旧库应继续保留用于回滚；新库产生新写入后，不得直接切回旧库而忽略增量数据。
