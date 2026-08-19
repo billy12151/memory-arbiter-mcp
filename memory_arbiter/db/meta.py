@@ -70,21 +70,27 @@ class MetaStore:
 
     @staticmethod
     def _space_rebuild_pending_sql() -> str:
+        # The subject/content guard excludes rows with no indexable text at
+        # all (legacy/imported artifacts; product writes validate non-blank
+        # content): they publish zero evidence rows and would otherwise stay
+        # pending forever, blocking the mismatch->ready flip.
         return (
-            """SELECT m.id FROM memories m WHERE m.status!='deleted'
-               AND NOT EXISTS(
-                 SELECT 1 FROM memory_evidence e
-                 WHERE e.memory_id=m.id AND e.memory_version=m.version
-                   AND e.id > ?
-               )"""
+            """SELECT m.id FROM memories m
+               WHERE m.status!='deleted'
+                 AND (COALESCE(m.subject,'')!='' OR TRIM(COALESCE(m.content,''))!='')
+                 AND NOT EXISTS(
+                   SELECT 1 FROM memory_evidence e
+                   WHERE e.memory_id=m.id AND e.memory_version=m.version
+                     AND e.id > ?
+                 )"""
         )
 
     def space_rebuild_pending_ids(self, limit: int) -> list[int]:
         """Ids still needing republish in the active space rebuild (paged).
 
         Without a persisted epoch (dry-run preview before any execute) the
-        current MAX(id) stands in read-only, which yields the full non-deleted
-        set — exactly what the first execute would mark and queue."""
+        current MAX(id) stands in read-only, which yields the same starting
+        set the first execute would mark (modulo rows written in between)."""
         db = self._db
         if not db._db_available:
             return []
@@ -152,7 +158,8 @@ class MetaStore:
             if active_space_id == embedding_space_id:
                 self.set_meta(conn, "state", "ready")
                 for key in (
-                    "target_space_id", "migration_cursor", "migration_epoch",
+                    "target_space_id", "space_rebuild_evidence_id",
+                    "migration_cursor", "migration_epoch",
                     "migration_lease_owner", "migration_lease_expires_at",
                     "last_error",
                 ):
@@ -179,7 +186,8 @@ class MetaStore:
                 self.set_meta(conn, "target_space_id", embedding_space_id)
                 self.set_meta(conn, "migration_epoch", uuid.uuid4().hex)
                 for key in (
-                    "migration_cursor", "migration_lease_owner",
+                    "space_rebuild_evidence_id", "migration_cursor",
+                    "migration_lease_owner",
                     "migration_lease_expires_at", "last_error",
                 ):
                     self.delete_meta(conn, key)

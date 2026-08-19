@@ -837,12 +837,19 @@ class OperationsPipeline:
                 and vec_state.get("target_space_id") is not None
                 and not workspace_sql
             )
-            if mismatch_rebuild and not dry_run:
-                self.db.mark_space_rebuild_started()
             if mismatch_rebuild:
+                if not dry_run:
+                    self.db.mark_space_rebuild_started()
                 ids = self.db.space_rebuild_pending_ids(batch)
+                if not dry_run and not ids:
+                    # Nothing pending: settle the flip now instead of waiting
+                    # for an unrelated write to trigger the completion check.
+                    embedder, _w = self._ensure_embedder()
+                    if embedder is not None:
+                        self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
             else:
                 stale_clause = (
+                    "AND (COALESCE(m.subject,'')!='' OR TRIM(COALESCE(m.content,''))!='') "
                     "AND NOT EXISTS(SELECT 1 FROM memory_evidence e "
                     "WHERE e.memory_id=m.id AND e.memory_version=m.version) "
                 )
