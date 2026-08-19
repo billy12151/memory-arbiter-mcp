@@ -1,9 +1,18 @@
 """Read-only database generation detection used before runtime startup."""
 from __future__ import annotations
 
+import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Iterator, Literal
+
+try:
+    import fcntl
+
+    _HAVE_FCNTL = True
+except ImportError:  # pragma: no cover - Windows lacks fcntl; startup stays best-effort
+    _HAVE_FCNTL = False
 
 
 DatabaseGeneration = Literal["missing", "empty", "current", "legacy", "unknown"]
@@ -76,6 +85,33 @@ def legacy_database_message(path: Path) -> str:
         "Run `mema upgrade` when mema can remain unavailable for 1-5 minutes. "
         "The old database will be kept for rollback."
     )
+
+
+@contextmanager
+def database_startup_lock(db_path: Path) -> Iterator[None]:
+    """Serialize generation detection against concurrent first-start schema init.
+
+    A database being created by another thread/process exposes an intermediate
+    table set (memories exists, memory_evidence/migration_state not yet) that
+    is indistinguishable from a legacy database, and a reader can also hit
+    SQLITE_BUSY mid-creation. Hold an advisory flock across the whole
+    detect-then-init sequence so concurrent startups wait for the initializing
+    writer instead of misclassifying the half-built file. The lock file is a
+    tiny persistent ``<db>.startup.lock`` sidecar; the kernel releases it if
+    the holder dies.
+    """
+    if not _HAVE_FCNTL:  # pragma: no cover - non-POSIX fallback
+        yield
+        return
+    path = Path(db_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".startup.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def require_current_or_new_database(path: Path) -> DatabaseGeneration:

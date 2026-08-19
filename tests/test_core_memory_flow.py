@@ -14,6 +14,7 @@ import pytest
 from memory_arbiter.arbitration import compare_memories
 from memory_arbiter.config import Settings, parse_bool
 from memory_arbiter.db import MemoryDB
+from memory_arbiter.db_generation import database_startup_lock
 from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
@@ -107,6 +108,40 @@ def test_concurrent_first_start_does_not_false_degrade_on_column_migration(tmp_p
         for db in databases
         for warning in db.state.warnings
     )
+
+
+def test_database_startup_lock_serializes_concurrent_holders(tmp_path: Path) -> None:
+    """A second startup must wait while another holder is between detect and init.
+
+    Without serialization, a concurrent first-start's generation check reads the
+    half-built schema (memories without memory_evidence/migration_state) and
+    misclassifies it as a legacy database.
+    """
+    db_path = tmp_path / "locked.sqlite3"
+    first_entered = threading.Event()
+    release = threading.Event()
+    acquired_after_release = threading.Event()
+
+    def holder() -> None:
+        with database_startup_lock(db_path):
+            first_entered.set()
+            assert release.wait(timeout=5)
+
+    def waiter() -> None:
+        with database_startup_lock(db_path):
+            acquired_after_release.set()
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert first_entered.wait(timeout=5)
+    second = threading.Thread(target=waiter)
+    second.start()
+    # While the first holder is inside, the second must stay blocked.
+    assert not acquired_after_release.wait(timeout=0.3)
+    release.set()
+    first.join(timeout=5)
+    assert acquired_after_release.wait(timeout=5)
+    second.join(timeout=5)
 
 
 def clear_config_env(monkeypatch) -> None:

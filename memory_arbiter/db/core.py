@@ -13,7 +13,7 @@ from typing import Any, Iterator, Optional, Tuple
 from ..config import Settings
 from ..conflict_judgments import ConflictJudgmentStore
 from ..degrade import DegradeState
-from ..db_generation import require_current_or_new_database
+from ..db_generation import database_startup_lock, require_current_or_new_database
 from ..models import MemoryRecord, utc_now_iso
 from .semantic_notices import SemanticNoticeStore
 from .audit import AuditStore
@@ -80,7 +80,10 @@ class MemoryDB:
     """
 
     def __init__(self, settings: Settings):
-        require_current_or_new_database(settings.db_path)
+        # Startup lock: a concurrent first-start can otherwise observe this
+        # process's half-built schema and misclassify it as a legacy database.
+        with database_startup_lock(settings.db_path):
+            require_current_or_new_database(settings.db_path)
         self.settings = settings
         self.state = DegradeState()
         self._db_available = False
@@ -96,7 +99,8 @@ class MemoryDB:
         self.backup_replay = BackupReplayStore(self)
         self.evidence = EvidenceStore(self)
         self._judgment_store = self.judgments
-        self._init_database()
+        with database_startup_lock(settings.db_path):
+            self._init_database()
 
     # ------------------------------------------------------------------
     #  Connection factory + context managers

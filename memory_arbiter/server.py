@@ -8,7 +8,7 @@ import sys
 from typing import Any, NamedTuple, Optional
 
 from .config import Settings
-from .db_generation import require_current_or_new_database
+from .db_generation import database_startup_lock, require_current_or_new_database
 from .tools import MemoryTools
 
 
@@ -19,7 +19,10 @@ class ServerBundle(NamedTuple):
 
 def build_runtime() -> ServerBundle:
     settings = Settings.from_env()
-    require_current_or_new_database(settings.db_path)
+    # Same startup lock as MemoryDB.__init__: never race another first-start's
+    # in-flight schema creation with this pre-flight generation check.
+    with database_startup_lock(settings.db_path):
+        require_current_or_new_database(settings.db_path)
     try:
         from mcp.server.fastmcp import FastMCP
     except Exception as exc:
