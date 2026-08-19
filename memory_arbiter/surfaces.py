@@ -121,10 +121,15 @@ class ProductSurfaces:
         return {
             "source_type": [item.value for item in SourceType],
             "protection_level": [item.value for item in ProtectionLevel],
-            "remember_status": [item.value for item in MemoryStatus],
+            "memory_status_note": (
+                "Lifecycle values a record can carry. Omit status on remember: new "
+                "memories default to active; pending is set internally under strict "
+                "isolation until confirm_pending_workspace activates the memory."
+            ),
+            "memory_status": [item.value for item in MemoryStatus],
             "update_modes": {
                 "replace_content": "memory_id plus new_content, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
-                "replace_text": "memory_id plus old_text and new_text, optionally add_tags/remove_tags/reason.",
+                "replace_text": "memory_id plus old_text and new_text, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
                 "tags_only": "memory_id plus tags_only=true with add_tags and/or remove_tags; content is unchanged.",
             },
         }

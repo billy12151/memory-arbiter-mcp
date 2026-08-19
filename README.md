@@ -78,7 +78,7 @@ Memory Arbiter exposes four MCP tools:
 - `memory`: `remember`, `find`, `read`, `update`, `judge`, `status`, `help`
 - `memory_review`: read-only health, conflicts, judgments, history, expired memory, audit, and entities
 - `memory_govern`: explicitly authorized retirement, confirmation, conflict resolution, judgment correction, and workspace governance
-- `memory_repair`: evidence rebuild, history cleanup, pending activation, backup replay, semantic runtime control, and notice lifecycle
+- `memory_repair`: evidence rebuild, history cleanup, entity assignment, pending activation, backup replay, semantic runtime control, and notice lifecycle
 
 State-changing governance requires `authorized=true` after the user confirms that specific action.
 

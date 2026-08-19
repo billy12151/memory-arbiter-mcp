@@ -43,7 +43,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_review(view: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Read-only inspection: overview, doctor, conflicts, judgments, history, audit, help.
+        """Read-only inspection: overview, doctor, conflicts, judgments, history, expired memory, audit, entities, help.
 
         Use memory_review(view="help") for accepted fields. Use conflict_detail
         before formal judgments so both sides and snapshot context are visible.
@@ -62,7 +62,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Maintenance: history cleanup, evidence rebuild, backup replay, notices, and runtime control.
+        """Maintenance: evidence rebuild, history cleanup, entity assignment, pending activation, backup replay, notices, and semantic runtime control.
 
         Use memory_repair(task="help") for notice handling and semantic_control
         actions. Semantic notices are advisory; read both memories before dismiss

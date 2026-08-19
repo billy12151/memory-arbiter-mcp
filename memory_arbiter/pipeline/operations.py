@@ -1055,7 +1055,8 @@ class OperationsPipeline:
         Edit modes:
           * tags-only (v0.7.6): pass ``tags_only=True`` with
             ``add_tags``/``remove_tags`` to update tags without touching
-            content, memory_history, version, embeddings, or sections.
+            content, memory_history, version, or the evidence index
+            (content is unchanged, so no re-embedding is needed).
             FTS is re-synced because tags are indexed in FTS5.
           * full replace: pass ``new_content`` (old_text/new_text must be empty)
           * partial replace: pass ``old_text`` + ``new_text`` for an exact
