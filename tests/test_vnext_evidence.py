@@ -119,6 +119,78 @@ def test_vnext_search_uses_evidence_knn_not_legacy_vectors(tmp_path: Path) -> No
     assert hit.get("_evidence_hits") or hit.get("content")
 
 
+def test_evidence_candidate_enters_when_lexical_pool_is_full(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path)
+    tools.settings.recall_pool_cap = 4
+    lexical_ids = [
+        tools.memory_write(
+            content=f"needle lexical distractor {index}",
+            subject=f"needle {index}",
+        )["data"]["id"]
+        for index in range(4)
+    ]
+    target_id = tools.memory_write(
+        content="semantically relevant target without the query term",
+        subject="semantic target",
+    )["data"]["id"]
+    target = tools.db.get_memory(target_id)
+    assert target is not None
+    tools.db.state.sqlite_vec_available = True
+
+    def evidence_knn(*_args, **_kwargs):
+        return [{
+            **target,
+            "id": 999,
+            "memory_id": target_id,
+            "kind": "text",
+            "text": target["content"],
+            "start_offset": 0,
+            "end_offset": len(target["content"]),
+            "distance": 0.01,
+        }]
+
+    monkeypatch.setattr(tools.db, "evidence_knn", evidence_knn)
+    result = tools.memory_search(
+        query="needle", limit=4, query_embedding=[1.0, 0.0],
+        include_linked_open_items=False, include_conflict_signal=False,
+    )
+    ids = [row["id"] for row in result["data"]["results"]]
+    assert target_id in ids
+    assert len(set(ids) & set(lexical_ids)) >= 1
+
+
+def test_exact_subject_match_survives_evidence_fusion(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path)
+    tools.settings.recall_pool_cap = 4
+    exact_id = tools.memory_write(
+        content="exact command reference",
+        subject="needle",
+    )["data"]["id"]
+    semantic_id = tools.memory_write(
+        content="semantic-only candidate",
+        subject="other topic",
+    )["data"]["id"]
+    semantic = tools.db.get_memory(semantic_id)
+    assert semantic is not None
+    tools.db.state.sqlite_vec_available = True
+
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *_args, **_kwargs: [{
+        **semantic,
+        "id": 1000,
+        "memory_id": semantic_id,
+        "kind": "text",
+        "text": semantic["content"],
+        "start_offset": 0,
+        "end_offset": len(semantic["content"]),
+        "distance": 0.0,
+    }])
+    result = tools.memory_search(
+        query="needle", limit=4, query_embedding=[1.0, 0.0],
+        include_linked_open_items=False, include_conflict_signal=False,
+    )
+    assert result["data"]["results"][0]["id"] == exact_id
+
+
 def test_notify_surfaces_without_qwen_and_check_fails_closed(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path, semantic_enabled=False)
     old = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=["api"])["data"]

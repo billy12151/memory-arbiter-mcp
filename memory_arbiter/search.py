@@ -141,6 +141,13 @@ _CONTENT_ONLY_PENALTY = 2.0     # r4 §8.3: subject/tags miss + content hits
 # semantically relevant. Set just below CONTENT_SCORE_CAP so a vec candidate
 # beats content-only noise but never beats a real subject/tags hit.
 _VEC_FLOOR_SCORE = 2.5
+# Reciprocal-rank fusion keeps lexical and evidence channels comparable even
+# though BM25 scores and vector distances live on unrelated scales. 60 is the
+# conventional RRF damping constant; the multiplier makes fusion meaningful
+# beside the existing 0..20 lexical relevance score without overriding a
+# strong subject+tag match from a single channel.
+_RRF_K = 60.0
+_RRF_SCORE_WEIGHT = 300.0
 
 # subject/tags match-level weights (after capping)
 _SUBJECT_STRONG_WEIGHT = 10.0
@@ -475,7 +482,15 @@ def _soft_rerank(
         # Superseded always sinks below active regardless of score (r4 carries
         # this forward from v0.2.6).
         superseded_sink = 1 if rec.get("status") == "superseded" else 0
-        final_score = relevance + trust + recency + ws_adjust - (superseded_sink * 1000.0)
+        fusion_score = float(rec.get("_fusion_score") or 0.0)
+        final_score = (
+            relevance
+            + fusion_score * _RRF_SCORE_WEIGHT
+            + trust
+            + recency
+            + ws_adjust
+            - (superseded_sink * 1000.0)
+        )
 
         # Build debug info (only returned when debug_ranking=True).
         notes: list[str] = []
@@ -511,6 +526,7 @@ def _soft_rerank(
         rec_copy["_recency_bonus"] = recency
         rec_copy["_trust_bonus"] = trust
         rec_copy["_workspace_bonus"] = ws_adjust
+        rec_copy["_fusion_score"] = fusion_score
         scored.append((final_score, rec_copy))
 
     # Sort by final_score desc; tiebreak by ingest_time desc (newest first).
@@ -671,24 +687,27 @@ def _wide_recall(
     finally:
         conn.close()
 
-    # Local-text evidence KNN aggregates multiple evidence hits
-    # into one memory candidate so long documents cannot occupy many result slots.
+    # Freeze lexical rank before adding evidence. Evidence is an independent
+    # bounded channel: it must run even when FTS/LIKE already filled the pool.
+    lexical_rank = {int(memory_id): rank for rank, memory_id in enumerate(pool, 1)}
+
+    # Local-text evidence KNN aggregates multiple evidence hits into one memory
+    # candidate so long documents cannot occupy many result slots.
     if (
         query_embedding
         and db.state.sqlite_vec_available
-        and len(pool) < pool_cap
     ):
-        need = max(pool_cap - len(pool), 10)
+        evidence_memory_cap = max(pool_cap, 10)
         evidence_rows = db.evidence_knn(
             query_embedding,
-            k=need * 8,
+            k=evidence_memory_cap * 8,
             parent_status_filter=status_filter,
             workspace=ws_canonical,
         )
         by_memory: dict[int, dict[str, Any]] = {}
         for row in evidence_rows:
             rid = row.get("memory_id")
-            if rid is None or rid in pool:
+            if rid is None:
                 continue
             mid = int(rid)
             entry = by_memory.setdefault(mid, {"row": row, "hits": []})
@@ -720,13 +739,14 @@ def _wide_recall(
                 support += max(0.0, float(hit.get("score") or 0.0) - 0.45)
             ranked.append((best + 0.08 * support, mid, entry["row"]))
         ranked.sort(reverse=True, key=lambda item: item[0])
-        for _score, mid, row in ranked[:need]:
-            if mid in pool:
-                continue
-            d = dict(row)
+        for evidence_rank, (_score, mid, row) in enumerate(
+            ranked[:evidence_memory_cap], 1,
+        ):
+            d = dict(pool.get(mid) or row)
             d["id"] = mid
             d["_vec_candidate"] = True
             d["_evidence_vec_candidate"] = True
+            d["_evidence_rank"] = evidence_rank
             d["_evidence_hits"] = sorted(
                 by_memory[mid]["hits"],
                 key=lambda h: float(h.get("score") or 0.0),
@@ -734,7 +754,57 @@ def _wide_recall(
             )[:3]
             pool[mid] = d
 
-    return list(pool.values())[:pool_cap]
+    # Fuse channel ranks, then restore the original bounded pool size. A memory
+    # present in both channels naturally receives more support than one present
+    # in only one channel. Trust/recency remain later, lightweight adjustments.
+    for memory_id, row in pool.items():
+        lexical = lexical_rank.get(int(memory_id))
+        evidence = row.get("_evidence_rank")
+        fusion = 0.0
+        if lexical is not None:
+            fusion += 1.0 / (_RRF_K + lexical)
+            row["_lexical_rank"] = lexical
+        if evidence is not None:
+            fusion += 1.0 / (_RRF_K + int(evidence))
+        row["_fusion_score"] = fusion
+
+    fused = sorted(
+        pool.values(),
+        key=lambda row: (
+            float(row.get("_fusion_score") or 0.0),
+            -int(row.get("_lexical_rank") or 10**9),
+        ),
+        reverse=True,
+    )
+    if not lexical_rank or not any(row.get("_evidence_rank") for row in fused):
+        return fused[:pool_cap]
+
+    # Reserve bounded admission for both channels before the final soft rerank.
+    # RRF alone gives a lexical-only and evidence-only candidate at the same
+    # rank the same score, so deterministic tie-breaking could still starve one
+    # channel when the other is full. The quotas guarantee representation while
+    # keeping the candidate count exactly at pool_cap.
+    lexical_quota = (pool_cap + 1) // 2
+    evidence_quota = pool_cap - lexical_quota
+    lexical_candidates = sorted(
+        (row for row in fused if row.get("_lexical_rank") is not None),
+        key=lambda row: int(row["_lexical_rank"]),
+    )
+    evidence_candidates = sorted(
+        (row for row in fused if row.get("_evidence_rank") is not None),
+        key=lambda row: int(row["_evidence_rank"]),
+    )
+    selected: dict[int, dict[str, Any]] = {}
+    for row in lexical_candidates[:lexical_quota]:
+        selected[int(row["id"])] = row
+    for row in evidence_candidates[:evidence_quota]:
+        selected[int(row["id"])] = row
+    if len(selected) < pool_cap:
+        for row in fused:
+            selected.setdefault(int(row["id"]), row)
+            if len(selected) >= pool_cap:
+                break
+    return list(selected.values())
 
 
 def _sanitize_fts_query_or(query: str) -> str:
