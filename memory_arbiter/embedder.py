@@ -9,7 +9,11 @@ from typing import Any, Callable, Optional, Tuple
 
 # Bump when embed_text input construction, truncation strategy, or pipeline
 # semantics change.  Part of embedding_space_id — changing it forces a rebuild.
-EMBEDDING_PIPELINE_VERSION = 1
+# v2: evidence offsets are derived from a normalization-to-source character
+# map (not reverse-searched), and unit text preserves source punctuation
+# spacing. Rotating the space id forces every v1 row to be rebuilt before
+# evidence recall is re-enabled.
+EMBEDDING_PIPELINE_VERSION = 2
 
 EncodeFn = Callable[[str], list[float]]
 TokenizeFn = Callable[[str], list[int]]

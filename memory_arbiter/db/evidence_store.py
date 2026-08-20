@@ -305,34 +305,24 @@ class EvidenceStore:
                     return peer_content_cache[peer_mid]
 
                 def locate_span(content: str, unit_text: str, hint_start: int, hint_end: int) -> dict[str, int] | None:
-                    """Locate the triggering text in the ORIGINAL content.
+                    """Validate an exact evidence span and pad it for review.
 
-                    Stored unit offsets are approximate (the locator
-                    disclaims exactness and can drift by hundreds of chars
-                    on dense content), so they seed the search and the text
-                    itself confirms it: on a miss the span is dropped and
-                    the caller falls back to a full read instead of a
-                    silently wrong window.
+                    Evidence pipeline v2 guarantees that cleaning the source
+                    slice equals the unit text. Do not search for the text:
+                    repeated phrases make search ambiguous and can silently
+                    choose the wrong occurrence. A failed invariant drops the
+                    span and falls back to a full read.
                     """
-                    if not content or not unit_text:
+                    from ..evidence import _clean
+
+                    start, end = int(hint_start), int(hint_end)
+                    if not (content and unit_text and 0 <= start < end <= len(content)):
                         return None
-                    # Prefer an exact full-text match near the hint — a short
-                    # probe alone can latch onto a repeated phrase elsewhere
-                    # in the content (filler/preamble) and point the window
-                    # at the wrong region. Fall back to the probe only when
-                    # whitespace-normalized text prevents an exact match.
-                    idx = content.find(unit_text, max(0, int(hint_start) - 64))
-                    if idx < 0:
-                        probe = unit_text[:20] or unit_text
-                        idx = content.find(probe, max(0, int(hint_start) - 256))
-                    if idx < 0:
-                        probe = unit_text[:20] or unit_text
-                        idx = content.find(probe)
-                    if idx < 0:
+                    if _clean(content[start:end]) != unit_text:
                         return None
                     return {
-                        "start": max(0, idx - 128),
-                        "end": min(len(content), idx + len(unit_text) + 128),
+                        "start": max(0, start - 128),
+                        "end": min(len(content), end + 128),
                     }
 
                 for unit in units:

@@ -1946,3 +1946,86 @@ def test_notice_read_call_span_gates_on_drift_and_shrink(tmp_path: Path) -> None
     # The right side drifted in version (its pinned version still matches —
     # untouched), so its span stays and round-trips.
     assert "span" in read["right_read_call"]["data"]
+
+
+def _assert_exact_text_unit_spans(subject: str, content: str) -> None:
+    from memory_arbiter.evidence import _clean
+
+    for unit in local_text_units(subject, content):
+        if unit.kind != "text":
+            continue
+        assert 0 <= unit.start_offset < unit.end_offset <= len(content)
+        restored = _clean(content[unit.start_offset:unit.end_offset])
+        assert restored == unit.text, (
+            unit.unit_index, unit.start_offset, unit.end_offset,
+            unit.text, restored,
+        )
+
+
+def test_evidence_offsets_exactly_map_normalized_source_text() -> None:
+    # Regression: repeated tokens + semicolon-dense multiline config used to
+    # make the reverse locator overshoot by hundreds of chars and cascade.
+    dense = "\n".join([
+        "pool.max=50; pool.timeout=30; pool.min_idle=5;",
+        "cache.ttl=60; cache.size=1000; cache.backend=memory;",
+        "retry.count=3; retry.backoff=200; retry.jitter=50;",
+        "log.level=info; log.file=/var/log/app.log; log.rotation=daily;",
+        "queue.depth=100; queue.workers=8; queue.strategy=fifo;",
+        "rate.limit=1000; rate.burst=50; rate.window=1s;",
+    ])
+    _assert_exact_text_unit_spans("service config", dense)
+
+    # Cross-line whitespace, CRLF, repeated sentence text, headings, short
+    # paragraph merge, and long overlapping windows.
+    corpus = [
+        "重复句子。重复句子。值为 3。重复句子。值为 5。",
+        "第一行  多空格\r\n第二行\t制表符\r\n\r\n尾段。",
+        "# 标题 2025\n正文一。\n\n短。\n相邻长段落用于合并验证。",
+        ("超长无标点文本abc重复词" * 80),
+        "A; B; C; A; B; C; A; B; C; 数值=10; 数值=20;",
+    ]
+    for content in corpus:
+        _assert_exact_text_unit_spans("subject", content)
+
+
+def test_evidence_offset_mapping_deterministic_fuzz() -> None:
+    import random
+
+    random.seed(20260820)
+    tokens = [
+        "alpha", "beta", "key=30;", "key=90;", "重复", "接口", "超时",
+        "。", "；", ";", "!", "?", "  ", "\t", "\n", "\r\n",
+    ]
+    for _ in range(1000):
+        content = "".join(random.choice(tokens) for _ in range(random.randint(1, 80)))
+        if random.random() < 0.25:
+            content = "# 标题 2025\n" + content
+        _assert_exact_text_unit_spans("主题" if random.random() < 0.5 else "", content)
+
+
+def test_short_paragraph_merge_never_crosses_heading_barrier() -> None:
+    from memory_arbiter.evidence import _clean
+
+    content = "短。\n# Runtime Heading\n后面的正文足够长用于单独索引。"
+    units = local_text_units("", content)
+    headings = [u for u in units if u.kind == "heading"]
+    texts = [u for u in units if u.kind == "text"]
+    assert [u.text for u in headings] == ["Runtime Heading"]
+    assert texts
+    assert all("Runtime Heading" not in u.text and "#" not in u.text for u in texts)
+    for unit in texts:
+        assert _clean(content[unit.start_offset:unit.end_offset]) == unit.text
+
+    # Symmetric case: long paragraph before the heading, short one after it.
+    content2 = "前面的正文足够长用于单独索引。\n# Boundary\n短。"
+    units2 = local_text_units("", content2)
+    text_units2 = [u for u in units2 if u.kind == "text"]
+    assert all("Boundary" not in u.text and "#" not in u.text for u in text_units2)
+    for unit in text_units2:
+        assert _clean(content2[unit.start_offset:unit.end_offset]) == unit.text
+
+
+def test_embedding_pipeline_version_rotated_for_exact_offsets() -> None:
+    from memory_arbiter.embedder import EMBEDDING_PIPELINE_VERSION
+
+    assert EMBEDDING_PIPELINE_VERSION == 2

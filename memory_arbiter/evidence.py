@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Iterable
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -18,6 +17,35 @@ class EvidenceUnit:
     start_offset: int
     end_offset: int
     unit_index: int
+
+
+@dataclass(frozen=True)
+class _MappedText:
+    """Normalized text whose characters retain exact source coordinates."""
+
+    text: str
+    starts: tuple[int, ...]
+    ends: tuple[int, ...]
+
+    def slice(self, start: int, end: int) -> "_MappedText":
+        start = max(0, min(int(start), len(self.text)))
+        end = max(start, min(int(end), len(self.text)))
+        return _MappedText(self.text[start:end], self.starts[start:end], self.ends[start:end])
+
+    def strip(self) -> "_MappedText":
+        start = 0
+        end = len(self.text)
+        while start < end and self.text[start].isspace():
+            start += 1
+        while end > start and self.text[end - 1].isspace():
+            end -= 1
+        return self.slice(start, end)
+
+    @property
+    def source_span(self) -> tuple[int, int]:
+        if not self.text:
+            return 0, 0
+        return self.starts[0], self.ends[-1]
 
 
 def _clean(text: str) -> str:
@@ -50,42 +78,64 @@ def has_indexable_text(subject: str, content: str) -> bool:
     return any(line.strip() for line in (content or "").splitlines())
 
 
-def _locate_clean_text(content: str, cleaned: str, start: int, end: int) -> tuple[int, int]:
-    """Locate normalized text without pretending normalized offsets are exact."""
-    direct = content.find(cleaned, start, end)
-    if direct >= 0:
-        return direct, direct + len(cleaned)
-    words = [word for word in re.split(r"\s+", cleaned) if word]
-    if words:
-        first = content.find(words[0], start, end)
-        if first >= 0:
-            # Bound the trailing anchor's search window to the cleaned
-            # text's own length plus whitespace slack: an unbounded rfind
-            # can latch onto the last word's LATER recurrences (repeated
-            # key=value; settings), overshooting the group's true end and
-            # cascading into empty spans for every following group.
-            window_end = min(end, first + len(cleaned) + 64)
-            last = content.rfind(words[-1], first, window_end)
-            if last >= first:
-                return first, min(end, last + len(words[-1]))
-    # Placement failed (e.g. the caller's search anchor already sits past
-    # this group's words). Never hand back an empty or content-free span
-    # for non-empty text: fall back to a window ending at `end` sized to
-    # the cleaned text so downstream consumers always get a locatable
-    # citation.
-    if start < end and content[start:end].strip():
-        return start, end
-    return max(0, end - len(cleaned)), end
+def _normalize_with_map(content: str, start: int, end: int) -> _MappedText:
+    """Collapse source whitespace while preserving exact source coordinates.
+
+    The old implementation normalized text first and then searched for it in
+    the source to recover offsets. Repeated words, semicolon-dense settings,
+    and collapsed cross-line whitespace made that reverse lookup ambiguous and
+    errors cascaded through the forward-only search cursor. Here coordinates
+    are created during normalization, so no reverse lookup is needed.
+    """
+    chars: list[str] = []
+    starts: list[int] = []
+    ends: list[int] = []
+    index = max(0, int(start))
+    stop = min(len(content), max(index, int(end)))
+    while index < stop:
+        char = content[index]
+        if char.isspace():
+            run_start = index
+            index += 1
+            while index < stop and content[index].isspace():
+                index += 1
+            if chars and index < stop:
+                chars.append(" ")
+                starts.append(run_start)
+                ends.append(index)
+            continue
+        chars.append(char)
+        starts.append(index)
+        ends.append(index + 1)
+        index += 1
+    return _MappedText("".join(chars), tuple(starts), tuple(ends)).strip()
 
 
-def _split_long(text: str, start: int, *, size: int = 300, overlap: int = 60) -> Iterable[tuple[str, int, int]]:
+def _sentence_slices(mapped: _MappedText) -> list[_MappedText]:
+    """Split normalized text at sentence boundaries without losing mapping."""
+    slices: list[_MappedText] = []
+    cursor = 0
+    for match in _SENTENCE_BOUNDARY_RE.finditer(mapped.text):
+        item = mapped.slice(cursor, match.start()).strip()
+        if item.text:
+            slices.append(item)
+        cursor = match.end()
+    item = mapped.slice(cursor, len(mapped.text)).strip()
+    if item.text:
+        slices.append(item)
+    return slices
+
+
+def _long_parts(mapped: _MappedText, *, size: int = 300, overlap: int = 60) -> list[_MappedText]:
+    parts: list[_MappedText] = []
     step = max(1, size - overlap)
-    for offset in range(0, len(text), step):
-        part = text[offset:offset + size].strip()
-        if len(part) >= 8:
-            yield part, start + offset, min(start + offset + size, start + len(text))
-        if offset + size >= len(text):
+    for offset in range(0, len(mapped.text), step):
+        part = mapped.slice(offset, min(offset + size, len(mapped.text))).strip()
+        if len(part.text) >= 8:
+            parts.append(part)
+        if offset + size >= len(mapped.text):
             break
+    return parts
 
 
 def local_text_units(subject: str, content: str) -> list[EvidenceUnit]:
@@ -93,84 +143,103 @@ def local_text_units(subject: str, content: str) -> list[EvidenceUnit]:
 
     Subject and Markdown headings are indexed independently. Body text follows
     existing line/sentence boundaries; long unpunctuated text uses an overlap
-    fallback. The function never guesses entities, attributes, or scopes.
+    fallback. Every body unit's offsets are derived directly from a
+    normalization-to-source character map, so ``_clean(content[start:end])``
+    contains the unit text even for repeated tokens and cross-line whitespace.
+    The function never guesses entities, attributes, or scopes.
     """
     raw_units: list[tuple[str, str, int, int]] = []
     normalized_subject = _clean(subject)
     if normalized_subject:
         raw_units.append(("subject", normalized_subject, 0, 0))
 
-    paragraphs: list[tuple[int, int, str]] = []
-    paragraph_lines: list[str] = []
-    paragraph_start = 0
+    paragraph_spans: list[tuple[int, int]] = []
+    heading_offsets: list[int] = []
+    paragraph_start: int | None = None
     offset = 0
 
     def flush(end: int) -> None:
-        nonlocal paragraph_lines
-        if paragraph_lines:
-            paragraphs.append((paragraph_start, end, " ".join(paragraph_lines)))
-            paragraph_lines = []
+        nonlocal paragraph_start
+        if paragraph_start is not None:
+            paragraph_spans.append((paragraph_start, end))
+            paragraph_start = None
 
     for line in (content or "").splitlines(keepends=True):
         raw = line.rstrip("\r\n")
         heading = _HEADING_RE.match(raw.strip())
         if heading:
             flush(offset)
+            heading_offsets.append(offset)
             title = _clean(heading.group(2))
             if title:
                 raw_units.append(("heading", title, offset, offset + len(raw)))
         elif not raw.strip():
             flush(offset)
-        else:
-            if not paragraph_lines:
-                paragraph_start = offset
-            paragraph_lines.append(raw)
+        elif paragraph_start is None:
+            paragraph_start = offset
         offset += len(line)
     flush(len(content or ""))
 
-    # Spec §4 rule 4/6: merge very short paragraphs with an adjacent one
-    # instead of dropping them — coverage of retrievable text is mandatory.
-    merged: list[tuple[int, int, str]] = []
-    for start, end, paragraph in paragraphs:
-        text = _clean(paragraph)
-        if merged and (len(text) < 8 or len(merged[-1][2]) < 8):
-            prev_start, _, prev_text = merged[-1]
-            merged[-1] = (prev_start, end, _clean(f"{prev_text} {text}"))
+    paragraphs: list[tuple[int, int, _MappedText]] = []
+    for start, end in paragraph_spans:
+        mapped = _normalize_with_map(content or "", start, end)
+        if not mapped.text:
+            continue
+        previous_end = paragraphs[-1][1] if paragraphs else 0
+        heading_between = any(previous_end <= pos < start for pos in heading_offsets)
+        if (
+            paragraphs
+            and not heading_between
+            and (len(mapped.text) < 8 or len(paragraphs[-1][2].text) < 8)
+        ):
+            prev_start, _, _ = paragraphs[-1]
+            # Blank lines may separate the paragraphs; normalizing one
+            # continuous source range keeps exact offsets without losing the
+            # separator. Headings are an explicit merge barrier above.
+            combined = _normalize_with_map(content or "", prev_start, end)
+            paragraphs[-1] = (prev_start, end, combined)
         else:
-            merged.append((start, end, text))
-    paragraphs = [item for item in merged if item[2]]
+            paragraphs.append((start, end, mapped))
 
-    for start, end, paragraph in paragraphs:
-        text = _clean(paragraph)
-        sentences = [_clean(item) for item in _SENTENCE_BOUNDARY_RE.split(text) if _clean(item)]
-        sentence_groups: list[str]
+    for _, _, paragraph in paragraphs:
+        sentences = _sentence_slices(paragraph)
+        groups: list[_MappedText]
         if len(sentences) <= 1:
-            sentence_groups = [text]
+            groups = [paragraph]
         else:
-            sentence_groups = []
+            groups = []
             index = 0
             while index < len(sentences):
-                sentence_group: list[str] = []
                 chars = 0
                 cursor = index
                 while cursor < len(sentences) and (
-                    chars < 100 or (chars + len(sentences[cursor]) <= 240 and len(sentence_group) < 3)
+                    chars < 100
+                    or (
+                        chars + len(sentences[cursor].text) <= 240
+                        and cursor - index < 3
+                    )
                 ):
-                    sentence_group.append(sentences[cursor])
-                    chars += len(sentences[cursor])
+                    chars += len(sentences[cursor].text)
                     cursor += 1
-                sentence_groups.append(" ".join(sentence_group))
+                group_source_start = sentences[index].source_span[0]
+                group_source_end = sentences[cursor - 1].source_span[1]
+                groups.append(
+                    _normalize_with_map(
+                        content or "", group_source_start, group_source_end,
+                    )
+                )
                 index = max(index + 1, cursor - 1)
 
-        search_from = start
-        for grouped_text in sentence_groups:
-            group_start, group_end = _locate_clean_text(content or "", grouped_text, search_from, end)
-            search_from = max(search_from, group_end)
-            if len(grouped_text) <= 400:
-                raw_units.append(("text", grouped_text, group_start, group_end))
+        for group in groups:
+            if not group.text:
+                continue
+            if len(group.text) <= 400:
+                start, end = group.source_span
+                raw_units.append(("text", group.text, start, end))
             else:
-                for part, part_start, part_end in _split_long(grouped_text, group_start):
-                    raw_units.append(("text", part, part_start, part_end))
+                for part in _long_parts(group):
+                    start, end = part.source_span
+                    raw_units.append(("text", part.text, start, end))
 
     return [
         EvidenceUnit(kind, text, start, end, index)
