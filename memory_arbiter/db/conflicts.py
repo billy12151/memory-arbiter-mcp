@@ -270,10 +270,43 @@ class ConflictStore:
                     "left_id": a, "right_id": b,
                     "left_version": left_version, "right_version": right_version,
                 }
+            # Dedupe against the latest open OR not_a_conflict row: scan
+            # triage registers non-issues as not_a_conflict and must not
+            # stack duplicate rows, while re-escalation of a dismissed pair
+            # should reopen the existing row instead of inserting a new one.
             existing = conn.execute(
-                "SELECT * FROM conflicts WHERE status='open' AND left_id=? AND right_id=?",
+                "SELECT * FROM conflicts WHERE status IN ('open','not_a_conflict') "
+                "AND left_id=? AND right_id=? ORDER BY id DESC LIMIT 1",
                 (a, b),
             ).fetchone()
+            if existing and existing["status"] == "open" and status == "not_a_conflict":
+                return {
+                    "outcome": "open_conflict_exists",
+                    "conflict_id": int(existing["id"]),
+                    "left_id": a, "right_id": b,
+                    "error": "pair already has an open conflict; close it via memory_govern(resolve_conflict) with user authorization",
+                }
+            if existing and existing["status"] == "not_a_conflict" and status == "open":
+                cur = conn.execute(
+                    "UPDATE conflicts SET status='open', resolved_at=NULL, reason=?, "
+                    "conflict_type=?, conflict_point=?, suggested_winner=?, confidence_hint=?, "
+                    "source=?, left_version=?, right_version=?, refreshed_at=? WHERE id=?",
+                    (
+                        reason, conflict_type, conflict_point, suggested_winner,
+                        confidence_hint, source, left_version, right_version, now,
+                        int(existing["id"]),
+                    ),
+                )
+                if cur.rowcount == 0:
+                    return {"outcome": "not_open", "conflict_id": int(existing["id"])}
+                return {
+                    "outcome": "reopened", "conflict_id": int(existing["id"]),
+                    "left_id": a, "right_id": b,
+                    "left_version": left_version, "right_version": right_version,
+                }
+            if existing and existing["status"] == "not_a_conflict":
+                return {"outcome": "deduped", "conflict_id": int(existing["id"]),
+                        "left_id": a, "right_id": b}
             if existing:
                 existing_row = _row_to_dict(existing)
                 priority = {

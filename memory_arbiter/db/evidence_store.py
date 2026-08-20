@@ -235,12 +235,22 @@ class EvidenceStore:
         db = self._db
         if not db.state.sqlite_vec_available:
             return {"error": "sqlite_vec_unavailable"}
+        workspace_anchor_sql = ""
+        anchor_params: list[Any] = []
+        if workspace is not None:
+            # Strict callers must not anchor on — or leak snippets from —
+            # memories outside their workspace.
+            workspace_anchor_sql = (
+                "AND COALESCE(NULLIF(workspace_canonical,''),workspace)=? "
+            )
+            anchor_params.append(workspace)
         with db.connection() as conn:
             anchors = [
                 int(row["id"]) for row in conn.execute(
                     "SELECT id FROM memories WHERE status='active' AND id > ? "
-                    "ORDER BY id LIMIT ?",
-                    (int(after_memory_id), max(1, int(anchor_batch))),
+                    + workspace_anchor_sql
+                    + "ORDER BY id LIMIT ?",
+                    (int(after_memory_id), *anchor_params, max(1, int(anchor_batch))),
                 )
             ]
             if not anchors:
@@ -258,16 +268,27 @@ class EvidenceStore:
             dismissed_pairs = db.conflicts.dismissed_pairs_snapshot()
             candidates: dict[tuple[int, int], dict[str, Any]] = {}
             knn_pair_count = 0
+            stale_anchors = 0
+            filtered_open = 0
+            filtered_dismissed = 0
             for anchor_id in anchors:
+                # Only body-text units participate, matching the write-time
+                # notice path: subjects/headings are version-progression
+                # heavy and fire numeric_value_changed on their own.
                 units = conn.execute(
                     """SELECT e.id AS eid, e.text AS text, v.embedding AS embedding
                        FROM memory_evidence e
                        JOIN memory_evidence_vec v ON v.id=e.id
                        WHERE e.memory_id=? AND e.memory_version=(
                            SELECT version FROM memories WHERE id=?)
+                         AND e.kind='text'
                        ORDER BY e.id""",
                     (anchor_id, anchor_id),
                 ).fetchall()
+                if not units:
+                    # Async republish window or a permanently failed publish:
+                    # surface it instead of silently skipping forever.
+                    stale_anchors += 1
                 for unit in units:
                     text = str(unit["text"] or "")
                     if not text:
@@ -279,6 +300,8 @@ class EvidenceStore:
                         exclude_memory_id=anchor_id,
                     )
                     for hit in hits:
+                        if hit.get("kind") != "text":
+                            continue
                         peer_id = int(hit["memory_id"])
                         if peer_id == anchor_id:
                             continue
@@ -296,8 +319,10 @@ class EvidenceStore:
                             continue
                         pair = (min(anchor_id, peer_id), max(anchor_id, peer_id))
                         if pair in open_pairs:
+                            filtered_open += 1
                             continue
                         if pair in dismissed_pairs:
+                            filtered_dismissed += 1
                             continue
                         distance = float(hit.get("distance") or 0)
                         existing = candidates.get(pair)
@@ -311,9 +336,13 @@ class EvidenceStore:
                             }
                         else:
                             # notify outranks check when different unit pairs
-                            # on the same memory pair disagree.
+                            # on the same memory pair disagree — and the
+                            # snippets must show the strongest signal, not
+                            # the first discovery.
                             if existing["route"] == "check" and decision.action == "notify":
                                 existing["route"] = "notify"
+                                existing["left_snippet"] = text[:200] if pair[0] == anchor_id else str(hit.get("text") or "")[:200]
+                                existing["right_snippet"] = str(hit.get("text") or "")[:200] if pair[0] == anchor_id else text[:200]
                             existing["reasons"].add(decision.reason)
                             existing["distance"] = min(existing["distance"], distance)
             ordered = [candidates[pair] for pair in sorted(candidates)]
@@ -332,8 +361,9 @@ class EvidenceStore:
                 "counts": {
                     "knn_pairs": knn_pair_count,
                     "rule_pass": len(ordered),
-                    "filtered_open": len(open_pairs),
-                    "filtered_dismissed": len(dismissed_pairs),
+                    "filtered_open": filtered_open,
+                    "filtered_dismissed": filtered_dismissed,
+                    "stale_anchors": stale_anchors,
                 },
             }
 

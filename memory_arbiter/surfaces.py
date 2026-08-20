@@ -716,9 +716,12 @@ class ProductSurfaces:
             if denied is not None:
                 return denied
             try:
-                batch_value = int(payload.get("batch") or 50)
-                k_value = int(payload.get("k") or 10)
-                anchor_value = int(payload.get("anchor_memory_id") or 0)
+                batch_value = int(payload["batch"]) if payload.get("batch") is not None else 50
+                k_value = int(payload["k"]) if payload.get("k") is not None else 10
+                anchor_value = (
+                    int(payload["anchor_memory_id"])
+                    if payload.get("anchor_memory_id") is not None else 0
+                )
                 distance_value = payload.get("max_distance")
                 if distance_value is not None:
                     distance_value = float(distance_value)
@@ -836,7 +839,7 @@ class ProductSurfaces:
                 scan_prompt_version=payload.get("scan_prompt_version"),
                 scan_model=payload.get("scan_model"),
             )
-            ok = result.get("outcome") in {"inserted", "deduped", "refreshed"}
+            ok = result.get("outcome") in {"inserted", "deduped", "refreshed", "reopened"}
             if not ok:
                 result.setdefault("error", f"record_conflict failed: {result.get('outcome')}")
             return self.db.state.response(

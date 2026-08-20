@@ -1678,3 +1678,116 @@ def test_record_conflict_not_a_conflict_registration(tmp_path: Path) -> None:
         "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "x", "status": "resolved"},
     )
     assert bad_status["ok"] is False
+
+
+def test_scan_candidates_review_regression_batch(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+
+    # batch=0 / k=0 are falsy but must be rejected, not coerced to defaults.
+    zero = tools.memory_repair("scan_candidates", {"batch": 0})
+    assert zero["ok"] is False
+    zero_k = tools.memory_repair("scan_candidates", {"k": 0})
+    assert zero_k["ok"] is False
+
+    # Subject-only version progression must not become a numeric clue:
+    # only body-text units participate (matching the write-time path).
+    v1 = tools.memory_write(content="服务部署文档正文内容，部署步骤说明。", subject="服务 2024 规划", tags=[])["data"]
+    v2 = tools.memory_write(content="服务部署文档正文内容，回滚步骤说明。", subject="服务 2025 规划", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    subject_pair = (min(v1["id"], v2["id"]), max(v1["id"], v2["id"]))
+    assert subject_pair not in {(c["left_id"], c["right_id"]) for c in scan["data"]["candidates"]}
+
+    # A memory pair whose equivalent unit precedes its numeric-change unit
+    # must still surface the numeric clue (peer-blacklisting regression).
+    mixed = tools.memory_write(
+        content="完全相同的开场说明。\n重试次数为 3 次。", subject="mixed", tags=[],
+    )["data"]
+    twin = tools.memory_write(
+        content="完全相同的开场说明。\n重试次数为 5 次。", subject="mixed", tags=[],
+    )["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    scan2 = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    mixed_pair = (min(mixed["id"], twin["id"]), max(mixed["id"], twin["id"]))
+    clue = next(
+        (c for c in scan2["data"]["candidates"] if (c["left_id"], c["right_id"]) == mixed_pair), None,
+    )
+    assert clue is not None
+    assert "numeric_value_changed" in clue["reasons"]
+    # Snippets show the numeric-bearing text, not the equivalent preamble.
+    snippets = clue["left_snippet"] + clue["right_snippet"]
+    assert "重试次数" in snippets
+
+
+def test_scan_candidates_strict_workspace_does_not_leak(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.settings.isolation = "strict"
+    # Workspace names whose fake embeddings differ (one contains "pgsql"),
+    # so vector resolution keeps them canonically separate.
+    tools.memory_write(content="主库配置说明与参数清单。", subject="db", tags=[], workspace="dbapgsql")["data"]
+    tools.memory_write(
+        content="接口超时为 5 秒。", subject="timeout", tags=[], workspace="apisvc",
+    )["data"]
+    tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[], workspace="apisvc")["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    with tools.db.connection() as conn:
+        canonicals = {
+            row["id"]: row["workspace_canonical"]
+            for row in conn.execute("SELECT id, workspace_canonical FROM memories")
+        }
+    assert set(canonicals.values()) == {"dbapgsql", "apisvc"}
+
+    result = tools.memory_repair(
+        "scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "workspace": "apisvc"},
+    )
+    assert result["ok"] is True
+    for clue in result["data"]["candidates"]:
+        assert "postgres" not in clue["left_snippet"] and "postgres" not in clue["right_snippet"]
+        for side in (clue["left_id"], clue["right_id"]):
+            record = tools.db.get_memory(side)
+            canonical = record.get("workspace_canonical") or record.get("workspace")
+            assert canonical == "apisvc", f"leaked anchor from workspace {canonical}"
+
+
+def test_record_conflict_not_a_conflict_lifecycle(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="上限 10。", subject="cap", tags=[])["data"]
+    b = tools.memory_write(content="上限 99。", subject="cap", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    # Duplicate not_a_conflict registrations dedupe to one row.
+    first = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "演进", "status": "not_a_conflict"},
+    )
+    second = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "再判仍演进", "status": "not_a_conflict"},
+    )
+    assert first["data"]["outcome"] == "inserted"
+    assert second["data"]["outcome"] == "deduped"
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM conflicts WHERE left_id=? AND right_id=?",
+            (min(a["id"], b["id"]), max(a["id"], b["id"])),
+        ).fetchone()[0]
+    assert rows == 1
+
+    # Re-escalation reopens the existing row instead of inserting a new one.
+    reopened = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "复判为矛盾",
+                            "status": "open", "conflict_type": "contradiction"},
+    )
+    assert reopened["ok"] is True
+    assert reopened["data"]["outcome"] == "reopened"
+    assert reopened["data"]["conflict_id"] == first["data"]["conflict_id"]
+    with tools.db.connection() as conn:
+        status = conn.execute(
+            "SELECT status FROM conflicts WHERE id=?", (first["data"]["conflict_id"],),
+        ).fetchone()["status"]
+    assert status == "open"
+
+    # Quieting an existing OPEN pair via not_a_conflict is refused with guidance.
+    refused = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "想静默", "status": "not_a_conflict"},
+    )
+    assert refused["ok"] is False
+    assert refused["data"]["outcome"] == "open_conflict_exists"
