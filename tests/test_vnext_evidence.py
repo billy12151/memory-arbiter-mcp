@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import ast
 import contextlib
+import uuid
 
 import pytest
 
@@ -1052,3 +1053,178 @@ def test_rebuild_evidence_response_surfaces_vec_index_state(tmp_path: Path) -> N
     result = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
     assert result["data"]["queued"] == 0
     assert result["data"]["vec_index_state"]["state"] == "mismatch"
+
+
+def _seed_notice(tools: MemoryTools, left_id: int, right_id: int, *, left_version: int = 1, right_version: int = 1) -> int:
+    created = tools.db.record_semantic_notice(
+        memory_id=left_id, peer_id=right_id, severity="high",
+        notice_type="semantic_evidence",
+        title=f"Possible memory change with #{right_id}",
+        message="numeric_value_changed",
+        payload={"route": "notify", "reason": "numeric_value_changed", "anchors": ["timeout"]},
+        dedupe_key=f"test-notice-{left_id}-{right_id}-{uuid.uuid4().hex}",
+        left_version=left_version, right_version=right_version,
+    )
+    return int(created["notice_id"])
+
+
+def test_notice_escalate_creates_formal_conflict_and_supports_judge(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    left = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    right = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    notice_id = _seed_notice(tools, left["id"], right["id"])
+
+    result = tools.memory_repair(
+        "notice", {"action": "escalate", "notice_id": notice_id, "reason": "读两侧后确认是真实矛盾"},
+    )
+    assert result["ok"] is True
+    assert result["data"]["outcome"] == "escalated"
+    conflict_id = result["data"]["conflict_id"]
+    assert isinstance(conflict_id, int)
+    with tools.db.connection() as conn:
+        conflict = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone()
+        notice_row = conn.execute("SELECT * FROM semantic_notices WHERE id=?", (notice_id,)).fetchone()
+    assert conflict["status"] == "open"
+    assert conflict["source"] == "semantic_notice"
+    assert conflict["left_id"] < conflict["right_id"]
+    assert notice_row["status"] == "resolved"
+    assert notice_row["conflict_id"] == conflict_id
+    assert "escalated_to_conflict" in notice_row["resolution_reason"]
+
+    # The escalated conflict is inspectable and judgeable end to end.
+    detail = tools.memory_review("conflict_detail", {"conflict_id": conflict_id})["data"]["conflict"]
+    judged = tools.memory(
+        "judge",
+        {
+            "conflict_id": conflict_id,
+            "expected_left_version": detail["left_version"],
+            "expected_right_version": detail["right_version"],
+            "verdict": "contradiction", "recommended_use": "contextual",
+            "suggested_winner": None, "confidence_hint": "medium",
+            "reason": "两个超时口径并存", "affects_current_output": True,
+            "usage_context": "接口配置依据",
+        },
+    )
+    assert judged["ok"] is True
+    assert judged["data"]["outcome"] == "judged"
+
+
+def test_notice_escalate_rejects_stale_and_terminal_notices(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="连接池 10。", subject="pool", tags=[])["data"]
+    b = tools.memory_write(content="连接池 99。", subject="pool", tags=[])["data"]
+    first_id = _seed_notice(tools, a["id"], b["id"])
+    second_id = _seed_notice(tools, a["id"], b["id"])
+    terminal_id = _seed_notice(tools, a["id"], b["id"])
+    # Every successful product response delivers one notice stub, so the
+    # dismiss below delivers `first` (severity/age order); `second` stays
+    # undelivered, `terminal` is dismissed outright.
+    dismissed = tools.memory_repair("notice", {"action": "dismiss", "notice_id": terminal_id, "reason": "误报"})
+    assert dismissed["ok"] is True
+    with tools.db.connection() as conn:
+        first_delivered = conn.execute(
+            "SELECT delivered_at IS NOT NULL FROM semantic_notices WHERE id=?", (first_id,)
+        ).fetchone()[0]
+    assert first_delivered == 1
+
+    tools.memory(
+        "update", {"memory_id": a["id"], "new_content": "连接池 20，已修订。", "reason": "修订"},
+    )
+    # The update response's delivery scan auto-marks the undelivered drifted
+    # notice stale; the delivered one stays open with lost freshness.
+    with tools.db.connection() as conn:
+        second_status = conn.execute(
+            "SELECT status FROM semantic_notices WHERE id=?", (second_id,)
+        ).fetchone()["status"]
+    assert second_status == "stale"
+    auto_stale = tools.memory_repair("notice", {"action": "escalate", "notice_id": second_id})
+    assert auto_stale["ok"] is False
+    assert auto_stale["data"]["outcome"] == "already_terminal"
+
+    # Delivered but drifted: escalate must refuse instead of pinning stale
+    # versions onto a new conflict row.
+    drifted = tools.memory_repair("notice", {"action": "escalate", "notice_id": first_id})
+    assert drifted["ok"] is False
+    assert drifted["data"]["outcome"] == "stale_notice"
+    with tools.db.connection() as conn:
+        open_count = conn.execute("SELECT COUNT(*) FROM conflicts WHERE status='open'").fetchone()[0]
+    assert open_count == 0
+
+    terminal = tools.memory_repair("notice", {"action": "escalate", "notice_id": terminal_id})
+    assert terminal["ok"] is False
+    assert terminal["data"]["outcome"] == "already_terminal"
+    assert terminal["data"]["status"] == "dismissed"
+
+
+def test_notice_escalate_dedupes_same_pair_across_notices(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="重试 3 次。", subject="retry", tags=[])["data"]
+    b = tools.memory_write(content="重试 5 次。", subject="retry", tags=[])["data"]
+    first = _seed_notice(tools, a["id"], b["id"])
+    second = _seed_notice(tools, a["id"], b["id"])
+
+    r1 = tools.memory_repair("notice", {"action": "escalate", "notice_id": first})
+    r2 = tools.memory_repair("notice", {"action": "escalate", "notice_id": second})
+    assert r1["data"]["conflict_outcome"] == "inserted"
+    assert r2["data"]["conflict_outcome"] == "deduped"
+    assert r1["data"]["conflict_id"] == r2["data"]["conflict_id"]
+    with tools.db.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM conflicts WHERE status='open'").fetchone()[0]
+    assert count == 1
+
+
+def test_record_conflict_task_registers_external_scan_findings(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="主从延迟阈值 3s。", subject="lag", tags=[])["data"]
+    b = tools.memory_write(content="主从延迟阈值 10s。", subject="lag", tags=[])["data"]
+
+    registered = tools.memory_repair(
+        "record_conflict",
+        {
+            "left_id": a["id"], "right_id": b["id"],
+            "reason": "延迟阈值两说", "conflict_type": "contradiction",
+            "suggested_winner": b["id"], "confidence_hint": "high",
+            "source": "llm_informed", "scan_model": "test-scan-model",
+        },
+    )
+    assert registered["ok"] is True
+    assert registered["data"]["outcome"] == "inserted"
+    conflict_id = registered["data"]["conflict_id"]
+    with tools.db.connection() as conn:
+        row = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone()
+    assert row["source"] == "llm_informed"
+    assert row["scan_model"] == "test-scan-model"
+    assert row["left_id"] == min(a["id"], b["id"])
+    assert row["left_version"] == 1 and row["right_version"] == 1  # auto-pinned current versions
+
+    again = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "重复登记应幂等"},
+    )
+    assert again["data"]["outcome"] == "deduped"
+    assert again["data"]["conflict_id"] == conflict_id
+
+    refreshed = tools.memory_repair(
+        "record_conflict",
+        {"left_id": a["id"], "right_id": b["id"], "reason": "复判更新", "refresh": True,
+         "confidence_hint": "low"},
+    )
+    assert refreshed["data"]["outcome"] == "refreshed"
+
+
+def test_record_conflict_task_validates_input(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="唯一一条。", subject="solo", tags=[])["data"]
+
+    same = tools.memory_repair("record_conflict", {"left_id": a["id"], "right_id": a["id"], "reason": "自冲突"})
+    assert same["ok"] is False
+    no_reason = tools.memory_repair("record_conflict", {"left_id": a["id"], "right_id": 999})
+    assert no_reason["ok"] is False
+    missing = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": 999, "reason": "右侧不存在"},
+    )
+    assert missing["ok"] is False
+    bad_winner = tools.memory_repair(
+        "record_conflict",
+        {"left_id": a["id"], "right_id": 999, "reason": "x", "suggested_winner": 12345},
+    )
+    assert bad_winner["ok"] is False

@@ -178,18 +178,20 @@ class ProductSurfaces:
             },
             "memory_repair": {
                 "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-                "tasks": ["rebuild_evidence", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "semantic_control", "notice", "help"],
+                "tasks": ["rebuild_evidence", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "semantic_control", "notice", "record_conflict", "help"],
                 "examples": {
                     "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
                     "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
                     "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
                     "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
+                    "record_conflict": {"task": "record_conflict", "data": {"left_id": 12, "right_id": 34, "reason": "Timeout value contradicts between runbooks.", "conflict_type": "contradiction", "suggested_winner": 34, "confidence_hint": "high", "source": "llm_informed", "scan_model": "qwen2.5-7b"}},
                     "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
                     "notice_read": {"task": "notice", "data": {"action": "read", "notice_id": 1}},
                     "notice_dismiss": {"task": "notice", "data": {"action": "dismiss", "notice_id": 1, "reason": "Reviewed; not actionable."}},
                     "notice_resolve": {"task": "notice", "data": {"action": "resolve", "notice_id": 1, "reason": "Reviewed and handled."}},
+                    "notice_escalate": {"task": "notice", "data": {"action": "escalate", "notice_id": 1, "reason": "Verified against both memories: real contradiction needing governance."}},
                 },
-                "semantic_notice_delivery": "Local-text evidence finds candidates. Deterministic notify routes surface directly; check routes require Qwen and degrade to ignore when Qwen is unavailable. Read both memories before assessing an advisory notice.",
+                "semantic_notice_delivery": "Local-text evidence finds candidates. Deterministic notify routes surface directly; check routes require Qwen and degrade to ignore when Qwen is unavailable. Read both memories before assessing an advisory notice, then dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict.",
                 "semantic_control_actions": [
                     "status", "pause", "resume", "enable", "unload", "disable",
                 ],
@@ -727,6 +729,65 @@ class ProductSurfaces:
             return self._forward("memory_repair", task, self.memory_activate, **payload)
         if task == "replay_backup":
             return self._forward("memory_repair", task, self.memory_replay_backup, **payload)
+        if task == "record_conflict":
+            caller = self._caller_workspace(payload.get("workspace"))
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+            for id_field in ("left_id", "right_id"):
+                invalid_id = self._coerce_product_id("memory_repair", payload, id_field, task)
+                if invalid_id is not None:
+                    return invalid_id
+            left_id, right_id = int(payload["left_id"]), int(payload["right_id"])
+            if left_id == right_id:
+                return self._invalid_product_call("memory_repair", "left_id and right_id must differ", task)
+            reason = str(payload.get("reason") or "").strip()
+            if not reason:
+                return self._invalid_product_call("memory_repair", "record_conflict requires a reason", task)
+            left = self._get_memory_visible(left_id, caller)
+            right = self._get_memory_visible(right_id, caller)
+            if not left or not right:
+                return self.db.state.response(
+                    {"error": "memory id not found", **caller.response_fields()}, ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
+            suggested_winner = payload.get("suggested_winner")
+            if suggested_winner is not None:
+                invalid_winner = self._coerce_product_id("memory_repair", payload, "suggested_winner", task)
+                if invalid_winner is not None:
+                    return invalid_winner
+                suggested_winner = int(suggested_winner)
+                if suggested_winner not in (left_id, right_id):
+                    return self._invalid_product_call(
+                        "memory_repair", "suggested_winner must be left_id, right_id, or null", task,
+                    )
+            # External scan loops (scheduled LLM review) register findings
+            # here; the row is a governance record only — it never edits or
+            # retires a memory, so unlike memory_govern this needs no
+            # per-action authorized flag. Unpinned versions default to the
+            # current ones so the row carries a usable CAS snapshot.
+            result = self.db.record_conflict_enriched(
+                left_id, right_id,
+                conflict_type=payload.get("conflict_type"),
+                conflict_point=payload.get("conflict_point"),
+                reason=reason,
+                suggested_winner=suggested_winner,
+                confidence_hint=payload.get("confidence_hint"),
+                source=str(payload.get("source") or "llm_informed"),
+                status="open",
+                refresh=self._is_truthy(payload.get("refresh")),
+                left_version=int(payload.get("left_version") or left.get("version") or 1),
+                right_version=int(payload.get("right_version") or right.get("version") or 1),
+                judgment_status=None,
+                scan_prompt_version=payload.get("scan_prompt_version"),
+                scan_model=payload.get("scan_model"),
+            )
+            ok = result.get("outcome") in {"inserted", "deduped", "refreshed"}
+            if not ok:
+                result.setdefault("error", f"record_conflict failed: {result.get('outcome')}")
+            return self.db.state.response(
+                result, ok=ok, extra_warnings=list(caller.warnings),
+            )
         if task == "semantic_control":
             timeout_raw = payload.get("timeout")
             timeout_value = 30.0 if timeout_raw is None else float(timeout_raw)
@@ -745,7 +806,7 @@ class ProductSurfaces:
             if not isinstance(action_value, str):
                 return self._invalid_product_call("memory_repair", "notice action must be a string", task)
             action = action_value.strip().lower()
-            if action not in {"list", "read", "dismiss", "resolve"}:
+            if action not in {"list", "read", "dismiss", "resolve", "escalate"}:
                 return self._invalid_product_call("memory_repair", f"unknown notice action: {action}", task)
             caller = self._caller_workspace(payload.get("workspace"))
             denied = self._strict_acl_unavailable(caller)
@@ -775,6 +836,73 @@ class ProductSurfaces:
                 if notice is None:
                     return self.db.state.response({"outcome": "not_found"}, ok=False)
                 return self.db.state.response({"notice": notice}, extra_warnings=list(caller.warnings))
+            if action == "escalate":
+                notice = self.db.read_semantic_notice(int(payload["notice_id"]), workspace)
+                if notice is None:
+                    return self.db.state.response({"outcome": "not_found"}, ok=False)
+                if notice.get("status") != "open":
+                    return self.db.state.response(
+                        {"outcome": "already_terminal", "status": notice.get("status")}, ok=False,
+                        extra_warnings=list(caller.warnings),
+                    )
+                if not notice.get("freshness", {}).get("fresh"):
+                    return self.db.state.response(
+                        {
+                            "outcome": "stale_notice",
+                            "error": "notice pins no longer match current memory versions; read both memories and judge the current state instead",
+                            "freshness": notice.get("freshness"),
+                        },
+                        ok=False,
+                        extra_warnings=list(caller.warnings),
+                    )
+                agent_reason = str(payload.get("reason") or "").strip()
+                if notice.get("memory_id") is None or notice.get("peer_id") is None:
+                    return self.db.state.response(
+                        {"outcome": "escalate_failed", "error": "notice has no memory pair to escalate"},
+                        ok=False, extra_warnings=list(caller.warnings),
+                    )
+                route = notice.get("payload", {}).get("route") or "semantic_evidence"
+                escalate_reason = (
+                    f"Escalated from semantic notice #{int(payload['notice_id'])}"
+                    f" ({route}: {notice.get('message') or ''})" + (f" — {agent_reason}" if agent_reason else "")
+                )
+                created = self.db.record_conflict_enriched(
+                    int(notice["memory_id"]), int(notice["peer_id"]),
+                    conflict_type=None, conflict_point=None,
+                    reason=escalate_reason,
+                    suggested_winner=None, confidence_hint=None,
+                    source="semantic_notice", status="open",
+                    left_version=notice.get("left_version"),
+                    right_version=notice.get("right_version"),
+                )
+                conflict_id = created.get("conflict_id")
+                if created.get("outcome") not in {"inserted", "deduped", "refreshed"} or conflict_id is None:
+                    return self.db.state.response(
+                        {"outcome": "escalate_failed", "detail": created}, ok=False,
+                        extra_warnings=list(caller.warnings),
+                    )
+                settled = self.db.update_semantic_notice_status(
+                    int(payload["notice_id"]), "resolved",
+                    f"escalated_to_conflict: {escalate_reason}", workspace,
+                    conflict_id=conflict_id,
+                )
+                return self.db.state.response(
+                    {
+                        "outcome": "escalated",
+                        "conflict_outcome": created.get("outcome"),
+                        "conflict_id": conflict_id,
+                        "notice_outcome": settled.get("outcome"),
+                        "left_version": notice.get("left_version"),
+                        "right_version": notice.get("right_version"),
+                        "next_step": (
+                            "Credible contradiction is now a formal conflict. Use "
+                            "memory_review(view='conflict_detail') to inspect it, then "
+                            "memory(action='judge') with the pinned versions if a "
+                            "judgment is required."
+                        ),
+                    },
+                    extra_warnings=list(caller.warnings),
+                )
             status = "dismissed" if action == "dismiss" else "resolved"
             result = self.db.update_semantic_notice_status(
                 int(payload["notice_id"]), status, str(payload.get("reason") or ""), workspace,

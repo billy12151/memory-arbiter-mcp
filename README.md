@@ -52,7 +52,7 @@ One route only: evidence KNN finds semantically close local text, a narrow deter
 - `check` sends only the short pair to the optional local Qwen model; without Qwen it degrades to `ignore`.
 - The agent reads both complete memories and decides whether to surface, dismiss, or resolve the notice.
 
-A notice has no formal `conflict_id`: never pass it to `judge` or `resolve_conflict`. Formal conflicts are judged with the two memory versions as CAS pins. Qwen never edits memory, confirms a conflict, or supersedes a record.
+A notice has no formal `conflict_id`: never pass it to `judge` or `resolve_conflict`. Formal conflicts enter the table through two paths: escalate a verified notice (`memory_repair` task `notice` action `escalate`, which creates the conflict and resolves the notice), or register findings from a scheduled external scan loop (`memory_repair` task `record_conflict`, idempotent per open pair). Formal conflicts are judged with the two memory versions as CAS pins. Qwen never edits memory, confirms a conflict, or supersedes a record.
 
 ## Workspaces
 

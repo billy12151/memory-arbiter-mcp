@@ -605,9 +605,10 @@ class MemoryDB:
         status: str,
         reason: str = "",
         workspace_canonical: Optional[str] = None,
+        conflict_id: Optional[int] = None,
     ) -> dict[str, Any]:
         return self.semantic_notices.update_semantic_notice_status(
-            notice_id, status, reason, workspace_canonical,
+            notice_id, status, reason, workspace_canonical, conflict_id,
         )
 
     @property

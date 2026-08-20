@@ -24,7 +24,7 @@ Deterministic evidence routes pairs as:
 - `check`: semantic similarity needs Qwen filtering; no Qwen means no notice.
 - `ignore`: insufficient, equivalent, compatible, or explicitly different scope.
 
-The Agent must read both complete memories before presenting a notice to the user. A notice does not create a formal conflict. Formal conflicts and append-only judgments are separate governance records pinned by left and right memory versions.
+The Agent must read both complete memories before presenting a notice to the user. A notice does not create a formal conflict by itself. Formal conflicts enter the conflicts table through two product paths: `memory_repair(task="notice", data={"action":"escalate", ...})` turns a verified notice into a conflict row (and resolves the notice, backfilling its `conflict_id`), and `memory_repair(task="record_conflict", ...)` registers findings from a scheduled external scan loop (idempotent per open pair; `refresh=true` rewrites enrichment fields; the row pins both memory versions as CAS snapshots). Formal conflicts and append-only judgments are separate governance records pinned by left and right memory versions.
 
 ## Workspace Isolation
 

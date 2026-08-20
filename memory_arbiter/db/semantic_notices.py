@@ -147,8 +147,10 @@ class SemanticNoticeStore:
         peer_id = notice.get("peer_id")
         notice["right_read_call"] = self._read_call(memories.get(int(peer_id))) if peer_id is not None else None
         notice["agent_instruction"] = (
-            "Read both full memories before deciding. Surface credible conflicts, "
-            "dismiss false positives, and do not treat this advisory notice as confirmed."
+            "Read both full memories before deciding. Dismiss false positives, "
+            "resolve handled ones, and escalate a credible contradiction you "
+            "have verified against both complete memories into a formal "
+            "conflict; do not treat this advisory notice as confirmed by itself."
         )
         return notice
 
@@ -265,7 +267,7 @@ class SemanticNoticeStore:
             return False
         return False
 
-    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "", workspace_canonical: Optional[str] = None) -> dict[str, Any]:
+    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "", workspace_canonical: Optional[str] = None, conflict_id: Optional[int] = None) -> dict[str, Any]:
         status = str(status).lower()
         if status not in {"dismissed", "resolved"}:
             return {"outcome": "invalid_status"}
@@ -280,8 +282,13 @@ class SemanticNoticeStore:
                 return {"outcome": "not_found"}
             if row["status"] != "open":
                 return {"outcome": "already_terminal", "status": row["status"]}
+            # conflict_id backfills the link when an open notice is escalated
+            # into a formal conflict row (the column stays NULL otherwise).
+            conflict_sql = ", conflict_id=?" if conflict_id is not None else ""
+            conflict_args: list[Any] = [int(conflict_id)] if conflict_id is not None else []
             cur = conn.execute(
-                f"UPDATE semantic_notices SET status=?,{column}=?,resolution_reason=? WHERE id=? AND status='open'",
-                (status, utc_now_iso(), str(reason), int(notice_id)),
+                f"UPDATE semantic_notices SET status=?,{column}=?,resolution_reason=?{conflict_sql} "
+                "WHERE id=? AND status='open'",
+                (status, utc_now_iso(), str(reason), *conflict_args, int(notice_id)),
             )
         return {"outcome": "updated" if cur.rowcount else "already_terminal", "status": status}

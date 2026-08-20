@@ -28,7 +28,9 @@ notice, then execute both returned memory read calls. Only after reading both
 complete memories should you tell the user that the candidate appears credible.
 Dismiss false positives and resolve credible notices only after handling them.
 A notice has no formal conflict_id: never pass it to judge or resolve_conflict.
-It never edits, retires, or automatically creates a formal conflict.
+To turn a verified contradiction into a governance record, escalate the notice
+(memory_repair task="notice" action="escalate"); that creates the formal
+conflict and resolves the notice in one step.
 
 Formal conflict judgments use the left and right memory versions as snapshot
 pins. When acting on a conflict already present in the review queue, read both
@@ -65,7 +67,9 @@ notify、check、ignore：Qwen 不可用时 notify 继续提醒，check 降级�
 Qwen 只负责降噪，不编辑记忆，也不确认冲突。
 
 收到 advisory notice 后，先读取两侧完整记忆再判断；误报 dismiss，可信候选处理完后
-resolve。notice 没有正式 conflict_id，不能传给 judge 或 resolve_conflict。
+resolve。notice 没有正式 conflict_id，不能传给 judge 或 resolve_conflict；要把已核实
+的矛盾变成治理记录，用 memory_repair(task="notice", action="escalate") 升格，一步
+创建正式冲突并关闭 notice。
 对已在审查队列中的正式 conflict，先读两侧完整记忆，再带返回的版本快照调用
 judge；ask_user 表示必须询问用户，不能用再次 judge 代替。
 
