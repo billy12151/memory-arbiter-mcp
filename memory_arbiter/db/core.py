@@ -14,7 +14,13 @@ from typing import Any, Iterator, Optional, Tuple
 from ..config import Settings
 from ..conflict_judgments import ConflictJudgmentStore
 from ..degrade import DegradeState
-from ..db_generation import database_startup_lock, require_current_or_new_database
+from ..db_generation import (
+    LegacyDatabaseError,
+    database_startup_lock,
+    detect_database_generation,
+    legacy_database_message,
+    require_current_or_new_database,
+)
 from ..models import MemoryRecord, utc_now_iso
 from .semantic_notices import SemanticNoticeStore
 from .audit import AuditStore
@@ -80,11 +86,18 @@ class MemoryDB:
     transactions and cross-call commit/rollback.
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, allow_incomplete: bool = False):
         # Startup lock: a concurrent first-start can otherwise observe this
         # process's half-built schema and misclassify it as a legacy database.
+        # allow_incomplete is reserved for migrate-vnext --resume, which must
+        # reopen the crashed target it is repairing; legacy databases are
+        # still refused.
         with database_startup_lock(settings.db_path):
-            require_current_or_new_database(settings.db_path)
+            if allow_incomplete:
+                if detect_database_generation(settings.db_path) == "legacy":
+                    raise LegacyDatabaseError(legacy_database_message(settings.db_path))
+            else:
+                require_current_or_new_database(settings.db_path)
         self.settings = settings
         self.state = DegradeState()
         self._db_available = False

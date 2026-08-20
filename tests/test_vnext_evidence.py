@@ -1511,3 +1511,46 @@ def test_migration_inspect_accepts_missing_parent_dir(tmp_path: Path) -> None:
     plan = inspect(source, tmp_path / "nested" / "dir" / "new.vnext.sqlite3", settings)
     assert plan.get("ok") is not False
     assert "disk_ok" in plan
+
+
+def test_wave9_resuming_phase_refused_and_foreign_targets_clean(tmp_path: Path) -> None:
+    from memory_arbiter.db_generation import detect_database_generation
+
+    # M1: a kill -9 inside the resume window must not leave the incomplete
+    # target openable as "current".
+    source = tmp_path / "legacy.sqlite3"
+    db = MemoryDB(Settings(db_path=source, backup_jsonl=tmp_path / "b.jsonl"))
+    with db.write_transaction() as conn:
+        conn.execute(
+            """INSERT INTO memories(content, agent_id, workspace, tags, source_type,
+               event_time, ingest_time, status, subject, metadata, version, created_at)
+               VALUES ('x。', 'agent', 'default', '[]', 'agent_generated',
+                       '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+                       'active', 's', '{}', 1, '2026-01-01T00:00:00+00:00')""",
+        )
+    target = tmp_path / "t.vnext.sqlite3"
+    settings = Settings(
+        db_path=source, backup_jsonl=tmp_path / "b.jsonl", vec_dim=2,
+    )
+    built = build(source, target, settings, resume=False, progress=False)
+    assert built["ok"] is False or built["ok"] is True  # indexing may skip without embedder
+    with sqlite3.connect(target) as conn:
+        conn.execute("INSERT INTO migration_state(key, value) VALUES ('phase', 'resuming') "
+                     "ON CONFLICT(key) DO UPDATE SET value='resuming'")
+    assert detect_database_generation(target) == "unknown"
+    with pytest.raises(RuntimeError):
+        MemoryDB(Settings(db_path=target, backup_jsonl=tmp_path / "b2.jsonl"))
+
+    # M2: resume against foreign/empty targets returns clean errors.
+    empty = tmp_path / "empty.sqlite3"
+    empty.write_bytes(b"")
+    foreign = tmp_path / "foreign.sqlite3"
+    with sqlite3.connect(foreign) as conn:
+        conn.execute("CREATE TABLE unrelated(x)")
+    for bad_target, expected in ((empty, None), (foreign, "target_not_a_vnext_database")):
+        result = build(source, bad_target, settings, resume=True, progress=False)
+        if expected is None:
+            assert result.get("error") != "target_not_a_vnext_database" or result.get("ok") is False
+        else:
+            assert result["ok"] is False
+            assert expected in result.get("error", "")

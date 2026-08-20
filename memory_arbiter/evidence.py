@@ -69,10 +69,11 @@ def _locate_clean_text(content: str, cleaned: str, start: int, end: int) -> tupl
             if last >= first:
                 return first, min(end, last + len(words[-1]))
     # Placement failed (e.g. the caller's search anchor already sits past
-    # this group's words). Never hand back an empty span for non-empty
-    # text: fall back to a window ending at `end` sized to the cleaned
-    # text so downstream consumers always get a locatable citation.
-    if start < end:
+    # this group's words). Never hand back an empty or content-free span
+    # for non-empty text: fall back to a window ending at `end` sized to
+    # the cleaned text so downstream consumers always get a locatable
+    # citation.
+    if start < end and content[start:end].strip():
         return start, end
     return max(0, end - len(cleaned)), end
 

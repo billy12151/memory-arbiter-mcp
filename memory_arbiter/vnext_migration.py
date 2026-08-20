@@ -16,7 +16,7 @@ from typing import Any
 
 from .config import Settings
 from .db import MemoryDB
-from .db_generation import CURRENT_SCHEMA_GENERATION
+from .db_generation import CURRENT_SCHEMA_GENERATION, detect_database_generation
 from .evidence import local_text_units
 from .tools import MemoryTools
 
@@ -173,6 +173,19 @@ def _remove_sidecars(path: Path) -> None:
             candidate.unlink()
 
 
+def _reset_phase_to_failed(target: Path) -> None:
+    """Best-effort: put a resumed target back into the refused state."""
+    try:
+        with contextlib.closing(sqlite3.connect(target)) as conn:
+            conn.execute(
+                "INSERT INTO migration_state(key, value) VALUES ('phase', 'failed') "
+                "ON CONFLICT(key) DO UPDATE SET value='failed'"
+            )
+            conn.commit()
+    except sqlite3.Error:
+        pass
+
+
 def _target_owned_by_source(target: Path, source: Path) -> bool:
     """Whether an existing migration artifact was built from this source."""
     if not target.exists():
@@ -213,22 +226,55 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         with db.connection() as conn:
             db.schema._rebuild_fts(conn)
     else:
-        # A crashed build leaves phase in {failed, backfill}, which the
-        # startup generation guard refuses to open as a current database —
-        # the exact state --resume exists for. Clear the phase via a raw
-        # connection first so MemoryDB can start; build() re-marks it below.
-        with contextlib.closing(sqlite3.connect(target)) as conn:
-            phase_row = conn.execute(
-                "SELECT value FROM migration_state WHERE key='phase'"
-            ).fetchone()
-            if phase_row is not None and str(phase_row[0]) in {"failed", "backfill"}:
-                conn.execute(
-                    "UPDATE migration_state SET value='resuming' WHERE key='phase'"
+        # Classify by content, not by detect(): a crashed vnext target
+        # (current schema, phase failed/backfill/resuming) is exactly what
+        # --resume repairs, while detect() rightly classifies it "unknown"
+        # so the MCP server cannot open it. Empty/new files take the fresh
+        # path; anything else fails with a clean error.
+        generation = detect_database_generation(target)
+        if generation == "empty":
+            db = MemoryDB(target_settings)
+        else:
+            try:
+                with contextlib.closing(sqlite3.connect(target)) as conn:
+                    state = {
+                        str(row[0]): str(row[1])
+                        for row in conn.execute("SELECT key,value FROM migration_state")
+                    }
+            except sqlite3.Error as exc:
+                return {"ok": False, "error": f"target_not_a_vnext_database: {exc}"}
+            if not (
+                state.get("schema_generation") == CURRENT_SCHEMA_GENERATION
+                and (
+                    state.get("phase") in {"failed", "backfill", "resuming"}
+                    or generation == "current"
                 )
-                conn.commit()
-        db = MemoryDB(target_settings)
+            ):
+                return {"ok": False, "error": "target_not_a_vnext_database", "generation": generation}
+            try:
+                with contextlib.closing(sqlite3.connect(target)) as conn:
+                    conn.execute(
+                        "INSERT INTO migration_state(key, value) VALUES ('phase', 'resuming') "
+                        "ON CONFLICT(key) DO UPDATE SET value='resuming'"
+                    )
+                    conn.commit()
+            except sqlite3.Error as exc:
+                return {"ok": False, "error": f"resume_unavailable: {exc}"}
+            # 'resuming' is refused by the normal guard (a kill -9 in this
+            # window must not leave the incomplete DB openable), so reopen
+            # with the explicit incomplete allowance; every non-success exit
+            # resets the phase so the target never stays openable.
+            try:
+                db = MemoryDB(target_settings, allow_incomplete=True)
+            except Exception:
+                _reset_phase_to_failed(target)
+                raise
     tools = MemoryTools(settings=target_settings, db=db)
-    _set_state(db, {"phase": "backfill", "source_path": str(source)})
+    try:
+        _set_state(db, {"phase": "backfill", "source_path": str(source)})
+    except sqlite3.Error as exc:
+        _reset_phase_to_failed(target)
+        return {"ok": False, "error": f"resume_state_write_failed: {exc}"}
     with db.connection() as conn:
         cursor_row = conn.execute("SELECT value FROM migration_state WHERE key='cursor_memory_id'").fetchone()
         cursor = int(cursor_row["value"]) if cursor_row else 0

@@ -577,7 +577,8 @@ class MemoriesStore:
                         rows = conn.execute(
                             f"SELECT id, subject, tags, content FROM memories "
                             f"WHERE status='active' AND id != ? AND "
-                            f"EXISTS (SELECT 1 FROM json_each(tags) "
+                            f"EXISTS (SELECT 1 FROM json_each("
+                            f"CASE WHEN json_valid(tags) THEN tags ELSE '[]' END) "
                             f"WHERE json_each.value IN ({ph}) AND json_each.type='text') "
                             f"LIMIT ?",
                             (exclude_id, *ph_placeholders, limit),
@@ -732,7 +733,7 @@ class MemoriesStore:
             tag_hits AS MATERIALIZED (
                 SELECT pool.id, input_tags.tag
                 FROM pool
-                JOIN json_each(pool.tags) stored_tag ON stored_tag.type='text'
+                JOIN json_each(CASE WHEN json_valid(pool.tags) THEN pool.tags ELSE '[]' END) stored_tag ON stored_tag.type='text'
                 JOIN input_tags ON lower(stored_tag.value)=input_tags.tag
                 GROUP BY pool.id, input_tags.tag
             ),
