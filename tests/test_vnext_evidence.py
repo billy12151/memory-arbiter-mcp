@@ -1277,6 +1277,10 @@ def test_escalate_refreshes_drifted_pins_on_existing_open_row(tmp_path: Path) ->
 
     tools.memory("update", {"memory_id": a["id"], "new_content": "限流 200/s，修订。", "reason": "r"})
     tools.memory("update", {"memory_id": b["id"], "new_content": "限流 500/s，补充。", "reason": "r"})
+    # Wait for the async republish: the final find is two CJK characters
+    # (below the FTS trigram floor), so the evidence channel must be live
+    # for a direct hit — on a slow runner this races otherwise.
+    assert tools.wait_evidence_worker_drained(timeout=10)
     with tools.db.connection() as conn:
         versions = dict(
             (row["id"], int(row["version"]))
