@@ -178,13 +178,14 @@ class ProductSurfaces:
             },
             "memory_repair": {
                 "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-                "tasks": ["rebuild_evidence", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "semantic_control", "notice", "record_conflict", "help"],
+                "tasks": ["rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "semantic_control", "notice", "record_conflict", "help"],
                 "examples": {
                     "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
                     "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
                     "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
                     "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
                     "record_conflict": {"task": "record_conflict", "data": {"left_id": 12, "right_id": 34, "reason": "Timeout value contradicts between runbooks.", "conflict_type": "contradiction", "suggested_winner": 34, "confidence_hint": "high", "source": "llm_informed", "scan_model": "qwen2.5-7b"}},
+                    "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
                     "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
                     "notice_read": {"task": "notice", "data": {"action": "read", "notice_id": 1}},
                     "notice_dismiss": {"task": "notice", "data": {"action": "dismiss", "notice_id": 1, "reason": "Reviewed; not actionable."}},
@@ -709,6 +710,32 @@ class ProductSurfaces:
             return self.db.state.response(self._product_help("memory_repair", self._help_topic(payload, "task")))
         if task == "rebuild_evidence":
             return self._forward("memory_repair", task, self.memory_rebuild_evidence, **payload)
+        if task == "scan_candidates":
+            caller = self._caller_workspace(payload.get("workspace"))
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+            try:
+                batch_value = int(payload.get("batch") or 50)
+                k_value = int(payload.get("k") or 10)
+                anchor_value = int(payload.get("anchor_memory_id") or 0)
+                distance_value = payload.get("max_distance")
+                if distance_value is not None:
+                    distance_value = float(distance_value)
+            except (TypeError, ValueError):
+                return self._invalid_product_call("memory_repair", "scan_candidates batch/k/anchor_memory_id must be integers and max_distance a number", task)
+            if not (1 <= batch_value <= 200) or not (1 <= k_value <= 20) or anchor_value < 0:
+                return self._invalid_product_call("memory_repair", "scan_candidates requires 1<=batch<=200, 1<=k<=20, anchor_memory_id>=0", task)
+            result = self.db.scan_rule_candidates(
+                after_memory_id=anchor_value,
+                anchor_batch=batch_value,
+                neighbor_k=k_value,
+                include_check=self._is_truthy(payload.get("include_check")),
+                max_distance=distance_value,
+                workspace=caller.canonical if caller.isolation == "strict" else None,
+            )
+            ok = "error" not in result
+            return self.db.state.response(result, ok=ok, extra_warnings=list(caller.warnings))
         if task == "cleanup_history":
             if "id" in payload or "memory_id" in payload:
                 invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
@@ -776,12 +803,23 @@ class ProductSurfaces:
                     return self._invalid_product_call(
                         "memory_repair", "suggested_winner must be left_id, right_id, or null", task,
                     )
+            status_value = str(payload.get("status") or "open").strip().lower()
+            if status_value not in {"open", "not_a_conflict"}:
+                return self._invalid_product_call(
+                    "memory_repair", "record_conflict status must be open or not_a_conflict", task,
+                )
+            if status_value == "not_a_conflict" and suggested_winner is not None:
+                return self._invalid_product_call(
+                    "memory_repair", "a not_a_conflict registration cannot carry suggested_winner", task,
+                )
             # External scan loops (scheduled LLM review) register findings
             # here; the row is a governance record only — it never edits or
             # retires a memory, so unlike memory_govern this needs no
             # per-action authorized flag. Version pins are resolved inside
             # the write transaction: omitted pins default to the current
             # versions, explicit pins are CAS-verified against them.
+            # status=not_a_conflict marks a triaged non-issue so later scans
+            # (and advisory overlap) stay quiet until a version changes.
             result = self.db.record_conflict_enriched(
                 left_id, right_id,
                 conflict_type=payload.get("conflict_type"),
@@ -790,7 +828,7 @@ class ProductSurfaces:
                 suggested_winner=suggested_winner,
                 confidence_hint=payload.get("confidence_hint"),
                 source=str(source_value) if source_value is not None else "llm_informed",
-                status="open",
+                status=status_value,
                 refresh=self._is_truthy(payload.get("refresh")),
                 left_version=payload.get("left_version"),
                 right_version=payload.get("right_version"),

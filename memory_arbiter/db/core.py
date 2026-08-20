@@ -390,6 +390,17 @@ class MemoryDB:
     ) -> list[dict[str, Any]]:
         return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id)
 
+    def scan_rule_candidates(
+        self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
+        include_check: bool = False, max_distance: Optional[float] = None,
+        workspace: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return self.evidence.scan_rule_candidates(
+            after_memory_id=after_memory_id, anchor_batch=anchor_batch,
+            neighbor_k=neighbor_k, include_check=include_check,
+            max_distance=max_distance, workspace=workspace,
+        )
+
     def insert_memory(
         self, record: MemoryRecord, workspace_canonical: Optional[str] = None
     ) -> Tuple[Optional[int], list[str]]:

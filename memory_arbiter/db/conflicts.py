@@ -414,6 +414,31 @@ class ConflictStore:
                 return {"outcome": "not_open", "conflict_id": int(conflict_id)}
             return {"outcome": status, "conflict_id": int(conflict_id)}
 
+    def dismissed_pairs_snapshot(self) -> set[tuple[int, int]]:
+        """Set of canonical (left, right) pairs currently dismissed.
+
+        Same semantics as is_pair_dismissed (a not_a_conflict row whose
+        version pins still match the current memories), batched for the
+        scan-candidates enumeration so it can filter thousands of pairs
+        with one query instead of one query per pair.
+        """
+        if not self._db_available:
+            return set()
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    "SELECT c.left_id AS a, c.right_id AS b FROM conflicts c "
+                    "WHERE c.status='not_a_conflict' "
+                    "AND (c.left_version IS NULL OR c.left_version = (SELECT version FROM memories WHERE id=c.left_id)) "
+                    "AND (c.right_version IS NULL OR c.right_version = (SELECT version FROM memories WHERE id=c.right_id))",
+                ).fetchall()
+                return {
+                    (min(int(r["a"]), int(r["b"])), max(int(r["a"]), int(r["b"])))
+                    for r in rows
+                }
+        except sqlite3.Error:
+            return set()
+
     def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
         """v0.8.8: True if (left, right) has a ``not_a_conflict`` row whose pinned
         ``left_version``/``right_version`` still match the memories' current

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import struct
 from typing import Any, TYPE_CHECKING
 
 from ..evidence import EvidenceUnit, has_indexable_text, INDEXABLE_PREFILTER_SQL
@@ -199,3 +200,144 @@ class EvidenceStore:
             return results
         except sqlite3.Error:
             return []
+
+    def scan_rule_candidates(
+        self,
+        *,
+        after_memory_id: int = 0,
+        anchor_batch: int = 50,
+        neighbor_k: int = 10,
+        include_check: bool = False,
+        max_distance: float | None = None,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        """Enumerate conflict-candidate pairs for an external scan loop.
+
+        Scheduled LLM review cannot load the whole library into a session,
+        so the server enumerates the clues: for every active memory's
+        current evidence units, KNN neighbours (rank-based, like the
+        write-time notice path but with a wider window) pass through the
+        deterministic decide_evidence rule. By default only rule-level
+        notify routes (numeric/polarity/todo change) are returned —
+        similarity-only check pairs are legion in topic-clustered
+        libraries and are opt-in via include_check. Each pair carries the
+        triggering unit snippets so the agent can triage without reading
+        full memories. Pairs with an open conflict, or a version-pinned
+        not_a_conflict dismissal, are filtered out.
+
+        Calibrated on a real 474-memory production copy: absolute vector
+        distance has no discrimination there (random same-workspace pairs
+        overlap notice pairs), so ranking + rules do the work and
+        max_distance stays an optional extra gate.
+        """
+        from ..semantic_conflict import decide_evidence
+
+        db = self._db
+        if not db.state.sqlite_vec_available:
+            return {"error": "sqlite_vec_unavailable"}
+        with db.connection() as conn:
+            anchors = [
+                int(row["id"]) for row in conn.execute(
+                    "SELECT id FROM memories WHERE status='active' AND id > ? "
+                    "ORDER BY id LIMIT ?",
+                    (int(after_memory_id), max(1, int(anchor_batch))),
+                )
+            ]
+            if not anchors:
+                return {
+                    "anchors_scanned": 0, "next_anchor_memory_id": None,
+                    "candidates": [], "counts": {"knn_pairs": 0, "rule_pass": 0,
+                                                 "filtered_open": 0, "filtered_dismissed": 0},
+                }
+            open_pairs = {
+                (min(int(r["left_id"]), int(r["right_id"])), max(int(r["left_id"]), int(r["right_id"])))
+                for r in conn.execute(
+                    "SELECT left_id, right_id FROM conflicts WHERE status='open'"
+                )
+            }
+            dismissed_pairs = db.conflicts.dismissed_pairs_snapshot()
+            candidates: dict[tuple[int, int], dict[str, Any]] = {}
+            knn_pair_count = 0
+            for anchor_id in anchors:
+                units = conn.execute(
+                    """SELECT e.id AS eid, e.text AS text, v.embedding AS embedding
+                       FROM memory_evidence e
+                       JOIN memory_evidence_vec v ON v.id=e.id
+                       WHERE e.memory_id=? AND e.memory_version=(
+                           SELECT version FROM memories WHERE id=?)
+                       ORDER BY e.id""",
+                    (anchor_id, anchor_id),
+                ).fetchall()
+                for unit in units:
+                    text = str(unit["text"] or "")
+                    if not text:
+                        continue
+                    hits = self.knn(
+                        self._blob_to_vector(bytes(unit["embedding"])),
+                        k=max(1, int(neighbor_k)) + 1,
+                        workspace=workspace,
+                        exclude_memory_id=anchor_id,
+                    )
+                    for hit in hits:
+                        peer_id = int(hit["memory_id"])
+                        if peer_id == anchor_id:
+                            continue
+                        knn_pair_count += 1
+                        # Every unit pair is judged: an earlier equivalent
+                        # match (e.g. identical subjects) must not blacklist
+                        # the peer, or a later numeric-change unit on the
+                        # same pair would be lost.
+                        decision = decide_evidence(text, str(hit.get("text") or ""))
+                        if decision.action == "ignore":
+                            continue
+                        if decision.action == "check" and not include_check:
+                            continue
+                        if max_distance is not None and float(hit.get("distance") or 0) > float(max_distance):
+                            continue
+                        pair = (min(anchor_id, peer_id), max(anchor_id, peer_id))
+                        if pair in open_pairs:
+                            continue
+                        if pair in dismissed_pairs:
+                            continue
+                        distance = float(hit.get("distance") or 0)
+                        existing = candidates.get(pair)
+                        if existing is None:
+                            candidates[pair] = {
+                                "left_id": pair[0], "right_id": pair[1],
+                                "route": decision.action, "reasons": {decision.reason},
+                                "distance": distance,
+                                "left_snippet": text[:200] if pair[0] == anchor_id else str(hit.get("text") or "")[:200],
+                                "right_snippet": str(hit.get("text") or "")[:200] if pair[0] == anchor_id else text[:200],
+                            }
+                        else:
+                            # notify outranks check when different unit pairs
+                            # on the same memory pair disagree.
+                            if existing["route"] == "check" and decision.action == "notify":
+                                existing["route"] = "notify"
+                            existing["reasons"].add(decision.reason)
+                            existing["distance"] = min(existing["distance"], distance)
+            ordered = [candidates[pair] for pair in sorted(candidates)]
+            for item in ordered:
+                item["reasons"] = sorted(item["reasons"])
+            next_anchor = anchors[-1]
+            with db.connection() as conn:
+                more = conn.execute(
+                    "SELECT 1 FROM memories WHERE status='active' AND id > ? LIMIT 1",
+                    (next_anchor,),
+                ).fetchone()
+            return {
+                "anchors_scanned": len(anchors),
+                "next_anchor_memory_id": int(next_anchor) if more else None,
+                "candidates": ordered,
+                "counts": {
+                    "knn_pairs": knn_pair_count,
+                    "rule_pass": len(ordered),
+                    "filtered_open": len(open_pairs),
+                    "filtered_dismissed": len(dismissed_pairs),
+                },
+            }
+
+    @staticmethod
+    def _blob_to_vector(blob: bytes) -> list[float]:
+        count = len(blob) // 4
+        return list(struct.unpack(f"{count}f", blob))

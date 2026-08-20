@@ -1554,3 +1554,127 @@ def test_wave9_resuming_phase_refused_and_foreign_targets_clean(tmp_path: Path) 
         else:
             assert result["ok"] is False
             assert expected in result.get("error", "")
+
+
+def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    b = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    dup1 = tools.memory_write(content="完全一样的配置说明文字。", subject="same", tags=[])["data"]
+    dup2 = tools.memory_write(content="完全一样的配置说明文字。", subject="same", tags=[])["data"]
+    far = tools.memory_write(content="PostgreSQL 数据库生产环境配置。", subject="db", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    result = tools.memory_repair(
+        "scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10},
+    )
+    assert result["ok"] is True
+    data = result["data"]
+    pairs = {(c["left_id"], c["right_id"]): c for c in data["candidates"]}
+    # The numeric-change pair is surfaced as a notify clue with snippets.
+    key = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+    assert key in pairs
+    clue = pairs[key]
+    assert clue["route"] == "notify"
+    assert "numeric_value_changed" in clue["reasons"]
+    assert clue["left_snippet"] and clue["right_snippet"]
+    # Equivalent duplicates and unrelated memories are not surfaced.
+    dup_key = (min(dup1["id"], dup2["id"]), max(dup1["id"], dup2["id"]))
+    assert dup_key not in pairs
+    for c in data["candidates"]:
+        assert far["id"] not in (c["left_id"], c["right_id"])
+
+    # An open conflict suppresses re-surfacing the pair.
+    registered = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "已登记"},
+    )
+    assert registered["ok"] is True
+    after = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    assert key not in {(c["left_id"], c["right_id"]) for c in after["data"]["candidates"]}
+
+    # A version-pinned not_a_conflict dismissal also suppresses it; editing
+    # either side re-opens the pair.
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE conflicts SET status='not_a_conflict', resolved_at='2026-01-01T00:00:00+00:00' "
+            "WHERE status='open'"
+        )
+    dismissed_scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    assert key not in {(c["left_id"], c["right_id"]) for c in dismissed_scan["data"]["candidates"]}
+    tools.memory("update", {"memory_id": a["id"], "new_content": "接口超时为 60 秒，已修订。", "reason": "r"})
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    reopened = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    assert key in {(c["left_id"], c["right_id"]) for c in reopened["data"]["candidates"]}
+
+
+def test_scan_candidates_pagination_and_check_gate(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    ids = [
+        tools.memory_write(content=f"扫描锚点 {i}：连接池 {i}0。", subject=f"scan{i}", tags=[])["data"]["id"]
+        for i in range(3)
+    ]
+    # Real rule check pair: structurally similar, no deterministic signal.
+    chk1 = tools.memory_write(content="服务使用数据库甲存储数据。", subject="store", tags=[])["data"]
+    chk2 = tools.memory_write(content="服务采用数据库乙保存数据。", subject="store", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    # Cursor pagination: one anchor per batch, union covers everything.
+    collected, anchor, batches = set(), 0, 0
+    while True:
+        r = tools.memory_repair("scan_candidates", {"anchor_memory_id": anchor, "batch": 1, "k": 10})
+        assert r["ok"] is True
+        batches += 1
+        for c in r["data"]["candidates"]:
+            collected.add((c["left_id"], c["right_id"]))
+        if r["data"]["next_anchor_memory_id"] is None:
+            break
+        anchor = r["data"]["next_anchor_memory_id"]
+    assert batches == len(ids) + 2
+
+    # include_check gates rule-level check clues in and out.
+    chk_key = (min(chk1["id"], chk2["id"]), max(chk1["id"], chk2["id"]))
+    base = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 10, "k": 10})
+    with_check = tools.memory_repair(
+        "scan_candidates", {"anchor_memory_id": 0, "batch": 10, "k": 10, "include_check": True},
+    )
+    base_pairs = {(c["left_id"], c["right_id"]) for c in base["data"]["candidates"]}
+    check_pairs = {(c["left_id"], c["right_id"]) for c in with_check["data"]["candidates"]}
+    assert all(c["route"] == "notify" for c in base["data"]["candidates"])
+    assert chk_key not in base_pairs
+    assert chk_key in check_pairs
+    chk_clue = next(c for c in with_check["data"]["candidates"] if (c["left_id"], c["right_id"]) == chk_key)
+    assert chk_clue["route"] == "check"
+    assert len(check_pairs) > len(base_pairs)
+
+
+def test_record_conflict_not_a_conflict_registration(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="阈值 100。", subject="th", tags=[])["data"]
+    b = tools.memory_write(content="阈值 200。", subject="th", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    marked = tools.memory_repair(
+        "record_conflict",
+        {"left_id": a["id"], "right_id": b["id"], "reason": "同主题演进，无需治理",
+         "status": "not_a_conflict", "source": "llm_informed", "scan_model": "test"},
+    )
+    assert marked["ok"] is True
+    with tools.db.connection() as conn:
+        row = conn.execute("SELECT * FROM conflicts WHERE id=?", (marked["data"]["conflict_id"],)).fetchone()
+    assert row["status"] == "not_a_conflict"
+
+    # The dismissed pair is filtered out of scan candidates.
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    assert (a["id"], b["id"]) not in {(c["left_id"], c["right_id"]) for c in scan["data"]["candidates"]}
+
+    # A winner on a not_a_conflict registration is rejected.
+    bad = tools.memory_repair(
+        "record_conflict",
+        {"left_id": a["id"], "right_id": b["id"], "reason": "x",
+         "status": "not_a_conflict", "suggested_winner": a["id"]},
+    )
+    assert bad["ok"] is False
+    bad_status = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "x", "status": "resolved"},
+    )
+    assert bad_status["ok"] is False
