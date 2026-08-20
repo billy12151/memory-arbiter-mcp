@@ -17,12 +17,21 @@ def test_console_static_has_sidebar_language_and_branding() -> None:
     assert "catch(e)" in INDEX_HTML
 
 
-def test_console_static_shows_resolution_guidance_without_write_actions() -> None:
-    assert "resolutionLabel" in INDEX_HTML
+def test_console_static_conflict_detail_uses_one_to_many_contract() -> None:
+    for field in ("d.members", "d.member_versions", "d.value_groups", "d.revision", "d.apply_summary"):
+        assert field in INDEX_HTML
+    assert "conflictDecision(c)" in INDEX_HTML
+    assert "conflictMemberCards(d)" in INDEX_HTML
+    assert "d.left" not in INDEX_HTML
+    assert "d.right" not in INDEX_HTML
+    assert "winner_side" not in INDEX_HTML
+
+
+def test_console_static_shows_resolution_guidance_without_retired_fields() -> None:
     assert "resolutionActionText" in INDEX_HTML
-    assert "Partial update" in INDEX_HTML
-    assert "完整替代" in INDEX_HTML
     assert "user authorization is still required" in INDEX_HTML
+    assert "resolution_kind" not in INDEX_HTML
+    assert "judgment_" not in INDEX_HTML
 
 
 def test_console_static_shows_support_panel_without_github_api() -> None:

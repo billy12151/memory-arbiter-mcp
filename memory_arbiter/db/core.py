@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
 
 from ..config import Settings
-from ..conflict_judgments import ConflictJudgmentStore
 from ..degrade import DegradeState
 from ..db_generation import (
     LegacyDatabaseError,
@@ -48,7 +47,6 @@ __all__ = [
     "_normalize_alias_key",
     "_subject_tokens",
     "Any",
-    "ConflictJudgmentStore",
     "DegradeState",
     "Iterator",
     "MemoryRecord",
@@ -102,7 +100,6 @@ class MemoryDB:
         self.state = DegradeState()
         self._db_available = False
         self._sqlite_vec_loadable = False
-        self.judgments = ConflictJudgmentStore(self)
         self.semantic_notices = SemanticNoticeStore(self)
         self.audit = AuditStore(self)
         self.meta = MetaStore(self)
@@ -112,7 +109,6 @@ class MemoryDB:
         self.memories = MemoriesStore(self)
         self.backup_replay = BackupReplayStore(self)
         self.evidence = EvidenceStore(self)
-        self._judgment_store = self.judgments
         with database_startup_lock(settings.db_path):
             self._init_database()
 
@@ -402,9 +398,12 @@ class MemoryDB:
         )
 
     def insert_memory(
-        self, record: MemoryRecord, workspace_canonical: Optional[str] = None
+        self,
+        record: MemoryRecord,
+        workspace_canonical: Optional[str] = None,
+        workspace_embedding: Optional[list[float]] = None,
     ) -> Tuple[Optional[int], list[str]]:
-        return self.memories.insert_memory(record, workspace_canonical)
+        return self.memories.insert_memory(record, workspace_canonical, workspace_embedding)
 
     def insert_memory_on_conn(
         self, conn: sqlite3.Connection, record: MemoryRecord,
@@ -481,20 +480,17 @@ class MemoryDB:
             limit, offset, ws_canonical,
         )
 
-    def record_conflict(self, left_id: int, right_id: int, subject: Optional[str], reason: str, winner_id: Optional[int], status: str = "open") -> Optional[int]:
-        return self.conflicts.record_conflict(left_id, right_id, subject, reason, winner_id, status)
+    def record_conflict_group(self, **kwargs: Any) -> dict[str, Any]:
+        return self.conflicts.record_conflict_group(**kwargs)
 
-    def record_conflict_on_conn(
-        self,
-        conn: sqlite3.Connection,
-        left_id: int,
-        right_id: int,
-        subject: Optional[str],
-        reason: str,
-        winner_id: Optional[int],
-        status: str = "open",
-    ) -> int:
-        return self.conflicts.record_conflict_on_conn(conn, left_id, right_id, subject, reason, winner_id, status)
+    def get_conflict(self, conflict_id: int) -> Optional[dict[str, Any]]:
+        return self.conflicts.get_conflict(conflict_id)
+
+    def escalate_structured_notice(self, notice_id: int, **kwargs: Any) -> dict[str, Any]:
+        return self.conflicts.escalate_structured_notice(notice_id, **kwargs)
+
+    def judge_conflict(self, conflict_id: int, **kwargs: Any) -> dict[str, Any]:
+        return self.conflicts.judge_conflict(conflict_id, **kwargs)
 
     def resolve_conflicts_for(self, memory_id: int) -> int:
         return self.conflicts.resolve_conflicts_for(memory_id)
@@ -515,46 +511,13 @@ class MemoryDB:
     ) -> dict[int, dict[str, Any]]:
         return self.audit.get_memory_summaries(memory_ids)
 
-    def record_conflict_enriched(
-        self,
-        left_id: int,
-        right_id: int,
-        conflict_type: Optional[str],
-        conflict_point: Optional[str],
-        reason: str,
-        suggested_winner: Optional[int] = None,
-        confidence_hint: Optional[str] = None,
-        source: Optional[str] = None,
-        status: str = "open",
-        refresh: bool = False,
-        left_version: Optional[int] = None,
-        right_version: Optional[int] = None,
-        judgment_status: Optional[str] = None,
-        scan_prompt_version: Optional[str] = None,
-        scan_model: Optional[str] = None,
-    ) -> dict[str, Any]:
-        return self.conflicts.record_conflict_enriched(
-            left_id,
-            right_id,
-            conflict_type,
-            conflict_point,
-            reason,
-            suggested_winner=suggested_winner,
-            confidence_hint=confidence_hint,
-            source=source,
-            status=status,
-            refresh=refresh,
-            left_version=left_version,
-            right_version=right_version,
-            judgment_status=judgment_status,
-            scan_prompt_version=scan_prompt_version,
-            scan_model=scan_model,
-        )
-
     def resolve_conflict(
         self, conflict_id: int, reason: str = "", status: str = "resolved",
+        *, expected_revision: Optional[int] = None,
     ) -> dict[str, Any]:
-        return self.conflicts.resolve_conflict(conflict_id, reason=reason, status=status)
+        return self.conflicts.resolve_conflict(
+            conflict_id, reason=reason, status=status, expected_revision=expected_revision,
+        )
 
     def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
         return self.conflicts.is_pair_dismissed(left_id, right_id)
@@ -807,6 +770,37 @@ class MemoryDB:
     @staticmethod
     def _delete_meta(conn: sqlite3.Connection, key: str) -> None:
         return MetaStore.delete_meta(conn, key)
+
+    def conflict_scan_state(self) -> dict[str, Any]:
+        return self.meta.conflict_scan_state()
+
+    def record_conflict_scan_page(
+        self,
+        *,
+        epoch: str,
+        detector_version: str,
+        boundary: dict[str, Any],
+        after_memory_id: int,
+        next_anchor_memory_id: int | None,
+        anchors_scanned: int,
+        workspace: str | None,
+    ) -> bool:
+        return self.meta.record_conflict_scan_page(
+            epoch=epoch,
+            detector_version=detector_version,
+            boundary=boundary,
+            after_memory_id=after_memory_id,
+            next_anchor_memory_id=next_anchor_memory_id,
+            anchors_scanned=anchors_scanned,
+            workspace=workspace,
+        )
+
+    def complete_conflict_scan(
+        self, *, epoch: str, detector_version: str, boundary: dict[str, Any]
+    ) -> bool:
+        return self.meta.complete_conflict_scan(
+            epoch=epoch, detector_version=detector_version, boundary=boundary,
+        )
 
     def get_vec_index_state(self) -> dict[str, Any]:
         return self.meta.get_vec_index_state()

@@ -124,13 +124,13 @@ class AuditStore:
             ).fetchall()
 
             open_conflict_rows = conn.execute(
-                "SELECT workspace, COUNT(*) AS open_conflicts FROM ("
-                " SELECT m.workspace AS workspace FROM conflicts c"
-                " JOIN memories m ON m.id IN (c.left_id, c.right_id)"
-                " WHERE c.status = 'open' GROUP BY c.id"
-                ") GROUP BY workspace"
+                "SELECT workspace_canonical AS workspace, COUNT(*) AS open_conflicts "
+                "FROM conflicts WHERE status='open' GROUP BY workspace_canonical"
             ).fetchall()
-            open_conflicts_by_ws = {row["workspace"]: int(row["open_conflicts"]) for row in open_conflict_rows}
+            open_conflicts_by_ws = {
+                str(row["workspace"]): int(row["open_conflicts"])
+                for row in open_conflict_rows if row["workspace"] is not None
+            }
 
         workspaces: dict[str, dict[str, Any]] = {}
         total_memories = 0

@@ -140,7 +140,7 @@ def test_integer_id_and_cas_fields_reject_floats_and_non_finite_values() -> None
         ("memory", "read", "memory_id"),
         ("memory", "find", "limit"),
         ("memory", "update", "expected_version"),
-        ("memory", "judge", "expected_left_version"),
+        ("memory", "judge", "expected_revision"),
     ]
     for surface, operation, field in cases:
         for value in (1.0, 1.5, math.nan, math.inf, -math.inf):
@@ -168,16 +168,14 @@ def test_integer_id_and_cas_fields_reject_floats_and_non_finite_values() -> None
 def test_cas_pins_and_semantic_timeout_bounds(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     judge_base = {
-        "conflict_id": 1, "expected_left_version": 1, "expected_right_version": 1,
-        "verdict": "uncertain", "recommended_use": "ask_user", "suggested_winner": None,
-        "confidence_hint": "low", "reason": "test", "affects_current_output": False,
-        "usage_context": "unknown",
+        "conflict_id": 1, "expected_revision": 1, "chosen_value": "sqlite",
+        "decided_by": "agent", "ref": None, "reason": "test",
+        "apply_plan": [], "resolution_memory_id": None,
     }
-    for field in ("expected_left_version", "expected_right_version"):
-        bad = dict(judge_base, **{field: 0})
-        result = tools.memory("judge", bad)
-        assert result["ok"] is False
-        assert result["data"]["field"] == field
+    bad = dict(judge_base, expected_revision=0)
+    result = tools.memory("judge", bad)
+    assert result["ok"] is False
+    assert result["data"]["field"] == "expected_revision"
     for timeout in (-0.1, 601, math.inf, "NaN"):
         result = tools.memory_repair("semantic_control", {"action": "status", "timeout": timeout})
         assert result["ok"] is False
@@ -210,8 +208,8 @@ def test_notice_authorized_is_not_registered_and_notice_remains_unauthorized(tmp
 def test_product_field_registry_covers_all_declared_surface_operations() -> None:
     expected = {
         "memory": {"help", "status", "remember", "find", "read", "update", "judge"},
-        "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "judgments", "history", "expired", "entities", "help"},
-        "memory_govern": {"retire", "resolve_conflict", "confirm", "correct_judgment", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"},
+        "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "history", "expired", "entities", "help"},
+        "memory_govern": {"retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"},
         "memory_repair": {"rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "semantic_control", "notice", "record_conflict", "replay_backup", "help"},
     }
     actual = {
@@ -234,7 +232,7 @@ def test_workspace_vector_publish_failure_does_not_fail_memory_write(tmp_path: P
 
     monkeypatch.setattr(tools, "_ensure_embedder", lambda: (Embedder(), []))
     monkeypatch.setattr(tools, "_embedding_configured", lambda: True)
-    original_connection = tools.db.connection
+    original_connection = tools.db.workspaces.connection
 
     class FailingConnection:
         def __init__(self, conn):
@@ -248,7 +246,7 @@ def test_workspace_vector_publish_failure_does_not_fail_memory_write(tmp_path: P
             return self._conn.__exit__(*args)
 
         def execute(self, sql, params=()):
-            if "INSERT OR REPLACE INTO workspace_canonicals_vec" in sql:
+            if "workspace_canonicals_vec" in sql and "INSERT" in sql:
                 import sqlite3
                 raise sqlite3.OperationalError("injected workspace vector failure")
             return self._entered.execute(sql, params)
@@ -259,4 +257,16 @@ def test_workspace_vector_publish_failure_does_not_fail_memory_write(tmp_path: P
     monkeypatch.setattr(tools.db.workspaces, "connection", lambda: FailingConnection(original_connection()))
     result = tools.memory("remember", {"content": "fact", "subject": "s", "workspace": "new-project"})
     assert result["ok"] is True
-    assert result["data"]["id"] is not None
+    memory_id = result["data"]["id"]
+    assert memory_id is not None
+    assert result["data"]["workspace_vector_publish"]["status"] == "pending_retry"
+    assert any("workspace canonical vector publish failed" in warning for warning in result["warnings"])
+    with tools.db.connection() as conn:
+        memory = conn.execute(
+            "SELECT workspace_canonical FROM memories WHERE id=?", (memory_id,)
+        ).fetchone()
+        canonical = conn.execute(
+            "SELECT name FROM workspace_canonicals WHERE name='new-project'"
+        ).fetchone()
+    assert memory["workspace_canonical"] == "new-project"
+    assert canonical["name"] == "new-project"

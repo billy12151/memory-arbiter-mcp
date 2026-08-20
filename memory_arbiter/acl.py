@@ -73,69 +73,33 @@ def memory_public_stub(memory_id: Any, *, visible: bool, memory: Optional[dict[s
     }
 
 
-def redacted_conflict_shell(conflict: dict[str, Any], left_visible: bool, right_visible: bool) -> dict[str, Any]:
-    """Return a conflict row safe for a caller that may see only one side.
+def redacted_conflict_shell(conflict: dict[str, Any]) -> dict[str, Any]:
+    """Return a conflict-group shell safe when any member is hidden.
 
-    Raw conflict fields such as reason/structured_details/conflict_point may embed
-    hidden-side evidence, so strict partial visibility exposes only neutral shell
-    fields and a public summary.
+    Group fields are correlated: slot, values, evidence, decisions, and apply
+    results can all reveal a hidden member.  Partial strict visibility therefore
+    exposes only lifecycle metadata and explicit redaction markers.
     """
-    winner = conflict.get("suggested_winner") or conflict.get("winner_id") or conflict.get("judgment_suggested_winner")
-    winner_side: Optional[str] = None
-    try:
-        winner_int = int(winner) if winner is not None else None
-        left_id = conflict.get("left_id")
-        right_id = conflict.get("right_id")
-        left_id_int = int(left_id) if left_id is not None else None
-        right_id_int = int(right_id) if right_id is not None else None
-        if winner_int is not None and left_visible and winner_int == left_id_int:
-            winner_side = "left"
-        elif winner_int is not None and right_visible and winner_int == right_id_int:
-            winner_side = "right"
-        elif winner_int is not None:
-            winner_side = "unknown"
-    except (TypeError, ValueError):
-        winner_side = None
-    redacted_fields = [
-        name for name in (
-            "subject", "reason", "conflict_point", "structured_details",
-            "judgment_reason", "confidence_hint", "suggested_winner", "winner_id",
-            "judgment_suggested_winner",
-        )
-        if conflict.get(name) is not None
-    ]
+    sensitive_fields = (
+        "slot_key", "candidate_key", "conflict_point", "member_versions",
+        "member_fingerprint", "value_groups", "detection_reason", "chosen_value",
+        "resolution_memory_id", "resolution_memory_version", "decided_by",
+        "decided_ref", "decision_reason", "decided_at", "apply_summary",
+    )
     return {
         "id": conflict.get("id"),
+        "revision": conflict.get("revision"),
         "status": conflict.get("status"),
-        "created_at": conflict.get("created_at"),
-        "resolved_at": conflict.get("resolved_at"),
-        "conflict_type": conflict.get("conflict_type"),
         "source": conflict.get("source"),
-        "detection_channel": conflict.get("detection_channel"),
-        "judgment_status": conflict.get("judgment_status"),
-        "active_judgment_id": conflict.get("active_judgment_id"),
-        "resolution_kind": conflict.get("resolution_kind") or conflict.get("judgment_resolution_kind"),
-        "conflict_scope": conflict.get("conflict_scope") or conflict.get("judgment_conflict_scope"),
-        "public_conflict_summary": "Conflict is visible because at least one side is in the caller workspace; hidden-side evidence is redacted.",
-        "redacted_fields": redacted_fields,
-        "winner_side": winner_side,
-    }
-
-
-def redact_judgment(row: dict[str, Any], *, visible: bool) -> dict[str, Any]:
-    if visible:
-        return {**row, "visible": True, "redacted_fields": []}
-    return {
-        "visible": False,
-        "id": row.get("id"),
-        "conflict_id": row.get("conflict_id"),
-        "verdict": None,
-        "recommended_use": None,
-        "suggested_winner": None,
-        "reason": None,
-        "redaction_reason": "hidden_side_evidence",
-        "redacted_fields": [
-            "verdict", "recommended_use", "suggested_winner", "confidence_hint",
-            "reason", "judge_ref", "resolution_kind", "conflict_scope",
-        ],
+        "detector_version": conflict.get("detector_version"),
+        "prompt_version": conflict.get("prompt_version"),
+        "overflow": bool(conflict.get("overflow")),
+        "created_at": conflict.get("created_at"),
+        "refreshed_at": conflict.get("refreshed_at"),
+        "resolved_at": conflict.get("resolved_at"),
+        "public_conflict_summary": (
+            "Conflict group is linked to the caller workspace; fields correlated "
+            "with hidden members are redacted."
+        ),
+        "redacted_fields": [name for name in sensitive_fields if conflict.get(name) is not None],
     }

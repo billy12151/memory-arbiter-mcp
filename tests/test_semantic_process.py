@@ -50,6 +50,23 @@ def _serial_probe_child(conn, config):
         return
 
 
+def _fair_probe_child(conn, config):
+    try:
+        while True:
+            request = conn.recv()
+            if request.get("command") == "load":
+                conn.send({"ok": True, "result": {"loaded": True}})
+                continue
+            time.sleep(0.025)
+            if request.get("command") == "classify_pair":
+                result = ModelSignal(True, "replacement", 0.9, "{}", {"kind": "notice"})
+            else:
+                result = WorkspaceCandidateSignal("canonical", "alias", 0.9, "same")
+            conn.send({"ok": True, "result": result})
+    except (EOFError, OSError):
+        return
+
+
 def _workspace_probe_child(conn, config):
     try:
         while True:
@@ -128,6 +145,64 @@ def test_process_backend_concurrent_callers_are_serialized(tmp_path: Path) -> No
     assert backend.status()["max_concurrency"] == 1
     backend.force_terminate()
     assert backend.status()["child_pid"] is None
+
+
+def test_scheduler_discards_expired_workspace_and_preserves_notice_budget(tmp_path: Path) -> None:
+    backend = _backend(tmp_path, _fair_probe_child, timeout=1000)
+    blocker = threading.Thread(target=lambda: backend.classify_pair({}, {}))
+    blocker.start()
+    deadline = time.monotonic() + 1
+    while backend.status()["inflight"] != 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    started = time.monotonic()
+    expired = backend.suggest_workspace_candidate(
+        "raw", {}, ["canonical"], deadline_monotonic=time.monotonic() + 0.005,
+    )
+    elapsed = time.monotonic() - started
+    assert expired.candidate is None
+    assert "deadline" in (expired.error or "")
+    assert elapsed < 0.05
+
+    notice = backend.classify_pair({}, {})
+    assert notice.candidate is True
+    blocker.join(1)
+    assert not blocker.is_alive()
+    backend.force_terminate()
+
+
+def test_scheduler_is_fair_under_continuous_workspace_and_notice_load(tmp_path: Path) -> None:
+    backend = _backend(tmp_path, _fair_probe_child, timeout=1000)
+    barrier = threading.Barrier(9)
+    completed: list[str] = []
+    lock = threading.Lock()
+
+    def run(kind: str) -> None:
+        barrier.wait()
+        if kind == "workspace":
+            result = backend.suggest_workspace_candidate(
+                "raw", {}, ["canonical"], deadline_monotonic=time.monotonic() + 2,
+            )
+            ok = result.candidate == "canonical"
+        else:
+            ok = backend.classify_pair({}, {}).candidate
+        if ok:
+            with lock:
+                completed.append(kind)
+
+    threads = [threading.Thread(target=run, args=(kind,)) for kind in (["workspace", "notice"] * 4)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(3)
+    assert completed.count("workspace") == 4
+    assert completed.count("notice") == 4
+    assert max(
+        max(i for i, kind in enumerate(completed) if kind == "workspace"),
+        max(i for i, kind in enumerate(completed) if kind == "notice"),
+    ) < 8
+    backend.force_terminate()
 
 
 def test_disable_closes_admission_before_unload_timeout(tmp_path: Path) -> None:

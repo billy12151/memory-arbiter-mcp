@@ -4,6 +4,7 @@ from pathlib import Path
 
 from memory_arbiter.config import Settings
 from memory_arbiter.console_api import ConsoleAPI
+from memory_arbiter.models import ConflictMember, ConflictValueGroup
 from memory_arbiter.tools import MemoryTools
 
 
@@ -37,7 +38,27 @@ def test_overview_returns_counts_and_brand(tmp_path: Path) -> None:
     assert overview["support"]["new_issue_url"].endswith("/issues/new")
 
 
-def test_conflict_detail_returns_left_and_right(tmp_path: Path) -> None:
+def _record_group(api: ConsoleAPI, left: int, right: int, *, point: str = "scope", extra: int | None = None) -> dict:
+    members = [
+        ConflictMember(left, 1, point, "old", point, "old", "old", (0, 3), "a" * 64, "a_to_b", "p1", "d1"),
+        ConflictMember(right, 1, point, "new", point, "new", "new", (0, 3), "b" * 64, "b_to_a", "p1", "d1"),
+    ]
+    if extra is not None:
+        members.append(ConflictMember(extra, 1, point, "new", point, "new", "new", (0, 3), "c" * 64, "a_to_b", "p1", "d1"))
+    return api.tools.db.record_conflict_group(
+        workspace_canonical="console-ws",
+        slot_key={"entity": "console", "attribute": point, "scope": "global"},
+        members=members,
+        value_groups=[
+            ConflictValueGroup("old", "old", (f"{left}@1",)),
+            ConflictValueGroup("new", "new", tuple([f"{right}@1"] + ([f"{extra}@1"] if extra is not None else []))),
+        ],
+        detection_reason="values differ", source="scan", detector_version="d1",
+        prompt_version="p1", conflict_point=point,
+    )
+
+
+def test_conflict_detail_returns_group_members(tmp_path: Path) -> None:
     api = _api(tmp_path)
     left = api.tools.memory_write(
         content="old scope",
@@ -55,24 +76,32 @@ def test_conflict_detail_returns_left_and_right(tmp_path: Path) -> None:
         workspace="console-ws",
         agent_id="test",
     )["data"]["id"]
-    conflict = api.tools.memory_record_conflict(
-        left_id=left,
-        right_id=right,
-        reason="scope differs",
-        conflict_type="evolution",
-        conflict_point="Console MVP scope changed",
-        suggested_winner=right,
-        confidence_hint="high",
-        source="llm_informed",
-    )["data"]
+    conflict = _record_group(api, left, right, point="Console MVP scope changed")
     detail = api.conflict_detail(conflict["conflict_id"])
     assert detail["conflict"]["conflict_point"] == "Console MVP scope changed"
-    assert detail["left"]["memory"]["id"] == left
-    assert detail["right"]["memory"]["id"] == right
-    assert detail["winner_side"] == "right"
+    assert [member["memory"]["id"] for member in detail["members"]] == [left, right]
+    assert detail["revision"] == 1
+    assert len(detail["value_groups"]) == 2
 
 
-def test_conflict_detail_exposes_resolution_guidance(tmp_path: Path) -> None:
+def test_conflict_detail_frontend_contract_supports_three_members(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    ids = [
+        api.tools.memory_write(content=f"value {index}", subject=f"M{index}", workspace="console-ws")["data"]["id"]
+        for index in range(3)
+    ]
+    conflict = _record_group(api, ids[0], ids[1], extra=ids[2])
+    detail = api.conflict_detail(conflict["conflict_id"])
+    assert [member["memory"]["id"] for member in detail["members"]] == ids
+    assert len(detail["member_versions"]) == 3
+    new_group = next(group for group in detail["value_groups"] if group["normalized_value"] == "new")
+    assert new_group["members"] == [f"{ids[1]}@1", f"{ids[2]}@1"]
+    assert detail["revision"] == 1
+    assert detail["apply_summary"] == {"plan": []}
+    assert "left" not in detail and "right" not in detail and "winner_side" not in detail
+
+
+def test_conflict_detail_exposes_unified_resolution_state(tmp_path: Path) -> None:
     api = _api(tmp_path)
     left = api.tools.memory_write(
         content="old full rule", subject="Old", workspace="console-ws",
@@ -80,23 +109,22 @@ def test_conflict_detail_exposes_resolution_guidance(tmp_path: Path) -> None:
     right = api.tools.memory_write(
         content="new full rule", subject="New", workspace="console-ws",
     )["data"]["id"]
-    conflict = api.tools.memory_record_conflict(
-        left_id=left, right_id=right, reason="full replacement",
-        conflict_type="evolution", suggested_winner=right,
-    )["data"]
-    with api.tools.db.write_transaction() as conn:
-        conn.execute(
-            "UPDATE conflicts SET resolution_kind='full_replacement', "
-            "conflict_scope='whole_memory' WHERE id=?",
-            (conflict["conflict_id"],),
-        )
+    conflict = _record_group(api, left, right, point="rule")
+    judged = api.tools.db.judge_conflict(
+        conflict["conflict_id"], expected_revision=1, chosen_value="new",
+        decided_by="user", decided_ref="console", decision_reason="confirmed",
+        resolution_memory_id=right,
+        apply_plan=[
+            {"memory_id": left, "action": "update_current_claim"},
+            {"memory_id": right, "action": "use_as_resolution"},
+        ],
+    )
 
     detail = api.conflict_detail(conflict["conflict_id"])
-
-    assert detail["conflict"]["resolution_kind"] == "full_replacement"
-    assert detail["conflict"]["conflict_scope"] == "whole_memory"
-    assert detail["conflict"]["recommended_resolution_action"] == "supersede_old_memory"
-    assert detail["conflict"]["supersede_candidate"] is True
+    assert detail["conflict"]["status"] == "applying"
+    assert detail["revision"] == judged["revision"]
+    assert detail["resolution_memory"]["memory"]["id"] == right
+    assert detail["next_executable_call"]["action"] == "apply_conflict_action"
 
 
 def test_memories_expired_invalid_offset_defaults_to_zero(tmp_path: Path) -> None:

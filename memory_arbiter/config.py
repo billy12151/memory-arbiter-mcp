@@ -76,6 +76,8 @@ class Settings:
     semantic_conflict_load_timeout_ms: int = 120000
     semantic_conflict_min_pair_budget_ms: int = 1000
     semantic_conflict_max_notice_pairs: int = 2
+    notice_sync_wait_ms: int = 3000
+    workspace_qwen_budget_ms: int = 750
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -325,6 +327,14 @@ class Settings:
             semantic_conflict_min_pair_budget_ms=clamp_int(
                 pick_int_field(semantic_cfg.get("min_pair_budget_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_MIN_PAIR_BUDGET_MS", 1000, name="semantic_conflict.min_pair_budget_ms"),
                 50, 300000, name="semantic_conflict.min_pair_budget_ms", warnings=config_warnings,
+            ),
+            notice_sync_wait_ms=clamp_int(
+                pick_int_field(semantic_cfg.get("notice_sync_wait_ms"), "MEMORY_ARBITER_NOTICE_SYNC_WAIT_MS", 3000, name="semantic_conflict.notice_sync_wait_ms"),
+                0, 5000, name="semantic_conflict.notice_sync_wait_ms", warnings=config_warnings,
+            ),
+            workspace_qwen_budget_ms=clamp_int(
+                pick_int_field(semantic_cfg.get("workspace_qwen_budget_ms"), "MEMORY_ARBITER_WORKSPACE_QWEN_BUDGET_MS", 750, name="semantic_conflict.workspace_qwen_budget_ms"),
+                50, 5000, name="semantic_conflict.workspace_qwen_budget_ms", warnings=config_warnings,
             ),
         )
         settings.config_warnings = config_warnings

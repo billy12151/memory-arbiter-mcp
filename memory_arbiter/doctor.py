@@ -46,13 +46,25 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
     stale = int(conn.execute("SELECT COUNT(*) FROM memory_evidence e JOIN memories m ON m.id=e.memory_id WHERE e.memory_version<>m.version").fetchone()[0])
     orphan = int(conn.execute("SELECT COUNT(*) FROM memory_evidence e WHERE NOT EXISTS(SELECT 1 FROM memories m WHERE m.id=e.memory_id)").fetchone()[0])
-    open_notices = int(conn.execute("SELECT COUNT(*) FROM semantic_notices WHERE status='open'").fetchone()[0])
+    open_notices = int(conn.execute(
+        "SELECT COUNT(*) FROM conflicts WHERE notice_type IS NOT NULL "
+        "AND notice_delivery_status IN ('pending','delivered')"
+    ).fetchone()[0])
     open_conflicts = int(conn.execute("SELECT COUNT(*) FROM conflicts WHERE status='open'").fetchone()[0])
+    scan_required_row = conn.execute(
+        "SELECT value FROM migration_state WHERE key='conflict_scan_required'"
+    ).fetchone()
+    conflict_scan_required = bool(scan_required_row and str(scan_required_row[0]) == "true")
     findings.append(_finding("config.writable", runtime_state is None or runtime_state.sqlite_writable, "SQLite writable", critical=True))
     findings.append(_finding("evidence.coverage", indexed == eligible or not settings.embedding_auto_write, f"{indexed}/{eligible} memories indexed", evidence={"indexed": indexed, "eligible": eligible, "non_indexable": counts["non_indexable_memories"], "units": units}))
     findings.append(_finding("evidence.freshness", stale == 0, f"{stale} stale evidence rows", evidence={"stale": stale}))
     findings.append(_finding("evidence.orphans", orphan == 0, f"{orphan} orphan evidence rows", evidence={"orphan": orphan}))
     findings.append(_finding("conflicts.backlog", open_conflicts < 100, f"{open_conflicts} open conflicts"))
+    findings.append(_finding(
+        "conflicts.scan_required", not conflict_scan_required,
+        "complete a full matching-detector conflict scan" if conflict_scan_required
+        else "conflict rebuild scan complete",
+    ))
     findings.append(_finding("notices.backlog", open_notices < 100, f"{open_notices} open notices"))
     # v0.8.8 observability (restored): searches that ring conflict signals
     # append to attention_log.jsonl; surfacing the volume keeps advisory

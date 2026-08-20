@@ -179,6 +179,9 @@ def test_server_always_exposes_only_product_tools(tmp_path: Path, monkeypatch) -
     monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
     monkeypatch.setitem(sys.modules, "mcp.server", fake_server)
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fake_fastmcp)
+    server_config = tmp_path / "server-config.json"
+    server_config.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(server_config))
     monkeypatch.setenv("MEMORY_ARBITER_TOOL_PROFILE", "legacy_full")
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
@@ -268,7 +271,7 @@ def test_product_wrappers_validate_aliases_and_bad_inputs(tmp_path: Path) -> Non
     judge_missing = tools.memory(action="judge", data={"id": 1})
     assert judge_missing["ok"] is False
     assert "missing" in judge_missing["data"]["error"]
-    assert "expected_left_version" in judge_missing["data"]["help"]["missing_fields"]
+    assert "expected_revision" in judge_missing["data"]["help"]["missing_fields"]
 
 
 def test_product_repair_cleanup_history_id_alias_is_not_full_cleanup(tmp_path: Path) -> None:
@@ -349,13 +352,11 @@ def test_all_governance_actions_require_explicit_user_authorization(tmp_path: Pa
     tools = make_tools(tmp_path)
     valid_payloads = {
         "retire": {"memory_id": 1, "reason": "retire whole memory"},
-        "resolve_conflict": {"conflict_id": 1},
+        "resolve_conflict": {"conflict_id": 1, "expected_revision": 2},
         "confirm": {"memory_id": 1},
-        "correct_judgment": {
-            "conflict_id": 1, "verdict": "evolution", "recommended_use": "merge",
-            "suggested_winner": None, "reason": "correction", "expected_judgment_id": 1,
-            "expected_left_version": 1, "expected_right_version": 1,
-            "authorized": False,
+        "apply_conflict_action": {
+            "conflict_id": 1, "expected_revision": 2, "memory_id": 1,
+            "action": "update_current_claim", "content": "corrected fact",
         },
         "accept_workspace_alias": {"alias": "alias", "canonical": "canonical"},
         "reject_workspace_alias": {"alias": "alias", "canonical": "canonical"},
@@ -396,7 +397,7 @@ def test_product_forwards_return_clean_error_when_id_missing(tmp_path: Path) -> 
     assert_clean_error("memory.update", tools.memory(action="update", data={"new_content": "x"}))
     assert_clean_error("govern.retire", tools.memory_govern(action="retire", data={}))
     assert_clean_error("govern.confirm", tools.memory_govern(action="confirm", data={}))
-    assert_clean_error("govern.correct_judgment", tools.memory_govern(action="correct_judgment", data={}))
+    assert_clean_error("govern.apply_conflict_action", tools.memory_govern(action="apply_conflict_action", data={}))
     assert_clean_error("govern.resolve_conflict", tools.memory_govern(action="resolve_conflict", data={}))
     assert_clean_error("repair.split", tools.memory_repair(task="split", data={}))
     assert_clean_error("repair.set_entity", tools.memory_repair(task="set_entity", data={}))
@@ -409,34 +410,31 @@ def test_product_forwards_return_clean_error_when_id_missing(tmp_path: Path) -> 
     assert "authorized" in cleanup["data"]["error"]
 
 
-def test_product_judge_help_exposes_enum_constraints(tmp_path: Path) -> None:
-    """v0.11.1: judge/correct_judgment help must document enums + cross-field rules.
-
-    Without these an agent iterates against invalid_* outcomes because the
-    allowed verdict/recommended_use/resolution_kind values are otherwise
-    undiscoverable from the help surface.
-    """
+def test_product_judge_help_exposes_group_decision_constraints(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
 
     mem_help = tools.memory(action="help")["data"]
-    assert "judge_constraints" in mem_help
-    jc = mem_help["judge_constraints"]
-    # Single source of truth: these mirror ConflictJudgmentStore + submit_conflict_judgment.
-    assert jc["verdict"] == ["contradiction", "evolution", "compatible", "uncertain"]
-    assert set(jc["recommended_use"]) == {"left", "right", "contextual", "merge", "ask_user", "none"}
-    assert "partial_update" in jc["resolution_kind"]
-    assert "field" in jc["conflict_scope"]
-    assert any("partial_update|merge" in rule for rule in jc["rules"])
+    constraints = mem_help["judge_constraints"]
+    assert constraints["decided_by"] == ["user", "agent"]
+    assert set(constraints["apply_actions"]) == {
+        "update_current_claim", "append_superseded_context", "preserve_historical_record",
+        "use_as_resolution", "needs_authorization",
+    }
+    assert any("expected_revision" in rule for rule in constraints["rules"])
+    assert any("apply_conflict_action" in rule for rule in constraints["rules"])
 
-    # memory_govern help must also carry the same constraint block (correct_judgment).
     gov_help = tools.memory_govern(action="help")["data"]
-    assert "judge_constraints" in gov_help
+    assert gov_help["judge_constraints"] == constraints
+    assert gov_help["actions"] == [
+        "retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm",
+        "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical",
+        "migrate_workspace", "confirm_pending_workspace", "help",
+    ]
 
-    # The missing-fields error path must also attach the constraints.
     missing = tools.memory(action="judge", data={"id": 1})
     assert missing["ok"] is False
-    assert "judge_constraints" in missing["data"]["help"]
-    assert "expected_left_version" in missing["data"]["help"]["missing_fields"]
+    assert missing["data"]["help"]["judge_constraints"] == constraints
+    assert "expected_revision" in missing["data"]["help"]["missing_fields"]
 
 def test_product_help_exposes_agent_onboarding_topic(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
@@ -446,7 +444,8 @@ def test_product_help_exposes_agent_onboarding_topic(tmp_path: Path) -> None:
     assert help_doc["notice"] == "agent-onboarding:v1"
     assert help_doc["guide_file"] == "memory_arbiter/AGENT_ONBOARDING.md"
     assert "Compact Rule" in help_doc["content"]
-    assert "notify" in help_doc["content"]
+    assert "record_conflict" in help_doc["content"]
+    assert "apply_conflict_action" in help_doc["content"]
     assert "memory(action=\"find\")" in help_doc["content"]
 
 
@@ -455,14 +454,15 @@ def test_product_help_exposes_agent_decision_paths(tmp_path: Path) -> None:
 
     memory_help = tools.memory(action="help")["data"]
     assert memory_help["judge_required_fields"] == [
-        "conflict_id", "expected_left_version", "expected_right_version",
-        "verdict", "recommended_use", "suggested_winner", "confidence_hint",
-        "reason", "affects_current_output", "usage_context",
+        "conflict_id", "expected_revision", "chosen_value", "decided_by",
+        "ref", "reason", "apply_plan", "resolution_memory_id",
     ]
     paths = memory_help["action_required_paths"]
     assert "not a formal conflict" in paths["read_semantic_notice"]
+    assert "freshness.fresh=true" in paths["read_semantic_notice"]
     assert "authorized=true" in paths["confirm_new_workspace"]
-    assert "returned retry instructions" in paths["ask_user_for_authorization"]
+    assert "Authorization is mandatory" in paths["ask_user_for_authorization"]
+    assert {"apply_conflict_action", "preview_backup_replay", "inspect_backup_replay_manually"} <= paths.keys()
     assert "add_tags" in memory_help["accepted_fields"]["update"]
     assert memory_help["value_reference"]["source_type"] == [
         "user_confirmed", "document_extracted", "agent_generated", "unknown", "pending",
@@ -480,6 +480,37 @@ def test_product_help_exposes_agent_decision_paths(tmp_path: Path) -> None:
     ]
     assert repair_help["action_required_paths"] == paths
     assert "action" in repair_help["accepted_fields"]["semantic_control"]
+
+
+def test_help_record_conflict_example_is_valid_and_executable(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    left = tools.memory_write(content="database is MySQL", subject="database", workspace="repo-a")["data"]
+    right = tools.memory_write(content="database is SQLite", subject="database", workspace="repo-a")["data"]
+    example = tools.memory_repair(task="help")["data"]["examples"]["record_conflict"]
+    payload = json.loads(json.dumps(example["data"]))
+    assert len(payload["members"]) == len(payload["value_groups"]) == 2
+    actual_rows = [tools.db.get_memory(left["id"]), tools.db.get_memory(right["id"])]
+    for member, actual in zip(payload["members"], actual_rows):
+        member["memory_id"] = actual["id"]
+        member["version"] = actual["version"]
+        member["content_hash"] = hashlib.sha256(actual["content"].encode()).hexdigest()
+    payload["value_groups"][0]["members"] = [f"{actual_rows[0]['id']}@{actual_rows[0]['version']}"]
+    payload["value_groups"][1]["members"] = [f"{actual_rows[1]['id']}@{actual_rows[1]['version']}"]
+    assert all(re.fullmatch(r"[0-9a-f]{64}", member["content_hash"]) for member in payload["members"])
+    result = tools.memory_repair(task=example["task"], data=payload)
+    assert result["ok"] is True
+    assert result["data"]["outcome"] == "inserted"
+
+
+def test_emitted_action_required_literals_have_help_paths(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    root = Path(__file__).parents[1] / "memory_arbiter"
+    emitted: set[str] = set()
+    pattern = re.compile(r'["\']action_required["\']\s*:\s*["\']([^"\']+)["\']')
+    for source in root.rglob("*.py"):
+        emitted.update(pattern.findall(source.read_text(encoding="utf-8")))
+    paths = set(tools.memory(action="help")["data"]["action_required_paths"])
+    assert emitted <= paths, sorted(emitted - paths)
 
 
 def test_product_help_exposes_fields_for_read_only_surface(tmp_path: Path) -> None:
@@ -544,51 +575,29 @@ def test_product_forwards_handle_bad_secondary_int_args(tmp_path: Path) -> None:
                  tools.memory_repair(task="cleanup_history", data={"older_than_days": "abc", "authorized": True}))
 
 
-def test_product_judge_and_correct_judgment_field_ordering(tmp_path: Path) -> None:
-    """v0.11.1: a non-integer conflict_id must not mask other missing required fields.
-
-    correct_judgment now runs the required-fields check BEFORE coercing
-    conflict_id, so an agent learns about every missing field at once rather
-    than one per round-trip. judge coerces conflict_id explicitly so a
-    non-numeric id gets a clear error instead of an obscure invalid_input.
-    """
+def test_product_judge_and_apply_conflict_action_field_ordering(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
 
-    # judge with a non-numeric conflict_id alias and nothing else: still reports
-    # the *missing* required fields (conflict_id is present, just non-numeric),
-    # so the agent fills the rest first.
     r = tools.memory(action="judge", data={"id": "abc"})
     assert r["ok"] is False
     assert "missing_fields" in r["data"]["help"]
-    assert "verdict" in r["data"]["help"]["missing_fields"]
+    assert "chosen_value" in r["data"]["help"]["missing_fields"]
 
-    # judge with ALL required fields present but a non-numeric conflict_id:
-    # clean integer error, not a deep invalid_input.
     r = tools.memory(action="judge", data={
-        "conflict_id": "abc", "expected_left_version": 1, "expected_right_version": 1,
-        "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None,
-        "confidence_hint": "medium", "reason": "x", "affects_current_output": True,
-        "usage_context": "answer",
+        "conflict_id": "abc", "expected_revision": 1, "chosen_value": "sqlite",
+        "decided_by": "agent", "ref": None, "reason": "reviewed",
+        "apply_plan": [], "resolution_memory_id": None,
     })
     assert r["ok"] is False
     assert "conflict_id" in r["data"]["error"]
 
-    # correct_judgment: non-int conflict_id + other missing fields -> reports MISSING
-    # fields (9 of them), not the integer error.
-    r = tools.memory_govern(action="correct_judgment", data={"conflict_id": "abc", "verdict": "x"})
-    assert r["ok"] is False
-    assert "missing_fields" in r["data"]["help"]
-    assert len(r["data"]["help"]["missing_fields"]) >= 5
-
-    # correct_judgment: all required present, conflict_id non-int -> integer error
-    r = tools.memory_govern(action="correct_judgment", data={
-        "conflict_id": "abc", "verdict": "evolution", "recommended_use": "merge",
-        "suggested_winner": None, "reason": "fix", "expected_judgment_id": 1,
-        "expected_left_version": 1, "expected_right_version": 1,
+    r = tools.memory_govern(action="apply_conflict_action", data={
+        "conflict_id": "abc", "expected_revision": 2, "memory_id": 1,
+        "action": "update_current_claim", "content": "database is sqlite",
         "authorized": True,
     })
     assert r["ok"] is False
-    assert "conflict_id" in r["data"]["error"]
+    assert r["data"]["field"] == "conflict_id"
 
 
 
@@ -831,6 +840,9 @@ def test_server_build_runtime_exposes_tools_for_shutdown(tmp_path: Path, monkeyp
     monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
     monkeypatch.setitem(sys.modules, "mcp.server", fake_server)
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fake_fastmcp)
+    server_config = tmp_path / "shutdown-config.json"
+    server_config.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(server_config))
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
     monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")
@@ -863,6 +875,9 @@ def test_real_server_product_wrappers_preserve_non_object_data(tmp_path: Path, m
     monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
     monkeypatch.setitem(sys.modules, "mcp.server", fake_server)
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fake_fastmcp)
+    wrapper_config = tmp_path / "wrapper-config.json"
+    wrapper_config.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(wrapper_config))
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "wrapper.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "wrapper.jsonl"))
     monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")

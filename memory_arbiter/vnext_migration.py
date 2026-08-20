@@ -10,22 +10,32 @@ import os
 import shutil
 import sqlite3
 import sys
+import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import Settings
 from .db import MemoryDB
-from .db_generation import CURRENT_SCHEMA_GENERATION, detect_database_generation
+from .db_generation import (
+    CONFLICT_DETECTOR_VERSION,
+    CURRENT_SCHEMA_GENERATION,
+    detect_database_generation,
+)
 from .evidence import local_text_units
+from .db.meta import active_scan_boundary_on_connection, canonical_scan_boundary
 from .tools import MemoryTools
 
 
 PRESERVED_TABLES = (
-    "memories", "memory_history", "conflicts", "conflict_judgments",
-    "semantic_notices", "workspace_canonicals", "workspace_aliases",
-    "workspace_alias_events", "backup_replay_log",
+    "memories", "memory_history", "memory_evidence",
+    "workspace_canonicals", "workspace_aliases", "workspace_alias_events",
+    "backup_replay_log",
 )
+DESTRUCTIVELY_REBUILT_TABLES = (
+    "conflicts", "conflict_judgments", "semantic_notices",
+)
+_BUILDING_SCHEMA_GENERATION = f"{CURRENT_SCHEMA_GENERATION}:building"
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -47,20 +57,52 @@ def _counts(path: Path) -> dict[str, int]:
         return _counts_on_connection(conn)
 
 
+def _destructive_counts(path: Path) -> dict[str, int]:
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        return {
+            table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            if _table_exists(conn, table) else 0
+            for table in DESTRUCTIVELY_REBUILT_TABLES
+        }
+
+
+def _fingerprint_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for table, order_by in (
+        ("memories", "id"),
+        ("memory_history", "id"),
+        ("memory_evidence", "id"),
+        ("workspace_canonicals", "id"),
+        ("workspace_aliases", "alias_workspace"),
+        ("workspace_alias_events", "id"),
+    ):
+        digest = hashlib.sha256()
+        count = 0
+        if _table_exists(conn, table):
+            if table == "memory_evidence":
+                rows = conn.execute(
+                    """SELECT memory_id,memory_version,content_hash,unit_index,kind,
+                              text,start_offset,end_offset
+                       FROM memory_evidence ORDER BY memory_id,unit_index"""
+                )
+            else:
+                rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by}")
+            for row in rows:
+                count += 1
+                digest.update(
+                    json.dumps(dict(row), ensure_ascii=False, sort_keys=True).encode()
+                )
+                digest.update(b"\n")
+        result[f"{table}_count"] = count
+        result[f"{table}_digest"] = digest.hexdigest()
+    return result
+
+
 def _fingerprint(path: Path) -> dict[str, Any]:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        digest = hashlib.sha256()
-        count = 0
-        for row in conn.execute(
-            "SELECT id,version,status,content,subject,tags,workspace,workspace_canonical "
-            "FROM memories ORDER BY id"
-        ):
-            count += 1
-            digest.update(json.dumps(dict(row), ensure_ascii=False, sort_keys=True).encode())
-            digest.update(b"\n")
-        return {"memory_count": count, "memory_digest": digest.hexdigest()}
+        return _fingerprint_on_connection(conn)
     finally:
         conn.close()
 
@@ -95,6 +137,8 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
     return {
         "source": str(source), "target": str(target),
         "source_bytes": source.stat().st_size, "counts": _counts(source),
+        "destructive_history_loss": list(DESTRUCTIVELY_REBUILT_TABLES),
+        "destructive_history_counts": _destructive_counts(source),
         "estimated_evidence_units": units,
         "estimated_vector_bytes": vector_bytes,
         "free_bytes": free_bytes, "required_bytes": required,
@@ -106,27 +150,33 @@ def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
 
 
-def _copy_preserved_tables(source: Path, db: MemoryDB) -> None:
+def _copy_preserved_tables(source: Path, db: MemoryDB, *, chunk_size: int = 500) -> None:
     src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
     try:
-        with db.write_transaction() as dst:
-            dst.execute("PRAGMA defer_foreign_keys=ON")
-            for table in PRESERVED_TABLES:
-                if not _table_exists(src, table):
-                    continue
-                common = [name for name in _columns(dst, table) if name in _columns(src, table)]
-                if not common:
-                    continue
-                quoted = ",".join(f'"{name}"' for name in common)
-                rows = src.execute(f"SELECT {quoted} FROM {table}").fetchall()
+        for table in PRESERVED_TABLES:
+            if not _table_exists(src, table):
+                continue
+            with db.connection() as dst_probe:
+                common = [
+                    name for name in _columns(dst_probe, table)
+                    if name in _columns(src, table)
+                ]
+            if not common:
+                continue
+            quoted = ",".join(f'"{name}"' for name in common)
+            placeholders = ",".join("?" for _ in common)
+            cursor = src.execute(f"SELECT {quoted} FROM {table}")
+            while True:
+                rows = cursor.fetchmany(max(1, int(chunk_size)))
                 if not rows:
-                    continue
-                placeholders = ",".join("?" for _ in common)
-                dst.executemany(
-                    f"INSERT INTO {table}({quoted}) VALUES({placeholders})",
-                    [tuple(row[name] for name in common) for row in rows],
-                )
+                    break
+                with db.write_transaction() as dst:
+                    dst.execute("PRAGMA defer_foreign_keys=ON")
+                    dst.executemany(
+                        f"INSERT INTO {table}({quoted}) VALUES({placeholders})",
+                        (tuple(row[name] for name in common) for row in rows),
+                    )
     finally:
         src.close()
 
@@ -139,6 +189,25 @@ def _set_state(db: MemoryDB, values: dict[str, str]) -> None:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
                 (key, value),
             )
+
+
+def _active_scan_boundary(db: MemoryDB) -> str:
+    with db.connection() as conn:
+        return canonical_scan_boundary(active_scan_boundary_on_connection(conn))
+
+
+def _mark_conflict_rebuild_ready(db: MemoryDB) -> dict[str, str]:
+    epoch = uuid.uuid4().hex
+    boundary = _active_scan_boundary(db)
+    values = {
+        "schema_generation": CURRENT_SCHEMA_GENERATION,
+        "conflict_scan_required": "true",
+        "conflict_scan_epoch": epoch,
+        "conflict_scan_detector_version": CONFLICT_DETECTOR_VERSION,
+        "conflict_scan_boundary": boundary,
+    }
+    _set_state(db, values)
+    return values
 
 
 def _checkpoint(path: Path) -> bool:
@@ -244,7 +313,9 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
             except sqlite3.Error as exc:
                 return {"ok": False, "error": f"target_not_a_vnext_database: {exc}"}
             if not (
-                state.get("schema_generation") == CURRENT_SCHEMA_GENERATION
+                state.get("schema_generation") in {
+                    CURRENT_SCHEMA_GENERATION, _BUILDING_SCHEMA_GENERATION,
+                }
                 and (
                     state.get("phase") in {"failed", "backfill", "resuming"}
                     or generation == "current"
@@ -271,39 +342,84 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
                 raise
     tools = MemoryTools(settings=target_settings, db=db)
     try:
-        _set_state(db, {"phase": "backfill", "source_path": str(source)})
+        _set_state(db, {
+            "schema_generation": _BUILDING_SCHEMA_GENERATION,
+            "phase": "backfill",
+            "source_path": str(source),
+        })
     except sqlite3.Error as exc:
         _reset_phase_to_failed(target)
         return {"ok": False, "error": f"resume_state_write_failed: {exc}"}
     with db.connection() as conn:
         cursor_row = conn.execute("SELECT value FROM migration_state WHERE key='cursor_memory_id'").fetchone()
         cursor = int(cursor_row["value"]) if cursor_row else 0
-        rows = conn.execute("SELECT * FROM memories WHERE id>? AND status!='deleted' ORDER BY id", (cursor,)).fetchall()
+        remaining = int(conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE id>? AND status!='deleted'", (cursor,)
+        ).fetchone()[0])
     failed: list[dict[str, Any]] = []
     indexed = 0
-    for row in rows:
-        memory = dict(row)
-        result = tools._index_local_text_evidence(int(memory["id"]), memory)
-        if result.get("status") != "indexed":
-            failed.append({"memory_id": int(memory["id"]), "result": result})
+    page_size = 100
+    while not failed:
+        with db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE id>? AND status!='deleted' ORDER BY id LIMIT ?",
+                (cursor, page_size),
+            ).fetchall()
+        if not rows:
             break
-        indexed += 1
-        _set_state(db, {"cursor_memory_id": str(memory["id"])})
-        if progress and indexed % 25 == 0:
-            print(json.dumps({"indexed": indexed, "remaining": len(rows) - indexed}), file=sys.stderr, flush=True)
+        for row in rows:
+            memory = dict(row)
+            result = tools._index_local_text_evidence(int(memory["id"]), memory)
+            if result.get("status") != "indexed":
+                failed.append({"memory_id": int(memory["id"]), "result": result})
+                break
+            cursor = int(memory["id"])
+            indexed += 1
+            _set_state(db, {"cursor_memory_id": str(cursor)})
+            if progress and indexed % 25 == 0:
+                print(
+                    json.dumps({"indexed": indexed, "remaining": max(0, remaining - indexed)}),
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     coverage = db.evidence.coverage()
     source_counts, target_counts = _counts(source), _counts(target)
-    row_counts_match = source_counts == target_counts
+    # Evidence may be newly generated for a pre-evidence source, so its row
+    # count is validated by coverage below rather than equality. When source
+    # evidence exists its logical fingerprint (excluding ids/timestamps) must
+    # remain identical after vector republish.
+    row_counts_match = all(
+        source_counts.get(table, 0) == target_counts.get(table, 0)
+        for table in PRESERVED_TABLES if table != "memory_evidence"
+    )
     source_fp, target_fp = _fingerprint(source), _fingerprint(target)
-    source_stable = source_fp == target_fp
-    complete = not failed and coverage["indexed_memories"] == coverage["eligible_memories"] and row_counts_match and source_stable
+    stable_keys = [
+        key for key in source_fp
+        if not key.startswith("memory_evidence_")
+    ]
+    if source_fp.get("memory_evidence_count", 0):
+        stable_keys.extend(["memory_evidence_count", "memory_evidence_digest"])
+    source_stable = all(source_fp.get(key) == target_fp.get(key) for key in stable_keys)
+    destructive_tables_empty = all(
+        target_counts.get(table, 0) == 0 for table in DESTRUCTIVELY_REBUILT_TABLES
+    )
+    complete = (
+        not failed
+        and coverage["indexed_memories"] == coverage["eligible_memories"]
+        and row_counts_match
+        and source_stable
+        and destructive_tables_empty
+    )
+    scan_state: dict[str, str] = {}
+    if complete:
+        scan_state = _mark_conflict_rebuild_ready(db)
     _set_state(db, {
-        "schema_generation": CURRENT_SCHEMA_GENERATION,
         "phase": "ready" if complete else "failed",
         "row_counts_match": str(row_counts_match).lower(),
         "evidence_coverage": f"{coverage['indexed_memories']}/{coverage['eligible_memories']}",
         "failed_count": str(len(failed)), "source_stable": str(source_stable).lower(),
+        "destructive_tables_empty": str(destructive_tables_empty).lower(),
     })
     switch_ready = False
     if complete:
@@ -319,6 +435,8 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         "coverage": coverage, "row_counts_match": row_counts_match,
         "source_stable": source_stable, "source_fingerprint": source_fp,
         "target_fingerprint": target_fp, "failed": failed,
+        "destructive_tables_empty": destructive_tables_empty,
+        "conflict_scan": scan_state,
         "switch_ready": switch_ready,
         "next_step": "freeze writes and run --final-sync before switching db_path" if complete else "fix failures and rerun with --resume",
     }
@@ -330,6 +448,7 @@ def final_sync(
     settings: Settings,
     *,
     progress: bool = True,
+    publish_callback: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build verified staging and atomically replace the side-by-side target."""
     if target.exists() and not _target_owned_by_source(target, source):
@@ -361,26 +480,50 @@ def final_sync(
             "staging": str(staging),
         })
         return result
-    # The build verified the source before checkpoint/replace; a write that
-    # landed since then would be silently absent from the target. Re-verify
-    # the fingerprint immediately before the atomic replace and refuse to
-    # switch on any drift (the caller documents that writers must be stopped).
-    if _fingerprint(source) != result.get("source_fingerprint"):
-        result.update({
-            "ok": False,
-            "error": "source_changed_during_final_sync",
-            "staging": str(staging),
-            "next_step": (
-                "stop all writers and rerun the final sync; the fully built "
-                "staging database is kept at the staging path and will be "
-                "rebuilt on the next run (it roughly doubles disk usage "
-                "until then)"
-            ),
-        })
-        return result
-    _remove_sidecars(target)
-    os.replace(staging, target)
-    _remove_sidecars(staging)
+    # Hold an EXCLUSIVE transaction on the source from final verification
+    # through target publication and, when supplied by the upgrade wrapper,
+    # the config switch. This deterministically excludes an already-open old
+    # writer from landing a commit in the verification-to-switch gap.
+    source_lock = sqlite3.connect(source, timeout=5)
+    source_lock.row_factory = sqlite3.Row
+    try:
+        source_lock.execute("PRAGMA busy_timeout=5000")
+        source_lock.execute("BEGIN EXCLUSIVE")
+        locked_fingerprint = _fingerprint_on_connection(source_lock)
+        if locked_fingerprint != result.get("source_fingerprint"):
+            source_lock.execute("ROLLBACK")
+            result.update({
+                "ok": False,
+                "error": "source_changed_during_final_sync",
+                "staging": str(staging),
+                "next_step": (
+                    "stop all writers and rerun the final sync; the fully built "
+                    "staging database is kept at the staging path and will be "
+                    "rebuilt on the next run (it roughly doubles disk usage "
+                    "until then)"
+                ),
+            })
+            return result
+        _remove_sidecars(target)
+        os.replace(staging, target)
+        _remove_sidecars(staging)
+        if publish_callback is not None:
+            publish_result = publish_callback()
+            result["config"] = publish_result
+            if not publish_result.get("switched"):
+                source_lock.execute("ROLLBACK")
+                result.update({
+                    "ok": False,
+                    "error": "migration_complete_but_config_switch_failed",
+                })
+                return result
+        source_lock.execute("COMMIT")
+    except BaseException:
+        if source_lock.in_transaction:
+            source_lock.execute("ROLLBACK")
+        raise
+    finally:
+        source_lock.close()
     # The staging build's startup-lock sidecar outlives the rename; the
     # switched-in database does not need one.
     staging_lock = staging.with_name(staging.name + ".startup.lock")

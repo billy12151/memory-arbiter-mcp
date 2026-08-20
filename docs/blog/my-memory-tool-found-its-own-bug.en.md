@@ -10,7 +10,7 @@ I use two AI tools every day: **OpenClaw** (my planning assistant) and **ZCode**
 
 > Cursor learned my coding conventions. Claude Code had no idea. ZCode forgot what OpenClaw decided. I was re-explaining the same context to five different tools, every single day.
 
-So I built **[`memory-arbiter`](https://github.com/billy12151/memory-arbiter-mcp)** — a tiny local MCP server. One SQLite file. Every tool reads and writes through the same MCP protocol. Conflicts get arbitrated by structured rules (user-confirmation → event time → source trust → ingest time), not by an LLM guessing. No cloud, no API keys, no per-call cost.
+So I built **[`memory-arbiter`](https://github.com/billy12151/memory-arbiter-mcp)** — a tiny local MCP server. One SQLite file. Every tool reads and writes through the same MCP protocol. In the **v0.2.x implementation described in this story**, conflicts were ranked by deterministic precedence (user confirmation → event time → source trust → ingest time), not by an LLM guessing. The current API has since moved to four task-oriented tools and explicit user-authorized conflict governance. No cloud model, API key, or per-call model cost; current releases do have an optional background PyPI update check that can be disabled.
 
 The pitch writes itself: **stop re-teaching your stack the same facts. Write once, every tool knows.**
 
@@ -18,10 +18,12 @@ The pitch writes itself: **stop re-teaching your stack the same facts. Write onc
 
 For the v0.2.1 release, I decided to actually use the thing I built. Instead of writing the release spec into a file and pointing ZCode at it, I had OpenClaw write the spec straight into `memory-arbiter`:
 
-```
+```text
 OpenClaw  →  memory_write(spec for "v0.2.1 release task")
 ZCode     →  memory_search("v0.2.1 release task")  ← picks it up, zero file handoff
 ```
+
+Those are the historical low-level tool names used in v0.2.1. Current product-profile clients use `memory(action="remember")` and `memory(action="find")`; the old names may exist only in the compatibility profile.
 
 It worked. ZCode retrieved the spec, executed the release, wrote the result back. The handoff for a ~2000-word spec went from ~3000 tokens (loading the whole doc) to ~500 tokens (just the relevant slice). **83% saved.** I felt pretty clever.
 
@@ -115,7 +117,7 @@ pip install memory-arbiter-mcp
 Repo: [github.com/billy12151/memory-arbiter-mcp](https://github.com/billy12151/memory-arbiter-mcp)
 PyPI: [pypi.org/project/memory-arbiter-mcp](https://pypi.org/project/memory-arbiter-mcp/)
 
-It's Apache-2.0 licensed for the 0.8.2 line going forward, fully local, and won't send your memory anywhere you don't want it to.
+Versions 0.8.2 and later are Apache-2.0 licensed. Memory content and model inference stay local; current releases' only optional outbound request is a metadata-only PyPI update check, disabled with `{"update_check":{"enabled":false}}` in the JSON config.
 
 ---
 

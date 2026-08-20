@@ -6,11 +6,10 @@ import re
 import threading
 import time
 from importlib import resources
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, cast, Optional, Tuple
 
-from .acl import CallerWorkspace, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, redact_judgment, visible_memory
+from .acl import CallerWorkspace, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, visible_memory
 from .arbitration import compare_memories
-from .conflict_judgments import ConflictJudgmentStore
 from .config import Settings
 from .constants import strict_ws
 from .db import MemoryDB
@@ -77,6 +76,9 @@ class MemoryTools:
         self._check_degradation_reason: Optional[str] = None
         self._check_degradation_count = 0
         self._check_degradation_at: Optional[str] = None
+        self._notice_claim_error_count = 0
+        self._notice_claim_last_error: Optional[str] = None
+        self._notice_claim_last_error_at: Optional[str] = None
         self._last_backup_notice_signature: Optional[tuple[int, int, int, bool]] = None
         self._last_backup_source_signature: Optional[tuple[int, int, int]] = None
         # v0.6.0: initialise vec index state on startup
@@ -123,9 +125,46 @@ class MemoryTools:
             ),
         }
 
-    def _enqueue_local_text_index(self, memory_id: int, record: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def _enqueue_local_text_index(
+        self, memory_id: int, record: Optional[dict[str, Any]] = None,
+        *, trusted_applying_context: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         current = record or self.db.get_memory(int(memory_id)) or {}
-        return self._evidence_worker.enqueue(int(memory_id), {"version": int(current.get("version") or 1)})
+        version = int(current.get("version") or 1)
+        task_id = f"semantic:{int(memory_id)}@{version}"
+        self._semantic_worker.reserve(task_id)
+        snapshot: dict[str, Any] = {"version": version, "task_id": task_id}
+        if trusted_applying_context:
+            snapshot["trusted_applying_context"] = dict(trusted_applying_context)
+        result = self._evidence_worker.enqueue(int(memory_id), snapshot)
+        if result.get("status") != "queued":
+            self._semantic_worker.complete(
+                task_id,
+                {"status": "incomplete", "reason": f"evidence_index_{result.get('status') or 'rejected'}", "notices_created": 0},
+            )
+        return {**result, "semantic_task_id": task_id, "semantic_dedupe_key": task_id}
+
+    def _enqueue_content_postcommit(
+        self, memory_id: int, record: Optional[dict[str, Any]] = None,
+        *, trusted_applying_context: Optional[dict[str, Any]] = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        index = self._enqueue_local_text_index(
+            memory_id, record, trusted_applying_context=trusted_applying_context,
+        )
+        task_id = index.get("semantic_task_id")
+        wait_ms = max(0, min(5000, int(getattr(self.settings, "notice_sync_wait_ms", 3000))))
+        can_check = bool(self._embedding_configured()) and self.settings.semantic_conflict_on_write != "off"
+        completed = (
+            self._semantic_worker.wait_task(str(task_id), wait_ms / 1000.0)
+            if can_check and task_id and wait_ms > 0 else None
+        )
+        if completed is not None:
+            return index, completed
+        status = "deferred" if not can_check else "async"
+        check: dict[str, Any] = {"status": status, "task_id": task_id, "dedupe_key": task_id}
+        if not can_check:
+            check["reason"] = "waiting_for_evidence_index"
+        return index, check
 
     def start_semantic_worker(self) -> None:
         self._semantic_worker.start()
@@ -370,7 +409,9 @@ class MemoryTools:
             workspace = str(getattr(self.settings, "workspace", "") or "").strip()
         warnings: list[str] = []
         canonical: Optional[str] = None
-        if isolation != "none" and workspace:
+        if workspace:
+            # Explicit filters are canonicalized in every isolation mode. In
+            # none this is query normalization only, never an ACL boundary.
             embedder, ensure_warnings = self._ensure_embedder()
             warnings.extend(ensure_warnings)
             try:
@@ -385,7 +426,7 @@ class MemoryTools:
         return CallerWorkspace(
             isolation=isolation,
             workspace=workspace or None,
-            canonical=canonical if isolation != "none" else None,
+            canonical=canonical,
             source=source,
             warnings=tuple(warnings),
         )
@@ -415,74 +456,83 @@ class MemoryTools:
             return records
         return [r for r in records if raw_workspace(r) == caller.canonical]
 
-    def _conflict_detail_for_workspace(self, conflict_id: int, caller: Optional[CallerWorkspace] = None) -> Optional[dict[str, Any]]:
-        """ACL-aware conflict detail with any-side-current visibility.
+    @staticmethod
+    def _conflict_next_call(conflict: dict[str, Any]) -> Optional[dict[str, Any]]:
+        conflict_id = int(conflict["id"])
+        revision = int(conflict["revision"])
+        status = conflict.get("status")
+        if status == "open":
+            return {
+                "tool": "memory", "action": "judge",
+                "data": {"conflict_id": conflict_id, "expected_revision": revision},
+            }
+        if status == "applying":
+            plan = (conflict.get("apply_summary") or {}).get("plan") or []
+            pending = next((item for item in plan if item.get("status") == "pending"), None)
+            if pending is not None:
+                return {
+                    "tool": "memory_govern", "action": "apply_conflict_action",
+                    "data": {
+                        "conflict_id": conflict_id, "expected_revision": revision,
+                        "memory_id": pending.get("memory_id"), "action": pending.get("action"),
+                    },
+                    "authorization_required": True,
+                }
+            return {
+                "tool": "memory_govern", "action": "resolve_conflict",
+                "data": {"conflict_id": conflict_id, "expected_revision": revision},
+                "authorization_required": True,
+            }
+        return None
 
-        Returns None when the conflict row is absent or neither side is visible.
-        """
+    def _conflict_detail_for_workspace(self, conflict_id: int, caller: Optional[CallerWorkspace] = None) -> Optional[dict[str, Any]]:
+        """Return group detail only when every member passes strict ACL."""
         caller = caller or self._caller_workspace(None)
-        try:
-            with self.db.connection() as conn:
-                row = conn.execute(
-                    "SELECT c.*, j.verdict AS judgment_verdict, "
-                    "j.recommended_use AS judgment_recommended_use, "
-                    "j.suggested_winner AS judgment_suggested_winner, "
-                    "j.confidence_hint AS judgment_confidence_hint, "
-                    "j.reason AS judgment_reason, j.judge_type AS judgment_judge_type, "
-                    "j.judge_ref AS judgment_judge_ref, j.resolution_kind AS judgment_resolution_kind, "
-                    "j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
-                    "FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
-                    "WHERE c.id=?",
-                    (int(conflict_id),),
-                ).fetchone()
-                if row is None:
-                    return None
-                conflict = {k: row[k] for k in row.keys()}
-                left_id = conflict.get("left_id")
-                right_id = conflict.get("right_id")
-                if left_id is None or right_id is None:
-                    return None
-                left = self.db._fetch_memory(conn, int(left_id))
-                right = self.db._fetch_memory(conn, int(right_id))
-                jrows = conn.execute(
-                    "SELECT * FROM conflict_judgments WHERE conflict_id=? ORDER BY created_at DESC, id DESC",
-                    (int(conflict_id),),
-                ).fetchall()
-                judgments = [{k: jr[k] for k in jr.keys()} for jr in jrows]
-        except Exception:
+        conflict = self.db.get_conflict(int(conflict_id))
+        if conflict is None:
             return None
-        left_visible = visible_memory(left, caller.canonical if caller.isolation == "strict" else None)
-        right_visible = visible_memory(right, caller.canonical if caller.isolation == "strict" else None)
-        if caller.isolation == "strict" and not (left_visible or right_visible):
-            return None
-        both_visible = left_visible and right_visible
-        public_conflict = dict(conflict) if caller.isolation != "strict" or both_visible else redacted_conflict_shell(conflict, left_visible, right_visible)
-        winner_side = public_conflict.get("winner_side")
-        if winner_side is None:
-            winner = conflict.get("suggested_winner") or conflict.get("winner_id") or conflict.get("judgment_suggested_winner")
-            try:
-                winner_int = int(winner) if winner is not None else None
-                left_id = conflict.get("left_id")
-                right_id = conflict.get("right_id")
-                left_id_int = int(left_id) if left_id is not None else None
-                right_id_int = int(right_id) if right_id is not None else None
-                if winner_int is not None and winner_int == left_id_int:
-                    winner_side = "left"
-                elif winner_int is not None and winner_int == right_id_int:
-                    winner_side = "right"
-            except (TypeError, ValueError):
-                winner_side = None
-        if caller.isolation != "strict":
-            public_judgments = [dict(j, visible=True, redacted_fields=[]) for j in judgments]
-        else:
-            public_judgments = [redact_judgment(j, visible=both_visible) for j in judgments]
+        member_ids = sorted({int(member["memory_id"]) for member in conflict.get("member_versions") or []})
+        resolution_id = conflict.get("resolution_memory_id")
+        lookup_ids = member_ids + ([int(resolution_id)] if resolution_id is not None else [])
+        memories = {
+            memory_id: memory
+            for memory_id in lookup_ids
+            if (memory := self.db.get_memory(memory_id)) is not None
+        }
+        if caller.isolation == "strict":
+            visible = {
+                memory_id: visible_memory(memories.get(memory_id), caller.canonical)
+                for memory_id in lookup_ids
+            }
+            visible_member_count = sum(bool(visible.get(memory_id, False)) for memory_id in member_ids)
+            if not member_ids or visible_member_count == 0:
+                return None
+            # Strict callers either see the complete correlated snapshot or no
+            # conflict at all. Even a redacted shell leaks lifecycle/existence.
+            if visible_member_count != len(member_ids):
+                return None
+            if resolution_id is not None and not visible.get(int(resolution_id), False):
+                return None
+        members = [
+            memory_public_stub(memory_id, visible=True, memory=memories.get(memory_id))
+            for memory_id in member_ids
+        ]
+        resolution = (
+            memory_public_stub(resolution_id, visible=True, memory=memories.get(int(resolution_id)))
+            if resolution_id is not None else None
+        )
         detail = {
-            "conflict": self._with_resolution_guidance(public_conflict),
-            "left": memory_public_stub(conflict.get("left_id"), visible=left_visible, memory=left if left_visible else None),
-            "right": memory_public_stub(conflict.get("right_id"), visible=right_visible, memory=right if right_visible else None),
-            "winner_side": winner_side,
-            "judgments": public_judgments,
-            "judgments_visible": bool(caller.isolation != "strict" or both_visible),
+            "conflict": conflict,
+            "revision": conflict.get("revision"),
+            "slot": conflict.get("slot_key"),
+            "member_versions": conflict.get("member_versions") or [],
+            "value_groups": conflict.get("value_groups") or [],
+            "members": members,
+            "resolution_memory": resolution,
+            "resolution_memory_version": conflict.get("resolution_memory_version"),
+            "apply_summary": conflict.get("apply_summary") or {"plan": []},
+            "next_executable_call": self._conflict_next_call(conflict),
+            "all_members_visible": True,
         }
         if caller.isolation == "strict":
             detail.update(caller.response_fields())
@@ -538,16 +588,27 @@ class MemoryTools:
         candidates = [s["name"] for s in (similar or []) if s.get("name")][:5]
         if not candidates:
             return None
-        try:
-            return backend.suggest_workspace_candidate(ws_raw, evidence, candidates)
-        except Exception:
+        budget_ms = max(0, min(5000, int(getattr(self.settings, "workspace_qwen_budget_ms", 750))))
+        if budget_ms <= 0:
             return None
+        try:
+            suggestion = backend.suggest_workspace_candidate(
+                ws_raw, evidence, candidates,
+                deadline_monotonic=time.monotonic() + budget_ms / 1000.0,
+            )
+        except TypeError:
+            # Compatibility for injected/test backends implementing the original
+            # protocol. Production scheduling is deadline-aware below.
+            suggestion = backend.suggest_workspace_candidate(ws_raw, evidence, candidates)
+        except Exception:
+            suggestion = None
         finally:
             if not self.settings.semantic_conflict_resident and hasattr(backend, "maybe_unload_if_idle"):
                 try:
                     backend.maybe_unload_if_idle()
                 except Exception:
                     pass
+        return suggestion
 
     def _semantic_notice_workspace_scope(self, workspace: Any = None) -> Optional[str]:
         """Use the shared read-only caller resolver for notice API/count scope."""
@@ -592,6 +653,11 @@ class MemoryTools:
             "worker": self._semantic_worker.status(),
             "backend": backend_status,
             "notices": self.db.semantic_notice_counts(workspace_canonical),
+            "notice_delivery": {
+                "claim_error_count": self._notice_claim_error_count,
+                "last_claim_error": self._notice_claim_last_error,
+                "last_claim_error_at": self._notice_claim_last_error_at,
+            },
         }
 
     def _semantic_control(self, action: str) -> dict[str, Any]:
@@ -664,7 +730,10 @@ class MemoryTools:
             return disable_result
         return {"outcome": "invalid_action", "valid_actions": ["status", "pause", "resume", "enable", "unload", "disable"]}
 
-    def _enqueue_semantic_conflict_check(self, memory_id: Optional[int], record: Any, *, after_evidence: bool=False) -> dict[str, Any]:
+    def _enqueue_semantic_conflict_check(
+        self, memory_id: Optional[int], record: Any, *, after_evidence: bool = False,
+        trusted_applying_context: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         if memory_id is None:
             return {"status": "skipped", "reason": "backup_only"}
         if not after_evidence:
@@ -675,15 +744,21 @@ class MemoryTools:
         content = (record.get("content") if isinstance(record, dict) else getattr(record, "content", None))
         if content is None:
             content = stored.get("content") or ""
+        version = int(stored.get("version") or self.db.get_memory_version(int(memory_id)) or 1)
+        task_id = f"semantic:{int(memory_id)}@{version}"
         snapshot = {
             "memory_id": int(memory_id),
-            "version": int(stored.get("version") or self.db.get_memory_version(int(memory_id)) or 1),
+            "version": version,
             "content_hash": hashlib.sha256(str(content or "").encode("utf-8")).hexdigest(),
+            "task_id": task_id,
+            "dedupe_key": task_id,
         }
+        if trusted_applying_context:
+            snapshot["trusted_applying_context"] = dict(trusted_applying_context)
         return self._semantic_worker.enqueue(int(memory_id), snapshot)
 
-    def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> None:
-        self._evidence.process_conflicts(memory_id, snapshot)
+    def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        return self._evidence.process_conflicts(memory_id, snapshot)
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         return self._write_pipeline.memory_write(**payload)
@@ -758,16 +833,17 @@ class MemoryTools:
         scan_prompt_version: Optional[str] = None, scan_model: Optional[str] = None,
         **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_record_conflict(
+        return cast(dict[str, Any], self._operations.memory_record_conflict(
             left_id, right_id, reason, conflict_type, conflict_point, suggested_winner,
             confidence_hint, source, refresh, left_version, right_version,
             scan_prompt_version, scan_model, **_,
-        )
+        ))
 
     def memory_resolve_conflict(
         self, conflict_id: int, reason: str = "", status: str = "resolved", **_: Any,
     ) -> dict[str, Any]:
-        return self._operations.memory_resolve_conflict(conflict_id, reason, status, **_)
+        resolve_conflict = cast(Callable[..., dict[str, Any]], self._operations.memory_resolve_conflict)
+        return resolve_conflict(conflict_id, reason, status, **_)
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
         return self._operations.memory_confirm(
@@ -851,55 +927,6 @@ class MemoryTools:
         batch_size: int = 50, **_: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_rebuild_evidence(memory_ids, dry_run, batch_size, **_)
-
-    def memory_submit_conflict_judgment(
-        self,
-        conflict_id: int,
-        expected_left_version: int,
-        expected_right_version: int,
-        verdict: str,
-        recommended_use: str,
-        suggested_winner: Optional[int],
-        confidence_hint: Optional[str],
-        reason: str,
-        affects_current_output: bool,
-        usage_context: str,
-        judge_ref: Optional[str] = None,
-        resolution_kind: Optional[str] = None,
-        conflict_scope: Optional[str] = None,
-        **_: Any,
-    ) -> dict[str, Any]:
-        return self._operations.memory_submit_conflict_judgment(
-            conflict_id, expected_left_version, expected_right_version,
-            verdict, recommended_use, suggested_winner, confidence_hint,
-            reason, affects_current_output, usage_context, judge_ref,
-            resolution_kind, conflict_scope, **_,
-        )
-
-    def memory_correct_conflict_judgment(
-        self,
-        conflict_id: int,
-        verdict: str,
-        recommended_use: str,
-        suggested_winner: Optional[int],
-        reason: str,
-        expected_judgment_id: int,
-        expected_left_version: int,
-        expected_right_version: int,
-        authorized: bool = False,
-        judge_ref: Optional[str] = None,
-        resolution_kind: Optional[str] = None,
-        conflict_scope: Optional[str] = None,
-        **_: Any,
-    ) -> dict[str, Any]:
-        return self._operations.memory_correct_conflict_judgment(
-            conflict_id, verdict, recommended_use, suggested_winner, reason,
-            expected_judgment_id, expected_left_version, expected_right_version,
-            self._is_truthy(authorized), judge_ref, resolution_kind, conflict_scope, **_,
-        )
-
-    def memory_list_conflict_judgments(self, conflict_id: int, **_: Any) -> dict[str, Any]:
-        return self._operations.memory_list_conflict_judgments(conflict_id, **_)
 
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
         return self._operations.memory_audit_summary(**_)

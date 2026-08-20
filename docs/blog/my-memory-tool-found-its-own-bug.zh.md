@@ -10,9 +10,9 @@
 
 > Cursor 学会了我的编码规范，Claude Code 完全不知道；ZCode 忘了 OpenClaw 刚定的事。我每天都在把同样的上下文重新解释给五个不同的工具听。
 
-所以我做了 `memory-arbiter` —— 一个本地跑的 MCP server。**一个 SQLite 文件，所有工具通过同一套 MCP 协议读写**，冲突用结构化规则仲裁（用户确认 → 事件时间 → 来源可信度 → 录入时间），不靠大模型猜。没云、没 API key、没按次计费。
+所以我做了 `memory-arbiter` —— 一个本地跑的 MCP server。**一个 SQLite 文件，所有工具通过同一套 MCP 协议读写**。本文讲的是 **v0.2.x 当时的实现**：冲突按确定性优先级（用户确认 → 事件时间 → 来源可信度 → 录入时间）排序，不靠大模型猜；当前 API 已演进为四个任务型工具和需要用户明确授权的冲突治理。记忆内容和模型推理不上云、不要 API key、没有按次模型费用；当前版本另有一个可关闭的后台 PyPI 更新检查。
 
-顺带还有一个被低估的好处：**精准检索替代全文加载**。多数 AI 客户端每轮都把整个 `MEMORY.md` 塞进 system prompt，记忆越多 token 烧得越快；改成 `memory_search("关键词")` 只取相关切片，能省 80%+ 的 token。
+顺带还有一个被低估的好处：**精准检索替代全文加载**。多数 AI 客户端每轮都把整个 `MEMORY.md` 塞进 system prompt，记忆越多 token 烧得越快；当时改成历史 API `memory_search("关键词")` 只取相关切片，能省 80%+ 的 token（当前对应 `memory(action="find")`）。
 
 卖点自己就写好了：**别再给你的工具栈重复上课了。写一次，所有工具都知道，还更省 token。**
 
@@ -20,10 +20,12 @@
 
 发 v0.2.1 的时候，我决定真用一下自己做的东西。我没有把发版规格写成文件再让 ZCode 去读，而是让 OpenClaw 直接把规格写进 `memory-arbiter`：
 
-```
+```text
 OpenClaw  →  memory_write(写入 "v0.2.1 发版任务" 规格)
 ZCode     →  memory_search("v0.2.1 发版任务")  ← 直接捞出来执行，零文件传递
 ```
+
+这是 v0.2.1 当时的低层工具名。当前 product profile 使用 `memory(action="remember")` 和 `memory(action="find")`；旧名字只可能出现在兼容 profile。
 
 跑通了。ZCode 检索到规格，执行发版，把结果写回去。一份 ~2000 字规格的交接成本从 ~3000 tokens（整篇加载）降到 ~500 tokens（只取相关切片），**省了 83%**。我当时觉得自己挺聪明的。
 
@@ -117,7 +119,7 @@ pip install memory-arbiter-mcp
 仓库：[github.com/billy12151/memory-arbiter-mcp](https://github.com/billy12151/memory-arbiter-mcp)
 PyPI：[pypi.org/project/memory-arbiter-mcp](https://pypi.org/project/memory-arbiter-mcp/)
 
-0.8.2 及后续版本从现在起按 Apache-2.0 授权，完全本地，不会把你的记忆发到任何你没同意的地方。
+0.8.2 及后续版本按 Apache-2.0 授权。记忆内容和模型推理保持本地；当前版本唯一可选的外发请求是只查版本元数据的 PyPI 更新检查，可在 JSON 配置中用 `{"update_check":{"enabled":false}}` 关闭。
 
 ---
 

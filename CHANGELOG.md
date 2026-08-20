@@ -3,6 +3,31 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.0.dev2] — 2026-08-20
+
+Development state implementing the memory 715 conflict-group and workspace-normalization baseline. This is not a compatibility release.
+
+### Breaking
+
+- **Conflict history is rebuilt, not migrated** — both previous `local_text_evidence_v1` and older derived-index generations are refused at startup and use side-by-side `mema upgrade`. Upgrade in an exclusive window after a WAL-safe source checkpoint/backup, stopping old writers, and draining/stopping the semantic worker. The target omits old `conflicts`, `conflict_judgments`, and `semantic_notices`; memory content/history, workspace/audit/backup state, and logical evidence units remain, while FTS/evidence vectors are rebuilt. `--yes` skips only the destructive-loss confirmation, not these prerequisites.
+- **One conflicts table and lifecycle** — a row now represents one one-to-many event and stores immutable detection snapshots, value groups, the final decision, and application results. Public states are `open`, `applying`, `resolved`, and `not_a_conflict`; old pair judgment/correction wording and public `notify/check/ignore` routing are no longer the contract.
+
+### Added
+
+- **Required post-upgrade scan epoch** — successful rebuild sets persistent `conflict_scan_required=true` and `conflict_scan_epoch`. Only a complete scan covering the upgrade-time active-memory set with the matching detector version may CAS-clear the flag; partial, failed, or old-detector scans cannot.
+- **Bidirectional four-field Qwen extraction** — short candidate pairs run A→B and B→A extraction of exactly `attribute_a`, `value_a`, `attribute_b`, and `value_b`. Strict validation checks side mapping, mechanical normalization, quote grounding, complete slot provenance, and deterministic coexistence vetoes. Qwen has no winner-selection, scan-veto, grouping, or mutation authority.
+- **Broad scan and strict notices** — scheduled scan unions deterministic KNN/rule candidates with Qwen enhancement and retains uncertain cases as `review_candidate`; write-time notices require two consistent grounded directions and a complete slot. Model failure closes the notice path without shrinking scan recall.
+- **CAS application protocol** — `memory(action="judge")` moves an `open` group to `applying` and returns a per-member plan. Authorized `memory_govern(action="apply_conflict_action")` applies one step at a time with the latest revision; authorized `resolve_conflict` closes the group only after all steps succeed.
+- **Evidence-scoped reads** — `memory(action="read")` accepts a strict `{start,end}` character span and returns clipped `data.memory.content` plus `data.span`; scan/notice deep-read calls can carry these source windows while full read remains available by omitting span.
+- **Conflict replanning** — a failed apply step returns `data.action_required=replan_conflict`; authorized `memory_govern(action="replan_conflict")` CAS-replaces the remaining plan while preserving prior plan history.
+- **Delivery and workspace budgets** — `semantic_conflict.notice_sync_wait_ms` defaults to 3000 ms (0–5000) and only controls sync-versus-async notice delivery. An accepted timed-out task continues; queue-full means no accepted task. `semantic_conflict.workspace_qwen_budget_ms` defaults to 750 ms (50–5000) and bounds near-match workspace suggestions independently.
+
+### Changed
+
+- **Workspace normalization is orthogonal to ACL** — `none`, `weak`, and `strict` all write canonical workspace results. `none` performs no workspace ACL and unscoped reads remain whole-library; `weak` adds soft ranking; `strict` forbids silent Qwen merges and keeps new workspaces pending. Automatic vector/Qwen results do not create confirmed aliases.
+- **Scan triage persistence is explicit** — `scan_candidates` returns internal `review_candidate`/`notice_ready` states. Agents must call `record_conflict(status="open"|"not_a_conflict")` for each triaged snapshot to gain dedupe semantics. Process-local queue loss/full/restart is recovered by checking coverage, rebuilding evidence to ready, then scanning.
+- **Response paths are explicit** — product operation results and `action_required` live under `data`; successful delivery side channels use top-level `notices`, where each notice carries its own action/read call. No generic top-level operation `action_required` is promised.
+
 ## [0.13.1] — 2026-08-17
 
 ### Changed

@@ -13,7 +13,13 @@ from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.evidence import evidence_content_hash, local_text_units
-from memory_arbiter.semantic_conflict import ModelSignal, decide_evidence
+from memory_arbiter.models import ConflictMember, ConflictValueGroup
+from memory_arbiter.semantic_conflict import (
+    AttributeValueExtraction,
+    ModelSignal,
+    decide_evidence,
+    evaluate_pair_extractions,
+)
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.vnext_migration import build, inspect
 
@@ -78,13 +84,51 @@ def test_local_text_worker_has_single_definition() -> None:
     assert len(definitions) == 1
 
 
-def test_decide_evidence_has_narrow_notify_check_ignore_contract() -> None:
+def test_decide_evidence_numeric_change_is_scan_candidate_not_direct_notice() -> None:
     assert decide_evidence("数据库使用 pgsql。", "数据库使用 PostgreSQL。").action == "ignore"
     changed = decide_evidence("接口超时为 5 秒。", "接口超时为 30 秒。")
-    assert changed.action == "notify"
-    assert changed.reason == "numeric_value_changed"
+    assert changed.action == "check"
+    assert changed.reason == "numeric_value_candidate"
     assert decide_evidence("测试环境数据库使用 MySQL。", "生产环境数据库使用 PostgreSQL。").action == "ignore"
     assert decide_evidence("服务使用数据库。", "服务迁移到新的存储引擎。").action in {"check", "ignore"}
+
+
+def test_write_notice_requires_consistent_bidirectional_qwen_mapping() -> None:
+    forward = AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒")
+    reverse = AttributeValueExtraction("接口超时", "30 秒", "接口超时", "5 秒")
+    ready = evaluate_pair_extractions(
+        forward, reverse,
+        {"quote": "接口超时为 5 秒。"}, {"quote": "接口超时为 30 秒。"},
+        require_bidirectional=True,
+    )
+    assert ready.state == "notice_ready"
+    inconsistent = AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒")
+    rejected = evaluate_pair_extractions(
+        forward, inconsistent,
+        {"quote": "接口超时为 5 秒。"}, {"quote": "接口超时为 30 秒。"},
+        require_bidirectional=True,
+    )
+    assert rejected.state == "review_candidate"
+    assert rejected.reason == "bidirectional_mapping_mismatch"
+
+
+def test_write_notice_rejects_whole_quote_values_but_accepts_short_values() -> None:
+    left_quote = "生产环境的接口超时策略明确设置为 5 秒。"
+    right_quote = "生产环境的接口超时策略明确设置为 30 秒。"
+    copied = evaluate_pair_extractions(
+        AttributeValueExtraction("接口超时", left_quote, "接口超时", right_quote),
+        AttributeValueExtraction("接口超时", right_quote, "接口超时", left_quote),
+        {"quote": left_quote}, {"quote": right_quote}, require_bidirectional=True,
+    )
+    assert copied.state == "review_candidate"
+    assert copied.reason == "qwen_unverified"
+
+    short = evaluate_pair_extractions(
+        AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒"),
+        AttributeValueExtraction("接口超时", "30 秒", "接口超时", "5 秒"),
+        {"quote": left_quote}, {"quote": right_quote}, require_bidirectional=True,
+    )
+    assert short.state == "notice_ready"
 
 
 def test_write_publishes_local_text_evidence(tmp_path: Path) -> None:
@@ -194,37 +238,23 @@ def test_exact_subject_match_survives_evidence_fusion(tmp_path: Path, monkeypatc
     assert result["data"]["results"][0]["id"] == exact_id
 
 
-def test_notify_surfaces_without_qwen_and_check_fails_closed(tmp_path: Path, monkeypatch) -> None:
+def test_numeric_candidate_fails_closed_without_qwen(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path, semantic_enabled=False)
-    # Disable the background semantic job so only this test's explicit
-    # _process_semantic_conflict_job runs (deterministic under suite load).
     tools.settings.semantic_conflict_on_write = "off"
     old = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=["api"])["data"]
     new = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=["api"])["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
-    record = tools.db.get_memory(new["id"])
-    snapshot = {
-        "memory_id": new["id"],
-        "version": record["version"],
-        "content_hash": evidence_content_hash(record["content"]),
-    }
-    tools._process_semantic_conflict_job(new["id"], snapshot)
-    notices = tools.db.list_semantic_notices()
-    assert any(notice["peer_id"] == old["id"] for notice in notices)
-    notice = next(notice for notice in notices if notice["peer_id"] == old["id"])
-    assert notice["payload"]["route"] == "notify"
-    assert notice["payload"]["qwen_signal"]["status"] == "not_required"
-
-    tools.db.update_semantic_notice_status(notice["id"], "dismissed")
-    monkeypatch.setattr(
-            "memory_arbiter.pipeline.evidence.decide_evidence",
-        lambda _a, _b: type("D", (), {
-            "action": "check", "reason": "semantic_similarity_only", "anchors": [],
-            "left_value": None, "right_value": None,
-        })(),
-    )
-    tools._process_semantic_conflict_job(new["id"], snapshot)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
+    result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    assert result["status"] == "incomplete"
+    assert result["reason"] == "qwen_unavailable"
+    assert result["notices_created"] == 0
     assert tools.db.list_semantic_notices(status="open") == []
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    pair = (min(old["id"], new["id"]), max(old["id"], new["id"]))
+    clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
+    assert clue["route"] == "review_candidate"
+    assert "numeric_value_candidate" in clue["reasons"]
 
 
 def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, monkeypatch) -> None:
@@ -238,11 +268,21 @@ def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, mo
 
     monkeypatch.setattr(tools, "_enqueue_semantic_conflict_check", tracked)
     result = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])
+    task_id = result["data"]["evidence_index"]["semantic_task_id"]
+    # The write's sync gate waits for this exact reserved task. A fast local
+    # index + semantic pass may therefore complete in the same request rather
+    # than returning the older waiting_for_evidence_index placeholder.
     assert result["data"]["semantic_conflict_check"] == {
-        "status": "deferred", "reason": "waiting_for_evidence_index",
+        "status": "completed",
+        "outcome": "checked_no_notice",
+        "notices_created": 0,
+        "task_id": task_id,
+        "dedupe_key": task_id,
     }
     assert tools.wait_evidence_worker_drained(timeout=2)
-    assert any(after and indexed >= 1 for _mid, after, indexed in calls)
+    # The enqueue observation is taken inside the evidence worker after
+    # publish, so this still proves semantic work was chained behind evidence.
+    assert calls == [(result["data"]["id"], True, 1)]
 
 
 def test_evidence_publish_rejects_stale_snapshot(tmp_path: Path) -> None:
@@ -426,96 +466,85 @@ def _job_snapshot(tools: MemoryTools, memory_id: int) -> dict:
     }
 
 
-def test_same_peer_notify_not_demoted_by_closer_check(tmp_path: Path, monkeypatch) -> None:
-    from types import SimpleNamespace
+def _strict_pair_backend():
+    class Backend:
+        @staticmethod
+        def classify_pair(left, right):
+            import re
+            left_value = re.search(r"\d+", left["quote"]).group(0)
+            right_value = re.search(r"\d+", right["quote"]).group(0)
+            parsed = {
+                "attribute_a": "连接池上限", "value_a": left_value,
+                "attribute_b": "连接池上限", "value_b": right_value,
+            }
+            return ModelSignal(True, "attribute_value", None, "", parsed, None)
+    return Backend()
 
+
+def test_notice_pairs_capped_in_unified_conflicts_table(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    peer = tools.memory_write(content="旧值：连接池 10。", subject="pool", tags=[])["data"]
-    new = tools.memory_write(content="新值：连接池 20。", subject="pool2", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
-    routes = iter(["notify", "check"])
-
-    def fake_decide(_left, _right):
-        return SimpleNamespace(action=next(routes), reason="numeric_value_changed", anchors=[], left_value=None, right_value=None)
-
-    monkeypatch.setattr("memory_arbiter.pipeline.evidence.decide_evidence", fake_decide)
-    hits = [
-        {"memory_id": peer["id"], "id": 1, "kind": "text", "text": "旧值：连接池 10。", "start_offset": 0, "end_offset": 9, "distance": 0.50},
-        {"memory_id": peer["id"], "id": 2, "kind": "text", "text": "旧值：连接池 10。", "start_offset": 0, "end_offset": 9, "distance": 0.05},
-    ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
-    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    notices = [n for n in tools.db.list_semantic_notices() if n["peer_id"] == peer["id"]]
-    assert notices and notices[0]["payload"]["route"] == "notify"
-
-
-def test_notice_pairs_capped_per_write(tmp_path: Path, monkeypatch) -> None:
-    from types import SimpleNamespace
-
-    tools = make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
+    metadata = {"entity": "checkout-api", "scope": "production"}
     peers = [
-        tools.memory_write(content=f"旧值 {i}：连接池 {i}0。", subject=f"pool{i}", tags=[])["data"]
+        tools.memory_write(
+            content=f"连接池上限为 {i + 10}。", subject=f"pool{i}", tags=[], metadata=metadata,
+        )["data"]
         for i in range(4)
     ]
-    new = tools.memory_write(content="新值：连接池 99。", subject="poolx", tags=[])["data"]
+    new = tools.memory_write(
+        content="连接池上限为 99。", subject="poolx", tags=[], metadata=metadata,
+    )["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
-    monkeypatch.setattr(
-        "memory_arbiter.pipeline.evidence.decide_evidence",
-        lambda _l, _r: SimpleNamespace(action="notify", reason="numeric_value_changed", anchors=[], left_value=None, right_value=None),
-    )
     hits = [
-        {"memory_id": p["id"], "id": i, "kind": "text", "text": f"旧值 {i}", "start_offset": 0, "end_offset": 4, "distance": 0.10 + i * 0.05}
-        for i, p in enumerate(peers)
+        {"memory_id": peer["id"], "id": i, "kind": "text", "text": f"连接池上限为 {i + 10}。",
+         "start_offset": 0, "end_offset": 11, "distance": 0.10 + i * 0.05}
+        for i, peer in enumerate(peers)
     ]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
-    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    created = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
-    assert len(created) == tools.settings.semantic_conflict_max_notice_pairs == 2
+    first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 2}
+    notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
+    assert len(notices) == tools.settings.semantic_conflict_max_notice_pairs == 2
+    assert all(n["payload"]["route"] == "notice_ready" for n in notices)
+    with tools.db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM conflicts WHERE notice_type IS NOT NULL").fetchone()[0] == 2
 
     tools.settings.semantic_conflict_max_notice_pairs = 99
-    tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    created = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
-    # Deduped re-records no longer consume budget, so the re-run surfaces the
-    # remaining two peers (hard cap 3 created per run, 2 pre-existing deduped).
-    assert len(created) == 4
-    # The hard cap still applies per run even when configured above 3.
-    assert tools.settings.semantic_conflict_max_notice_pairs == 99
+    second = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    assert second["notices_created"] == 2
+    assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 4
 
 
-def test_deduped_pairs_do_not_starve_fresh_notify(tmp_path: Path, monkeypatch) -> None:
-    from types import SimpleNamespace
-
+def test_unified_notice_dedupe_does_not_starve_fresh_pair(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     tools.settings.semantic_conflict_max_notice_pairs = 2
+    metadata = {"entity": "checkout-api", "scope": "production"}
     peers = [
-        tools.memory_write(content=f"旧值 {i}：连接池 {i}0。", subject=f"pool{i}", tags=[])["data"]
+        tools.memory_write(
+            content=f"连接池上限为 {i + 10}。", subject=f"pool{i}", tags=[], metadata=metadata,
+        )["data"]
         for i in range(3)
     ]
-    new = tools.memory_write(content="新值：连接池 99。", subject="poolx", tags=[])["data"]
+    new = tools.memory_write(
+        content="连接池上限为 99。", subject="poolx", tags=[], metadata=metadata,
+    )["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
-    monkeypatch.setattr(
-        "memory_arbiter.pipeline.evidence.decide_evidence",
-        lambda _l, _r: SimpleNamespace(action="notify", reason="numeric_value_changed", anchors=[], left_value=None, right_value=None),
-    )
     hits = [
-        {"memory_id": p["id"], "id": i, "kind": "text", "text": f"旧值 {i}", "start_offset": 0, "end_offset": 4, "distance": 0.10 + i * 0.05}
-        for i, p in enumerate(peers)
+        {"memory_id": peer["id"], "id": i, "kind": "text", "text": f"连接池上限为 {i + 10}。",
+         "start_offset": 0, "end_offset": 11, "distance": 0.10 + i * 0.05}
+        for i, peer in enumerate(peers)
     ]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
-    # First run fills the cap with peers 0 and 1.
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 2
-
-    # Re-run: peers 0/1 dedupe without consuming budget, so the fresh notify
-    # pair for peer 2 must still be created within the same cap.
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
-    assert sorted(n["peer_id"] for n in notices) == [p["id"] for p in peers]
+    assert sorted(n["peer_id"] for n in notices) == [peer["id"] for peer in peers]
+    assert len({n["dedupe_key"] for n in notices}) == 3
 
 
 def test_search_surfaces_vector_lag(tmp_path: Path) -> None:
@@ -565,11 +594,25 @@ def test_knn_enforces_memory_status_despite_stale_parent(tmp_path: Path) -> None
 
 def test_knn_workspace_overfetch_restores_recall(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # Workspace A: one long memory whose many units own the global top-k.
-    bulk = "\n".join(f"postgres 配置项 {i}：连接池参数说明 {i}。" for i in range(8))
-    tools.memory_write(content=bulk, subject="pg bulk", tags=[], workspace="wsA")
-    peer = tools.memory_write(content="postgres 端口为 5432。", subject="pg port", tags=[], workspace="wsB")["data"]
+    # Insert B first so the later A units win sqlite-vec's equal-distance tie
+    # order and own the initial global top-k window.
+    peer = tools.memory_write(
+        content="postgres 端口为 5432。", subject="pg port", tags=[], workspace="wsB",
+    )["data"]
+    bulk = "\n\n".join(f"postgres 配置项 {i}：连接池参数说明 {i}。" for i in range(8))
+    bulk_record = tools.memory_write(
+        content=bulk, subject="pg bulk", tags=[], workspace="wsA",
+    )["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
+    # FakeEmbedder intentionally maps all workspace names to one vector, so
+    # normal workspace resolution treats wsB as an alias of wsA. This test is
+    # about KNN filtering rather than canonicalization; restore the intended
+    # independent canonical fixture explicitly.
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE memories SET workspace_canonical=workspace WHERE id IN (?,?)",
+            (peer["id"], bulk_record["id"]),
+        )
     hits = tools.db.evidence_knn([1.0, 0.0], k=5, workspace="wsB", exclude_memory_id=999999)
     assert any(h["memory_id"] == peer["id"] for h in hits)
 
@@ -587,14 +630,118 @@ def test_evidence_only_candidates_carry_memory_row_shape(tmp_path: Path) -> None
         assert "_evidence_hits" in row or row.get("_match_reason") != "evidence_vec_recall"
 
 
-def test_queue_full_drop_is_counted_and_visible(tmp_path: Path) -> None:
+def test_semantic_worker_sync_wait_observes_same_task_completion() -> None:
+    from types import SimpleNamespace
+    from memory_arbiter.workers import SemanticConflictWorker
+
+    calls: list[tuple[int, str]] = []
+
+    class Tools:
+        settings = SimpleNamespace(
+            semantic_conflict_on_write="async",
+            semantic_conflict_preload=False,
+            semantic_conflict_queue_max_size=10,
+        )
+
+        @staticmethod
+        def _process_semantic_conflict_job(memory_id, snapshot):
+            calls.append((memory_id, snapshot["task_id"]))
+            return {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
+
+    worker = SemanticConflictWorker(Tools())
+    task_id = "semantic:42@3"
+    queued = worker.enqueue(42, {"version": 3, "task_id": task_id, "dedupe_key": task_id})
+    assert queued["task_id"] == task_id and queued["dedupe_key"] == task_id
+    completed = worker.wait_task(task_id, 2)
+    assert completed == {
+        "status": "completed", "outcome": "checked_no_notice", "notices_created": 0,
+        "task_id": task_id, "dedupe_key": task_id,
+    }
+    assert calls == [(42, task_id)]
+    assert worker.enqueue(42, {"version": 3, "task_id": task_id})["status"] == "completed"
+    assert calls == [(42, task_id)]
+
+
+def test_semantic_worker_coalescing_completes_displaced_task() -> None:
+    from types import SimpleNamespace
+    from memory_arbiter.workers import SemanticConflictWorker
+
+    class Tools:
+        settings = SimpleNamespace(
+            semantic_conflict_on_write="async", semantic_conflict_preload=False,
+            semantic_conflict_queue_max_size=10,
+        )
+
+    worker = SemanticConflictWorker(Tools())
+    worker._ensure_thread = lambda: None
+    first = "semantic:42@1"
+    second = "semantic:42@2"
+    worker.enqueue(42, {"version": 1, "task_id": first})
+    worker.enqueue(42, {"version": 2, "task_id": second})
+    assert worker.wait_task(first, 0) == {
+        "status": "incomplete", "reason": "coalesced_by_newer_snapshot", "notices_created": 0,
+        "task_id": first, "dedupe_key": first,
+    }
+    assert second in worker._expected
+    worker.shutdown(discard_pending=True)
+
+
+def test_evidence_index_error_completes_exact_reserved_task(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path)
+    tools.settings.notice_sync_wait_ms = 1000
+    monkeypatch.setattr(
+        tools, "_index_local_text_evidence",
+        lambda memory_id, record: {"status": "failed", "reason": "synthetic_failure"},
+    )
+    result = tools.memory_write(content="index me", subject="index failure", tags=[])
+    check = result["data"]["semantic_conflict_check"]
+    task_id = result["data"]["evidence_index"]["semantic_task_id"]
+    assert check == {
+        "status": "incomplete", "reason": "evidence_index_synthetic_failure", "notices_created": 0,
+        "task_id": task_id, "dedupe_key": task_id,
+    }
+    assert "timeout_continuing_async" not in str(result)
+
+
+def test_queue_full_drop_completes_exact_reserved_task_end_to_end(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_queue_max_size = 1
-    tools._semantic_worker._pending[111] = {"version": 1}
-    outcome = tools._semantic_worker.enqueue(222, {"version": 1})
-    assert outcome == {"status": "queue_full"}
+    tools._semantic_worker._ensure_thread = lambda: None
+    tools._semantic_worker.enqueue(111, {"version": 1, "task_id": "semantic:111@1"})
+    task_id = "semantic:222@1"
+    tools._semantic_worker.reserve(task_id)
+    outcome = tools._semantic_worker.enqueue(222, {"version": 1, "task_id": task_id})
+    assert outcome == {
+        "status": "incomplete", "reason": "queue_full", "notices_created": 0,
+        "task_id": task_id, "dedupe_key": task_id,
+    }
+    assert tools._semantic_worker.wait_task(task_id, 0) == outcome
     status = tools._semantic_status()["worker"]
     assert status["dropped_queue_full"] == 1
+    tools._semantic_worker.shutdown(discard_pending=True)
+
+
+def test_paused_disabled_and_shutdown_enqueue_complete_exact_task(tmp_path: Path) -> None:
+    for state in ("paused", "runtime_disabled", "shutdown"):
+        state_path = tmp_path / state
+        state_path.mkdir()
+        tools = make_tools(state_path)
+        worker = tools._semantic_worker
+        worker._ensure_thread = lambda: None
+        if state == "paused":
+            worker.pause()
+        elif state == "runtime_disabled":
+            worker.disable_runtime()
+        else:
+            worker.shutdown()
+        task_id = f"semantic:7@{state}"
+        worker.reserve(task_id)
+        outcome = worker.enqueue(7, {"version": 1, "task_id": task_id})
+        assert outcome == {
+            "status": "incomplete", "reason": state, "notices_created": 0,
+            "task_id": task_id, "dedupe_key": task_id,
+        }
+        assert worker.wait_task(task_id, 0) == outcome
 
 
 def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path, monkeypatch) -> None:
@@ -1056,302 +1203,245 @@ def test_rebuild_evidence_response_surfaces_vec_index_state(tmp_path: Path) -> N
     assert result["data"]["vec_index_state"]["state"] == "mismatch"
 
 
-def _seed_notice(
-    tools: MemoryTools, left_id: int, right_id: int, *, left_version: int = 1, right_version: int = 1,
-    left_content: str = "", right_content: str = "",
-) -> int:
-    def evidence_for(content: str) -> dict[str, Any]:
-        start = content.find("重试次数为") if "重试次数为" in content else content.find("缓存 TTL")
-        if start < 0:
-            start = 0
-        end = min(len(content), start + 40)
-        return {"text": content[start:end], "start_offset": start, "end_offset": end}
+def _conflict_member(memory_id: int, value: str, quote: str, *, version: int = 1) -> dict[str, Any]:
+    return ConflictMember(
+        memory_id=memory_id,
+        version=version,
+        attribute_raw="接口超时",
+        value_raw=value,
+        normalized_attribute="接口超时",
+        normalized_value=value,
+        evidence_quote=quote,
+        evidence_span=(0, len(quote)),
+        content_hash=evidence_content_hash(quote),
+        direction="a_to_b",
+        prompt_version="pair-v1",
+        detector_version="attribute-value-v1",
+    ).to_dict()
 
+
+def _structured_conflict_payload(left_id: int, right_id: int, *, left_version: int = 1, right_version: int = 1) -> dict[str, Any]:
+    left_quote, right_quote = "接口超时为 5 秒。", "接口超时为 30 秒。"
+    return {
+        "slot_key": {"entity": "checkout-api", "attribute": "接口超时", "scope": "production"},
+        "members": [
+            _conflict_member(left_id, "5秒", left_quote, version=left_version),
+            _conflict_member(right_id, "30秒", right_quote, version=right_version),
+        ],
+        "value_groups": [
+            ConflictValueGroup("5秒", "5 秒", (f"{left_id}@{left_version}",)).to_dict(),
+            ConflictValueGroup("30秒", "30 秒", (f"{right_id}@{right_version}",)).to_dict(),
+        ],
+        "detector_version": "attribute-value-v1",
+        "prompt_version": "pair-v1",
+        "source": "scheduled_scan",
+        "reason": "同一生产接口超时槽位存在不同值",
+        "status": "open",
+    }
+
+
+def _seed_notice(
+    tools: MemoryTools,
+    left_id: int,
+    right_id: int,
+    *,
+    left_version: int = 1,
+    right_version: int = 1,
+    complete_slot: bool = False,
+) -> int:
+    payload: dict[str, Any] = {
+        "route": "notice_ready",
+        "reason": "bidirectional_attribute_value_difference",
+        "left_evidence": {"text": "接口超时为 5 秒。", "start_offset": 0, "end_offset": 10},
+        "right_evidence": {"text": "接口超时为 30 秒。", "start_offset": 0, "end_offset": 11},
+        "candidate_key": {
+            "detector_version": "attribute-value-v1",
+            "members": sorted([f"{left_id}@{left_version}", f"{right_id}@{right_version}"]),
+        },
+        "task_id": f"semantic:{left_id}@{left_version}",
+    }
+    if complete_slot:
+        structured = _structured_conflict_payload(
+            left_id, right_id, left_version=left_version, right_version=right_version,
+        )
+        payload.update({
+            "slot_key": structured["slot_key"],
+            "slot_provenance": {"entity": "metadata", "scope": "metadata", "attribute": "bidirectional_extraction"},
+            "member_versions": structured["members"],
+            "value_groups": structured["value_groups"],
+        })
     created = tools.db.record_semantic_notice(
-        memory_id=left_id, peer_id=right_id, severity="high",
+        memory_id=left_id,
+        peer_id=right_id,
+        severity="high",
         notice_type="semantic_evidence",
         title=f"Possible memory change with #{right_id}",
-        message="numeric_value_changed",
-        payload={
-            "route": "notify", "reason": "numeric_value_changed", "anchors": ["timeout"],
-            "left_evidence": evidence_for(left_content),
-            "right_evidence": evidence_for(right_content),
-        },
-        dedupe_key=f"test-notice-{left_id}-{right_id}-{uuid.uuid4().hex}",
-        left_version=left_version, right_version=right_version,
+        message="bidirectional_attribute_value_difference",
+        payload=payload,
+        dedupe_key=f"notice:{left_id}@{left_version}:{right_id}@{right_version}:{complete_slot}",
+        left_version=left_version,
+        right_version=right_version,
     )
     return int(created["notice_id"])
 
 
-def test_notice_escalate_creates_formal_conflict_and_supports_judge(tmp_path: Path) -> None:
+def test_unified_conflicts_notice_columns_and_api(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     left = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
     right = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
-    notice_id = _seed_notice(tools, left["id"], right["id"])
+    notice_id = _seed_notice(tools, left["id"], right["id"], complete_slot=True)
 
-    result = tools.memory_repair(
-        "notice", {"action": "escalate", "notice_id": notice_id, "reason": "读两侧后确认是真实矛盾"},
-    )
-    assert result["ok"] is True
-    assert result["data"]["outcome"] == "escalated"
-    conflict_id = result["data"]["conflict_id"]
-    assert isinstance(conflict_id, int)
     with tools.db.connection() as conn:
-        conflict = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone()
-        notice_row = conn.execute("SELECT * FROM semantic_notices WHERE id=?", (notice_id,)).fetchone()
-    assert conflict["status"] == "open"
-    assert conflict["source"] == "semantic_notice"
-    assert conflict["left_id"] < conflict["right_id"]
-    assert notice_row["status"] == "resolved"
-    assert notice_row["conflict_id"] == conflict_id
-    assert "escalated_to_conflict" in notice_row["resolution_reason"]
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='semantic_notices'"
+        ).fetchone() is None
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(conflicts)")}
+    assert {
+        "notice_type", "notice_payload", "notice_task_id", "notice_dedupe_key",
+        "notice_delivery_status", "notice_slot_provenance",
+    } <= columns
 
-    # The escalated conflict is inspectable and judgeable end to end.
-    detail = tools.memory_review("conflict_detail", {"conflict_id": conflict_id})["data"]["conflict"]
-    judged = tools.memory(
-        "judge",
-        {
-            "conflict_id": conflict_id,
-            "expected_left_version": detail["left_version"],
-            "expected_right_version": detail["right_version"],
-            "verdict": "contradiction", "recommended_use": "contextual",
-            "suggested_winner": None, "confidence_hint": "medium",
-            "reason": "两个超时口径并存", "affects_current_output": True,
-            "usage_context": "config",
-        },
-    )
-    assert judged["ok"] is True
-    assert judged["data"]["outcome"] == "judged"
+    listed = tools.memory_repair("notice", {"action": "list", "status": "open"})
+    assert listed["ok"] is True
+    assert notice_id in {item["notice_id"] for item in listed["data"]["notices"]}
+    read = tools.memory_repair("notice", {"action": "read", "notice_id": notice_id})
+    notice = read["data"]["notice"]
+    assert notice["conflict_id"] == notice_id
+    assert notice["payload"]["slot_key"]["entity"] == "checkout-api"
+    assert len(notice["member_versions"]) == 2
 
 
-def test_notice_escalate_rejects_stale_and_terminal_notices(tmp_path: Path) -> None:
+def test_notice_escalation_requires_structured_slot_snapshot(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = tools.memory_write(content="连接池 10。", subject="pool", tags=[])["data"]
-    b = tools.memory_write(content="连接池 99。", subject="pool", tags=[])["data"]
-    first_id = _seed_notice(tools, a["id"], b["id"])
-    second_id = _seed_notice(tools, a["id"], b["id"])
-    terminal_id = _seed_notice(tools, a["id"], b["id"])
-    # Every successful product response delivers one notice stub, so the
-    # dismiss below delivers `first` (severity/age order); `second` stays
-    # undelivered, `terminal` is dismissed outright.
-    dismissed = tools.memory_repair("notice", {"action": "dismiss", "notice_id": terminal_id, "reason": "误报"})
+    left = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    right = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    incomplete_id = _seed_notice(tools, left["id"], right["id"], complete_slot=False)
+
+    rejected = tools.memory_repair("notice", {"action": "escalate", "notice_id": incomplete_id})
+    assert rejected["ok"] is False
+    assert rejected["data"]["outcome"] == "escalate_failed"
+    assert rejected["data"]["detail"]["outcome"] == "structured_group_required"
+
+    complete_id = _seed_notice(tools, left["id"], right["id"], complete_slot=True)
+    notice = tools.memory_repair("notice", {"action": "read", "notice_id": complete_id})["data"]["notice"]
+    assert notice["slot_key"] == {
+        "attribute": "接口超时", "entity": "checkout-api", "scope": "production",
+    }
+    assert notice["notice_slot_provenance"]["entity"] == "metadata"
+    escalated = tools.memory_repair(
+        "notice", {"action": "escalate", "notice_id": complete_id, "reason": "verified"},
+    )
+    assert escalated["ok"] is True
+    assert escalated["data"]["conflict_id"] == complete_id
+    detail = tools.memory_review(
+        "conflict_detail", {"conflict_id": complete_id},
+    )["data"]["conflict"]
+    assert detail["status"] == "open"
+    assert detail["source"] == "semantic_notice"
+    assert detail["notice_delivery_status"] == "resolved"
+    assert detail["slot_key"]["entity"] == "checkout-api"
+    assert {group["normalized_value"] for group in detail["value_groups"]} == {"5秒", "30秒"}
+
+
+def test_notice_freshness_and_terminal_lifecycle_use_api(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    left = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    right = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    notice_id = _seed_notice(tools, left["id"], right["id"], complete_slot=True)
+    assert tools.db.read_semantic_notice(notice_id)["freshness"]["fresh"] is True
+
+    tools.memory("update", {"memory_id": left["id"], "new_content": "接口超时为 10 秒。", "reason": "修订"})
+    assert tools.db.read_semantic_notice(notice_id)["freshness"]["fresh"] is False
+    stale = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id})
+    assert stale["ok"] is False and stale["data"]["outcome"] == "stale_notice"
+
+    fresh_id = _seed_notice(tools, left["id"], right["id"], left_version=2, complete_slot=True)
+    dismissed = tools.memory_repair(
+        "notice", {"action": "dismiss", "notice_id": fresh_id, "reason": "可共存"},
+    )
     assert dismissed["ok"] is True
-    with tools.db.connection() as conn:
-        first_delivered = conn.execute(
-            "SELECT delivered_at IS NOT NULL FROM semantic_notices WHERE id=?", (first_id,)
-        ).fetchone()[0]
-    assert first_delivered == 1
-
-    tools.memory(
-        "update", {"memory_id": a["id"], "new_content": "连接池 20，已修订。", "reason": "修订"},
-    )
-    # The update response's delivery scan auto-marks the undelivered drifted
-    # notice stale; the delivered one stays open with lost freshness.
-    with tools.db.connection() as conn:
-        second_status = conn.execute(
-            "SELECT status FROM semantic_notices WHERE id=?", (second_id,)
-        ).fetchone()["status"]
-    assert second_status == "stale"
-    auto_stale = tools.memory_repair("notice", {"action": "escalate", "notice_id": second_id})
-    assert auto_stale["ok"] is False
-    assert auto_stale["data"]["outcome"] == "already_terminal"
-
-    # Delivered but drifted: escalate must refuse instead of pinning stale
-    # versions onto a new conflict row.
-    drifted = tools.memory_repair("notice", {"action": "escalate", "notice_id": first_id})
-    assert drifted["ok"] is False
-    assert drifted["data"]["outcome"] == "stale_notice"
-    with tools.db.connection() as conn:
-        open_count = conn.execute("SELECT COUNT(*) FROM conflicts WHERE status='open'").fetchone()[0]
-    assert open_count == 0
-
-    terminal = tools.memory_repair("notice", {"action": "escalate", "notice_id": terminal_id})
-    assert terminal["ok"] is False
-    assert terminal["data"]["outcome"] == "already_terminal"
-    assert terminal["data"]["status"] == "dismissed"
+    assert tools.db.read_semantic_notice(fresh_id)["status"] == "dismissed"
 
 
-def test_notice_escalate_dedupes_same_pair_across_notices(tmp_path: Path) -> None:
+def test_structured_record_conflict_group_dedupes_and_rejects_pair_payload(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = tools.memory_write(content="重试 3 次。", subject="retry", tags=[])["data"]
-    b = tools.memory_write(content="重试 5 次。", subject="retry", tags=[])["data"]
-    first = _seed_notice(tools, a["id"], b["id"])
-    second = _seed_notice(tools, a["id"], b["id"])
+    left = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    right = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    payload = _structured_conflict_payload(left["id"], right["id"])
 
-    r1 = tools.memory_repair("notice", {"action": "escalate", "notice_id": first})
-    r2 = tools.memory_repair("notice", {"action": "escalate", "notice_id": second})
-    assert r1["data"]["conflict_outcome"] == "inserted"
-    assert r2["data"]["conflict_outcome"] == "deduped"
-    assert r1["data"]["conflict_id"] == r2["data"]["conflict_id"]
-    with tools.db.connection() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM conflicts WHERE status='open'").fetchone()[0]
-    assert count == 1
+    inserted = tools.memory_repair("record_conflict", payload)
+    assert inserted["ok"] is True and inserted["data"]["outcome"] == "inserted"
+    deduped = tools.memory_repair("record_conflict", payload)
+    assert deduped["ok"] is True and deduped["data"]["outcome"] == "deduped"
+    assert deduped["data"]["conflict_id"] == inserted["data"]["conflict_id"]
+
+    pair = tools.memory_repair(
+        "record_conflict", {"left_id": left["id"], "right_id": right["id"], "reason": "legacy"},
+    )
+    assert pair["ok"] is False
+    assert any("left_id" in warning for warning in pair.get("warnings", []))
 
 
-def test_record_conflict_task_registers_external_scan_findings(tmp_path: Path) -> None:
+def test_structured_record_conflict_validates_slot_members_and_revision(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = tools.memory_write(content="主从延迟阈值 3s。", subject="lag", tags=[])["data"]
-    b = tools.memory_write(content="主从延迟阈值 10s。", subject="lag", tags=[])["data"]
+    left = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    right = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    payload = _structured_conflict_payload(left["id"], right["id"])
+    inserted = tools.memory_repair("record_conflict", payload)
+    assert inserted["ok"] is True
 
-    registered = tools.memory_repair(
-        "record_conflict",
-        {
-            "left_id": a["id"], "right_id": b["id"],
-            "reason": "延迟阈值两说", "conflict_type": "contradiction",
-            "suggested_winner": b["id"], "confidence_hint": "high",
-            "source": "llm_informed", "scan_model": "test-scan-model",
-        },
-    )
-    assert registered["ok"] is True
-    assert registered["data"]["outcome"] == "inserted"
-    conflict_id = registered["data"]["conflict_id"]
-    with tools.db.connection() as conn:
-        row = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone()
-    assert row["source"] == "llm_informed"
-    assert row["scan_model"] == "test-scan-model"
-    assert row["left_id"] == min(a["id"], b["id"])
-    assert row["left_version"] == 1 and row["right_version"] == 1  # auto-pinned current versions
-
-    again = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "重复登记应幂等"},
-    )
-    assert again["data"]["outcome"] == "deduped"
-    assert again["data"]["conflict_id"] == conflict_id
-
-    refreshed = tools.memory_repair(
-        "record_conflict",
-        {"left_id": a["id"], "right_id": b["id"], "reason": "复判更新", "refresh": True,
-         "confidence_hint": "low"},
-    )
-    assert refreshed["data"]["outcome"] == "refreshed"
+    third = tools.memory_write(content="接口超时为 60 秒。", subject="timeout", tags=[])["data"]
+    third_member = _conflict_member(third["id"], "60秒", "接口超时为 60 秒。")
+    appended_payload = {
+        **payload,
+        "members": payload["members"] + [third_member],
+        "value_groups": payload["value_groups"] + [
+            ConflictValueGroup("60秒", "60 秒", (f"{third['id']}@1",)).to_dict(),
+        ],
+        "expected_revision": 1,
+    }
+    appended = tools.memory_repair("record_conflict", appended_payload)
+    assert appended["ok"] is True and appended["data"]["outcome"] == "appended"
+    stale = tools.memory_repair("record_conflict", appended_payload)
+    assert stale["ok"] is False and stale["data"]["outcome"] == "stale_conflict"
 
 
-def test_record_conflict_task_validates_input(tmp_path: Path) -> None:
+def test_judge_uses_group_revision_and_apply_plan(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = tools.memory_write(content="唯一一条。", subject="solo", tags=[])["data"]
-
-    same = tools.memory_repair("record_conflict", {"left_id": a["id"], "right_id": a["id"], "reason": "自冲突"})
-    assert same["ok"] is False
-    no_reason = tools.memory_repair("record_conflict", {"left_id": a["id"], "right_id": 999})
-    assert no_reason["ok"] is False
-    missing = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": 999, "reason": "右侧不存在"},
-    )
-    assert missing["ok"] is False
-    bad_winner = tools.memory_repair(
-        "record_conflict",
-        {"left_id": a["id"], "right_id": 999, "reason": "x", "suggested_winner": 12345},
-    )
-    assert bad_winner["ok"] is False
-
-
-def test_notice_escalate_swapped_orientation_returns_row_aligned_pins(tmp_path: Path) -> None:
-    tools = make_tools(tmp_path)
-    a = tools.memory_write(content="缓存 TTL 60 秒。", subject="ttl", tags=[])["data"]
-    b = tools.memory_write(content="缓存 TTL 300 秒。", subject="ttl", tags=[])["data"]
-    # Worker notices carry memory_id = the newly written memory, so exercise
-    # the memory_id > peer_id orientation (b as the notice's left side).
-    notice_id = _seed_notice(tools, b["id"], a["id"])
-
-    result = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id})
-    assert result["ok"] is True
-    conflict_id = result["data"]["conflict_id"]
-    with tools.db.connection() as conn:
-        row = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone()
-    assert row["left_id"] == a["id"] and row["right_id"] == b["id"]
-    # Response pins are row-aligned (canonical), not the notice's own sides.
-    assert result["data"]["left_id"] == row["left_id"]
-    assert result["data"]["right_id"] == row["right_id"]
-    assert result["data"]["left_version"] == row["left_version"]
-    assert result["data"]["right_version"] == row["right_version"]
-
-    # Judging directly with the echoed pins must succeed without a detour.
-    judged = tools.memory(
-        "judge",
-        {
-            "conflict_id": conflict_id,
-            "expected_left_version": result["data"]["left_version"],
-            "expected_right_version": result["data"]["right_version"],
-            "verdict": "contradiction", "recommended_use": "contextual",
-            "suggested_winner": None, "confidence_hint": "low",
-            "reason": "TTL 两说", "affects_current_output": True,
-            "usage_context": "config",
-        },
-    )
+    left = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    right = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    conflict_id = tools.memory_repair(
+        "record_conflict", _structured_conflict_payload(left["id"], right["id"]),
+    )["data"]["conflict_id"]
+    judged = tools.memory("judge", {
+        "conflict_id": conflict_id,
+        "expected_revision": 1,
+        "chosen_value": "30秒",
+        "decided_by": "user",
+        "ref": "test",
+        "reason": "用户确认生产超时",
+        "resolution_memory_id": right["id"],
+        "apply_plan": [
+            {"memory_id": left["id"], "action": "update_current_claim"},
+            {"memory_id": right["id"], "action": "use_as_resolution"},
+        ],
+    })
     assert judged["ok"] is True
-
-
-def test_escalate_refreshes_drifted_pins_on_existing_open_row(tmp_path: Path) -> None:
-    tools = make_tools(tmp_path)
-    a = tools.memory_write(content="限流 100/s。", subject="rate", tags=[])["data"]
-    b = tools.memory_write(content="限流 500/s。", subject="rate", tags=[])["data"]
-    registered = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "扫描登记"},
-    )
-    assert registered["ok"] is True
-
-    tools.memory("update", {"memory_id": a["id"], "new_content": "限流 200/s，修订。", "reason": "r"})
-    tools.memory("update", {"memory_id": b["id"], "new_content": "限流 500/s，补充。", "reason": "r"})
-    # Wait for the async republish: the final find is two CJK characters
-    # (below the FTS trigram floor), so the evidence channel must be live
-    # for a direct hit — on a slow runner this races otherwise.
-    assert tools.wait_evidence_worker_drained(timeout=10)
-    with tools.db.connection() as conn:
-        versions = dict(
-            (row["id"], int(row["version"]))
-            for row in conn.execute("SELECT id,version FROM memories WHERE id IN (?,?)", (a["id"], b["id"]))
-        )
-    notice_id = _seed_notice(
-        tools, b["id"], a["id"],
-        left_version=versions[b["id"]], right_version=versions[a["id"]],
-    )
-    result = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id})
-    assert result["ok"] is True
-    conflict_id = result["data"]["conflict_id"]
-    with tools.db.connection() as conn:
-        row = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone()
-    # The drifted row must be re-pinned to the current versions, or it would
-    # be a zombie: never ringing at search, unjudgeable, notice consumed.
-    assert row["left_version"] == 2 and row["right_version"] == 2
-    hits = tools.memory("find", {"query": "限流"})["data"]["results"]
-    signaled = any(
-        r["id"] in (a["id"], b["id"]) and r.get("conflict_signal") for r in hits
-    )
-    assert signaled
-
-
-def test_record_conflict_task_guards_sides_source_and_pins(tmp_path: Path) -> None:
-    tools = make_tools(tmp_path)
-    a = tools.memory_write(content="活的。", subject="live", tags=[])["data"]
-    b = tools.memory_write(content="另一条。", subject="other", tags=[])["data"]
-    with tools.db.write_transaction() as conn:
-        conn.execute("UPDATE memories SET status='superseded' WHERE id=?", (a["id"],))
-
-    non_active = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "x"},
-    )
-    assert non_active["ok"] is False
-    assert "active" in non_active["data"]["error"]
-
-    c = tools.memory_write(content="第三条。", subject="third", tags=[])["data"]
-    bad_source = tools.memory_repair(
-        "record_conflict",
-        {"left_id": b["id"], "right_id": c["id"], "reason": "x", "source": "human_confirmed_forgeries"},
-    )
-    assert bad_source["ok"] is False
-
-    stale_pins = tools.memory_repair(
-        "record_conflict",
-        {"left_id": b["id"], "right_id": c["id"], "reason": "x", "left_version": 999, "right_version": 999},
-    )
-    assert stale_pins["ok"] is False
-    assert stale_pins["data"]["outcome"] == "stale_snapshot"
+    assert judged["data"]["revision"] == 2
+    assert judged["data"]["next_action"]["action"] == "apply_conflict_action"
+    legacy = tools.memory("judge", {
+        "conflict_id": conflict_id,
+        "expected_left_version": 1,
+        "expected_right_version": 1,
+        "verdict": "contradiction",
+        "reason": "legacy",
+    })
+    assert legacy["ok"] is False
 
 
 def test_wave8_regression_basics(tmp_path: Path) -> None:
     from memory_arbiter.evidence import local_text_units
 
-    # A3: semicolon-dense config lines must not produce empty evidence spans.
     content = "\n".join([
         "pool.max=50; pool.timeout=30; pool.min_idle=5;",
         "cache.ttl=60; cache.size=1000; cache.backend=memory;",
@@ -1364,26 +1454,22 @@ def test_wave8_regression_basics(tmp_path: Path) -> None:
     assert units
     assert all(u.start_offset < u.end_offset or u.kind == "subject" for u in units)
 
-    # D4: governance/scan metadata strings are bounded.
     tools = make_tools(tmp_path)
-    a = tools.memory_write(content="一条。", subject="s", tags=[])["data"]
-    b = tools.memory_write(content="二条。", subject="s2", tags=[])["data"]
+    a = tools.memory_write(content="接口超时为 5 秒。", subject="s", tags=[])["data"]
+    b = tools.memory_write(content="接口超时为 30 秒。", subject="s2", tags=[])["data"]
     huge = "x" * 5000
-    rejected = tools.memory_repair(
-        "record_conflict",
-        {"left_id": a["id"], "right_id": b["id"], "reason": "r", "scan_model": huge},
-    )
+    payload = _structured_conflict_payload(a["id"], b["id"])
+    rejected = tools.memory_repair("record_conflict", {**payload, "reason": huge})
     assert rejected["ok"] is False
     assert rejected["data"]["error"] == "invalid_input"
 
-    # B2: failed governance resolve reports ok=False.
     bogus = tools.memory_govern(
         "resolve_conflict", {"conflict_id": 99999, "reason": "x", "authorized": True},
     )
     assert bogus["ok"] is False
-    assert bogus["data"]["outcome"] in {"not_open", "not_found"}
+    assert bogus["data"]["outcome"] == "invalid_input"
+    assert bogus["data"]["field"] == "expected_revision"
 
-    # A4: an explicit memory_ids repair list is never batch-truncated.
     ids = [tools.memory_write(content=f"修复 {i}。", subject=f"fix{i}", tags=[])["data"]["id"] for i in range(4)]
     result = tools.memory_repair(
         "rebuild_evidence", {"dry_run": False, "memory_ids": ids, "batch_size": 2},
@@ -1391,29 +1477,27 @@ def test_wave8_regression_basics(tmp_path: Path) -> None:
     assert result["data"]["queued"] == 4
 
 
-def test_wave8_judge_enum_and_bool_gates(tmp_path: Path) -> None:
+def test_judge_group_schema_rejects_legacy_fields_and_bad_types(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = tools.memory_write(content="超时 5s。", subject="t", tags=[])["data"]
-    b = tools.memory_write(content="超时 30s。", subject="t", tags=[])["data"]
-    notice_id = _seed_notice(tools, a["id"], b["id"])
-    esc = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id})
-    assert esc["ok"] is True
-    conflict_id = esc["data"]["conflict_id"]
-
+    a = tools.memory_write(content="接口超时为 5 秒。", subject="t", tags=[])["data"]
+    b = tools.memory_write(content="接口超时为 30 秒。", subject="t", tags=[])["data"]
+    conflict_id = tools.memory_repair(
+        "record_conflict", _structured_conflict_payload(a["id"], b["id"]),
+    )["data"]["conflict_id"]
     base = {
-        "conflict_id": conflict_id,
-        "expected_left_version": esc["data"]["left_version"],
-        "expected_right_version": esc["data"]["right_version"],
-        "verdict": "contradiction", "recommended_use": "contextual",
-        "suggested_winner": None, "confidence_hint": "medium",
-        "reason": "两说", "affects_current_output": True,
+        "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "30秒",
+        "decided_by": "user", "ref": "test", "reason": "两说",
+        "resolution_memory_id": b["id"],
+        "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"}],
     }
-    bad_context = tools.memory("judge", {**base, "usage_context": "some free text"})
-    assert bad_context["ok"] is False
-    bad_confidence = tools.memory("judge", {**base, "usage_context": "config", "confidence_hint": "banana"})
-    assert bad_confidence["ok"] is False
-    good = tools.memory("judge", {**base, "usage_context": "config"})
-    assert good["ok"] is True
+    assert tools.memory("judge", {**base, "expected_revision": "banana"})["ok"] is False
+    assert tools.memory("judge", {**base, "decided_by": "model"})["ok"] is False
+    legacy = tools.memory("judge", {
+        "conflict_id": conflict_id, "expected_left_version": 1,
+        "expected_right_version": 1, "verdict": "contradiction", "reason": "legacy",
+    })
+    assert legacy["ok"] is False
+    assert tools.memory("judge", base)["ok"] is True
 
 
 def test_wave8_malformed_tags_do_not_zero_filter_recall(tmp_path: Path) -> None:
@@ -1441,7 +1525,7 @@ def test_wave8_doctor_reports_attention_volume(tmp_path: Path) -> None:
     a = tools.memory_write(content="限流 10。", subject="r", tags=[])["data"]
     b = tools.memory_write(content="限流 99。", subject="r", tags=[])["data"]
     reg = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "两说"},
+        "record_conflict", _structured_conflict_payload(a["id"], b["id"]),
     )
     assert reg["ok"] is True
     log_path = tools.db.settings.db_path.parent / "attention_log.jsonl"
@@ -1594,8 +1678,8 @@ def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> Non
     key = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     assert key in pairs
     clue = pairs[key]
-    assert clue["route"] == "notify"
-    assert "numeric_value_changed" in clue["reasons"]
+    assert clue["route"] == "review_candidate"
+    assert "numeric_value_candidate" in clue["reasons"]
     assert clue["left_snippet"] and clue["right_snippet"]
     # Equivalent duplicates and unrelated memories are not surfaced.
     dup_key = (min(dup1["id"], dup2["id"]), max(dup1["id"], dup2["id"]))
@@ -1603,21 +1687,20 @@ def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> Non
     for c in data["candidates"]:
         assert far["id"] not in (c["left_id"], c["right_id"])
 
-    # An open conflict suppresses re-surfacing the pair.
-    registered = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "已登记"},
-    )
-    assert registered["ok"] is True
-    after = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
-    assert key not in {(c["left_id"], c["right_id"]) for c in after["data"]["candidates"]}
+    # Enumeration alone does not claim persistence: an external loop may retry
+    # until record_conflict succeeds, with the same frozen candidate identity.
+    repeated = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    repeated_clue = next(c for c in repeated["data"]["candidates"] if (c["left_id"], c["right_id"]) == key)
+    assert repeated_clue["candidate_key_hash"] == clue["candidate_key_hash"]
 
-    # A version-pinned not_a_conflict dismissal also suppresses it; editing
-    # either side re-opens the pair.
-    with tools.db.write_transaction() as conn:
-        conn.execute(
-            "UPDATE conflicts SET status='not_a_conflict', resolved_at='2026-01-01T00:00:00+00:00' "
-            "WHERE status='open'"
-        )
+    # A successfully recorded candidate snapshot suppresses re-surfacing. Use
+    # the group API and exact candidate_key rather than removed pair columns.
+    registered = tools.db.record_conflict_group(
+        workspace_canonical="default", slot_key=None, members=clue["members"], value_groups=[],
+        candidate_key=clue["candidate_key"], detection_reason="已分诊", source="scheduled_scan",
+        detector_version="attribute-value-v1", status="not_a_conflict",
+    )
+    assert registered["outcome"] == "inserted"
     dismissed_scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
     assert key not in {(c["left_id"], c["right_id"]) for c in dismissed_scan["data"]["candidates"]}
     tools.memory("update", {"memory_id": a["id"], "new_content": "接口超时为 60 秒，已修订。", "reason": "r"})
@@ -1658,11 +1741,11 @@ def test_scan_candidates_pagination_and_check_gate(tmp_path: Path) -> None:
     )
     base_pairs = {(c["left_id"], c["right_id"]) for c in base["data"]["candidates"]}
     check_pairs = {(c["left_id"], c["right_id"]) for c in with_check["data"]["candidates"]}
-    assert all(c["route"] == "notify" for c in base["data"]["candidates"])
+    assert all(c["route"] in {"review_candidate", "notice_ready"} for c in base["data"]["candidates"])
     assert chk_key not in base_pairs
     assert chk_key in check_pairs
     chk_clue = next(c for c in with_check["data"]["candidates"] if (c["left_id"], c["right_id"]) == chk_key)
-    assert chk_clue["route"] == "check"
+    assert chk_clue["route"] == "review_candidate"
     assert len(check_pairs) > len(base_pairs)
 
 
@@ -1671,32 +1754,35 @@ def test_record_conflict_not_a_conflict_registration(tmp_path: Path) -> None:
     a = tools.memory_write(content="阈值 100。", subject="th", tags=[])["data"]
     b = tools.memory_write(content="阈值 200。", subject="th", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
-
-    marked = tools.memory_repair(
-        "record_conflict",
-        {"left_id": a["id"], "right_id": b["id"], "reason": "同主题演进，无需治理",
-         "status": "not_a_conflict", "source": "llm_informed", "scan_model": "test"},
-    )
-    assert marked["ok"] is True
-    with tools.db.connection() as conn:
-        row = conn.execute("SELECT * FROM conflicts WHERE id=?", (marked["data"]["conflict_id"],)).fetchone()
-    assert row["status"] == "not_a_conflict"
-
-    # The dismissed pair is filtered out of scan candidates.
     scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
-    assert (a["id"], b["id"]) not in {(c["left_id"], c["right_id"]) for c in scan["data"]["candidates"]}
+    pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+    clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
 
-    # A winner on a not_a_conflict registration is rejected.
-    bad = tools.memory_repair(
-        "record_conflict",
-        {"left_id": a["id"], "right_id": b["id"], "reason": "x",
-         "status": "not_a_conflict", "suggested_winner": a["id"]},
-    )
-    assert bad["ok"] is False
-    bad_status = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "x", "status": "resolved"},
-    )
-    assert bad_status["ok"] is False
+    payload = {
+        "slot_key": None,
+        "members": clue["members"],
+        "value_groups": [],
+        "candidate_key": clue["candidate_key"],
+        "status": "not_a_conflict",
+        "detector_version": "attribute-value-v1",
+        "source": "scheduled_scan",
+        "reason": "同主题演进，无需治理",
+    }
+    marked = tools.memory_repair("record_conflict", payload)
+    assert marked["ok"] is True
+    row = tools.db.get_conflict(marked["data"]["conflict_id"])
+    assert row["status"] == "not_a_conflict"
+    assert row["slot_key"] is None
+    assert row["candidate_key_hash"]
+
+    repeat = tools.memory_repair("record_conflict", payload)
+    assert repeat["ok"] is True and repeat["data"]["outcome"] == "deduped"
+    after = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    assert pair not in {(c["left_id"], c["right_id"]) for c in after["data"]["candidates"]}
+
+    invalid_open = tools.memory_repair("record_conflict", {**payload, "status": "open"})
+    assert invalid_open["ok"] is False
+    assert invalid_open["data"]["outcome"] == "invalid_slot_key"
 
 
 def test_scan_candidates_review_regression_batch(tmp_path: Path) -> None:
@@ -1732,7 +1818,7 @@ def test_scan_candidates_review_regression_batch(tmp_path: Path) -> None:
         (c for c in scan2["data"]["candidates"] if (c["left_id"], c["right_id"]) == mixed_pair), None,
     )
     assert clue is not None
-    assert "numeric_value_changed" in clue["reasons"]
+    assert "numeric_value_candidate" in clue["reasons"]
     # Snippets show the numeric-bearing text, not the equivalent preamble.
     snippets = clue["left_snippet"] + clue["right_snippet"]
     assert "重试次数" in snippets
@@ -1755,11 +1841,16 @@ def test_scan_candidates_strict_workspace_does_not_leak(tmp_path: Path) -> None:
             for row in conn.execute("SELECT id, workspace_canonical FROM memories")
         }
     assert set(canonicals.values()) == {"dbapgsql", "apisvc"}
+    # A later active row in another workspace must not create a phantom next
+    # cursor for strict workspace pagination.
+    tools.memory_write(content="末尾外部工作区。", subject="tail", tags=[], workspace="dbapgsql")
+    assert tools.wait_evidence_worker_drained(timeout=5)
 
     result = tools.memory_repair(
         "scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "workspace": "apisvc"},
     )
     assert result["ok"] is True
+    assert result["data"]["next_anchor_memory_id"] is None
     for clue in result["data"]["candidates"]:
         assert "postgres" not in clue["left_snippet"] and "postgres" not in clue["right_snippet"]
         for side in (clue["left_id"], clue["right_id"]):
@@ -1768,48 +1859,29 @@ def test_scan_candidates_strict_workspace_does_not_leak(tmp_path: Path) -> None:
             assert canonical == "apisvc", f"leaked anchor from workspace {canonical}"
 
 
-def test_record_conflict_not_a_conflict_lifecycle(tmp_path: Path) -> None:
+def test_not_a_conflict_candidate_version_change_can_be_reevaluated(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = tools.memory_write(content="上限 10。", subject="cap", tags=[])["data"]
     b = tools.memory_write(content="上限 99。", subject="cap", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
-
-    # Duplicate not_a_conflict registrations dedupe to one row.
-    first = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "演进", "status": "not_a_conflict"},
-    )
-    second = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "再判仍演进", "status": "not_a_conflict"},
-    )
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+    clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
+    payload = {
+        "slot_key": None, "members": clue["members"], "value_groups": [],
+        "candidate_key": clue["candidate_key"], "status": "not_a_conflict",
+        "detector_version": "attribute-value-v1", "source": "scheduled_scan", "reason": "演进",
+    }
+    first = tools.memory_repair("record_conflict", payload)
+    second = tools.memory_repair("record_conflict", payload)
     assert first["data"]["outcome"] == "inserted"
     assert second["data"]["outcome"] == "deduped"
-    with tools.db.connection() as conn:
-        rows = conn.execute(
-            "SELECT COUNT(*) FROM conflicts WHERE left_id=? AND right_id=?",
-            (min(a["id"], b["id"]), max(a["id"], b["id"])),
-        ).fetchone()[0]
-    assert rows == 1
 
-    # Re-escalation reopens the existing row instead of inserting a new one.
-    reopened = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "复判为矛盾",
-                            "status": "open", "conflict_type": "contradiction"},
-    )
-    assert reopened["ok"] is True
-    assert reopened["data"]["outcome"] == "reopened"
-    assert reopened["data"]["conflict_id"] == first["data"]["conflict_id"]
-    with tools.db.connection() as conn:
-        status = conn.execute(
-            "SELECT status FROM conflicts WHERE id=?", (first["data"]["conflict_id"],),
-        ).fetchone()["status"]
-    assert status == "open"
-
-    # Quieting an existing OPEN pair via not_a_conflict is refused with guidance.
-    refused = tools.memory_repair(
-        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "想静默", "status": "not_a_conflict"},
-    )
-    assert refused["ok"] is False
-    assert refused["data"]["outcome"] == "open_conflict_exists"
+    tools.memory("update", {"memory_id": a["id"], "new_content": "上限 20。", "reason": "新版本"})
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    again = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    fresh = next(c for c in again["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
+    assert fresh["candidate_key_hash"] != clue["candidate_key_hash"]
 
 
 def test_read_span_window_and_clue_deep_read(tmp_path: Path) -> None:
@@ -1840,7 +1912,7 @@ def test_read_span_window_and_clue_deep_read(tmp_path: Path) -> None:
     scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
-    assert "numeric_value_changed" in clue["reasons"]
+    assert "numeric_value_candidate" in clue["reasons"]
     for side in ("left", "right"):
         call = clue["deep_read"][side]
         assert call["memory_id"] in (a["id"], b["id"])
@@ -1849,21 +1921,20 @@ def test_read_span_window_and_clue_deep_read(tmp_path: Path) -> None:
         assert "重试次数为" in window["data"]["memory"]["content"]
 
 
-def test_notice_read_call_carries_evidence_span(tmp_path: Path) -> None:
+def test_notice_snapshot_carries_evidence_spans(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = tools.memory_write(content="开场说明。\n缓存 TTL 为 60 秒。", subject="ttl", tags=[])["data"]
-    b = tools.memory_write(content="开场说明。\n缓存 TTL 为 300 秒。", subject="ttl", tags=[])["data"]
-    notice_id = _seed_notice(
-        tools, a["id"], b["id"],
-        left_content="开场说明。\n缓存 TTL 为 60 秒。", right_content="开场说明。\n缓存 TTL 为 300 秒。",
-    )
-    read = tools.memory_repair("notice", {"action": "read", "notice_id": notice_id})["data"]["notice"]
-    for side in ("left_read_call", "right_read_call"):
-        call = read[side]
-        assert "span" in call["data"]
-        window = tools.memory("read", {"memory_id": call["data"]["memory_id"], "span": call["data"]["span"]})
+    a = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    b = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    notice_id = _seed_notice(tools, a["id"], b["id"], complete_slot=True)
+    notice = tools.memory_repair("notice", {"action": "read", "notice_id": notice_id})["data"]["notice"]
+    for member in notice["member_versions"]:
+        assert member["evidence_span"][0] < member["evidence_span"][1]
+        window = tools.memory("read", {
+            "memory_id": member["memory_id"],
+            "span": {"start": member["evidence_span"][0], "end": member["evidence_span"][1]},
+        })
         assert window["ok"] is True
-        assert "缓存 TTL" in window["data"]["memory"]["content"]
+        assert "接口超时" in window["data"]["memory"]["content"]
 
 
 def test_deep_read_spans_follow_clue_upgrade_and_drifted_offsets(tmp_path: Path) -> None:
@@ -1883,8 +1954,8 @@ def test_deep_read_spans_follow_clue_upgrade_and_drifted_offsets(tmp_path: Path)
     )
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
-    assert clue["route"] == "notify"
-    assert "numeric_value_changed" in clue["reasons"]
+    assert clue["route"] == "review_candidate"
+    assert "numeric_value_candidate" in clue["reasons"]
     # The deep-read span must track the UPGRADED (numeric) discovery, not
     # the first (similarity) one — and re-reading it must contain the text.
     for side in ("left", "right"):
@@ -1922,30 +1993,19 @@ def test_deep_read_survives_offset_drift_on_dense_content(tmp_path: Path) -> Non
         assert "timeout=30" in window["data"]["memory"]["content"] or "timeout=90" in window["data"]["memory"]["content"]
 
 
-def test_notice_read_call_span_gates_on_drift_and_shrink(tmp_path: Path) -> None:
+def test_notice_snapshot_is_frozen_when_member_drifts(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = tools.memory_write(content="开场说明。\n缓存 TTL 为 60 秒。" + "很长的背景交代。" * 60, subject="ttl", tags=[])["data"]
-    b = tools.memory_write(content="开场说明。\n缓存 TTL 为 300 秒。", subject="ttl", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
-    notice_id = _seed_notice(
-        tools, a["id"], b["id"],
-        left_content="开场说明。\n缓存 TTL 为 60 秒。" + "很长的背景交代。" * 60,
-        right_content="开场说明。\n缓存 TTL 为 300 秒。",
-    )
+    a = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    b = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    notice_id = _seed_notice(tools, a["id"], b["id"], complete_slot=True)
+    before = tools.db.read_semantic_notice(notice_id)
+    original_members = before["member_versions"]
 
-    # Shrink the left memory: the stale offsets no longer fit the current
-    # content, so the left read call falls back to a full read (no span).
     tools.memory("update", {"memory_id": a["id"], "new_content": "短。", "reason": "缩短"})
-    with tools.db.write_transaction() as conn:
-        conn.execute(
-            "UPDATE semantic_notices SET status='open', delivered_at=NULL WHERE id=?",
-            (notice_id,),
-        )
-    read = tools.memory_repair("notice", {"action": "read", "notice_id": notice_id})["data"]["notice"]
-    assert "span" not in read["left_read_call"]["data"]
-    # The right side drifted in version (its pinned version still matches —
-    # untouched), so its span stays and round-trips.
-    assert "span" in read["right_read_call"]["data"]
+    after = tools.db.read_semantic_notice(notice_id)
+    assert after["freshness"]["fresh"] is False
+    assert after["member_versions"] == original_members
+    assert after["member_versions"][0]["version"] == 1
 
 
 def _assert_exact_text_unit_spans(subject: str, content: str) -> None:

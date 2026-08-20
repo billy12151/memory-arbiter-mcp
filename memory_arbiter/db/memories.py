@@ -40,7 +40,10 @@ class MemoriesStore:
         return getattr(self._db, name)
 
     def insert_memory(
-        self, record: MemoryRecord, workspace_canonical: Optional[str] = None
+        self,
+        record: MemoryRecord,
+        workspace_canonical: Optional[str] = None,
+        workspace_embedding: Optional[list[float]] = None,
     ) -> Tuple[Optional[int], list[str]]:
         warnings: list[str] = []
         if not record.content:
@@ -55,9 +58,23 @@ class MemoriesStore:
         # (from tools-side alias resolution) lands in `workspace_canonical`.
         # Fall back to the raw workspace so the column is never NULL on new rows.
         canonical = (workspace_canonical or record.workspace or "").strip() or record.workspace
-        with self.connection() as conn:
+        # Register only the final canonical, atomically with the memory row. The
+        # resolver/model runs before this transaction and must never register the
+        # raw near-miss workspace (which would leave a phantom canonical).
+        with self.write_transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                (canonical, utc_now_iso()),
+            )
             memory_id = self.insert_memory_on_conn(conn, record, canonical)
-            conn.commit()
+        # Vector publication is a derived-index side effect. Keep canonical
+        # registration + memory insertion atomic above, then degrade a vector
+        # failure to a warning without rolling back the authoritative write.
+        warnings.extend(
+            self._db.workspaces.publish_workspace_canonical_vector(
+                canonical, workspace_embedding,
+            )
+        )
         return memory_id, warnings
 
     def insert_memory_on_conn(

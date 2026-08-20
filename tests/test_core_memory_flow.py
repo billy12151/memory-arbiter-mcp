@@ -16,7 +16,7 @@ from memory_arbiter.config import Settings, parse_bool
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.db_generation import database_startup_lock
 from memory_arbiter.embedder import EmbedResult
-from memory_arbiter.models import SourceType
+from memory_arbiter.models import ConflictMember, ConflictValueGroup, SourceType
 from memory_arbiter.tools import MemoryTools
 
 
@@ -71,6 +71,54 @@ def make_vec_tools(tmp_path: Path) -> MemoryTools:
         split_threshold=1,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def record_database_conflict(
+    tools: MemoryTools,
+    left_id: int,
+    right_id: int,
+    *,
+    left_value: str = "old",
+    right_value: str = "new",
+    entity: str = "project",
+) -> dict:
+    def member(memory_id: int, value: str) -> dict:
+        record = tools.db.get_memory(memory_id)
+        assert record is not None
+        quote = record["content"]
+        return ConflictMember(
+            memory_id=memory_id,
+            version=record["version"],
+            attribute_raw="database",
+            value_raw=value,
+            normalized_attribute="database",
+            normalized_value=value.casefold(),
+            evidence_quote=quote,
+            evidence_span=(0, len(quote)),
+            content_hash=hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+            direction="a_to_b",
+            prompt_version="p1",
+            detector_version="d1",
+        ).to_dict()
+
+    left = member(left_id, left_value)
+    right = member(right_id, right_value)
+    return tools.memory_repair(
+        "record_conflict",
+        {
+            "slot_key": {"entity": entity, "attribute": "database", "scope": "global"},
+            "members": [left, right],
+            "value_groups": [
+                ConflictValueGroup(left_value.casefold(), left_value, (f"{left_id}@{left['version']}",)).to_dict(),
+                ConflictValueGroup(right_value.casefold(), right_value, (f"{right_id}@{right['version']}",)).to_dict(),
+            ],
+            "detector_version": "d1",
+            "prompt_version": "p1",
+            "source": "scheduled_scan",
+            "reason": "different database values",
+            "status": "open",
+        },
+    )
 
 
 def test_concurrent_first_start_does_not_false_degrade_on_column_migration(tmp_path: Path) -> None:
@@ -297,7 +345,7 @@ def test_memory_recent_ignores_workspace_filter(tmp_path: Path) -> None:
     assert subjects == ["other", "new", "old"]
 
 
-def test_arbitration_prefers_event_time(tmp_path: Path) -> None:
+def test_arbitration_prefers_event_time_without_creating_conflict(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     old = tools.memory_write(content="Use port 3000", subject="dev-port", event_time="2026-01-01T00:00:00Z")
     new = tools.memory_write(content="Use port 5173", subject="dev-port", event_time="2026-02-01T00:00:00Z")
@@ -305,7 +353,8 @@ def test_arbitration_prefers_event_time(tmp_path: Path) -> None:
 
     assert result["ok"] is True
     assert result["data"]["comparison"]["winner_id"] == new["data"]["id"]
-    assert result["data"]["conflict_id"] is not None
+    assert result["data"]["conflict_id"] is None
+    assert tools.memory_list_conflicts(status="open")["data"]["count"] == 0
 
 
 def test_user_confirmed_is_protected(tmp_path: Path) -> None:
@@ -449,7 +498,7 @@ def test_supersede_requires_authorization(tmp_path: Path) -> None:
     assert still_active["protection_level"] == "locked"
 
 
-def test_supersede_marks_record_and_resolves_conflicts(tmp_path: Path) -> None:
+def test_supersede_marks_record_without_creating_conflict_audit(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     old = tools.memory_write(
         content="Old release spec",
@@ -465,12 +514,6 @@ def test_supersede_marks_record_and_resolves_conflicts(tmp_path: Path) -> None:
     )
     old_id, new_id = old["data"]["id"], new["data"]["id"]
 
-    # arbitrate hits the user-protected wall and leaves an open conflict
-    blocked = tools.memory_arbitrate(old_id, new_id, mark_conflict=True, authorized=True)
-    assert blocked["data"]["comparison"]["manual_review"] is True
-    open_conflicts_before = tools.memory_list_conflicts(status="open")["data"]["count"]
-    assert open_conflicts_before >= 1
-
     result = tools.memory_supersede(
         memory_id=old_id,
         reason="replaced by newer spec",
@@ -481,78 +524,16 @@ def test_supersede_marks_record_and_resolves_conflicts(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["data"]["superseded"] is True
     assert result["data"]["memory_id"] == old_id
-    assert result["data"]["conflict_id"] is not None
-    assert result["data"]["linked_conflicts_resolved"] >= 1
+    assert "conflict_id" not in result["data"]
+    assert result["data"]["linked_conflicts_resolved"] == 0
+    assert tools.memory_list_conflicts(status="resolved")["data"]["count"] == 0
 
     updated = tools.db.get_memory(old_id)
     assert updated["status"] == "superseded"
     assert updated["protection_level"] == "normal"
 
-    # The open conflict from the blocked arbitrate must now be resolved
-    open_conflicts_after = tools.memory_list_conflicts(status="open")["data"]["count"]
-    assert open_conflicts_after == 0
-    # And an audit row exists for the supersede itself
-    resolved = tools.memory_list_conflicts(status="resolved")["data"]["conflicts"]
-    assert any("USER-AUTHORIZED SUPERSEDE" in c["reason"] for c in resolved)
 
-
-def test_supersede_audit_failure_rolls_back_status_and_conflicts(monkeypatch, tmp_path: Path) -> None:
-    tools = make_tools(tmp_path)
-    old = tools.memory_write(
-        content="Old audited fact",
-        subject="audit",
-        source_type="user_confirmed",
-        event_time="2026-01-01T00:00:00Z",
-    )
-    new = tools.memory_write(
-        content="New audited fact",
-        subject="audit",
-        source_type="user_confirmed",
-        event_time="2026-02-01T00:00:00Z",
-    )
-    old_id, new_id = old["data"]["id"], new["data"]["id"]
-    tools.memory_arbitrate(old_id, new_id, mark_conflict=True, authorized=True)
-    assert tools.memory_list_conflicts(status="open")["data"]["count"] >= 1
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("audit insert exploded")
-
-    monkeypatch.setattr(tools.db, "record_conflict_on_conn", boom)
-    result = tools.memory_supersede(
-        memory_id=old_id,
-        reason="must rollback",
-        superseded_by=new_id,
-        authorized=True,
-    )
-
-    assert result["ok"] is False
-    updated = tools.db.get_memory(old_id)
-    assert updated["status"] == "active"
-    assert updated["protection_level"] == "locked"
-    assert tools.memory_list_conflicts(status="open")["data"]["count"] >= 1
-
-
-def test_external_conn_helper_raises_and_write_transaction_rolls_back(monkeypatch, tmp_path: Path) -> None:
-    tools = make_tools(tmp_path)
-    written = tools.memory_write(
-        content="rollback helper fact",
-        subject="helper",
-        source_type="agent_generated",
-        event_time="2026-01-01T00:00:00Z",
-    )
-    memory_id = written["data"]["id"]
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("audit insert exploded")
-
-    monkeypatch.setattr(tools.db, "record_conflict_on_conn", boom)
-    with pytest.raises(RuntimeError):
-        with tools.db.write_transaction() as conn:
-            assert tools.db.update_memory_on_conn(conn, memory_id, {"status": "superseded"}) is True
-            tools.db.record_conflict_on_conn(conn, memory_id, memory_id, "helper", "audit", None, status="resolved")
-
-    assert tools.db.get_memory(memory_id)["status"] == "active"
-
+def test_supersede_rejects_already_inactive_memory(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     written = tools.memory_write(
         content="Stale memory",
@@ -626,13 +607,13 @@ def test_audit_summary_aggregates_per_workspace(tmp_path: Path) -> None:
     # purpose but only intends to count the manually recorded conflict below.
     # Structured-claim scan paths were retired with vNext; nothing else adds
     # candidates here, so the old audit fixture needs no isolation anymore.
-    tools.memory_write(
+    confirmed = tools.memory_write(
         content="Confirmed port 5173",
         subject="dev-port",
         source_type="user_confirmed",
         event_time="2026-01-01T00:00:00Z",
     )
-    tools.memory_write(
+    guessed = tools.memory_write(
         content="Agent guessed port 3000",
         subject="dev-port",
         source_type="agent_generated",
@@ -645,9 +626,16 @@ def test_audit_summary_aggregates_per_workspace(tmp_path: Path) -> None:
         source_type="document_extracted",
         event_time="2026-02-01T00:00:00Z",
     )
-    # Create an open conflict inside repo-a
-    ids = [r["id"] for r in tools.memory_recent(workspace="repo-a", limit=10)["data"]["results"]]
-    tools.memory_arbitrate(ids[0], ids[1], mark_conflict=True)
+    # Create a formal group record inside repo-a; pair arbitration no longer persists conflicts.
+    recorded = record_database_conflict(
+        tools,
+        confirmed["data"]["id"],
+        guessed["data"]["id"],
+        left_value="5173",
+        right_value="3000",
+        entity="dev-server",
+    )
+    assert recorded["ok"] is True
 
     summary = tools.memory_audit_summary()
     data = summary["data"]

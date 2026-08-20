@@ -95,6 +95,18 @@ def test_weak_high_confidence_silent_merge(tmp_path):
     assert d["workspace_matched_by"] == "qwen"
 
 
+def test_none_high_confidence_normalizes_without_acl_or_confirmed_alias(tmp_path):
+    t = make_tools(tmp_path, "none")
+    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.95, "同项目"))
+    _force_undecided_with_candidate(t, backend)
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
+    assert r["data"]["workspace_canonical"] == "金营项目"
+    assert t.db.get_workspace_alias("金营") is None
+    # none remains cross-workspace: normalization never becomes an ACL.
+    t.memory_write(content="y", workspace="其他", source_type="agent_generated", subject="other")
+    assert len(t.memory_search(query="", workspace="金营")["data"]["results"]) == 2
+
+
 def test_weak_low_confidence_asks_not_merge(tmp_path):
     t = make_tools(tmp_path, "weak")
     backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "related", 0.5, "可能相关"))
@@ -105,6 +117,17 @@ def test_weak_low_confidence_asks_not_merge(tmp_path):
     # NOT silently merged
     assert d["workspace_canonical"] != "金营项目"
     assert d.get("write_hints", {}).get("workspace_review")
+
+
+def test_near_miss_registers_only_final_canonical(tmp_path):
+    t = make_tools(tmp_path, "weak")
+    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.95, "同项目"))
+    _force_undecided_with_candidate(t, backend)
+    t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
+    with t.db.connection() as conn:
+        names = {row["name"] for row in conn.execute("SELECT name FROM workspace_canonicals")}
+    assert "金营项目" in names
+    assert "金营" not in names
 
 
 def test_strict_never_silent_merges_even_high_conf(tmp_path):

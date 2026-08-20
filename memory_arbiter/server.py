@@ -46,20 +46,21 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_review(view: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Read-only inspection: overview, doctor, conflicts, judgments, history, expired memory, audit, entities, help.
+        """Read-only inspection: overview, doctor, conflicts, conflict_detail, history, expired, audit, entities, help.
 
-        Use memory_review(view="help") for accepted fields. Use conflict_detail
-        before formal judgments so both sides and snapshot context are visible.
+        Use memory_review(view="help") for accepted fields. Inspect conflict_detail
+        before judging a conflict so its members, value groups, revision, and apply
+        state are visible.
         """
         return tools.memory_review(view=view, data={} if data is None else data)
 
     @app.tool()
     def memory_govern(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        """Explicitly authorized governance for memories, conflicts, and workspaces.
+        """Authorized governance: retire, apply/replan/resolve conflicts, confirm, and manage workspaces.
 
-        State-changing governance requires the user to authorize that exact action;
-        then retry with authorized=true. Call memory_govern(action="help") for
-        impact notes, accepted fields, and confirm vs confirm_pending_workspace.
+        Every state-changing action requires explicit user authorization for that
+        action, then authorized=true. Call memory_govern(action="help") for exact
+        actions, accepted fields, impact notes, and confirmation semantics.
         """
         return tools.memory_govern(action=action, data={} if data is None else data)
 
@@ -127,7 +128,18 @@ def main() -> None:
 
             raise SystemExit(upgrade_main(sys.argv[2:]))
         if command in {"-h", "--help", "help"}:
-            print("Usage: mema [doctor|setup|console|upgrade|migrate-vnext]")
+            print(
+                "Usage: mema [command]\n\n"
+                "Run the MCP server when no command is given.\n\n"
+                "Commands:\n"
+                "  doctor         Check database, configuration, and runtime health\n"
+                "  setup          Generate a starter config and check local prerequisites\n"
+                "  console        Open the read-only local web console\n"
+                "  upgrade        Rebuild a legacy database into a side-by-side current database\n"
+                "  migrate-vnext  Run the low-level migration workflow\n"
+                "  help           Show this help\n\n"
+                "Use `mema <command> --help` for command-specific options."
+            )
             return
 
     try:

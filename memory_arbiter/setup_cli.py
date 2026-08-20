@@ -1,8 +1,8 @@
 """CLI shell for ``memory-arbiter setup``.
 
-Semi-automatic one-shot setup helper: generates ``~/.config/memory-arbiter/config.json``
-from an inline template, then runs read-only environment checks and prints the
-*exact* commands / download URLs the user still needs to run.
+Semi-automatic one-shot setup helper: generates a current starter
+``~/.config/memory-arbiter/config.json``, then runs read-only environment checks
+and prints concrete commands and download URLs for remaining prerequisites.
 
 Design stance (deliberate): this command does **not** call ``pip``, does **not**
 download the model, does **not** touch the network. Failing installs of
@@ -55,27 +55,32 @@ def _color(text: str, code: str, use_color: bool) -> str:
 
 
 def _default_config_dict(model_path: Path, db_path: Path, backup_jsonl: Path) -> dict[str, Any]:
-    """Inline config template.
+    """Return a self-contained starter config using current documented defaults.
 
-    Mirrors ``examples/memory-arbiter.config.example.json`` field structure but
-    drops the long ``_readme`` tutorials (runtime config does not need the
-    lesson) and writes absolute paths. Kept inline instead of loaded from
-    examples/ because examples are not wheel package data. Inlining makes the
-    behaviour testable and install-path-independent.
+    This is intentionally a practical baseline, not a copy of every annotated
+    example option. It includes current top-level behavior controls and absolute
+    local paths; optional semantic-conflict tuning remains
+    available through the example config and environment variables.
     """
     return {
         "db_path": str(db_path),
         "backup_jsonl": str(backup_jsonl),
+        "tool_profile": "product",
+        "isolation": "none",
+        "workspace_match_distance": 0.25,
         "vec": {"enabled": True, "dim": 768},
         "embedding": {
             "provider": "gguf",
             "model_path": str(model_path),
             "auto_query": True,
             "auto_write": True,
+            "n_ctx": 2048,
+            "reserved_tokens": 64,
             "max_unit_chars": 3600,
         },
         "recall_pool_cap": 50,
         "content_like_cap": 30,
+        "update_check": {"enabled": True},
     }
 
 
@@ -301,8 +306,8 @@ def _render_summary(all_ok: bool, use_color: bool, config_written: bool, *, supp
     if all_ok:
         lines.append(_color("✓ 环境就绪。重启 MCP 客户端即可生效（embedding 首次调用会惰性加载模型）。", _GREEN, use_color))
     elif suppress_warning:
-        # Dry-run / check-only: just report readiness without the "do these steps" framing.
-        lines.append(_color("（预览/检查模式：以上自检结果仅供参考，未执行写入或安装。）", _DIM, use_color))
+        # Preview/check-only modes report observations without claiming readiness.
+        lines.append(_color("（预览/检查模式：以上仅为当前环境检查；未写入配置、安装依赖或下载模型。）", _DIM, use_color))
     else:
         lines.append(_color("⚠ 有缺失项。完成上述步骤后重新运行 `memory-arbiter setup` 验证。", _YELLOW, use_color))
         if config_written:
@@ -448,9 +453,8 @@ def run_cli(argv: list[str]) -> int:
     out_lines.extend(check_lines)
 
     # ── Step 3: summary ──
-    # In --print-config (dry-run) or --no-config modes we don't make strong
-    # Report observed state without overstating readiness.
-    # an existing environment. Suppress the missing-items warning there.
+    # Preview/check-only modes report observed state without claiming readiness
+    # or implying that this command changed the environment.
     suppress_warning = args.print_config or args.no_config
     out_lines.extend(_render_summary(all_ok, use_color, written, suppress_warning=suppress_warning))
 

@@ -103,7 +103,12 @@ def main() -> int:
     development_version = ".dev" in version
     if not args.check:
         if development_version:
-            print(f"development version {version}: release manifests unchanged")
+            if not check_uv_lock(version):
+                return 1
+            print(
+                f"development version {version}: uv.lock is valid; release manifests "
+                "intentionally remain at the latest release version"
+            )
             return 0
         sync_server_json(version, check=False)
         return 0
@@ -114,7 +119,13 @@ def main() -> int:
         check_uv_lock(version),
     )
     if all(checks):
-        print(f"release metadata in sync: {version}")
+        if development_version:
+            print(
+                f"development version {version}: uv.lock is valid; release manifests "
+                "intentionally remain at the latest release version"
+            )
+        else:
+            print(f"release metadata in sync: {version}")
         return 0
     return 1
 

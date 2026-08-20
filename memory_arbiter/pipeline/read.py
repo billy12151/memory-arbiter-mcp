@@ -1,4 +1,4 @@
-"""Read/search operations for MemoryTools (Phase 4 extraction)."""
+"""Internal read, search, comparison, and conflict-signal operations."""
 # mypy: disable-error-code=no-any-return
 from __future__ import annotations
 

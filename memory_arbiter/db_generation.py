@@ -16,7 +16,9 @@ except ImportError:  # pragma: no cover - Windows lacks fcntl; startup stays bes
 
 
 DatabaseGeneration = Literal["missing", "empty", "current", "legacy", "unknown"]
-CURRENT_SCHEMA_GENERATION = "local_text_evidence_v1"
+CURRENT_SCHEMA_GENERATION = "conflict_groups_v2"
+PREVIOUS_SCHEMA_GENERATIONS = frozenset({"local_text_evidence_v1"})
+CONFLICT_DETECTOR_VERSION = "conflict_group_detector_v1"
 LEGACY_DERIVED_TABLES = {
     "memory_claims", "memories_vec", "memory_sections_vec",
 }
@@ -65,6 +67,8 @@ def detect_database_generation(path: Path) -> DatabaseGeneration:
             conn.close()
     except sqlite3.Error:
         return "unknown"
+    if state.get("schema_generation") in PREVIOUS_SCHEMA_GENERATIONS:
+        return "legacy"
     if state.get("schema_generation") == CURRENT_SCHEMA_GENERATION:
         # A side-by-side build whose backfill failed (or crashed mid-backfill)
         # must never start as "current": the data is incomplete even though
@@ -74,13 +78,6 @@ def detect_database_generation(path: Path) -> DatabaseGeneration:
         if state.get("phase") in {"failed", "backfill", "resuming"}:
             return "unknown"
         return "current"
-    # Accept clean databases produced by the immediately preceding vNext build;
-    # startup will add the explicit generation marker idempotently.
-    if state.get("phase") == "ready":
-        return "current"
-    # A fresh current-schema database may not have migration phase metadata yet.
-    if not state:
-        return "current"
     return "unknown"
 
 
@@ -89,8 +86,11 @@ def legacy_database_message(path: Path) -> str:
         f"Detected a legacy Memory Arbiter database at {Path(path).expanduser()}.\n"
         "This release requires a one-time structural migration. MCP will not "
         "start or modify the old database.\n"
-        "Run `mema upgrade` when mema can remain unavailable for 1-5 minutes. "
-        "The old database will be kept for rollback."
+        "Stop every process that can write to this database, then run `mema upgrade`. "
+        "Use `mema upgrade --dry-run` first to inspect prerequisites and the side-by-side "
+        "target. The old database is kept for rollback, but old conflict, decision, and "
+        "semantic-notice history is not copied. Reindexing requires sqlite-vec, a local "
+        "GGUF embedding model, and llama-cpp-python."
     )
 
 

@@ -1,7 +1,8 @@
-"""Local Qwen protocol parsing and isolated GGUF process supervision.
+"""Local extraction protocol and isolated GGUF process supervision.
 
-The model filters only short evidence pairs routed as ``check``. Deterministic
-``notify`` decisions bypass it, and the Agent remains the terminal reviewer.
+The model extracts comparable attribute/value fields from candidate evidence
+pairs. Deterministic gates may accept, reject, or request extraction; advisory
+semantic notices still require an agent to read both memories before acting.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import multiprocessing
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Protocol
@@ -44,20 +46,12 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
-_PAIR_PROMPT = """你是 mema 的候选降噪器，只输出 JSON，不要解释。
-字段：label(conflict|not_conflict|uncertain), same_fact_slot(boolean), confidence(number 0..1)。
-
-核心规则：默认 not_conflict。只有两句在同一时间和范围内回答同一个具体问题，且答案不能同时成立，才是 conflict。
-同主题不等于同事实槽位；一个说技术选型、另一个说连接池、参数或能力，是 not_conflict。
-同义词、重复、兼容补充、不同环境或范围也是 not_conflict。
-旧口径明确替换新口径、采用与不采用、公开与不公开、同一数值不同、todo 与已完成，是 conflict。
-确实同槽位但证据不足才用 uncertain。
-
-例1 A=数据库使用 PostgreSQL。 B=PostgreSQL 连接池上限为20。 -> {"label":"not_conflict","same_fact_slot":false,"confidence":0.95}
-例2 A=系统支持 memory find。 B=系统支持 memory read。 -> {"label":"not_conflict","same_fact_slot":false,"confidence":0.9}
-例3 A=数据库使用 pgsql。 B=数据库使用 PostgreSQL。 -> {"label":"not_conflict","same_fact_slot":true,"confidence":0.98}
-例4 A=旧方案采用 Redis。 B=新方案不再采用 Redis，改用 SQLite。 -> {"label":"conflict","same_fact_slot":true,"confidence":0.95}
-例5 A=TODO 完成数据库迁移。 B=数据库迁移已经完成。 -> {"label":"conflict","same_fact_slot":true,"confidence":0.95}"""
+_PAIR_PROMPT = """你只做条件抽槽，只输出一个 JSON 对象，不要解释或裁决。
+对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
+attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中的数字、名称、状态或短策略。
+若任一侧不能可靠抽取，仍保留四键并将不能抽取的字段设为 null。不要输出 conflict、coexistence、winner、confidence 或额外字段。
+例：A=生产数据库使用 MySQL。B=生产数据库使用 SQLite。
+输出：{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}"""
 
 
 _WORKSPACE_PROMPT = """你是 mema 的 workspace 归一候选建议器，只输出 JSON，不要解释。
@@ -115,6 +109,24 @@ class EvidenceDecision:
     right_value: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class AttributeValueExtraction:
+    attribute_a: str
+    value_a: str
+    attribute_b: str
+    value_b: str
+
+
+@dataclass(frozen=True)
+class PairGateResult:
+    state: str
+    reason: str
+    attribute: Optional[str] = None
+    value_a: Optional[str] = None
+    value_b: Optional[str] = None
+    grounded: bool = False
+
+
 class SemanticBackend(Protocol):
     def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
         ...
@@ -124,6 +136,8 @@ class SemanticBackend(Protocol):
         ws_raw: str,
         evidence: dict[str, Any],
         candidates: list[str],
+        *,
+        deadline_monotonic: Optional[float] = None,
     ) -> WorkspaceCandidateSignal:
         ...
 
@@ -225,8 +239,11 @@ def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
     if left_values and right_values and left_values != right_values and (
         common or char_similarity >= 0.45
     ):
+        # Numeric deltas are recall evidence only. Ports, PIDs, status codes,
+        # durations, and similar values need an extracted attribute before they
+        # can become a user-visible notice.
         return EvidenceDecision(
-            "notify", "numeric_value_changed", common,
+            "check", "numeric_value_candidate", common,
             ", ".join(left_values), ", ".join(right_values),
         )
 
@@ -362,55 +379,205 @@ def _extract_first_json_object(raw: str) -> Optional[str]:
     return None
 
 
-def model_signal_from_text(raw: str) -> ModelSignal:
-    parsed: dict[str, Any] | None = None
+_EXTRACTION_FIELDS = {"attribute_a", "value_a", "attribute_b", "value_b"}
+_MAX_ATTRIBUTE_CHARS = 80
+# Extracted values are slot values, never prose.  Keep the protocol bound well
+# below the quote/attribute limits so a model cannot make an entire sentence
+# appear "grounded" merely by copying it verbatim.
+_MAX_VALUE_CHARS = 64
+_MAX_VALUE_WORDS = 12
+_ATTRIBUTE_ALIASES = {
+    "dbselection": "databasechoice",
+    "databaseengine": "databasechoice",
+    "数据库选型": "数据库选择",
+    "数据库引擎": "数据库选择",
+}
+_VALUE_ALIASES = {
+    "pgsql": "postgresql",
+    "postgres": "postgresql",
+    "sqlitevec": "sqlitevec",
+}
+
+
+def extraction_from_text(raw: str) -> tuple[Optional[AttributeValueExtraction], Optional[str]]:
+    """Strictly parse the bounded four-field conflict extraction protocol."""
     snippet = _extract_first_json_object(raw or "")
     if not snippet:
-        return ModelSignal(False, "invalid_json", None, raw or "", None, "missing_json")
-    protocol_fields = {"label", "same_fact_slot", "confidence"}
+        return None, "missing_json"
 
-    def reject_duplicate_protocol_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        decoded_object: dict[str, Any] = {}
-        seen_protocol_fields: set[str] = set()
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        decoded: dict[str, Any] = {}
         for key, value in pairs:
-            if key in protocol_fields:
-                if key in seen_protocol_fields:
-                    raise ValueError(f"duplicate protocol field: {key}")
-                seen_protocol_fields.add(key)
-            decoded_object[key] = value
-        return decoded_object
+            if key in decoded:
+                raise ValueError(f"duplicate field: {key}")
+            decoded[key] = value
+        return decoded
 
     try:
-        decoded = json.loads(snippet, object_pairs_hook=reject_duplicate_protocol_fields)
+        parsed = json.loads(snippet, object_pairs_hook=reject_duplicates)
     except Exception as exc:
-        return ModelSignal(False, "invalid_json", None, raw or "", None, str(exc))
-    if not isinstance(decoded, dict):
-        return ModelSignal(False, "invalid_schema", None, raw or "", None, "invalid_schema")
-    parsed = decoded
+        return None, f"invalid_json:{exc}"
+    if not isinstance(parsed, dict) or set(parsed) != _EXTRACTION_FIELDS:
+        return None, "invalid_schema"
+    limits = {
+        "attribute_a": _MAX_ATTRIBUTE_CHARS, "attribute_b": _MAX_ATTRIBUTE_CHARS,
+        "value_a": _MAX_VALUE_CHARS, "value_b": _MAX_VALUE_CHARS,
+    }
+    values: dict[str, str] = {}
+    for field_name, limit in limits.items():
+        value = parsed[field_name]
+        if not isinstance(value, str):
+            return None, "invalid_schema"
+        value = value.strip()
+        if not value or len(value) > limit or "\n" in value or "\r" in value:
+            return None, f"invalid_{field_name}"
+        values[field_name] = value
+    return AttributeValueExtraction(**values), None
 
-    required = {"label", "same_fact_slot", "confidence"}
-    label = parsed.get("label")
-    same_slot = parsed.get("same_fact_slot")
-    confidence = parsed.get("confidence")
-    schema_valid = (
-        required.issubset(parsed)
-        and type(same_slot) is bool
-        and isinstance(label, str)
-        and label in {"conflict", "not_conflict", "uncertain"}
-        and isinstance(confidence, (int, float))
-        and not isinstance(confidence, bool)
-        and math.isfinite(confidence)
-        and 0.0 <= confidence <= 1.0
+
+def _mechanical_normalize(value: str) -> str:
+    normalized = (value or "").casefold().strip()
+    normalized = re.sub(r"(?<=\d)[,_](?=\d)", "", normalized)
+    normalized = re.sub(r"(\d+(?:\.\d+)?)\s*秒\b", r"\1s", normalized)
+    normalized = re.sub(r"(\d+(?:\.\d+)?)\s*毫秒\b", r"\1ms", normalized)
+    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
+
+
+def normalize_attribute(value: str) -> str:
+    normalized = _mechanical_normalize(value)
+    return _ATTRIBUTE_ALIASES.get(normalized, normalized)
+
+
+def normalize_value(value: str) -> str:
+    normalized = _mechanical_normalize(value)
+    return _VALUE_ALIASES.get(normalized, normalized)
+
+
+def _bounded_short_value(value: str, quote: str) -> bool:
+    """Reject copied whole quotes/sentences while allowing compact slot values."""
+    compact = value.strip()
+    source = quote.strip()
+    if not compact or len(compact) > _MAX_VALUE_CHARS:
+        return False
+    if len(re.findall(r"\S+", compact)) > _MAX_VALUE_WORDS:
+        return False
+    value_norm = _mechanical_normalize(compact)
+    quote_norm = _mechanical_normalize(source)
+    if not value_norm or value_norm == quote_norm:
+        return False
+    # Sentence punctuation is a strong signal that the model copied a clause
+    # instead of extracting a name, number, state, or short policy value.
+    if re.search(r"[。！？!?；;](?:[\"'”’）)]*)$", compact):
+        return False
+    return True
+
+
+def value_is_grounded(value: str, quote: str) -> bool:
+    """Accept only bounded short values with mechanical grounding in the quote."""
+    if not quote or not _bounded_short_value(value, quote):
+        return False
+    if value.casefold() in quote.casefold():
+        return True
+    target = normalize_value(value)
+    if not target:
+        return False
+    # Compare against bounded quote tokens/phrases; this permits case, spacing,
+    # punctuation, numeric formatting, units and explicit aliases, not paraphrase.
+    pieces = re.findall(r"[A-Za-z][A-Za-z0-9_.-]*|\d[\d,_.]*\s*(?:ms|s|秒|毫秒|%|mb|gb|kb)?|[\u4e00-\u9fff]{1,24}", quote)
+    return any(normalize_value(piece) == target for piece in pieces)
+
+
+def coexistence_veto(left: dict[str, Any], right: dict[str, Any]) -> Optional[str]:
+    """Return a deterministic coexistence reason code, or None when unknown."""
+    left_text = str(left.get("quote") or left.get("content") or "").casefold()
+    right_text = str(right.get("quote") or right.get("content") or "").casefold()
+    dimension_markers = {
+        "coexist_environment_mismatch": (("测试环境", "生产环境"), ("staging", "production"), ("dev", "prod")),
+        "coexist_region_mismatch": (("中国区", "海外区"), ("us-east", "eu-west")),
+        "coexist_version_mismatch": (("v1", "v2"), ("旧版本", "新版本")),
+        "coexist_object_mismatch": (("移动端", "管理后台"), ("客户端", "服务端")),
+        "coexist_observation_time_mismatch": (("昨天", "今天"), ("上周", "本周"), ("当时", "目前")),
+        "coexist_historical_current": (("历史记录", "当前"), ("曾经", "现在")),
+        "coexist_metric_mismatch": (("平均", "峰值"), ("总计", "单项"), ("总数", "其中")),
+    }
+    for code, pairs in dimension_markers.items():
+        if any((a in left_text and b in right_text) or (b in left_text and a in right_text) for a, b in pairs):
+            return code
+    evolution = ("替换为", "升级为", "迁移到", "不再采用", "由", "改为")
+    if any(term in left_text or term in right_text for term in evolution) and any(
+        marker in left_text or marker in right_text for marker in ("旧", "新", "此前", "现在", "当前")
+    ):
+        return "coexist_explicit_evolution"
+    return None
+
+
+def evaluate_pair_extractions(
+    forward: Optional[AttributeValueExtraction],
+    reverse: Optional[AttributeValueExtraction],
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    require_bidirectional: bool,
+) -> PairGateResult:
+    """Apply scan/notice gates; reverse is extracted from input order B→A."""
+    valid = [item for item in (forward, reverse) if item is not None]
+    if not valid:
+        return PairGateResult("review_candidate", "qwen_unverified")
+    if require_bidirectional and (forward is None or reverse is None):
+        return PairGateResult("review_candidate", "bidirectional_extraction_required")
+
+    def one_direction(item: AttributeValueExtraction) -> bool:
+        return (
+            normalize_attribute(item.attribute_a) == normalize_attribute(item.attribute_b)
+            and normalize_value(item.value_a) != normalize_value(item.value_b)
+        )
+
+    if not any(one_direction(item) for item in valid):
+        return PairGateResult("review_candidate", "not_same_attribute_different_value")
+    if forward is None or reverse is None:
+        item = valid[0]
+        return PairGateResult(
+            "review_candidate", "single_direction_only", normalize_attribute(item.attribute_a),
+            normalize_value(item.value_a), normalize_value(item.value_b), False,
+        )
+    if not (one_direction(forward) and one_direction(reverse)):
+        return PairGateResult("review_candidate", "direction_invalid")
+    if not (
+        normalize_attribute(forward.attribute_a) == normalize_attribute(reverse.attribute_b)
+        and normalize_attribute(forward.attribute_b) == normalize_attribute(reverse.attribute_a)
+        and normalize_value(forward.value_a) == normalize_value(reverse.value_b)
+        and normalize_value(forward.value_b) == normalize_value(reverse.value_a)
+    ):
+        return PairGateResult("review_candidate", "bidirectional_mapping_mismatch")
+    quote_a = str(left.get("quote") or left.get("content") or "")
+    quote_b = str(right.get("quote") or right.get("content") or "")
+    grounded = value_is_grounded(forward.value_a, quote_a) and value_is_grounded(forward.value_b, quote_b)
+    if not grounded:
+        return PairGateResult("review_candidate", "qwen_unverified")
+    veto = coexistence_veto(left, right)
+    if veto:
+        return PairGateResult("review_candidate", veto, grounded=True)
+    return PairGateResult(
+        "notice_ready", "same_attribute_different_grounded_value",
+        normalize_attribute(forward.attribute_a), normalize_value(forward.value_a),
+        normalize_value(forward.value_b), True,
     )
-    if schema_valid and label in {"conflict", "uncertain"}:
-        schema_valid = same_slot is True
-    if not schema_valid:
-        return ModelSignal(False, "invalid_schema", None, raw or "", parsed, "invalid_schema")
-    assert isinstance(label, str)
-    assert isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
-    # Spec §9: only an explicit "conflict" surfaces a check-route notice.
-    # "uncertain" parses fine but must fail closed (candidate=False).
-    return ModelSignal(label == "conflict", label, float(confidence), raw or "", parsed)
+
+
+def model_signal_from_text(raw: str) -> ModelSignal:
+    extraction, error = extraction_from_text(raw)
+    if extraction is None:
+        kind = "invalid_json" if error and (error.startswith("invalid_json") or error == "missing_json") else "invalid_schema"
+        return ModelSignal(False, kind, None, raw or "", None, error)
+    parsed = {
+        "attribute_a": extraction.attribute_a, "value_a": extraction.value_a,
+        "attribute_b": extraction.attribute_b, "value_b": extraction.value_b,
+    }
+    candidate = (
+        normalize_attribute(extraction.attribute_a) == normalize_attribute(extraction.attribute_b)
+        and normalize_value(extraction.value_a) != normalize_value(extraction.value_b)
+    )
+    return ModelSignal(candidate, "attribute_value_extraction", None, raw or "", parsed)
 
 
 _WS_RELATIONS = {"alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain"}
@@ -779,6 +946,13 @@ class IsolatedGGUFSemanticBackend:
         self._process_target = process_target
         self._ctx = multiprocessing.get_context("spawn")
         self._request_lock = threading.Lock()
+        self._schedule_cond = threading.Condition()
+        self._schedule_queues: dict[str, deque[tuple[object, Optional[float]]]] = {
+            "notice": deque(), "workspace": deque(),
+        }
+        self._schedule_active = False
+        self._schedule_last_class = "workspace"
+        self._schedule_max_pending = 64
         self._state_lock = threading.RLock()
         self._process: Any = None
         self._conn: Any = None
@@ -851,14 +1025,78 @@ class IsolatedGGUFSemanticBackend:
             if count_restart:
                 self._restarts += 1
 
-    def _request(self, command: str, **payload: Any) -> Any:
+    def _admit_request(self, request_class: str, deadline_monotonic: Optional[float]) -> Optional[object]:
+        now = time.monotonic()
+        if deadline_monotonic is not None and deadline_monotonic <= now:
+            return None
+        token = object()
+        cls = "workspace" if request_class == "workspace" else "notice"
+        with self._schedule_cond:
+            total_pending = sum(len(queue) for queue in self._schedule_queues.values())
+            if total_pending >= self._schedule_max_pending:
+                return None
+            self._schedule_queues[cls].append((token, deadline_monotonic))
+            while True:
+                if deadline_monotonic is not None and deadline_monotonic <= time.monotonic():
+                    try:
+                        self._schedule_queues[cls].remove((token, deadline_monotonic))
+                    except ValueError:
+                        pass
+                    self._schedule_cond.notify_all()
+                    return None
+                if not self._schedule_active and self._select_next_request_locked() is token:
+                    self._schedule_active = True
+                    self._schedule_last_class = cls
+                    self._schedule_queues[cls].popleft()
+                    self._schedule_cond.notify_all()
+                    return token
+                if deadline_monotonic is None:
+                    self._schedule_cond.wait()
+                else:
+                    remaining = max(0.0, deadline_monotonic - time.monotonic())
+                    if remaining <= 0:
+                        continue
+                    self._schedule_cond.wait(remaining)
+
+    def _select_next_request_locked(self) -> Optional[object]:
+        now = time.monotonic()
+        for queue in self._schedule_queues.values():
+            while queue and queue[0][1] is not None and queue[0][1] <= now:
+                queue.popleft()
+        notice = self._schedule_queues["notice"]
+        workspace = self._schedule_queues["workspace"]
+        if notice and workspace:
+            next_class = "workspace" if self._schedule_last_class == "notice" else "notice"
+            return self._schedule_queues[next_class][0][0]
+        if notice:
+            return notice[0][0]
+        if workspace:
+            return workspace[0][0]
+        return None
+
+    def _release_admission(self) -> None:
+        with self._schedule_cond:
+            self._schedule_active = False
+            self._schedule_cond.notify_all()
+
+    def _request(
+        self, command: str, *, request_class: str = "notice",
+        deadline_monotonic: Optional[float] = None, **payload: Any,
+    ) -> Any:
         # Fast rejection matters for synchronous workspace suggestions while a
         # prior inference owns the single-flight lock. Re-check after acquiring
         # it to close the race with disable.
         with self._state_lock:
             if self._disabled:
                 raise RuntimeError("semantic backend disabled")
-        with self._request_lock:  # Strict max_concurrency=1, including load.
+        admission = self._admit_request(request_class, deadline_monotonic)
+        if admission is None:
+            raise TimeoutError("semantic request admission deadline expired")
+        try:
+            acquired = self._request_lock.acquire(timeout=0)
+            if not acquired:  # pragma: no cover - scheduler invariant guard
+                raise RuntimeError("semantic scheduler admitted concurrent request")
+            # Strict max_concurrency=1, including load.
             with self._state_lock:
                 self._start_locked()
                 conn = self._conn
@@ -866,14 +1104,15 @@ class IsolatedGGUFSemanticBackend:
                 self._inflight_started = time.monotonic()
             try:
                 if command != "load" and not self._child_loaded:
-                    self._exchange(conn, "load", self.load_timeout_ms)
+                    load_timeout = self._remaining_timeout_ms(deadline_monotonic, self.load_timeout_ms)
+                    self._exchange(conn, "load", load_timeout)
                     self._child_loaded = True
                     self._loaded_at = time.time()
-                result = self._exchange(
-                    conn, command,
+                request_timeout = self._remaining_timeout_ms(
+                    deadline_monotonic,
                     self.load_timeout_ms if command == "load" else self.hard_timeout_ms,
-                    **payload,
                 )
+                result = self._exchange(conn, command, request_timeout, **payload)
                 if command == "load":
                     self._child_loaded = True
                     self._loaded_at = time.time()
@@ -889,6 +1128,19 @@ class IsolatedGGUFSemanticBackend:
                     self._inflight_started = None
                     if process is not None and self._process is process and not process.is_alive():
                         self._terminate_locked(count_restart=True)
+        finally:
+            if 'acquired' in locals() and acquired:
+                self._request_lock.release()
+            self._release_admission()
+
+    @staticmethod
+    def _remaining_timeout_ms(deadline_monotonic: Optional[float], configured_ms: int) -> int:
+        if deadline_monotonic is None:
+            return configured_ms
+        remaining_ms = int((deadline_monotonic - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise TimeoutError("semantic request deadline expired before inference")
+        return max(1, min(configured_ms, remaining_ms))
 
     def _exchange(self, conn: Any, command: str, timeout_ms: int, **payload: Any) -> Any:
         try:
@@ -930,10 +1182,12 @@ class IsolatedGGUFSemanticBackend:
 
     def suggest_workspace_candidate(
         self, ws_raw: str, evidence: dict[str, Any], candidates: list[str],
+        *, deadline_monotonic: Optional[float] = None,
     ) -> WorkspaceCandidateSignal:
         try:
             result = self._request(
-                "suggest_workspace_candidate",
+                "suggest_workspace_candidate", request_class="workspace",
+                deadline_monotonic=deadline_monotonic,
                 workspace=ws_raw, evidence=evidence, candidates=candidates,
             )
             return result if isinstance(result, WorkspaceCandidateSignal) else WorkspaceCandidateSignal(None, "uncertain", None, "", "", "invalid child response")

@@ -14,12 +14,14 @@ memories.workspace_canonical (resolved). Runs only when isolation != none.
 Without an embedder it degrades to exact string identity.
 """
 from pathlib import Path
+import hashlib
 
 import pytest
 
+from memory_arbiter.acl import raw_workspace
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
-from memory_arbiter.models import MemoryStatus
+from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryStatus
 from memory_arbiter.tools import MemoryTools
 
 
@@ -51,6 +53,29 @@ def _active_write(tools: MemoryTools, content: str, workspace: str, subject: str
     return mid
 
 
+def _record_group(tools: MemoryTools, member_ids: list[int], *, conflict_point: str = "database") -> int:
+    members = []
+    groups = []
+    for index, memory_id in enumerate(member_ids):
+        record = tools.db.get_memory(memory_id)
+        value = f"value-{index}"
+        quote = record["content"]
+        members.append(ConflictMember(
+            memory_id=memory_id, version=record["version"], attribute_raw="database", value_raw=value,
+            normalized_attribute="database", normalized_value=value, evidence_quote=quote,
+            evidence_span=(0, len(quote)), content_hash=hashlib.sha256(quote.encode()).hexdigest(),
+            direction="a_to_b", prompt_version="p1", detector_version="d1",
+        ))
+        groups.append(ConflictValueGroup(value, value, (f"{memory_id}@{record['version']}",)))
+    result = tools.db.record_conflict_group(
+        workspace_canonical=raw_workspace(tools.db.get_memory(member_ids[0])),
+        slot_key={"entity": "project", "attribute": "database", "scope": "global"},
+        members=members, value_groups=groups, detection_reason="different values",
+        source="scan", detector_version="d1", conflict_point=conflict_point,
+    )
+    return result["conflict_id"]
+
+
 # ── v0.12.5 strict read ACL ────────────────────────────────────────────────
 
 
@@ -77,23 +102,32 @@ def test_strict_history_filters_workspace(tmp_path):
     assert r["data"]["workspace_source"] == "explicit"
 
 
-def test_strict_conflict_detail_any_side_redacts_hidden_side(tmp_path):
+def test_strict_conflict_creation_rejects_cross_workspace_members(tmp_path):
     tools = make_tools(tmp_path, "strict")
     a_id = _active_write(tools, "alpha visible text", "projA")
     b_id = _active_write(tools, "beta hidden secret", "projB")
-    cid = tools.memory_record_conflict(
-        left_id=a_id, right_id=b_id, reason="hidden beta secret conflicts", conflict_point="secret point"
-    )["data"]["conflict_id"]
+    before = tools.db.list_conflicts("open", 100)
 
-    detail = tools.memory_review(view="conflict_detail", data={"conflict_id": cid, "workspace": "projA"})
-    denied = tools.memory_review(view="conflict_detail", data={"conflict_id": cid, "workspace": "projC"})
-
-    assert detail["ok"] is True
-    assert detail["data"]["left"]["visible"] is True
-    assert detail["data"]["right"]["visible"] is False
-    assert "reason" in detail["data"]["conflict"]["redacted_fields"]
-    assert "hidden beta secret" not in str(detail["data"])
-    assert denied["ok"] is False
+    members = []
+    groups = []
+    for index, memory_id in enumerate((a_id, b_id)):
+        record = tools.db.get_memory(memory_id)
+        value = f"value-{index}"
+        quote = record["content"]
+        members.append(ConflictMember(
+            memory_id=memory_id, version=record["version"], attribute_raw="database", value_raw=value,
+            normalized_attribute="database", normalized_value=value, evidence_quote=quote,
+            evidence_span=(0, len(quote)), content_hash=hashlib.sha256(quote.encode()).hexdigest(),
+            direction="a_to_b", prompt_version="p1", detector_version="d1",
+        ))
+        groups.append(ConflictValueGroup(value, value, (f"{memory_id}@{record['version']}",)))
+    result = tools.db.record_conflict_group(
+        workspace_canonical="projA", slot_key={"entity": "project", "attribute": "database", "scope": "global"},
+        members=members, value_groups=groups, detection_reason="secret point",
+        source="scan", detector_version="d1",
+    )
+    assert result["outcome"] == "workspace_mismatch"
+    assert tools.db.list_conflicts("open", 100) == before
 
 
 def test_strict_console_memory_detail_uses_workspace_acl(tmp_path):
@@ -111,48 +145,40 @@ def test_strict_console_memory_detail_uses_workspace_acl(tmp_path):
     assert ok["memory"]["id"] == b_id
 
 
-def test_strict_search_conflict_signal_redacts_cross_workspace_peer(tmp_path):
+def test_strict_search_conflict_signal_hides_cross_workspace_group_existence(tmp_path):
     tools = make_tools(tmp_path, "strict")
     a_id = _active_write(tools, "alpha searchable conflict", "projA", subject="same")
-    b_id = _active_write(tools, "beta hidden conflict", "projB", subject="same")
-    tools.memory_record_conflict(left_id=a_id, right_id=b_id, reason="hidden beta conflict")
+    b_id = _active_write(tools, "beta hidden conflict", "projA", subject="same")
+    _record_group(tools, [a_id, b_id])
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET workspace='projB',workspace_canonical='projB' WHERE id=?", (b_id,))
 
     r = tools.memory_search(query="searchable", workspace="projA", limit=10)
-    sig = r["data"]["results"][0].get("conflict_signal") or {}
-
-    assert sig.get("conflict_id") is not None
-    assert sig.get("conflict_point") is None
-    assert sig.get("suggested_winner") is None
-    assert sig.get("judgment") is None
-    assert sig.get("redacted_fields")
-    assert sig["conflict_peer"]["redaction_reason"] == "workspace_acl"
-    assert "beta hidden conflict" not in str(sig)
+    assert "conflict_signal" not in r["data"]["results"][0]
+    assert "beta hidden conflict" not in str(r)
 
 
 def test_strict_conflict_signal_redacts_legacy_empty_workspace_peer(tmp_path):
     tools = make_tools(tmp_path, "strict")
     a_id = _active_write(tools, "alpha legacy peer search", "projA", subject="same")
-    b_id = _active_write(tools, "beta legacy secret peer", "projB", subject="same")
+    b_id = _active_write(tools, "beta legacy secret peer", "projA", subject="same")
+    _record_group(tools, [a_id, b_id], conflict_point="LEGACY_SECRET_POINT")
     with tools.db.write_transaction() as conn:
         conn.execute("UPDATE memories SET workspace='', workspace_canonical=NULL WHERE id=?", (b_id,))
-    tools.memory_record_conflict(left_id=a_id, right_id=b_id, reason="legacy secret reason", conflict_point="LEGACY_SECRET_POINT")
 
     r = tools.memory_search(query="legacy peer search", workspace="projA", limit=10)
-    sig = r["data"]["results"][0].get("conflict_signal") or {}
-
-    assert sig.get("conflict_point") is None
-    assert sig.get("suggested_winner") is None
-    assert sig.get("judgment") is None
-    assert sig["conflict_peer"]["redaction_reason"] == "workspace_acl"
-    assert "LEGACY_SECRET_POINT" not in str(sig)
-    assert "beta legacy secret" not in str(sig)
+    assert "conflict_signal" not in r["data"]["results"][0]
+    assert "LEGACY_SECRET_POINT" not in str(r)
+    assert "beta legacy secret" not in str(r)
 
 
 def test_strict_expired_search_does_not_attach_conflict_signal(tmp_path):
     tools = make_tools(tmp_path, "strict")
     a_id = _active_write(tools, "alpha expired searchable", "projA", subject="same")
-    b_id = _active_write(tools, "beta expired hidden", "projB", subject="same")
-    tools.memory_record_conflict(left_id=a_id, right_id=b_id, reason="hidden expired reason", conflict_point="EXPIRED_SECRET_POINT")
+    b_id = _active_write(tools, "beta expired hidden", "projA", subject="same")
+    _record_group(tools, [a_id, b_id], conflict_point="EXPIRED_SECRET_POINT")
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET workspace='projB',workspace_canonical='projB' WHERE id=?", (b_id,))
     tools.db.update_memory(a_id, {"status": "superseded"})
 
     r = tools.memory_search_expired(query="expired searchable", workspace="projA", limit=10)

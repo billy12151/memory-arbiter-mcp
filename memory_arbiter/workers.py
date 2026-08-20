@@ -27,11 +27,18 @@ class LocalTextIndexWorker:
         self._ensure_thread()
 
     def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        displaced: Optional[dict[str, Any]] = None
         with self._cond:
             if self._shutdown:
                 return {"status": "shutdown"}
+            displaced = self._pending.get(int(memory_id))
             self._pending[int(memory_id)] = dict(snapshot)
             self._cond.notify_all()
+        if displaced is not None:
+            self._tools._semantic_worker.complete(
+                str(displaced["task_id"]),
+                {"status": "incomplete", "reason": "coalesced_by_newer_snapshot", "notices_created": 0},
+            )
         self._ensure_thread()
         return {"status": "queued"}
 
@@ -81,6 +88,7 @@ class LocalTextIndexWorker:
                 memory_id = next(iter(self._pending))
                 snapshot = self._pending.pop(memory_id)
                 self._inflight.add(memory_id)
+            task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")
             try:
                 current = self._tools.db.get_memory(memory_id)
                 if current is None or int(current.get("version") or 1) != int(snapshot.get("version") or 1):
@@ -88,9 +96,25 @@ class LocalTextIndexWorker:
                 else:
                     result = self._tools._index_local_text_evidence(memory_id, current)
                     if result.get("status") == "indexed":
-                        self._tools._enqueue_semantic_conflict_check(
-                            memory_id, current, after_evidence=True,
-                        )
+                        context = snapshot.get("trusted_applying_context")
+                        if context is None:
+                            self._tools._enqueue_semantic_conflict_check(
+                                memory_id, current, after_evidence=True,
+                            )
+                        else:
+                            self._tools._enqueue_semantic_conflict_check(
+                                memory_id, current, after_evidence=True,
+                                trusted_applying_context=context,
+                            )
+                if result.get("status") != "indexed":
+                    self._tools._semantic_worker.complete(
+                        task_id,
+                        {
+                            "status": "incomplete",
+                            "reason": f"evidence_index_{result.get('reason') or result.get('status') or 'failed'}",
+                            "notices_created": 0,
+                        },
+                    )
                 with self._cond:
                     # A stale publish race (edit landed between fetch and
                     # publish) is routine coalescing, not an error.
@@ -100,6 +124,10 @@ class LocalTextIndexWorker:
                     self._last_error = None if clean else str(result)
                     self._processed += 1
             except Exception as exc:
+                self._tools._semantic_worker.complete(
+                    task_id,
+                    {"status": "incomplete", "reason": "evidence_index_error", "error": str(exc), "notices_created": 0},
+                )
                 with self._cond:
                     self._last_error = str(exc)
             finally:
@@ -126,6 +154,8 @@ class SemanticConflictWorker:
         # Overflow drops kill the whole conflict job (notify included); the
         # drop must stay observable instead of silently vanishing.
         self._dropped_queue_full = 0
+        self._expected: set[str] = set()
+        self._completed: dict[str, dict[str, Any]] = {}
 
     def start(self) -> None:
         if self._tools.settings.semantic_conflict_on_write == "off":
@@ -146,22 +176,71 @@ class SemanticConflictWorker:
         except Exception as exc:
             self.set_error(str(exc))
 
-    def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+    def reserve(self, task_id: str) -> None:
         with self._cond:
+            if task_id not in self._completed:
+                self._expected.add(task_id)
+
+    def complete(self, task_id: str, result: dict[str, Any]) -> None:
+        with self._cond:
+            if task_id in self._completed:
+                return
+            self._completed[task_id] = {**result, "task_id": task_id, "dedupe_key": task_id}
+            self._expected.discard(task_id)
+            if len(self._completed) > 1000:
+                self._completed.pop(next(iter(self._completed)))
+            self._cond.notify_all()
+
+    def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        task_id = str(snapshot.get("task_id") or f"semantic:{int(memory_id)}@{int(snapshot.get('version') or 1)}")
+        snapshot = {**snapshot, "task_id": task_id, "dedupe_key": task_id}
+        with self._cond:
+            if task_id in self._completed:
+                return {"status": "completed", "task_id": task_id, "dedupe_key": task_id}
+            rejected: Optional[str] = None
             if self._shutdown:
-                return {"status": "shutdown"}
-            if self._runtime_disabled:
-                return {"status": "runtime_disabled"}
-            if self._paused:
-                return {"status": "paused"}
+                rejected = "shutdown"
+            elif self._runtime_disabled:
+                rejected = "runtime_disabled"
+            elif self._paused:
+                rejected = "paused"
             max_size = int(getattr(self._tools.settings, "semantic_conflict_queue_max_size", 100))
-            if len(self._pending) >= max_size and int(memory_id) not in self._pending:
+            if rejected is None and len(self._pending) >= max_size and int(memory_id) not in self._pending:
                 self._dropped_queue_full += 1
-                return {"status": "queue_full"}
+                rejected = "queue_full"
+            if rejected is not None:
+                self._completed[task_id] = {
+                    "status": "incomplete", "reason": rejected, "notices_created": 0,
+                    "task_id": task_id, "dedupe_key": task_id,
+                }
+                self._expected.discard(task_id)
+                self._cond.notify_all()
+                return dict(self._completed[task_id])
+            displaced = self._pending.get(int(memory_id))
+            if displaced is not None:
+                displaced_task_id = str(displaced["task_id"])
+                self._completed[displaced_task_id] = {
+                    "status": "incomplete", "reason": "coalesced_by_newer_snapshot", "notices_created": 0,
+                    "task_id": displaced_task_id, "dedupe_key": displaced_task_id,
+                }
+                self._expected.discard(displaced_task_id)
             self._pending[int(memory_id)] = snapshot
+            self._expected.add(task_id)
             self._cond.notify_all()
         self._ensure_thread()
-        return {"status": "queued"}
+        return {"status": "queued", "task_id": task_id, "dedupe_key": task_id}
+
+    def wait_task(self, task_id: str, timeout: float) -> Optional[dict[str, Any]]:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._cond:
+            while task_id not in self._completed:
+                if task_id not in self._expected:
+                    return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._cond.wait(remaining)
+            return dict(self._completed[task_id])
 
     def status(self) -> dict[str, Any]:
         with self._cond:
@@ -197,6 +276,13 @@ class SemanticConflictWorker:
             skipped = 0
             if discard_pending:
                 skipped = len(self._pending)
+                for snapshot in self._pending.values():
+                    task_id = str(snapshot["task_id"])
+                    self._completed[task_id] = {
+                        "status": "incomplete", "reason": "shutdown", "notices_created": 0,
+                        "task_id": task_id, "dedupe_key": task_id,
+                    }
+                    self._expected.discard(task_id)
                 self._pending.clear()
                 self._skipped += skipped
             self._cond.notify_all()
@@ -218,6 +304,13 @@ class SemanticConflictWorker:
             self._paused = True
             skipped = len(self._pending)
             if skipped:
+                for snapshot in self._pending.values():
+                    task_id = str(snapshot["task_id"])
+                    self._completed[task_id] = {
+                        "status": "incomplete", "reason": "runtime_disabled", "notices_created": 0,
+                        "task_id": task_id, "dedupe_key": task_id,
+                    }
+                    self._expected.discard(task_id)
                 self._pending.clear()
                 self._skipped += skipped
             self._cond.notify_all()
@@ -271,14 +364,23 @@ class SemanticConflictWorker:
                 snapshot = self._pending.pop(memory_id)
                 self._inflight.add(memory_id)
             error_message: Optional[str] = None
+            job_result: dict[str, Any] = {"status": "incomplete", "reason": "worker_error"}
+            task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")
             with self._cond:
                 error_seq_before = self._error_seq
             try:
-                self._tools._process_semantic_conflict_job(memory_id, snapshot)
+                result = self._tools._process_semantic_conflict_job(memory_id, snapshot)
+                if isinstance(result, dict):
+                    job_result = result
             except Exception as exc:
                 error_message = str(exc)
+                job_result = {"status": "incomplete", "reason": "worker_error", "error": error_message}
             finally:
                 with self._cond:
+                    self._completed[task_id] = {**job_result, "task_id": task_id, "dedupe_key": task_id}
+                    self._expected.discard(task_id)
+                    if len(self._completed) > 1000:
+                        self._completed.pop(next(iter(self._completed)))
                     self._inflight.discard(memory_id)
                     if error_message is not None:
                         self._last_error = error_message

@@ -8,7 +8,6 @@ from typing import Any, Optional
 from . import __version__
 from .config import Settings, _find_config_file
 from .config_registry import CONFIG_DESCRIPTORS, grouped_descriptors
-from .conflict_judgments import ConflictJudgmentStore
 from .tools import MemoryTools
 
 
@@ -162,23 +161,22 @@ class ConsoleAPI:
     def _get_conflict_row(self, conflict_id: int) -> Optional[dict[str, Any]]:
         if not self.tools.db.db_available:
             return None
-        select = (
-            "SELECT c.*, j.verdict AS judgment_verdict, "
-            "j.recommended_use AS judgment_recommended_use, "
-            "j.suggested_winner AS judgment_suggested_winner, "
-            "j.confidence_hint AS judgment_confidence_hint, "
-            "j.reason AS judgment_reason, j.judge_type AS judgment_judge_type, "
-            "j.judge_ref AS judgment_judge_ref, j.resolution_kind AS judgment_resolution_kind, "
-            "j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
-            "FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
-            "WHERE c.id=?"
-        )
         try:
             with self.tools.db.connection() as conn:
-                row = conn.execute(select, (int(conflict_id),)).fetchone()
+                row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
                 if row is None:
                     return None
-                return {k: row[k] for k in row.keys()}
+                conflict = {key: row[key] for key in row.keys()}
+                for key in (
+                    "slot_key", "candidate_key", "member_versions", "value_groups",
+                    "apply_summary", "notice_payload", "notice_slot_provenance",
+                ):
+                    if isinstance(conflict.get(key), str):
+                        try:
+                            conflict[key] = json.loads(conflict[key])
+                        except json.JSONDecodeError:
+                            conflict[key] = None
+                return conflict
         except sqlite3.Error:
             return None
 

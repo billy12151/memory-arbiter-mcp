@@ -6,7 +6,12 @@ import time
 from typing import Any, TYPE_CHECKING
 
 from ..evidence import evidence_content_hash, local_text_units
-from ..semantic_conflict import decide_evidence, notice_dedupe_key
+from ..semantic_conflict import (
+    AttributeValueExtraction,
+    decide_evidence,
+    evaluate_pair_extractions,
+    notice_dedupe_key,
+)
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
@@ -55,18 +60,19 @@ class EvidencePipeline:
             **published,
         }
 
-    def process_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> None:
+    def process_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Run the bounded notice gate and report completion to sync callers."""
         record = self.db.get_memory(int(memory_id))
         if not record or record.get("status") != "active":
-            return
+            return {"status": "incomplete", "reason": "memory_not_active", "notices_created": 0}
         if int(record.get("version") or 1) != int(snapshot.get("version") or 1):
-            return
+            return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
         content = str(record.get("content") or "")
         if hashlib.sha256(content.encode()).hexdigest() != snapshot.get("content_hash"):
-            return
+            return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
         embedder, _ = self._ensure_embedder()
         if embedder is None:
-            return
+            return {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
         workspace = (
             record.get("workspace_canonical") or record.get("workspace")
             if self.settings.isolation == "strict" else None
@@ -113,8 +119,34 @@ class EvidencePipeline:
             self.settings, "semantic_conflict_max_notice_pairs", 2,
         ))
         surfaced = 0
+        incomplete_reason: str | None = None
+
+        def envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
+            metadata_value = memory.get("metadata")
+            metadata = metadata_value if isinstance(metadata_value, dict) else {}
+            return {
+                "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
+                "tags": list(memory.get("tags") or [])[:20],
+                "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
+                "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
+                "event_time": memory.get("event_time"),
+                "metadata": {key: metadata.get(key) for key in ("entity", "scope") if metadata.get(key)},
+            }
+
+        def extraction(signal: Any) -> AttributeValueExtraction | None:
+            parsed = signal.parsed if isinstance(signal.parsed, dict) else None
+            if not parsed:
+                return None
+            try:
+                return AttributeValueExtraction(**{key: parsed[key] for key in (
+                    "attribute_a", "value_a", "attribute_b", "value_b",
+                )})
+            except (KeyError, TypeError):
+                return None
+
         for peer_id, (hit, unit, decision) in ordered:
             if surfaced >= max(1, min(3, max_pairs)):
+                incomplete_reason = "notice_budget_exhausted"
                 break
             peer = self.db.get_memory(peer_id)
             if not peer or peer.get("status") != "active":
@@ -123,45 +155,80 @@ class EvidencePipeline:
             right_version = int(peer.get("version") or 1)
             if self.db.is_semantic_pair_closed(memory_id, peer_id, left_version, right_version):
                 continue
-            qwen: dict[str, Any] = {"status": "not_required"}
-            if decision.action == "check":
-                if backend is None:
-                    self._tools._record_check_degradation("qwen_unavailable")
-                    continue
-                if deadline - time.monotonic() < min_budget:
-                    self._tools._record_check_degradation("qwen_budget_exhausted")
-                    continue
-                started = time.monotonic()
-                signal = backend.classify_pair(
-                    {"content": unit.text}, {"content": str(hit.get("text") or "")},
-                )
-                self._tools._last_pair_duration_ms = int((time.monotonic() - started) * 1000)
-                qwen = {
-                    "status": "candidate" if signal.candidate else "rejected",
-                    "type": signal.candidate_type,
-                    "confidence": signal.confidence,
-                }
-                if not signal.candidate:
-                    # Spec §7: timeout / backend failure / invalid output are
-                    # retryable diagnostics and must surface in check_degradation,
-                    # not masquerade as clean model rejections.
-                    if signal.error and "timeout" in str(signal.error).lower():
-                        self._tools._record_check_degradation("qwen_timeout")
-                    elif signal.candidate_type == "backend_unavailable":
-                        self._tools._record_check_degradation("qwen_unavailable")
-                    elif signal.candidate_type == "backend_error":
-                        self._tools._record_check_degradation("qwen_backend_error")
-                    elif signal.candidate_type in {"invalid_json", "invalid_schema"}:
-                        self._tools._record_check_degradation("qwen_invalid_output")
-                    continue
+            if backend is None:
+                self._tools._record_check_degradation("qwen_unavailable")
+                incomplete_reason = "qwen_unavailable"
+                continue
+            if deadline - time.monotonic() < min_budget * 2:
+                self._tools._record_check_degradation("qwen_budget_exhausted")
+                incomplete_reason = "qwen_budget_exhausted"
+                continue
+            left_env = envelope(record, unit.text)
+            right_env = envelope(peer, str(hit.get("text") or ""))
+            started = time.monotonic()
+            forward_signal = backend.classify_pair(left_env, right_env)
+            reverse_signal = backend.classify_pair(right_env, left_env)
+            self._tools._last_pair_duration_ms = int((time.monotonic() - started) * 1000)
+            gate = evaluate_pair_extractions(
+                extraction(forward_signal), extraction(reverse_signal), left_env, right_env,
+                require_bidirectional=True,
+            )
+            qwen = {
+                "status": gate.state, "reason": gate.reason,
+                "forward_type": forward_signal.candidate_type,
+                "reverse_type": reverse_signal.candidate_type,
+            }
+            if gate.state != "notice_ready":
+                signals = (forward_signal, reverse_signal)
+                if any(signal.error and "timeout" in str(signal.error).lower() for signal in signals):
+                    reason = "qwen_timeout"
+                elif any(signal.candidate_type == "backend_unavailable" for signal in signals):
+                    reason = "qwen_unavailable"
+                elif any(signal.candidate_type == "backend_error" for signal in signals):
+                    reason = "qwen_backend_error"
+                elif any(signal.candidate_type in {"invalid_json", "invalid_schema"} for signal in signals):
+                    reason = "qwen_invalid_output"
+                else:
+                    reason = gate.reason
+                self._tools._record_check_degradation(reason)
+                incomplete_reason = reason
+                continue
+            metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+            peer_metadata = peer.get("metadata") if isinstance(peer.get("metadata"), dict) else {}
+            entity = metadata.get("entity") if metadata.get("entity") == peer_metadata.get("entity") else None
+            scope = metadata.get("scope") if metadata.get("scope") == peer_metadata.get("scope") else None
+            if not entity or not scope:
+                incomplete_reason = "slot_provenance_insufficient"
+                continue
+            member_versions = [
+                {"memory_id": memory_id, "version": left_version, "value": gate.value_a,
+                 "evidence": {"quote": unit.text, "start": unit.start_offset, "end": unit.end_offset}},
+                {"memory_id": peer_id, "version": right_version, "value": gate.value_b,
+                 "evidence": {"quote": hit.get("text"), "start": hit.get("start_offset"), "end": hit.get("end_offset")}},
+            ]
+            value_groups = [
+                {"normalized_value": gate.value_a, "display_value": forward_signal.parsed["value_a"],
+                 "members": [f"{memory_id}@{left_version}"]},
+                {"normalized_value": gate.value_b, "display_value": forward_signal.parsed["value_b"],
+                 "members": [f"{peer_id}@{right_version}"]},
+            ]
             outcome = self.db.record_semantic_notice(
                 memory_id=memory_id, peer_id=peer_id,
                 severity="high" if decision.action == "notify" else "normal",
                 notice_type="semantic_evidence",
                 title=f"Possible memory change with #{peer_id}", message=decision.reason,
                 payload={
-                    "route": decision.action, "reason": decision.reason,
+                    "route": "notice_ready", "reason": gate.reason,
                     "anchors": decision.anchors,
+                    "slot_key": {"entity": entity, "attribute": gate.attribute, "scope": scope},
+                    "slot_provenance": {"entity": "metadata", "scope": "metadata", "attribute": "bidirectional_extraction"},
+                    "member_versions": member_versions,
+                    "value_groups": value_groups,
+                    "candidate_key": {
+                        "detector_version": "attribute-value-v1",
+                        "members": sorted([f"{memory_id}@{left_version}", f"{peer_id}@{right_version}"]),
+                        "evidence": [],
+                    },
                     "left_evidence": {
                         "text": unit.text, "start_offset": unit.start_offset,
                         "end_offset": unit.end_offset,
@@ -185,3 +252,8 @@ class EvidencePipeline:
             # outcomes must not starve a fresh deterministic notify pair.
             if outcome.get("outcome") == "created":
                 surfaced += 1
+        if surfaced:
+            return {"status": "completed", "outcome": "notices_created", "notices_created": surfaced}
+        if incomplete_reason:
+            return {"status": "incomplete", "reason": incomplete_reason, "notices_created": 0}
+        return {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}

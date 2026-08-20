@@ -12,6 +12,24 @@ import pytest
 from memory_arbiter import server
 
 
+def test_top_level_help_describes_commands(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["mema", "--help"])
+    server.main()
+    output = capsys.readouterr().out
+    assert "Run the MCP server when no command is given" in output
+    assert "doctor         Check database" in output
+    assert "setup          Generate a starter config" in output
+    assert "upgrade        Rebuild a legacy database" in output
+    assert "mema <command> --help" in output
+
+
+def test_product_tool_docstrings_use_current_exact_review_contract() -> None:
+    source = Path(server.__file__).read_text(encoding="utf-8")
+    assert "conflicts, conflict_detail, history, expired, audit, entities, help" in source
+    assert "judgments" not in source
+    assert "before judging a conflict" in source
+
+
 def test_terminate_after_shutdown_redelivers_signal(monkeypatch) -> None:
     events: list[object] = []
 
@@ -37,9 +55,11 @@ def test_terminate_after_shutdown_redelivers_signal(monkeypatch) -> None:
 
 def test_stdio_server_sigterm_does_not_abort_during_finalization(tmp_path: Path) -> None:
     env = os.environ.copy()
+    config_path = tmp_path / "isolated-config.json"
+    config_path.write_text("{}", encoding="utf-8")
     env.update(
         {
-            "MEMORY_ARBITER_CONFIG": str(tmp_path / "missing-config.json"),
+            "MEMORY_ARBITER_CONFIG": str(config_path),
             "MEMORY_ARBITER_DB_PATH": str(tmp_path / "server.sqlite3"),
             "MEMORY_ARBITER_BACKUP_JSONL": str(tmp_path / "server.backup.jsonl"),
             "MEMORY_ARBITER_UPDATE_CHECK_ENABLED": "false",

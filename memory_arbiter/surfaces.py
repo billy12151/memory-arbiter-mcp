@@ -5,7 +5,6 @@ from __future__ import annotations
 from importlib import resources
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
-from .conflict_judgments import ConflictJudgmentStore
 from .models import MemoryStatus, ProtectionLevel, SourceType
 from .validation import PRODUCT_FIELD_REGISTRY, _controlled_integer, validate_product_payload
 
@@ -32,9 +31,10 @@ def _agent_onboarding_guide() -> str:
 class ProductSurfaces:
     _GOVERNANCE_IMPACTS: dict[str, str] = {
         "retire": "Marks a whole memory superseded and removes it from active recall.",
-        "resolve_conflict": "Closes the conflict and may suppress future warnings for the same snapshot.",
+        "resolve_conflict": "Marks an applying conflict resolved after every planned member action completed.",
+        "apply_conflict_action": "Atomically applies one planned member change and records its result in the conflict.",
+        "replan_conflict": "CAS-replaces a stale or failed applying plan while preserving prior plan history.",
         "confirm": "Promotes the memory to user_confirmed and locks it against ordinary changes.",
-        "correct_judgment": "Replaces the active conflict guidance while preserving judgment history.",
         "accept_workspace_alias": "Makes future reads and writes resolve the alias to the canonical workspace.",
         "reject_workspace_alias": "Suppresses this workspace alias candidate in future normalization.",
         "rename_workspace_canonical": "Renames a canonical workspace and reroutes all affected memories.",
@@ -48,47 +48,37 @@ class ProductSurfaces:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._tools, name)
 
-    def _judge_constraints(self) -> dict[str, Any]:
-        """Allowed values and cross-field rules for conflict judgments.
-
-        Pulled live from ``ConflictJudgmentStore`` (the single source of truth
-        for resolution_kind / conflict_scope) plus the verdict/recommendation/
-        context/hint enums validated in ``submit_conflict_judgment``. Surfacing
-        them in help lets an agent fill a judgment request on the first try
-        instead of iterating against ``invalid_*`` outcomes.
-        """
-        store = ConflictJudgmentStore
+    @staticmethod
+    def _judge_constraints() -> dict[str, Any]:
         return {
-            "verdict": ["contradiction", "evolution", "compatible", "uncertain"],
-            "recommended_use": ["left", "right", "contextual", "merge", "ask_user", "none"],
-            "usage_context": ["answer", "code", "config", "memory_write", "external_action", "unrelated", "unknown"],
-            "confidence_hint": ["low", "medium", "high"],
-            "resolution_kind": sorted(store.RESOLUTION_KINDS),
-            "conflict_scope": sorted(store.CONFLICT_SCOPES),
+            "decided_by": ["user", "agent"],
+            "apply_actions": [
+                "update_current_claim", "append_superseded_context",
+                "preserve_historical_record", "use_as_resolution", "needs_authorization",
+            ],
             "rules": [
-                "resolution_kind=partial_update|merge requires recommended_use in [merge, contextual, ask_user].",
-                "resolution_kind=near_duplicate|full_replacement requires recommended_use in [left, right] and a suggested_winner, with conflict_scope in [record, whole_memory].",
-                "resolution_kind=contextual_keep_both requires recommended_use=contextual and no suggested_winner.",
-                "resolution_kind=not_a_conflict requires recommended_use=none and no suggested_winner.",
-                "conflict_scope in [field, section] cannot pair with near_duplicate|full_replacement.",
+                "expected_revision must match the current conflict revision.",
+                "apply_plan contains each planned member at most once.",
+                "resolution_memory_id, when supplied, must identify an active memory.",
+                "Each plan step is applied sequentially with memory_govern(action='apply_conflict_action').",
             ],
         }
 
     @staticmethod
     def _judge_required_fields() -> list[str]:
         return [
-            "conflict_id", "expected_left_version", "expected_right_version",
-            "verdict", "recommended_use", "suggested_winner",
-            "confidence_hint", "reason", "affects_current_output", "usage_context",
+            "conflict_id", "expected_revision", "chosen_value", "decided_by",
+            "ref", "reason", "apply_plan", "resolution_memory_id",
         ]
 
     @staticmethod
     def _action_required_paths() -> dict[str, str]:
         return {
             "read_semantic_notice": (
-                "Read the notice, execute both returned memory read calls, and assess the complete memories. "
-                "Dismiss a false positive; after the credible notice has been handled, resolve the notice. "
-                "A notice is not a formal conflict and cannot be judged or passed to resolve_conflict."
+                "Read the notice, require freshness.fresh=true, execute every returned read_calls entry, and "
+                "assess every complete frozen member before triage. Dismiss a false positive; after the credible "
+                "notice has been handled, resolve the notice. A notice is not a formal conflict and cannot be "
+                "judged or passed to resolve_conflict."
             ),
             "ask_user": (
                 "The formal conflict judgment requires a user decision. Ask the user; do not submit another "
@@ -100,8 +90,14 @@ class ProductSurfaces:
             ),
             "ask_user_for_authorization": (
                 "Explain the returned impact and ask the user to authorize that specific governance action. "
-                "Only after approval follow the returned retry instructions with authorized=true."
+                "Authorization is mandatory; only after approval add authorized=true to the returned retry call."
             ),
+            "apply_conflict_action": (
+                "Inspect conflict_detail and the pending plan step. Obtain explicit user authorization, add "
+                "authorized=true, then execute next_executable_call."
+            ),
+            "preview_backup_replay": "Execute suggested_call to preview pending backup records; do not apply them during preview.",
+            "inspect_backup_replay_manually": "Execute suggested_call and inspect the dry-run result because automatic notice inspection degraded.",
         }
 
     @staticmethod
@@ -141,14 +137,14 @@ class ProductSurfaces:
                     "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
                     "read": {"action": "read", "data": {"memory_id": 123}},
                     "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
-                    "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_left_version": 1, "expected_right_version": 2, "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None, "confidence_hint": "medium", "affects_current_output": True, "usage_context": "config", "resolution_kind": "partial_update", "conflict_scope": "field", "reason": "Only one field changed; current answer depends on it."}},
+                    "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
                 },
                 "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
                 "value_reference": self._memory_value_reference(),
             },
             "memory_review": {
                 "description": "Read-only inspection. Never changes memory state.",
-                "views": ["overview", "doctor", "conflicts", "conflict_detail", "judgments", "history", "expired", "audit", "entities", "help"],
+                "views": ["overview", "doctor", "conflicts", "conflict_detail", "history", "expired", "audit", "entities", "help"],
                 "examples": {
                     "conflicts": {"view": "conflicts", "data": {"status": "open", "limit": 20}},
                     "history": {"view": "history", "data": {"memory_id": 123}},
@@ -157,10 +153,11 @@ class ProductSurfaces:
             },
             "memory_govern": {
                 "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
-                "actions": ["retire", "resolve_conflict", "confirm", "correct_judgment", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"],
+                "actions": ["retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"],
                 "examples": {
                     "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
-                    "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "status": "not_a_conflict", "reason": "User confirmed this is not a conflict.", "authorized": True}},
+                    "apply_conflict_action": {"action": "apply_conflict_action", "data": {"conflict_id": 1, "expected_revision": 2, "memory_id": 12, "action": "update_current_claim", "content": "The database is SQLite.", "reason": "Apply the confirmed conflict decision.", "authorized": True}},
+                    "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "expected_revision": 4, "reason": "All planned member actions completed.", "authorized": True}},
                     "accept_workspace_alias": {"action": "accept_workspace_alias", "data": {"alias": "金营二期", "canonical": "金营项目", "reason": "User confirmed these are the same project.", "authorized": True}},
                     "reject_workspace_alias": {"action": "reject_workspace_alias", "data": {"alias": "金营培训", "canonical": "金营项目", "reason": "User confirmed these are distinct workspaces.", "authorized": True}},
                     "rename_workspace_canonical": {"action": "rename_workspace_canonical", "data": {"old": "旧项目名", "new": "新项目名", "reason": "User confirmed the rename.", "authorized": True}},
@@ -184,7 +181,7 @@ class ProductSurfaces:
                     "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
                     "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
                     "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
-                    "record_conflict": {"task": "record_conflict", "data": {"left_id": 12, "right_id": 34, "reason": "Timeout value contradicts between runbooks.", "conflict_type": "contradiction", "suggested_winner": 34, "confidence_hint": "high", "source": "llm_informed", "scan_model": "qwen2.5-7b"}},
+                    "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
                     "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
                     "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
                     "notice_read": {"task": "notice", "data": {"action": "read", "notice_id": 1}},
@@ -192,7 +189,8 @@ class ProductSurfaces:
                     "notice_resolve": {"task": "notice", "data": {"action": "resolve", "notice_id": 1, "reason": "Reviewed and handled."}},
                     "notice_escalate": {"task": "notice", "data": {"action": "escalate", "notice_id": 1, "reason": "Verified against both memories: real contradiction needing governance."}},
                 },
-                "semantic_notice_delivery": "Local-text evidence finds candidates. Deterministic notify routes surface directly; check routes require Qwen and degrade to ignore when Qwen is unavailable. Read both memories before assessing an advisory notice, then dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict.",
+                "semantic_notice_delivery": "Notices progress pending -> delivered while open, then dismissed/resolved, or stale when any frozen member is no longer active at its pinned version. Read requires freshness.fresh=true and executing every read_calls entry for complete memories before triage; two-member notices also expose optional left/right aliases. Dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict.",
+                "checked_no_notice": "A completed semantic task with outcome=checked_no_notice examined its eligible candidates and emitted zero notices; it is not a claim that no conflict can exist outside that task snapshot or candidate budget.",
                 "semantic_control_actions": [
                     "status", "pause", "resume", "enable", "unload", "disable",
                 ],
@@ -207,8 +205,6 @@ class ProductSurfaces:
                 "content": _agent_onboarding_guide(),
             }
         help_doc = helps.get(surface, {"description": "Unknown product surface."})
-        # judge / correct_judgment carry enum + cross-field constraints that the
-        # agent cannot otherwise discover without iterating invalid_* outcomes.
         if surface in {"memory", "memory_govern"} and isinstance(help_doc, dict):
             help_doc = dict(help_doc)
             help_doc["judge_constraints"] = self._judge_constraints()
@@ -404,8 +400,16 @@ class ProductSurfaces:
             semantic = self.db.claim_next_semantic_notice(
                 self._notice_workspace_scope(response, data),
             )
-        except Exception:
+        except Exception as exc:
+            from .models import utc_now_iso
             semantic = None
+            self._tools._notice_claim_error_count += 1
+            self._tools._notice_claim_last_error = str(exc)
+            self._tools._notice_claim_last_error_at = utc_now_iso()
+            warning = f"semantic_notice_claim_failed: {exc}"
+            if warning not in response.setdefault("warnings", []):
+                response["warnings"].append(warning)
+            response["degraded"] = True
         if semantic is not None:
             notices.append(semantic)
         if notices:
@@ -507,7 +511,7 @@ class ProductSurfaces:
             invalid_id = self._coerce_product_id("memory", payload, "conflict_id", action)
             if invalid_id is not None:
                 return invalid_id
-            return self._forward("memory", action, self.memory_submit_conflict_judgment, **payload)
+            return self._forward("memory", action, self._tools._operations.memory_judge_conflict, **payload)
         if action == "status":
             return self.memory_status(workspace=payload.get("workspace"))
         return self._invalid_product_call("memory", f"unknown action: {action}", action)
@@ -553,14 +557,6 @@ class ProductSurfaces:
                     data.update(caller.response_fields())
                 return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
             return self.db.state.response(detail, extra_warnings=list(caller.warnings))
-        if view == "judgments":
-            conflict_id = payload.get("conflict_id") or payload.get("id")
-            if conflict_id is None:
-                return self._invalid_product_call("memory_review", "judgments requires conflict_id", view)
-            conflict_id_int = self._int_product_arg("memory_review", conflict_id, "conflict_id", view)
-            if isinstance(conflict_id_int, dict):
-                return conflict_id_int
-            return self._forward("memory_review", view, self.memory_list_conflict_judgments, conflict_id=conflict_id_int, workspace=payload.get("workspace"))
         if view == "history":
             memory_id = payload.get("memory_id") or payload.get("id")
             if memory_id is None:
@@ -604,14 +600,36 @@ class ProductSurfaces:
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self.memory_supersede, **payload)
-        if action == "resolve_conflict":
+        if action in {"apply_conflict_action", "replan_conflict", "resolve_conflict"}:
             invalid_id = self._coerce_product_id("memory_govern", payload, "conflict_id", action)
             if invalid_id is not None:
                 return invalid_id
+            if payload.get("expected_revision") is None:
+                response = self._invalid_product_call(
+                    "memory_govern", f"{action} requires expected_revision", action,
+                )
+                response["data"]["outcome"] = "invalid_input"
+                response["data"]["field"] = "expected_revision"
+                return response
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
-            return self._forward("memory_govern", action, self.memory_resolve_conflict, **payload)
+            if action == "apply_conflict_action":
+                return self._forward(
+                    "memory_govern", action,
+                    self._tools._operations.memory_apply_conflict_action, **payload,
+                )
+            if action == "replan_conflict":
+                if not isinstance(payload.get("apply_plan"), list):
+                    return self._invalid_product_call("memory_govern", "replan_conflict requires apply_plan", action)
+                return self._forward(
+                    "memory_govern", action,
+                    self._tools._operations.memory_replan_conflict, **payload,
+                )
+            return self._forward(
+                "memory_govern", action,
+                self._tools._operations.memory_resolve_conflict, **payload,
+            )
         if action == "confirm":
             invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
             if invalid_id is not None:
@@ -620,30 +638,6 @@ class ProductSurfaces:
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self.memory_confirm, **payload)
-        if action == "correct_judgment":
-            if "conflict_id" not in payload and "id" in payload:
-                payload["conflict_id"] = payload.pop("id")
-            required = [
-                "conflict_id", "verdict", "recommended_use", "suggested_winner",
-                "reason", "expected_judgment_id", "expected_left_version",
-                "expected_right_version", "authorized",
-            ]
-            missing_fields = [name for name in required if name not in payload]
-            if missing_fields:
-                help_doc = self._product_help("memory_govern", "correct_judgment")
-                help_doc["required_fields"] = required
-                help_doc["missing_fields"] = missing_fields
-                return self.db.state.response({"error": "correct_judgment missing required fields", "help": help_doc}, ok=False)
-            # Coerce conflict_id AFTER the missing-fields check so a non-integer
-            # id is reported as its own error, not as "conflict_id must be an
-            # integer" while other required fields are also missing.
-            invalid_id = self._coerce_product_id("memory_govern", payload, "conflict_id", action)
-            if invalid_id is not None:
-                return invalid_id
-            auth_error = self._governance_authorization_error(action, payload)
-            if auth_error is not None:
-                return auth_error
-            return self._forward("memory_govern", action, self.memory_correct_conflict_judgment, **payload)
         if action == "accept_workspace_alias":
             if not payload.get("alias") or not payload.get("canonical"):
                 return self._invalid_product_call("memory_govern", "accept_workspace_alias requires alias and canonical", action)
@@ -729,15 +723,37 @@ class ProductSurfaces:
                 return self._invalid_product_call("memory_repair", "scan_candidates batch/k/anchor_memory_id must be integers and max_distance a number", task)
             if not (1 <= batch_value <= 200) or not (1 <= k_value <= 20) or anchor_value < 0:
                 return self._invalid_product_call("memory_repair", "scan_candidates requires 1<=batch<=200, 1<=k<=20, anchor_memory_id>=0", task)
+            scan_workspace = caller.canonical if caller.isolation == "strict" else None
             result = self.db.scan_rule_candidates(
                 after_memory_id=anchor_value,
                 anchor_batch=batch_value,
                 neighbor_k=k_value,
                 include_check=self._is_truthy(payload.get("include_check")),
                 max_distance=distance_value,
-                workspace=caller.canonical if caller.isolation == "strict" else None,
+                workspace=scan_workspace,
             )
             ok = "error" not in result
+            scan_state = self.db.conflict_scan_state()
+            if ok and scan_state.get("required"):
+                progress_ok = self.db.record_conflict_scan_page(
+                    epoch=str(scan_state.get("epoch") or ""),
+                    detector_version=str(scan_state.get("detector_version") or ""),
+                    boundary=scan_state.get("boundary") or {},
+                    after_memory_id=anchor_value,
+                    next_anchor_memory_id=result.get("next_anchor_memory_id"),
+                    anchors_scanned=int(result.get("anchors_scanned") or 0),
+                    workspace=scan_workspace,
+                )
+                if progress_ok:
+                    result["conflict_scan_progress"] = self.db.conflict_scan_state().get("progress")
+                    if result.get("next_anchor_memory_id") is None:
+                        result["conflict_scan_completed"] = self.db.complete_conflict_scan(
+                            epoch=str(scan_state.get("epoch") or ""),
+                            detector_version=str(scan_state.get("detector_version") or ""),
+                            boundary=scan_state.get("boundary") or {},
+                        )
+                else:
+                    result["conflict_scan_progress_rejected"] = True
             return self.db.state.response(result, ok=ok, extra_warnings=list(caller.warnings))
         if task == "cleanup_history":
             if "id" in payload or "memory_id" in payload:
@@ -762,89 +778,33 @@ class ProductSurfaces:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
                 return denied
-            for id_field in ("left_id", "right_id"):
-                invalid_id = self._coerce_product_id("memory_repair", payload, id_field, task)
-                if invalid_id is not None:
-                    return invalid_id
-            left_id, right_id = int(payload["left_id"]), int(payload["right_id"])
-            if left_id == right_id:
-                return self._invalid_product_call("memory_repair", "left_id and right_id must differ", task)
-            reason = str(payload.get("reason") or "").strip()
-            if not reason:
-                return self._invalid_product_call("memory_repair", "record_conflict requires a reason", task)
-            left = self._get_memory_visible(left_id, caller)
-            right = self._get_memory_visible(right_id, caller)
-            if not left or not right:
-                return self.db.state.response(
-                    {"error": "memory id not found", **caller.response_fields()}, ok=False,
-                    extra_warnings=list(caller.warnings),
-                )
-            if any(str(m.get("status")) != "active" for m in (left, right)):
-                return self.db.state.response(
-                    {
-                        "error": "conflict sides must be active memories",
-                        "left_status": left.get("status"), "right_status": right.get("status"),
-                    },
-                    ok=False, extra_warnings=list(caller.warnings),
-                )
-            source_value = payload.get("source")
-            if source_value is not None and str(source_value) not in {
-                "metadata_write_hint", "llm_informed", "policy_informed", "human_confirmed",
-            }:
+            required = ["members", "value_groups", "detector_version", "source", "reason"]
+            missing = [name for name in required if name not in payload]
+            if missing:
                 return self._invalid_product_call(
-                    "memory_repair",
-                    "source must be one of metadata_write_hint/llm_informed/policy_informed/human_confirmed",
-                    task,
+                    "memory_repair", f"record_conflict missing required fields: {', '.join(missing)}", task,
                 )
-            suggested_winner = payload.get("suggested_winner")
-            if suggested_winner is not None:
-                invalid_winner = self._coerce_product_id("memory_repair", payload, "suggested_winner", task)
-                if invalid_winner is not None:
-                    return invalid_winner
-                suggested_winner = int(suggested_winner)
-                if suggested_winner not in (left_id, right_id):
-                    return self._invalid_product_call(
-                        "memory_repair", "suggested_winner must be left_id, right_id, or null", task,
-                    )
-            status_value = str(payload.get("status") or "open").strip().lower()
-            if status_value not in {"open", "not_a_conflict"}:
-                return self._invalid_product_call(
-                    "memory_repair", "record_conflict status must be open or not_a_conflict", task,
-                )
-            if status_value == "not_a_conflict" and suggested_winner is not None:
-                return self._invalid_product_call(
-                    "memory_repair", "a not_a_conflict registration cannot carry suggested_winner", task,
-                )
-            # External scan loops (scheduled LLM review) register findings
-            # here; the row is a governance record only — it never edits or
-            # retires a memory, so unlike memory_govern this needs no
-            # per-action authorized flag. Version pins are resolved inside
-            # the write transaction: omitted pins default to the current
-            # versions, explicit pins are CAS-verified against them.
-            # status=not_a_conflict marks a triaged non-issue so later scans
-            # (and advisory overlap) stay quiet until a version changes.
-            result = self.db.record_conflict_enriched(
-                left_id, right_id,
-                conflict_type=payload.get("conflict_type"),
+            if not isinstance(payload.get("members"), list) or not isinstance(payload.get("value_groups"), list):
+                return self._invalid_product_call("memory_repair", "members and value_groups must be arrays", task)
+            workspace_canonical = caller.canonical or str(payload.get("workspace") or self.settings.workspace or "").strip()
+            result = self.db.record_conflict_group(
+                workspace_canonical=workspace_canonical,
+                slot_key=payload.get("slot_key"),
+                members=payload["members"],
+                value_groups=payload["value_groups"],
+                candidate_key=payload.get("candidate_key"),
+                status=str(payload.get("status") or "open").strip().lower(),
+                detector_version=str(payload["detector_version"]),
+                prompt_version=payload.get("prompt_version"),
+                source=str(payload["source"]),
+                detection_reason=str(payload["reason"]),
                 conflict_point=payload.get("conflict_point"),
-                reason=reason,
-                suggested_winner=suggested_winner,
-                confidence_hint=payload.get("confidence_hint"),
-                source=str(source_value) if source_value is not None else "llm_informed",
-                status=status_value,
-                refresh=self._is_truthy(payload.get("refresh")),
-                left_version=payload.get("left_version"),
-                right_version=payload.get("right_version"),
-                judgment_status=None,
-                scan_prompt_version=payload.get("scan_prompt_version"),
-                scan_model=payload.get("scan_model"),
+                expected_revision=payload.get("expected_revision"),
             )
-            ok = result.get("outcome") in {"inserted", "deduped", "refreshed", "reopened"}
+            ok = result.get("outcome") in {"inserted", "appended", "deduped"}
             if not ok:
                 result.setdefault("error", f"record_conflict failed: {result.get('outcome')}")
-            return self.db.state.response(
-                result, ok=ok, extra_warnings=list(caller.warnings),
-            )
+            return self.db.state.response(result, ok=ok, extra_warnings=list(caller.warnings))
         if task == "semantic_control":
             timeout_raw = payload.get("timeout")
             timeout_value = 30.0 if timeout_raw is None else float(timeout_raw)
@@ -894,87 +854,42 @@ class ProductSurfaces:
                     return self.db.state.response({"outcome": "not_found"}, ok=False)
                 return self.db.state.response({"notice": notice}, extra_warnings=list(caller.warnings))
             if action == "escalate":
-                notice = self.db.read_semantic_notice(int(payload["notice_id"]), workspace)
-                if notice is None:
-                    return self.db.state.response({"outcome": "not_found"}, ok=False)
-                if notice.get("status") != "open":
-                    return self.db.state.response(
-                        {"outcome": "already_terminal", "status": notice.get("status")}, ok=False,
-                        extra_warnings=list(caller.warnings),
-                    )
-                if not notice.get("freshness", {}).get("fresh"):
-                    return self.db.state.response(
-                        {
-                            "outcome": "stale_notice",
-                            "error": "notice pins no longer match current memory versions; read both memories and judge the current state instead",
-                            "freshness": notice.get("freshness"),
-                        },
-                        ok=False,
-                        extra_warnings=list(caller.warnings),
-                    )
                 agent_reason = str(payload.get("reason") or "").strip()
-                if notice.get("memory_id") is None or notice.get("peer_id") is None:
-                    return self.db.state.response(
-                        {"outcome": "escalate_failed", "error": "notice has no memory pair to escalate"},
-                        ok=False, extra_warnings=list(caller.warnings),
-                    )
-                route = notice.get("payload", {}).get("route") or "semantic_evidence"
                 escalate_reason = (
                     f"Escalated from semantic notice #{int(payload['notice_id'])}"
-                    f" ({route}: {notice.get('message') or ''})" + (f" — {agent_reason}" if agent_reason else "")
+                    + (f" — {agent_reason}" if agent_reason else "")
                 )
-                created = self.db.record_conflict_enriched(
-                    int(notice["memory_id"]), int(notice["peer_id"]),
-                    conflict_type=None, conflict_point=None,
-                    reason=escalate_reason,
-                    suggested_winner=None, confidence_hint=None,
-                    source="semantic_notice", status="open",
-                    left_version=notice.get("left_version"),
-                    right_version=notice.get("right_version"),
+                created = self.db.escalate_structured_notice(
+                    int(payload["notice_id"]), workspace_canonical=workspace, reason=escalate_reason,
                 )
-                conflict_id = created.get("conflict_id")
                 if created.get("outcome") == "stale_snapshot":
-                    # The memories changed between the freshness check and
-                    # this write; the notice pins can no longer be trusted.
                     return self.db.state.response(
                         {
                             "outcome": "stale_notice",
                             "error": "notice pins no longer match current memory versions; read both memories and judge the current state instead",
-                            "detail": created,
-                        },
-                        ok=False,
-                        extra_warnings=list(caller.warnings),
+                            "freshness": created.get("freshness"),
+                        }, ok=False, extra_warnings=list(caller.warnings),
                     )
-                if created.get("outcome") not in {"inserted", "deduped", "refreshed"} or conflict_id is None:
+                if created.get("outcome") != "promoted":
+                    outcome = created.get("outcome")
                     return self.db.state.response(
-                        {"outcome": "escalate_failed", "detail": created}, ok=False,
-                        extra_warnings=list(caller.warnings),
+                        {"outcome": "escalate_failed", "detail": created},
+                        ok=False, extra_warnings=list(caller.warnings),
+                    ) if outcome == "structured_group_required" else self.db.state.response(
+                        created, ok=False, extra_warnings=list(caller.warnings),
                     )
-                settled = self.db.update_semantic_notice_status(
-                    int(payload["notice_id"]), "resolved",
-                    f"escalated_to_conflict: {escalate_reason}", workspace,
-                    conflict_id=conflict_id,
-                )
                 return self.db.state.response(
                     {
-                        "outcome": "escalated",
-                        "conflict_outcome": created.get("outcome"),
-                        "conflict_id": conflict_id,
-                        "notice_outcome": settled.get("outcome"),
-                        # Row-aligned canonical pins (left_id < right_id): the
-                        # notice's own pins may be swapped relative to the row.
-                        "left_id": created.get("left_id"),
-                        "right_id": created.get("right_id"),
-                        "left_version": created.get("left_version"),
-                        "right_version": created.get("right_version"),
+                        "outcome": "escalated", "conflict_outcome": "promoted",
+                        "conflict_id": created["conflict_id"], "revision": created["revision"],
+                        "member_versions": created["member_versions"],
+                        "value_groups": created["value_groups"],
                         "next_step": (
                             "Credible contradiction is now a formal conflict. Use "
                             "memory_review(view='conflict_detail') to inspect it, then "
-                            "memory(action='judge') with the pinned versions if a "
-                            "judgment is required."
+                            "memory(action='judge') with the pinned revision."
                         ),
-                    },
-                    extra_warnings=list(caller.warnings),
+                    }, extra_warnings=list(caller.warnings),
                 )
             status = "dismissed" if action == "dismiss" else "resolved"
             result = self.db.update_semantic_notice_status(

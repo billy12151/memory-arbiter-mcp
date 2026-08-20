@@ -51,18 +51,14 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "expected_version", "expected_content_hash", "content_hash", "workspace",
     },
     ("memory", "judge"): {
-        "id", "conflict_id", "expected_left_version", "expected_right_version",
-        "verdict",
-        "recommended_use", "suggested_winner", "confidence_hint", "reason",
-        "affects_current_output", "usage_context", "judge_ref", "resolution_kind",
-        "conflict_scope", "workspace",
+        "id", "conflict_id", "expected_revision", "chosen_value", "decided_by",
+        "ref", "reason", "apply_plan", "resolution_memory_id", "workspace",
     },
     ("memory_review", "overview"): _COMMON,
     ("memory_review", "doctor"): {"deep", "workspace"},
     ("memory_review", "audit"): {"workspace"},
     ("memory_review", "conflicts"): {"status", "limit", "source", "workspace"},
     ("memory_review", "conflict_detail"): {"id", "conflict_id", "workspace"},
-    ("memory_review", "judgments"): {"id", "conflict_id", "workspace"},
     ("memory_review", "history"): {"id", "memory_id", "workspace"},
     ("memory_review", "expired"): {
         "query", "workspace", "tags", "limit", "offset", "debug_ranking",
@@ -72,14 +68,18 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_review", "entities"): {"limit", "include_unassigned", "workspace"},
     ("memory_review", "help"): {"topic", "view"},
     ("memory_govern", "retire"): {"id", "memory_id", "reason", "superseded_by", "authorized", "workspace"},
-    ("memory_govern", "resolve_conflict"): {"id", "conflict_id", "reason", "status", "authorized", "workspace"},
-    ("memory_govern", "confirm"): {"id", "memory_id", "source_ref", "confidence", "authorized", "workspace"},
-    ("memory_govern", "correct_judgment"): {
-        "id", "conflict_id", "verdict", "recommended_use", "suggested_winner", "reason",
-        "expected_judgment_id", "expected_left_version", "expected_right_version",
-        "authorized",
-        "judge_ref", "resolution_kind", "conflict_scope", "workspace",
+    ("memory_govern", "resolve_conflict"): {
+        "id", "conflict_id", "expected_revision", "reason", "authorized", "workspace",
     },
+    ("memory_govern", "apply_conflict_action"): {
+        "id", "conflict_id", "expected_revision", "memory_id", "action", "content",
+        "old_text", "new_text", "reason", "authorized", "workspace",
+    },
+    ("memory_govern", "replan_conflict"): {
+        "id", "conflict_id", "expected_revision", "apply_plan",
+        "resolution_memory_id", "authorized", "workspace",
+    },
+    ("memory_govern", "confirm"): {"id", "memory_id", "source_ref", "confidence", "authorized", "workspace"},
     ("memory_govern", "accept_workspace_alias"): {"alias", "canonical", "relation", "reason", "source", "authorized"},
     ("memory_govern", "reject_workspace_alias"): {"alias", "canonical", "reason", "source", "authorized"},
     ("memory_govern", "rename_workspace_canonical"): {"old", "new", "reason", "authorized"},
@@ -96,9 +96,9 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "anchor_memory_id", "batch", "k", "include_check", "max_distance", "workspace",
     },
     ("memory_repair", "record_conflict"): {
-        "left_id", "right_id", "reason", "conflict_type", "conflict_point",
-        "suggested_winner", "confidence_hint", "source", "status", "refresh",
-        "left_version", "right_version", "scan_prompt_version", "scan_model", "workspace",
+        "slot_key", "members", "value_groups", "candidate_key", "status",
+        "detector_version", "prompt_version", "source", "reason", "conflict_point",
+        "expected_revision", "workspace",
     },
     ("memory_repair", "replay_backup"): {"dry_run", "authorized", "limit", "offset"},
     ("memory_repair", "help"): {"topic", "task"},
@@ -177,10 +177,7 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
     for key in ("id", "memory_id", "conflict_id", "notice_id", "superseded_by", "suggested_winner"):
         if key not in payload:
             continue
-        if key in {"id", "conflict_id"} and (
-            (surface, operation) == ("memory", "judge")
-            or (surface, operation) == ("memory_govern", "correct_judgment")
-        ):
+        if key in {"id", "conflict_id"} and (surface, operation) == ("memory", "judge"):
             # Their dispatchers intentionally report all missing receipt fields
             # before coercing the primary id. The dispatcher uses the same strict
             # integer policy, so skipping here does not admit floats.
@@ -291,9 +288,7 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         "batch_size": (1, 500),
         "older_than_days": (0, 365_000),
         "expected_version": (1, MAX_REVISION),
-        "expected_judgment_id": (1, MAX_REVISION),
-        "expected_left_version": (1, MAX_REVISION),
-        "expected_right_version": (1, MAX_REVISION),
+        "expected_revision": (1, MAX_REVISION),
     }
     for key, (minimum, maximum) in integer_limits.items():
         if key not in payload or payload[key] is None:

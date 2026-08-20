@@ -84,6 +84,29 @@ def test_sync_version_detects_manifest_changelog_and_lock_drift(monkeypatch, tmp
     assert not sync.check_uv_lock("0.13.0")
 
 
+def test_development_version_output_explains_lock_and_release_manifests(monkeypatch, capsys):
+    sync = _load_script("sync_version_development_output", "scripts/sync_version.py")
+    monkeypatch.setattr(sync, "read_authoritative_version", lambda: "0.14.0.dev1")
+    monkeypatch.setattr(sync, "check_uv_lock", lambda _version: True)
+    monkeypatch.setattr(sys, "argv", ["sync_version.py", "--check"])
+    assert sync.main() == 0
+    output = capsys.readouterr().out
+    assert "uv.lock is valid" in output
+    assert "release manifests intentionally remain at the latest release version" in output
+
+
+def test_release_version_check_remains_strict(monkeypatch):
+    sync = _load_script("sync_version_release_strict", "scripts/sync_version.py")
+    calls: list[str] = []
+    monkeypatch.setattr(sync, "read_authoritative_version", lambda: "0.14.0")
+    monkeypatch.setattr(sync, "sync_server_json", lambda version, check: calls.append(f"manifest:{version}:{check}") or False)
+    monkeypatch.setattr(sync, "check_changelog", lambda version: calls.append(f"changelog:{version}") or False)
+    monkeypatch.setattr(sync, "check_uv_lock", lambda version: calls.append(f"lock:{version}") or True)
+    monkeypatch.setattr(sys, "argv", ["sync_version.py", "--check"])
+    assert sync.main() == 1
+    assert calls == ["manifest:0.14.0:True", "changelog:0.14.0", "lock:0.14.0"]
+
+
 def test_uv_lock_dynamic_version_record_is_valid(monkeypatch, tmp_path):
     sync = _load_script("sync_version_dynamic_lock", "scripts/sync_version.py")
     pyproject = tmp_path / "pyproject.toml"

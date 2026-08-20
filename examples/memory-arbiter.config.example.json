@@ -2,7 +2,10 @@
   "_readme": [
     "Copy to ~/.config/memory-arbiter/config.json and edit local paths.",
     "The embedding model enables local-text evidence recall.",
-    "The Qwen model is optional and filters only check-route short pairs."
+    "The optional Qwen2.5-0.5B model extracts four attribute/value fields in both directions; scan is broad and write-time notice is strict.",
+    "This example explicitly keeps semantic_conflict.enabled=false: editing model_path alone will not enable it; set enabled=true or remove enabled to use model-path auto-enable.",
+    "All isolation modes normalize workspace_canonical; none disables ACL only.",
+    "mema setup writes a smaller embedding-only template; it intentionally does not mirror every optional key in this reference example."
   ],
   "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
   "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
@@ -41,6 +44,8 @@
     "job_timeout_ms": 5000,
     "inference_timeout_ms": 30000,
     "load_timeout_ms": 120000,
-    "min_pair_budget_ms": 1000
+    "min_pair_budget_ms": 1000,
+    "notice_sync_wait_ms": 3000,
+    "workspace_qwen_budget_ms": 750
   }
 }

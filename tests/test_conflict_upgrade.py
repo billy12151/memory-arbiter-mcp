@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+from memory_arbiter.config import Settings
+from memory_arbiter.db import MemoryDB
+from memory_arbiter.db_generation import (
+    CONFLICT_DETECTOR_VERSION,
+    CURRENT_SCHEMA_GENERATION,
+    detect_database_generation,
+)
+from memory_arbiter.models import MemoryRecord
+from memory_arbiter.tools import MemoryTools
+from memory_arbiter.vnext_migration import (
+    _copy_preserved_tables,
+    _fingerprint,
+    _mark_conflict_rebuild_ready,
+)
+
+
+def _settings(path: Path, tmp_path: Path) -> Settings:
+    return Settings(db_path=path, backup_jsonl=tmp_path / "backup.jsonl")
+
+
+def _memory(defaults: dict[str, object]) -> MemoryRecord:
+    return MemoryRecord.from_input(
+        {"content": "数据库使用 SQLite。", "subject": "数据库选型", "workspace": "project"},
+        defaults,
+    )
+
+
+def test_destructive_copy_preserves_core_data_but_not_conflict_history(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.sqlite3"
+    target_path = tmp_path / "target.sqlite3"
+    source = MemoryDB(_settings(source_path, tmp_path))
+    memory_id, _ = source.insert_memory(_memory(_settings(source_path, tmp_path).defaults()), "project")
+    assert memory_id is not None
+    with source.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO memory_history(memory_id,content_snapshot,subject_snapshot,tags_snapshot,version,changed_at,reason) VALUES(?,?,?,?,?,?,?)",
+            (memory_id, "old", "数据库选型", "[]", 1, "2026-08-20T00:00:00Z", "test"),
+        )
+        conn.execute(
+            "INSERT INTO workspace_aliases(alias_workspace,canonical,relation,status,source,updated_at) VALUES(?,?,?,?,?,?)",
+            ("proj", "project", "alias", "confirmed", "user", "2026-08-20T00:00:00Z"),
+        )
+        # Removed tables may exist in a previous-generation source even though
+        # current runtime schema intentionally does not create them.
+        conn.execute("CREATE TABLE semantic_notices(id INTEGER PRIMARY KEY, message TEXT)")
+        conn.execute("INSERT INTO semantic_notices VALUES(1,'legacy notice')")
+        conn.execute("CREATE TABLE conflict_judgments(id INTEGER PRIMARY KEY, reason TEXT)")
+        conn.execute("INSERT INTO conflict_judgments VALUES(1,'legacy judgment')")
+
+    target = MemoryDB(_settings(target_path, tmp_path))
+    _copy_preserved_tables(source_path, target)
+
+    with target.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM memory_history").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM workspace_aliases").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM conflicts").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='semantic_notices'"
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='conflict_judgments'"
+        ).fetchone() is None
+    assert _fingerprint(source_path) == _fingerprint(target_path)
+
+
+def test_startup_migrates_legacy_alias_unique_key_to_pair_key(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-alias.sqlite3"
+    db = MemoryDB(_settings(path, tmp_path))
+    with db.write_transaction() as conn:
+        conn.execute("ALTER TABLE workspace_aliases RENAME TO workspace_aliases_new")
+        conn.execute(
+            "CREATE TABLE workspace_aliases(alias_workspace TEXT NOT NULL UNIQUE, canonical TEXT NOT NULL, relation TEXT NOT NULL, status TEXT NOT NULL, source TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO workspace_aliases VALUES('raw','candidate-a','alias','rejected','user','2026-08-20T00:00:00Z')"
+        )
+        conn.execute("DROP TABLE workspace_aliases_new")
+    reopened = MemoryDB(_settings(path, tmp_path))
+    assert reopened.upsert_workspace_alias("raw", "candidate-b", status="rejected")[0]
+    with reopened.connection() as conn:
+        rows = conn.execute(
+            "SELECT canonical FROM workspace_aliases WHERE alias_workspace='raw' ORDER BY canonical"
+        ).fetchall()
+        pk = [row["name"] for row in conn.execute("PRAGMA table_info(workspace_aliases)") if row["pk"]]
+    assert [row["canonical"] for row in rows] == ["candidate-a", "candidate-b"]
+    assert pk == ["alias_workspace", "canonical"]
+
+
+def test_scan_gate_requires_matching_epoch_detector_boundary_and_live_set(tmp_path: Path) -> None:
+    path = tmp_path / "db.sqlite3"
+    settings = _settings(path, tmp_path)
+    db = MemoryDB(settings)
+    memory_id, _ = db.insert_memory(_memory(settings.defaults()), "project")
+    assert memory_id is not None
+    state = _mark_conflict_rebuild_ready(db)
+    visible = db.conflict_scan_state()
+    assert visible["required"] is True
+    assert visible["detector_version"] == CONFLICT_DETECTOR_VERSION
+
+    # Completion is not a caller assertion: without persisted pages it fails,
+    # even when epoch/detector/boundary are otherwise correct.
+    assert db.complete_conflict_scan(
+        epoch=state["conflict_scan_epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=visible["boundary"],
+    ) is False
+    assert db.complete_conflict_scan(
+        epoch="wrong", detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=visible["boundary"],
+    ) is False
+    assert db.complete_conflict_scan(
+        epoch=state["conflict_scan_epoch"], detector_version="old-detector",
+        boundary=visible["boundary"],
+    ) is False
+
+    with db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET status='superseded' WHERE id=?", (memory_id,))
+    assert db.complete_conflict_scan(
+        epoch=state["conflict_scan_epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=visible["boundary"],
+    ) is False
+
+    with db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET status='active' WHERE id=?", (memory_id,))
+    assert db.record_conflict_scan_page(
+        epoch=state["conflict_scan_epoch"],
+        detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=visible["boundary"],
+        after_memory_id=0,
+        next_anchor_memory_id=None,
+        anchors_scanned=1,
+        workspace=None,
+    ) is True
+    assert db.complete_conflict_scan(
+        epoch=state["conflict_scan_epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=visible["boundary"],
+    ) is True
+    assert db.conflict_scan_state()["required"] is False
+    assert db.complete_conflict_scan(
+        epoch=state["conflict_scan_epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=visible["boundary"],
+    ) is False
+
+
+def test_scan_candidates_pages_persist_progress_and_clear_gate(tmp_path: Path) -> None:
+    path = tmp_path / "db.sqlite3"
+    settings = _settings(path, tmp_path)
+    db = MemoryDB(settings)
+    for index in range(3):
+        memory_id, _ = db.insert_memory(
+            MemoryRecord.from_input(
+                {"content": f"配置值为 {index}。", "subject": "配置", "workspace": "project"},
+                settings.defaults(),
+            ),
+            "project",
+        )
+        assert memory_id is not None
+    _mark_conflict_rebuild_ready(db)
+    tools = MemoryTools(settings=settings, db=db)
+    # The scan path is exercised without requiring sqlite-vec in this gate test.
+    tools.db.state.sqlite_vec_available = True
+    tools.db.scan_rule_candidates = lambda **kwargs: {
+        "anchors_scanned": min(2, 3 - int(kwargs["after_memory_id"])),
+        "next_anchor_memory_id": 2 if int(kwargs["after_memory_id"]) == 0 else None,
+        "candidates": [],
+        "counts": {},
+    }
+
+    first = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 2})
+    assert first["data"]["conflict_scan_progress"]["complete"] is False
+    assert db.conflict_scan_state()["required"] is True
+    # Skipping the persisted cursor is rejected and cannot clear the gate.
+    skipped = tools.memory_repair("scan_candidates", {"anchor_memory_id": 1, "batch": 2})
+    assert skipped["data"]["conflict_scan_progress_rejected"] is True
+    assert db.conflict_scan_state()["required"] is True
+
+    final = tools.memory_repair("scan_candidates", {"anchor_memory_id": 2, "batch": 2})
+    assert final["data"]["conflict_scan_completed"] is True
+    assert db.conflict_scan_state()["required"] is False
+
+
+def test_previous_generation_is_refused_until_destructive_upgrade(tmp_path: Path) -> None:
+    path = tmp_path / "previous.sqlite3"
+    db = MemoryDB(_settings(path, tmp_path))
+    with db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE migration_state SET value='local_text_evidence_v1' WHERE key='schema_generation'"
+        )
+    assert CURRENT_SCHEMA_GENERATION != "local_text_evidence_v1"
+    assert detect_database_generation(path) == "legacy"
+
+
+def test_generation_switch_marker_is_atomic_with_scan_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "db.sqlite3"
+    db = MemoryDB(_settings(path, tmp_path))
+    _mark_conflict_rebuild_ready(db)
+    with sqlite3.connect(path) as conn:
+        state = dict(conn.execute("SELECT key,value FROM migration_state"))
+    assert state["schema_generation"] == CURRENT_SCHEMA_GENERATION
+    assert state["conflict_scan_required"] == "true"
+    assert state["conflict_scan_detector_version"] == CONFLICT_DETECTOR_VERSION
+    boundary = json.loads(state["conflict_scan_boundary"])
+    assert boundary["active_count"] == 0
+    assert boundary["max_memory_id"] == 0
+    assert len(boundary["active_set_digest"]) == 64
+
+
+def test_status_and_doctor_expose_pending_rebuild_scan(tmp_path: Path) -> None:
+    path = tmp_path / "db.sqlite3"
+    settings = _settings(path, tmp_path)
+    db = MemoryDB(settings)
+    _mark_conflict_rebuild_ready(db)
+    tools = MemoryTools(settings=settings, db=db)
+    status = tools.memory_status()["data"]
+    assert status["conflict_scan_required"] is True
+    assert status["conflict_scan"]["detector_version"] == CONFLICT_DETECTOR_VERSION
+    findings = tools.memory_doctor_overview()["data"]["findings"]
+    scan = next(item for item in findings if item["check_id"] == "conflicts.scan_required")
+    assert scan["status"] == "warn"

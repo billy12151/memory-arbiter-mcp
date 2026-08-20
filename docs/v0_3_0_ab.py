@@ -4,14 +4,19 @@ Runs the 15 baseline queries from id=41 against the real memory DB under both
 RANKING_MODE=bm25 and RANKING_MODE=hybrid, and prints a side-by-side comparison
 plus Top-1 / Top-3 / pairwise pass-rate statistics.
 
-This is NOT a pytest test — it's a standalone evaluation script. Run with:
-    python docs/v0_3_0_ab.py
+This is NOT a pytest test — it's a standalone historical evaluation script.
+It opens the database through MemoryDB, so use a disposable copy: runtime schema
+initialization/migrations may write. An explicit path is mandatory, preventing a
+silent fallback to a developer's real default database:
+    python docs/v0_3_0_ab.py --db /path/to/evaluation-copy.sqlite3
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -139,11 +144,26 @@ GOLDEN_QUERIES = [
 ]
 
 
-def run_eval(ranking_mode: str) -> dict:
+def _require_database(path: Path) -> Path:
+    """Validate an explicit existing SQLite file without creating it."""
+    resolved = path.expanduser().resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError(f"database path is not a file: {resolved}")
+    # Probe read-only first. MemoryDB is used only after we know the path exists;
+    # this prevents sqlite3 from creating a typo path as an empty database.
+    uri = f"file:{resolved.as_posix()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+    return resolved
+
+
+def run_eval(ranking_mode: str, db_path: Path) -> dict:
     """Run all golden queries under the given RANKING_MODE, return stats."""
     os.environ["MEMORY_ARBITER_RANKING_MODE"] = ranking_mode
-    db_path = "/Users/zhangzhiwei17/.local/share/memory-arbiter/memory.sqlite3"
-    settings = Settings(db_path=Path(db_path), backup_jsonl=Path("/tmp/_unused.jsonl"))
+    settings = Settings(
+        db_path=db_path,
+        backup_jsonl=db_path.with_name("_v0_3_0_ab_unused.backup.jsonl"),
+    )
     db = MemoryDB(settings)
 
     results = []
@@ -223,13 +243,29 @@ def run_eval(ranking_mode: str) -> dict:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run the historical v0.3.0 ranking A/B evaluation on an explicit disposable database copy."
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="Explicit path to an existing evaluation SQLite database (use a copy).",
+    )
+    args = parser.parse_args()
+    try:
+        db_path = _require_database(args.db)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        parser.error(str(exc))
+
     print("=" * 80)
     print("memory-arbiter v0.3.0 A/B Evaluation: bm25 (v0.2.6) vs hybrid (v0.3.0)")
+    print(f"Database (explicit; prefer a disposable copy): {db_path}")
     print("=" * 80)
     print()
 
-    bm25_eval = run_eval("bm25")
-    hybrid_eval = run_eval("hybrid")
+    bm25_eval = run_eval("bm25", db_path)
+    hybrid_eval = run_eval("hybrid", db_path)
 
     # Side-by-side summary
     print("=== Aggregate Stats ===")

@@ -113,6 +113,75 @@ class WorkspaceStore:
                 f"workspace canonical vector publish failed for {canonical!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
             )
 
+    def prepare_missing_workspace_canonical_embedding(
+        self,
+        canonical: str,
+        embedder: Any = None,
+    ) -> Optional[list[float]]:
+        """Embed canonical text only when its derived vector is missing.
+
+        Both the existence probe and model call happen before the authoritative
+        memory write transaction. A concurrent publisher is harmless because the
+        post-commit publication uses INSERT OR IGNORE.
+        """
+        canonical = _coerce_ws(canonical)
+        if not (
+            canonical
+            and embedder is not None
+            and self.state.sqlite_writable
+            and self.state.sqlite_vec_available
+        ):
+            return None
+        try:
+            with self.connection() as conn:
+                row = conn.execute(
+                    "SELECT v.id AS vector_id FROM workspace_canonicals c "
+                    "LEFT JOIN workspace_canonicals_vec v ON v.id = c.id "
+                    "WHERE c.name = ?",
+                    (canonical,),
+                ).fetchone()
+            if row is not None and row["vector_id"] is not None:
+                return None
+        except sqlite3.Error:
+            return None
+        try:
+            er = embedder.embed_text(prefix="", body=canonical)
+            return list(er.embedding) if er and er.embedding else None
+        except Exception:
+            return None
+
+    def publish_workspace_canonical_vector(
+        self,
+        canonical: str,
+        embedding: Optional[list[float]],
+    ) -> list[str]:
+        """Publish a prepared canonical vector after the canonical write commits.
+
+        Canonical registration and the memory row are the authoritative atomic
+        transaction. The vector is a derived index: a failure here must leave
+        that committed write successful and return an actionable warning.
+        """
+        if not embedding or not self.state.sqlite_vec_available:
+            return []
+        try:
+            with self.write_transaction() as conn:
+                row = conn.execute(
+                    "SELECT id FROM workspace_canonicals WHERE name = ?", (canonical,)
+                ).fetchone()
+                if row is None:
+                    return []
+                conn.execute(
+                    "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
+                    (int(row["id"]), json.dumps(embedding)),
+                )
+            return []
+        except sqlite3.Error as exc:
+            return [
+                f"workspace canonical vector publish failed for {canonical!r}; "
+                "retry a write using this workspace after sqlite-vec and embedding "
+                f"configuration recover: {exc}"
+            ]
+
     def resolve_workspace_canonical(
         self,
         ws_raw: Optional[str],
@@ -150,6 +219,9 @@ class WorkspaceStore:
             "rejected_canonicals": [],
             "warnings": [],
             "vector_publish_pending": False,
+            # Prepared outside the eventual memory write transaction. Callers
+            # may publish it only for the final canonical selected by policy.
+            "candidate_embedding": None,
         }
         if not raw:
             result["canonical"] = "default"
@@ -172,7 +244,8 @@ class WorkspaceStore:
                 try:
                     arow = conn.execute(
                         "SELECT canonical, status FROM workspace_aliases "
-                        "WHERE alias_workspace = ?",
+                        "WHERE alias_workspace = ? "
+                        "ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
                         (alias_key,),
                     ).fetchone()
                 except sqlite3.Error:
@@ -191,9 +264,15 @@ class WorkspaceStore:
                             )
                         return result
                     if str(arow["status"]) == "rejected":
-                        # Do not auto-merge to this canonical; remember it so the
-                        # vector/candidate stages skip the rejected pair.
-                        result["rejected_canonicals"] = [arow["canonical"]]
+                        # Rejections accumulate per (raw, canonical).  Confirmed
+                        # aliases have singular precedence above; absent one, skip
+                        # every explicitly rejected target during candidate ranking.
+                        rejected_rows = conn.execute(
+                            "SELECT canonical FROM workspace_aliases "
+                            "WHERE alias_workspace=? AND status='rejected'",
+                            (alias_key,),
+                        ).fetchall()
+                        result["rejected_canonicals"] = [row["canonical"] for row in rejected_rows]
 
                 # 1. Exact canonical hit.
                 exact = conn.execute(
@@ -236,6 +315,7 @@ class WorkspaceStore:
                     except Exception:
                         embedding = None
                 if embedding:
+                    result["candidate_embedding"] = embedding
                     try:
                         query_json = json.dumps(embedding)
                         # Full-scan cosine (not MATCH/L2): the canonical table is
@@ -333,30 +413,39 @@ class WorkspaceStore:
         if status not in {"confirmed", "rejected"}:
             return False, [f"status={status!r} invalid; expected confirmed|rejected."]
         now = utc_now_iso()
-        prev = conn.execute(
-            "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
+        pair = conn.execute(
+            "SELECT canonical, status FROM workspace_aliases "
+            "WHERE alias_workspace=? AND canonical=?",
+            (alias_key, canonical),
+        ).fetchone()
+        confirmed = conn.execute(
+            "SELECT canonical, status FROM workspace_aliases "
+            "WHERE alias_workspace=? AND status='confirmed' LIMIT 1",
             (alias_key,),
         ).fetchone()
+        prev = confirmed or pair
         old_canonical = prev["canonical"] if prev else None
         old_status = prev["status"] if prev else None
-        # Guard: do not silently reverse a user rejection.
-        if (
-            prev is not None
-            and old_status == "rejected"
-            and status == "confirmed"
-            and not force
-        ):
+        # Guard only the exact rejected pair. Other rejected targets are retained
+        # as independent negative decisions and do not block a singular confirm.
+        if pair is not None and pair["status"] == "rejected" and status == "confirmed" and not force:
             return False, [
                 f"workspace {alias_key!r} was explicitly rejected as an alias of "
-                f"{old_canonical!r}; refusing to confirm it silently. Pass an "
+                f"{canonical!r}; refusing to confirm it silently. Pass an "
                 "authorized override to change this decision."
             ]
+        if status == "confirmed":
+            # At most one positive mapping per raw alias. Rejected pairs remain so
+            # governance history continues to suppress those alternatives.
+            conn.execute(
+                "DELETE FROM workspace_aliases WHERE alias_workspace=? AND status='confirmed' AND canonical<>?",
+                (alias_key, canonical),
+            )
         conn.execute(
             """INSERT INTO workspace_aliases
                  (alias_workspace, canonical, relation, status, source, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(alias_workspace) DO UPDATE SET
-                 canonical=excluded.canonical,
+               ON CONFLICT(alias_workspace,canonical) DO UPDATE SET
                  relation=excluded.relation,
                  status=excluded.status,
                  source=excluded.source,
@@ -459,7 +548,8 @@ class WorkspaceStore:
             with self.connection() as conn:
                 row = conn.execute(
                     "SELECT alias_workspace, canonical, relation, status, source, updated_at "
-                    "FROM workspace_aliases WHERE alias_workspace = ?",
+                    "FROM workspace_aliases WHERE alias_workspace = ? "
+                    "ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
                     (alias_key,),
                 ).fetchone()
                 return dict(row) if row else None
@@ -669,7 +759,8 @@ class WorkspaceStore:
                 #     so the rejection guard reasons about real prior state, not
                 #     a row a later blanket repoint has already mutated.
                 fwd_prev = conn.execute(
-                    "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ?",
+                    "SELECT canonical, status FROM workspace_aliases WHERE alias_workspace = ? "
+                    "ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
                     (alias_key,),
                 ).fetchone()
                 fwd_prev_canonical = fwd_prev["canonical"] if fwd_prev else None
@@ -754,10 +845,9 @@ class WorkspaceStore:
                         """INSERT INTO workspace_aliases
                              (alias_workspace, canonical, relation, status, source, updated_at)
                            VALUES (?, ?, 'alias', 'confirmed', 'user', ?)
-                           ON CONFLICT(alias_workspace) DO UPDATE SET
-                             canonical=excluded.canonical, relation=excluded.relation,
-                             status=excluded.status, source=excluded.source,
-                             updated_at=excluded.updated_at""",
+                           ON CONFLICT(alias_workspace,canonical) DO UPDATE SET
+                             relation=excluded.relation, status=excluded.status,
+                             source=excluded.source, updated_at=excluded.updated_at""",
                         (alias_key, to_ws, now),
                     )
                     conn.execute(

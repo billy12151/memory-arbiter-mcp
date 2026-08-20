@@ -57,11 +57,17 @@ def test_config_template_has_required_fields():
         db_path=Path("/tmp/db.sqlite3"),
         backup_jsonl=Path("/tmp/bak.jsonl"),
     )
+    assert cfg["tool_profile"] == "product"
+    assert cfg["isolation"] == "none"
+    assert cfg["workspace_match_distance"] == 0.25
     assert cfg["vec"] == {"enabled": True, "dim": 768}
     assert cfg["embedding"]["provider"] == "gguf"
     assert cfg["embedding"]["auto_query"] is True
     assert cfg["embedding"]["auto_write"] is True
+    assert cfg["embedding"]["n_ctx"] == 2048
+    assert cfg["embedding"]["reserved_tokens"] == 64
     assert cfg["embedding"]["max_unit_chars"] == 3600
+    assert cfg["update_check"] == {"enabled": True}
     # Paths must be absolute strings (no ~ left over).
     assert cfg["embedding"]["model_path"] == "/tmp/model.gguf"
     assert cfg["db_path"] == "/tmp/db.sqlite3"

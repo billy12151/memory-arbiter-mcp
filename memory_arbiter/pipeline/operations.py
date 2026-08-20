@@ -2,6 +2,7 @@
 # mypy: disable-error-code=no-any-return
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -10,9 +11,9 @@ from typing import Any, Optional, TYPE_CHECKING
 from .. import __version__
 from ..acl import forbidden_payload, raw_workspace
 from ..arbitration import compare_memories
-from ..conflict_judgments import ConflictJudgmentStore
 from ..db import MemoryDB
 from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
+from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
 
 if TYPE_CHECKING:
@@ -52,9 +53,7 @@ class OperationsPipeline:
             return self.db.state.response(missing_data, ok=False, extra_warnings=list(caller.warnings))
         comparison = self._compare_memories(left, right)
         conflict_id = None
-        if mark_conflict:
-            reason = "; ".join(comparison["reasons"])
-            conflict_id = self.db.record_conflict(int(left_id), int(right_id), left.get("subject") or right.get("subject"), reason, comparison["winner_id"])
+        conflict_recording = "requires_structured_group" if mark_conflict else "not_requested"
         applied = False
         resolved = 0
         if authorized and comparison["winner_id"] and comparison["loser_id"] and not comparison["manual_review"]:
@@ -70,34 +69,29 @@ class OperationsPipeline:
                 except sqlite3.Error:
                     applied = False
                     resolved = 0
-        result_data = {"comparison": comparison, "conflict_id": conflict_id, "applied": applied, "linked_conflicts_resolved": resolved}
+        result_data = {"comparison": comparison, "conflict_id": conflict_id, "conflict_recording": conflict_recording, "applied": applied, "linked_conflicts_resolved": resolved}
         if caller.isolation == "strict":
             result_data.update(caller.response_fields())
         return self.db.state.response(result_data, extra_warnings=list(caller.warnings))
 
-    def _with_resolution_guidance(self, conflict: dict[str, Any]) -> dict[str, Any]:
-        resolution_kind = conflict.get("resolution_kind") or conflict.get("judgment_resolution_kind")
-        conflict_scope = conflict.get("conflict_scope") or conflict.get("judgment_conflict_scope")
+    @staticmethod
+    def _with_resolution_guidance(conflict: dict[str, Any]) -> dict[str, Any]:
         enriched = dict(conflict)
-        enriched["resolution_kind"] = resolution_kind
-        enriched["conflict_scope"] = conflict_scope
-        enriched["recommended_resolution_action"] = ConflictJudgmentStore.resolution_action(resolution_kind)
-        enriched["supersede_candidate"] = ConflictJudgmentStore.is_supersede_candidate(resolution_kind)
-        if conflict.get("active_judgment_id") is not None:
-            enriched["active_judgment"] = {
-                "id": conflict.get("active_judgment_id"),
-                "verdict": conflict.get("judgment_verdict"),
-                "recommended_use": conflict.get("judgment_recommended_use"),
-                "suggested_winner": conflict.get("judgment_suggested_winner"),
-                "confidence_hint": conflict.get("judgment_confidence_hint"),
-                "reason": conflict.get("judgment_reason"),
-                "resolution_kind": resolution_kind,
-                "conflict_scope": conflict_scope,
-                "recommended_resolution_action": enriched["recommended_resolution_action"],
-                "supersede_candidate": enriched["supersede_candidate"],
-                "judge_type": conflict.get("judgment_judge_type"),
-                "judge_ref": conflict.get("judgment_judge_ref"),
-                "judged_at": conflict.get("judged_at"),
+        plan = (enriched.get("apply_summary") or {}).get("plan", [])
+        pending = next((item for item in plan if item.get("status") == "pending"), None)
+        if pending is not None:
+            enriched["next_action"] = {
+                "tool": "memory_govern", "action": "apply_conflict_action",
+                "data": {
+                    "conflict_id": enriched.get("id"), "expected_revision": enriched.get("revision"),
+                    "memory_id": pending.get("memory_id"), "action": pending.get("action"),
+                    "authorized": True,
+                },
+            }
+        elif enriched.get("status") == "applying":
+            enriched["next_action"] = {
+                "tool": "memory_govern", "action": "resolve_conflict",
+                "data": {"conflict_id": enriched.get("id"), "expected_revision": enriched.get("revision"), "authorized": True},
             }
         return enriched
 
@@ -124,84 +118,157 @@ class OperationsPipeline:
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
-    def memory_record_conflict(
-        self,
-        left_id: int,
-        right_id: int,
-        reason: str,
-        conflict_type: Optional[str] = None,
-        conflict_point: Optional[str] = None,
-        suggested_winner: Optional[int] = None,
-        confidence_hint: Optional[str] = None,
-        source: Optional[str] = None,
-        refresh: bool = False,
-        left_version: Optional[int] = None,
-        right_version: Optional[int] = None,
-        scan_prompt_version: Optional[str] = None,
-        scan_model: Optional[str] = None,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Persist an explicitly reviewed formal conflict with version pins."""
-        left_version = left_version or self.db.get_memory_version(int(left_id))
-        right_version = right_version or self.db.get_memory_version(int(right_id))
-        if left_version is None or right_version is None:
-            return self.db.state.response(
-                {"outcome": "memory_not_found", "error": "both conflict memories must exist"},
-                ok=False,
-            )
-        result = self.db.record_conflict_enriched(
-            int(left_id), int(right_id),
-            conflict_type=conflict_type,
-            conflict_point=conflict_point,
-            reason=reason,
-            suggested_winner=int(suggested_winner) if suggested_winner is not None else None,
-            confidence_hint=confidence_hint,
-            source=source,
-            refresh=refresh,
-            left_version=int(left_version),
-            right_version=int(right_version),
-            scan_prompt_version=scan_prompt_version,
-            scan_model=scan_model,
-        )
-        return self.db.state.response(result)
-
     def memory_resolve_conflict(
-        self,
-        conflict_id: int,
-        reason: str = "",
-        status: str = "resolved",
-        **_: Any,
+        self, conflict_id: int, expected_revision: int, reason: str = "", **_: Any,
     ) -> dict[str, Any]:
-        """v0.7.5 (id=243): close a single open conflict by id (dismiss).
-
-        ``status``: ``'resolved'`` (default; arbitrated, has winner) or
-        ``'not_a_conflict'`` (v0.8.8; pair judged NOT a real conflict — advisory
-        dismissal; write/search then skip it via Layer 0 until a version change
-        invalidates it). Use ``'not_a_conflict'`` when the user confirms an
-        advisory/duplicate hint was a false positive.
-
-        Unlike ``memory_supersede`` (which resolves all conflicts touching a
-        memory via ``resolve_conflicts_for``), this targets exactly one
-        conflict row — used to dismiss a false positive without touching
-        either memory.
-        """
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
-        if caller.isolation == "strict":
-            detail = self._conflict_detail_for_workspace(int(conflict_id), caller)
-            if detail is None:
-                return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
-            if not (detail.get("left", {}).get("visible") and detail.get("right", {}).get("visible")):
-                return self.db.state.response(
-                    forbidden_payload("conflict", workspace=caller, reason="partial_conflict_governance_not_supported"),
-                    ok=False,
-                    extra_warnings=list(caller.warnings),
+        conflict = self.db.get_conflict(int(conflict_id))
+        if conflict is None or (caller.isolation == "strict" and conflict.get("workspace_canonical") != caller.canonical):
+            return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
+        result = self.db.conflicts.resolve_conflict(
+            int(conflict_id), reason=reason, expected_revision=int(expected_revision),
+            strict_workspace=caller.canonical if caller.isolation == "strict" else None,
+        )
+        return self.db.state.response(
+            result, ok=result.get("outcome") == "resolved", extra_warnings=list(caller.warnings),
+        )
+
+    def memory_apply_conflict_action(
+        self, conflict_id: int, expected_revision: int, memory_id: int, action: str,
+        content: Optional[str] = None, old_text: Optional[str] = None,
+        new_text: Optional[str] = None, reason: str = "", authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Apply one planned member action and update its result in one write transaction."""
+        if not self._is_truthy(authorized):
+            return self.db.state.response({"error": "authorized=True is required"}, ok=False)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        try:
+            conflict_id_int, revision, target_id = int(conflict_id), int(expected_revision), int(memory_id)
+        except (TypeError, ValueError):
+            return self.db.state.response({"error": "conflict_id, expected_revision, and memory_id must be integers"}, ok=False)
+        try:
+            with self.db.write_transaction() as conn:
+                row = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id_int,)).fetchone()
+                if row is None:
+                    raise ValueError("not_found")
+                conflict = dict(row)
+                for json_field in ("slot_key", "candidate_key", "member_versions", "value_groups", "apply_summary"):
+                    if isinstance(conflict.get(json_field), str):
+                        conflict[json_field] = json.loads(conflict[json_field])
+                if conflict.get("status") != "applying":
+                    raise ValueError("not_applying")
+                if int(conflict.get("revision") or 0) != revision:
+                    raise ValueError(f"stale_conflict:{conflict.get('revision')}")
+                if caller.isolation == "strict" and not self.db.conflicts._active_members_match_workspace(
+                    conn, conflict, caller.canonical,
+                ):
+                    raise PermissionError("forbidden")
+                plan = (conflict.get("apply_summary") or {}).get("plan", [])
+                step = next((item for item in plan if int(item.get("memory_id") or 0) == target_id), None)
+                if step is None or step.get("action") != action or step.get("status") != "pending":
+                    raise ValueError("invalid_action")
+                current = self.db.get_memory_on_conn(conn, target_id)
+                if current is None or int(current.get("version") or 0) != int(step.get("expected_version") or 0):
+                    raise ValueError("stale_member")
+                if action in {"preserve_historical_record", "use_as_resolution"}:
+                    edited = {"outcome": "no_change", "record": current}
+                elif action == "needs_authorization":
+                    raise ValueError("needs_authorization_replan")
+                else:
+                    edited = self.db.edit_memory_intent(
+                        target_id, new_content=content, old_text=old_text, new_text=new_text,
+                        reason=reason or f"Apply conflict #{conflict_id_int}: {action}",
+                        authorized=True, expected_version=int(step["expected_version"]), conn=conn,
+                    )
+                    if edited.get("outcome") != "edited":
+                        raise ValueError(str(edited.get("outcome") or "edit_failed"))
+                updated = edited.get("record") or current
+                chosen = str(conflict.get("chosen_value") or "")
+                updated_content = str(updated.get("content") or "")
+                if action in {"update_current_claim", "use_as_resolution"} and not value_is_grounded(
+                    chosen, updated_content
+                ):
+                    # The memory edit (if any) and failure bookkeeping must commit
+                    # together: applying remains retryable/replannable and history
+                    # accurately records that this attempt did not establish the
+                    # chosen value.
+                    step.update(status="failed", result_version=int(updated.get("version") or 0),
+                                result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
+                                error="chosen_value_not_grounded")
+                else:
+                    step.update(status="completed", result_version=int(updated.get("version") or step["expected_version"]),
+                                result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(), error=None)
+                result_version = int(updated.get("version") or step["expected_version"])
+                result_hash = hashlib.sha256(updated_content.encode("utf-8")).hexdigest()
+                cur = conn.execute(
+                    "UPDATE conflicts SET revision=revision+1,apply_summary=?,refreshed_at=? WHERE id=? AND status='applying' AND revision=?",
+                    (json.dumps({"plan": plan}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), conflict_id_int, revision),
                 )
-        result = self.db.resolve_conflict(int(conflict_id), reason=reason, status=status)
-        ok = result.get("outcome") in {"resolved", "not_a_conflict"}
-        return self.db.state.response(result, ok=ok, extra_warnings=list(caller.warnings))
+                if cur.rowcount != 1:
+                    raise ValueError("stale_conflict")
+        except PermissionError:
+            return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
+        except ValueError as exc:
+            error_code, _separator, current_revision = str(exc).partition(":")
+            data: dict[str, Any] = {"outcome": error_code, "error": error_code}
+            if current_revision:
+                data["revision"] = int(current_revision)
+            return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
+        successful = step.get("status") == "completed"
+        result = {"outcome": "completed" if successful else "apply_failed", "conflict_id": conflict_id_int, "revision": revision + 1, "memory_id": target_id, "action": action, "apply_summary": {"plan": plan}}
+        if successful and action not in {"preserve_historical_record", "use_as_resolution"}:
+            # Post-commit only: index the committed result, then let the normal
+            # semantic worker re-enter. Its task remains allowed to discover
+            # unrelated facts; conflict-plan trust is not exposed to callers as
+            # a general suppression switch.
+            result["evidence_index"], result["semantic_conflict_check"] = self._enqueue_content_postcommit(
+                target_id, self.db.get_memory(target_id),
+                trusted_applying_context={
+                    "conflict_id": conflict_id_int, "revision": revision + 1,
+                    "memory_id": target_id, "action": action,
+                    "chosen_value": conflict.get("chosen_value"),
+                },
+            )
+        next_step = next((item for item in plan if item.get("status") == "pending"), None)
+        if successful:
+            result["next_action"] = ({"tool": "memory_govern", "action": "apply_conflict_action", "data": {"conflict_id": conflict_id_int, "expected_revision": revision + 1, "memory_id": next_step["memory_id"], "action": next_step["action"], "authorized": True}} if next_step else {"tool": "memory_govern", "action": "resolve_conflict", "data": {"conflict_id": conflict_id_int, "expected_revision": revision + 1, "authorized": True}})
+        else:
+            result["action_required"] = "replan_conflict"
+            result["replan"] = {"tool": "memory_govern", "action": "replan_conflict", "data": {"conflict_id": conflict_id_int, "expected_revision": revision + 1, "authorized": True}}
+        return self.db.state.response(result, ok=successful, extra_warnings=list(caller.warnings))
+
+    def memory_replan_conflict(
+        self, conflict_id: int, expected_revision: int, apply_plan: list[dict[str, Any]],
+        resolution_memory_id: Optional[int] = None, authorized: bool = False, **_: Any,
+    ) -> dict[str, Any]:
+        if not self._is_truthy(authorized):
+            return self.db.state.response({"error": "authorized=True is required"}, ok=False)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        conflict = self.db.get_conflict(int(conflict_id))
+        if conflict is None or (
+            caller.isolation == "strict" and conflict.get("workspace_canonical") != caller.canonical
+        ):
+            return self.db.state.response(
+                forbidden_payload("conflict", workspace=caller), ok=False,
+                extra_warnings=list(caller.warnings),
+            )
+        result = self.db.conflicts.replan_conflict(
+            int(conflict_id), expected_revision=int(expected_revision), apply_plan=apply_plan,
+            resolution_memory_id=resolution_memory_id,
+            strict_workspace=caller.canonical if caller.isolation == "strict" else None,
+        )
+        return self.db.state.response(result, ok=result.get("outcome") == "replanned", extra_warnings=list(caller.warnings))
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
         authorized = self._is_truthy(authorized)
@@ -535,7 +602,6 @@ class OperationsPipeline:
                 extra_warnings=list(caller.warnings),
             )
         resolved = 0
-        conflict_id: Optional[int] = None
         updated: Optional[dict[str, Any]] = None
         try:
             with self.db.write_transaction() as conn:
@@ -560,18 +626,6 @@ class OperationsPipeline:
                 if not status_updated:
                     raise ValueError("failed to update memory status")
                 resolved = self.db.resolve_conflicts_for_on_conn(conn, int(memory_id))
-                audit_reason = f"USER-AUTHORIZED SUPERSEDE: {reason}"
-                conflict_id = self.db.record_conflict_on_conn(
-                    conn,
-                    int(memory_id),
-                    int(superseded_by) if superseded_by is not None else int(memory_id),
-                    memory.get("subject"),
-                    audit_reason,
-                    int(superseded_by) if superseded_by is not None else None,
-                    status="resolved",
-                )
-                if conflict_id is None:
-                    raise sqlite3.Error("failed to append supersede audit conflict")
                 updated = self.db.get_memory_on_conn(conn, int(memory_id))
         except ValueError as exc:
             return self.db.state.response({"error": str(exc), "superseded": False}, ok=False)
@@ -597,7 +651,6 @@ class OperationsPipeline:
             "superseded": True,
             "memory_id": int(memory_id),
             "linked_conflicts_resolved": resolved,
-            "conflict_id": conflict_id,
             "record": updated,
         }
         if caller.isolation == "strict":
@@ -622,6 +675,7 @@ class OperationsPipeline:
             evidence_status["migration"] = {str(row["key"]): str(row["value"]) for row in rows}
         except Exception as exc:
             evidence_status["error"] = str(exc)
+        conflict_scan = self.db.conflict_scan_state()
         return self.db.state.response(
             {
                 "arbiter_version": __version__,
@@ -639,6 +693,8 @@ class OperationsPipeline:
                 "embedding_auto_query": self.settings.embedding_auto_query,
                 "embedding_auto_write": self.settings.embedding_auto_write,
                 "local_text_evidence": evidence_status,
+                "conflict_scan": conflict_scan,
+                "conflict_scan_required": conflict_scan["required"],
                 "local_text_index_worker": self._evidence_worker.status(),
                 "isolation": self.settings.isolation,
                 "tool_surface": {
@@ -887,141 +943,42 @@ class OperationsPipeline:
             extra_warnings=list(caller.warnings),
         )
 
-    def memory_submit_conflict_judgment(
-        self,
-        conflict_id: int,
-        expected_left_version: int,
-        expected_right_version: int,
-        verdict: str,
-        recommended_use: str,
-        suggested_winner: Optional[int],
-        confidence_hint: Optional[str],
-        reason: str,
-        affects_current_output: bool,
-        usage_context: str,
-        judge_ref: Optional[str] = None,
-        resolution_kind: Optional[str] = None,
-        conflict_scope: Optional[str] = None,
-        **_: Any,
+    def memory_judge_conflict(
+        self, conflict_id: int, expected_revision: int, chosen_value: str,
+        decided_by: str, ref: Optional[str], reason: str,
+        apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int], **_: Any,
     ) -> dict[str, Any]:
         try:
             conflict_id_int = int(conflict_id)
-            left_version = int(expected_left_version)
-            right_version = int(expected_right_version)
-            winner = int(suggested_winner) if suggested_winner is not None else None
+            revision = int(expected_revision)
+            resolution_id = int(resolution_memory_id) if resolution_memory_id is not None else None
         except (TypeError, ValueError):
-            return self.db.state.response(
-                {"error": "conflict id, snapshot pins, and winner must be integers"}, ok=False,
-            )
+            return self.db.state.response({"error": "conflict_id, expected_revision, and resolution_memory_id must be integers"}, ok=False)
+        if not isinstance(apply_plan, list):
+            return self.db.state.response({"error": "apply_plan must be an array"}, ok=False)
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
-        if caller.isolation == "strict":
-            detail = self._conflict_detail_for_workspace(conflict_id_int, caller)
-            if detail is None:
-                return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
-            if not (detail.get("left", {}).get("visible") and detail.get("right", {}).get("visible")):
-                return self.db.state.response(
-                    forbidden_payload("conflict", workspace=caller, reason="partial_conflict_governance_not_supported"),
-                    ok=False,
-                    extra_warnings=list(caller.warnings),
-                )
-        request_before = self.db.judgments.build_conflict_judgment_request(conflict_id_int)
-        result = self.db.judgments.submit_conflict_judgment(
-            conflict_id_int, left_version, right_version,
-            verdict, recommended_use, winner,
-            confidence_hint, reason, bool(affects_current_output), usage_context,
-            judge_ref=judge_ref,
-            resolution_kind=resolution_kind,
-            conflict_scope=conflict_scope,
+        conflict = self.db.get_conflict(conflict_id_int)
+        if conflict is None or (caller.isolation == "strict" and conflict.get("workspace_canonical") != caller.canonical):
+            return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
+        result = self.db.judge_conflict(
+            conflict_id_int, expected_revision=revision, chosen_value=str(chosen_value),
+            decided_by=str(decided_by), decided_ref=ref, decision_reason=str(reason),
+            apply_plan=apply_plan, resolution_memory_id=resolution_id,
+            strict_workspace=caller.canonical if caller.isolation == "strict" else None,
         )
-        if result.get("outcome") == "judged":
-            event = "user_escalated" if result.get("user_action_required") else "llm_assessed"
-            ids = []
-            if request_before:
-                ids = [
-                    int(request_before["left"]["id"]),
-                    int(request_before["right"]["id"]),
-                ]
-            self.db.log_attention(trigger="conflict_judgment", source=event, memory_ids=ids)
-        return self.db.state.response(result, ok=result.get("outcome") == "judged")
-
-    def memory_correct_conflict_judgment(
-        self,
-        conflict_id: int,
-        verdict: str,
-        recommended_use: str,
-        suggested_winner: Optional[int],
-        reason: str,
-        expected_judgment_id: int,
-        expected_left_version: int,
-        expected_right_version: int,
-        authorized: bool = False,
-        judge_ref: Optional[str] = None,
-        resolution_kind: Optional[str] = None,
-        conflict_scope: Optional[str] = None,
-        **_: Any,
-    ) -> dict[str, Any]:
-        authorized = self._is_truthy(authorized)
-        if not authorized:
-            return self.db.state.response(
-                {"error": "authorized=True is required for human judgment correction"}, ok=False,
-            )
-        try:
-            conflict_id_int = int(conflict_id)
-            winner = int(suggested_winner) if suggested_winner is not None else None
-            judgment_id = int(expected_judgment_id)
-            left_version = int(expected_left_version)
-            right_version = int(expected_right_version)
-        except (TypeError, ValueError):
-            return self.db.state.response(
-                {"error": "conflict id, judgment id, snapshot pins, and winner must be integers"},
-                ok=False,
-            )
-        caller = self._caller_workspace(_.get("workspace"))
-        denied = self._strict_acl_unavailable(caller)
-        if denied is not None:
-            return denied
-        if caller.isolation == "strict":
-            detail = self._conflict_detail_for_workspace(conflict_id_int, caller)
-            if detail is None:
-                return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
-            if not (detail.get("left", {}).get("visible") and detail.get("right", {}).get("visible")):
-                return self.db.state.response(
-                    forbidden_payload("conflict", workspace=caller, reason="partial_conflict_governance_not_supported"),
-                    ok=False,
-                    extra_warnings=list(caller.warnings),
-                )
-        result = self.db.judgments.correct_conflict_judgment(
-            conflict_id_int, verdict, recommended_use, winner,
-            reason, judgment_id, left_version, right_version,
-            judge_ref=judge_ref,
-            resolution_kind=resolution_kind,
-            conflict_scope=conflict_scope,
-        )
-        return self.db.state.response(result, ok=result.get("outcome") == "corrected")
-
-    def memory_list_conflict_judgments(self, conflict_id: int, **_: Any) -> dict[str, Any]:
-        try:
-            conflict_id_int = int(conflict_id)
-        except (TypeError, ValueError):
-            return self.db.state.response({"error": "conflict_id must be an integer"}, ok=False)
-        caller = self._caller_workspace(_.get("workspace"))
-        denied = self._strict_acl_unavailable(caller)
-        if denied is not None:
-            return denied
-        if caller.isolation == "strict":
-            detail = self._conflict_detail_for_workspace(conflict_id_int, caller)
-            if detail is None:
-                return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
-            rows = detail.get("judgments") or []
-        else:
-            rows = self.db.judgments.list_conflict_judgments(conflict_id_int)
-        data = {"conflict_id": conflict_id_int, "judgments": rows, "count": len(rows)}
-        if caller.isolation == "strict":
-            data.update(caller.response_fields())
-        return self.db.state.response(data, extra_warnings=list(caller.warnings))
+        if result.get("outcome") == "applying":
+            plan = (result.get("apply_summary") or {}).get("plan", [])
+            pending = next((item for item in plan if item.get("status") == "pending"), None)
+            if pending is not None:
+                result["next_action"] = {
+                    "tool": "memory_govern", "action": "apply_conflict_action",
+                    "data": {"conflict_id": conflict_id_int, "expected_revision": result["revision"],
+                             "memory_id": pending["memory_id"], "action": pending["action"], "authorized": True},
+                }
+        return self.db.state.response(result, ok=result.get("outcome") == "applying", extra_warnings=list(caller.warnings))
 
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
         caller = self._caller_workspace(_.get("workspace"))
@@ -1214,7 +1171,9 @@ class OperationsPipeline:
             "record": updated,
         }
         data["record"] = self.db.get_memory(memory_id_int)
-        data["evidence_index"] = self._enqueue_local_text_index(memory_id_int, data["record"])
+        data["evidence_index"], data["semantic_conflict_check"] = (
+            self._enqueue_content_postcommit(memory_id_int, data["record"])
+        )
         return self.db.state.response(data)
 
     def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:

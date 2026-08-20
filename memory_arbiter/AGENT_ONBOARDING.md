@@ -19,29 +19,51 @@ user explicitly authorizes that specific state-changing action. Never infer
 authorized=true from earlier preferences.
 
 Memory Arbiter indexes local-text evidence from subjects, headings, and nearby
-sentences. Conflict candidates route as notify, check, or ignore. Notify remains
-visible without Qwen. Check requires Qwen and becomes ignore when Qwen is not
-available. Qwen is only a filter; it never edits memory or confirms a conflict.
+sentences. Scheduled conflict scan is broad and keeps deterministic candidates
+when Qwen is missing or uncertain. A write-time notice is strict: Qwen must
+extract attribute_a/value_a/attribute_b/value_b in both directions with
+consistent side mapping, grounded values, complete entity/scope, and no
+coexistence veto. Qwen never chooses a winner or edits memory.
 
-A successful product response may include one advisory notice stub. Read the
-notice, then execute both returned memory read calls. Only after reading both
-complete memories should you tell the user that the candidate appears credible.
-Dismiss false positives and resolve credible notices only after handling them.
-A notice has no formal conflict_id: never pass it to judge or resolve_conflict.
-To turn a verified contradiction into a governance record, escalate the notice
-(memory_repair task="notice" action="escalate"); that creates the formal
-conflict and resolves the notice in one step.
+A formal conflict is one one-to-many row with status open, applying, resolved,
+or not_a_conflict. Read conflict_detail and every relevant memory before acting.
+For an open group, submit memory(action="judge") with the current revision,
+chosen value, decision provenance, resolution memory, and per-member apply plan.
+Judge moves the conflict to applying; it does not finish the memory changes.
 
-Formal conflict judgments use the left and right memory versions as snapshot
-pins. When acting on a conflict already present in the review queue, read both
-memories and submit judge with the returned pins. A judgment records guidance
-only. If action_required is ask_user, ask the user instead of judging again.
+Follow the returned calls sequentially. For each member, obtain explicit user
+authorization and call memory_govern(action="apply_conflict_action") with the
+latest expected_revision. Never run old-revision plan steps in parallel. After
+all steps succeed, call authorized resolve_conflict. On stale_conflict,
+stale_member, or data.action_required=replan_conflict, re-read the group and
+members, then call authorized replan_conflict with the current revision and a
+replacement plan. Partial failure remains applying; old plan history is kept.
+
+For scan_candidates, use each supplied deep_read span first (omit span when full
+context is needed), then call record_conflict with status open or
+not_a_conflict; scan output alone is not persisted and may recur. memory(read)
+returns operation data under response.data; a span read places clipped text at
+data.memory.content and bounds at data.span.
+
+Product responses use {ok,mode,warnings,degraded,data}. Operation action_required
+is under data; successful delivery side channels are top-level notices, and each
+notice carries its own action_required/read_call. A notice is a strict frozen
+snapshot; handle it through those instructions, not the old pair workflow.
+
+Workspace canonical normalization runs in none, weak, and strict modes. none has
+no workspace ACL but still normalizes; an unscoped query remains whole-library.
+strict never lets Qwen silently merge a new workspace. Automatic vector/Qwen
+normalization does not create a confirmed alias; only explicit governance does.
 
 For confirm_new_workspace, ask the user before calling confirm_pending_workspace
 with authorized=true. For ask_user_for_authorization, explain the returned impact
 and retry with authorized=true only after specific approval. Govern confirm
 promotes one memory to user_confirmed; confirm_pending_workspace instead confirms
 a strict-isolation workspace and activates its pending memory.
+
+Evidence and semantic queues are process-local. After queue loss/full, forced
+restart, or index uncertainty, inspect coverage, run rebuild_evidence until no
+pending ids remain and vectors are ready, then paginate scan_candidates.
 
 Preview backup replay with dry_run=true. Apply it only after explicit user
 authorization with dry_run=false and authorized=true. Complete a todo by removing
@@ -62,21 +84,31 @@ source-of-truth 替换旧内容时，先找到现有记忆再 update，不要新
 只读检查使用 memory_review。改变状态的 memory_govern 动作必须先取得用户对本次
 具体动作的明确授权，不能根据历史偏好推断 authorized=true。
 
-系统从标题、Markdown heading 和局部语句生成统一 evidence。冲突候选分为
-notify、check、ignore：Qwen 不可用时 notify 继续提醒，check 降级为忽略。
-Qwen 只负责降噪，不编辑记忆，也不确认冲突。
+scheduled scan 是宽门：Qwen 缺失或不确定时仍保留规则/KNN 基础候选。write-time
+notice 是严门：Qwen 必须双向输出 attribute_a/value_a/attribute_b/value_b，交换方向后
+映射一致、值有原文 grounding、entity/scope 完整且无共存 veto 才提醒。Qwen 不选
+正确值，也不修改记忆。
 
-收到 advisory notice 后，先读取两侧完整记忆再判断；误报 dismiss，可信候选处理完后
-resolve。notice 没有正式 conflict_id，不能传给 judge 或 resolve_conflict；要把已核实
-的矛盾变成治理记录，用 memory_repair(task="notice", action="escalate") 升格，一步
-创建正式冲突并关闭 notice。
-对已在审查队列中的正式 conflict，先读两侧完整记忆，再带返回的版本快照调用
-judge；ask_user 表示必须询问用户，不能用再次 judge 代替。
+正式冲突是一条一对多记录，状态为 open、applying、resolved 或 not_a_conflict。
+先读 conflict_detail 和所有相关记忆，再以当前 revision 调 memory(judge)；judge 记录
+chosen value 和逐成员计划并进入 applying，不代表修改已完成。随后按返回调用逐条、
+串行、经明确授权执行 memory_govern(apply_conflict_action)，每一步使用最新 revision；
+全部成功后才 authorized resolve_conflict。stale_conflict/stale_member 或返回
+ data.action_required=replan_conflict 时，重读后按当前 revision 授权调用 replan_conflict
+替换计划；部分失败保持 applying，旧计划历史保留。
+
+scan_candidates 的每个已分诊候选先按 deep_read span 读局部（需要全文时去掉 span），
+再调用 record_conflict(open|not_a_conflict)，否则下轮仍可能出现。产品响应固定为
+{ok,mode,warnings,degraded,data}：操作 action_required 在 data，成功响应的顶层 notices
+数组中每条 notice 自带 action_required/read_call。notice 不走旧的 pair judgment。
+
+none、weak、strict 都执行 workspace canonical normalization；none 只是不做 ACL，未传
+workspace 的查询仍跨全库。strict 不允许 Qwen 静默合并。自动 vector/Qwen 结果不会
+创建 confirmed alias，只有显式用户治理可以。
 
 confirm_new_workspace 应先取得用户授权，再用 authorized=true 调
-confirm_pending_workspace；ask_user_for_authorization 应说明返回的 impact，取得本次明确
-授权后才按 retry 重试。govern 的 confirm 是把单条 memory 提升为 user_confirmed，
-confirm_pending_workspace 则确认 strict isolation 的新 workspace 并激活 pending memory。
-
-备份恢复先 dry_run=true 预览，取得用户明确授权后才可正式执行。
+confirm_pending_workspace；ask_user_for_authorization 应说明 impact，取得本次明确授权后
+才按 retry 重试。evidence/semantic 队列是进程内状态；queue full/丢队列/强制重启后，
+按 coverage 反复 rebuild_evidence 到向量 ready，再分页 scan_candidates。备份恢复先
+ dry_run=true 预览，明确授权后才正式执行。
 ```

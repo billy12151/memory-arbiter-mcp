@@ -27,7 +27,6 @@ from .core import (
 )
 
 from .core import (  # noqa: F401
-    ConflictJudgmentStore,
     DegradeState,
     MemoryRecord,
     Path,
@@ -57,7 +56,6 @@ __all__ = [
     "_normalize_alias_key",
     "_subject_tokens",
     "Any",
-    "ConflictJudgmentStore",
     "DegradeState",
     "Iterator",
     "MemoryRecord",

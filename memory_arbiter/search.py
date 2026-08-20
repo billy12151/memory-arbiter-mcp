@@ -37,13 +37,7 @@ from .constants import strict_ws
 
 @dataclass
 class SearchOutcome:
-    """v0.7.4 (M2): structured return for search_memories.
-
-    Replaces the bare (results, warnings, has_more, total_estimate) 4-tuple so
-    retrieval_mode can travel with the result without growing into a 5-tuple
-    (which would break every tuple-unpacking caller). All callers must use
-    attribute access.
-    """
+    """Structured search result with rows, warnings, pagination, and retrieval mode."""
 
     results: list[dict[str, Any]]
     warnings: list[str]

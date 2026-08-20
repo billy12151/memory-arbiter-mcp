@@ -56,6 +56,32 @@ def test_accept_alias_is_casefold_stable(tmp_path):
 
 # ── reject → suppression ─────────────────────────────────────────────────────
 
+def test_rejected_aliases_accumulate_per_pair_and_confirmed_alias_wins(tmp_path):
+    t = make_tools(tmp_path)
+    assert t.db.upsert_workspace_alias("raw", "candidate-a", status="rejected", action="reject")[0]
+    assert t.db.upsert_workspace_alias("raw", "candidate-b", status="rejected", action="reject")[0]
+    with t.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT canonical,status FROM workspace_aliases WHERE alias_workspace='raw' ORDER BY canonical"
+        ).fetchall()
+    assert [(row["canonical"], row["status"]) for row in rows] == [
+        ("candidate-a", "rejected"), ("candidate-b", "rejected"),
+    ]
+    resolved = t.db.resolve_workspace_canonical("raw", None, register_new=False)
+    assert set(resolved["rejected_canonicals"]) == {"candidate-a", "candidate-b"}
+
+    assert t.db.upsert_workspace_alias("raw", "canonical", status="confirmed", action="accept")[0]
+    assert t.db.get_workspace_alias("raw")["canonical"] == "canonical"
+    assert t.db.resolve_workspace_canonical("raw", None, register_new=False)["matched_by"] == "confirmed_alias"
+    with t.db.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM workspace_aliases WHERE alias_workspace='raw' AND status='rejected'"
+        ).fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM workspace_aliases WHERE alias_workspace='raw' AND status='confirmed'"
+        ).fetchone()[0] == 1
+
+
 def test_reject_alias_records_rejected_canonical(tmp_path):
     t = make_tools(tmp_path)
     r = t.memory_govern("reject_workspace_alias",

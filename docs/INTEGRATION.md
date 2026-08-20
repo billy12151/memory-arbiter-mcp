@@ -1,73 +1,133 @@
 # Integration Guide
 
+This guide describes the `0.14.0.dev2` development contract.
+
 ## MCP Surface
 
-Configure the command as `mema` and use the four product tools. Call `memory(action="help")` or the corresponding tool help to discover fields.
+Configure the command as `mema` and use the four product tools. Call `memory(action="help")` or the corresponding tool help to discover current fields.
 
-Writes should include `subject`, `source_type`, `event_time`, `workspace`, `source_ref`, and useful tags. Use `user_confirmed` only for facts explicitly verified by the user.
-
-When a new source replaces an existing current source, find and read the existing memory, then update it. Do not create a second active copy.
+Writes should include `subject`, `source_type`, `event_time`, `workspace`, `source_ref`, and useful tags. Use `user_confirmed` only for facts explicitly verified by the user. When a new source replaces an existing current source, find/read the existing memory and update it instead of creating a second active copy.
 
 ## Evidence Recall
 
-With sqlite-vec and a local embedding model configured, writes asynchronously publish local-text evidence. Search automatically embeds the query and aggregates multiple evidence hits into one memory result. Evidence hit offsets identify the relevant local text while the memory read API returns the complete source.
+With sqlite-vec and a local embedding model configured, writes asynchronously publish sentence/paragraph evidence derived from the stored source. Lexical and evidence channels recall independently and merge per memory with reciprocal-rank fusion before trust, recency, filters, and workspace adjustments. Evidence offsets identify relevant source text.
 
-Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect missing or stale coverage, then queue a bounded rebuild. After an embedding-model change the vector index reports `state=mismatch` and the evidence channel is disabled; running `rebuild_evidence` (non-strict workspace, repeat per batch until the pending set is empty) republishes every memory in the new space and flips the index back to `ready` automatically. Memories with no indexable text at all (blank or whitespace-only subject and content, e.g. legacy imports) are excluded from rebuild pending sets and coverage counts by design; `memory_status` reports them under `local_text_evidence.non_indexable_memories`. Evidence KNN applies workspace/exclude filters after the vector search with a bounded over-fetch (up to 4x, capped at 2048 rows; the factor shrinks for k>512), so very small workspaces in very large shared libraries can still see reduced evidence-channel recall. Semantic status (`memory_repair(task="semantic_control", data={"action":"status"})`) surfaces `check_degradation.last_reason` (`qwen_unavailable` / `qwen_backend_error` / `qwen_timeout` / `qwen_invalid_output` / `qwen_budget_exhausted`) and `worker.dropped_queue_full` for overflow drops.
+`memory(action="read", data={"memory_id":42})` returns the complete source. Add `"span":{"start":120,"end":640}` to return only `data.memory.content[120:640]` plus `data.span.{start,end,total_chars}`. Bounds must be strict JSON integers with `0 <= start < end`; an oversized end clips to content length, while a start beyond content fails. `scan_candidates.deep_read` and semantic-notice read calls may provide ready-to-use spans; omit the span whenever full context is needed.
 
-Lexical and evidence recall are independent bounded channels. Results are aggregated by memory and merged with reciprocal-rank fusion before the existing trust, recency, filter, and workspace adjustments. This prevents a full lexical pool from suppressing semantically relevant local evidence while preserving exact lexical hits.
+Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect missing/stale coverage, then queue bounded rebuild pages. Repeat execute/dry-run until no ids remain and status reports complete eligible coverage. A changed embedding space reports `state=mismatch` and disables the evidence channel until every eligible memory is republished. Evidence units and vectors are derived: a migration may retain the logical source units, but vectors are always rebuilt in the configured space.
 
-## Conflict Review
+## Conflict Detection Contract
 
-Deterministic evidence routes pairs as:
+### Bidirectional four-field extraction
 
-- `notify`: high-confidence explicit change; create a notice even without Qwen.
-- `check`: semantic similarity needs Qwen filtering; no Qwen means no notice.
-- `ignore`: insufficient, equivalent, compatible, or explicitly different scope.
+Evidence KNN provides bounded short-pair recall and ranking only. Optional local Qwen2.5-0.5B runs once as A→B and once as B→A. Each result must be a strict JSON object with exactly four bounded string fields:
 
-For scheduled full-library scans, `memory_repair(task="scan_candidates")` enumerates clues server-side: every active memory's evidence units are matched against their KNN neighbours and filtered through the deterministic `notify/check/ignore` rule, so an external LLM loop never loads the whole library into a session. Each clue carries the triggering unit snippets, a pre-built `deep_read` span pair, and a route (`notify` by default — similarity-only `check` clues are opt-in via `include_check`), pairs with open conflicts or version-pinned `not_a_conflict` dismissals are filtered out, and `anchor_memory_id`/`batch` paginate the scan with `next_anchor_memory_id`. Deep reading uses `memory(action="read")` with `span={"start","end"}`: the response carries the sliced content plus span metadata, so triage pays tokens only for the triggering region plus context (a full read stays one call away — omit `span`). Notice `left/right_read_call`s carry the same evidence-scoped span. Calibrated on a real library: ranking+rules, not absolute distance, do the filtering (vector distance alone cannot separate conflicts from same-topic neighbours). Triaged pairs should be registered with `record_conflict` (open) or recorded as `not_a_conflict` so later scans stay quiet.
+```json
+{"attribute_a":"database","value_a":"MySQL","attribute_b":"database","value_b":"SQLite"}
+```
 
-The Agent must read both complete memories before presenting a notice to the user. A notice does not create a formal conflict by itself. Formal conflicts enter the conflicts table through two product paths: `memory_repair(task="notice", data={"action":"escalate", ...})` turns a verified notice into a conflict row (and resolves the notice, backfilling its `conflict_id`), and `memory_repair(task="record_conflict", ...)` registers findings from a scheduled external scan loop (idempotent per open pair; `refresh=true` rewrites enrichment fields; the row pins both memory versions as CAS snapshots). Formal conflicts and append-only judgments are separate governance records pinned by left and right memory versions.
+The model must not return a final conflict/coexistence decision, winner, or mutation. Code validates:
 
-## Workspace Isolation
+1. each direction has a concrete same-attribute/different-value extraction;
+2. after swapping sides, both directions agree on normalized attributes and value-to-source mapping;
+3. values are grounded in their corresponding evidence quote, except mechanical case/unit/number/confirmed-alias derivations;
+4. normalized values actually differ;
+5. deterministic duplicate, compatibility, environment/version/region/object, observation-time, historical/current, evolution, and measurement-scope vetoes do not apply;
+6. a formal slot has sufficient `workspace_canonical + entity + attribute + scope` provenance.
 
-- `none`: workspace does not restrict recall.
-- `weak`: workspace softly influences ranking and alias suggestions.
-- `strict`: reads and conflict details require the caller workspace; new workspaces remain pending until explicitly confirmed.
+Fuzzy attribute similarity cannot create a formal slot. Qwen failure or absence has no authority to veto deterministic scan candidates.
 
-## Backup And Migration
+### Scheduled scan: broad gate
 
-JSONL replay is previewable without authorization. Applying replay requires explicit user authorization and is idempotent by replay key and payload hash. Derived post-processing consists only of evidence indexing; successful publication automatically chains conflict candidate processing.
+`memory_repair(task="scan_candidates")` enumerates bounded KNN/rule candidates without loading the whole library into the agent session. The scan keeps the deterministic baseline and unions Qwen-enhanced candidates with it. Either valid extraction direction can support recall. Single-direction output, weak grounding, or missing entity/scope remains `review_candidate` for agent deep reading; Qwen absent/invalid/timeout/budget failure never reduces the baseline set.
 
-Use side-by-side migration for historical databases. Stop writers before `--final-sync`, verify the target, switch `db_path`, and keep the source for rollback.
+Candidates carry member versions, evidence spans, candidate identity, and deep-read calls. `scan_candidates` does not itself persist triage. For every reviewed candidate, call `memory_repair(task="record_conflict")` with `status="open"` or `status="not_a_conflict"`; otherwise it may appear on a later scan. Candidate-only `not_a_conflict` rows use `candidate_key` and do not invent `scope="unknown"`.
 
-### Upgrade From An Existing Database
+### Write-time notice: strict gate
 
-The current runtime expects the local-text evidence schema. An existing database is not upgraded in place because its derived claim, memory-vector, and section-vector state belongs to a different lifecycle.
+A user-visible notice requires both valid directions, consistent side mapping, strict quote grounding, distinct normalized values, complete slot provenance, and no coexistence veto. Any failure closes the notice path and leaves the case for scheduled scan review. Notice snapshots freeze member versions, value groups, slot provenance, detector/prompt version, task id, and dedupe key.
 
-1. Upgrade the package. If the configured database is legacy, MCP refuses to start, does not modify it, and instructs the user to run `mema upgrade`.
-2. Preview the migration. The command reports source and target paths, row counts, estimated evidence units, vector storage, and free disk space:
+After a successful write, the server waits at most `semantic_conflict.notice_sync_wait_ms` (default 3000, range 0–5000 ms) for the bounded notice task. `0` is fully asynchronous. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the strict gate; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
+
+## One Conflicts Table
+
+There is no separate public judgment store. One `conflicts` row represents one one-to-many event and retains its immutable detection snapshot, `value_groups`, decision, and application results. Important identity/concurrency fields include `revision`, `workspace_canonical`, `slot_key`, `slot_key_hash`, `candidate_key`, `candidate_key_hash`, `member_versions`, and `member_fingerprint`.
+
+Public lifecycle:
+
+- `open`: confirmed as worth governing; scan may append new members for the same slot with `expected_revision` CAS.
+- `applying`: a decision and apply plan exist; ordinary members cannot be appended and duplicate reminders are suppressed only for validated plan actions.
+- `resolved`: every planned change completed and was reviewed; the event is closed and never expanded.
+- `not_a_conflict`: this candidate snapshot was reviewed as compatible/false positive.
+
+Only one `open`/`applying` row may exist for a canonical workspace+slot. A new value/version after resolution creates a new event.
+
+## Resolution Workflow
+
+1. Read `memory_review(view="conflict_detail")` and all relevant memories. Present the shared slot, every value group, and its members.
+2. Call `memory(action="judge")` with the current `expected_revision`, chosen value, decision provenance/reason, resolution memory, and a per-member plan. This transitions `open → applying`.
+3. Follow the returned machine call. Execute one authorized `memory_govern(action="apply_conflict_action")` at a time with the latest revision. Never run precomputed steps concurrently.
+4. Re-read/replan on `stale_conflict` or `stale_member`. A failed apply returns `ok=false` with `data.action_required="replan_conflict"` and `data.replan`; partial failures remain `applying`. After re-reading the group and members, call authorized `memory_govern(action="replan_conflict")` with the current revision, replacement `apply_plan`, and optional replacement `resolution_memory_id`. Replanning preserves previous plan history and bumps revision.
+5. After every current plan step succeeds, call authorized `memory_govern(action="resolve_conflict")` with the latest revision.
+
+Prefer correcting an incorrect current fact, preserve historical/external/locked context appropriately, and reuse an existing correct active memory as `resolution_memory_id` when possible. Ordinary `memory(update)` cannot supply a conflict id as a notice-suppression switch.
+
+## Workspace Normalization and ACL
+
+Canonical normalization runs under every isolation mode and is independent from ACL:
+
+- `none`: exact/confirmed/vector/rule/Qwen normalization behaves like weak mode, but no workspace ACL is applied. An omitted workspace filter returns all workspaces.
+- `weak`: same normalization plus soft ranking/hints; no hard visibility filter.
+- `strict`: exact/confirmed and safe mechanical rules may reuse a canonical; Qwen cannot silently merge. A new workspace remains pending until authorized `confirm_pending_workspace`.
+
+Resolution order is confirmed/rejected alias, exact canonical, bounded vector candidates, deterministic `AUTO|KEEP|ASK`, then Qwen only for an undecided near-match. Qwen must choose from at most five supplied candidates and may suggest `alias|typo|same_project|same_family|related|unrelated|uncertain`. Automatic vector/Qwen normalization writes only the memory's `workspace_canonical`; it does not create a confirmed alias. A rejected alias is never re-proposed.
+
+Workspace and conflict inference share a serial local worker. `semantic_conflict.workspace_qwen_budget_ms` (default 750, range 50–5000 ms) is an independent short budget: timeout/busy preserves the raw canonical and returns a review hint rather than blocking the write-time notice gate.
+
+## Response Envelope
+
+All four product tools return `{ok, mode, warnings, degraded, data}`. Operation results and required steps are under `data`, for example `data.action_required`, `data.next_action`, or `data.replan`. On a successful response only, delivery side channels may add a top-level `notices` array. A semantic notice stub's `action_required` and `read_call` live inside that notice item. Clients should therefore inspect both `response.data.action_required` and every `response.notices[*].action_required`; there is no generic top-level action-required field.
+
+## Notice Lifecycle and Recovery
+
+Notice delivery is an atomic best-effort database claim, not transport exactly-once. Internal `pending` and `delivered` both appear publicly as `open`; attaching a stub changes `pending → delivered` and sets `delivered_at`. Public terminal actions are `dismiss` (false positive, conflict becomes `not_a_conflict`) and `resolve` (already handled). If either pinned memory snapshot has changed before delivery, the server may internally mark the notice `stale`. Delivery itself does not edit memory, judge/resolve a formal conflict, or supersede either side.
+
+The evidence and semantic queues are process-local. A crash, forced shutdown, queue-full drop, or model-subprocess restart can lose unprocessed indexing/classification work even though the memory write committed. Recovery is coverage-driven: inspect `memory(action="status")`, run `rebuild_evidence` repeatedly until dry-run is empty, eligible coverage is complete, and vector state is ready; then paginate `scan_candidates` and record each reviewed candidate. Do not assume restart reconstructs the old queue. `rebuild_evidence` restores source-derived units/vectors; the subsequent scan restores missed conflict discovery.
+
+## Backup and Upgrade
+
+JSONL replay is previewable without authorization. Applying replay requires explicit user authorization and is idempotent by replay key/payload hash.
+
+### Upgrade matrix
+
+| Source database | Runtime behavior | Public upgrade path | Retained / rebuilt |
+| --- | --- | --- | --- |
+| New/empty or `conflict_groups_v2` | Starts normally; current additive migrations may run | None | Existing current data |
+| `local_text_evidence_v1` (immediately previous generation) | Refused without modification | Side-by-side `mema upgrade` | Core/public data retained; conflict history omitted; evidence vectors rebuilt |
+| Older claim + memory/section-vector generations | Refused without modification | Same side-by-side `mema upgrade` | Core/public data retained; evidence units generated/retained and vectors rebuilt |
+| Unknown, partial, failed/resuming target | Refused | Diagnose with `mema doctor --json`; repair/resume only with the lower-level migration workflow | Never open as current until verification succeeds |
+
+There is no public in-place conflict-only upgrade. `mema upgrade` requires sqlite-vec, a readable configured GGUF embedding model, `llama-cpp-python` (the `semantic-local` extra also supplies the embedding runtime), a writable target directory, and enough free space. The separate optional semantic-conflict Qwen model is not a migration prerequisite.
+
+### WAL-safe procedure
+
+1. Preview with `mema upgrade --dry-run`.
+2. Stop every old-version writer/client and drain or terminate the semantic worker.
+3. Create a rollback copy only after checkpointing the stopped source:
 
    ```bash
-   mema upgrade --dry-run
+   sqlite3 /absolute/path/to/memory.sqlite3 "PRAGMA wal_checkpoint(TRUNCATE);"
+   cp /absolute/path/to/memory.sqlite3 /absolute/path/to/memory.pre-0.14.sqlite3
    ```
 
-3. Stop all mema MCP clients. Run the upgrade and confirm the displayed plan. Migration usually takes 1–5 minutes and no MCP service is provided during it:
+   Abort if the checkpoint reports non-zero `busy`; copying only the main file while committed frames remain in `-wal` is incomplete. SQLite's online `.backup` command is also safe before shutdown.
+4. Run `mema upgrade`; restart and verify with `mema doctor --json`.
+5. Complete the epoch-pinned full `scan_candidates` pass shown by status/doctor.
 
-   ```bash
-   mema upgrade
-   ```
+The side-by-side copy retains memory content/history, backup replay receipts, workspace aliases/canonicals, audit, and logical evidence units. It rebuilds FTS and republishes vectors in the configured embedding space. It intentionally starts with empty new conflict/notice state: old `conflicts`, `conflict_judgments`, and `semantic_notices` history are not migrated. Target publication requires row/fingerprint stability, complete eligible evidence coverage, empty destructive tables, and a successful target `wal_checkpoint(TRUNCATE)` before WAL/SHM removal and config switch.
 
-4. `mema upgrade` performs the final snapshot build and requires `ok=true`, `row_counts_match=true`, `source_stable=true`, full evidence coverage, no failed memories, and `switch_ready=true`.
-5. After verification, it backs up and atomically updates the selected standard JSON config. If `MEMORY_ARBITER_DB_PATH` overrides the path, or the JSON config does not point at the migrated source, the command does not edit configuration and prints the manual action instead.
-6. Restart the MCP client and run `mema doctor --json`.
-7. Keep the old database. A direct rollback is lossless only while the new database has accepted no new writes; otherwise newer records must be exported or replayed first.
-
-Options: `--no-switch` builds and verifies without changing configuration; `--yes` accepts the plan non-interactively; `--source` and `--target` override paths. The lower-level `mema migrate-vnext` command remains available for diagnostics and advanced workflows.
-
-Qwen installation is not a migration prerequisite. The upgrade preflight does require `llama-cpp-python` (the `semantic-local` extra) because the evidence embedding model runs on it, and the evidence index additionally requires sqlite-vec and the configured embedding model; without Qwen, deterministic `notify` remains active and `check` candidates fail closed to `ignore`.
+On success `conflict_scan_required=true` and a persistent epoch are recorded. Only a full scan covering the upgrade-time active set with the matching detector can CAS-clear it. A partial page, failed scan, or old detector cannot. `--yes` only skips the prompt acknowledging writer shutdown and permanent conflict/judgment/notice-history loss; it does not stop processes, checkpoint/back up the source, or relax verification. `--no-switch` leaves configuration untouched. Environment-overridden/mismatched config paths require the printed manual switch.
 
 ## 中文摘要
 
-集成时只使用四个产品工具。统一 evidence 向量同时承担语义召回和冲突候选召回；`notify` 不依赖 Qwen，`check` 在 Qwen 不可用时降级为忽略。notice 只是候选，Agent 必须读取两侧完整记忆后判断。历史数据库通过旁路迁移生成干净新库。
-
-老用户升级顺序：升级包后，旧库会让 MCP 拒绝启动且不会被修改；先执行 `mema upgrade --dry-run` 查看预估；关闭所有 mema MCP 客户端后运行 `mema upgrade`，迁移期间 1–5 分钟不提供 MCP；命令验证行数、fingerprint、evidence coverage、失败列表和 `switch_ready`，成功后备份并原子切换标准 JSON 配置；环境变量覆盖路径时只输出手工操作；重启后运行 `mema doctor --json`。旧库默认保留。Qwen 不是迁移前提，没有 Qwen 时 `notify` 仍工作，`check` 降级为忽略。
+0.14.0.dev2 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization，`none` 只是不启用 ACL。升级会丢弃旧 conflict/judgment/notice 历史，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。

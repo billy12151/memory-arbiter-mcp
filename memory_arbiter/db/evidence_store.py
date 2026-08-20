@@ -1,6 +1,8 @@
 """Persistence and KNN operations for vNext local-text evidence."""
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
 import sqlite3
 import struct
@@ -165,39 +167,51 @@ class EvidenceStore:
         # parent_status is best-effort (a vec-disabled process can skip its
         # update), so the authoritative memories.status is enforced too.
         clauses = [status_sql, memory_status_sql]
-        fetch_k = max(1, int(k))
-        if workspace or exclude_memory_id is not None:
-            # Bounded over-fetch; the absolute ceiling keeps deep paginated
-            # queries (pool_cap grows with offset) from multiplying into a
-            # full-index KNN scan.
-            fetch_k = min(fetch_k * 4, 2048)
-        params: list[Any] = [json.dumps(query_embedding), fetch_k]
+        requested_k = max(1, int(k))
+        filtered = bool(workspace or exclude_memory_id is not None)
+        filter_params: list[Any] = []
         if workspace:
             clauses.append("COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)=?")
-            params.append(workspace)
+            filter_params.append(workspace)
         if exclude_memory_id is not None:
             clauses.append("e.memory_id!=?")
-            params.append(int(exclude_memory_id))
+            filter_params.append(int(exclude_memory_id))
         try:
             with self._db.connection() as conn:
-                rows = conn.execute(
-                    f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
-                               m.workspace, m.workspace_canonical, m.source_type,
-                               m.confidence, m.protection_level, m.event_time,
-                               m.ingest_time, m.metadata, m.content,
-                               m.version AS memory_row_version, m.agent_id,
-                               m.source_ref, m.created_at AS memory_created_at
-                        FROM memory_evidence_vec v
-                        JOIN memory_evidence e ON e.id=v.id
-                        JOIN memories m ON m.id=e.memory_id
-                        WHERE v.embedding MATCH ? AND k=? AND {' AND '.join(clauses)}
-                        ORDER BY v.distance""",
-                    params,
-                ).fetchall()
-            results = [dict(row) for row in rows]
-            if workspace or exclude_memory_id is not None:
-                results = results[:max(1, int(k))]
-            return results
+                # Workspace/exclusion predicates are evaluated after vec0 picks
+                # its global KNN window. Grow that window until recall is
+                # satisfied or every bounded candidate has been considered.
+                candidate_count = int(
+                    conn.execute(
+                        f"""SELECT COUNT(*) FROM memory_evidence_vec v
+                            JOIN memory_evidence e ON e.id=v.id
+                            JOIN memories m ON m.id=e.memory_id
+                            WHERE {status_sql} AND {memory_status_sql}"""
+                    ).fetchone()[0]
+                )
+                max_fetch = min(max(1, candidate_count), 2048)
+                fetch_k = min(max_fetch, requested_k * 4) if filtered else requested_k
+                rows: list[Any] = []
+                while fetch_k > 0:
+                    params: list[Any] = [json.dumps(query_embedding), fetch_k, *filter_params]
+                    rows = conn.execute(
+                        f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
+                                   m.workspace, m.workspace_canonical, m.source_type,
+                                   m.confidence, m.protection_level, m.event_time,
+                                   m.ingest_time, m.metadata, m.content,
+                                   m.version AS memory_row_version, m.agent_id,
+                                   m.source_ref, m.created_at AS memory_created_at
+                            FROM memory_evidence_vec v
+                            JOIN memory_evidence e ON e.id=v.id
+                            JOIN memories m ON m.id=e.memory_id
+                            WHERE v.embedding MATCH ? AND k=? AND {' AND '.join(clauses)}
+                            ORDER BY v.distance""",
+                        params,
+                    ).fetchall()
+                    if not filtered or len(rows) >= requested_k or fetch_k >= max_fetch:
+                        break
+                    fetch_k = min(max_fetch, fetch_k * 2)
+            return [dict(row) for row in rows[:requested_k]]
         except sqlite3.Error:
             return []
 
@@ -259,13 +273,31 @@ class EvidenceStore:
                     "candidates": [], "counts": {"knn_pairs": 0, "rule_pass": 0,
                                                  "filtered_open": 0, "filtered_dismissed": 0},
                 }
-            open_pairs = {
-                (min(int(r["left_id"]), int(r["right_id"])), max(int(r["left_id"]), int(r["right_id"])))
-                for r in conn.execute(
-                    "SELECT left_id, right_id FROM conflicts WHERE status='open'"
-                )
-            }
-            dismissed_pairs = db.conflicts.dismissed_pairs_snapshot()
+            # The group schema has no left/right columns. Suppression is tied
+            # to the exact candidate snapshot successfully persisted by
+            # record_conflict, not merely to a memory pair. That keeps an
+            # unrecorded external review repeatable and allows changed member
+            # versions/evidence to be reconsidered.
+            recorded_candidate_statuses: dict[str, str] = {}
+            active_group_members: list[frozenset[str]] = []
+            for row in conn.execute(
+                "SELECT status,candidate_key_hash,member_versions FROM conflicts "
+                "WHERE status IN ('open','applying','not_a_conflict')"
+            ):
+                candidate_hash = str(row["candidate_key_hash"] or "")
+                status = str(row["status"])
+                if candidate_hash:
+                    recorded_candidate_statuses[candidate_hash] = status
+                try:
+                    members = json.loads(str(row["member_versions"] or "[]"))
+                    refs = frozenset(
+                        f"{int(member['memory_id'])}@{int(member['version'])}"
+                        for member in members
+                    )
+                except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
+                if refs and status in {"open", "applying"}:
+                    active_group_members.append(refs)
             candidates: dict[tuple[int, int], dict[str, Any]] = {}
             knn_pair_count = 0
             stale_anchors = 0
@@ -277,6 +309,7 @@ class EvidenceStore:
                 # heavy and fire numeric_value_changed on their own.
                 units = conn.execute(
                     """SELECT e.id AS eid, e.text AS text, v.embedding AS embedding,
+                              e.memory_version AS memory_version, e.content_hash AS content_hash,
                               e.start_offset AS start_offset, e.end_offset AS end_offset
                        FROM memory_evidence e
                        JOIN memory_evidence_vec v ON v.id=e.id
@@ -285,8 +318,9 @@ class EvidenceStore:
                          AND e.kind='text'
                        ORDER BY e.id""",
                     (anchor_id, anchor_id),
-                ).fetchall()
-                if not units:
+                )
+                first_unit = units.fetchone()
+                if first_unit is None:
                     # Async republish window or a permanently failed publish:
                     # surface it instead of silently skipping forever.
                     stale_anchors += 1
@@ -325,7 +359,7 @@ class EvidenceStore:
                         "end": min(len(content), end + 128),
                     }
 
-                for unit in units:
+                for unit in (() if first_unit is None else itertools.chain((first_unit,), units)):
                     text = str(unit["text"] or "")
                     if not text:
                         continue
@@ -349,17 +383,18 @@ class EvidenceStore:
                         decision = decide_evidence(text, str(hit.get("text") or ""))
                         if decision.action == "ignore":
                             continue
-                        if decision.action == "check" and not include_check:
+                        # Numeric deltas remain a deterministic scan baseline
+                        # candidate even though they can no longer directly
+                        # produce a write-time notice.
+                        if (
+                            decision.action == "check"
+                            and decision.reason != "numeric_value_candidate"
+                            and not include_check
+                        ):
                             continue
                         if max_distance is not None and float(hit.get("distance") or 0) > float(max_distance):
                             continue
                         pair = (min(anchor_id, peer_id), max(anchor_id, peer_id))
-                        if pair in open_pairs:
-                            filtered_open += 1
-                            continue
-                        if pair in dismissed_pairs:
-                            filtered_dismissed += 1
-                            continue
                         distance = float(hit.get("distance") or 0)
                         existing = candidates.get(pair)
                         hit_text = str(hit.get("text") or "")
@@ -371,11 +406,89 @@ class EvidenceStore:
                             peer_content(peer_id), hit_text,
                             int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0),
                         )
+                        member_refs = frozenset([
+                            f"{anchor_id}@{int(unit['memory_version'] or 1)}",
+                            f"{peer_id}@{int(hit.get('memory_version') or hit.get('memory_row_version') or 1)}",
+                        ])
+                        evidence_by_ref = {
+                            f"{anchor_id}@{int(unit['memory_version'] or 1)}": {
+                                "member": f"{anchor_id}@{int(unit['memory_version'] or 1)}",
+                                "unit": int(unit["eid"]),
+                                "span": [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)],
+                                "hash": str(unit["content_hash"] or ""),
+                            },
+                            f"{peer_id}@{int(hit.get('memory_version') or hit.get('memory_row_version') or 1)}": {
+                                "member": f"{peer_id}@{int(hit.get('memory_version') or hit.get('memory_row_version') or 1)}",
+                                "unit": int(hit.get("id") or 0),
+                                "span": [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)],
+                                "hash": str(hit.get("content_hash") or ""),
+                            },
+                        }
+                        sorted_refs = sorted(member_refs, key=lambda ref: tuple(int(value) for value in ref.split("@", 1)))
+                        candidate_key = {
+                            "detector_version": "attribute-value-v1",
+                            "members": sorted_refs,
+                            "evidence": [evidence_by_ref[ref] for ref in sorted_refs],
+                        }
+                        candidate_hash = hashlib.sha256(
+                            json.dumps(
+                                candidate_key, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        recorded_status = recorded_candidate_statuses.get(candidate_hash)
+                        if recorded_status is None and any(
+                            member_refs <= group_members for group_members in active_group_members
+                        ):
+                            recorded_status = "open"
+                        if recorded_status is not None:
+                            if recorded_status == "not_a_conflict":
+                                filtered_dismissed += 1
+                            else:
+                                filtered_open += 1
+                            continue
                         if existing is None:
+                            state = "notice_ready" if decision.action == "notify" else "review_candidate"
                             candidates[pair] = {
                                 "left_id": pair[0], "right_id": pair[1],
-                                "route": decision.action, "reasons": {decision.reason},
-                                "distance": distance,
+                                "state": state, "route": state,
+                                "reasons": {decision.reason}, "distance": distance,
+                                "candidate_key": candidate_key,
+                                "candidate_key_hash": candidate_hash,
+                                "members": [
+                                    {
+                                        "memory_id": pair[0],
+                                        "version": int(hit.get("memory_row_version") or 1) if pair[0] == peer_id else int(unit["memory_version"] or 1),
+                                        "attribute_raw": None, "value_raw": None,
+                                        "normalized_attribute": None, "normalized_value": None,
+                                        "evidence_quote": text if pair[0] == anchor_id else hit_text,
+                                        "evidence_span": (
+                                            [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)]
+                                            if pair[0] == anchor_id else
+                                            [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
+                                        ),
+                                        "content_hash": str(unit["content_hash"] or "") if pair[0] == anchor_id else str(hit.get("content_hash") or ""),
+                                        "evidence_unit": int(unit["eid"]) if pair[0] == anchor_id else int(hit.get("id") or 0),
+                                        "direction": "deterministic", "prompt_version": None,
+                                        "detector_version": "attribute-value-v1",
+                                    },
+                                    {
+                                        "memory_id": pair[1],
+                                        "version": int(hit.get("memory_row_version") or 1) if pair[1] == peer_id else int(unit["memory_version"] or 1),
+                                        "attribute_raw": None, "value_raw": None,
+                                        "normalized_attribute": None, "normalized_value": None,
+                                        "evidence_quote": hit_text if pair[1] == peer_id else text,
+                                        "evidence_span": (
+                                            [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
+                                            if pair[1] == peer_id else
+                                            [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)]
+                                        ),
+                                        "content_hash": str(hit.get("content_hash") or "") if pair[1] == peer_id else str(unit["content_hash"] or ""),
+                                        "evidence_unit": int(hit.get("id") or 0) if pair[1] == peer_id else int(unit["eid"]),
+                                        "direction": "deterministic", "prompt_version": None,
+                                        "detector_version": "attribute-value-v1",
+                                    },
+                                ],
+                                "value_groups": [], "slot_key": None, "slot_provenance": None,
                                 "left_snippet": text[:200] if pair[0] == anchor_id else hit_text[:200],
                                 "right_snippet": hit_text[:200] if pair[0] == anchor_id else text[:200],
                                 # Pre-built deep-read calls: reading just the
@@ -389,12 +502,13 @@ class EvidenceStore:
                                 },
                             }
                         else:
-                            # notify outranks check when different unit pairs
-                            # on the same memory pair disagree — and the
-                            # snippets AND deep-read spans must track the
-                            # strongest signal, not the first discovery.
-                            if existing["route"] == "check" and decision.action == "notify":
-                                existing["route"] = "notify"
+                            # notice_ready outranks review_candidate when
+                            # different unit pairs on the same memory pair
+                            # disagree. Snippets and spans track the strongest
+                            # signal, not the first discovery.
+                            if existing["state"] == "review_candidate" and decision.action == "notify":
+                                existing["state"] = "notice_ready"
+                                existing["route"] = "notice_ready"
                                 existing["left_snippet"] = text[:200] if pair[0] == anchor_id else hit_text[:200]
                                 existing["right_snippet"] = hit_text[:200] if pair[0] == anchor_id else text[:200]
                                 existing["deep_read"] = {
@@ -411,8 +525,10 @@ class EvidenceStore:
             next_anchor = anchors[-1]
             with db.connection() as conn:
                 more = conn.execute(
-                    "SELECT 1 FROM memories WHERE status='active' AND id > ? LIMIT 1",
-                    (next_anchor,),
+                    "SELECT 1 FROM memories WHERE status='active' AND id > ? "
+                    + workspace_anchor_sql
+                    + "LIMIT 1",
+                    (next_anchor, *anchor_params),
                 ).fetchone()
             return {
                 "anchors_scanned": len(anchors),

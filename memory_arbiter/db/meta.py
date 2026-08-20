@@ -1,11 +1,38 @@
 """Vector-index metadata persistence for MemoryDB (Phase 3 extraction)."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from typing import Any, Optional, TYPE_CHECKING
 
 from ..evidence import INDEXABLE_PREFILTER_SQL, has_indexable_text
+
+
+def active_scan_boundary_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return a stable identity for the active set a rebuild scan must cover."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    count = 0
+    max_memory_id = 0
+    for row in conn.execute(
+        "SELECT id,version FROM memories WHERE status='active' ORDER BY id"
+    ):
+        memory_id = int(row["id"])
+        version = int(row["version"] or 1)
+        count += 1
+        max_memory_id = memory_id
+        digest.update(f"{memory_id}@{version}\n".encode("ascii"))
+    return {
+        "max_memory_id": max_memory_id,
+        "active_count": count,
+        "active_set_digest": digest.hexdigest(),
+    }
+
+
+def canonical_scan_boundary(boundary: dict[str, Any]) -> str:
+    return json.dumps(boundary, sort_keys=True, separators=(",", ":"))
 
 if TYPE_CHECKING:
     from .core import MemoryDB
@@ -31,6 +58,141 @@ class MetaStore:
     @staticmethod
     def delete_meta(conn: sqlite3.Connection, key: str) -> None:
         conn.execute("DELETE FROM _vec_index_meta WHERE key = ?", (key,))
+
+    @staticmethod
+    def _migration_state(conn: sqlite3.Connection) -> dict[str, str]:
+        return {
+            str(row["key"]): str(row["value"])
+            for row in conn.execute("SELECT key,value FROM migration_state")
+        }
+
+    def conflict_scan_state(self) -> dict[str, Any]:
+        if not self._db._db_available:
+            return {"required": False}
+        with self._db.connection() as conn:
+            state = self._migration_state(conn)
+        boundary_raw = state.get("conflict_scan_boundary")
+        try:
+            boundary = json.loads(boundary_raw) if boundary_raw else None
+        except json.JSONDecodeError:
+            boundary = boundary_raw
+        progress_raw = state.get("conflict_scan_progress")
+        try:
+            progress = json.loads(progress_raw) if progress_raw else None
+        except json.JSONDecodeError:
+            progress = None
+        return {
+            "required": state.get("conflict_scan_required") == "true",
+            "epoch": state.get("conflict_scan_epoch"),
+            "detector_version": state.get("conflict_scan_detector_version"),
+            "boundary": boundary,
+            "progress": progress,
+        }
+
+    def record_conflict_scan_page(
+        self,
+        *,
+        epoch: str,
+        detector_version: str,
+        boundary: dict[str, Any],
+        after_memory_id: int,
+        next_anchor_memory_id: int | None,
+        anchors_scanned: int,
+        workspace: str | None,
+    ) -> bool:
+        """Persist one contiguous server-enumerated page of a rebuild full scan."""
+        if workspace is not None:
+            return False
+        boundary_json = canonical_scan_boundary(boundary)
+        with self._db.write_transaction() as conn:
+            state = self._migration_state(conn)
+            if not (
+                state.get("conflict_scan_required") == "true"
+                and state.get("conflict_scan_epoch") == epoch
+                and state.get("conflict_scan_detector_version") == detector_version
+                and state.get("conflict_scan_boundary") == boundary_json
+                and canonical_scan_boundary(active_scan_boundary_on_connection(conn)) == boundary_json
+            ):
+                return False
+            progress_raw = state.get("conflict_scan_progress")
+            try:
+                progress = json.loads(progress_raw) if progress_raw else None
+            except json.JSONDecodeError:
+                return False
+            expected_after = 0 if progress is None else int(progress.get("next_after_memory_id", -1))
+            if progress is not None and bool(progress.get("complete")):
+                return False
+            if int(after_memory_id) != expected_after or int(anchors_scanned) < 0:
+                return False
+            terminal = next_anchor_memory_id is None
+            if terminal:
+                if int(anchors_scanned) == 0 and int(after_memory_id) < int(boundary.get("max_memory_id", 0)):
+                    return False
+                next_after = int(boundary.get("max_memory_id", 0))
+            else:
+                if next_anchor_memory_id is None:
+                    return False
+                next_after = int(next_anchor_memory_id)
+                if int(anchors_scanned) <= 0 or next_after <= int(after_memory_id):
+                    return False
+            pages = (int(progress.get("pages", 0)) if progress else 0) + 1
+            scanned = (int(progress.get("anchors_scanned", 0)) if progress else 0) + int(anchors_scanned)
+            payload = canonical_scan_boundary({
+                "epoch": epoch,
+                "detector_version": detector_version,
+                "boundary": boundary,
+                "pages": pages,
+                "anchors_scanned": scanned,
+                "next_after_memory_id": next_after,
+                "complete": terminal,
+            })
+            conn.execute(
+                """INSERT INTO migration_state(key,value,updated_at)
+                   VALUES('conflict_scan_progress',?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                (payload,),
+            )
+            return True
+
+    def complete_conflict_scan(
+        self,
+        *,
+        epoch: str,
+        detector_version: str,
+        boundary: dict[str, Any],
+    ) -> bool:
+        """CAS-clear only after persisted server-validated full-scan progress."""
+        boundary_json = canonical_scan_boundary(boundary)
+        with self._db.write_transaction() as conn:
+            state = self._migration_state(conn)
+            try:
+                progress = json.loads(state.get("conflict_scan_progress", ""))
+            except (TypeError, json.JSONDecodeError):
+                return False
+            live_boundary = canonical_scan_boundary(active_scan_boundary_on_connection(conn))
+            if not (
+                state.get("conflict_scan_required") == "true"
+                and state.get("conflict_scan_epoch") == epoch
+                and state.get("conflict_scan_detector_version") == detector_version
+                and state.get("conflict_scan_boundary") == boundary_json
+                and live_boundary == boundary_json
+                and progress.get("epoch") == epoch
+                and progress.get("detector_version") == detector_version
+                and canonical_scan_boundary(progress.get("boundary") or {}) == boundary_json
+                and progress.get("complete") is True
+                and int(progress.get("anchors_scanned", -1)) == int(boundary.get("active_count", -2))
+                and int(progress.get("next_after_memory_id", -1)) == int(boundary.get("max_memory_id", -2))
+            ):
+                return False
+            row = conn.execute(
+                """UPDATE migration_state SET value='false', updated_at=CURRENT_TIMESTAMP
+                   WHERE key='conflict_scan_required' AND value='true'
+                     AND EXISTS(SELECT 1 FROM migration_state WHERE key='conflict_scan_epoch' AND value=?)
+                     AND EXISTS(SELECT 1 FROM migration_state WHERE key='conflict_scan_detector_version' AND value=?)
+                     AND EXISTS(SELECT 1 FROM migration_state WHERE key='conflict_scan_boundary' AND value=?)""",
+                (epoch, detector_version, boundary_json),
+            )
+            return row.rowcount == 1
 
     def get_vec_index_state(self) -> dict[str, Any]:
         db = self._db

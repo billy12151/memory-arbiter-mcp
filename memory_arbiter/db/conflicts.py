@@ -1,540 +1,756 @@
-"""Conflict-row persistence and dismissal helpers for MemoryDB (Phase 3 extraction)."""
+"""Revisioned conflict-group persistence.
+
+A row is one immutable detection event whose open snapshot may only grow by
+CAS-guarded member append.  Decisions and per-member application results live
+on that same row; there is no judgment side table.
+"""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from typing import Any, Optional, TYPE_CHECKING
 
-from ..models import utc_now_iso
-from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
+from ..models import ConflictMember, ConflictValueGroup, utc_now_iso
+from ..semantic_conflict import normalize_value
 
 if TYPE_CHECKING:
     from .core import MemoryDB
 
+_MAX_MEMBERS = 256
+_MAX_FIELD_CHARS = 16_384
+_MAX_MEMBER_JSON = 262_144
+_MAX_VALUE_JSON = 131_072
+_ALLOWED_ACTIONS = {
+    "update_current_claim", "append_superseded_context",
+    "preserve_historical_record", "use_as_resolution", "needs_authorization",
+}
 
-def _row_to_dict(row: Any) -> dict[str, Any]:
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _hash_json(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _member_ref(member: dict[str, Any]) -> str:
+    return f"{int(member['memory_id'])}@{int(member['version'])}"
+
+
+def _decode_row(row: Any) -> dict[str, Any]:
     data = dict(row)
-    for key in ("tags", "metadata", "structured_details"):
-        if key in data and isinstance(data[key], str):
-            try:
-                data[key] = json.loads(data[key])
-            except json.JSONDecodeError:
-                pass
+    for key in ("slot_key", "candidate_key", "member_versions", "value_groups", "apply_summary"):
+        if isinstance(data.get(key), str):
+            data[key] = json.loads(data[key])
+    data["overflow"] = bool(data.get("overflow"))
     return data
 
 
 class ConflictStore:
-    def __init__(self, db: "MemoryDB"):
+    def __init__(self, db: "MemoryDB") -> None:
         self._db = db
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._db, name)
 
-    def record_conflict_on_conn(
-        self,
-        conn: sqlite3.Connection,
-        left_id: int,
-        right_id: int,
-        subject: Optional[str],
-        reason: str,
-        winner_id: Optional[int],
-        status: str = "open",
-    ) -> int:
-        cur = conn.execute(
-            """
-            INSERT INTO conflicts(left_id, right_id, subject, status, reason, winner_id, created_at, resolved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (left_id, right_id, subject, status, reason, winner_id, utc_now_iso(), utc_now_iso() if status != "open" else None),
-        )
-        if cur.lastrowid is None:
-            raise sqlite3.Error("conflict insert did not return an id")
-        return int(cur.lastrowid)
-
-    def record_conflict(
-        self,
-        left_id: int,
-        right_id: int,
-        subject: Optional[str],
-        reason: str,
-        winner_id: Optional[int],
-        status: str = "open",
-        *,
-        conn: Optional[sqlite3.Connection] = None,
-    ) -> Optional[int]:
-        if conn is not None:
-            return self.record_conflict_on_conn(conn, left_id, right_id, subject, reason, winner_id, status)
-        if not self._db_available or not self.state.sqlite_writable:
+    @staticmethod
+    def _normalize_slot(slot_key: Optional[dict[str, Any]]) -> Optional[dict[str, str]]:
+        if slot_key is None:
             return None
+        if set(slot_key) != {"entity", "attribute", "scope"}:
+            raise ValueError("slot_key must contain exactly entity, attribute, and scope")
+        normalized = {key: str(slot_key[key]).strip() for key in ("entity", "attribute", "scope")}
+        if not all(normalized.values()) or normalized["scope"].casefold() == "unknown":
+            raise ValueError("slot_key entity, attribute, and scope must be reliable and non-empty")
+        if any(len(value) > _MAX_FIELD_CHARS for value in normalized.values()):
+            raise ValueError("slot_key field exceeds size bound")
+        return normalized
+
+    @staticmethod
+    def _normalize_members(members: list[dict[str, Any] | ConflictMember]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in members:
+            member = raw.to_dict() if isinstance(raw, ConflictMember) else dict(raw)
+            required = {
+                "memory_id", "version", "attribute_raw", "value_raw",
+                "normalized_attribute", "normalized_value", "evidence_quote",
+                "evidence_span", "content_hash", "direction", "prompt_version",
+                "detector_version",
+            }
+            missing = required - member.keys()
+            if missing:
+                raise ValueError(f"member missing required fields: {', '.join(sorted(missing))}")
+            member["memory_id"] = int(member["memory_id"])
+            member["version"] = int(member["version"])
+            span = member["evidence_span"]
+            if not isinstance(span, (list, tuple)) or len(span) != 2:
+                raise ValueError("evidence_span must be [start, end]")
+            member["evidence_span"] = [int(span[0]), int(span[1])]
+            unit = member.get("evidence_unit")
+            member["evidence_unit"] = None if unit is None else int(unit)
+            if member["memory_id"] <= 0 or member["version"] <= 0:
+                raise ValueError("member memory_id and version must be positive")
+            if member["evidence_span"][0] < 0 or member["evidence_span"][1] < member["evidence_span"][0]:
+                raise ValueError("evidence_span must be ordered and non-negative")
+            if member["evidence_unit"] is not None and member["evidence_unit"] < 0:
+                raise ValueError("evidence_unit must be non-negative")
+            if len(str(member["content_hash"])) != 64:
+                raise ValueError("member content_hash must be 64 characters")
+            for key, value in member.items():
+                if isinstance(value, str) and len(value) > _MAX_FIELD_CHARS:
+                    raise ValueError(f"member field {key} exceeds size bound")
+            ref = _member_ref(member)
+            if ref in seen:
+                raise ValueError("members must contain each memory@version exactly once")
+            normalized.append(member)
+            seen.add(ref)
+        normalized.sort(key=lambda item: (item["memory_id"], item["version"]))
+        return normalized
+
+    @staticmethod
+    def _normalize_value_groups(
+        groups: list[dict[str, Any] | ConflictValueGroup], members: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        member_values = {_member_ref(member): str(member["normalized_value"]) for member in members}
+        normalized: list[dict[str, Any]] = []
+        seen_values: set[str] = set()
+        covered: set[str] = set()
+        for raw in groups:
+            group = raw.to_dict() if isinstance(raw, ConflictValueGroup) else dict(raw)
+            if set(group) != {"normalized_value", "display_value", "members"}:
+                raise ValueError("value group must contain normalized_value, display_value, members")
+            value = str(group["normalized_value"])
+            display = str(group["display_value"])
+            raw_refs = group["members"]
+            if not isinstance(raw_refs, (list, tuple)):
+                raise ValueError("value group members must be an array")
+            refs = [str(ref) for ref in raw_refs]
+            if len(refs) != len(set(refs)):
+                raise ValueError("value groups must contain each member exactly once")
+            refs.sort()
+            if not value or value in seen_values or not refs or not set(refs) <= set(member_values):
+                raise ValueError("invalid value group membership or duplicate normalized value")
+            if covered.intersection(refs):
+                raise ValueError("value groups must contain each member exactly once")
+            if any(member_values[ref] != value for ref in refs):
+                raise ValueError("value group normalized_value must match every member")
+            if len(value) > _MAX_FIELD_CHARS or len(display) > _MAX_FIELD_CHARS:
+                raise ValueError("value group field exceeds size bound")
+            normalized.append({"normalized_value": value, "display_value": display, "members": refs})
+            seen_values.add(value)
+            covered.update(refs)
+        if covered != set(member_values):
+            raise ValueError("value groups must cover every member exactly once")
+        normalized.sort(key=lambda item: item["normalized_value"])
+        return normalized
+
+    @staticmethod
+    def _candidate_key(
+        detector_version: str, members: list[dict[str, Any]], candidate_key: Optional[dict[str, Any]]
+    ) -> dict[str, Any]:
+        expected_evidence = [{
+            "member": _member_ref(member),
+            "unit": member.get("evidence_unit"),
+            "span": member["evidence_span"],
+            "hash": member["content_hash"],
+        } for member in members]
+        expected = {
+            "detector_version": detector_version,
+            "members": [_member_ref(member) for member in members],
+            "evidence": expected_evidence,
+        }
+        if candidate_key is None:
+            return expected
+        key = dict(candidate_key)
+        if set(key) != {"detector_version", "members", "evidence"}:
+            raise ValueError("candidate_key must contain exactly detector_version, members, and evidence")
         try:
-            with self.connection() as txn_conn:
-                conflict_id = self.record_conflict_on_conn(txn_conn, left_id, right_id, subject, reason, winner_id, status)
-                txn_conn.commit()
-                return conflict_id
-        except sqlite3.Error:
+            normalized = {
+                "detector_version": str(key["detector_version"]),
+                "members": [str(ref) for ref in key["members"]],
+                "evidence": [
+                    {
+                        "member": str(item["member"]),
+                        "unit": None if item["unit"] is None else int(item["unit"]),
+                        "span": [int(item["span"][0]), int(item["span"][1])],
+                        "hash": str(item["hash"]),
+                    }
+                    for item in key["evidence"]
+                ],
+            }
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise ValueError("candidate_key has invalid member evidence") from exc
+        if normalized != expected:
+            raise ValueError("candidate_key does not match detector and sorted member evidence")
+        if len(_canonical_json(normalized)) > 65_536:
+            raise ValueError("candidate_key exceeds size bound")
+        return normalized
+
+    @staticmethod
+    def _active_members_match_workspace(
+        conn: sqlite3.Connection, conflict: dict[str, Any], caller_workspace: Optional[str] = None,
+    ) -> bool:
+        """Revalidate every current member against the conflict and strict caller workspace."""
+        expected_workspace = str(conflict.get("workspace_canonical") or "").strip()
+        caller = str(caller_workspace or "").strip()
+        if not expected_workspace or (caller and caller != expected_workspace):
+            return False
+        members = conflict.get("member_versions") or []
+        if not members:
+            return False
+        for member in members:
+            current = conn.execute(
+                "SELECT status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                "FROM memories WHERE id=?", (int(member["memory_id"]),),
+            ).fetchone()
+            if (
+                current is None or current["status"] != "active"
+                or str(current["workspace"] or "").strip() != expected_workspace
+                or (caller and str(current["workspace"] or "").strip() != caller)
+            ):
+                return False
+        return True
+
+    def get_conflict(self, conflict_id: int) -> Optional[dict[str, Any]]:
+        if not self._db_available:
             return None
-
-    def resolve_conflicts_for_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> int:
-        cur = conn.execute(
-            "UPDATE conflicts SET status='resolved', resolved_at=? "
-            "WHERE status='open' AND (left_id=? OR right_id=?)",
-            (utc_now_iso(), memory_id, memory_id),
-        )
-        # v0.8.8: a memory resolved-away (supersede) also obsoletes any
-        # not_a_conflict (advisory dismissal) rows touching it — the
-        # dismissal has no referent once the memory is superseded.
-        conn.execute(
-            "DELETE FROM conflicts WHERE status='not_a_conflict' "
-            "AND (left_id=? OR right_id=?)",
-            (memory_id, memory_id),
-        )
-        return int(cur.rowcount)
-
-    def resolve_conflicts_for(
-        self,
-        memory_id: int,
-        *,
-        conn: Optional[sqlite3.Connection] = None,
-    ) -> int:
-        if conn is not None:
-            return self.resolve_conflicts_for_on_conn(conn, memory_id)
-        if not self._db_available or not self.state.sqlite_writable:
-            return 0
-        try:
-            with self.connection() as txn_conn:
-                resolved = self.resolve_conflicts_for_on_conn(txn_conn, memory_id)
-                txn_conn.commit()
-                return resolved
-        except sqlite3.Error:
-            return 0
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
+        return _decode_row(row) if row else None
 
     def list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None) -> list[dict[str, Any]]:
         if not self._db_available:
             return []
+        sql = "SELECT * FROM conflicts WHERE status=?"
+        params: list[Any] = [status]
+        if source is not None:
+            sql += " AND source=?"
+            params.append(source)
+        sql += " ORDER BY created_at DESC,id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
         with self.connection() as conn:
-            select = (
-                "SELECT c.*, j.verdict AS judgment_verdict, "
-                "j.recommended_use AS judgment_recommended_use, "
-                "j.suggested_winner AS judgment_suggested_winner, "
-                "j.confidence_hint AS judgment_confidence_hint, "
-                "j.reason AS judgment_reason, j.judge_type AS judgment_judge_type, "
-                "j.judge_ref AS judgment_judge_ref, j.resolution_kind AS judgment_resolution_kind, "
-                "j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
-                "FROM conflicts c LEFT JOIN conflict_judgments j "
-                "ON j.id=c.active_judgment_id "
-            )
-            if source is None:
-                rows = conn.execute(
-                    select + "WHERE c.status = ? ORDER BY c.created_at DESC LIMIT ?",
-                    (status, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    select + "WHERE c.status = ? AND c.source = ? "
-                    "ORDER BY c.created_at DESC LIMIT ?",
-                    (status, source, limit),
-                ).fetchall()
-            return [_row_to_dict(row) for row in rows]
+            return [_decode_row(row) for row in conn.execute(sql, params).fetchall()]
 
-    # ------------------------------------------------------------------
-    # v0.7.6: batch conflict-signal helpers for search attachment.
-    # Both are read-only, chunked to respect SQLite's parameter limit,
-    # and never raise (callers treat failure as empty).
-    # ------------------------------------------------------------------
-
-    def list_open_conflicts_for_memory_ids(
-        self, memory_ids: list[int],
-    ) -> list[dict[str, Any]]:
-        """Batch-fetch all open conflicts where either side is in *memory_ids*.
-
-        Returns row_to_dict rows. Single SQL per chunk (no N+1). DB-unavailable
-        or empty input → [].
-
-        Note (v0.10.2): the resolved branch surfaces reusable *guidance* only
-        for evolution/compatible verdicts with a live active judgment.
-        Search must not re-litigate a pair as guidance; a contradiction-resolved
-        pair is left ringable for a second look.
-        """
-        if not memory_ids or not self._db_available:
-            return []
-        unique_ids = sorted(set(int(i) for i in memory_ids if i is not None))
-        if not unique_ids:
-            return []
-        results: list[dict[str, Any]] = []
-        try:
-            with self.connection() as conn:
-                # chunk=250 because the query binds each id twice (left_id IN + right_id IN);
-                # 2×250=500 stays under SQLite's default SQLITE_MAX_VARIABLE_NUMBER=999.
-                for chunk_start in range(0, len(unique_ids), 250):
-                    chunk = unique_ids[chunk_start:chunk_start + 250]
-                    ph = ",".join("?" * len(chunk))
-                    rows = conn.execute(
-                        f"SELECT c.*, j.verdict AS judgment_verdict, "
-                        f"j.recommended_use AS judgment_recommended_use, "
-                        f"j.suggested_winner AS judgment_suggested_winner, "
-                        f"j.confidence_hint AS judgment_confidence_hint, "
-                        f"j.reason AS judgment_reason, j.judge_type AS judgment_judge_type, "
-                        f"j.judge_ref AS judgment_judge_ref, j.resolution_kind AS judgment_resolution_kind, "
-                        f"j.conflict_scope AS judgment_conflict_scope, j.created_at AS judged_at "
-                        f"FROM conflicts c LEFT JOIN conflict_judgments j ON j.id=c.active_judgment_id "
-                        f"WHERE ("
-                        f"(c.status='open' AND (c.left_version IS NULL OR ("
-                        f"c.left_version=(SELECT version FROM memories WHERE id=c.left_id) AND "
-                        f"c.right_version=(SELECT version FROM memories WHERE id=c.right_id)))) "
-                        f"OR (c.status='resolved' AND c.active_judgment_id IS NOT NULL "
-                        f"AND j.verdict IN ('evolution','compatible') "
-                        f"AND c.left_version IS NOT NULL AND c.right_version IS NOT NULL "
-                        f"AND c.left_version=(SELECT version FROM memories WHERE id=c.left_id) "
-                        f"AND c.right_version=(SELECT version FROM memories WHERE id=c.right_id))"
-                        f") AND (c.left_id IN ({ph}) OR c.right_id IN ({ph}))",
-                        (*chunk, *chunk),
-                    ).fetchall()
-                    results.extend(_row_to_dict(r) for r in rows)
-        except sqlite3.Error:
-            return []
-        return results
-
-    def get_memory_summaries(
-        self, memory_ids: list[int],
-    ) -> dict[int, dict[str, Any]]:
-        return self._db.audit.get_memory_summaries(memory_ids)
-
-    # ------------------------------------------------------------------
-    # Explicit conflict persistence. Candidate discovery remains advisory in
-    # semantic_notices until an Agent or user decides governance is needed.
-    # ------------------------------------------------------------------
-
-    def record_conflict_enriched(
-        self,
-        left_id: int,
-        right_id: int,
-        conflict_type: Optional[str],
-        conflict_point: Optional[str],
-        reason: str,
-        suggested_winner: Optional[int] = None,
-        confidence_hint: Optional[str] = None,
-        source: Optional[str] = None,
-        status: str = "open",
-        refresh: bool = False,
-        left_version: Optional[int] = None,
-        right_version: Optional[int] = None,
-        judgment_status: Optional[str] = None,
-        scan_prompt_version: Optional[str] = None,
-        scan_model: Optional[str] = None,
+    def record_conflict_group(
+        self, *, workspace_canonical: str, slot_key: Optional[dict[str, Any]],
+        members: list[dict[str, Any] | ConflictMember],
+        value_groups: list[dict[str, Any] | ConflictValueGroup],
+        detection_reason: str, source: str, detector_version: str,
+        conflict_point: Optional[str] = None, prompt_version: Optional[str] = None,
+        candidate_key: Optional[dict[str, Any]] = None, status: str = "open",
+        expected_revision: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Insert a conflict row carrying scan-enrichment fields.
-
-        Pairs are canonicalised to ``left_id < right_id``. Idempotent: if an
-        open conflict on the same (left, right) pair already exists, no new
-        row is written and ``deduped`` is returned — *unless* ``refresh=True``,
-        in which case the existing row's enrichment fields are UPDATEd in place
-        and ``refreshed`` is returned (``created_at`` is preserved), provided
-        the incoming source's priority is at least the existing row's;
-        drifted version pins alone always refresh regardless of priority.
-        """
+        if status not in {"open", "not_a_conflict"}:
+            return {"outcome": "invalid_status"}
+        if status == "open" and slot_key is None:
+            return {"outcome": "invalid_slot_key", "error": "open conflicts require a complete slot_key"}
+        try:
+            slot = self._normalize_slot(slot_key)
+            normalized_members = self._normalize_members(members)
+            if not normalized_members:
+                raise ValueError("at least one member is required")
+            if any(str(member["detector_version"]) != str(detector_version) for member in normalized_members):
+                raise ValueError("member detector_version must match detector_version")
+            refs = {_member_ref(member) for member in normalized_members}
+            groups = (
+                self._normalize_value_groups(value_groups, normalized_members)
+                if status == "open" or value_groups else []
+            )
+            if status == "open" and len(groups) < 2:
+                raise ValueError("open conflicts require at least two value groups")
+            candidate = self._candidate_key(detector_version, normalized_members, candidate_key)
+            candidate_hash = _hash_json(candidate)
+            slot_hash = _hash_json(slot) if slot is not None else None
+        except (TypeError, ValueError) as exc:
+            return {"outcome": "invalid_input", "error": str(exc)}
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable"}
-        raw_left, raw_right = int(left_id), int(right_id)
-        if raw_left <= raw_right:
-            a, b = raw_left, raw_right
-        else:
-            a, b = raw_right, raw_left
-            left_version, right_version = right_version, left_version
-        subject = conflict_point or reason
         now = utc_now_iso()
         with self.write_transaction() as conn:
-            # Resolve version pins inside the write transaction so the row can
-            # never carry pins that were already stale when it was written:
-            # omitted pins default to the current versions, explicit pins are
-            # CAS-verified against them.
-            try:
-                if left_version is not None:
-                    left_version = int(left_version)
-                if right_version is not None:
-                    right_version = int(right_version)
-            except (TypeError, ValueError):
-                return {"outcome": "invalid_input", "left_id": a, "right_id": b}
-            version_rows = conn.execute(
-                "SELECT id, version FROM memories WHERE id IN (?, ?)", (a, b)
-            ).fetchall()
-            current_versions = {int(r["id"]): int(r["version"] or 1) for r in version_rows}
-            if len(current_versions) < 2:
-                return {"outcome": "memory_not_found", "left_id": a, "right_id": b}
-            if left_version is None:
-                left_version = current_versions[a]
-            if right_version is None:
-                right_version = current_versions[b]
-            if left_version != current_versions[a] or right_version != current_versions[b]:
-                return {
-                    "outcome": "stale_snapshot",
-                    "left_id": a, "right_id": b,
-                    "left_version": left_version, "right_version": right_version,
-                }
-            # Dedupe against the latest open OR not_a_conflict row: scan
-            # triage registers non-issues as not_a_conflict and must not
-            # stack duplicate rows, while re-escalation of a dismissed pair
-            # should reopen the existing row instead of inserting a new one.
-            existing = conn.execute(
-                "SELECT * FROM conflicts WHERE status IN ('open','not_a_conflict') "
-                "AND left_id=? AND right_id=? ORDER BY id DESC LIMIT 1",
-                (a, b),
-            ).fetchone()
-            if existing and existing["status"] == "open" and status == "not_a_conflict":
-                return {
-                    "outcome": "open_conflict_exists",
-                    "conflict_id": int(existing["id"]),
-                    "left_id": a, "right_id": b,
-                    "error": "pair already has an open conflict; close it via memory_govern(resolve_conflict) with user authorization",
-                }
-            if existing and existing["status"] == "not_a_conflict" and status == "open":
+            # Derive the workspace from current pinned member rows inside the
+            # same transaction; caller labels cannot create cross-workspace groups.
+            member_workspaces: set[str] = set()
+            for member in normalized_members:
+                memory = conn.execute(
+                    "SELECT version,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=?", (int(member["memory_id"]),),
+                ).fetchone()
+                if memory is None or int(memory["version"] or 0) != int(member["version"]):
+                    return {"outcome": "stale_snapshot"}
+                member_workspaces.add(str(memory["workspace"] or "").strip())
+            if len(member_workspaces) != 1:
+                return {"outcome": "workspace_mismatch"}
+            derived_workspace = next(iter(member_workspaces))
+            if not derived_workspace or (
+                workspace_canonical and str(workspace_canonical).strip() != derived_workspace
+            ):
+                return {"outcome": "workspace_mismatch"}
+            workspace_canonical = derived_workspace
+            active = None
+            if slot_hash is not None:
+                active = conn.execute(
+                    "SELECT * FROM conflicts WHERE workspace_canonical=? AND slot_key_hash=? "
+                    "AND status IN ('open','applying')", (workspace_canonical, slot_hash),
+                ).fetchone()
+            if active:
+                current = _decode_row(active)
+                # Update calls are CAS operations.  Check the revision before
+                # candidate/member dedupe so replaying an old exact payload is
+                # observably stale rather than appearing successful.
+                if expected_revision is not None and int(expected_revision) != int(current["revision"]):
+                    return {"outcome": "stale_conflict", "conflict_id": current["id"], "revision": current["revision"]}
+                if current["status"] != "open":
+                    return {"outcome": "applying", "conflict_id": current["id"], "revision": current["revision"]}
+                if expected_revision is None:
+                    duplicate = conn.execute(
+                        "SELECT * FROM conflicts WHERE candidate_key_hash=?", (candidate_hash,)
+                    ).fetchone()
+                    if duplicate:
+                        row = _decode_row(duplicate)
+                        if row["candidate_key"] == candidate:
+                            return {"outcome": "deduped", "conflict_id": row["id"], "revision": row["revision"]}
+                        return {"outcome": "identity_collision"}
+                    return {"outcome": "stale_conflict", "conflict_id": current["id"], "revision": current["revision"]}
+                existing_refs = {_member_ref(member) for member in current["member_versions"]}
+                additions = [member for member in normalized_members if _member_ref(member) not in existing_refs]
+                if not additions:
+                    return {"outcome": "deduped", "conflict_id": current["id"], "revision": current["revision"]}
+                combined = current["member_versions"] + additions
+                merged_groups = {group["normalized_value"]: dict(group) for group in current["value_groups"]}
+                for group in groups:
+                    found = merged_groups.setdefault(group["normalized_value"], dict(group))
+                    found["members"] = sorted(set(found["members"]) | set(group["members"]))
+                merged = sorted(merged_groups.values(), key=lambda item: item["normalized_value"])
+                members_json, groups_json = _canonical_json(combined), _canonical_json(merged)
+                overflow = len(combined) > _MAX_MEMBERS or len(members_json) > _MAX_MEMBER_JSON or len(groups_json) > _MAX_VALUE_JSON
+                if overflow:
+                    conn.execute(
+                        "UPDATE conflicts SET overflow=1,revision=revision+1,refreshed_at=? WHERE id=? AND revision=?",
+                        (now, current["id"], current["revision"]),
+                    )
+                    return {"outcome": "overflow", "conflict_id": current["id"], "revision": current["revision"] + 1}
+                fingerprint = _hash_json(sorted(_member_ref(member) for member in combined))
                 cur = conn.execute(
-                    "UPDATE conflicts SET status='open', resolved_at=NULL, reason=?, "
-                    "conflict_type=?, conflict_point=?, suggested_winner=?, confidence_hint=?, "
-                    "source=?, left_version=?, right_version=?, refreshed_at=? WHERE id=?",
-                    (
-                        reason, conflict_type, conflict_point, suggested_winner,
-                        confidence_hint, source, left_version, right_version, now,
-                        int(existing["id"]),
-                    ),
+                    "UPDATE conflicts SET revision=revision+1,member_versions=?,member_fingerprint=?,"
+                    "value_groups=?,candidate_key=?,candidate_key_hash=?,refreshed_at=? "
+                    "WHERE id=? AND status='open' AND revision=?",
+                    (members_json, fingerprint, groups_json, _canonical_json(candidate), candidate_hash,
+                     now, current["id"], current["revision"]),
                 )
-                if cur.rowcount == 0:
-                    return {"outcome": "not_open", "conflict_id": int(existing["id"])}
-                return {
-                    "outcome": "reopened", "conflict_id": int(existing["id"]),
-                    "left_id": a, "right_id": b,
-                    "left_version": left_version, "right_version": right_version,
-                }
-            if existing and existing["status"] == "not_a_conflict":
-                return {"outcome": "deduped", "conflict_id": int(existing["id"]),
-                        "left_id": a, "right_id": b}
-            if existing:
-                existing_row = _row_to_dict(existing)
-                priority = {
-                    "metadata_write_hint": 10,
-                    "llm_informed": 30,
-                    "semantic_notice": 35,
-                    "policy_informed": 35,
-                    "human_confirmed": 40,
-                    None: 30,
-                }
-                incoming_priority = priority.get(source, 25)
-                existing_priority = priority.get(existing_row.get("source"), 25)
-                preserve_judgment_projection = existing_row.get("active_judgment_id") is not None
-                effective_left_version = left_version
-                effective_right_version = right_version
-                pins_changed = (
-                    effective_left_version != existing_row.get("left_version")
-                    or effective_right_version != existing_row.get("right_version")
+                if cur.rowcount != 1:
+                    return {"outcome": "stale_conflict", "conflict_id": current["id"]}
+                return {"outcome": "appended", "conflict_id": current["id"], "revision": current["revision"] + 1}
+            duplicate = conn.execute(
+                "SELECT * FROM conflicts WHERE candidate_key_hash=?", (candidate_hash,)
+            ).fetchone()
+            if duplicate:
+                duplicate_row = _decode_row(duplicate)
+                promotable_notice = (
+                    status == "open"
+                    and duplicate_row.get("status") == "candidate"
+                    and duplicate_row.get("notice_type") is not None
+                    and duplicate_row.get("slot_key_hash") == slot_hash
                 )
-                reset_judgment = pins_changed and existing_row.get("active_judgment_id") is not None
-                should_update = (
-                    incoming_priority > existing_priority
-                    or (refresh and incoming_priority >= existing_priority)
-                    or reset_judgment
-                    # Drifted pins alone must refresh the row: a dedupe that
-                    # keeps stale pins leaves an open conflict that never
-                    # rings at search and cannot be judged (zombie row).
-                    or pins_changed
-                )
-                if should_update:
-                    effective_judgment_status = (
-                        "pending_llm" if reset_judgment else
-                        (judgment_status if judgment_status is not None else existing_row.get("judgment_status"))
+                if not promotable_notice:
+                    if duplicate_row["candidate_key"] == candidate:
+                        return {
+                            "outcome": "deduped", "conflict_id": duplicate_row["id"],
+                            "revision": duplicate_row["revision"],
+                        }
+                    return {"outcome": "identity_collision"}
+            if expected_revision is not None:
+                return {"outcome": "stale_conflict"}
+            members_json, groups_json = _canonical_json(normalized_members), _canonical_json(groups)
+            if len(normalized_members) > _MAX_MEMBERS or len(members_json) > _MAX_MEMBER_JSON or len(groups_json) > _MAX_VALUE_JSON:
+                return {"outcome": "overflow", "error": "initial conflict snapshot exceeds bounds"}
+            fingerprint = _hash_json(sorted(refs))
+            # A delivered notice may already own this exact frozen event
+            # snapshot. Promote that row instead of creating a parallel formal
+            # conflict or replacing its immutable member/value evidence.
+            if status == "open" and slot_hash is not None:
+                notice_row = conn.execute(
+                    "SELECT * FROM conflicts WHERE workspace_canonical=? AND slot_key_hash=? "
+                    "AND member_fingerprint=? AND status='candidate' AND notice_type IS NOT NULL",
+                    (workspace_canonical, slot_hash, fingerprint),
+                ).fetchone()
+                if notice_row:
+                    frozen = _decode_row(notice_row)
+                    frozen_members = sorted(
+                        frozen["member_versions"], key=lambda item: (item["memory_id"], item["version"]),
                     )
-                    active_judgment_id = None if reset_judgment else existing_row.get("active_judgment_id")
-                    effective_resolution_kind = None if reset_judgment else existing_row.get("resolution_kind")
-                    effective_conflict_scope = None if reset_judgment else existing_row.get("conflict_scope")
-                    effective_reason = (
-                        existing_row.get("reason")
-                        if preserve_judgment_projection else reason
+                    frozen_groups = sorted(
+                        frozen["value_groups"], key=lambda item: item["normalized_value"],
                     )
-                    effective_winner = (
-                        existing_row.get("suggested_winner")
-                        if preserve_judgment_projection else suggested_winner
-                    )
-                    effective_confidence = (
-                        existing_row.get("confidence_hint")
-                        if preserve_judgment_projection else confidence_hint
-                    )
-                    effective_source = (
-                        existing_row.get("source")
-                        if preserve_judgment_projection else source
-                    )
+                    if frozen_members != normalized_members or frozen_groups != groups:
+                        return {"outcome": "snapshot_mismatch", "conflict_id": frozen["id"]}
                     cur = conn.execute(
-                        """
-                        UPDATE conflicts SET
-                            conflict_type=?, conflict_point=?, reason=?,
-                            winner_id=?, suggested_winner=?, confidence_hint=?,
-                            source=?, left_version=?, right_version=?,
-                            judgment_status=?, active_judgment_id=?,
-                            resolution_kind=?, conflict_scope=?,
-                            scan_prompt_version=?, scan_model=?, refreshed_at=?
-                        WHERE id=?
-                        """,
-                        (
-                            conflict_type, conflict_point, effective_reason,
-                            effective_winner, effective_winner, effective_confidence,
-                            effective_source, effective_left_version, effective_right_version,
-                            effective_judgment_status, active_judgment_id,
-                            effective_resolution_kind, effective_conflict_scope,
-                            scan_prompt_version, scan_model, now,
-                            int(existing["id"]),
-                        ),
+                        "UPDATE conflicts SET status='open',revision=revision+1,conflict_point=?,"
+                        "detection_reason=?,source=?,detector_version=?,prompt_version=?,refreshed_at=? "
+                        "WHERE id=? AND status='candidate' AND revision=?",
+                        (conflict_point, detection_reason, source, detector_version, prompt_version,
+                         now, frozen["id"], frozen["revision"]),
                     )
-                    if cur.rowcount == 0:
-                        return {"outcome": "not_open", "conflict_id": int(existing["id"])}
+                    if cur.rowcount != 1:
+                        return {"outcome": "stale_conflict", "conflict_id": frozen["id"]}
                     return {
-                        "outcome": "refreshed", "conflict_id": int(existing["id"]),
-                        "left_id": a, "right_id": b,
-                        "left_version": effective_left_version,
-                        "right_version": effective_right_version,
+                        "outcome": "deduped", "conflict_id": frozen["id"],
+                        "revision": int(frozen["revision"]) + 1,
                     }
-                return {
-                    "outcome": "deduped", "conflict_id": int(existing["id"]),
-                    "left_id": a, "right_id": b,
-                    "left_version": existing_row.get("left_version"),
-                    "right_version": existing_row.get("right_version"),
-                }
+            try:
+                cur = conn.execute(
+                    """INSERT INTO conflicts(
+                       revision,workspace_canonical,slot_key,slot_key_hash,candidate_key,candidate_key_hash,
+                       conflict_point,status,member_versions,member_fingerprint,value_groups,detection_reason,
+                       source,detector_version,prompt_version,created_at,refreshed_at)
+                       VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (workspace_canonical, _canonical_json(slot) if slot else None, slot_hash,
+                     _canonical_json(candidate), candidate_hash, conflict_point, status, members_json,
+                     fingerprint, groups_json, detection_reason, source, detector_version, prompt_version,
+                     now, now),
+                )
+            except sqlite3.IntegrityError:
+                duplicate = conn.execute(
+                    "SELECT * FROM conflicts WHERE candidate_key_hash=?", (candidate_hash,),
+                ).fetchone()
+                if duplicate is not None:
+                    existing = _decode_row(duplicate)
+                    if existing["candidate_key"] == candidate:
+                        return {
+                            "outcome": "deduped", "conflict_id": int(existing["id"]),
+                            "revision": int(existing["revision"]),
+                        }
+                raise
+            return {"outcome": "inserted", "conflict_id": int(cur.lastrowid), "revision": 1}
+
+    def escalate_structured_notice(
+        self, notice_id: int, *, workspace_canonical: Optional[str], reason: str,
+    ) -> dict[str, Any]:
+        """Atomically validate and promote a complete frozen notice snapshot."""
+        now = utc_now_iso()
+        with self.write_transaction() as conn:
+            sql = "SELECT * FROM conflicts WHERE id=? AND notice_type IS NOT NULL"
+            args: list[Any] = [int(notice_id)]
+            if workspace_canonical is not None:
+                sql += " AND workspace_canonical=?"
+                args.append(workspace_canonical)
+            row = conn.execute(sql, args).fetchone()
+            if row is None:
+                return {"outcome": "not_found"}
+            notice = _decode_row(row)
+            delivery = str(notice.get("notice_delivery_status") or "")
+            try:
+                slot = self._normalize_slot(notice.get("slot_key"))
+                members = self._normalize_members(notice.get("member_versions") or [])
+                groups = self._normalize_value_groups(notice.get("value_groups") or [], members)
+                if slot is None or len(members) < 2 or len(groups) < 2:
+                    raise ValueError("complete slot, members, and at least two value groups are required")
+            except (TypeError, ValueError) as exc:
+                return {"outcome": "structured_group_required", "error": str(exc)}
+            checks: list[dict[str, Any]] = []
+            for member in members:
+                current = conn.execute(
+                    "SELECT version,status FROM memories WHERE id=?", (member["memory_id"],),
+                ).fetchone()
+                fresh = bool(current and current["status"] == "active" and int(current["version"]) == int(member["version"]))
+                checks.append({
+                    "memory_id": member["memory_id"], "expected_version": member["version"],
+                    "current_version": current["version"] if current else None,
+                    "status": current["status"] if current else None, "fresh": fresh,
+                })
+            if not all(check["fresh"] for check in checks):
+                return {"outcome": "stale_snapshot", "freshness": {"fresh": False, "checks": checks}}
+            if delivery not in {"pending", "delivered"} or notice.get("status") != "candidate":
+                return {"outcome": "already_terminal", "status": delivery}
             cur = conn.execute(
-                """
-                INSERT INTO conflicts(
-                    left_id, right_id, subject, status, reason, winner_id,
-                    created_at, resolved_at,
-                    conflict_type, conflict_point, suggested_winner,
-                    confidence_hint, source,
-                    left_version, right_version, scan_prompt_version, scan_model,
-                    judgment_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    a, b, subject, status, reason, suggested_winner,
-                    now, now if status != "open" else None,
-                    conflict_type, conflict_point, suggested_winner,
-                    confidence_hint, source,
-                    left_version, right_version, scan_prompt_version, scan_model,
-                    judgment_status,
-                ),
+                """UPDATE conflicts SET status='open',revision=revision+1,source='semantic_notice',
+                   detection_reason=?,notice_delivery_status='resolved',notice_resolution_reason=?,
+                   refreshed_at=? WHERE id=? AND status='candidate'
+                   AND notice_delivery_status IN ('pending','delivered') AND revision=?""",
+                (reason, f"escalated_to_conflict: {reason}", now, int(notice_id), int(notice["revision"])),
             )
+            if cur.rowcount != 1:
+                return {"outcome": "stale_conflict"}
             return {
-                "outcome": "inserted", "conflict_id": int(cur.lastrowid),
-                "left_id": a, "right_id": b,
-                "left_version": left_version, "right_version": right_version,
+                "outcome": "promoted", "conflict_id": int(notice_id),
+                "revision": int(notice["revision"]) + 1,
+                "member_versions": members, "value_groups": groups, "slot_key": slot,
             }
 
-    def resolve_conflict(
-        self, conflict_id: int, reason: str = "", status: str = "resolved",
+    def judge_conflict(
+        self, conflict_id: int, *, expected_revision: int, chosen_value: str,
+        decided_by: str, decided_ref: Optional[str], decision_reason: str,
+        apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int] = None,
+        strict_workspace: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Close a single open conflict by id (status -> resolved or not_a_conflict).
-
-        ``status='not_a_conflict'`` records that the pair was judged NOT a real
-        conflict (advisory dismissal): write/search then skip it (Layer 0) until
-        a version change invalidates the row. ``status`` must be 'resolved' or
-        'not_a_conflict'. Unlike ``resolve_conflicts_for`` (which closes *all*
-        conflicts touching a memory), this targets exactly one row.
-        """
-        if status not in ("resolved", "not_a_conflict"):
-            return {"outcome": "invalid_status", "conflict_id": int(conflict_id)}
-        if not self._db_available or not self.state.sqlite_writable:
-            return {"outcome": "unavailable"}
-        with self.connection() as conn:
-            cur = conn.execute(
-                "UPDATE conflicts SET status=?, resolved_at=?, reason=? "
-                "WHERE id=? AND status='open'",
-                (status, utc_now_iso(), reason, int(conflict_id)),
-            )
-            conn.commit()
-            if cur.rowcount == 0:
-                return {"outcome": "not_open", "conflict_id": int(conflict_id)}
-            return {"outcome": status, "conflict_id": int(conflict_id)}
-
-    def dismissed_pairs_snapshot(self) -> set[tuple[int, int]]:
-        """Set of canonical (left, right) pairs currently dismissed.
-
-        Same semantics as is_pair_dismissed (a not_a_conflict row whose
-        version pins still match the current memories), batched for the
-        scan-candidates enumeration so it can filter thousands of pairs
-        with one query instead of one query per pair.
-        """
-        if not self._db_available:
-            return set()
-        try:
-            with self.connection() as conn:
-                rows = conn.execute(
-                    "SELECT c.left_id AS a, c.right_id AS b FROM conflicts c "
-                    "WHERE c.status='not_a_conflict' "
-                    "AND (c.left_version IS NULL OR c.left_version = (SELECT version FROM memories WHERE id=c.left_id)) "
-                    "AND (c.right_version IS NULL OR c.right_version = (SELECT version FROM memories WHERE id=c.right_id))",
-                ).fetchall()
-                return {
-                    (min(int(r["a"]), int(r["b"])), max(int(r["a"]), int(r["b"])))
-                    for r in rows
-                }
-        except sqlite3.Error:
-            return set()
-
-    def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
-        """v0.8.8: True if (left, right) has a ``not_a_conflict`` row whose pinned
-        ``left_version``/``right_version`` still match the memories' current
-        versions (neither edited since dismissal). One correlated query; never
-        raises (best-effort: on error returns False → fail-open, re-ring).
-        """
-        if not self._db_available:
-            return False
-        a, b = sorted((int(left_id), int(right_id)))
-        try:
-            with self.connection() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM conflicts c "
-                    "WHERE c.status='not_a_conflict' AND c.left_id=? AND c.right_id=? "
-                    "AND (c.left_version IS NULL OR c.left_version = (SELECT version FROM memories WHERE id=c.left_id)) "
-                    "AND (c.right_version IS NULL OR c.right_version = (SELECT version FROM memories WHERE id=c.right_id)) "
-                    "LIMIT 1",
-                    (a, b),
+        if decided_by not in {"user", "agent"} or not chosen_value:
+            return {"outcome": "invalid_input"}
+        with self.write_transaction() as conn:
+            row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
+            if not row:
+                return {"outcome": "not_found"}
+            conflict = _decode_row(row)
+            if conflict["status"] != "open":
+                return {"outcome": "not_open", "status": conflict["status"]}
+            if int(conflict["revision"]) != int(expected_revision):
+                return {"outcome": "stale_conflict", "revision": conflict["revision"]}
+            if strict_workspace is not None and not self._active_members_match_workspace(
+                conn, conflict, strict_workspace,
+            ):
+                return {"outcome": "workspace_mismatch"}
+            normalized_chosen = normalize_value(str(chosen_value))
+            existing_values = {
+                normalize_value(str(group.get("normalized_value") or "")): str(group.get("normalized_value") or "")
+                for group in conflict.get("value_groups") or []
+            }
+            if not normalized_chosen or normalized_chosen not in existing_values:
+                return {"outcome": "invalid_chosen_value"}
+            chosen_value = existing_values[normalized_chosen]
+            member_versions = {_member_ref(member): member for member in conflict["member_versions"]}
+            plan: list[dict[str, Any]] = []
+            seen: set[int] = set()
+            for raw in apply_plan:
+                item = dict(raw)
+                target = int(item.get("memory_id", 0))
+                action = str(item.get("action", ""))
+                matches = [member for member in member_versions.values() if int(member["memory_id"]) == target]
+                if action not in _ALLOWED_ACTIONS or not matches or target in seen:
+                    return {"outcome": "invalid_plan"}
+                current = conn.execute(
+                    "SELECT version,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=? AND status='active'", (target,),
                 ).fetchone()
-                return row is not None
-        except sqlite3.Error:
-            return False
+                if (
+                    current is None
+                    or int(current["version"] or 0) != int(matches[0]["version"])
+                    or str(current["workspace"] or "") != str(conflict["workspace_canonical"] or "")
+                ):
+                    return {"outcome": "stale_member"}
+                plan.append({"memory_id": target, "expected_version": int(matches[0]["version"]),
+                             "action": action, "status": "pending", "result_version": None,
+                             "result_hash": None, "error": None})
+                seen.add(target)
+            resolution_version = None
+            if resolution_memory_id is not None:
+                resolution = conn.execute(
+                    "SELECT version,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=? AND status='active'", (int(resolution_memory_id),)
+                ).fetchone()
+                if (
+                    not resolution
+                    or str(resolution["workspace"] or "") != str(conflict["workspace_canonical"] or "")
+                ):
+                    return {"outcome": "invalid_resolution_memory"}
+                resolution_version = int(resolution["version"])
+            now = utc_now_iso()
+            cur = conn.execute(
+                """UPDATE conflicts SET status='applying',revision=revision+1,chosen_value=?,
+                   resolution_memory_id=?,resolution_memory_version=?,decided_by=?,decided_ref=?,
+                   decision_reason=?,decided_at=?,apply_summary=?,refreshed_at=?
+                   WHERE id=? AND status='open' AND revision=?""",
+                (chosen_value, resolution_memory_id, resolution_version, decided_by, decided_ref,
+                 decision_reason, now, _canonical_json({"plan": plan}), now, int(conflict_id), int(expected_revision)),
+            )
+            if cur.rowcount != 1:
+                return {"outcome": "stale_conflict"}
+            return {"outcome": "applying", "conflict_id": int(conflict_id),
+                    "revision": int(expected_revision) + 1, "apply_summary": {"plan": plan}}
+
+    def replan_conflict(
+        self, conflict_id: int, *, expected_revision: int,
+        apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int] = None,
+        strict_workspace: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """CAS-reset an applying plan while retaining every prior plan snapshot."""
+        with self.write_transaction() as conn:
+            row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
+            if not row:
+                return {"outcome": "not_found"}
+            conflict = _decode_row(row)
+            if conflict["status"] != "applying":
+                return {"outcome": "not_applying"}
+            if int(conflict["revision"]) != int(expected_revision):
+                return {"outcome": "stale_conflict", "revision": conflict["revision"]}
+            if strict_workspace is not None and not self._active_members_match_workspace(
+                conn, conflict, strict_workspace,
+            ):
+                return {"outcome": "workspace_mismatch"}
+            members = {int(member["memory_id"]): member for member in conflict["member_versions"]}
+            plan: list[dict[str, Any]] = []
+            seen: set[int] = set()
+            for raw in apply_plan:
+                target = int(dict(raw).get("memory_id", 0))
+                action = str(dict(raw).get("action", ""))
+                member = members.get(target)
+                current = conn.execute(
+                    "SELECT version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=?", (target,),
+                ).fetchone()
+                if (
+                    action not in _ALLOWED_ACTIONS or member is None or target in seen
+                    or current is None or current["status"] != "active"
+                    or str(current["workspace"] or "") != str(conflict["workspace_canonical"] or "")
+                ):
+                    return {"outcome": "invalid_plan"}
+                plan.append({"memory_id": target, "expected_version": int(current["version"]),
+                             "action": action, "status": "pending", "result_version": None,
+                             "result_hash": None, "error": None})
+                seen.add(target)
+            resolution_id = (
+                int(resolution_memory_id) if resolution_memory_id is not None
+                else conflict.get("resolution_memory_id")
+            )
+            resolution_version = None
+            if resolution_id is not None:
+                resolution = conn.execute(
+                    "SELECT version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=?", (int(resolution_id),),
+                ).fetchone()
+                if (
+                    resolution is None or resolution["status"] != "active"
+                    or str(resolution["workspace"] or "") != str(conflict["workspace_canonical"] or "")
+                ):
+                    return {"outcome": "invalid_resolution_memory"}
+                resolution_version = int(resolution["version"])
+            previous = conflict.get("apply_summary") or {"plan": []}
+            history = list(previous.get("history") or [])
+            history.append({"revision": int(expected_revision), "plan": previous.get("plan") or []})
+            summary = {"plan": plan, "history": history}
+            now = utc_now_iso()
+            cur = conn.execute(
+                "UPDATE conflicts SET revision=revision+1,apply_summary=?,resolution_memory_id=?,"
+                "resolution_memory_version=?,refreshed_at=? WHERE id=? AND status='applying' AND revision=?",
+                (_canonical_json(summary), resolution_id, resolution_version, now,
+                 int(conflict_id), int(expected_revision)),
+            )
+            if cur.rowcount != 1:
+                return {"outcome": "stale_conflict"}
+            return {"outcome": "replanned", "conflict_id": int(conflict_id),
+                    "revision": int(expected_revision) + 1, "apply_summary": summary}
+
+    def resolve_conflict(
+        self, conflict_id: int, reason: str = "", status: str = "resolved", *,
+        expected_revision: Optional[int] = None, strict_workspace: Optional[str] = None,
+    ) -> dict[str, Any]:
+        if status != "resolved":
+            return {"outcome": "invalid_status", "conflict_id": int(conflict_id)}
+        with self.write_transaction() as conn:
+            row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
+            if not row:
+                return {"outcome": "not_found"}
+            conflict = _decode_row(row)
+            if conflict["status"] != "applying":
+                return {"outcome": "not_applying", "status": conflict["status"]}
+            if expected_revision is None or int(conflict["revision"]) != int(expected_revision):
+                return {"outcome": "stale_conflict", "revision": conflict["revision"]}
+            if strict_workspace is not None and not self._active_members_match_workspace(
+                conn, conflict, strict_workspace,
+            ):
+                return {"outcome": "workspace_mismatch"}
+            plan = conflict["apply_summary"].get("plan", [])
+            if any(item.get("status") != "completed" for item in plan):
+                return {"outcome": "apply_incomplete", "apply_summary": conflict["apply_summary"]}
+            resolution_id = conflict.get("resolution_memory_id")
+            resolution_version = conflict.get("resolution_memory_version")
+            if resolution_id is not None:
+                resolution = conn.execute(
+                    "SELECT version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=?", (int(resolution_id),),
+                ).fetchone()
+                if (
+                    resolution is None or resolution["status"] != "active"
+                    or int(resolution["version"] or 0) != int(resolution_version or 0)
+                    or str(resolution["workspace"] or "") != str(conflict["workspace_canonical"] or "")
+                ):
+                    return {"outcome": "stale_resolution_memory"}
+            now = utc_now_iso()
+            conn.execute(
+                "UPDATE conflicts SET status='resolved',revision=revision+1,decision_reason=CASE WHEN ?='' "
+                "THEN decision_reason ELSE ? END,resolved_at=?,refreshed_at=? WHERE id=? AND revision=?",
+                (reason, reason, now, now, int(conflict_id), int(expected_revision)),
+            )
+            return {"outcome": "resolved", "conflict_id": int(conflict_id), "revision": int(expected_revision) + 1}
+
+    def list_open_conflicts_for_memory_ids(
+        self, memory_ids: list[int], *, include_applying: bool = False,
+    ) -> list[dict[str, Any]]:
+        wanted = sorted({int(value) for value in memory_ids})
+        if not wanted or not self._db_available:
+            return []
+        statuses = "('open','applying')" if include_applying else "('open')"
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT c.* FROM conflicts AS c "
+                "JOIN json_each(c.member_versions) AS member "
+                "JOIN json_each(?) AS wanted "
+                "ON CAST(json_extract(member.value,'$.memory_id') AS INTEGER)=CAST(wanted.value AS INTEGER) "
+                f"WHERE c.status IN {statuses} ORDER BY c.created_at DESC,c.id DESC",
+                (_canonical_json(wanted),),
+            ).fetchall()
+        return [_decode_row(row) for row in rows]
+
+    def resolve_conflicts_for_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> int:
+        # Generic memory mutation cannot complete a revisioned application plan.
+        return 0
+
+    def resolve_conflicts_for(self, memory_id: int, *, conn: Optional[sqlite3.Connection] = None) -> int:
+        return 0
 
     def get_memory_version(self, memory_id: int) -> Optional[int]:
-        """v0.8.8: current version of a memory (for conflict-row version pinning)."""
-        if not self._db_available:
-            return None
-        try:
-            with self.connection() as conn:
-                row = conn.execute(
-                    "SELECT version FROM memories WHERE id=?", (int(memory_id),)
-                ).fetchone()
-                return int(row["version"]) if row else None
-        except sqlite3.Error:
-            return None
+        memory = self._db.get_memory(int(memory_id))
+        return int(memory["version"]) if memory else None
 
+    def dismissed_pairs_snapshot(self) -> set[tuple[int, int]]:
+        if not self._db_available:
+            return set()
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT c.id,CAST(json_extract(member.value,'$.memory_id') AS INTEGER) AS memory_id "
+                "FROM conflicts AS c JOIN json_each(c.member_versions) AS member "
+                "WHERE c.status='not_a_conflict' ORDER BY c.id,memory_id"
+            ).fetchall()
+        by_conflict: dict[int, set[int]] = {}
+        for row in rows:
+            by_conflict.setdefault(int(row["id"]), set()).add(int(row["memory_id"]))
+        return {
+            tuple(sorted(ids))  # type: ignore[misc]
+            for ids in by_conflict.values() if len(ids) == 2
+        }
+
+    def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
+        pair = sorted({int(left_id), int(right_id)})
+        if len(pair) != 2 or not self._db_available:
+            return False
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM conflicts AS c WHERE c.status='not_a_conflict' "
+                "AND json_array_length(c.member_versions)=2 "
+                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) WHERE json_extract(value,'$.memory_id')=?) "
+                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) WHERE json_extract(value,'$.memory_id')=?) LIMIT 1",
+                (pair[0], pair[1]),
+            ).fetchone()
+        return row is not None
 
     def dismissed_pairs_for(self, memory_ids: list[int]) -> set[tuple[int, int]]:
-        """v0.8.8: canonical ``(a, b)`` pairs (a<b) that are currently dismissed
-        — a ``not_a_conflict`` row whose pinned versions still match the
-        memories' current versions. Restricted to pairs touching *memory_ids*.
-        For Layer 0 gating of the computed-overlap advisory path. Best-effort.
-        """
-        if not memory_ids or not self._db_available:
+        wanted = sorted({int(value) for value in memory_ids})
+        if not wanted or not self._db_available:
             return set()
-        ids = sorted(set(int(i) for i in memory_ids if i is not None))
-        if not ids:
-            return set()
-        out: set[tuple[int, int]] = set()
-        try:
-            with self.connection() as conn:
-                ph = ",".join("?" * len(ids))
-                rows = conn.execute(
-                    "SELECT left_id, right_id FROM conflicts "
-                    "WHERE status='not_a_conflict' "
-                    f"AND (left_id IN ({ph}) OR right_id IN ({ph})) "
-                    "AND (left_version IS NULL OR left_version = (SELECT version FROM memories WHERE id=conflicts.left_id)) "
-                    "AND (right_version IS NULL OR right_version = (SELECT version FROM memories WHERE id=conflicts.right_id))",
-                    (*ids, *ids),
-                ).fetchall()
-                for r in rows:
-                    a, b = int(r["left_id"]), int(r["right_id"])
-                    out.add((min(a, b), max(a, b)))
-        except sqlite3.Error:
-            return set()
-        return out
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT c.id,CAST(json_extract(member.value,'$.memory_id') AS INTEGER) AS memory_id "
+                "FROM conflicts AS c JOIN json_each(c.member_versions) AS member "
+                "WHERE c.status='not_a_conflict' AND json_array_length(c.member_versions)=2 "
+                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) AS linked "
+                "JOIN json_each(?) AS wanted ON json_extract(linked.value,'$.memory_id')=wanted.value) "
+                "ORDER BY c.id,memory_id",
+                (_canonical_json(wanted),),
+            ).fetchall()
+        by_conflict: dict[int, set[int]] = {}
+        for row in rows:
+            by_conflict.setdefault(int(row["id"]), set()).add(int(row["memory_id"]))
+        return {
+            tuple(sorted(ids))  # type: ignore[misc]
+            for ids in by_conflict.values() if len(ids) == 2
+        }

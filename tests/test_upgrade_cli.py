@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,42 @@ from memory_arbiter.config import Settings
 from memory_arbiter.db_generation import (
     CURRENT_SCHEMA_GENERATION,
     detect_database_generation,
+    legacy_database_message,
 )
 from memory_arbiter.upgrade_cli import run_upgrade
 from memory_arbiter.upgrade_cli import _preflight
 from memory_arbiter.upgrade_cli import _switch_standard_config
+
+
+def test_startup_refusal_explains_safe_upgrade_requirements(tmp_path: Path) -> None:
+    message = legacy_database_message(tmp_path / "legacy.db")
+    for phrase in (
+        "Stop every process that can write",
+        "mema upgrade --dry-run",
+        "side-by-side target",
+        "old conflict, decision, and semantic-notice history is not copied",
+        "sqlite-vec",
+        "local GGUF embedding model",
+        "llama-cpp-python",
+    ):
+        assert phrase in message
+
+
+def test_upgrade_help_warns_about_writers_loss_target_and_reindex(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        run_upgrade(["--help"])
+    assert exc_info.value.code == 0
+    output = " ".join(capsys.readouterr().out.split())
+    for phrase in (
+        "stop every MCP server",
+        "side-by-side target",
+        "old conflict, decision, and semantic-notice records",
+        "sqlite-vec",
+        "llama-cpp-python",
+        "local GGUF embedding model",
+        "--dry-run",
+    ):
+        assert phrase in output
 
 
 @pytest.fixture(autouse=True)
@@ -93,10 +126,16 @@ def test_upgrade_cancel_does_not_migrate_or_edit_config(
         raise AssertionError("migration must not run")
 
     monkeypatch.setattr("memory_arbiter.upgrade_cli.final_sync", forbidden)
-    assert run_upgrade([], input_func=lambda _prompt: "n") == 1
+    prompts: list[str] = []
+    assert run_upgrade([], input_func=lambda prompt: prompts.append(prompt) or "n") == 1
     assert called is False
     assert config.read_bytes() == before
-    assert "No data or configuration was changed" in capsys.readouterr().out
+    assert "every source-database writer is stopped" in prompts[0]
+    assert "old conflict, decision, and semantic-notice history" in prompts[0]
+    output = capsys.readouterr().out
+    assert "side by side" in output
+    assert "Run with --dry-run first" in output
+    assert "No data or configuration was changed" in output
 
 
 def test_json_execution_requires_yes_without_prompting(
@@ -147,9 +186,13 @@ def test_upgrade_success_backs_up_and_switches_standard_config(
         },
     )
 
-    def completed(*_args, **_kwargs):
+    def completed(*_args, **kwargs):
         target.write_bytes(b"new")
-        return {"ok": True, "switch_ready": True, "target": str(target)}
+        result = {"ok": True, "switch_ready": True, "target": str(target)}
+        callback = kwargs.get("publish_callback")
+        if callback is not None:
+            result["config"] = callback()
+        return result
 
     monkeypatch.setattr("memory_arbiter.upgrade_cli.final_sync", completed)
     assert run_upgrade(["--yes", "--json"]) == 0
@@ -369,6 +412,63 @@ def test_final_sync_refuses_unrelated_existing_target(
     assert result["error"] == "existing_target_not_owned_by_source"
     assert called is False
     assert target.read_bytes() == before
+
+
+def test_final_sync_excludes_late_old_writer_through_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memory_arbiter.vnext_migration import final_sync
+
+    source = tmp_path / "legacy.db"
+    target = tmp_path / "target.db"
+    _legacy_db(source)
+    settings = Settings(db_path=source, backup_jsonl=tmp_path / "backup.jsonl")
+    source_fingerprint = {"stable": True}
+
+    def built(_source, staging, _settings, **_kwargs):
+        staging.write_bytes(b"new")
+        return {
+            "ok": True,
+            "switch_ready": True,
+            "source_fingerprint": source_fingerprint,
+        }
+
+    monkeypatch.setattr("memory_arbiter.vnext_migration.build", built)
+    monkeypatch.setattr(
+        "memory_arbiter.vnext_migration._fingerprint_on_connection",
+        lambda _conn: source_fingerprint,
+    )
+    monkeypatch.setattr("memory_arbiter.vnext_migration._remove_sidecars", lambda _path: None)
+
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    writer_error: list[str] = []
+
+    def publish():
+        def late_writer() -> None:
+            conn = sqlite3.connect(source, timeout=0.05)
+            try:
+                writer_started.set()
+                conn.execute("INSERT INTO memories(content) VALUES('late')")
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                writer_error.append(str(exc).lower())
+            finally:
+                conn.close()
+                writer_finished.set()
+
+        thread = threading.Thread(target=late_writer)
+        thread.start()
+        assert writer_started.wait(1)
+        assert writer_finished.wait(1)
+        thread.join()
+        return {"switched": True}
+
+    result = final_sync(source, target, settings, progress=False, publish_callback=publish)
+    assert result["ok"] is True
+    assert any("locked" in error for error in writer_error)
+    with sqlite3.connect(source) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
 
 
 def test_preflight_rejects_missing_vec_embedding_and_model(tmp_path) -> None:

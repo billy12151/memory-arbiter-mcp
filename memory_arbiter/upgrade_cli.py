@@ -36,9 +36,15 @@ def _render_plan(plan: dict[str, Any]) -> str:
         "Memory Arbiter upgrade",
         "",
         "This upgrade significantly improves long-document recall and conflict discovery.",
-        "The database structure must be rebuilt. Migration usually takes 1-5 minutes,",
-        "and mema MCP must remain stopped during the migration.",
-        "The old database will be kept for rollback.",
+        "The database structure and evidence index must be rebuilt side by side.",
+        "STOP all MCP servers, consoles, workers, and other processes that can write",
+        "to the source database for the entire migration. Otherwise the upgrade refuses",
+        "to publish the target. The source database remains unchanged for rollback.",
+        "WARNING: old conflict, decision, and semantic-notice records are permanently",
+        "excluded from the new database; they remain only in the old database.",
+        "Memories, memory history, workspace governance, and evidence are preserved.",
+        "Reindex prerequisites: sqlite-vec, llama-cpp-python, and a configured local",
+        "GGUF embedding model. Run with --dry-run first to verify them and disk space.",
         "",
         f"Memories: {int((plan.get('counts') or {}).get('memories') or 0)}",
         f"Estimated evidence units: {int(plan.get('estimated_evidence_units') or 0)}",
@@ -148,14 +154,24 @@ def run_upgrade(
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="mema upgrade",
-        description="Migrate an existing database to local-text evidence storage.",
+        description=(
+            "Rebuild a legacy database and evidence index into a separate current "
+            "database, verify it, then optionally switch the standard config."
+        ),
+        epilog=(
+            "Before execution, stop every MCP server, console, worker, or other writer "
+            "using the source. The source is retained, but old conflict, decision, and "
+            "semantic-notice records are not copied to the target. Reindexing requires "
+            "sqlite-vec, llama-cpp-python, and a configured local GGUF embedding model. "
+            "Run --dry-run first."
+        ),
     )
-    parser.add_argument("--source", type=Path, help="Override the configured source database.")
-    parser.add_argument("--target", type=Path, help="Override the side-by-side target database.")
-    parser.add_argument("--dry-run", action="store_true", help="Inspect only; do not migrate or switch config.")
-    parser.add_argument("--yes", action="store_true", help="Skip the interactive confirmation.")
-    parser.add_argument("--no-switch", action="store_true", help="Build and verify the new database without editing config.")
-    parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
+    parser.add_argument("--source", type=Path, help="Legacy source database (default: configured db_path).")
+    parser.add_argument("--target", type=Path, help="Separate side-by-side target database (default: <source>.vnext<suffix>).")
+    parser.add_argument("--dry-run", action="store_true", help="Check source, reindex prerequisites, target, and disk space; write nothing and do not switch config.")
+    parser.add_argument("--yes", action="store_true", help="Confirm non-interactively that all writers are stopped and old conflict/decision/notice history may be omitted.")
+    parser.add_argument("--no-switch", action="store_true", help="Build and verify the side-by-side target but leave config pointing at the source.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
     args = parser.parse_args(list(argv or []))
 
     settings = Settings.from_env()
@@ -233,7 +249,11 @@ def run_upgrade(
     if not args.json:
         print(_render_plan(plan))
     if not args.yes:
-        answer = input_func("\nConfirm that all mema MCP clients are stopped and continue? [y/N] ")
+        answer = input_func(
+            "\nConfirm every source-database writer is stopped and accept that old "
+            "conflict, decision, and semantic-notice history will not exist in the "
+            "side-by-side target? [y/N] "
+        )
         if answer.strip().lower() not in {"y", "yes"}:
             result = {"ok": False, "cancelled": True, "source": str(source), "target": str(target)}
             if args.json:
@@ -242,11 +262,9 @@ def run_upgrade(
                 print("Upgrade cancelled. No data or configuration was changed.")
             return 1
 
-    result = final_sync(source, target, settings, progress=not args.json)
     config_result: dict[str, Any]
-    if not result.get("ok") or not result.get("switch_ready"):
-        config_result = {"switched": False, "reason": "migration_not_verified"}
-    elif args.no_switch:
+    publish_callback: Callable[[], dict[str, Any]] | None = None
+    if args.no_switch:
         config_result = {"switched": False, "reason": "no_switch_requested"}
     elif os.getenv("MEMORY_ARBITER_DB_PATH"):
         config_result = {
@@ -275,7 +293,21 @@ def run_upgrade(
                     "manual_action": f"Set db_path to {target}",
                 }
             else:
-                config_result = _switch_standard_config(config_path, target)
+                publish_callback = lambda: _switch_standard_config(config_path, target)
+                config_result = {"switched": False, "reason": "migration_not_verified"}
+
+    result = final_sync(
+        source,
+        target,
+        settings,
+        progress=not args.json,
+        publish_callback=publish_callback,
+    )
+    returned_config = result.get("config")
+    if isinstance(returned_config, dict):
+        config_result = returned_config
+    elif not result.get("ok") or not result.get("switch_ready"):
+        config_result = {"switched": False, "reason": "migration_not_verified"}
 
     result["config"] = config_result
     result["old_database_kept"] = str(source)

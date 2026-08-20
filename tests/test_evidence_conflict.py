@@ -2,9 +2,14 @@ from pathlib import Path
 
 from memory_arbiter.config import Settings
 from memory_arbiter.semantic_conflict import (
+    AttributeValueExtraction,
+    coexistence_veto,
     decide_evidence,
+    evaluate_pair_extractions,
+    extraction_from_text,
     model_signal_from_text,
     notice_dedupe_key,
+    value_is_grounded,
 )
 from memory_arbiter.tools import MemoryTools
 
@@ -19,21 +24,26 @@ def _tools(tmp_path: Path, **overrides) -> MemoryTools:
 
 
 def test_deterministic_routes_are_explainable() -> None:
-    notify = decide_evidence("PostgreSQL port is 5432", "PostgreSQL port is 3306")
-    assert notify.action == "notify"
-    assert notify.reason == "numeric_value_changed"
+    numeric = decide_evidence("PostgreSQL port is 5432", "PostgreSQL port is 3306")
+    assert numeric.action == "check"
+    assert numeric.reason == "numeric_value_candidate"
     assert decide_evidence("pgsql", "PostgreSQL").action == "ignore"
     assert decide_evidence("database connection pool", "database connection policy").action == "check"
 
 
-def test_qwen_protocol_accepts_candidate_and_rejects_invalid_schema() -> None:
-    accepted = model_signal_from_text('{"label":"conflict","same_fact_slot":true,"confidence":0.9}')
+def test_qwen_protocol_is_strict_bounded_four_field_extraction() -> None:
+    raw = '{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}'
+    accepted = model_signal_from_text(raw)
     assert accepted.candidate is True
-    rejected = model_signal_from_text('{"label":"conflict","same_fact_slot":false,"confidence":0.9}')
-    assert rejected.candidate is False
-    assert rejected.error == "invalid_schema"
-    noisy = model_signal_from_text('{"label":"not_conflict","same_fact_slot":true,"confidence":1.0}')
-    assert noisy.candidate is False
+    extraction, error = extraction_from_text(raw)
+    assert error is None and extraction is not None
+    for invalid in (
+        '{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型"}',
+        '{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite","conflict":true}',
+        '{"attribute_a":"数据库选型","value_a":3,"attribute_b":"数据库选型","value_b":"SQLite"}',
+    ):
+        parsed, parse_error = extraction_from_text(invalid)
+        assert parsed is None and parse_error
 
 
 def test_notice_dedupe_is_symmetric_and_version_pinned() -> None:
@@ -69,8 +79,48 @@ def test_notice_freshness_uses_only_memory_versions(tmp_path: Path) -> None:
     assert notice["freshness"]["fresh"] is False
 
 
-def test_qwen_uncertain_label_fails_closed() -> None:
-    signal = model_signal_from_text('{"label":"uncertain","same_fact_slot":true,"confidence":0.9}')
-    assert signal.candidate is False
-    assert signal.candidate_type == "uncertain"
-    assert signal.error is None
+def test_bidirectional_mapping_grounding_and_notice_gate() -> None:
+    forward = AttributeValueExtraction("数据库引擎", "MySQL", "数据库选型", "SQLite")
+    reverse = AttributeValueExtraction("数据库选型", "SQLite", "数据库引擎", "MySQL")
+    result = evaluate_pair_extractions(
+        forward, reverse,
+        {"quote": "生产数据库使用 MySQL。"},
+        {"quote": "生产数据库使用 SQLite。"},
+        require_bidirectional=True,
+    )
+    assert result.state == "notice_ready"
+    wrong_side = AttributeValueExtraction("数据库选型", "MySQL", "数据库引擎", "SQLite")
+    rejected = evaluate_pair_extractions(
+        forward, wrong_side,
+        {"quote": "生产数据库使用 MySQL。"}, {"quote": "生产数据库使用 SQLite。"},
+        require_bidirectional=True,
+    )
+    assert rejected.state == "review_candidate"
+    assert rejected.reason == "bidirectional_mapping_mismatch"
+
+
+def test_grounding_is_mechanical_and_coexistence_reasons_are_stable() -> None:
+    assert value_is_grounded("5s", "接口超时为 5 秒。")
+    assert value_is_grounded("PostgreSQL", "数据库采用 pgsql。")
+    assert not value_is_grounded("关系数据库", "数据库采用 PostgreSQL。")
+    assert coexistence_veto(
+        {"quote": "测试环境数据库使用 MySQL"},
+        {"quote": "生产环境数据库使用 SQLite"},
+    ) == "coexist_environment_mismatch"
+    assert coexistence_veto(
+        {"quote": "v1 API timeout 5s"}, {"quote": "v2 API timeout 10s"},
+    ) == "coexist_version_mismatch"
+
+
+def test_single_direction_scan_survives_but_notice_fails_closed() -> None:
+    extraction = AttributeValueExtraction("端口", "5432", "端口", "3306")
+    scan = evaluate_pair_extractions(
+        extraction, None, {"quote": "端口 5432"}, {"quote": "端口 3306"},
+        require_bidirectional=False,
+    )
+    notice = evaluate_pair_extractions(
+        extraction, None, {"quote": "端口 5432"}, {"quote": "端口 3306"},
+        require_bidirectional=True,
+    )
+    assert scan.state == "review_candidate" and scan.reason == "single_direction_only"
+    assert notice.state == "review_candidate" and notice.reason == "bidirectional_extraction_required"

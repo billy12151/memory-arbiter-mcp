@@ -75,76 +75,46 @@ class SchemaStore:
 
             CREATE TABLE IF NOT EXISTS conflicts (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
-              left_id INTEGER NOT NULL,
-              right_id INTEGER NOT NULL,
-              subject TEXT,
-              status TEXT NOT NULL DEFAULT 'open',
-              reason TEXT NOT NULL,
-              winner_id INTEGER,
-              conflict_type TEXT,
+              revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+              workspace_canonical TEXT NOT NULL,
+              slot_key TEXT CHECK(slot_key IS NULL OR (json_valid(slot_key) AND json_type(slot_key)='object' AND length(slot_key) <= 4096)),
+              slot_key_hash TEXT CHECK(slot_key_hash IS NULL OR length(slot_key_hash)=64),
+              candidate_key TEXT NOT NULL CHECK(json_valid(candidate_key) AND json_type(candidate_key)='object' AND length(candidate_key) <= 65536),
+              candidate_key_hash TEXT NOT NULL CHECK(length(candidate_key_hash)=64),
               conflict_point TEXT,
-              suggested_winner INTEGER,
-              confidence_hint TEXT,
-              source TEXT,
-              left_version INTEGER,
-              right_version INTEGER,
-              judgment_status TEXT,
-              active_judgment_id INTEGER,
-              resolution_kind TEXT,
-              conflict_scope TEXT,
-              scan_prompt_version TEXT,
-              scan_model TEXT,
-              refreshed_at TEXT,
-              created_at TEXT NOT NULL,
-              resolved_at TEXT,
-              FOREIGN KEY(left_id) REFERENCES memories(id),
-              FOREIGN KEY(right_id) REFERENCES memories(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS conflict_judgments (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              conflict_id INTEGER NOT NULL,
-              verdict TEXT NOT NULL,
-              recommended_use TEXT NOT NULL,
-              suggested_winner INTEGER,
-              confidence_hint TEXT,
-              reason TEXT NOT NULL,
-              judge_type TEXT NOT NULL,
-              judge_ref TEXT,
-              left_version INTEGER NOT NULL,
-              right_version INTEGER NOT NULL,
-              supersedes_judgment_id INTEGER,
-              resolution_kind TEXT,
-              conflict_scope TEXT,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY(conflict_id) REFERENCES conflicts(id) ON DELETE CASCADE,
-              FOREIGN KEY(suggested_winner) REFERENCES memories(id),
-              FOREIGN KEY(supersedes_judgment_id) REFERENCES conflict_judgments(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS semantic_notices (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              created_at TEXT NOT NULL,
-              status TEXT NOT NULL DEFAULT 'open',
-              severity TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('candidate','open','applying','resolved','not_a_conflict'))
+                CHECK(status NOT IN ('open','applying') OR (slot_key IS NOT NULL AND slot_key_hash IS NOT NULL)),
+              member_versions TEXT NOT NULL CHECK(json_valid(member_versions) AND json_type(member_versions)='array' AND length(member_versions) <= 262144),
+              member_fingerprint TEXT NOT NULL CHECK(length(member_fingerprint)=64),
+              value_groups TEXT NOT NULL CHECK(json_valid(value_groups) AND json_type(value_groups)='array' AND length(value_groups) <= 131072),
+              detection_reason TEXT NOT NULL,
               source TEXT NOT NULL,
-              memory_id INTEGER NOT NULL,
-              peer_id INTEGER,
-              conflict_id INTEGER,
-              notice_type TEXT NOT NULL,
-              title TEXT NOT NULL,
-              message TEXT NOT NULL,
-              payload TEXT NOT NULL DEFAULT '{}',
-              dedupe_key TEXT,
-              left_version INTEGER NOT NULL,
-              right_version INTEGER NOT NULL,
-              delivered_at TEXT,
-              dismissed_at TEXT,
+              detector_version TEXT NOT NULL,
+              prompt_version TEXT,
+              overflow INTEGER NOT NULL DEFAULT 0 CHECK(overflow IN (0,1)),
+              chosen_value TEXT,
+              resolution_memory_id INTEGER,
+              resolution_memory_version INTEGER,
+              decided_by TEXT CHECK(decided_by IS NULL OR decided_by IN ('user','agent')),
+              decided_ref TEXT,
+              decision_reason TEXT,
+              decided_at TEXT,
+              apply_summary TEXT NOT NULL DEFAULT '{"plan":[]}' CHECK(json_valid(apply_summary) AND json_type(apply_summary)='object' AND length(apply_summary) <= 131072),
+              notice_severity TEXT,
+              notice_type TEXT,
+              notice_title TEXT,
+              notice_message TEXT,
+              notice_payload TEXT CHECK(notice_payload IS NULL OR (json_valid(notice_payload) AND json_type(notice_payload)='object' AND length(notice_payload) <= 131072)),
+              notice_task_id TEXT,
+              notice_dedupe_key TEXT,
+              notice_delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK(notice_delivery_status IN ('pending','delivered','dismissed','resolved','stale','not_applicable')),
+              notice_delivered_at TEXT,
+              notice_resolution_reason TEXT,
+              notice_slot_provenance TEXT CHECK(notice_slot_provenance IS NULL OR (json_valid(notice_slot_provenance) AND json_type(notice_slot_provenance)='object' AND length(notice_slot_provenance) <= 32768)),
+              created_at TEXT NOT NULL,
+              refreshed_at TEXT NOT NULL,
               resolved_at TEXT,
-              resolution_reason TEXT,
-              FOREIGN KEY(memory_id) REFERENCES memories(id),
-              FOREIGN KEY(peer_id) REFERENCES memories(id),
-              FOREIGN KEY(conflict_id) REFERENCES conflicts(id)
+              FOREIGN KEY(resolution_memory_id) REFERENCES memories(id)
             );
 
             CREATE TABLE IF NOT EXISTS memory_evidence (
@@ -187,12 +157,13 @@ class SchemaStore:
               created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS workspace_aliases (
-              alias_workspace TEXT NOT NULL UNIQUE,
+              alias_workspace TEXT NOT NULL,
               canonical TEXT NOT NULL,
               relation TEXT NOT NULL,
-              status TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('confirmed','rejected')),
               source TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(alias_workspace, canonical)
             );
             CREATE TABLE IF NOT EXISTS workspace_alias_events (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -212,37 +183,25 @@ class SchemaStore:
             CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(workspace, subject);
             CREATE INDEX IF NOT EXISTS idx_memories_event ON memories(event_time, ingest_time);
             CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, changed_at);
-            CREATE INDEX IF NOT EXISTS idx_conflicts_status_left ON conflicts(status, left_id);
-            CREATE INDEX IF NOT EXISTS idx_conflicts_status_right ON conflicts(status, right_id);
             CREATE INDEX IF NOT EXISTS idx_conflicts_status_created ON conflicts(status, created_at);
-            CREATE INDEX IF NOT EXISTS idx_conflicts_judgment_status ON conflicts(status, judgment_status);
-            CREATE INDEX IF NOT EXISTS idx_judgments_conflict_created ON conflict_judgments(conflict_id, created_at);
-            CREATE INDEX IF NOT EXISTS idx_semantic_notices_status_created ON semantic_notices(status, created_at);
-            CREATE INDEX IF NOT EXISTS idx_semantic_notices_open_undelivered_priority
-              ON semantic_notices(
-                CASE lower(severity)
-                  WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'warning' THEN 2
-                  WHEN 'normal' THEN 3 WHEN 'info' THEN 4 ELSE 5 END,
-                created_at, id, severity, notice_type, memory_id, peer_id,
-                left_version, right_version
-              ) WHERE status='open' AND delivered_at IS NULL;
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_notices_dedupe
-              ON semantic_notices(dedupe_key) WHERE dedupe_key IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conflicts_candidate_identity
+              ON conflicts(candidate_key_hash);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conflicts_active_slot
+              ON conflicts(workspace_canonical, slot_key_hash)
+              WHERE slot_key_hash IS NOT NULL AND status IN ('open','applying');
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conflicts_event_snapshot
+              ON conflicts(workspace_canonical, slot_key_hash, member_fingerprint)
+              WHERE slot_key_hash IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conflicts_notice_dedupe
+              ON conflicts(notice_dedupe_key) WHERE notice_dedupe_key IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_conflicts_notice_delivery
+              ON conflicts(notice_delivery_status, created_at, id)
+              WHERE notice_delivery_status='pending';
             CREATE INDEX IF NOT EXISTS idx_ws_alias_events
               ON workspace_alias_events(alias_workspace, created_at);
-
-            CREATE TRIGGER IF NOT EXISTS trg_conflicts_active_judgment_fk
-            BEFORE UPDATE OF active_judgment_id ON conflicts
-            WHEN NEW.active_judgment_id IS NOT NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM conflict_judgments j
-               WHERE j.id=NEW.active_judgment_id AND j.conflict_id=NEW.id
-             )
-            BEGIN
-              SELECT RAISE(ABORT, 'invalid active_judgment_id');
-            END;
             """
         )
+        self._migrate_workspace_alias_pairs(conn)
         conn.execute(
             "INSERT INTO migration_state(key,value,updated_at) "
             "VALUES('schema_generation',?,CURRENT_TIMESTAMP) "
@@ -250,6 +209,36 @@ class SchemaStore:
             (CURRENT_SCHEMA_GENERATION,),
         )
         conn.commit()
+
+    @staticmethod
+    def _migrate_workspace_alias_pairs(conn: sqlite3.Connection) -> None:
+        """Upgrade the old one-row-per-raw alias table without losing decisions."""
+        columns = conn.execute("PRAGMA table_info(workspace_aliases)").fetchall()
+        pk_columns = [
+            str(row[1])
+            for row in sorted(columns, key=lambda item: int(item[5] or 0))
+            if int(row[5] or 0) > 0
+        ]
+        if pk_columns == ["alias_workspace", "canonical"]:
+            return
+        conn.executescript(
+            """
+            ALTER TABLE workspace_aliases RENAME TO workspace_aliases_legacy;
+            CREATE TABLE workspace_aliases (
+              alias_workspace TEXT NOT NULL,
+              canonical TEXT NOT NULL,
+              relation TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('confirmed','rejected')),
+              source TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(alias_workspace, canonical)
+            );
+            INSERT INTO workspace_aliases(alias_workspace,canonical,relation,status,source,updated_at)
+              SELECT alias_workspace,canonical,relation,status,source,updated_at
+              FROM workspace_aliases_legacy;
+            DROP TABLE workspace_aliases_legacy;
+            """
+        )
 
     def _probe_features(self, conn: sqlite3.Connection) -> None:
         if self.settings.enable_sqlite_vec:

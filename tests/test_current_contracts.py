@@ -3,7 +3,7 @@ from pathlib import Path
 
 from memory_arbiter.config import Settings
 from memory_arbiter.config_registry import CONFIG_DESCRIPTORS, grouped_descriptors
-from memory_arbiter.models import utc_now_iso
+from memory_arbiter.models import ConflictMember, ConflictValueGroup, utc_now_iso
 from memory_arbiter.semantic_conflict import notice_dedupe_key
 from memory_arbiter.tools import MemoryTools
 
@@ -24,31 +24,54 @@ def test_config_registry_only_describes_current_architecture() -> None:
     assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
 
 
-def test_formal_conflict_and_judgment_use_memory_versions(tmp_path: Path) -> None:
-    tool = tools(tmp_path)
-    left, right = write(tool, "old"), write(tool, "new")
-    conflict = tool.memory_record_conflict(
-        left, right, "changed", conflict_type="evolution",
-        left_version=1, right_version=1,
-    )["data"]
-    request = tool.db.judgments.build_conflict_judgment_request(conflict["conflict_id"])
-    assert request["judge_call"]["data"]["expected_left_version"] == 1
-    assert "expected_left_claim_revision" not in request["judge_call"]["data"]
-    result = tool.memory_submit_conflict_judgment(
-        conflict["conflict_id"], 1, 1, "evolution", "contextual", None,
-        "high", "new context", False, "answer",
-        resolution_kind="contextual_keep_both", conflict_scope="record",
+def _record_current_group(tool: MemoryTools, left: int, right: int) -> dict:
+    members = [
+        ConflictMember(left, 1, "state", "old", "state", "old", "old", (0, 3), "a" * 64, "a_to_b", "p1", "d1"),
+        ConflictMember(right, 1, "state", "new", "state", "new", "new", (0, 3), "b" * 64, "b_to_a", "p1", "d1"),
+    ]
+    return tool.db.record_conflict_group(
+        workspace_canonical="w", slot_key={"entity": "subject", "attribute": "state", "scope": "global"},
+        members=members, value_groups=[
+            ConflictValueGroup("old", "old", (f"{left}@1",)),
+            ConflictValueGroup("new", "new", (f"{right}@1",)),
+        ], detection_reason="changed", source="scan", detector_version="d1",
     )
-    assert result["ok"] is True
 
 
-def test_stale_formal_judgment_is_rejected(tmp_path: Path) -> None:
+def test_formal_conflict_and_decision_use_revisioned_member_versions(tmp_path: Path) -> None:
     tool = tools(tmp_path)
     left, right = write(tool, "old"), write(tool, "new")
-    cid = tool.memory_record_conflict(left, right, "changed", left_version=1, right_version=1)["data"]["conflict_id"]
-    tool.memory_edit(left, new_content="newer", reason="update")
-    result = tool.memory_submit_conflict_judgment(cid, 1, 1, "compatible", "none", None, "high", "same", False, "answer")
-    assert result["data"]["outcome"] == "stale_snapshot"
+    conflict = _record_current_group(tool, left, right)
+    result = tool.db.judge_conflict(
+        conflict["conflict_id"], expected_revision=1, chosen_value="new",
+        decided_by="user", decided_ref="answer", decision_reason="new context",
+        resolution_memory_id=right, apply_plan=[
+            {"memory_id": left, "action": "update_current_claim"},
+            {"memory_id": right, "action": "use_as_resolution"},
+        ],
+    )
+    assert result["outcome"] == "applying"
+    row = tool.db.get_conflict(conflict["conflict_id"])
+    assert [member["version"] for member in row["member_versions"]] == [1, 1]
+    assert row["revision"] == 2
+
+
+def test_stale_conflict_revision_is_rejected(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    left, right = write(tool, "old"), write(tool, "new")
+    conflict = _record_current_group(tool, left, right)
+    first = tool.db.judge_conflict(
+        conflict["conflict_id"], expected_revision=1, chosen_value="new",
+        decided_by="user", decided_ref=None, decision_reason="same",
+        apply_plan=[{"memory_id": left, "action": "update_current_claim"}],
+    )
+    assert first["outcome"] == "applying"
+    stale = tool.memory_govern("apply_conflict_action", {
+        "conflict_id": conflict["conflict_id"], "expected_revision": 1,
+        "memory_id": left, "action": "update_current_claim", "content": "new",
+        "authorized": True,
+    })
+    assert stale["data"]["outcome"] == "stale_conflict"
 
 
 def test_product_notice_delivery_is_version_pinned(tmp_path: Path) -> None:
@@ -75,6 +98,64 @@ def test_stale_notice_is_not_delivered(tmp_path: Path) -> None:
     response = tool.memory(action="help", data={})
     assert not response.get("notices")
     assert tool.db.semantic_notice_counts().get("stale") == 1
+
+
+def test_notice_read_calls_execute_all_frozen_members_and_strict_workspace(tmp_path: Path) -> None:
+    setting = Settings(
+        db_path=tmp_path / "strict.db", backup_jsonl=tmp_path / "backup.jsonl",
+        isolation="strict", workspace="w",
+    )
+    tool = MemoryTools(setting)
+    ids = [write(tool, value) for value in ("left", "middle", "right")]
+    payload = {
+        "member_versions": [
+            {"memory_id": memory_id, "version": 1, "value": value, "content_hash": char * 64}
+            for memory_id, value, char in zip(ids, ("left", "middle", "right"), "abc")
+        ],
+        "value_groups": [
+            {"normalized_value": value, "display_value": value, "members": [f"{memory_id}@1"]}
+            for memory_id, value in zip(ids, ("left", "middle", "right"))
+        ],
+    }
+    created = tool.db.record_semantic_notice(
+        memory_id=ids[0], peer_id=ids[1], severity="normal", notice_type="semantic_evidence",
+        title="candidate", message="check", payload=payload, left_version=1, right_version=1,
+    )
+    result = tool.memory_repair("notice", {"action": "read", "notice_id": created["notice_id"], "workspace": "w"})
+    notice = result["data"]["notice"]
+    assert len(notice["read_calls"]) == 3
+    assert "left_read_call" not in notice and "right_read_call" not in notice
+    assert "freshness.fresh" in notice["agent_instruction"] and "complete memory" in notice["agent_instruction"]
+    reads = [tool.memory(**{key: value for key, value in call.items() if key != "tool"}) for call in notice["read_calls"]]
+    assert [item["data"]["memory"]["id"] for item in reads] == ids
+    assert all(call["data"]["workspace"] == "w" for call in notice["read_calls"])
+
+
+def test_delivered_notice_becomes_stale_on_read_and_list(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    left, right = write(tool, "left"), write(tool, "right")
+    created = tool.db.record_semantic_notice(
+        memory_id=left, peer_id=right, severity="normal", notice_type="semantic_evidence",
+        title="candidate", message="check", payload={}, left_version=1, right_version=1,
+    )
+    assert tool.db.claim_next_semantic_notice()["notice_id"] == created["notice_id"]
+    tool.memory_edit(left, new_content="changed", reason="update")
+    read = tool.db.read_semantic_notice(created["notice_id"])
+    assert read["status"] == "stale" and read["freshness"]["fresh"] is False
+    assert tool.db.list_semantic_notices("open") == []
+    assert [item["notice_id"] for item in tool.db.list_semantic_notices("stale")] == [created["notice_id"]]
+
+
+def test_notice_claim_exception_is_nonfatal_warning_and_observable(tmp_path: Path, monkeypatch) -> None:
+    tool = tools(tmp_path)
+    monkeypatch.setattr(tool.db, "claim_next_semantic_notice", lambda *args: (_ for _ in ()).throw(RuntimeError("claim broke")))
+    result = tool.memory(action="help")
+    assert result["ok"] is True and result["degraded"] is True
+    assert any("semantic_notice_claim_failed: claim broke" in warning for warning in result["warnings"])
+    delivery = tool._semantic_status()["notice_delivery"]
+    assert delivery["claim_error_count"] == 1
+    assert delivery["last_claim_error"] == "claim broke"
+    assert delivery["last_claim_error_at"]
 
 
 def test_backup_replay_is_authorized_and_idempotent(tmp_path: Path) -> None:

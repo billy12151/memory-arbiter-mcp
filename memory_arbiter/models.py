@@ -28,6 +28,46 @@ class MemoryStatus(str, Enum):
     DELETED = "deleted"
 
 
+@dataclass(frozen=True)
+class ConflictMember:
+    memory_id: int
+    version: int
+    attribute_raw: str
+    value_raw: str
+    normalized_attribute: str
+    normalized_value: str
+    evidence_quote: str
+    evidence_span: tuple[int, int]
+    content_hash: str
+    direction: str
+    prompt_version: Optional[str]
+    detector_version: str
+    evidence_unit: Optional[int] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "memory_id": self.memory_id, "version": self.version,
+            "attribute_raw": self.attribute_raw, "value_raw": self.value_raw,
+            "normalized_attribute": self.normalized_attribute,
+            "normalized_value": self.normalized_value,
+            "evidence_quote": self.evidence_quote,
+            "evidence_span": list(self.evidence_span), "content_hash": self.content_hash,
+            "direction": self.direction, "prompt_version": self.prompt_version,
+            "detector_version": self.detector_version, "evidence_unit": self.evidence_unit,
+        }
+
+
+@dataclass(frozen=True)
+class ConflictValueGroup:
+    normalized_value: str
+    display_value: str
+    members: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"normalized_value": self.normalized_value, "display_value": self.display_value,
+                "members": list(self.members)}
+
+
 def utc_now_iso() -> str:
     """Current UTC time as ISO-8601 (µs stripped). Implementation: timeutil.utc_now_iso (Phase 1)."""
     from .timeutil import utc_now_iso

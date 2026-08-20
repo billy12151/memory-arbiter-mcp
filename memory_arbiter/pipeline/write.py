@@ -56,7 +56,11 @@ class WritePipeline:
             if workspace["strict_block"]:
                 record.status = MemoryStatus.PENDING.value
 
-            memory_id, write_warnings = self.db.insert_memory(record, workspace["canonical"])
+            memory_id, write_warnings = self.db.insert_memory(
+                record, workspace["canonical"], workspace.get("canonical_embedding"),
+            )
+            if any("workspace canonical vector publish failed" in warning for warning in write_warnings):
+                workspace["vector_publish_pending"] = True
             data: dict[str, Any] = {
                 "id": memory_id,
                 "backup_only": memory_id is None,
@@ -66,10 +70,9 @@ class WritePipeline:
             }
             self._apply_workspace_response(data, workspace)
             if memory_id is not None:
-                data["evidence_index"] = self._enqueue_local_text_index(memory_id, data["record"])
-                data["semantic_conflict_check"] = {
-                    "status": "deferred", "reason": "waiting_for_evidence_index",
-                }
+                data["evidence_index"], data["semantic_conflict_check"] = (
+                    self._enqueue_content_postcommit(memory_id, data["record"])
+                )
             return self._tools.db.state.response(
                 data,
                 extra_warnings=policy_warnings + write_warnings + workspace["warnings"],
@@ -93,14 +96,15 @@ class WritePipeline:
             "candidate": None,
             "vector_publish_pending": False,
             "strict_block": False,
+            "canonical_embedding": None,
         }
         isolation = self.settings.isolation
-        if isolation == "none":
-            return result
 
         embedder, warnings = self._ensure_embedder()
         result["warnings"].extend(warnings)
-        resolved = self.db.resolve_workspace_canonical(raw, embedder, register_new=True)
+        # Resolution is read-only. Registration of only the final policy result
+        # happens atomically in insert_memory.
+        resolved = self.db.resolve_workspace_canonical(raw, embedder, register_new=False)
         result.update({
             "canonical": resolved["canonical"],
             "is_new": bool(resolved["is_new"]),
@@ -108,23 +112,44 @@ class WritePipeline:
             "similar": resolved.get("similar") or [],
             "vector_publish_pending": bool(resolved.get("vector_publish_pending")),
         })
+        candidate_embedding = resolved.get("candidate_embedding")
+        if result["canonical"] == raw and candidate_embedding:
+            result["canonical_embedding"] = candidate_embedding
         result["warnings"].extend(resolved.get("warnings") or [])
+        # Confirmed aliases short-circuit before embedding their canonical text.
+        # Backfill a missing canonical vector once, outside the memory write
+        # transaction; insert_memory publishes this prepared vector post-commit.
+        if result["matched_by"] == "confirmed_alias":
+            result["canonical_embedding"] = (
+                self.db.workspaces.prepare_missing_workspace_canonical_embedding(
+                    result["canonical"], embedder,
+                )
+            )
         evidence = workspace_rules.extract_evidence(record)
         rule = workspace_rules.rule_decision(raw, resolved, evidence)
         result["decision"] = rule["decision"]
         result["decision_reason"] = rule["reason"]
-        if rule["decision"] == "KEEP" and result["matched_by"] == "vector":
+        if isolation == "strict" and result["matched_by"] == "vector":
+            # Vector similarity is a candidate, not a safe mechanical identity.
+            # Strict mode must never silently merge it.
+            result["canonical"] = raw.strip() or result["canonical"]
+            result["is_new"] = True
+            result["matched_by"] = "strict_candidate"
+            result["decision"] = "ASK"
+            result["decision_reason"] = "strict_requires_confirmation"
+            result["canonical_embedding"] = candidate_embedding
+        elif rule["decision"] == "KEEP" and result["matched_by"] == "vector":
             result["canonical"] = raw.strip() or result["canonical"]
             result["is_new"] = True
             result["matched_by"] = "rule_keep"
-            self.db.resolve_workspace_canonical(result["canonical"], embedder, register_new=True)
+            result["canonical_embedding"] = candidate_embedding
         elif rule["decision"] is None:
             suggestion = self._suggest_workspace_candidate(raw, evidence, result["similar"])
             result["candidate"] = suggestion
             if (
                 suggestion is not None and suggestion.candidate
                 and suggestion.relation in {"alias", "typo", "same_project"}
-                and isolation == "weak" and (suggestion.confidence or 0.0) >= 0.85
+                and isolation in {"none", "weak"} and (suggestion.confidence or 0.0) >= 0.85
                 and suggestion.candidate not in (resolved.get("rejected_canonicals") or [])
             ):
                 result["canonical"] = suggestion.candidate
@@ -132,6 +157,9 @@ class WritePipeline:
                 result["matched_by"] = "qwen"
                 result["decision"] = "AUTO"
                 result["decision_reason"] = "qwen_high_conf"
+                # The selected candidate already exists; never publish the raw
+                # query embedding under the chosen canonical.
+                result["canonical_embedding"] = None
             else:
                 result["decision"] = "ASK"
                 result["decision_reason"] = "qwen_low_conf"
