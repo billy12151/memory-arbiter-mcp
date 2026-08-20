@@ -53,8 +53,8 @@ class ManagedEmbedder:
         """Unified token-safe embedding (design doc §1.1b).
 
         Counts full prefix+body tokens for diagnostics, then truncates body
-        if total exceeds the model context budget.  All memory/query/section
-        embedding must go through this method.
+        if total exceeds the model context budget.  All evidence-unit, query,
+        and workspace-canonical embedding must go through this method.
 
         Thread-safety: the whole body runs under ``_embed_lock`` because both
         ``tokenize`` and ``encode_raw`` hit the underlying ``Llama`` instance,

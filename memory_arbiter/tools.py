@@ -49,15 +49,6 @@ def _agent_onboarding_guide() -> str:
 
 
 class MemoryTools:
-    _TRUST_RANK: dict[str, int] = {
-        "user_confirmed": 4,
-        "locked": 4,
-        "document_extracted": 3,
-        "protected": 3,
-        "agent_generated": 2,
-        "unknown": 1,
-    }
-
     def __init__(self, settings: Optional[Settings] = None, db: Optional[MemoryDB] = None):
         self.settings = settings or Settings.from_env()
         self.db = db or MemoryDB(self.settings)
@@ -954,9 +945,6 @@ class MemoryTools:
         return self._operations.memory_replay_backup(
             dry_run, self._is_truthy(authorized), limit, offset, **_,
         )
-
-    def _trust_score(self, record: dict[str, Any]) -> int:
-        return self._signals._trust_score(record)
 
     @staticmethod
     def _confidence_rank(hint: Optional[str]) -> int:

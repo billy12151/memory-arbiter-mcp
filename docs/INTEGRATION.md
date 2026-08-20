@@ -62,7 +62,7 @@ The current runtime expects the local-text evidence schema. An existing database
 
 Options: `--no-switch` builds and verifies without changing configuration; `--yes` accepts the plan non-interactively; `--source` and `--target` override paths. The lower-level `mema migrate-vnext` command remains available for diagnostics and advanced workflows.
 
-Qwen installation is not a migration prerequisite. The evidence index requires sqlite-vec and the configured embedding model; without Qwen, deterministic `notify` remains active and `check` candidates fail closed to `ignore`.
+Qwen installation is not a migration prerequisite. The upgrade preflight does require `llama-cpp-python` (the `semantic-local` extra) because the evidence embedding model runs on it, and the evidence index additionally requires sqlite-vec and the configured embedding model; without Qwen, deterministic `notify` remains active and `check` candidates fail closed to `ignore`.
 
 ## 中文摘要
 

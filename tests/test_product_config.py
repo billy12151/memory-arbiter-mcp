@@ -460,7 +460,6 @@ def test_product_help_exposes_agent_decision_paths(tmp_path: Path) -> None:
         "reason", "affects_current_output", "usage_context",
     ]
     paths = memory_help["action_required_paths"]
-    assert "memory(action='judge')" in paths["judge_conflict_before_use"]
     assert "not a formal conflict" in paths["read_semantic_notice"]
     assert "authorized=true" in paths["confirm_new_workspace"]
     assert "returned retry instructions" in paths["ask_user_for_authorization"]

@@ -90,10 +90,6 @@ class ProductSurfaces:
                 "Dismiss a false positive; after the credible notice has been handled, resolve the notice. "
                 "A notice is not a formal conflict and cannot be judged or passed to resolve_conflict."
             ),
-            "judge_conflict_before_use": (
-                "Read the formal conflict and both complete memories, then submit memory(action='judge') "
-                "with the returned conflict_id and left/right version snapshot pins before using the claim."
-            ),
             "ask_user": (
                 "The formal conflict judgment requires a user decision. Ask the user; do not submit another "
                 "agent judgment as a substitute."

@@ -1453,16 +1453,3 @@ class OperationsPipeline:
             extra_warnings=warnings,
         )
 
-    # ==================================================================
-    #  v0.7.6: Conflict-signal attachment for search results
-    # ==================================================================
-
-    # Trust rank for runtime_metadata_hint (higher = more authoritative).
-    _TRUST_RANK: dict[str, int] = {
-        "locked": 100,
-        "user_confirmed": 100,
-        "document_extracted": 70,
-        "agent_generated": 45,
-        "pending": 20,
-        "unknown": 10,
-    }

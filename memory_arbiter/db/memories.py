@@ -251,7 +251,7 @@ class MemoriesStore:
         except sqlite3.Error:
             return False
 
-    def list_memories(self, workspace: Optional[str] = None, subject: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
+    def list_memories(self, subject: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
         if not self._db_available:
             return []
         clauses = ["status != 'deleted'"]

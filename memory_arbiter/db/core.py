@@ -150,7 +150,7 @@ class MemoryDB:
         """Yield a connection wrapped in ``BEGIN IMMEDIATE`` … ``COMMIT``.
 
         On any exception the transaction is rolled back.  Use this for
-        atomic multi-statement writes (CAS, section publish, etc.).
+        atomic multi-statement writes (CAS, evidence publish, etc.).
         """
         if not self._db_available:
             raise sqlite3.Error("Database not available")
@@ -405,7 +405,7 @@ class MemoryDB:
         return self.memories.update_memory(memory_id, updates, conn=conn)
 
     def list_memories(self, workspace: Optional[str] = None, subject: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
-        return self.memories.list_memories(workspace, subject, limit)
+        return self.memories.list_memories(subject=subject, limit=limit)
 
     def _filter_clauses(
         self,
@@ -627,10 +627,10 @@ class MemoryDB:
     # ------------------------------------------------------------------
     #  Legacy vector conflict candidate scan was removed.
     #
-    #  Embedding/sqlite-vec remains available for semantic recall, section
-    #  recall, and workspace aliasing.  The old KNN conflict-candidate
-    #  scanner and its tuning parameters are intentionally not kept here; the
-    #  legacy MCP tool is no longer registered.
+    #  Embedding/sqlite-vec remains available for evidence recall and
+    #  workspace aliasing.  The old KNN conflict-candidate scanner and its
+    #  tuning parameters are intentionally not kept here; the legacy MCP tool
+    #  is no longer registered.
 
 
     # ------------------------------------------------------------------
@@ -757,7 +757,7 @@ class MemoryDB:
         return self.audit.audit_summary()
 
     # ==================================================================
-    #  v0.6.0: _vec_index_meta + section operations
+    #  v0.6.0: _vec_index_meta + vec-index state machine
     # ==================================================================
 
     # ---- _vec_index_meta CRUD ----

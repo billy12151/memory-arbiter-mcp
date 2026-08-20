@@ -25,7 +25,7 @@ Qwen 只负责降噪，不会编辑记忆、确认冲突或自动废弃任何记
 
 ## 升级与旁路迁移
 
-历史用户升级本版本后，旧库会让 MCP 拒绝启动且不会被修改；推荐用交互式 `mema upgrade`（默认 dry-run 预览，确认后构建新库、核对行数与 fingerprint、原子切换标准 JSON 配置）。等价的底层入口是 `mema migrate-vnext`。迁移只复制当前保留表的公共列，重建 FTS 与 evidence；旧库保持不变，便于回滚。
+历史用户升级本版本后，旧库会让 MCP 拒绝启动且不会被修改；推荐用交互式 `mema upgrade`（会先打印记忆数量、evidence/向量规模与磁盘计划并请用户确认 `[y/N]`，确认后构建新库、核对行数与 fingerprint、原子切换标准 JSON 配置；`--dry-run` 只做预览）。等价的底层入口是 `mema migrate-vnext`。迁移只复制当前保留表的公共列，重建 FTS 与 evidence；旧库保持不变，便于回滚。
 
 搜索召回为 lexical 与 evidence 双通道融合（RRF）：FTS/subject/tags 与局部文本向量各自排序后融合，单个长文档最多占一个结果位。
 

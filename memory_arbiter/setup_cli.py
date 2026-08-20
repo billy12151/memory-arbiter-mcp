@@ -307,7 +307,7 @@ def _render_summary(all_ok: bool, use_color: bool, config_written: bool, *, supp
         lines.append(_color("⚠ 有缺失项。完成上述步骤后重新运行 `memory-arbiter setup` 验证。", _YELLOW, use_color))
         if config_written:
             lines.append(_color("  config.json 已生成，但 embedding 还没就绪 —— 此时 memory-arbiter 退化为", _DIM, use_color))
-            lines.append(_color("  纯关键词检索（FTS5），其余功能（写入/版本链/冲突/分段）不受影响。", _DIM, use_color))
+            lines.append(_color("  纯关键词检索（FTS5），其余功能（写入/版本链/冲突治理）不受影响。", _DIM, use_color))
     return lines
 
 

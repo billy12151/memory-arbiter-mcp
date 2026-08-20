@@ -116,8 +116,9 @@ class ReadPipeline:
         has_more = outcome.has_more
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
-        # v0.7.6: attach conflict signals (open_table + runtime_metadata_hint),
-        # only on genuine query hits (direct mode). Failures degrade silently.
+        # v0.7.6: attach conflict signals (open_table / conflict_guidance
+        # sources), only on genuine query hits (direct mode). Failures degrade
+        # silently.
         if include_conflict_signal and retrieval_mode == "direct" and results:
             results = self._attach_conflict_signals(results, extra_warnings)
         # v0.8.7: promote conflict_signal to a loud top-level flag (mirrors the
@@ -148,11 +149,11 @@ class ReadPipeline:
                     ids.append(int(peer["id"]))
                 self.db.log_attention(trigger="search", source=src, memory_ids=ids)
             # v0.8.8: the loud must-surface flag fires ONLY for verified
-            # open_table signals. runtime_metadata_hint is advisory (unverified,
-            # and re-fires on every retrieval of an overlapping pair), so a
-            # must-surface flag would nag. It stays a per-result signal for the
-            # calling agent to judge by content (see memory_search docstring):
-            # surface only if the two genuinely contradict, else silently proceed.
+            # open_table / conflict_guidance signals (formally recorded
+            # conflicts). A loud flag on weaker sources would nag, so those
+            # stay a per-result signal for the calling agent to judge by
+            # content: surface only if the two genuinely contradict, else
+            # silently proceed.
             ot = seen_sources.get("open_table") or seen_sources.get("conflict_guidance")
             if ot is not None:
                 attention_required = True
@@ -238,8 +239,8 @@ class ReadPipeline:
 
         Searches ONLY non-active, non-deleted memories (superseded +
         conflicted + pending) for audit/history walkthroughs:
-        - vec channel: ``vec_knn(parent_status_filter="expired")`` with
-          ``parent_status NOT IN ('active','deleted')`` predicate
+        - evidence channel: ``evidence_knn(parent_status_filter="expired")``
+          with ``parent_status NOT IN ('active','deleted')`` predicate
         - FTS channel: ``search_memories(status_filter="expired")`` with
           ``status_clause = "m.status NOT IN ('active','deleted')"``
 

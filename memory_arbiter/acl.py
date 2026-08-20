@@ -1,6 +1,6 @@
 """Workspace read ACL helpers.
 
-Shared by product, legacy, pipeline, DB-facing read helpers, and console API.
+Shared by the product pipeline, DB-facing read helpers, and the console API.
 This module deliberately adds ACL-specific helpers instead of changing the
 semantics of general-purpose DB reads such as ``get_memory``.
 """

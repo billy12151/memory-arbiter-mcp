@@ -19,7 +19,7 @@ from .db import MemoryDB, row_to_dict
 # linked_open_items only triggers on "direct" (a real query hit) — the other
 # modes return browse/fallback/empty rows where injecting todos would be noise.
 RetrievalMode = Literal[
-    "direct",            # FTS/LIKE/vector/section genuinely matched the query
+    "direct",            # FTS/LIKE/evidence channels genuinely matched the query
     "recent_fallback",   # query was non-empty but nothing matched; recent returned
     "recent_browse",     # empty query, no filters — caller is browsing recent
     "empty",             # filters yielded nothing, or pool empty after post-filter

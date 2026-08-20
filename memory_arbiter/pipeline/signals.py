@@ -17,12 +17,6 @@ class ConflictSignalPipeline:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._tools, name)
 
-    def _trust_score(self, record: dict[str, Any]) -> int:
-        return max(
-            self._tools._TRUST_RANK.get(record.get("source_type", ""), 0),
-            self._tools._TRUST_RANK.get(record.get("protection_level", ""), 0),
-        )
-
     @staticmethod
     def _confidence_rank(hint: Optional[str]) -> int:
         return {"high": 3, "medium": 2, "low": 1}.get(hint or "", 0)
@@ -112,6 +106,3 @@ class ConflictSignalPipeline:
                 "judged_at": primary.get("judged_at"),
             }
         return signal
-
-    def _compute_runtime_hint(self, *args: Any, **kwargs: Any) -> None:
-        return None

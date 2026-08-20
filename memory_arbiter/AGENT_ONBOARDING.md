@@ -31,9 +31,9 @@ A notice has no formal conflict_id: never pass it to judge or resolve_conflict.
 It never edits, retires, or automatically creates a formal conflict.
 
 Formal conflict judgments use the left and right memory versions as snapshot
-pins. For judge_conflict_before_use, read both memories and submit judge with the
-returned pins before using the claim. A judgment records guidance only. If
-action_required is ask_user, ask the user instead of judging again.
+pins. When acting on a conflict already present in the review queue, read both
+memories and submit judge with the returned pins. A judgment records guidance
+only. If action_required is ask_user, ask the user instead of judging again.
 
 For confirm_new_workspace, ask the user before calling confirm_pending_workspace
 with authorized=true. For ask_user_for_authorization, explain the returned impact
@@ -66,7 +66,7 @@ Qwen 只负责降噪，不编辑记忆，也不确认冲突。
 
 收到 advisory notice 后，先读取两侧完整记忆再判断；误报 dismiss，可信候选处理完后
 resolve。notice 没有正式 conflict_id，不能传给 judge 或 resolve_conflict。
-正式 conflict 的 judge_conflict_before_use 必须先读两侧，再带返回的版本快照调用
+对已在审查队列中的正式 conflict，先读两侧完整记忆，再带返回的版本快照调用
 judge；ask_user 表示必须询问用户，不能用再次 judge 代替。
 
 confirm_new_workspace 应先取得用户授权，再用 authorized=true 调
