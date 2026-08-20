@@ -92,6 +92,11 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_repair", "activate_pending"): {"id", "memory_id", "authorized", "workspace"},
     ("memory_repair", "semantic_control"): {"action", "timeout", "workspace"},
     ("memory_repair", "notice"): {"action", "status", "limit", "id", "notice_id", "reason", "workspace"},
+    ("memory_repair", "record_conflict"): {
+        "left_id", "right_id", "reason", "conflict_type", "conflict_point",
+        "suggested_winner", "confidence_hint", "source", "refresh",
+        "left_version", "right_version", "scan_prompt_version", "scan_model", "workspace",
+    },
     ("memory_repair", "replay_backup"): {"dry_run", "authorized", "limit", "offset"},
     ("memory_repair", "help"): {"topic", "task"},
 }

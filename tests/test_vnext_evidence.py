@@ -1228,3 +1228,102 @@ def test_record_conflict_task_validates_input(tmp_path: Path) -> None:
         {"left_id": a["id"], "right_id": 999, "reason": "x", "suggested_winner": 12345},
     )
     assert bad_winner["ok"] is False
+
+
+def test_notice_escalate_swapped_orientation_returns_row_aligned_pins(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="缓存 TTL 60 秒。", subject="ttl", tags=[])["data"]
+    b = tools.memory_write(content="缓存 TTL 300 秒。", subject="ttl", tags=[])["data"]
+    # Worker notices carry memory_id = the newly written memory, so exercise
+    # the memory_id > peer_id orientation (b as the notice's left side).
+    notice_id = _seed_notice(tools, b["id"], a["id"])
+
+    result = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id})
+    assert result["ok"] is True
+    conflict_id = result["data"]["conflict_id"]
+    with tools.db.connection() as conn:
+        row = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone()
+    assert row["left_id"] == a["id"] and row["right_id"] == b["id"]
+    # Response pins are row-aligned (canonical), not the notice's own sides.
+    assert result["data"]["left_id"] == row["left_id"]
+    assert result["data"]["right_id"] == row["right_id"]
+    assert result["data"]["left_version"] == row["left_version"]
+    assert result["data"]["right_version"] == row["right_version"]
+
+    # Judging directly with the echoed pins must succeed without a detour.
+    judged = tools.memory(
+        "judge",
+        {
+            "conflict_id": conflict_id,
+            "expected_left_version": result["data"]["left_version"],
+            "expected_right_version": result["data"]["right_version"],
+            "verdict": "contradiction", "recommended_use": "contextual",
+            "suggested_winner": None, "confidence_hint": "low",
+            "reason": "TTL 两说", "affects_current_output": True,
+            "usage_context": "缓存配置",
+        },
+    )
+    assert judged["ok"] is True
+
+
+def test_escalate_refreshes_drifted_pins_on_existing_open_row(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="限流 100/s。", subject="rate", tags=[])["data"]
+    b = tools.memory_write(content="限流 500/s。", subject="rate", tags=[])["data"]
+    registered = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "扫描登记"},
+    )
+    assert registered["ok"] is True
+
+    tools.memory("update", {"memory_id": a["id"], "new_content": "限流 200/s，修订。", "reason": "r"})
+    tools.memory("update", {"memory_id": b["id"], "new_content": "限流 500/s，补充。", "reason": "r"})
+    with tools.db.connection() as conn:
+        versions = dict(
+            (row["id"], int(row["version"]))
+            for row in conn.execute("SELECT id,version FROM memories WHERE id IN (?,?)", (a["id"], b["id"]))
+        )
+    notice_id = _seed_notice(
+        tools, b["id"], a["id"],
+        left_version=versions[b["id"]], right_version=versions[a["id"]],
+    )
+    result = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id})
+    assert result["ok"] is True
+    conflict_id = result["data"]["conflict_id"]
+    with tools.db.connection() as conn:
+        row = conn.execute("SELECT * FROM conflicts WHERE id=?", (conflict_id,)).fetchone()
+    # The drifted row must be re-pinned to the current versions, or it would
+    # be a zombie: never ringing at search, unjudgeable, notice consumed.
+    assert row["left_version"] == 2 and row["right_version"] == 2
+    hits = tools.memory("find", {"query": "限流"})["data"]["results"]
+    signaled = any(
+        r["id"] in (a["id"], b["id"]) and r.get("conflict_signal") for r in hits
+    )
+    assert signaled
+
+
+def test_record_conflict_task_guards_sides_source_and_pins(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="活的。", subject="live", tags=[])["data"]
+    b = tools.memory_write(content="另一条。", subject="other", tags=[])["data"]
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET status='superseded' WHERE id=?", (a["id"],))
+
+    non_active = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "x"},
+    )
+    assert non_active["ok"] is False
+    assert "active" in non_active["data"]["error"]
+
+    c = tools.memory_write(content="第三条。", subject="third", tags=[])["data"]
+    bad_source = tools.memory_repair(
+        "record_conflict",
+        {"left_id": b["id"], "right_id": c["id"], "reason": "x", "source": "human_confirmed_forgeries"},
+    )
+    assert bad_source["ok"] is False
+
+    stale_pins = tools.memory_repair(
+        "record_conflict",
+        {"left_id": b["id"], "right_id": c["id"], "reason": "x", "left_version": 999, "right_version": 999},
+    )
+    assert stale_pins["ok"] is False
+    assert stale_pins["data"]["outcome"] == "stale_snapshot"

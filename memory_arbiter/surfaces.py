@@ -751,6 +751,23 @@ class ProductSurfaces:
                     {"error": "memory id not found", **caller.response_fields()}, ok=False,
                     extra_warnings=list(caller.warnings),
                 )
+            if any(str(m.get("status")) != "active" for m in (left, right)):
+                return self.db.state.response(
+                    {
+                        "error": "conflict sides must be active memories",
+                        "left_status": left.get("status"), "right_status": right.get("status"),
+                    },
+                    ok=False, extra_warnings=list(caller.warnings),
+                )
+            source_value = payload.get("source")
+            if source_value is not None and str(source_value) not in {
+                "metadata_write_hint", "llm_informed", "policy_informed", "human_confirmed",
+            }:
+                return self._invalid_product_call(
+                    "memory_repair",
+                    "source must be one of metadata_write_hint/llm_informed/policy_informed/human_confirmed",
+                    task,
+                )
             suggested_winner = payload.get("suggested_winner")
             if suggested_winner is not None:
                 invalid_winner = self._coerce_product_id("memory_repair", payload, "suggested_winner", task)
@@ -764,8 +781,9 @@ class ProductSurfaces:
             # External scan loops (scheduled LLM review) register findings
             # here; the row is a governance record only — it never edits or
             # retires a memory, so unlike memory_govern this needs no
-            # per-action authorized flag. Unpinned versions default to the
-            # current ones so the row carries a usable CAS snapshot.
+            # per-action authorized flag. Version pins are resolved inside
+            # the write transaction: omitted pins default to the current
+            # versions, explicit pins are CAS-verified against them.
             result = self.db.record_conflict_enriched(
                 left_id, right_id,
                 conflict_type=payload.get("conflict_type"),
@@ -773,11 +791,11 @@ class ProductSurfaces:
                 reason=reason,
                 suggested_winner=suggested_winner,
                 confidence_hint=payload.get("confidence_hint"),
-                source=str(payload.get("source") or "llm_informed"),
+                source=str(source_value) if source_value is not None else "llm_informed",
                 status="open",
                 refresh=self._is_truthy(payload.get("refresh")),
-                left_version=int(payload.get("left_version") or left.get("version") or 1),
-                right_version=int(payload.get("right_version") or right.get("version") or 1),
+                left_version=payload.get("left_version"),
+                right_version=payload.get("right_version"),
                 judgment_status=None,
                 scan_prompt_version=payload.get("scan_prompt_version"),
                 scan_model=payload.get("scan_model"),
@@ -876,6 +894,18 @@ class ProductSurfaces:
                     right_version=notice.get("right_version"),
                 )
                 conflict_id = created.get("conflict_id")
+                if created.get("outcome") == "stale_snapshot":
+                    # The memories changed between the freshness check and
+                    # this write; the notice pins can no longer be trusted.
+                    return self.db.state.response(
+                        {
+                            "outcome": "stale_notice",
+                            "error": "notice pins no longer match current memory versions; read both memories and judge the current state instead",
+                            "detail": created,
+                        },
+                        ok=False,
+                        extra_warnings=list(caller.warnings),
+                    )
                 if created.get("outcome") not in {"inserted", "deduped", "refreshed"} or conflict_id is None:
                     return self.db.state.response(
                         {"outcome": "escalate_failed", "detail": created}, ok=False,
@@ -892,8 +922,12 @@ class ProductSurfaces:
                         "conflict_outcome": created.get("outcome"),
                         "conflict_id": conflict_id,
                         "notice_outcome": settled.get("outcome"),
-                        "left_version": notice.get("left_version"),
-                        "right_version": notice.get("right_version"),
+                        # Row-aligned canonical pins (left_id < right_id): the
+                        # notice's own pins may be swapped relative to the row.
+                        "left_id": created.get("left_id"),
+                        "right_id": created.get("right_id"),
+                        "left_version": created.get("left_version"),
+                        "right_version": created.get("right_version"),
                         "next_step": (
                             "Credible contradiction is now a formal conflict. Use "
                             "memory_review(view='conflict_detail') to inspect it, then "

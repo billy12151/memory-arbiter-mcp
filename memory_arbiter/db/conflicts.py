@@ -241,6 +241,33 @@ class ConflictStore:
         subject = conflict_point or reason
         now = utc_now_iso()
         with self.write_transaction() as conn:
+            # Resolve version pins inside the write transaction so the row can
+            # never carry pins that were already stale when it was written:
+            # omitted pins default to the current versions, explicit pins are
+            # CAS-verified against them.
+            try:
+                if left_version is not None:
+                    left_version = int(left_version)
+                if right_version is not None:
+                    right_version = int(right_version)
+            except (TypeError, ValueError):
+                return {"outcome": "invalid_input", "left_id": a, "right_id": b}
+            version_rows = conn.execute(
+                "SELECT id, version FROM memories WHERE id IN (?, ?)", (a, b)
+            ).fetchall()
+            current_versions = {int(r["id"]): int(r["version"] or 1) for r in version_rows}
+            if len(current_versions) < 2:
+                return {"outcome": "memory_not_found", "left_id": a, "right_id": b}
+            if left_version is None:
+                left_version = current_versions[a]
+            if right_version is None:
+                right_version = current_versions[b]
+            if left_version != current_versions[a] or right_version != current_versions[b]:
+                return {
+                    "outcome": "stale_snapshot",
+                    "left_id": a, "right_id": b,
+                    "left_version": left_version, "right_version": right_version,
+                }
             existing = conn.execute(
                 "SELECT * FROM conflicts WHERE status='open' AND left_id=? AND right_id=?",
                 (a, b),
@@ -250,6 +277,7 @@ class ConflictStore:
                 priority = {
                     "metadata_write_hint": 10,
                     "llm_informed": 30,
+                    "semantic_notice": 35,
                     "policy_informed": 35,
                     "human_confirmed": 40,
                     None: 30,
@@ -268,6 +296,10 @@ class ConflictStore:
                     incoming_priority > existing_priority
                     or (refresh and incoming_priority >= existing_priority)
                     or reset_judgment
+                    # Drifted pins alone must refresh the row: a dedupe that
+                    # keeps stale pins leaves an open conflict that never
+                    # rings at search and cannot be judged (zombie row).
+                    or pins_changed
                 )
                 if should_update:
                     effective_judgment_status = (
@@ -316,8 +348,18 @@ class ConflictStore:
                     )
                     if cur.rowcount == 0:
                         return {"outcome": "not_open", "conflict_id": int(existing["id"])}
-                    return {"outcome": "refreshed", "conflict_id": int(existing["id"])}
-                return {"outcome": "deduped", "conflict_id": int(existing["id"])}
+                    return {
+                        "outcome": "refreshed", "conflict_id": int(existing["id"]),
+                        "left_id": a, "right_id": b,
+                        "left_version": effective_left_version,
+                        "right_version": effective_right_version,
+                    }
+                return {
+                    "outcome": "deduped", "conflict_id": int(existing["id"]),
+                    "left_id": a, "right_id": b,
+                    "left_version": existing_row.get("left_version"),
+                    "right_version": existing_row.get("right_version"),
+                }
             cur = conn.execute(
                 """
                 INSERT INTO conflicts(
@@ -338,7 +380,11 @@ class ConflictStore:
                     judgment_status,
                 ),
             )
-            return {"outcome": "inserted", "conflict_id": int(cur.lastrowid)}
+            return {
+                "outcome": "inserted", "conflict_id": int(cur.lastrowid),
+                "left_id": a, "right_id": b,
+                "left_version": left_version, "right_version": right_version,
+            }
 
     def resolve_conflict(
         self, conflict_id: int, reason: str = "", status: str = "resolved",

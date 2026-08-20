@@ -212,7 +212,7 @@ def test_product_field_registry_covers_all_declared_surface_operations() -> None
         "memory": {"help", "status", "remember", "find", "read", "update", "judge"},
         "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "judgments", "history", "expired", "entities", "help"},
         "memory_govern": {"retire", "resolve_conflict", "confirm", "correct_judgment", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"},
-        "memory_repair": {"rebuild_evidence", "cleanup_history", "set_entity", "activate_pending", "semantic_control", "notice", "replay_backup", "help"},
+        "memory_repair": {"rebuild_evidence", "cleanup_history", "set_entity", "activate_pending", "semantic_control", "notice", "record_conflict", "replay_backup", "help"},
     }
     actual = {
         surface: {operation for registered_surface, operation in PRODUCT_FIELD_REGISTRY if registered_surface == surface}
