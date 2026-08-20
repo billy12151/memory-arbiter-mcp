@@ -290,6 +290,51 @@ class EvidenceStore:
                     # Async republish window or a permanently failed publish:
                     # surface it instead of silently skipping forever.
                     stale_anchors += 1
+                anchor_content_row = conn.execute(
+                    "SELECT content FROM memories WHERE id=?", (anchor_id,),
+                ).fetchone()
+                anchor_content = str(anchor_content_row["content"]) if anchor_content_row else ""
+                peer_content_cache: dict[int, str] = {}
+
+                def peer_content(peer_mid: int) -> str:
+                    if peer_mid not in peer_content_cache:
+                        row = conn.execute(
+                            "SELECT content FROM memories WHERE id=?", (peer_mid,),
+                        ).fetchone()
+                        peer_content_cache[peer_mid] = str(row["content"]) if row else ""
+                    return peer_content_cache[peer_mid]
+
+                def locate_span(content: str, unit_text: str, hint_start: int, hint_end: int) -> dict[str, int] | None:
+                    """Locate the triggering text in the ORIGINAL content.
+
+                    Stored unit offsets are approximate (the locator
+                    disclaims exactness and can drift by hundreds of chars
+                    on dense content), so they seed the search and the text
+                    itself confirms it: on a miss the span is dropped and
+                    the caller falls back to a full read instead of a
+                    silently wrong window.
+                    """
+                    if not content or not unit_text:
+                        return None
+                    # Prefer an exact full-text match near the hint — a short
+                    # probe alone can latch onto a repeated phrase elsewhere
+                    # in the content (filler/preamble) and point the window
+                    # at the wrong region. Fall back to the probe only when
+                    # whitespace-normalized text prevents an exact match.
+                    idx = content.find(unit_text, max(0, int(hint_start) - 64))
+                    if idx < 0:
+                        probe = unit_text[:20] or unit_text
+                        idx = content.find(probe, max(0, int(hint_start) - 256))
+                    if idx < 0:
+                        probe = unit_text[:20] or unit_text
+                        idx = content.find(probe)
+                    if idx < 0:
+                        return None
+                    return {
+                        "start": max(0, idx - 128),
+                        "end": min(len(content), idx + len(unit_text) + 128),
+                    }
+
                 for unit in units:
                     text = str(unit["text"] or "")
                     if not text:
@@ -327,37 +372,47 @@ class EvidenceStore:
                             continue
                         distance = float(hit.get("distance") or 0)
                         existing = candidates.get(pair)
+                        hit_text = str(hit.get("text") or "")
+                        anchor_span = locate_span(
+                            anchor_content, text,
+                            int(unit["start_offset"] or 0), int(unit["end_offset"] or 0),
+                        )
+                        peer_span = locate_span(
+                            peer_content(peer_id), hit_text,
+                            int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0),
+                        )
                         if existing is None:
-                            def _pad_window(start: int, end: int) -> dict[str, int]:
-                                return {"start": max(0, int(start) - 128), "end": int(end) + 128}
-
-                            anchor_win = _pad_window(unit["start_offset"] or 0, unit["end_offset"] or 0)
-                            peer_win = _pad_window(hit.get("start_offset") or 0, hit.get("end_offset") or 0)
                             candidates[pair] = {
                                 "left_id": pair[0], "right_id": pair[1],
                                 "route": decision.action, "reasons": {decision.reason},
                                 "distance": distance,
-                                "left_snippet": text[:200] if pair[0] == anchor_id else str(hit.get("text") or "")[:200],
-                                "right_snippet": str(hit.get("text") or "")[:200] if pair[0] == anchor_id else text[:200],
+                                "left_snippet": text[:200] if pair[0] == anchor_id else hit_text[:200],
+                                "right_snippet": hit_text[:200] if pair[0] == anchor_id else text[:200],
                                 # Pre-built deep-read calls: reading just the
                                 # triggering region (plus context) instead of
                                 # the full text keeps triage token cost low.
                                 "deep_read": {
                                     "left": {"memory_id": pair[0],
-                                             "span": anchor_win if pair[0] == anchor_id else peer_win},
+                                             "span": anchor_span if pair[0] == anchor_id else peer_span},
                                     "right": {"memory_id": pair[1],
-                                              "span": peer_win if pair[0] == anchor_id else anchor_win},
+                                              "span": peer_span if pair[0] == anchor_id else anchor_span},
                                 },
                             }
                         else:
                             # notify outranks check when different unit pairs
                             # on the same memory pair disagree — and the
-                            # snippets must show the strongest signal, not
-                            # the first discovery.
+                            # snippets AND deep-read spans must track the
+                            # strongest signal, not the first discovery.
                             if existing["route"] == "check" and decision.action == "notify":
                                 existing["route"] = "notify"
-                                existing["left_snippet"] = text[:200] if pair[0] == anchor_id else str(hit.get("text") or "")[:200]
-                                existing["right_snippet"] = str(hit.get("text") or "")[:200] if pair[0] == anchor_id else text[:200]
+                                existing["left_snippet"] = text[:200] if pair[0] == anchor_id else hit_text[:200]
+                                existing["right_snippet"] = hit_text[:200] if pair[0] == anchor_id else text[:200]
+                                existing["deep_read"] = {
+                                    "left": {"memory_id": pair[0],
+                                             "span": anchor_span if pair[0] == anchor_id else peer_span},
+                                    "right": {"memory_id": pair[1],
+                                              "span": peer_span if pair[0] == anchor_id else anchor_span},
+                                }
                             existing["reasons"].add(decision.reason)
                             existing["distance"] = min(existing["distance"], distance)
             ordered = [candidates[pair] for pair in sorted(candidates)]

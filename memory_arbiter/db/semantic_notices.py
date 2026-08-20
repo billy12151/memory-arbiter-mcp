@@ -94,13 +94,16 @@ class SemanticNoticeStore:
         )
 
     @staticmethod
-    def _memories(conn: sqlite3.Connection, notice: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    def _memories(conn: sqlite3.Connection, notice: dict[str, Any], *, with_content: bool = False) -> dict[int, dict[str, Any]]:
         ids = [int(notice[key]) for key in ("memory_id", "peer_id") if notice.get(key) is not None]
         if not ids:
             return {}
         placeholders = ",".join("?" for _ in ids)
+        columns = "id,status,version,workspace,workspace_canonical"
+        if with_content:
+            columns += ",content"
         rows = conn.execute(
-            f"SELECT id,status,version,workspace,workspace_canonical FROM memories WHERE id IN ({placeholders})",
+            f"SELECT {columns} FROM memories WHERE id IN ({placeholders})",
             ids,
         ).fetchall()
         return {int(row["id"]): dict(row) for row in rows}
@@ -134,31 +137,52 @@ class SemanticNoticeStore:
     @staticmethod
     def _read_call(
         memory: Optional[dict[str, Any]], evidence: Optional[dict[str, Any]] = None,
+        expected_version: Optional[int] = None,
     ) -> Optional[dict[str, Any]]:
         if memory is None:
             return None
         data: dict[str, Any] = {"memory_id": int(memory["id"])}
         # When the triggering evidence carries usable offsets, scope the
         # read to that region: the agent still judges the full picture by
-        # context, but the token cost lands on the relevant window. A
-        # follow-up full read stays one call away.
+        # context, but the token cost lands on the relevant window. The
+        # span is only attached when the side is still fresh AND the
+        # offsets fit the CURRENT content — a drifted or shrunken memory
+        # would otherwise hand the agent a failing or silently misaligned
+        # window, so it falls back to a full read instead.
         if isinstance(evidence, dict):
             start, end = evidence.get("start_offset"), evidence.get("end_offset")
-            if isinstance(start, int) and isinstance(end, int) and 0 <= start < end:
-                data["span"] = {"start": max(0, start - 128), "end": end + 128}
+            content = str(memory.get("content") or "")
+            version_fresh = (
+                expected_version is None
+                or int(memory.get("version") or 0) == int(expected_version)
+            )
+            if (
+                version_fresh
+                and isinstance(start, int) and isinstance(end, int)
+                and 0 <= start < end and start < len(content)
+            ):
+                span_end = min(len(content), end + 128)
+                if span_end > start:
+                    data["span"] = {"start": max(0, start - 128), "end": span_end}
         workspace = str(memory.get("workspace_canonical") or memory.get("workspace") or "").strip()
         if workspace:
             data["workspace"] = workspace
         return {"tool": "memory", "action": "read", "data": data}
 
     def _with_review_calls(self, conn: sqlite3.Connection, notice: dict[str, Any]) -> dict[str, Any]:
-        memories = self._memories(conn, notice)
+        # Content is needed to validate the evidence span against the
+        # CURRENT text before attaching it to the read call.
+        memories = self._memories(conn, notice, with_content=True)
         notice["left_read_call"] = self._read_call(
             memories.get(int(notice["memory_id"])), notice.get("payload", {}).get("left_evidence"),
+            expected_version=notice.get("left_version"),
         )
         peer_id = notice.get("peer_id")
         notice["right_read_call"] = (
-            self._read_call(memories.get(int(peer_id)), notice.get("payload", {}).get("right_evidence"))
+            self._read_call(
+                memories.get(int(peer_id)), notice.get("payload", {}).get("right_evidence"),
+                expected_version=notice.get("right_version"),
+            )
             if peer_id is not None else None
         )
         notice["agent_instruction"] = (

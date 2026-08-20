@@ -1864,3 +1864,85 @@ def test_notice_read_call_carries_evidence_span(tmp_path: Path) -> None:
         window = tools.memory("read", {"memory_id": call["data"]["memory_id"], "span": call["data"]["span"]})
         assert window["ok"] is True
         assert "缓存 TTL" in window["data"]["memory"]["content"]
+
+
+def test_deep_read_spans_follow_clue_upgrade_and_drifted_offsets(tmp_path: Path) -> None:
+    filler = "这条是中性填充内容，用来把两个区域拉开超过窗口宽度。" * 8  # ~360 chars
+    # Empty lines keep the filler and the numeric value as separate text
+    # units, so the clue upgrades from a similarity check to a numeric
+    # notify across two distinct regions.
+    content_a = f"部署架构完全相同的描述文字甲。\n\n{filler}\n\n重试次数为 3 次。"
+    content_b = f"部署架构完全相同的描述文字甲。\n\n{filler}\n\n重试次数为 5 次。"
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content=content_a, subject="upg", tags=[])["data"]
+    b = tools.memory_write(content=content_b, subject="upg", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    scan = tools.memory_repair(
+        "scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_check": True},
+    )
+    pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+    clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
+    assert clue["route"] == "notify"
+    assert "numeric_value_changed" in clue["reasons"]
+    # The deep-read span must track the UPGRADED (numeric) discovery, not
+    # the first (similarity) one — and re-reading it must contain the text.
+    for side in ("left", "right"):
+        call = clue["deep_read"][side]
+        window = tools.memory("read", {"memory_id": call["memory_id"], "span": call["span"]})
+        assert window["ok"] is True
+        assert "重试次数为" in window["data"]["memory"]["content"]
+
+
+def test_deep_read_survives_offset_drift_on_dense_content(tmp_path: Path) -> None:
+    # Semicolon-dense repeated-token lines make stored unit offsets drift;
+    # deep_read must locate the trigger by text, not trust the offsets.
+    def dense(value: str) -> str:
+        return "\n".join([
+            f"pool.max=50; pool.timeout={value}; pool.min_idle=5;",
+            "cache.ttl=60; cache.size=1000; cache.backend=memory;",
+            f"retry.count=3; retry.backoff=200; retry.value={value};",
+            "log.level=info; log.file=/var/log/app.log; log.rotation=daily;",
+            "queue.depth=100; queue.workers=8; queue.strategy=fifo;",
+            f"rate.limit=1000; rate.burst=50; rate.window={value};",
+        ])
+
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content=dense("30"), subject="cfg", tags=[])["data"]
+    b = tools.memory_write(content=dense("90"), subject="cfg", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+    clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
+    for side in ("left", "right"):
+        call = clue["deep_read"][side]
+        assert call["span"] is not None
+        window = tools.memory("read", {"memory_id": call["memory_id"], "span": call["span"]})
+        assert window["ok"] is True
+        assert "timeout=30" in window["data"]["memory"]["content"] or "timeout=90" in window["data"]["memory"]["content"]
+
+
+def test_notice_read_call_span_gates_on_drift_and_shrink(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="开场说明。\n缓存 TTL 为 60 秒。" + "很长的背景交代。" * 60, subject="ttl", tags=[])["data"]
+    b = tools.memory_write(content="开场说明。\n缓存 TTL 为 300 秒。", subject="ttl", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    notice_id = _seed_notice(
+        tools, a["id"], b["id"],
+        left_content="开场说明。\n缓存 TTL 为 60 秒。" + "很长的背景交代。" * 60,
+        right_content="开场说明。\n缓存 TTL 为 300 秒。",
+    )
+
+    # Shrink the left memory: the stale offsets no longer fit the current
+    # content, so the left read call falls back to a full read (no span).
+    tools.memory("update", {"memory_id": a["id"], "new_content": "短。", "reason": "缩短"})
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE semantic_notices SET status='open', delivered_at=NULL WHERE id=?",
+            (notice_id,),
+        )
+    read = tools.memory_repair("notice", {"action": "read", "notice_id": notice_id})["data"]["notice"]
+    assert "span" not in read["left_read_call"]["data"]
+    # The right side drifted in version (its pinned version still matches —
+    # untouched), so its span stays and round-trips.
+    assert "span" in read["right_read_call"]["data"]

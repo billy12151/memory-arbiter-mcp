@@ -428,15 +428,15 @@ class ReadPipeline:
         if span is not None:
             if not isinstance(span, dict):
                 return self.db.state.response({"error": "span must be an object with start/end"}, ok=False)
-            try:
-                raw_start = span.get("start")
-                raw_end = span.get("end")
-                if raw_start is None or raw_end is None:
-                    raise TypeError("missing start/end")
-                span_start = int(raw_start)
-                span_end = int(raw_end)
-            except (TypeError, ValueError):
+            raw_start = span.get("start")
+            raw_end = span.get("end")
+            if (
+                not isinstance(raw_start, int) or isinstance(raw_start, bool)
+                or not isinstance(raw_end, int) or isinstance(raw_end, bool)
+            ):
                 return self.db.state.response({"error": "span start/end must be integers"}, ok=False)
+            span_start = raw_start
+            span_end = raw_end
             if span_start < 0 or span_end <= span_start:
                 return self.db.state.response({"error": "span requires 0 <= start < end"}, ok=False)
         caller = self._caller_workspace(_.get("workspace"))
