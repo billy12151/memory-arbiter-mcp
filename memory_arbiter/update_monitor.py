@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -251,13 +252,18 @@ class UpdateMonitor:
                 self._check_thread = None
 
     def _check_due_locked(self) -> bool:
+        now = self._now()
         next_retry = _parse_time(self._state.get("next_retry_after"))
-        if next_retry and self._now() < next_retry:
+        if next_retry and now < next_retry:
             return False
         checked = _parse_time(self._state.get("latest_checked_at"))
         if checked is None:
             return True
-        return self._now() - checked >= CHECK_INTERVAL
+        # A corrupted or clock-skewed future timestamp would otherwise
+        # disable update checks until wall time catches up; treat it as due.
+        if checked > now:
+            return True
+        return now - checked >= CHECK_INTERVAL
 
     def _update_available_notice_locked(self) -> Optional[dict[str, Any]]:
         latest = self._state.get("latest_version")
@@ -360,5 +366,9 @@ class UpdateMonitor:
                 json.dump(self._state, fh, ensure_ascii=False, indent=2, sort_keys=True)
                 fh.write("\n")
             tmp.replace(self.state_path)
+            try:
+                os.chmod(self.state_path, 0o600)
+            except OSError:
+                pass
         except OSError:
             return

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import hashlib
 import json
@@ -86,6 +87,9 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
     finally:
         conn.close()
     vector_bytes = units * int((settings.vec_dim if settings is not None else Settings.vec_dim)) * 4
+    # build()/final_sync() create the parent directory themselves; inspect
+    # may run first (dry run) against a not-yet-existing path.
+    target.parent.mkdir(parents=True, exist_ok=True)
     free_bytes = shutil.disk_usage(target.parent).free
     required = source.stat().st_size + vector_bytes * 2 + 64 * 1024 * 1024
     return {
@@ -209,6 +213,19 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         with db.connection() as conn:
             db.schema._rebuild_fts(conn)
     else:
+        # A crashed build leaves phase in {failed, backfill}, which the
+        # startup generation guard refuses to open as a current database —
+        # the exact state --resume exists for. Clear the phase via a raw
+        # connection first so MemoryDB can start; build() re-marks it below.
+        with contextlib.closing(sqlite3.connect(target)) as conn:
+            phase_row = conn.execute(
+                "SELECT value FROM migration_state WHERE key='phase'"
+            ).fetchone()
+            if phase_row is not None and str(phase_row[0]) in {"failed", "backfill"}:
+                conn.execute(
+                    "UPDATE migration_state SET value='resuming' WHERE key='phase'"
+                )
+                conn.commit()
         db = MemoryDB(target_settings)
     tools = MemoryTools(settings=target_settings, db=db)
     _set_state(db, {"phase": "backfill", "source_path": str(source)})
@@ -318,6 +335,11 @@ def final_sync(
     _remove_sidecars(target)
     os.replace(staging, target)
     _remove_sidecars(staging)
+    # The staging build's startup-lock sidecar outlives the rename; the
+    # switched-in database does not need one.
+    staging_lock = staging.with_name(staging.name + ".startup.lock")
+    if staging_lock.exists():
+        staging_lock.unlink()
     result.update({
         "target": str(target),
         "final_sync": True,

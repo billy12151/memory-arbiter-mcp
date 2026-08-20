@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -197,6 +198,9 @@ class MemoryDB:
     # ------------------------------------------------------------------
 
     def _init_database(self) -> None:
+        # Only brand-new databases are tightened: never touch permissions of
+        # a file the operator may share deliberately.
+        db_preexisted = self.settings.db_path.exists()
         self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         last_error: Optional[sqlite3.Error] = None
         for attempt in range(_INIT_BUSY_RETRIES):
@@ -205,6 +209,11 @@ class MemoryDB:
                 conn = self._new_connection(init=True)
                 self._init_schema(conn)
                 self._probe_features(conn)
+                if not db_preexisted:
+                    try:
+                        os.chmod(self.settings.db_path, 0o600)
+                    except OSError:
+                        pass
                 self._db_available = True
                 return
             except sqlite3.Error as exc:

@@ -20,6 +20,14 @@ class ConflictJudgmentStore:
     SUPERSEDE_KINDS = {"near_duplicate", "full_replacement"}
     VERDICTS = {"contradiction", "evolution", "compatible", "uncertain"}
     RECOMMENDATIONS = {"left", "right", "contextual", "merge", "ask_user", "none"}
+    # usage_context/confidence_hint drive the pending_user escalation gates;
+    # free-text values silently fall out of every set membership and weaken
+    # the gate, so they are validated like the other enums.
+    USAGE_CONTEXTS = {
+        "answer", "code", "config", "memory_write", "external_action",
+        "unrelated", "unknown",
+    }
+    CONFIDENCE_HINTS = {"low", "medium", "high"}
 
     def __init__(self, db: "MemoryDB") -> None:
         self._db = db
@@ -224,6 +232,10 @@ class ConflictJudgmentStore:
         )
         if error:
             return error
+        if usage_context not in self.USAGE_CONTEXTS:
+            return {"outcome": "invalid_input", "conflict_id": conflict_id, "error": "usage_context must be one of the declared values (see judge_constraints)"}
+        if confidence_hint is not None and confidence_hint not in self.CONFIDENCE_HINTS:
+            return {"outcome": "invalid_input", "conflict_id": conflict_id, "error": "confidence_hint must be low, medium, high, or null"}
         with self._db.write_transaction() as conn:
             snapshot = self._read_current_snapshot(conn, conflict_id, require_open=True)
             if snapshot is None:

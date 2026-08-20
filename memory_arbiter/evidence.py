@@ -58,10 +58,23 @@ def _locate_clean_text(content: str, cleaned: str, start: int, end: int) -> tupl
     words = [word for word in re.split(r"\s+", cleaned) if word]
     if words:
         first = content.find(words[0], start, end)
-        last = content.rfind(words[-1], first if first >= 0 else start, end)
-        if first >= 0 and last >= first:
-            return first, min(end, last + len(words[-1]))
-    return start, end
+        if first >= 0:
+            # Bound the trailing anchor's search window to the cleaned
+            # text's own length plus whitespace slack: an unbounded rfind
+            # can latch onto the last word's LATER recurrences (repeated
+            # key=value; settings), overshooting the group's true end and
+            # cascading into empty spans for every following group.
+            window_end = min(end, first + len(cleaned) + 64)
+            last = content.rfind(words[-1], first, window_end)
+            if last >= first:
+                return first, min(end, last + len(words[-1]))
+    # Placement failed (e.g. the caller's search anchor already sits past
+    # this group's words). Never hand back an empty span for non-empty
+    # text: fall back to a window ending at `end` sized to the cleaned
+    # text so downstream consumers always get a locatable citation.
+    if start < end:
+        return start, end
+    return max(0, end - len(cleaned)), end
 
 
 def _split_long(text: str, start: int, *, size: int = 300, overlap: int = 60) -> Iterable[tuple[str, int, int]]:

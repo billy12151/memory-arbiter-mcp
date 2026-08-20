@@ -141,7 +141,7 @@ class ProductSurfaces:
                     "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
                     "read": {"action": "read", "data": {"memory_id": 123}},
                     "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
-                    "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_left_version": 1, "expected_right_version": 2, "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None, "confidence_hint": "medium", "affects_current_output": True, "usage_context": "Current answer depends on this field.", "resolution_kind": "partial_update", "conflict_scope": "field", "reason": "Only one field changed."}},
+                    "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_left_version": 1, "expected_right_version": 2, "verdict": "evolution", "recommended_use": "merge", "suggested_winner": None, "confidence_hint": "medium", "affects_current_output": True, "usage_context": "config", "resolution_kind": "partial_update", "conflict_scope": "field", "reason": "Only one field changed; current answer depends on it."}},
                 },
                 "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
                 "value_reference": self._memory_value_reference(),
@@ -470,6 +470,7 @@ class ProductSurfaces:
         self._normalize_boolean_fields(
             payload, "authorized", "tags_only", "debug_ranking",
             "include_linked_open_items", "include_conflict_signal",
+            "affects_current_output",
         )
         if action == "help":
             return self.db.state.response(self._product_help("memory", self._help_topic(payload, "action")))
@@ -540,9 +541,6 @@ class ProductSurfaces:
             conflict_id_int = self._int_product_arg("memory_review", conflict_id, "conflict_id", view)
             if isinstance(conflict_id_int, dict):
                 return conflict_id_int
-            limit_int = self._int_product_arg("memory_review", payload.get("limit", 200), "limit", view)
-            if isinstance(limit_int, dict):
-                return limit_int
             caller = self._caller_workspace(payload.get("workspace"))
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:

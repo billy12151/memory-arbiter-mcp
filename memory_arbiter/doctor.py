@@ -1,9 +1,11 @@
 """Read-only health checks for the local-text evidence architecture."""
 from __future__ import annotations
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
@@ -52,6 +54,30 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     findings.append(_finding("evidence.orphans", orphan == 0, f"{orphan} orphan evidence rows", evidence={"orphan": orphan}))
     findings.append(_finding("conflicts.backlog", open_conflicts < 100, f"{open_conflicts} open conflicts"))
     findings.append(_finding("notices.backlog", open_notices < 100, f"{open_notices} open notices"))
+    # v0.8.8 observability (restored): searches that ring conflict signals
+    # append to attention_log.jsonl; surfacing the volume keeps advisory
+    # flooding visible instead of growing an unread log forever.
+    attention_lines = 0
+    attention_recent = 0
+    attention_path = Path(settings.db_path).parent / "attention_log.jsonl"
+    if attention_path.exists():
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            with open(attention_path, encoding="utf-8") as fh:
+                for line in fh:
+                    attention_lines += 1
+                    try:
+                        if str(json.loads(line).get("ts", "")) >= cutoff:
+                            attention_recent += 1
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            attention_lines = 0
+    findings.append(_finding(
+        "capacity.attention_volume", attention_recent < 200,
+        f"{attention_recent} attention events in 7 days ({attention_lines} total)",
+        evidence={"recent_7d": attention_recent, "total_lines": attention_lines},
+    ))
     if settings.config_warnings:
         findings.append(_finding("config.warnings", False, "; ".join(settings.config_warnings)))
     if deep:

@@ -228,7 +228,9 @@ class ConflictStore:
         open conflict on the same (left, right) pair already exists, no new
         row is written and ``deduped`` is returned — *unless* ``refresh=True``,
         in which case the existing row's enrichment fields are UPDATEd in place
-        and ``refreshed`` is returned (``created_at`` is preserved).
+        and ``refreshed`` is returned (``created_at`` is preserved), provided
+        the incoming source's priority is at least the existing row's;
+        drifted version pins alone always refresh regardless of priority.
         """
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable"}

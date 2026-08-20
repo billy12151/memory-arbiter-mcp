@@ -38,6 +38,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._handle(send_body=False)
 
     def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib hook name
+        address = self.server.server_address
+        port = int(address[1]) if isinstance(address, tuple) and len(address) > 1 else 0
+        if not _host_allowed(self.headers.get("Host"), port):
+            self._json({"error": "forbidden host"}, status=HTTPStatus.FORBIDDEN, send_body=False)
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Allow", "GET, HEAD, OPTIONS")
         self.end_headers()

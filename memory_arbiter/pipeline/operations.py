@@ -200,7 +200,8 @@ class OperationsPipeline:
                     extra_warnings=list(caller.warnings),
                 )
         result = self.db.resolve_conflict(int(conflict_id), reason=reason, status=status)
-        return self.db.state.response(result, extra_warnings=list(caller.warnings))
+        ok = result.get("outcome") in {"resolved", "not_a_conflict"}
+        return self.db.state.response(result, ok=ok, extra_warnings=list(caller.warnings))
 
     def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
         authorized = self._is_truthy(authorized)
@@ -849,7 +850,10 @@ class OperationsPipeline:
                 )
         else:
             try:
-                requested = list(dict.fromkeys(int(value) for value in memory_ids))[:batch]
+                # An explicitly enumerated repair set is not batch-capped:
+                # silently truncating it under-repairs (the discovery path
+                # below paginates with `batch` instead).
+                requested = list(dict.fromkeys(int(value) for value in memory_ids))
             except (TypeError, ValueError):
                 return self.db.state.response({"error": "memory_ids must contain integers"}, ok=False)
             ids = [mid for mid in requested if caller.isolation != "strict" or self._get_memory_visible(mid, caller)]
@@ -1327,7 +1331,6 @@ class OperationsPipeline:
             if isinstance(key, str)
         }
         record = self.db.get_memory(memory_id) or {}
-        stages = {}
         result = self._enqueue_local_text_index(memory_id, record)
         outcome = str(result.get("status") or "unknown")
         if outcome == "queued":

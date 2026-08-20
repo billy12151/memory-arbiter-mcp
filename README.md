@@ -5,8 +5,8 @@ Memory Arbiter is a trustworthy local fact layer for AI agents — not just shar
 ## Why trust it
 
 - **One complete source of truth.** Every memory keeps its full original text. Evidence vectors, full-text search, and rankings are all *derived* indexes — rebuildable, never the only copy.
-- **Provenance on every write.** Each memory carries `source_type`, `source_ref`, `event_time`, and `ingest_time`, so you can tell a user-confirmed fact from an agent's guess.
-- **Trust levels.** `user_confirmed` promotion and `normal`/`protected`/`locked` protection levels prevent an agent from silently overwriting facts you have verified.
+- **Provenance on every write.** Each memory carries `source_type`, `source_ref`, `event_time`, and `ingest_time`. The `user_confirmed` label is reserved by convention for facts the user explicitly verified; technically enforced protection is what happens after labeling — a `user_confirmed` memory is locked against silent edits.
+- **Trust levels.** `normal`/`protected`/`locked` protection levels prevent an agent from silently overwriting what is locked; `memory_govern(confirm)` promotes a memory to `user_confirmed` only with per-action user authorization.
 - **Full version history.** Every edit appends to `memory_history` with a version bump, and supersede chains keep old facts traceable instead of silently replaced.
 - **Advisory vs. formal conflicts.** Candidate conflicts surface as advisory notices the agent must read before acting; only an explicit user decision creates or resolves a formal conflict.
 - **Authorized governance.** Every state-changing `memory_govern` action requires per-action `authorized=true` after the user confirms that specific action.
@@ -86,9 +86,11 @@ The command displays memory count, estimated evidence volume and vector storage,
 
 Configuration discovery order:
 
-1. `MEMORY_ARBITER_CONFIG`
+1. `MEMORY_ARBITER_CONFIG` (points at a config file)
 2. `~/.config/memory-arbiter/config.json`
 3. environment variables and defaults
+
+Within one scope, a value set in the config file wins over the corresponding environment variable (e.g. `db_path` in `config.json` overrides `MEMORY_ARBITER_DB_PATH`); environment variables apply when no config file sets the key.
 
 See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json) and [`.env.example`](.env.example).
 

@@ -61,7 +61,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_review", "doctor"): {"deep", "workspace"},
     ("memory_review", "audit"): {"workspace"},
     ("memory_review", "conflicts"): {"status", "limit", "source", "workspace"},
-    ("memory_review", "conflict_detail"): {"id", "conflict_id", "limit", "workspace"},
+    ("memory_review", "conflict_detail"): {"id", "conflict_id", "workspace"},
     ("memory_review", "judgments"): {"id", "conflict_id", "workspace"},
     ("memory_review", "history"): {"id", "memory_id", "workspace"},
     ("memory_review", "expired"): {
@@ -227,6 +227,17 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         "to": MAX_TEXT_FIELD_CHARS,
         "entity": MAX_TEXT_FIELD_CHARS,
         "scope": MAX_TEXT_FIELD_CHARS,
+        # Governance/scan metadata is echoed by review surfaces; unbounded
+        # values would allow single-call storage amplification.
+        "conflict_type": MAX_TEXT_FIELD_CHARS,
+        "conflict_point": MAX_TEXT_FIELD_CHARS,
+        "scan_prompt_version": MAX_TEXT_FIELD_CHARS,
+        "scan_model": MAX_TEXT_FIELD_CHARS,
+        "confidence_hint": MAX_TEXT_FIELD_CHARS,
+        "judge_ref": MAX_TEXT_FIELD_CHARS,
+        "usage_context": MAX_TEXT_FIELD_CHARS,
+        "source": MAX_TEXT_FIELD_CHARS,
+        "relation": MAX_TEXT_FIELD_CHARS,
     }
     for key, maximum in bounded_strings.items():
         value = payload.get(key)

@@ -1102,7 +1102,7 @@ def test_notice_escalate_creates_formal_conflict_and_supports_judge(tmp_path: Pa
             "verdict": "contradiction", "recommended_use": "contextual",
             "suggested_winner": None, "confidence_hint": "medium",
             "reason": "两个超时口径并存", "affects_current_output": True,
-            "usage_context": "接口配置依据",
+            "usage_context": "config",
         },
     )
     assert judged["ok"] is True
@@ -1260,7 +1260,7 @@ def test_notice_escalate_swapped_orientation_returns_row_aligned_pins(tmp_path: 
             "verdict": "contradiction", "recommended_use": "contextual",
             "suggested_winner": None, "confidence_hint": "low",
             "reason": "TTL 两说", "affects_current_output": True,
-            "usage_context": "缓存配置",
+            "usage_context": "config",
         },
     )
     assert judged["ok"] is True
@@ -1327,3 +1327,187 @@ def test_record_conflict_task_guards_sides_source_and_pins(tmp_path: Path) -> No
     )
     assert stale_pins["ok"] is False
     assert stale_pins["data"]["outcome"] == "stale_snapshot"
+
+
+def test_wave8_regression_basics(tmp_path: Path) -> None:
+    from memory_arbiter.evidence import local_text_units
+
+    # A3: semicolon-dense config lines must not produce empty evidence spans.
+    content = "\n".join([
+        "pool.max=50; pool.timeout=30; pool.min_idle=5;",
+        "cache.ttl=60; cache.size=1000; cache.backend=memory;",
+        "retry.count=3; retry.backoff=200; retry.jitter=50;",
+        "log.level=info; log.file=/var/log/app.log; log.rotation=daily;",
+        "queue.depth=100; queue.workers=8; queue.strategy=fifo;",
+        "rate.limit=1000; rate.burst=50; rate.window=1s;",
+    ])
+    units = local_text_units("cfg", content)
+    assert units
+    assert all(u.start_offset < u.end_offset or u.kind == "subject" for u in units)
+
+    # D4: governance/scan metadata strings are bounded.
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="一条。", subject="s", tags=[])["data"]
+    b = tools.memory_write(content="二条。", subject="s2", tags=[])["data"]
+    huge = "x" * 5000
+    rejected = tools.memory_repair(
+        "record_conflict",
+        {"left_id": a["id"], "right_id": b["id"], "reason": "r", "scan_model": huge},
+    )
+    assert rejected["ok"] is False
+    assert rejected["data"]["error"] == "invalid_input"
+
+    # B2: failed governance resolve reports ok=False.
+    bogus = tools.memory_govern(
+        "resolve_conflict", {"conflict_id": 99999, "reason": "x", "authorized": True},
+    )
+    assert bogus["ok"] is False
+    assert bogus["data"]["outcome"] in {"not_open", "not_found"}
+
+    # A4: an explicit memory_ids repair list is never batch-truncated.
+    ids = [tools.memory_write(content=f"修复 {i}。", subject=f"fix{i}", tags=[])["data"]["id"] for i in range(4)]
+    result = tools.memory_repair(
+        "rebuild_evidence", {"dry_run": False, "memory_ids": ids, "batch_size": 2},
+    )
+    assert result["data"]["queued"] == 4
+
+
+def test_wave8_judge_enum_and_bool_gates(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="超时 5s。", subject="t", tags=[])["data"]
+    b = tools.memory_write(content="超时 30s。", subject="t", tags=[])["data"]
+    notice_id = _seed_notice(tools, a["id"], b["id"])
+    esc = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id})
+    assert esc["ok"] is True
+    conflict_id = esc["data"]["conflict_id"]
+
+    base = {
+        "conflict_id": conflict_id,
+        "expected_left_version": esc["data"]["left_version"],
+        "expected_right_version": esc["data"]["right_version"],
+        "verdict": "contradiction", "recommended_use": "contextual",
+        "suggested_winner": None, "confidence_hint": "medium",
+        "reason": "两说", "affects_current_output": True,
+    }
+    bad_context = tools.memory("judge", {**base, "usage_context": "some free text"})
+    assert bad_context["ok"] is False
+    bad_confidence = tools.memory("judge", {**base, "usage_context": "config", "confidence_hint": "banana"})
+    assert bad_confidence["ok"] is False
+    good = tools.memory("judge", {**base, "usage_context": "config"})
+    assert good["ok"] is True
+
+
+def test_wave8_malformed_tags_do_not_zero_filter_recall(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    healthy = tools.memory_write(content="健康条目。", subject="h", tags=["alpha"])["data"]
+    tools.memory_write(content="另一条。", subject="h2", tags=[])
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET tags='not-json{' WHERE subject='h2'")
+    result = tools.memory("find", {"tags_filter": ["alpha"]})
+    assert healthy["id"] in [r["id"] for r in result["data"]["results"]]
+    assert result["data"]["total_estimate"] >= 1
+
+
+def test_wave8_new_database_permissions(tmp_path: Path) -> None:
+    import os as _os
+    tools = make_tools(tmp_path)
+    mode = _os.stat(tools.settings.db_path).st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_wave8_doctor_reports_attention_volume(tmp_path: Path) -> None:
+    import json as _json
+
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="限流 10。", subject="r", tags=[])["data"]
+    b = tools.memory_write(content="限流 99。", subject="r", tags=[])["data"]
+    reg = tools.memory_repair(
+        "record_conflict", {"left_id": a["id"], "right_id": b["id"], "reason": "两说"},
+    )
+    assert reg["ok"] is True
+    log_path = tools.db.settings.db_path.parent / "attention_log.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(_json.dumps({"ts": "2026-01-01T00:00:00+00:00", "trigger": "search", "source": "open_table", "ids": [1]}) + "\n")
+    report = tools.memory_review("doctor", {})["data"]
+    finding = next(f for f in report["findings"] if f["check_id"] == "capacity.attention_volume")
+    assert finding["status"] == "pass"
+    assert finding["evidence"]["total_lines"] == 1
+
+
+def test_migration_resume_recovers_from_failed_build(tmp_path: Path, monkeypatch) -> None:
+    pytest.importorskip("sqlite_vec")
+    # Legacy-shaped source database with three memories.
+    source = tmp_path / "legacy.sqlite3"
+    db = MemoryDB(Settings(db_path=source, backup_jsonl=tmp_path / "b.jsonl"))
+    with db.write_transaction() as conn:
+        for i in range(3):
+            conn.execute(
+                """INSERT INTO memories(content, agent_id, workspace, tags, source_type,
+                   event_time, ingest_time, status, subject, metadata, version, created_at)
+                   VALUES (?, 'agent', 'default', '[]', 'agent_generated', '2026-01-01T00:00:00+00:00',
+                           '2026-01-01T00:00:00+00:00', 'active', ?, '{}', 1, '2026-01-01T00:00:00+00:00')""",
+                (f"迁移样本 {i} 内容。", f"mig{i}"),
+            )
+    target = tmp_path / "new.vnext.sqlite3"
+
+    real_index = MemoryTools._index_local_text_evidence
+    calls = {"n": 0}
+
+    def flaky(self, memory_id, record=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return {"status": "failed", "reason": "injected"}
+        return real_index(self, memory_id, record, **kwargs)
+
+    settings = Settings(
+        db_path=source, backup_jsonl=tmp_path / "b.jsonl",
+        enable_sqlite_vec=True, vec_dim=2, embedding_provider="gguf",
+        embedding_model_path=tmp_path / "fake.gguf",
+    )
+    (tmp_path / "fake.gguf").write_bytes(b"fake")
+    # build() constructs its own MemoryTools with a real embedder build;
+    # inject the test FakeEmbedder so indexing works without a real GGUF.
+    real_init = MemoryTools.__init__
+
+    def init_with_fake_embedder(self, settings=None, db=None):
+        real_init(self, settings=settings, db=db)
+        self._embedder = FakeEmbedder()
+        self._embedder_loaded = True
+
+    monkeypatch.setattr(MemoryTools, "__init__", init_with_fake_embedder)
+    monkeypatch.setattr(MemoryTools, "_index_local_text_evidence", flaky)
+    failed_build = build(source, target, settings, resume=False, progress=False)
+    assert failed_build["ok"] is False
+    with sqlite3.connect(target) as conn:
+        phase = conn.execute("SELECT value FROM migration_state WHERE key='phase'").fetchone()[0]
+    assert phase == "failed"
+
+    # --resume must be able to open the failed target and finish the build.
+    monkeypatch.setattr(MemoryTools, "_index_local_text_evidence", real_index)
+    resumed = build(source, target, settings, resume=True, progress=False)
+    assert resumed["ok"] is True, resumed
+    assert resumed["switch_ready"] is True
+    with sqlite3.connect(target) as conn:
+        phase = conn.execute("SELECT value FROM migration_state WHERE key='phase'").fetchone()[0]
+    assert phase == "ready"
+
+
+def test_migration_inspect_accepts_missing_parent_dir(tmp_path: Path) -> None:
+    source = tmp_path / "legacy.sqlite3"
+    db = MemoryDB(Settings(db_path=source, backup_jsonl=tmp_path / "b.jsonl"))
+    with db.write_transaction() as conn:
+        conn.execute(
+            """INSERT INTO memories(content, agent_id, workspace, tags, source_type,
+               event_time, ingest_time, status, subject, metadata, version, created_at)
+               VALUES ('内容。', 'agent', 'default', '[]', 'agent_generated',
+                       '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+                       'active', 's', '{}', 1, '2026-01-01T00:00:00+00:00')""",
+        )
+    settings = Settings(
+        db_path=source, backup_jsonl=tmp_path / "b.jsonl",
+        vec_dim=2,
+    )
+    plan = inspect(source, tmp_path / "nested" / "dir" / "new.vnext.sqlite3", settings)
+    assert plan.get("ok") is not False
+    assert "disk_ok" in plan

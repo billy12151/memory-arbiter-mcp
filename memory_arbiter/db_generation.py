@@ -111,7 +111,7 @@ def database_startup_lock(db_path: Path) -> Iterator[None]:
     path = Path(db_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".startup.lock")
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

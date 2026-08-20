@@ -285,7 +285,15 @@ class MemoriesStore:
         params: list[Any] = []
         if tags_filter:
             for tag in tags_filter:
-                clauses.append("EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)")
+                # CASE guard: json_each raises on malformed JSON, and one
+                # legacy/imported row with bad tags would abort the whole
+                # aggregate (the callers' sqlite3.Error handlers silently
+                # return 0 rows). Bad rows simply match nothing.
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM json_each("
+                    "CASE WHEN json_valid(tags) THEN tags ELSE '[]' END"
+                    ") WHERE json_each.value = ?)"
+                )
                 params.append(tag)
         if after_dt is not None:
             clauses.append("ingest_time >= ?")

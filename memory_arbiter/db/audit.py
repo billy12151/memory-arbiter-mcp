@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
@@ -70,8 +71,15 @@ class AuditStore:
                 "ids": [int(i) for i in memory_ids if i is not None],
             }
             line = json.dumps(entry, ensure_ascii=False) + "\n"
-            with open(self.attention_log_path, "a", encoding="utf-8") as fh:
+            path = self.attention_log_path
+            fresh = not path.exists()
+            with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line)
+            if fresh:
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
         except (OSError, ValueError, TypeError):
             pass
 
