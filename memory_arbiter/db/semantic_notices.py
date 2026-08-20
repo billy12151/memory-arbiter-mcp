@@ -132,10 +132,20 @@ class SemanticNoticeStore:
         return {"fresh": fresh, "checks": checks}
 
     @staticmethod
-    def _read_call(memory: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    def _read_call(
+        memory: Optional[dict[str, Any]], evidence: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
         if memory is None:
             return None
         data: dict[str, Any] = {"memory_id": int(memory["id"])}
+        # When the triggering evidence carries usable offsets, scope the
+        # read to that region: the agent still judges the full picture by
+        # context, but the token cost lands on the relevant window. A
+        # follow-up full read stays one call away.
+        if isinstance(evidence, dict):
+            start, end = evidence.get("start_offset"), evidence.get("end_offset")
+            if isinstance(start, int) and isinstance(end, int) and 0 <= start < end:
+                data["span"] = {"start": max(0, start - 128), "end": end + 128}
         workspace = str(memory.get("workspace_canonical") or memory.get("workspace") or "").strip()
         if workspace:
             data["workspace"] = workspace
@@ -143,9 +153,14 @@ class SemanticNoticeStore:
 
     def _with_review_calls(self, conn: sqlite3.Connection, notice: dict[str, Any]) -> dict[str, Any]:
         memories = self._memories(conn, notice)
-        notice["left_read_call"] = self._read_call(memories.get(int(notice["memory_id"])))
+        notice["left_read_call"] = self._read_call(
+            memories.get(int(notice["memory_id"])), notice.get("payload", {}).get("left_evidence"),
+        )
         peer_id = notice.get("peer_id")
-        notice["right_read_call"] = self._read_call(memories.get(int(peer_id))) if peer_id is not None else None
+        notice["right_read_call"] = (
+            self._read_call(memories.get(int(peer_id)), notice.get("payload", {}).get("right_evidence"))
+            if peer_id is not None else None
+        )
         notice["agent_instruction"] = (
             "Read both full memories before deciding. Dismiss false positives, "
             "resolve handled ones, and escalate a credible contradiction you "

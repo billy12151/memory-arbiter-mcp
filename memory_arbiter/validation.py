@@ -44,7 +44,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "query_embedding", "tags_filter", "after_time", "before_time",
         "source_type", "include_linked_open_items", "include_conflict_signal",
     },
-    ("memory", "read"): {"id", "memory_id", "workspace"},
+    ("memory", "read"): {"id", "memory_id", "span", "workspace"},
     ("memory", "update"): {
         "id", "memory_id", "new_content", "old_text", "new_text", "new_subject",
         "new_tags", "reason", "authorized", "tags_only", "add_tags", "remove_tags",

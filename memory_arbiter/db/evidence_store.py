@@ -276,7 +276,8 @@ class EvidenceStore:
                 # notice path: subjects/headings are version-progression
                 # heavy and fire numeric_value_changed on their own.
                 units = conn.execute(
-                    """SELECT e.id AS eid, e.text AS text, v.embedding AS embedding
+                    """SELECT e.id AS eid, e.text AS text, v.embedding AS embedding,
+                              e.start_offset AS start_offset, e.end_offset AS end_offset
                        FROM memory_evidence e
                        JOIN memory_evidence_vec v ON v.id=e.id
                        WHERE e.memory_id=? AND e.memory_version=(
@@ -327,12 +328,26 @@ class EvidenceStore:
                         distance = float(hit.get("distance") or 0)
                         existing = candidates.get(pair)
                         if existing is None:
+                            def _pad_window(start: int, end: int) -> dict[str, int]:
+                                return {"start": max(0, int(start) - 128), "end": int(end) + 128}
+
+                            anchor_win = _pad_window(unit["start_offset"] or 0, unit["end_offset"] or 0)
+                            peer_win = _pad_window(hit.get("start_offset") or 0, hit.get("end_offset") or 0)
                             candidates[pair] = {
                                 "left_id": pair[0], "right_id": pair[1],
                                 "route": decision.action, "reasons": {decision.reason},
                                 "distance": distance,
                                 "left_snippet": text[:200] if pair[0] == anchor_id else str(hit.get("text") or "")[:200],
                                 "right_snippet": str(hit.get("text") or "")[:200] if pair[0] == anchor_id else text[:200],
+                                # Pre-built deep-read calls: reading just the
+                                # triggering region (plus context) instead of
+                                # the full text keeps triage token cost low.
+                                "deep_read": {
+                                    "left": {"memory_id": pair[0],
+                                             "span": anchor_win if pair[0] == anchor_id else peer_win},
+                                    "right": {"memory_id": pair[1],
+                                              "span": peer_win if pair[0] == anchor_id else anchor_win},
+                                },
                             }
                         else:
                             # notify outranks check when different unit pairs

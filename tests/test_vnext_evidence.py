@@ -5,6 +5,7 @@ import sqlite3
 import ast
 import contextlib
 import uuid
+from typing import Any
 
 import pytest
 
@@ -1055,13 +1056,27 @@ def test_rebuild_evidence_response_surfaces_vec_index_state(tmp_path: Path) -> N
     assert result["data"]["vec_index_state"]["state"] == "mismatch"
 
 
-def _seed_notice(tools: MemoryTools, left_id: int, right_id: int, *, left_version: int = 1, right_version: int = 1) -> int:
+def _seed_notice(
+    tools: MemoryTools, left_id: int, right_id: int, *, left_version: int = 1, right_version: int = 1,
+    left_content: str = "", right_content: str = "",
+) -> int:
+    def evidence_for(content: str) -> dict[str, Any]:
+        start = content.find("重试次数为") if "重试次数为" in content else content.find("缓存 TTL")
+        if start < 0:
+            start = 0
+        end = min(len(content), start + 40)
+        return {"text": content[start:end], "start_offset": start, "end_offset": end}
+
     created = tools.db.record_semantic_notice(
         memory_id=left_id, peer_id=right_id, severity="high",
         notice_type="semantic_evidence",
         title=f"Possible memory change with #{right_id}",
         message="numeric_value_changed",
-        payload={"route": "notify", "reason": "numeric_value_changed", "anchors": ["timeout"]},
+        payload={
+            "route": "notify", "reason": "numeric_value_changed", "anchors": ["timeout"],
+            "left_evidence": evidence_for(left_content),
+            "right_evidence": evidence_for(right_content),
+        },
         dedupe_key=f"test-notice-{left_id}-{right_id}-{uuid.uuid4().hex}",
         left_version=left_version, right_version=right_version,
     )
@@ -1795,3 +1810,57 @@ def test_record_conflict_not_a_conflict_lifecycle(tmp_path: Path) -> None:
     )
     assert refused["ok"] is False
     assert refused["data"]["outcome"] == "open_conflict_exists"
+
+
+def test_read_span_window_and_clue_deep_read(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    content = "第一段背景说明文字。\n重试次数为 3 次。\n第三段运维备注信息。"
+    a = tools.memory_write(content=content, subject="span", tags=[])["data"]
+    b = tools.memory_write(content="第一段背景说明文字。\n重试次数为 5 次。\n第三段运维备注信息。", subject="span", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    # span read returns the sliced content plus window metadata.
+    full = tools.memory("read", {"memory_id": a["id"]})["data"]["memory"]
+    total = len(full["content"])
+    windowed = tools.memory("read", {"memory_id": a["id"], "span": {"start": 0, "end": 12}})
+    assert windowed["ok"] is True
+    assert windowed["data"]["memory"]["content"] == content[:12]
+    assert windowed["data"]["span"] == {"start": 0, "end": 12, "total_chars": total}
+    clipped = tools.memory("read", {"memory_id": a["id"], "span": {"start": total - 3, "end": 10_000}})
+    assert clipped["data"]["span"]["end"] == total
+    assert len(clipped["data"]["memory"]["content"]) == 3
+    for bad in ({"start": -1, "end": 5}, {"start": 5, "end": 5}, {"start": total + 5, "end": total + 9}):
+        rejected = tools.memory("read", {"memory_id": a["id"], "span": bad})
+        assert rejected["ok"] is False
+    not_dict = tools.memory("read", {"memory_id": a["id"], "span": [0, 5]})
+    assert not_dict["ok"] is False
+
+    # The clue's deep_read spans round-trip: reading each span returns the
+    # triggering numeric text.
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+    clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
+    assert "numeric_value_changed" in clue["reasons"]
+    for side in ("left", "right"):
+        call = clue["deep_read"][side]
+        assert call["memory_id"] in (a["id"], b["id"])
+        window = tools.memory("read", {"memory_id": call["memory_id"], "span": call["span"]})
+        assert window["ok"] is True
+        assert "重试次数为" in window["data"]["memory"]["content"]
+
+
+def test_notice_read_call_carries_evidence_span(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = tools.memory_write(content="开场说明。\n缓存 TTL 为 60 秒。", subject="ttl", tags=[])["data"]
+    b = tools.memory_write(content="开场说明。\n缓存 TTL 为 300 秒。", subject="ttl", tags=[])["data"]
+    notice_id = _seed_notice(
+        tools, a["id"], b["id"],
+        left_content="开场说明。\n缓存 TTL 为 60 秒。", right_content="开场说明。\n缓存 TTL 为 300 秒。",
+    )
+    read = tools.memory_repair("notice", {"action": "read", "notice_id": notice_id})["data"]["notice"]
+    for side in ("left_read_call", "right_read_call"):
+        call = read[side]
+        assert "span" in call["data"]
+        window = tools.memory("read", {"memory_id": call["data"]["memory_id"], "span": call["data"]["span"]})
+        assert window["ok"] is True
+        assert "缓存 TTL" in window["data"]["memory"]["content"]

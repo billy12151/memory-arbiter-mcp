@@ -404,9 +404,16 @@ class ReadPipeline:
         memory_id: int,
         sections: str = "none",
         section_ids: Optional[list[int]] = None,
+        span: Optional[dict[str, Any]] = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """Return one full memory by id."""
+        """Return one full memory by id, or a character window of it.
+
+        ``span={"start": int, "end": int}`` returns the record with
+        ``content`` sliced to that window (plus span metadata) so triage
+        loops can deep-read only the region a clue pointed at instead of
+        paying for the full text. Omitting ``span`` keeps the full read.
+        """
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):
@@ -416,6 +423,22 @@ class ReadPipeline:
                 {"error": "section reads were removed; read the full memory content"},
                 ok=False,
             )
+        span_start: Optional[int] = None
+        span_end: Optional[int] = None
+        if span is not None:
+            if not isinstance(span, dict):
+                return self.db.state.response({"error": "span must be an object with start/end"}, ok=False)
+            try:
+                raw_start = span.get("start")
+                raw_end = span.get("end")
+                if raw_start is None or raw_end is None:
+                    raise TypeError("missing start/end")
+                span_start = int(raw_start)
+                span_end = int(raw_end)
+            except (TypeError, ValueError):
+                return self.db.state.response({"error": "span start/end must be integers"}, ok=False)
+            if span_start < 0 or span_end <= span_start:
+                return self.db.state.response({"error": "span requires 0 <= start < end"}, ok=False)
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
@@ -427,7 +450,23 @@ class ReadPipeline:
                 error_data.update(caller.response_fields())
             return self.db.state.response(error_data, ok=False, extra_warnings=list(caller.warnings))
 
-        data: dict[str, Any] = {"memory": memory}
+        if span_start is not None and span_end is not None:
+            content = str(memory.get("content") or "")
+            if span_start >= len(content):
+                return self.db.state.response(
+                    {"error": "span start is past the end of the content",
+                     "total_chars": len(content)},
+                    ok=False,
+                )
+            clipped_end = min(span_end, len(content))
+            windowed = dict(memory)
+            windowed["content"] = content[span_start:clipped_end]
+            data: dict[str, Any] = {
+                "memory": windowed,
+                "span": {"start": span_start, "end": clipped_end, "total_chars": len(content)},
+            }
+        else:
+            data = {"memory": memory}
         if caller.isolation == "strict":
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
