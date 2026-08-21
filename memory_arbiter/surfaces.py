@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib import resources
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
+from .db_generation import CONFLICT_DETECTOR_VERSION
 from .models import MemoryStatus, ProtectionLevel, SourceType
 from .validation import PRODUCT_FIELD_REGISTRY, _controlled_integer, validate_product_payload
 
@@ -59,7 +60,7 @@ class ProductSurfaces:
             "rules": [
                 "expected_revision must match the current conflict revision.",
                 "apply_plan contains each planned member at most once.",
-                "resolution_memory_id, when supplied, must identify an active memory.",
+                "resolution_memory_id is required and must identify an active memory; prefer the existing correct member as the resolution.",
                 "Each plan step is applied sequentially with memory_govern(action='apply_conflict_action').",
             ],
         }
@@ -81,8 +82,19 @@ class ProductSurfaces:
                 "judged or passed to resolve_conflict."
             ),
             "ask_user": (
-                "The formal conflict judgment requires a user decision. Ask the user; do not submit another "
-                "agent judgment as a substitute."
+                "Governance-impacting decisions should be confirmed with the user. decided_by="
+                "'agent' is a valid recorded provenance when the agent has authorization, but a "
+                "formal conflict judgment with real impact should still be presented to the user."
+            ),
+            "judge_conflict": (
+                "Read memory_review(view='conflict_detail') with every member memory, present the common "
+                "slot and value groups, then call memory(action='judge') with the current revision and a "
+                "per-member apply plan."
+            ),
+            "replan_conflict": (
+                "A plan step failed or a member changed mid-apply. Re-read the group and members, then "
+                "call authorized memory_govern(action='replan_conflict') with the current revision and a "
+                "replacement plan; prior plan history is preserved."
             ),
             "confirm_new_workspace": (
                 "Explain the proposed canonical workspace and ask the user to authorize confirmation. After "
@@ -572,7 +584,7 @@ class ProductSurfaces:
         return self._invalid_product_call("memory_review", f"unknown view: {view}", view)
 
     def _memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
-        """Explicit user-authorized governance: retire, resolve conflicts, confirm, or correct judgments.
+        """Explicit user-authorized governance: retire, apply/replan/resolve conflict plans, confirm, or manage workspaces.
 
         Do not use this for ordinary updates or current source-of-truth replacement;
         use memory(action="update") for those. Retire is only for whole-memory
@@ -724,6 +736,7 @@ class ProductSurfaces:
             if not (1 <= batch_value <= 200) or not (1 <= k_value <= 20) or anchor_value < 0:
                 return self._invalid_product_call("memory_repair", "scan_candidates requires 1<=batch<=200, 1<=k<=20, anchor_memory_id>=0", task)
             scan_workspace = caller.canonical if caller.isolation == "strict" else None
+            scan_enhance = bool(getattr(self.settings, "semantic_conflict_scan_enhance", True))
             result = self.db.scan_rule_candidates(
                 after_memory_id=anchor_value,
                 anchor_batch=batch_value,
@@ -731,13 +744,23 @@ class ProductSurfaces:
                 include_check=self._is_truthy(payload.get("include_check")),
                 max_distance=distance_value,
                 workspace=scan_workspace,
+                similarity_pool_limit=(
+                    max(0, int(getattr(self.settings, "semantic_conflict_scan_max_pairs", 8)))
+                    if scan_enhance else 0
+                ),
             )
+            if "error" not in result:
+                # Spec §7.1 wide gate: bounded Qwen enhancement over the page.
+                result = self._tools._enhance_scan_candidates(result)
             ok = "error" not in result
             scan_state = self.db.conflict_scan_state()
             if ok and scan_state.get("required"):
+                # Compare the PERSISTED requirement against the RUNNING
+                # detector identity, never the persisted echo: an old-detector
+                # scan must not be able to clear the flag (spec §15.7/§15.8.24).
                 progress_ok = self.db.record_conflict_scan_page(
                     epoch=str(scan_state.get("epoch") or ""),
-                    detector_version=str(scan_state.get("detector_version") or ""),
+                    detector_version=CONFLICT_DETECTOR_VERSION,
                     boundary=scan_state.get("boundary") or {},
                     after_memory_id=anchor_value,
                     next_anchor_memory_id=result.get("next_anchor_memory_id"),
@@ -749,10 +772,16 @@ class ProductSurfaces:
                     if result.get("next_anchor_memory_id") is None:
                         result["conflict_scan_completed"] = self.db.complete_conflict_scan(
                             epoch=str(scan_state.get("epoch") or ""),
-                            detector_version=str(scan_state.get("detector_version") or ""),
+                            detector_version=CONFLICT_DETECTOR_VERSION,
                             boundary=scan_state.get("boundary") or {},
                         )
                 else:
+                    # A write between upgrade and scan completion drifts the
+                    # live boundary and would otherwise wedge the flag. Re-arm
+                    # against the current live set so a fresh full scan clears.
+                    if self.db.rearm_conflict_scan_if_drifted():
+                        result["conflict_scan_rearmed"] = True
+                        result["conflict_scan_state"] = self.db.conflict_scan_state()
                     result["conflict_scan_progress_rejected"] = True
             return self.db.state.response(result, ok=ok, extra_warnings=list(caller.warnings))
         if task == "cleanup_history":
@@ -870,7 +899,7 @@ class ProductSurfaces:
                             "freshness": created.get("freshness"),
                         }, ok=False, extra_warnings=list(caller.warnings),
                     )
-                if created.get("outcome") != "promoted":
+                if created.get("outcome") not in {"promoted", "appended", "linked"}:
                     outcome = created.get("outcome")
                     return self.db.state.response(
                         {"outcome": "escalate_failed", "detail": created},
@@ -880,12 +909,12 @@ class ProductSurfaces:
                     )
                 return self.db.state.response(
                     {
-                        "outcome": "escalated", "conflict_outcome": "promoted",
+                        "outcome": "escalated", "conflict_outcome": created.get("outcome"),
                         "conflict_id": created["conflict_id"], "revision": created["revision"],
-                        "member_versions": created["member_versions"],
-                        "value_groups": created["value_groups"],
+                        "member_versions": created.get("member_versions"),
+                        "value_groups": created.get("value_groups"),
                         "next_step": (
-                            "Credible contradiction is now a formal conflict. Use "
+                            "Credible contradiction is now linked to a formal conflict. Use "
                             "memory_review(view='conflict_detail') to inspect it, then "
                             "memory(action='judge') with the pinned revision."
                         ),

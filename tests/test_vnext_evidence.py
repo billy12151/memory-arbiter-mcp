@@ -2140,3 +2140,166 @@ def test_embedding_pipeline_version_rotated_for_exact_offsets() -> None:
     from memory_arbiter.embedder import EMBEDDING_PIPELINE_VERSION
 
     assert EMBEDDING_PIPELINE_VERSION == 2
+
+
+# ── 2026-08-21 review round: notice-pipeline and scan wide-gate fixes ────────
+
+def _grounded_db_backend():
+    """A backend that extracts a grounded mysql/sqlite slot from db-value quotes."""
+    from memory_arbiter.semantic_conflict import ModelSignal
+
+    class Backend:
+        @staticmethod
+        def classify_pair(left, right, *, deadline_monotonic=None):
+            def value(env):
+                text = str(env["quote"]).casefold()
+                return "mysql" if "mysql" in text else ("sqlite" if "sqlite" in text else "postgres")
+            parsed = {
+                "attribute_a": "数据库选型", "value_a": value(left),
+                "attribute_b": "数据库选型", "value_b": value(right),
+            }
+            return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+    return Backend()
+
+
+def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypatch) -> None:
+    """A candidate examined and cleanly rejected reports checked_no_notice."""
+    from memory_arbiter.semantic_conflict import ModelSignal
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "production"}
+    peer = tools.memory_write(content="database is mysql here", subject="a", tags=[], metadata=meta)["data"]
+    new = tools.memory_write(content="database is mysql there", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql here",
+             "start_offset": 0, "end_offset": 22, "distance": 0.1}]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+
+    # Same normalized value on both sides → clean not_same_attribute_different_value.
+    class SameValue:
+        @staticmethod
+        def classify_pair(left, right, *, deadline_monotonic=None):
+            parsed = {"attribute_a": "数据库选型", "value_a": "mysql",
+                      "attribute_b": "数据库选型", "value_b": "mysql"}
+            return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: SameValue())
+
+    result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
+    # A clean model decision is not counted as check degradation.
+    degradation = tools._semantic_status()["check_degradation"]
+    assert degradation["last_reason"] != "not_same_attribute_different_value"
+
+
+def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkeypatch) -> None:
+    """Spec §5/§15.3: an apply-plan edit does not re-notice the same conflict."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "production"}
+    a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
+
+    # Record + judge the a/b conflict into applying with a as the wrong current fact.
+    from memory_arbiter.models import ConflictMember, ConflictValueGroup
+
+    def member(mid, value):
+        quote = f"database is {value}"
+        return ConflictMember(
+            memory_id=mid, version=1, attribute_raw="数据库选型", value_raw=value,
+            normalized_attribute="数据库选型", normalized_value=value, evidence_quote=quote,
+            evidence_span=(0, len(quote)), content_hash=(str(mid) * 64)[:64],
+            direction="a_to_b", prompt_version="p1", detector_version="d1",
+        ).to_dict()
+    recorded = tools.memory_repair("record_conflict", {
+        "slot_key": {"entity": "svc", "attribute": "数据库选型", "scope": "production"},
+        "members": [member(a["id"], "mysql"), member(b["id"], "sqlite")],
+        "value_groups": [
+            ConflictValueGroup("mysql", "MySQL", (f"{a['id']}@1",)).to_dict(),
+            ConflictValueGroup("sqlite", "SQLite", (f"{b['id']}@1",)).to_dict(),
+        ],
+        "detector_version": "d1", "prompt_version": "p1", "source": "scan",
+        "reason": "db conflict", "status": "open",
+    })
+    conflict_id = recorded["data"]["conflict_id"]
+    tools.memory("judge", {
+        "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"},
+                       {"memory_id": b["id"], "action": "use_as_resolution"}],
+        "resolution_memory_id": b["id"],
+    })
+    # Now run the post-apply semantic job for a's new version against b: the
+    # re-entry rule must suppress a fresh notice for the same conflict.
+    tools.db.edit_memory_intent(a["id"], new_content="database is sqlite", reason="apply")
+    updated = tools.db.get_memory(a["id"])
+    hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
+             "start_offset": 0, "end_offset": 18, "distance": 0.1}]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: list(hits))
+    snapshot = {
+        "memory_id": a["id"], "version": updated["version"],
+        "content_hash": evidence_content_hash(updated["content"]),
+        "trusted_applying_context": {
+            "conflict_id": conflict_id, "revision": 2, "memory_id": a["id"],
+            "action": "update_current_claim", "chosen_value": "sqlite",
+        },
+    }
+    result = tools._process_semantic_conflict_job(a["id"], snapshot)
+    # No new notice for the same applying conflict pair.
+    fresh = [n for n in tools.db.list_semantic_notices(status="open")
+             if {n.get("memory_id"), n.get("peer_id")} == {a["id"], b["id"]}]
+    assert fresh == []
+
+
+def test_scan_candidates_qwen_enhancement_populates_value_groups(tmp_path: Path, monkeypatch) -> None:
+    """Spec §7.1: bounded Qwen enhancement enriches rule candidates in-place."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "production"}
+    a = tools.memory_write(content="生产数据库使用 mysql 方案", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(content="生产数据库使用 sqlite 方案", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
+
+    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10})
+    assert result["ok"] is True
+    enhancement = result["data"].get("qwen_enhancement") or {}
+    assert enhancement.get("status") == "ok"
+    # At least one candidate now carries extracted value_groups.
+    enriched = [c for c in result["data"]["candidates"] if c.get("value_groups")]
+    assert enriched, result["data"]
+    groups = enriched[0]["value_groups"]
+    assert {g["normalized_value"] for g in groups} == {"mysql", "sqlite"}
+    # Matching entity/scope aggregates into a slot group.
+    assert result["data"].get("slot_groups")
+
+
+def test_scan_enhancement_fails_open_without_backend(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "production"}
+    tools.memory_write(content="生产数据库使用 mysql 方案", subject="a", tags=[], metadata=meta)
+    tools.memory_write(content="生产数据库使用 sqlite 方案", subject="b", tags=[], metadata=meta)
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
+
+    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10})
+    assert result["ok"] is True
+    # Deterministic baseline is preserved; enhancement reports it was skipped.
+    assert result["data"]["qwen_enhancement"]["status"] == "skipped_unavailable"
+
+
+def test_exact_match_write_repairs_missing_canonical_vector(tmp_path: Path) -> None:
+    """The advertised 'retry a write using this workspace' actually republishes
+    a canonical whose vector publication previously failed."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="alpha", workspace="projA", subject="s", tags=[])
+    with tools.db.write_transaction() as conn:
+        conn.execute("DELETE FROM workspace_canonicals_vec")
+    result = tools.memory_write(content="beta", workspace="projA", subject="s2", tags=[])
+    assert result["data"]["workspace_matched_by"] == "exact"
+    with tools.db.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) AS c FROM workspace_canonicals_vec").fetchone()["c"]
+    assert count >= 1

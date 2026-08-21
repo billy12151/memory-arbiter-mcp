@@ -62,7 +62,9 @@ class ConflictStore:
         if set(slot_key) != {"entity", "attribute", "scope"}:
             raise ValueError("slot_key must contain exactly entity, attribute, and scope")
         normalized = {key: str(slot_key[key]).strip() for key in ("entity", "attribute", "scope")}
-        if not all(normalized.values()) or normalized["scope"].casefold() == "unknown":
+        if not all(normalized.values()) or any(
+            value.casefold() in {"unknown", "__unknown__"} for value in normalized.values()
+        ):
             raise ValueError("slot_key entity, attribute, and scope must be reliable and non-empty")
         if any(len(value) > _MAX_FIELD_CHARS for value in normalized.values()):
             raise ValueError("slot_key field exceeds size bound")
@@ -259,8 +261,6 @@ class ConflictStore:
                 self._normalize_value_groups(value_groups, normalized_members)
                 if status == "open" or value_groups else []
             )
-            if status == "open" and len(groups) < 2:
-                raise ValueError("open conflicts require at least two value groups")
             candidate = self._candidate_key(detector_version, normalized_members, candidate_key)
             candidate_hash = _hash_json(candidate)
             slot_hash = _hash_json(slot) if slot is not None else None
@@ -297,6 +297,10 @@ class ConflictStore:
                 ).fetchone()
             if active:
                 current = _decode_row(active)
+                if status == "not_a_conflict":
+                    # The caller's disposition must never be silently inverted
+                    # into a member append on an existing formal group.
+                    return {"outcome": "open_group_exists", "conflict_id": current["id"], "revision": current["revision"]}
                 # Update calls are CAS operations.  Check the revision before
                 # candidate/member dedupe so replaying an old exact payload is
                 # observably stale rather than appearing successful.
@@ -333,11 +337,24 @@ class ConflictStore:
                     )
                     return {"outcome": "overflow", "conflict_id": current["id"], "revision": current["revision"] + 1}
                 fingerprint = _hash_json(sorted(_member_ref(member) for member in combined))
+                # The row's candidate identity must describe the row's whole
+                # member snapshot after the append, not just the incoming batch.
+                combined_candidate = self._candidate_key(detector_version, combined, None)
+                combined_hash = _hash_json(combined_candidate)
+                collision = conn.execute(
+                    "SELECT * FROM conflicts WHERE candidate_key_hash=? AND id<>?",
+                    (combined_hash, current["id"]),
+                ).fetchone()
+                if collision is not None:
+                    collision_row = _decode_row(collision)
+                    if collision_row["candidate_key"] == combined_candidate:
+                        return {"outcome": "deduped", "conflict_id": collision_row["id"], "revision": collision_row["revision"]}
+                    return {"outcome": "identity_collision", "conflict_id": collision_row["id"]}
                 cur = conn.execute(
                     "UPDATE conflicts SET revision=revision+1,member_versions=?,member_fingerprint=?,"
                     "value_groups=?,candidate_key=?,candidate_key_hash=?,refreshed_at=? "
                     "WHERE id=? AND status='open' AND revision=?",
-                    (members_json, fingerprint, groups_json, _canonical_json(candidate), candidate_hash,
+                    (members_json, fingerprint, groups_json, _canonical_json(combined_candidate), combined_hash,
                      now, current["id"], current["revision"]),
                 )
                 if cur.rowcount != 1:
@@ -363,6 +380,11 @@ class ConflictStore:
                     return {"outcome": "identity_collision"}
             if expected_revision is not None:
                 return {"outcome": "stale_conflict"}
+            if status == "open" and len(groups) < 2:
+                # Creation only: a fresh open event needs two value groups. An
+                # append into an existing open group may carry a single new
+                # member/value group as long as it covers the incoming members.
+                return {"outcome": "invalid_input", "error": "open conflicts require at least two value groups"}
             members_json, groups_json = _canonical_json(normalized_members), _canonical_json(groups)
             if len(normalized_members) > _MAX_MEMBERS or len(members_json) > _MAX_MEMBER_JSON or len(groups_json) > _MAX_VALUE_JSON:
                 return {"outcome": "overflow", "error": "initial conflict snapshot exceeds bounds"}
@@ -422,6 +444,24 @@ class ConflictStore:
                             "outcome": "deduped", "conflict_id": int(existing["id"]),
                             "revision": int(existing["revision"]),
                         }
+                else:
+                    # The event-snapshot index spans all statuses: a resolved or
+                    # not_a_conflict row that already owns this exact
+                    # workspace+slot+member fingerprint turns a re-record under
+                    # a changed detector/candidate identity into a structured
+                    # duplicate instead of an uncaught IntegrityError.
+                    if slot_hash is not None:
+                        snapshot_row = conn.execute(
+                            "SELECT id,revision FROM conflicts WHERE workspace_canonical=? "
+                            "AND slot_key_hash=? AND member_fingerprint=?",
+                            (workspace_canonical, slot_hash, fingerprint),
+                        ).fetchone()
+                        if snapshot_row is not None:
+                            return {
+                                "outcome": "duplicate_event",
+                                "conflict_id": int(snapshot_row["id"]),
+                                "revision": int(snapshot_row["revision"]),
+                            }
                 raise
             return {"outcome": "inserted", "conflict_id": int(cur.lastrowid), "revision": 1}
 
@@ -464,6 +504,70 @@ class ConflictStore:
                 return {"outcome": "stale_snapshot", "freshness": {"fresh": False, "checks": checks}}
             if delivery not in {"pending", "delivered"} or notice.get("status") != "candidate":
                 return {"outcome": "already_terminal", "status": delivery}
+            slot_hash = _hash_json(slot)
+            occupied = conn.execute(
+                "SELECT * FROM conflicts WHERE workspace_canonical=? AND slot_key_hash=? "
+                "AND status IN ('open','applying') AND id<>?",
+                (str(notice["workspace_canonical"] or ""), slot_hash, int(notice_id)),
+            ).fetchone()
+            if occupied is not None:
+                # Spec §12: escalate 创建/追加. When a formal group already owns
+                # the slot, append the frozen notice members into it under CAS
+                # and link the notice row; never let the partial unique index
+                # raise through the tool layer.
+                group = _decode_row(occupied)
+                if group["status"] != "open":
+                    return {"outcome": "applying_group_exists", "conflict_id": group["id"], "revision": group["revision"]}
+                existing_refs = {_member_ref(member) for member in group["member_versions"]}
+                additions = [member for member in members if _member_ref(member) not in existing_refs]
+                if not additions:
+                    conn.execute(
+                        "UPDATE conflicts SET notice_delivery_status='resolved',"
+                        "notice_resolution_reason=?,refreshed_at=? WHERE id=? "
+                        "AND notice_delivery_status IN ('pending','delivered') AND revision=?",
+                        (f"escalated_to_conflict: {reason}", now, int(notice_id), int(notice["revision"])),
+                    )
+                    return {"outcome": "linked", "conflict_id": group["id"], "revision": group["revision"],
+                            "notice_conflict_id": int(notice_id)}
+                combined = group["member_versions"] + additions
+                merged_groups = {found["normalized_value"]: dict(found) for found in group["value_groups"]}
+                for found_group in groups:
+                    merged = merged_groups.setdefault(found_group["normalized_value"], dict(found_group))
+                    merged["members"] = sorted(set(merged["members"]) | set(found_group["members"]))
+                merged_list = sorted(merged_groups.values(), key=lambda item: item["normalized_value"])
+                members_json, groups_json = _canonical_json(combined), _canonical_json(merged_list)
+                if len(combined) > _MAX_MEMBERS or len(members_json) > _MAX_MEMBER_JSON or len(groups_json) > _MAX_VALUE_JSON:
+                    conn.execute(
+                        "UPDATE conflicts SET overflow=1,revision=revision+1,refreshed_at=? WHERE id=? AND revision=?",
+                        (now, group["id"], group["revision"]),
+                    )
+                    return {"outcome": "overflow", "conflict_id": group["id"], "revision": group["revision"] + 1}
+                combined_fingerprint = _hash_json(sorted(_member_ref(member) for member in combined))
+                combined_candidate = self._candidate_key(str(group.get("detector_version") or "attribute-value-v1"), combined, None)
+                try:
+                    cur = conn.execute(
+                        "UPDATE conflicts SET revision=revision+1,member_versions=?,member_fingerprint=?,"
+                        "value_groups=?,candidate_key=?,candidate_key_hash=?,refreshed_at=? "
+                        "WHERE id=? AND status='open' AND revision=?",
+                        (members_json, combined_fingerprint, groups_json,
+                         _canonical_json(combined_candidate), _hash_json(combined_candidate),
+                         now, group["id"], group["revision"]),
+                    )
+                except sqlite3.IntegrityError:
+                    return {"outcome": "identity_collision", "conflict_id": group["id"]}
+                if cur.rowcount != 1:
+                    return {"outcome": "stale_conflict", "conflict_id": group["id"]}
+                conn.execute(
+                    "UPDATE conflicts SET notice_delivery_status='resolved',notice_resolution_reason=?,"
+                    "revision=revision+1,refreshed_at=? WHERE id=? "
+                    "AND notice_delivery_status IN ('pending','delivered') AND revision=?",
+                    (f"escalated_to_conflict: {reason}", now, int(notice_id), int(notice["revision"])),
+                )
+                return {
+                    "outcome": "appended", "conflict_id": group["id"],
+                    "revision": group["revision"] + 1, "notice_conflict_id": int(notice_id),
+                    "member_versions": combined, "value_groups": merged_list, "slot_key": slot,
+                }
             cur = conn.execute(
                 """UPDATE conflicts SET status='open',revision=revision+1,source='semantic_notice',
                    detection_reason=?,notice_delivery_status='resolved',notice_resolution_reason=?,
@@ -522,13 +626,19 @@ class ConflictStore:
                     "SELECT version,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
                     "FROM memories WHERE id=? AND status='active'", (target,),
                 ).fetchone()
+                current_version = int(current["version"] or 0) if current else 0
+                # An open group may legitimately hold several versions of one
+                # memory (append after an external edit). Pin the stored member
+                # entry that matches the memory's CURRENT version; only a target
+                # whose current version was never recorded is stale.
+                match = next((member for member in matches if int(member["version"]) == current_version), None)
                 if (
                     current is None
-                    or int(current["version"] or 0) != int(matches[0]["version"])
+                    or match is None
                     or str(current["workspace"] or "") != str(conflict["workspace_canonical"] or "")
                 ):
                     return {"outcome": "stale_member"}
-                plan.append({"memory_id": target, "expected_version": int(matches[0]["version"]),
+                plan.append({"memory_id": target, "expected_version": int(match["version"]),
                              "action": action, "status": "pending", "result_version": None,
                              "result_hash": None, "error": None})
                 seen.add(target)

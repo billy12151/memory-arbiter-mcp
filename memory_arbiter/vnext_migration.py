@@ -245,6 +245,23 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
     switch_ready = preserved and destructive_empty and _checkpoint(target)
     if switch_ready:
         _remove_sidecars(target)
+    else:
+        # Mirror the full-rebuild path: a validation-failed target must not sit
+        # marked phase=ready/current — detect_database_generation would treat a
+        # manually adopted artifact as a good current database.
+        try:
+            failed_conn = sqlite3.connect(target)
+            try:
+                failed_conn.execute("BEGIN IMMEDIATE")
+                failed_conn.execute(
+                    "INSERT INTO migration_state(key,value,updated_at) VALUES('phase','failed',CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(key) DO UPDATE SET value='failed',updated_at=CURRENT_TIMESTAMP"
+                )
+                failed_conn.commit()
+            finally:
+                failed_conn.close()
+        except sqlite3.Error:
+            pass
     return {
         "ok": switch_ready,
         "target": str(target),

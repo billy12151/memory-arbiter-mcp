@@ -389,12 +389,13 @@ class MemoryDB:
     def scan_rule_candidates(
         self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
         include_check: bool = False, max_distance: Optional[float] = None,
-        workspace: Optional[str] = None,
+        workspace: Optional[str] = None, similarity_pool_limit: int = 0,
     ) -> dict[str, Any]:
         return self.evidence.scan_rule_candidates(
             after_memory_id=after_memory_id, anchor_batch=anchor_batch,
             neighbor_k=neighbor_k, include_check=include_check,
             max_distance=max_distance, workspace=workspace,
+            similarity_pool_limit=similarity_pool_limit,
         )
 
     def insert_memory(
@@ -502,9 +503,9 @@ class MemoryDB:
         return self.conflicts.list_conflicts(status, limit, source)
 
     def list_open_conflicts_for_memory_ids(
-        self, memory_ids: list[int],
+        self, memory_ids: list[int], *, include_applying: bool = False,
     ) -> list[dict[str, Any]]:
-        return self.conflicts.list_open_conflicts_for_memory_ids(memory_ids)
+        return self.conflicts.list_open_conflicts_for_memory_ids(memory_ids, include_applying=include_applying)
 
     def get_memory_summaries(
         self, memory_ids: list[int],
@@ -773,6 +774,9 @@ class MemoryDB:
 
     def conflict_scan_state(self) -> dict[str, Any]:
         return self.meta.conflict_scan_state()
+
+    def rearm_conflict_scan_if_drifted(self) -> bool:
+        return self.meta.rearm_conflict_scan_if_drifted()
 
     def record_conflict_scan_page(
         self,

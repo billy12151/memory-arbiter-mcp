@@ -8,6 +8,7 @@ import sqlite3
 import struct
 from typing import Any, TYPE_CHECKING
 
+from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..evidence import EvidenceUnit, has_indexable_text, INDEXABLE_PREFILTER_SQL
 from ..models import utc_now_iso
 
@@ -258,6 +259,7 @@ class EvidenceStore:
         include_check: bool = False,
         max_distance: float | None = None,
         workspace: str | None = None,
+        similarity_pool_limit: int = 0,
     ) -> dict[str, Any]:
         """Enumerate conflict-candidate pairs for an external scan loop.
 
@@ -333,6 +335,11 @@ class EvidenceStore:
                 if refs and status in {"open", "applying"}:
                     active_group_members.append(refs)
             candidates: dict[tuple[int, int], dict[str, Any]] = {}
+            # Spec §7.1 wide gate: similarity-only pairs dropped from the
+            # default candidate set stay available as a bounded pool for the
+            # caller's Qwen union instead of vanishing outright.
+            similarity_pool: dict[tuple[int, int], dict[str, Any]] = {}
+            pool_limit = max(0, int(similarity_pool_limit))
             knn_pair_count = 0
             stale_anchors = 0
             filtered_open = 0
@@ -420,17 +427,19 @@ class EvidenceStore:
                         # Numeric deltas remain a deterministic scan baseline
                         # candidate even though they can no longer directly
                         # produce a write-time notice.
-                        if (
+                        similarity_only = (
                             decision.action == "check"
                             and decision.reason != "numeric_value_candidate"
                             and not include_check
-                        ):
+                        )
+                        if similarity_only and pool_limit <= 0:
                             continue
                         if max_distance is not None and float(hit.get("distance") or 0) > float(max_distance):
                             continue
                         pair = (min(anchor_id, peer_id), max(anchor_id, peer_id))
                         distance = float(hit.get("distance") or 0)
-                        existing = candidates.get(pair)
+                        store = similarity_pool if similarity_only else candidates
+                        existing = store.get(pair)
                         hit_text = str(hit.get("text") or "")
                         anchor_span = locate_span(
                             anchor_content, text,
@@ -460,7 +469,7 @@ class EvidenceStore:
                         }
                         sorted_refs = sorted(member_refs, key=lambda ref: tuple(int(value) for value in ref.split("@", 1)))
                         candidate_key = {
-                            "detector_version": "attribute-value-v1",
+                            "detector_version": CONFLICT_DETECTOR_VERSION,
                             "members": sorted_refs,
                             "evidence": [evidence_by_ref[ref] for ref in sorted_refs],
                         }
@@ -482,7 +491,7 @@ class EvidenceStore:
                             continue
                         if existing is None:
                             state = "notice_ready" if decision.action == "notify" else "review_candidate"
-                            candidates[pair] = {
+                            store[pair] = {
                                 "left_id": pair[0], "right_id": pair[1],
                                 "state": state, "route": state,
                                 "reasons": {decision.reason}, "distance": distance,
@@ -503,7 +512,7 @@ class EvidenceStore:
                                         "content_hash": str(unit["content_hash"] or "") if pair[0] == anchor_id else str(hit.get("content_hash") or ""),
                                         "evidence_unit": int(unit["eid"]) if pair[0] == anchor_id else int(hit.get("id") or 0),
                                         "direction": "deterministic", "prompt_version": None,
-                                        "detector_version": "attribute-value-v1",
+                                        "detector_version": CONFLICT_DETECTOR_VERSION,
                                     },
                                     {
                                         "memory_id": pair[1],
@@ -519,7 +528,7 @@ class EvidenceStore:
                                         "content_hash": str(hit.get("content_hash") or "") if pair[1] == peer_id else str(unit["content_hash"] or ""),
                                         "evidence_unit": int(hit.get("id") or 0) if pair[1] == peer_id else int(unit["eid"]),
                                         "direction": "deterministic", "prompt_version": None,
-                                        "detector_version": "attribute-value-v1",
+                                        "detector_version": CONFLICT_DETECTOR_VERSION,
                                     },
                                 ],
                                 "value_groups": [], "slot_key": None, "slot_provenance": None,
@@ -540,7 +549,7 @@ class EvidenceStore:
                             # different unit pairs on the same memory pair
                             # disagree. Snippets and spans track the strongest
                             # signal, not the first discovery.
-                            if existing["state"] == "review_candidate" and decision.action == "notify":
+                            if not similarity_only and existing["state"] == "review_candidate" and decision.action == "notify":
                                 existing["state"] = "notice_ready"
                                 existing["route"] = "notice_ready"
                                 existing["left_snippet"] = text[:200] if pair[0] == anchor_id else hit_text[:200]
@@ -556,6 +565,11 @@ class EvidenceStore:
             ordered = [candidates[pair] for pair in sorted(candidates)]
             for item in ordered:
                 item["reasons"] = sorted(item["reasons"])
+            similarity_ordered = sorted(
+                similarity_pool.values(), key=lambda item: float(item.get("distance") or 9),
+            )[:pool_limit]
+            for item in similarity_ordered:
+                item["reasons"] = sorted(item["reasons"])
             next_anchor = anchors[-1]
             with db.connection() as conn:
                 more = conn.execute(
@@ -568,9 +582,11 @@ class EvidenceStore:
                 "anchors_scanned": len(anchors),
                 "next_anchor_memory_id": int(next_anchor) if more else None,
                 "candidates": ordered,
+                "similarity_pool": similarity_ordered,
                 "counts": {
                     "knn_pairs": knn_pair_count,
                     "rule_pass": len(ordered),
+                    "similarity_pool": len(similarity_ordered),
                     "filtered_open": filtered_open,
                     "filtered_dismissed": filtered_dismissed,
                     "stale_anchors": stale_anchors,

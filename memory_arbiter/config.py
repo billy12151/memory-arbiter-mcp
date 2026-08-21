@@ -76,6 +76,10 @@ class Settings:
     semantic_conflict_load_timeout_ms: int = 120000
     semantic_conflict_min_pair_budget_ms: int = 1000
     semantic_conflict_max_notice_pairs: int = 2
+    semantic_conflict_max_evidence_units: int = 24
+    semantic_conflict_scan_enhance: bool = True
+    semantic_conflict_scan_max_pairs: int = 8
+    semantic_conflict_scan_budget_ms: int = 60000
     notice_sync_wait_ms: int = 3000
     workspace_qwen_budget_ms: int = 750
     config_warnings: list[str] = field(default_factory=list)
@@ -327,6 +331,21 @@ class Settings:
             semantic_conflict_min_pair_budget_ms=clamp_int(
                 pick_int_field(semantic_cfg.get("min_pair_budget_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_MIN_PAIR_BUDGET_MS", 1000, name="semantic_conflict.min_pair_budget_ms"),
                 50, 300000, name="semantic_conflict.min_pair_budget_ms", warnings=config_warnings,
+            ),
+            semantic_conflict_max_evidence_units=clamp_int(
+                pick_int_field(semantic_cfg.get("max_evidence_units"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_MAX_EVIDENCE_UNITS", 24, name="semantic_conflict.max_evidence_units"),
+                1, 256, name="semantic_conflict.max_evidence_units", warnings=config_warnings,
+            ),
+            semantic_conflict_scan_enhance=pick_bool_field(
+                semantic_cfg.get("scan_enhance"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_SCAN_ENHANCE", "true", name="semantic_conflict.scan_enhance", default_bool=True,
+            ),
+            semantic_conflict_scan_max_pairs=clamp_int(
+                pick_int_field(semantic_cfg.get("scan_max_pairs"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_SCAN_MAX_PAIRS", 8, name="semantic_conflict.scan_max_pairs"),
+                0, 64, name="semantic_conflict.scan_max_pairs", warnings=config_warnings,
+            ),
+            semantic_conflict_scan_budget_ms=clamp_int(
+                pick_int_field(semantic_cfg.get("scan_budget_ms"), "MEMORY_ARBITER_SEMANTIC_CONFLICT_SCAN_BUDGET_MS", 60000, name="semantic_conflict.scan_budget_ms"),
+                5000, 600000, name="semantic_conflict.scan_budget_ms", warnings=config_warnings,
             ),
             notice_sync_wait_ms=clamp_int(
                 pick_int_field(semantic_cfg.get("notice_sync_wait_ms"), "MEMORY_ARBITER_NOTICE_SYNC_WAIT_MS", 3000, name="semantic_conflict.notice_sync_wait_ms"),

@@ -23,7 +23,7 @@ OpenClaw  →  memory_write(spec for "v0.2.1 release task")
 ZCode     →  memory_search("v0.2.1 release task")  ← picks it up, zero file handoff
 ```
 
-Those are the historical low-level tool names used in v0.2.1. Current product-profile clients use `memory(action="remember")` and `memory(action="find")`; the old names may exist only in the compatibility profile.
+Those are the historical low-level tool names used in v0.2.1. The old names have since been removed; the current surface is the four product tools (`memory`, `memory_review`, `memory_govern`, `memory_repair`).
 
 It worked. ZCode retrieved the spec, executed the release, wrote the result back. The handoff for a ~2000-word spec went from ~3000 tokens (loading the whole doc) to ~500 tokens (just the relevant slice). **83% saved.** I felt pretty clever.
 

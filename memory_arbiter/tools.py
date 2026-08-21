@@ -119,9 +119,11 @@ class MemoryTools:
                 "check-route candidates are fail-closed (no notice) while Qwen "
                 "is unavailable (qwen_unavailable/qwen_backend_error), times out "
                 "(qwen_timeout), returns invalid output (qwen_invalid_output), "
-                "or the job budget is exhausted; deterministic notify decisions "
-                "are unaffected. Semantic-worker queue overflow shows as "
-                "worker.dropped_queue_full."
+                "or the job budget is exhausted. While any of those hold, the "
+                "write-time check route creates no notices at all — including "
+                "pairs the deterministic rules classified as notify — and "
+                "recall is guaranteed only by scheduled scan. Semantic-worker "
+                "queue overflow shows as worker.dropped_queue_full."
             ),
         }
 
@@ -411,7 +413,9 @@ class MemoryTools:
         canonical: Optional[str] = None
         if workspace:
             # Explicit filters are canonicalized in every isolation mode. In
-            # none this is query normalization only, never an ACL boundary.
+            # none an explicit filter scopes the query (canonicalize-then-
+            # filter, spec §15.6); it is never an ACL boundary — an omitted
+            # workspace still spans all workspaces.
             embedder, ensure_warnings = self._ensure_embedder()
             warnings.extend(ensure_warnings)
             try:
@@ -476,6 +480,15 @@ class MemoryTools:
                         "conflict_id": conflict_id, "expected_revision": revision,
                         "memory_id": pending.get("memory_id"), "action": pending.get("action"),
                     },
+                    "authorization_required": True,
+                }
+            if any(item.get("status") not in {"pending", "completed"} for item in plan):
+                # A failed step with nothing pending: resolve_conflict would
+                # deterministically fail with apply_incomplete; the recovery
+                # path is an authorized replan.
+                return {
+                    "tool": "memory_govern", "action": "replan_conflict",
+                    "data": {"conflict_id": conflict_id, "expected_revision": revision},
                     "authorization_required": True,
                 }
             return {
@@ -615,6 +628,191 @@ class MemoryTools:
         if self.settings.isolation != "strict":
             return None
         return self._caller_workspace(workspace).canonical
+
+    @staticmethod
+    def _scan_envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
+        metadata_value = memory.get("metadata")
+        metadata = metadata_value if isinstance(metadata_value, dict) else {}
+        return {
+            "quote": str(quote)[:1000], "subject": str(memory.get("subject") or "")[:200],
+            "tags": list(memory.get("tags") or [])[:20],
+            "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
+            "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
+            "event_time": memory.get("event_time"),
+            "metadata": {key: metadata.get(key) for key in ("entity", "scope") if metadata.get(key)},
+        }
+
+    def _enhance_scan_candidates(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Spec §7.1 wide gate: bounded Qwen pair enhancement over one scan page.
+
+        Deterministic rule candidates are enriched with extracted
+        attribute/value member fields and value_groups; similarity-pool pairs
+        whose extraction yields a legal same-attribute/different-value in
+        either direction are unioned into the candidate list. Verified
+        candidates whose memories agree on metadata entity/scope are
+        aggregated by canonical slot. Fail-open by contract: backend absence,
+        timeout, or invalid output leaves the deterministic candidate set
+        unchanged and never removes a base candidate.
+        """
+        import json as _json
+
+        from .semantic_conflict import evaluate_pair_extractions, signal_extraction, PAIR_PROMPT_VERSION
+
+        pool = result.pop("similarity_pool", None) or []
+        max_pairs = max(0, int(getattr(self.settings, "semantic_conflict_scan_max_pairs", 8)))
+        if not getattr(self.settings, "semantic_conflict_scan_enhance", True) or max_pairs <= 0:
+            result["qwen_enhancement"] = {"status": "disabled", "similarity_pool_size": len(pool)}
+            return result
+        candidates = result.get("candidates") or []
+        if not candidates and not pool:
+            result["qwen_enhancement"] = {"status": "ok", "pairs_evaluated": 0, "enhanced": 0}
+            return result
+        backend = self._ensure_semantic_backend()
+        if backend is None:
+            result["qwen_enhancement"] = {"status": "skipped_unavailable", "similarity_pool_size": len(pool)}
+            return result
+        deadline = time.monotonic() + max(
+            1.0, int(getattr(self.settings, "semantic_conflict_scan_budget_ms", 60000)) / 1000.0,
+        )
+        memory_cache: dict[int, Optional[dict[str, Any]]] = {}
+
+        def memory(mid: int) -> Optional[dict[str, Any]]:
+            if mid not in memory_cache:
+                memory_cache[mid] = self.db.get_memory(int(mid))
+            return memory_cache[mid]
+
+        def classify(left_env: dict[str, Any], right_env: dict[str, Any]) -> Any:
+            try:
+                return backend.classify_pair(left_env, right_env, deadline_monotonic=deadline)
+            except TypeError:
+                # Test/legacy backends implementing the original two-arg protocol.
+                return backend.classify_pair(left_env, right_env)
+
+        state = {"evaluated": 0, "enhanced": 0}
+        slot_groups: dict[str, dict[str, Any]] = {}
+
+        def enhance(item: dict[str, Any]) -> str:
+            left_mem = memory(int(item.get("left_id") or 0))
+            right_mem = memory(int(item.get("right_id") or 0))
+            if (
+                not left_mem or not right_mem
+                or left_mem.get("status") != "active" or right_mem.get("status") != "active"
+            ):
+                return "skipped_inactive"
+            left_env = self._scan_envelope(left_mem, str(item.get("left_snippet") or ""))
+            right_env = self._scan_envelope(right_mem, str(item.get("right_snippet") or ""))
+            forward_signal = classify(left_env, right_env)
+            reverse_signal = classify(right_env, left_env)
+            state["evaluated"] += 1
+            gate = evaluate_pair_extractions(
+                signal_extraction(forward_signal), signal_extraction(reverse_signal),
+                left_env, right_env, require_bidirectional=False,
+            )
+            item["qwen_signal"] = {
+                "state": gate.state, "reason": gate.reason,
+                "forward_type": forward_signal.candidate_type,
+                "reverse_type": reverse_signal.candidate_type,
+                "prompt_version": PAIR_PROMPT_VERSION,
+            }
+            positive = gate.state == "notice_ready" or gate.reason == "single_direction_only"
+            if not positive:
+                return gate.reason
+            state["enhanced"] += 1
+            forward_parsed = forward_signal.parsed if isinstance(forward_signal.parsed, dict) else {}
+            reverse_parsed = reverse_signal.parsed if isinstance(reverse_signal.parsed, dict) else {}
+            if forward_parsed:
+                display_a, display_b = forward_parsed.get("value_a"), forward_parsed.get("value_b")
+                attribute_raw = forward_parsed.get("attribute_a")
+            else:
+                display_a, display_b = reverse_parsed.get("value_b"), reverse_parsed.get("value_a")
+                attribute_raw = reverse_parsed.get("attribute_b")
+            members = item.get("members") or []
+            for index, member in enumerate(members):
+                member["attribute_raw"] = str(attribute_raw or gate.attribute)
+                member["value_raw"] = str(display_a if index == 0 else display_b)
+                member["normalized_attribute"] = gate.attribute
+                member["normalized_value"] = gate.value_a if index == 0 else gate.value_b
+                member["direction"] = "a_to_b" if forward_parsed else "b_to_a"
+                member["prompt_version"] = PAIR_PROMPT_VERSION
+            refs = [f"{int(m['memory_id'])}@{int(m['version'])}" for m in members]
+            item["value_groups"] = [
+                {"normalized_value": gate.value_a, "display_value": str(display_a or gate.value_a),
+                 "members": [refs[0]] if refs else []},
+                {"normalized_value": gate.value_b, "display_value": str(display_b or gate.value_b),
+                 "members": [refs[1]] if len(refs) > 1 else []},
+            ]
+            if gate.state == "notice_ready":
+                item["state"] = item["route"] = "notice_ready"
+            left_meta = left_mem.get("metadata") if isinstance(left_mem.get("metadata"), dict) else {}
+            right_meta = right_mem.get("metadata") if isinstance(right_mem.get("metadata"), dict) else {}
+            entity = left_meta.get("entity") if left_meta.get("entity") == right_meta.get("entity") else None
+            scope = left_meta.get("scope") if left_meta.get("scope") == right_meta.get("scope") else None
+            if entity and scope:
+                slot_key = {"entity": entity, "attribute": gate.attribute, "scope": scope}
+                item["slot_key"] = slot_key
+                item["slot_provenance"] = {
+                    "entity": "metadata", "scope": "metadata",
+                    "attribute": "bidirectional_extraction" if gate.state == "notice_ready"
+                    else "single_direction_extraction",
+                }
+                slot_json = _json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                group = slot_groups.setdefault(slot_json, {
+                    "slot_key": slot_key, "members": {}, "value_groups": {}, "candidate_pairs": [],
+                })
+                for index, member in enumerate(members):
+                    ref = f"{int(member['memory_id'])}@{int(member['version'])}"
+                    group["members"][ref] = member.get("normalized_value")
+                    value = gate.value_a if index == 0 else gate.value_b
+                    display = str(display_a if index == 0 else display_b) or value
+                    entry = group["value_groups"].setdefault(
+                        value, {"normalized_value": value, "display_value": display, "members": set()},
+                    )
+                    entry["members"].add(ref)
+                group["candidate_pairs"].append([int(item["left_id"]), int(item["right_id"])])
+            return "notice_ready" if gate.state == "notice_ready" else "single_direction_only"
+
+        last_reason: Optional[str] = None
+        for item in candidates:
+            if state["evaluated"] >= max_pairs or time.monotonic() >= deadline:
+                break
+            last_reason = enhance(item) or last_reason
+        added: list[dict[str, Any]] = []
+        for item in pool:
+            if state["evaluated"] >= max_pairs or time.monotonic() >= deadline:
+                break
+            tag = enhance(item)
+            last_reason = last_reason or tag
+            if tag in {"notice_ready", "single_direction_only"}:
+                added.append(item)
+        if added:
+            result["candidates"] = candidates + added
+        counts = result.setdefault("counts", {})
+        counts["qwen_union_added"] = len(added)
+        counts["qwen_enhanced"] = state["enhanced"]
+        result["qwen_enhancement"] = {
+            "status": "ok",
+            "pairs_evaluated": state["evaluated"],
+            "enhanced": state["enhanced"],
+            "budget_exhausted": state["evaluated"] >= max_pairs or time.monotonic() >= deadline,
+            "last_reason": last_reason,
+        }
+        if slot_groups:
+            result["slot_groups"] = [
+                {
+                    "slot_key": group["slot_key"],
+                    "members": [
+                        {"member": ref, "normalized_value": value}
+                        for ref, value in sorted(group["members"].items())
+                    ],
+                    "value_groups": [
+                        {**entry, "members": sorted(entry["members"])}
+                        for entry in sorted(group["value_groups"].values(), key=lambda e: e["normalized_value"])
+                    ],
+                    "candidate_pairs": group["candidate_pairs"],
+                }
+                for group in slot_groups.values()
+            ]
+        return result
 
     def _semantic_status(self, workspace_canonical: Optional[str] = None) -> dict[str, Any]:
         backend = self._get_semantic_backend_ref()
@@ -833,11 +1031,18 @@ class MemoryTools:
         scan_prompt_version: Optional[str] = None, scan_model: Optional[str] = None,
         **_: Any,
     ) -> dict[str, Any]:
-        return cast(dict[str, Any], self._operations.memory_record_conflict(
-            left_id, right_id, reason, conflict_type, conflict_point, suggested_winner,
-            confidence_hint, source, refresh, left_version, right_version,
-            scan_prompt_version, scan_model, **_,
-        ))
+        """Legacy pair-based recording was removed with the conflict_judgments table."""
+        return self.db.state.response(
+            {
+                "outcome": "removed",
+                "error": (
+                    "pair-based memory_record_conflict was removed; record triaged scan "
+                    "candidates via memory_repair(task='record_conflict') with slot_key, "
+                    "members, value_groups, and evidence"
+                ),
+            },
+            ok=False,
+        )
 
     def memory_resolve_conflict(
         self, conflict_id: int, reason: str = "", status: str = "resolved", **_: Any,

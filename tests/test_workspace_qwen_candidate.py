@@ -102,9 +102,14 @@ def test_none_high_confidence_normalizes_without_acl_or_confirmed_alias(tmp_path
     r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
     assert r["data"]["workspace_canonical"] == "金营项目"
     assert t.db.get_workspace_alias("金营") is None
-    # none remains cross-workspace: normalization never becomes an ACL.
+    # none stays ACL-free: an unscoped search spans all workspaces, while an
+    # explicit filter canonicalizes then scopes that one query (spec §15.6).
+    # (The stub backend normalizes both writes to the same canonical.)
     t.memory_write(content="y", workspace="其他", source_type="agent_generated", subject="other")
-    assert len(t.memory_search(query="", workspace="金营")["data"]["results"]) == 2
+    assert len(t.memory_search(query="")["data"]["results"]) == 2
+    scoped = t.memory_search(query="", workspace="金营项目")["data"]["results"]
+    assert {item.get("workspace_canonical") or item["workspace"] for item in scoped} == {"金营项目"}
+    assert t.memory_search(query="", workspace="别的项目")["data"]["results"] == []
 
 
 def test_weak_low_confidence_asks_not_merge(tmp_path):
@@ -154,3 +159,50 @@ def test_strict_emits_governance_advisory(monkeypatch):
     monkeypatch.setenv("MEMORY_ARBITER_ISOLATION", "strict")
     s = Settings.from_env()
     assert any("memory_govern" in w for w in s.config_warnings)
+
+
+# ── decision-reason distinguishes model-absent from low-confidence (spec §8) ──
+
+def test_no_backend_reason_is_qwen_unavailable_not_low_conf(tmp_path):
+    t = make_tools(tmp_path, "weak")
+    _force_undecided_with_candidate(t, None)  # backend absent, candidates exist
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
+    d = r["data"]
+    assert d["workspace_decision"] == "ASK"
+    assert d["workspace_decision_reason"] == "qwen_unavailable"
+
+
+def test_genuine_low_confidence_reason_is_qwen_low_conf(tmp_path):
+    t = make_tools(tmp_path, "weak")
+    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.5, "可能相关"))
+    _force_undecided_with_candidate(t, backend)
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
+    d = r["data"]
+    assert d["workspace_decision"] == "ASK"
+    assert d["workspace_decision_reason"] == "qwen_low_conf"
+
+
+def test_rejected_candidate_reason_is_qwen_rejected(tmp_path):
+    t = make_tools(tmp_path, "none")
+    # Qwen suggests a candidate the user already rejected. The rule stays
+    # undecided (a second, non-rejected near-miss keeps it a near_miss), so the
+    # write path reaches the Qwen branch and must refuse the rejected merge.
+    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.95, "同项目"))
+
+    def fake_resolve(ws_raw, embedder=None, *, match_distance=None, register_new=True):
+        return {
+            "canonical": ws_raw, "is_new": True, "matched_by": "new", "distance": None,
+            "similar": [
+                {"name": "金营项目", "distance": 0.4},
+                {"name": "别的项目", "distance": 0.45},
+            ],
+            "rejected_canonicals": ["金营项目"],
+        }
+    t.db.resolve_workspace_canonical = fake_resolve  # type: ignore
+    t._ensure_semantic_backend = lambda: backend  # type: ignore
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
+    d = r["data"]
+    # A user-rejected candidate immediately overrides the high-confidence auto.
+    assert d["workspace_decision"] == "ASK"
+    assert d["workspace_canonical"] == "金营"
+    assert d["workspace_decision_reason"] == "qwen_rejected_candidate"

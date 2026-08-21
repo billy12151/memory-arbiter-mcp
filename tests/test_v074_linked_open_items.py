@@ -386,19 +386,26 @@ def test_memory_edit_tags_only_fts_failure_rolls_back(tmp_path: Path) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  M3: workspace is a reserved no-op at the search layer too
+#  M3: workspace is a soft scope at the search layer (spec §15.6: an
+#  explicit filter canonicalizes then scopes; it is never an ACL gate that
+#  hides data from governed reads — omitting it spans all workspaces)
 # ──────────────────────────────────────────────────────────────────────────
 
 def test_search_ignores_workspace_filter(tmp_path: Path) -> None:
-    """Passing workspace= does not hide memories from other workspaces."""
+    """An explicit workspace= scopes that query; omitting it spans everything.
+
+    Pre-0.14.0.dev3 the none-mode explicit filter was silently dropped. Spec
+    §15.6 requires canonicalize-then-filter, so repo-b's memory is now hidden
+    from the scoped query and visible in the unscoped one.
+    """
     tools = _tools(tmp_path)
     _write(tools, content="auth in repo-a", subject="a", tags=[], workspace="repo-a")
     _write(tools, content="auth in repo-b", subject="b", tags=[], workspace="repo-b")
     res = tools.memory_search(query="auth", workspace="repo-a")
     subjects = {r["subject"] for r in res["data"]["results"]}
-    # Both visible — workspace="repo-a" must NOT hide repo-b's memory.
-    assert "a" in subjects
-    assert "b" in subjects
+    assert subjects == {"a"}
+    unscoped = tools.memory_search(query="auth")
+    assert {r["subject"] for r in unscoped["data"]["results"]} == {"a", "b"}
 
 
 # ──────────────────────────────────────────────────────────────────────────

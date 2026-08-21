@@ -89,10 +89,18 @@ class OperationsPipeline:
                 },
             }
         elif enriched.get("status") == "applying":
-            enriched["next_action"] = {
-                "tool": "memory_govern", "action": "resolve_conflict",
-                "data": {"conflict_id": enriched.get("id"), "expected_revision": enriched.get("revision"), "authorized": True},
-            }
+            if any(item.get("status") not in {"pending", "completed"} for item in plan):
+                # Failed step, nothing pending: guide to an authorized replan
+                # instead of a resolve_conflict that would fail apply_incomplete.
+                enriched["next_action"] = {
+                    "tool": "memory_govern", "action": "replan_conflict",
+                    "data": {"conflict_id": enriched.get("id"), "expected_revision": enriched.get("revision"), "authorized": True},
+                }
+            else:
+                enriched["next_action"] = {
+                    "tool": "memory_govern", "action": "resolve_conflict",
+                    "data": {"conflict_id": enriched.get("id"), "expected_revision": enriched.get("revision"), "authorized": True},
+                }
         return enriched
 
     def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
@@ -207,9 +215,15 @@ class OperationsPipeline:
                                 result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(), error=None)
                 result_version = int(updated.get("version") or step["expected_version"])
                 result_hash = hashlib.sha256(updated_content.encode("utf-8")).hexdigest()
+                summary: dict[str, Any] = {"plan": plan}
+                prior_history = (conflict.get("apply_summary") or {}).get("history")
+                if prior_history:
+                    # replan_conflict preserved prior plan snapshots; applying a
+                    # step must not silently drop that history.
+                    summary["history"] = prior_history
                 cur = conn.execute(
                     "UPDATE conflicts SET revision=revision+1,apply_summary=?,refreshed_at=? WHERE id=? AND status='applying' AND revision=?",
-                    (json.dumps({"plan": plan}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    (json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                      time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), conflict_id_int, revision),
                 )
                 if cur.rowcount != 1:
@@ -221,6 +235,12 @@ class OperationsPipeline:
             data: dict[str, Any] = {"outcome": error_code, "error": error_code}
             if current_revision:
                 data["revision"] = int(current_revision)
+            if error_code in {"stale_conflict", "stale_member"}:
+                data["action_required"] = "replan_conflict"
+                data["note"] = (
+                    "re-read memory_review(view='conflict_detail') and the member memories, then call "
+                    "authorized memory_govern(action='replan_conflict') with the current revision"
+                )
             return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
         successful = step.get("status") == "completed"
         result = {"outcome": "completed" if successful else "apply_failed", "conflict_id": conflict_id_int, "revision": revision + 1, "memory_id": target_id, "action": action, "apply_summary": {"plan": plan}}
@@ -978,6 +998,11 @@ class OperationsPipeline:
                     "data": {"conflict_id": conflict_id_int, "expected_revision": result["revision"],
                              "memory_id": pending["memory_id"], "action": pending["action"], "authorized": True},
                 }
+        elif result.get("outcome") in {"stale_conflict", "stale_member"}:
+            result["note"] = (
+                "re-read memory_review(view='conflict_detail') and the member memories, then retry "
+                "judge with the current revision and a plan pinned to the members' current versions"
+            )
         return self.db.state.response(result, ok=result.get("outcome") == "applying", extra_warnings=list(caller.warnings))
 
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:

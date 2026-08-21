@@ -119,7 +119,9 @@ class WritePipeline:
         # Confirmed aliases short-circuit before embedding their canonical text.
         # Backfill a missing canonical vector once, outside the memory write
         # transaction; insert_memory publishes this prepared vector post-commit.
-        if result["matched_by"] == "confirmed_alias":
+        # Exact matches take the same repair path so the "retry a write using
+        # this workspace" guidance actually republishes a missing vector.
+        if result["matched_by"] in {"confirmed_alias", "exact"}:
             result["canonical_embedding"] = (
                 self.db.workspaces.prepare_missing_workspace_canonical_embedding(
                     result["canonical"], embedder,
@@ -146,11 +148,15 @@ class WritePipeline:
         elif rule["decision"] is None:
             suggestion = self._suggest_workspace_candidate(raw, evidence, result["similar"])
             result["candidate"] = suggestion
+            rejected = bool(
+                suggestion is not None and suggestion.candidate
+                and suggestion.candidate in (resolved.get("rejected_canonicals") or [])
+            )
             if (
                 suggestion is not None and suggestion.candidate
                 and suggestion.relation in {"alias", "typo", "same_project"}
                 and isolation in {"none", "weak"} and (suggestion.confidence or 0.0) >= 0.85
-                and suggestion.candidate not in (resolved.get("rejected_canonicals") or [])
+                and not rejected
             ):
                 result["canonical"] = suggestion.candidate
                 result["is_new"] = False
@@ -161,8 +167,20 @@ class WritePipeline:
                 # query embedding under the chosen canonical.
                 result["canonical_embedding"] = None
             else:
+                # Behavior is unchanged (keep raw canonical + workspace_review);
+                # the reason distinguishes model-absent/timeout/uncertain from a
+                # genuine low-confidence model output (spec §8 diagnostics).
                 result["decision"] = "ASK"
-                result["decision_reason"] = "qwen_low_conf"
+                if suggestion is None:
+                    result["decision_reason"] = "qwen_unavailable" if result["similar"] else "no_similar_candidates"
+                elif rejected:
+                    result["decision_reason"] = "qwen_rejected_candidate"
+                elif suggestion.error and "timeout" in str(suggestion.error).lower():
+                    result["decision_reason"] = "qwen_timeout"
+                elif not suggestion.candidate and suggestion.relation == "unrelated":
+                    result["decision_reason"] = "qwen_unrelated"
+                else:
+                    result["decision_reason"] = "qwen_low_conf"
         result["strict_block"] = isolation == "strict" and result["is_new"]
         return result
 

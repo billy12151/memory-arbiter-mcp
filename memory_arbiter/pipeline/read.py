@@ -13,6 +13,12 @@ if TYPE_CHECKING:
     from ..tools import MemoryTools
 
 
+# Verified/formally-recorded conflict signal sources that ring the loud
+# attention flag. conflict_group is the conflict-groups producer; the retired
+# names are kept so legacy payloads still resolve.
+_STRONG_CONFLICT_SOURCES = ("open_table", "conflict_guidance", "conflict_group")
+
+
 class ReadPipeline:
     def __init__(self, tools: "MemoryTools"):
         self._tools = tools
@@ -89,8 +95,13 @@ class ReadPipeline:
         # v0.9.7/v0.12.5: workspace isolation on the read path.
         isolation = self.settings.isolation
         caller = self._caller_workspace(workspace)
-        ws_canonical = caller.canonical if isolation != "none" else None
-        workspace = caller.workspace if isolation != "none" else workspace
+        # Spec §15.6: an explicit workspace filter is canonicalized then applied
+        # in every isolation mode. In none this honors the caller's explicit
+        # filter only — never an ACL: omitted workspace still spans all
+        # workspaces and the settings fallback never filters.
+        explicit_filter = isolation != "none" or caller.source == "explicit"
+        ws_canonical = caller.canonical if explicit_filter else None
+        workspace = caller.workspace if explicit_filter else workspace
         if isolation == "strict" and not ws_canonical:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
@@ -116,6 +127,19 @@ class ReadPipeline:
         has_more = outcome.has_more
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
+        # Spec §15.6: a none-mode EXPLICIT workspace filter canonicalizes and
+        # filters. The recall engine hard-filters only under strict, so apply
+        # the explicit scope here; omitted workspace still spans everything.
+        if isolation == "none" and caller.source == "explicit" and caller.canonical:
+            before = len(results)
+            results = [
+                r for r in results
+                if str(r.get("workspace_canonical") or r.get("workspace") or "") == caller.canonical
+            ]
+            if len(results) != before:
+                extra_warnings.append(
+                    f"explicit_workspace_filter={caller.canonical} removed {before - len(results)} result(s)"
+                )
         # v0.7.6: attach conflict signals (open_table / conflict_guidance
         # sources), only on genuine query hits (direct mode). Failures degrade
         # silently.
@@ -154,7 +178,7 @@ class ReadPipeline:
             # stay a per-result signal for the calling agent to judge by
             # content: surface only if the two genuinely contradict, else
             # silently proceed.
-            ot = seen_sources.get("open_table") or seen_sources.get("conflict_guidance")
+            ot = next((seen_sources.get(source) for source in _STRONG_CONFLICT_SOURCES if seen_sources.get(source)), None)
             if ot is not None:
                 attention_required = True
                 ot_sig = ot.get("conflict_signal") or {}
@@ -171,7 +195,7 @@ class ReadPipeline:
                     head += f" vs {peer_txt}"
                 n = sum(1 for x in results if (
                     (x.get("conflict_signal") or {}).get("conflict_source") in
-                    {"open_table", "conflict_guidance"}
+                    _STRONG_CONFLICT_SOURCES
                 ))
                 if n > 1:
                     head += f" and {n - 1} more"
@@ -205,7 +229,7 @@ class ReadPipeline:
                 (
                     r.get("conflict_signal") for r in results
                     if (r.get("conflict_signal") or {}).get("conflict_source")
-                    in {"open_table", "conflict_guidance"}
+                    in _STRONG_CONFLICT_SOURCES
                 ),
                 None,
             )
@@ -289,8 +313,11 @@ class ReadPipeline:
         # v0.12.5: expired recall uses the shared caller-workspace resolver.
         isolation = self.settings.isolation
         caller = self._caller_workspace(workspace)
-        ws_canonical = caller.canonical if isolation != "none" else None
-        workspace = caller.workspace if isolation != "none" else workspace
+        # Same contract as active search: an explicit filter canonicalizes and
+        # applies in every mode; none mode never filters without one.
+        explicit_filter = isolation != "none" or caller.source == "explicit"
+        ws_canonical = caller.canonical if explicit_filter else None
+        workspace = caller.workspace if explicit_filter else workspace
         if isolation == "strict" and not ws_canonical:
             return self.db.state.response(
                 {
@@ -322,6 +349,12 @@ class ReadPipeline:
         has_more = outcome.has_more
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
+        # Same none-mode explicit-filter contract as active search (spec §15.6).
+        if isolation == "none" and caller.source == "explicit" and caller.canonical:
+            results = [
+                r for r in results
+                if str(r.get("workspace_canonical") or r.get("workspace") or "") == caller.canonical
+            ]
 
         # v0.7.6: attach conflict signals (strict expired results are non-active
         # and may lack safe workspace summaries; fail closed by omitting signals).
@@ -337,7 +370,7 @@ class ReadPipeline:
                 if not sig:
                     continue
                 seen_sources.setdefault(str(sig.get("conflict_source", "conflict")), r)
-            ot = seen_sources.get("open_table") or seen_sources.get("conflict_guidance")
+            ot = next((seen_sources.get(source) for source in _STRONG_CONFLICT_SOURCES if seen_sources.get(source)), None)
             if ot is not None:
                 attention_required = True
                 ot_sig = ot.get("conflict_signal") or {}
@@ -354,7 +387,7 @@ class ReadPipeline:
                     head += f" vs {peer_txt}"
                 n = sum(1 for x in results if (
                     (x.get("conflict_signal") or {}).get("conflict_source") in
-                    {"open_table", "conflict_guidance"}
+                    _STRONG_CONFLICT_SOURCES
                 ))
                 if n > 1:
                     head += f" and {n - 1} more"
@@ -385,7 +418,7 @@ class ReadPipeline:
                 (
                     r.get("conflict_signal") for r in results
                     if (r.get("conflict_signal") or {}).get("conflict_source")
-                    in {"open_table", "conflict_guidance"}
+                    in _STRONG_CONFLICT_SOURCES
                 ),
                 None,
             )

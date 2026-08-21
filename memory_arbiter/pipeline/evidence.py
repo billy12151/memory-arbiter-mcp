@@ -2,20 +2,28 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from typing import Any, TYPE_CHECKING
 
+from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..evidence import evidence_content_hash, local_text_units
 from ..semantic_conflict import (
-    AttributeValueExtraction,
     PAIR_PROMPT_VERSION,
     decide_evidence,
     evaluate_pair_extractions,
     notice_dedupe_key,
+    signal_extraction,
 )
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
+
+# Technical failures degrade the check route and keep the job incomplete.
+_TECHNICAL_REASONS = {
+    "qwen_timeout", "qwen_unavailable", "qwen_backend_error",
+    "qwen_invalid_output", "qwen_budget_exhausted", "notice_budget_exhausted",
+}
 
 
 class EvidencePipeline:
@@ -74,6 +82,49 @@ class EvidencePipeline:
         embedder, _ = self._ensure_embedder()
         if embedder is None:
             return {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
+        # Spec §5/§15.3: while a conflict group is applying, versions produced
+        # by its apply plan must not re-notify the same conflict. Validation is
+        # server-side against the live conflict rows (status=applying, plan
+        # membership); the trusted context only names which row to revalidate.
+        applying_pairs: set[frozenset[int]] = set()
+        applying_slots: set[str] = set()
+        applying_groups: list[dict[str, Any]] = []
+        trusted = snapshot.get("trusted_applying_context")
+        if isinstance(trusted, dict) and trusted.get("conflict_id") is not None:
+            live = self.db.get_conflict(int(trusted["conflict_id"]))
+            if live is not None and live.get("status") == "applying":
+                plan_ids = {
+                    int(item.get("memory_id") or 0)
+                    for item in (live.get("apply_summary") or {}).get("plan") or []
+                }
+                trusted_memory = int(trusted.get("memory_id") or 0)
+                if trusted_memory in plan_ids or (
+                    live.get("resolution_memory_id") is not None
+                    and trusted_memory == int(live["resolution_memory_id"])
+                ):
+                    applying_groups.append(live)
+        applying_groups.extend(
+            group for group in self.db.list_open_conflicts_for_memory_ids(
+                [int(memory_id)], include_applying=True,
+            ) if group.get("status") == "applying"
+        )
+        for group in applying_groups:
+            ids = {int(member["memory_id"]) for member in group.get("member_versions") or []}
+            if group.get("resolution_memory_id") is not None:
+                ids.add(int(group["resolution_memory_id"]))
+            for left in ids:
+                for right in ids:
+                    if left != right:
+                        applying_pairs.add(frozenset((left, right)))
+            if group.get("slot_key"):
+                applying_slots.add(json.dumps(
+                    group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ))
+        deadline = time.monotonic() + self.settings.semantic_conflict_job_timeout_ms / 1000.0
+        min_budget = self.settings.semantic_conflict_min_pair_budget_ms / 1000.0
+        max_units = max(1, int(getattr(
+            self.settings, "semantic_conflict_max_evidence_units", 24,
+        )))
         workspace = (
             record.get("workspace_canonical") or record.get("workspace")
             if self.settings.isolation == "strict" else None
@@ -94,7 +145,15 @@ class EvidencePipeline:
                 embedded = embedder.embed_text(prefix="", body=unit.text)
                 if embedded.embedding:
                     unit_vectors.append((unit, list(embedded.embedding)))
+        units_examined = 0
+        gathering_truncated = False
         for unit, embedding in unit_vectors:
+            if units_examined >= max_units or time.monotonic() >= deadline:
+                # Spec §15.5: a bounded check that ran out of budget must not
+                # later claim checked_no_notice.
+                gathering_truncated = True
+                break
+            units_examined += 1
             for hit in self.db.evidence_knn(
                 embedding, k=5, workspace=workspace,
                 exclude_memory_id=memory_id,
@@ -113,10 +172,11 @@ class EvidencePipeline:
                 # check decision by a merely closer neighbour.
                 if existing is None or priority > existing_priority or (priority == existing_priority and closer):
                     by_peer[peer_id] = (hit, unit, decision)
+        if gathering_truncated:
+            self._tools._record_check_degradation("notice_budget_exhausted")
+            return {"status": "incomplete", "reason": "notice_budget_exhausted", "notices_created": 0}
 
         backend = self._ensure_semantic_backend()
-        deadline = time.monotonic() + self.settings.semantic_conflict_job_timeout_ms / 1000.0
-        min_budget = self.settings.semantic_conflict_min_pair_budget_ms / 1000.0
         ordered = sorted(
             by_peer.items(),
             key=lambda item: (
@@ -144,16 +204,12 @@ class EvidencePipeline:
                 "metadata": {key: metadata.get(key) for key in ("entity", "scope") if metadata.get(key)},
             }
 
-        def extraction(signal: Any) -> AttributeValueExtraction | None:
-            parsed = signal.parsed if isinstance(signal.parsed, dict) else None
-            if not parsed:
-                return None
+        def classify(left_env: dict[str, Any], right_env: dict[str, Any]) -> Any:
             try:
-                return AttributeValueExtraction(**{key: parsed[key] for key in (
-                    "attribute_a", "value_a", "attribute_b", "value_b",
-                )})
-            except (KeyError, TypeError):
-                return None
+                return backend.classify_pair(left_env, right_env, deadline_monotonic=deadline)
+            except TypeError:
+                # Test/legacy backends implementing the original two-arg protocol.
+                return backend.classify_pair(left_env, right_env)
 
         for peer_id, (hit, unit, decision) in ordered:
             if surfaced >= max(1, min(3, max_pairs)):
@@ -166,6 +222,10 @@ class EvidencePipeline:
             right_version = int(peer.get("version") or 1)
             if self.db.is_semantic_pair_closed(memory_id, peer_id, left_version, right_version):
                 continue
+            if frozenset((memory_id, peer_id)) in applying_pairs:
+                # Same applying group (member or resolution): the re-entry rule
+                # routes this pair to scan review, never to a fresh notice.
+                continue
             if backend is None:
                 self._tools._record_check_degradation("qwen_unavailable")
                 incomplete_reason = "qwen_unavailable"
@@ -177,11 +237,11 @@ class EvidencePipeline:
             left_env = envelope(record, unit.text)
             right_env = envelope(peer, str(hit.get("text") or ""))
             started = time.monotonic()
-            forward_signal = backend.classify_pair(left_env, right_env)
-            reverse_signal = backend.classify_pair(right_env, left_env)
+            forward_signal = classify(left_env, right_env)
+            reverse_signal = classify(right_env, left_env)
             self._tools._last_pair_duration_ms = int((time.monotonic() - started) * 1000)
             gate = evaluate_pair_extractions(
-                extraction(forward_signal), extraction(reverse_signal), left_env, right_env,
+                signal_extraction(forward_signal), signal_extraction(reverse_signal), left_env, right_env,
                 require_bidirectional=True,
             )
             qwen = {
@@ -199,10 +259,27 @@ class EvidencePipeline:
                     reason = "qwen_backend_error"
                 elif any(signal.candidate_type in {"invalid_json", "invalid_schema"} for signal in signals):
                     reason = "qwen_invalid_output"
+                elif any(signal.candidate_type == "unknown_field" for signal in signals):
+                    # The model explicitly reported an unextractable field: a
+                    # completed negative decision (fail-closed for notice), not
+                    # a technical failure (spec §8 diagnostics distinction).
+                    continue
                 else:
                     reason = gate.reason
-                self._tools._record_check_degradation(reason)
-                incomplete_reason = reason
+                if reason == "qwen_unverified":
+                    # Grounding failed: uncertain — fail-closed for notices and
+                    # the pair remains a scan review candidate.
+                    self._tools._record_check_degradation(reason)
+                    incomplete_reason = reason
+                    continue
+                if reason in _TECHNICAL_REASONS:
+                    self._tools._record_check_degradation(reason)
+                    incomplete_reason = reason
+                    continue
+                # Definitive strict-gate negatives (not_same_attribute_different_value,
+                # coexist_*, direction_invalid, bidirectional_*): the pair was
+                # examined and decided. The check stays complete and no
+                # degradation counter fires (spec §9/§15.5/§8).
                 continue
             metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
             peer_metadata = peer.get("metadata") if isinstance(peer.get("metadata"), dict) else {}
@@ -210,6 +287,11 @@ class EvidencePipeline:
             scope = metadata.get("scope") if metadata.get("scope") == peer_metadata.get("scope") else None
             if not entity or not scope:
                 incomplete_reason = "slot_provenance_insufficient"
+                continue
+            slot_key = {"entity": entity, "attribute": gate.attribute, "scope": scope}
+            if json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":")) in applying_slots:
+                # A third-party fact landing on a slot currently under
+                # application: scan review only (spec §15.3), no new notice.
                 continue
             member_versions = [
                 {"memory_id": memory_id, "version": left_version, "value": gate.value_a,
@@ -232,12 +314,12 @@ class EvidencePipeline:
                     "route": "notice_ready", "reason": gate.reason,
                     "prompt_version": PAIR_PROMPT_VERSION,
                     "anchors": decision.anchors,
-                    "slot_key": {"entity": entity, "attribute": gate.attribute, "scope": scope},
+                    "slot_key": slot_key,
                     "slot_provenance": {"entity": "metadata", "scope": "metadata", "attribute": "bidirectional_extraction"},
                     "member_versions": member_versions,
                     "value_groups": value_groups,
                     "candidate_key": {
-                        "detector_version": "attribute-value-v1",
+                        "detector_version": CONFLICT_DETECTOR_VERSION,
                         "members": sorted([f"{memory_id}@{left_version}", f"{peer_id}@{right_version}"]),
                         "evidence": [],
                     },

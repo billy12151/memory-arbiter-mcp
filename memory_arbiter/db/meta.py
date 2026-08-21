@@ -89,6 +89,42 @@ class MetaStore:
             "progress": progress,
         }
 
+    def rearm_conflict_scan_if_drifted(self) -> bool:
+        """Re-baseline a required scan whose live active set drifted.
+
+        A memory write between the upgrade and scan completion changes the
+        live active-set boundary, so pages recorded against the persisted
+        boundary can never validate again. Without a re-arm the
+        ``conflict_scan_required`` flag would stay true forever. Drift is
+        resolved by atomically persisting the CURRENT live boundary under a
+        fresh epoch and resetting progress, so one subsequent full scan of the
+        current set clears the flag.
+        """
+        import uuid
+
+        with self._db.write_transaction() as conn:
+            state = self._migration_state(conn)
+            if state.get("conflict_scan_required") != "true":
+                return False
+            persisted = state.get("conflict_scan_boundary") or ""
+            live = canonical_scan_boundary(active_scan_boundary_on_connection(conn))
+            if persisted == live:
+                return False
+            conn.execute(
+                """INSERT INTO migration_state(key,value,updated_at)
+                   VALUES('conflict_scan_epoch',?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                (uuid.uuid4().hex,),
+            )
+            conn.execute(
+                """INSERT INTO migration_state(key,value,updated_at)
+                   VALUES('conflict_scan_boundary',?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                (live,),
+            )
+            conn.execute("DELETE FROM migration_state WHERE key='conflict_scan_progress'")
+            return True
+
     def record_conflict_scan_page(
         self,
         *,

@@ -41,7 +41,10 @@ replacement plan. Partial failure remains applying; old plan history is kept.
 
 For scan_candidates, use each supplied deep_read span first (omit span when full
 context is needed), then call record_conflict with status open or
-not_a_conflict; scan output alone is not persisted and may recur. memory(read)
+not_a_conflict; scan output alone is not persisted and may recur. Pass slot_key
+only when recording status=open — a not_a_conflict triage records through the
+returned candidate_key alone, and a slot_key that collides with an existing open
+group returns open_group_exists. memory(read)
 returns operation data under response.data; a span read places clipped text at
 data.memory.content and bounds at data.span.
 
@@ -103,8 +106,9 @@ scan_candidates 的每个已分诊候选先按 deep_read span 读局部（需要
 数组中每条 notice 自带 action_required/read_call。notice 不走旧的 pair judgment。
 
 none、weak、strict 都执行 workspace canonical normalization；none 只是不做 ACL，未传
-workspace 的查询仍跨全库。strict 不允许 Qwen 静默合并。自动 vector/Qwen 结果不会
-创建 confirmed alias，只有显式用户治理可以。
+workspace 的查询仍跨全库，显式传入的 workspace 会先 canonicalize 再限定该次查询。
+strict 不允许 Qwen 静默合并。自动 vector/Qwen 结果不会创建 confirmed alias，只有
+显式用户治理可以。
 
 confirm_new_workspace 应先取得用户授权，再用 authorized=true 调
 confirm_pending_workspace；ask_user_for_authorization 应说明 impact，取得本次明确授权后

@@ -25,7 +25,7 @@ OpenClaw  →  memory_write(写入 "v0.2.1 发版任务" 规格)
 ZCode     →  memory_search("v0.2.1 发版任务")  ← 直接捞出来执行，零文件传递
 ```
 
-这是 v0.2.1 当时的低层工具名。当前 product profile 使用 `memory(action="remember")` 和 `memory(action="find")`；旧名字只可能出现在兼容 profile。
+这是 v0.2.1 当时的低层工具名。旧名字后来已移除；当前产品面是四个工具（`memory`、`memory_review`、`memory_govern`、`memory_repair`）。
 
 跑通了。ZCode 检索到规格，执行发版，把结果写回去。一份 ~2000 字规格的交接成本从 ~3000 tokens（整篇加载）降到 ~500 tokens（只取相关切片），**省了 83%**。我当时觉得自己挺聪明的。
 

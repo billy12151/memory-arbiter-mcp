@@ -145,7 +145,10 @@ class PairGateResult:
 
 
 class SemanticBackend(Protocol):
-    def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
+    def classify_pair(
+        self, left: dict[str, Any], right: dict[str, Any],
+        *, deadline_monotonic: Optional[float] = None,
+    ) -> ModelSignal:
         ...
 
     def suggest_workspace_candidate(
@@ -397,6 +400,7 @@ def _extract_first_json_object(raw: str) -> Optional[str]:
 
 
 _EXTRACTION_FIELDS = {"attribute_a", "value_a", "attribute_b", "value_b"}
+_UNKNOWN_SENTINEL = "__unknown__"
 _MAX_ATTRIBUTE_CHARS = 80
 # Extracted values are slot values, never prose.  Keep the protocol bound well
 # below the quote/attribute limits so a model cannot make an entire sentence
@@ -421,6 +425,10 @@ def extraction_from_text(raw: str) -> tuple[Optional[AttributeValueExtraction], 
     snippet = _extract_first_json_object(raw or "")
     if not snippet:
         return None, "missing_json"
+    if (raw or "").lstrip().startswith("["):
+        # A top-level array is extra top-level structure the protocol rejects,
+        # not prose to dig an object out of (spec §15.4).
+        return None, "invalid_schema:array_wrapper"
 
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         decoded: dict[str, Any] = {}
@@ -449,6 +457,10 @@ def extraction_from_text(raw: str) -> tuple[Optional[AttributeValueExtraction], 
         if not value or len(value) > limit or "\n" in value or "\r" in value:
             return None, f"invalid_{field_name}"
         values[field_name] = value
+    if any(value == _UNKNOWN_SENTINEL for value in values.values()):
+        # The protocol-legal "cannot reliably extract" marker: a valid model
+        # response, but never a usable extraction for any gate (spec §15.4).
+        return None, "unknown_field"
     return AttributeValueExtraction(**values), None
 
 
@@ -457,6 +469,9 @@ def _mechanical_normalize(value: str) -> str:
     normalized = re.sub(r"(?<=\d)[,_](?=\d)", "", normalized)
     normalized = re.sub(r"(\d+(?:\.\d+)?)\s*秒\b", r"\1s", normalized)
     normalized = re.sub(r"(\d+(?:\.\d+)?)\s*毫秒\b", r"\1ms", normalized)
+    # Unit-spelling compaction mirroring the recall guard's equivalences so
+    # "8GB" and "8G" normalize equal at the post-gate too.
+    normalized = re.sub(r"(?<=\d)\s*(gb|kb|mb|tb)(?![a-z0-9])", lambda match: match.group(1)[0], normalized)
     return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
 
 
@@ -520,10 +535,13 @@ def coexistence_veto(left: dict[str, Any], right: dict[str, Any]) -> Optional[st
     for code, pairs in dimension_markers.items():
         if any((a in left_text and b in right_text) or (b in left_text and a in right_text) for a, b in pairs):
             return code
-    evolution = ("替换为", "升级为", "迁移到", "不再采用", "由", "改为")
+    evolution = ("替换为", "升级为", "迁移到", "不再采用", "改为", "切换到", "切换为", "换成")
     if any(term in left_text or term in right_text for term in evolution) and any(
-        marker in left_text or marker in right_text for marker in ("旧", "新", "此前", "现在", "当前")
+        marker in left_text or marker in right_text
+        for marker in ("旧", "新", "此前", "现在", "当前", "之前", "原来", "原先")
     ):
+        # Requires real replacement wording — a bare "由" is an ordinary
+        # passive/agent marker in Chinese and must not co-trigger the veto.
         return "coexist_explicit_evolution"
     return None
 
@@ -581,10 +599,30 @@ def evaluate_pair_extractions(
     )
 
 
+def signal_extraction(signal: Any) -> Optional[AttributeValueExtraction]:
+    """Pull the validated four-field extraction out of a ModelSignal, if any."""
+    parsed = getattr(signal, "parsed", None)
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        return AttributeValueExtraction(**{key: parsed[key] for key in (
+            "attribute_a", "value_a", "attribute_b", "value_b",
+        )})
+    except (KeyError, TypeError):
+        return None
+
+
 def model_signal_from_text(raw: str) -> ModelSignal:
     extraction, error = extraction_from_text(raw)
     if extraction is None:
-        kind = "invalid_json" if error and (error.startswith("invalid_json") or error == "missing_json") else "invalid_schema"
+        if error and (error.startswith("invalid_json") or error == "missing_json"):
+            kind = "invalid_json"
+        elif error == "unknown_field":
+            # Explicit "cannot extract": distinguish it from protocol violations
+            # so diagnostics separate model output from technical failure.
+            kind = "unknown_field"
+        else:
+            kind = "invalid_schema"
         return ModelSignal(False, kind, None, raw or "", None, error)
     parsed = {
         "attribute_a": extraction.attribute_a, "value_a": extraction.value_a,
@@ -773,7 +811,10 @@ class LocalGGUFSemanticBackend:
             self._inflight = max(0, self._inflight - 1)
             self._cond.notify_all()
 
-    def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
+    def classify_pair(
+        self, left: dict[str, Any], right: dict[str, Any],
+        *, deadline_monotonic: Optional[float] = None,
+    ) -> ModelSignal:
         llm: Any | None = None
         acquired = False
         try:
@@ -1212,9 +1253,15 @@ class IsolatedGGUFSemanticBackend:
     def load(self) -> None:
         self._request("load")
 
-    def classify_pair(self, left: dict[str, Any], right: dict[str, Any]) -> ModelSignal:
+    def classify_pair(
+        self, left: dict[str, Any], right: dict[str, Any],
+        *, deadline_monotonic: Optional[float] = None,
+    ) -> ModelSignal:
         try:
-            result = self._request("classify_pair", left=left, right=right)
+            result = self._request(
+                "classify_pair", left=left, right=right,
+                deadline_monotonic=deadline_monotonic,
+            )
             return result if isinstance(result, ModelSignal) else ModelSignal(False, "backend_error", None, "", None, "invalid child response")
         except Exception as exc:
             return ModelSignal(False, "backend_error", None, "", None, str(exc))

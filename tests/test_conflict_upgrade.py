@@ -284,3 +284,86 @@ def test_status_and_doctor_expose_pending_rebuild_scan(tmp_path: Path) -> None:
     findings = tools.memory_doctor_overview()["data"]["findings"]
     scan = next(item for item in findings if item["check_id"] == "conflicts.scan_required")
     assert scan["status"] == "warn"
+
+
+def test_write_between_upgrade_and_scan_rearms_instead_of_wedging(tmp_path: Path) -> None:
+    """Spec §15.7/§15.8.24 recovery: a live-boundary drift re-arms the epoch so a
+    fresh full scan can still clear conflict_scan_required, instead of wedging."""
+    path = tmp_path / "db.sqlite3"
+    settings = _settings(path, tmp_path)
+    db = MemoryDB(settings)
+    first_id, _ = db.insert_memory(_memory(settings.defaults()), "project")
+    assert first_id is not None
+    original = _mark_conflict_rebuild_ready(db)
+    original_boundary = db.conflict_scan_state()["boundary"]
+
+    # A memory write after upgrade drifts the live active-set boundary: pages
+    # recorded against the original boundary are now rejected.
+    second_id, _ = db.insert_memory(
+        MemoryRecord.from_input(
+            {"content": "另一个配置。", "subject": "配置", "workspace": "project"},
+            settings.defaults(),
+        ),
+        "project",
+    )
+    assert second_id is not None
+    assert db.record_conflict_scan_page(
+        epoch=original["conflict_scan_epoch"],
+        detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=original_boundary,
+        after_memory_id=0, next_anchor_memory_id=None, anchors_scanned=2,
+        workspace=None,
+    ) is False
+    assert db.conflict_scan_state()["required"] is True
+
+    # Re-arm against the current live set, then a full scan of the new boundary
+    # clears the flag.
+    assert db.rearm_conflict_scan_if_drifted() is True
+    rearmed = db.conflict_scan_state()
+    assert rearmed["required"] is True
+    assert rearmed["epoch"] != original["conflict_scan_epoch"]
+    assert rearmed["progress"] is None
+    assert db.record_conflict_scan_page(
+        epoch=rearmed["epoch"],
+        detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=rearmed["boundary"],
+        after_memory_id=0, next_anchor_memory_id=None, anchors_scanned=2,
+        workspace=None,
+    ) is True
+    assert db.complete_conflict_scan(
+        epoch=rearmed["epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=rearmed["boundary"],
+    ) is True
+    assert db.conflict_scan_state()["required"] is False
+    # No re-arm happens when the boundary is already consistent.
+    assert db.rearm_conflict_scan_if_drifted() is False
+
+
+def test_conflict_only_validation_failure_marks_phase_failed(tmp_path: Path, monkeypatch) -> None:
+    """A conflict-only rebuild whose post-transaction validation fails must not
+    leave a phase=ready/current target that detect_database_generation trusts."""
+    import memory_arbiter.vnext_migration as vm
+
+    source = tmp_path / "source.sqlite3"
+    settings = _settings(source, tmp_path)
+    db = MemoryDB(settings)
+    db.insert_memory(_memory(settings.defaults()), "project")
+    # Move it to the previous generation so build_conflict_only is the path.
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO migration_state(key,value,updated_at) VALUES('schema_generation',?,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+            ("local_text_evidence_v1",),
+        )
+
+    # Force validation to fail after the rebuild transaction commits.
+    monkeypatch.setattr(vm, "_checkpoint", lambda *_a, **_k: False)
+    target = tmp_path / "target.sqlite3"
+    result = build_conflict_only(source, target, settings)
+    assert result["ok"] is False
+    # The stranded artifact is marked failed, so it is not classified current.
+    assert detect_database_generation(target) != "current"
+    with sqlite3.connect(target) as conn:
+        conn.row_factory = sqlite3.Row
+        phase = conn.execute("SELECT value FROM migration_state WHERE key='phase'").fetchone()
+    assert phase is not None and phase["value"] == "failed"

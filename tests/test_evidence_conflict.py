@@ -124,3 +124,48 @@ def test_single_direction_scan_survives_but_notice_fails_closed() -> None:
     )
     assert scan.state == "review_candidate" and scan.reason == "single_direction_only"
     assert notice.state == "review_candidate" and notice.reason == "bidirectional_extraction_required"
+
+
+# ── 2026-08-21 review round: semantic-layer fixes ───────────────────────────
+
+def test_unknown_sentinel_is_extraction_failure() -> None:
+    """The protocol-legal '__unknown__' marker never becomes a usable field."""
+    raw = '{"attribute_a":"数据库","value_a":"__unknown__","attribute_b":"数据库","value_b":"SQLite"}'
+    extraction, error = extraction_from_text(raw)
+    assert extraction is None
+    assert error == "unknown_field"
+    signal = model_signal_from_text(raw)
+    # Distinguished from a protocol violation so diagnostics separate model
+    # output from technical failure.
+    assert signal.candidate_type == "unknown_field"
+    assert signal.candidate is False
+
+
+def test_top_level_array_output_is_rejected() -> None:
+    raw = '[{"attribute_a":"db","value_a":"MySQL","attribute_b":"db","value_b":"SQLite"}]'
+    extraction, error = extraction_from_text(raw)
+    assert extraction is None
+    assert error is not None and error.startswith("invalid_schema")
+
+
+def test_bare_agent_marker_does_not_trigger_evolution_veto() -> None:
+    # "由" as a passive/agent marker with no replacement wording must not veto.
+    assert coexistence_veto(
+        {"quote": "新网关由运维分配"}, {"quote": "端口是 8080"},
+    ) is None
+    # Real replacement wording still vetoes.
+    assert coexistence_veto(
+        {"quote": "旧网关已迁移到新集群"}, {"quote": "当前使用新集群"},
+    ) == "coexist_explicit_evolution"
+
+
+def test_unit_spelling_variants_normalize_equal_at_post_gate() -> None:
+    # 8GB vs 8G is a restated duplicate, not a conflict, once units compact.
+    result = evaluate_pair_extractions(
+        AttributeValueExtraction("内存", "8GB", "内存", "8G"),
+        AttributeValueExtraction("内存", "8G", "内存", "8GB"),
+        {"quote": "内存 8GB"}, {"quote": "内存 8G"},
+        require_bidirectional=True,
+    )
+    assert result.state == "review_candidate"
+    assert result.reason == "not_same_attribute_different_value"

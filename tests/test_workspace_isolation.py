@@ -246,10 +246,10 @@ def test_memory_status_echoes_isolation(tmp_path):
     assert tools.memory_status()["data"]["isolation"] == "weak"
 
 
-# ── none: workspace has no effect ───────────────────────────────────────────
+# ── none: normalization without ACL; explicit filter still scopes ──────────
 
-def test_none_workspace_no_canonical_computed(tmp_path):
-    """none must not invoke the embedder or write a canonical (silent)."""
+def test_none_write_normalizes_without_hint_or_acl(tmp_path):
+    """none normalizes silently: no ACL, no hint/action, canonical falls back to raw."""
     tools = make_tools(tmp_path, "none")
     r = _write(tools, "alpha content", "projA")
     # canonical column falls back to raw (insert_memory never NULLs it), but
@@ -258,15 +258,17 @@ def test_none_workspace_no_canonical_computed(tmp_path):
     assert (r["data"].get("write_hints") or {}).get("new_workspace_detected") is None
 
 
-def test_none_recall_ignores_workspace(tmp_path):
+def test_none_explicit_workspace_filter_scopes_results(tmp_path):
+    """Spec §15.6: an explicit none-mode workspace filter canonicalizes then
+    filters; an omitted workspace still spans all workspaces."""
     tools = make_tools(tmp_path, "none")
     _write(tools, "alpha marketing content", "projA")
     _write(tools, "beta marketing content", "projB")
     with_ws = _results(tools.memory_search(query="marketing", workspace="projA", limit=10))
     without = _results(tools.memory_search(query="marketing", limit=10))
-    # Same result set + same order regardless of workspace.
-    assert [m["id"] for m in with_ws] == [m["id"] for m in without]
-    assert len(with_ws) == 2
+    # Explicit filter scopes to that workspace only; no filter spans all.
+    assert [m["workspace"] for m in with_ws] == ["projA"]
+    assert sorted(m["workspace"] for m in without) == ["projA", "projB"]
 
 
 # ── strict: mandatory ws, hard filter, blocking new ws ──────────────────────
