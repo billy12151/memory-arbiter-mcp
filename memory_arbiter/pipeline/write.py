@@ -171,12 +171,19 @@ class WritePipeline:
                 # the reason distinguishes model-absent/timeout/uncertain from a
                 # genuine low-confidence model output (spec §8 diagnostics).
                 result["decision"] = "ASK"
+                err = str(suggestion.error).lower() if (suggestion and suggestion.error) else ""
                 if suggestion is None:
                     result["decision_reason"] = "qwen_unavailable" if result["similar"] else "no_similar_candidates"
                 elif rejected:
                     result["decision_reason"] = "qwen_rejected_candidate"
-                elif suggestion.error and "timeout" in str(suggestion.error).lower():
+                elif "timeout" in err or "deadline" in err:
+                    # Admission/inference deadlines surface as "... deadline
+                    # expired ..." not the literal "timeout"; both are technical.
                     result["decision_reason"] = "qwen_timeout"
+                elif err:
+                    # Any other backend error (disabled/crashed/invalid child)
+                    # is a technical failure, not a low-confidence model output.
+                    result["decision_reason"] = "qwen_backend_error"
                 elif not suggestion.candidate and suggestion.relation == "unrelated":
                     result["decision_reason"] = "qwen_unrelated"
                 else:

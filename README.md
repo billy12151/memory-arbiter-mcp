@@ -65,7 +65,7 @@ The single `conflicts` table stores one one-to-many event and its immutable memb
 
 ## Workspaces
 
-Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` performs the same canonical normalization as `weak` but applies no workspace ACL; an unscoped read still spans all workspaces, while a workspace passed explicitly on a read is canonicalized and used to scope that query. `weak` additionally uses workspace as a soft ranking/hint signal. `weak` additionally uses workspace as a soft ranking/hint signal. Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it, and reads/governance are scoped to the canonical workspace. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; only explicit governance creates confirmed/rejected aliases.
+Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` performs the same canonical normalization as `weak` but applies no workspace ACL; an unscoped read still spans all workspaces, while a workspace passed explicitly on a read is canonicalized and used to scope that query. `weak` additionally uses workspace as a soft ranking/hint signal. Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it, and reads/governance are scoped to the canonical workspace. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; only explicit governance creates confirmed/rejected aliases.
 
 ## Operating mema
 

@@ -83,25 +83,43 @@ class EvidencePipeline:
         if embedder is None:
             return {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
         # Spec §5/§15.3: while a conflict group is applying, versions produced
-        # by its apply plan must not re-notify the same conflict. Validation is
-        # server-side against the live conflict rows (status=applying, plan
-        # membership); the trusted context only names which row to revalidate.
-        applying_pairs: set[frozenset[int]] = set()
+        # by its apply plan must not re-notify THE SAME conflict. Suppression is
+        # therefore slot-scoped and applied only after the gate resolves the
+        # candidate's slot_key, so a genuinely different conflict between the
+        # same two memories is still examined and surfaced. Validation is
+        # server-side against the live conflict rows; the trusted context only
+        # names which row to revalidate.
         applying_slots: set[str] = set()
         applying_groups: list[dict[str, Any]] = []
         trusted = snapshot.get("trusted_applying_context")
         if isinstance(trusted, dict) and trusted.get("conflict_id") is not None:
             live = self.db.get_conflict(int(trusted["conflict_id"]))
             if live is not None and live.get("status") == "applying":
-                plan_ids = {
-                    int(item.get("memory_id") or 0)
-                    for item in (live.get("apply_summary") or {}).get("plan") or []
-                }
+                plan = (live.get("apply_summary") or {}).get("plan") or []
+                plan_ids = {int(item.get("memory_id") or 0) for item in plan}
                 trusted_memory = int(trusted.get("memory_id") or 0)
-                if trusted_memory in plan_ids or (
+                trusted_revision = trusted.get("revision")
+                trusted_action = str(trusted.get("action") or "")
+                # Spec §15.3 preconditions: applying status, revision match,
+                # target in the plan (or the resolution memory), and an action
+                # consistent with that plan step.
+                revision_ok = (
+                    trusted_revision is None
+                    or int(trusted_revision) == int(live.get("revision") or 0)
+                )
+                step = next(
+                    (item for item in plan if int(item.get("memory_id") or 0) == trusted_memory),
+                    None,
+                )
+                action_ok = (
+                    not trusted_action or step is None
+                    or str(step.get("action") or "") == trusted_action
+                )
+                target_ok = trusted_memory in plan_ids or (
                     live.get("resolution_memory_id") is not None
                     and trusted_memory == int(live["resolution_memory_id"])
-                ):
+                )
+                if revision_ok and action_ok and target_ok:
                     applying_groups.append(live)
         applying_groups.extend(
             group for group in self.db.list_open_conflicts_for_memory_ids(
@@ -109,13 +127,6 @@ class EvidencePipeline:
             ) if group.get("status") == "applying"
         )
         for group in applying_groups:
-            ids = {int(member["memory_id"]) for member in group.get("member_versions") or []}
-            if group.get("resolution_memory_id") is not None:
-                ids.add(int(group["resolution_memory_id"]))
-            for left in ids:
-                for right in ids:
-                    if left != right:
-                        applying_pairs.add(frozenset((left, right)))
             if group.get("slot_key"):
                 applying_slots.add(json.dumps(
                     group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -221,10 +232,6 @@ class EvidencePipeline:
             left_version = int(record.get("version") or 1)
             right_version = int(peer.get("version") or 1)
             if self.db.is_semantic_pair_closed(memory_id, peer_id, left_version, right_version):
-                continue
-            if frozenset((memory_id, peer_id)) in applying_pairs:
-                # Same applying group (member or resolution): the re-entry rule
-                # routes this pair to scan review, never to a fresh notice.
                 continue
             if backend is None:
                 self._tools._record_check_degradation("qwen_unavailable")

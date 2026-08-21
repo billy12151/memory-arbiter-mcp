@@ -180,30 +180,52 @@ def test_escalate_appends_into_existing_open_group(tmp_path: Path) -> None:
 
 
 def test_escalate_links_when_members_already_covered(tmp_path: Path) -> None:
+    """When the open group already covers every notice member, escalate links
+    the notice (no new members) and resolves it."""
     tools, db = _tools(tmp_path)
-    a, b = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
+    a, b, c = _memory(db, "database is mysql"), _memory(db, "database is sqlite"), _memory(db, "database is postgres")
     notice_id = _structured_notice(db, tools, a, b)
+    # A superset open group at the same slot already contains a AND b.
     conflict_id = tools.memory_repair("record_conflict", {
         **_record_payload(a, b),
-        # A different candidate identity (extra evidence) so the notice row is
-        # not promoted through the identical-snapshot branch.
-        "candidate_key": None,
-        "detector_version": "d2",
-        "members": [_member(a, 1, "mysql"), _member(b, 1, "sqlite")],
+        "members": [_member(a, 1, "mysql"), _member(b, 1, "sqlite"), _member(c, 1, "postgres")],
         "value_groups": [
             ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
             ConflictValueGroup("sqlite", "SQLite", (f"{b}@1",)).to_dict(),
+            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
         ],
-    })
-    # Slot + fingerprint collide with the pending notice row's own event
-    # snapshot: the insert is rejected as a duplicate event, so promote the
-    # notice instead to occupy the slot, then verify the linked path through a
-    # second escalation attempt.
-    first = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id, "reason": "verify"})
-    if first["ok"]:
-        conflict_id = first["data"]["conflict_id"]
-    second = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id, "reason": "again"})
-    assert second["ok"] is False  # already terminal after the first escalation
+    })["data"]["conflict_id"]
+    escalated = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id, "reason": "verified"})
+    assert escalated["ok"] is True
+    assert escalated["data"]["conflict_outcome"] == "linked"
+    assert escalated["data"]["conflict_id"] == conflict_id
+    # No members were added; the notice row is resolved/linked.
+    assert len(db.get_conflict(conflict_id)["member_versions"]) == 3
+    assert db.get_conflict(notice_id)["notice_delivery_status"] == "resolved"
+
+
+def test_escalate_reports_applying_group_exists(tmp_path: Path) -> None:
+    """Escalating onto a slot whose group is already applying is refused
+    structurally, not with a raw exception."""
+    tools, db = _tools(tmp_path)
+    a, b, c = _memory(db, "database is mysql"), _memory(db, "database is sqlite"), _memory(db, "database is postgres")
+    notice_id = _structured_notice(db, tools, a, b)
+    conflict_id = tools.memory_repair("record_conflict", {
+        **_record_payload(a, c),
+        "members": [_member(a, 1, "mysql"), _member(c, 1, "postgres")],
+        "value_groups": [
+            ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
+            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+        ],
+    })["data"]["conflict_id"]
+    _judge(tools, conflict_id, [{"memory_id": a, "action": "update_current_claim"},
+                                {"memory_id": c, "action": "use_as_resolution"}],
+           chosen="postgres", resolution=c)
+    result = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id, "reason": "x"})
+    assert result["ok"] is False
+    assert result["data"].get("outcome") == "applying_group_exists" or (
+        result["data"].get("detail", {}).get("outcome") == "applying_group_exists"
+    )
 
 
 def test_record_conflict_duplicate_event_after_detector_change(tmp_path: Path) -> None:
@@ -408,7 +430,8 @@ def test_apply_rejects_wrong_target_duplicate_and_stale_member(tmp_path: Path) -
         "authorized": True,
     })
     assert duplicate["ok"] is False and duplicate["data"]["outcome"] == "invalid_action"
-    assert db.get_conflict(conflict_id)["apply_summary"] != summary_before or True
+    # The rejected duplicate must not mutate the persisted plan/summary.
+    assert db.get_conflict(conflict_id)["apply_summary"]["plan"][0]["status"] == "completed"
 
     # stale_member: the remaining member is externally edited before its step.
     db.edit_memory_intent(b, new_content="database is sqlite v2", reason="user edit")
@@ -434,7 +457,8 @@ def test_plain_update_cannot_forge_conflict_context(tmp_path: Path) -> None:
     })
     assert edited["ok"] is True
     assert db.get_conflict(conflict_id)["apply_summary"] == summary_before
-    assert any("applying_conflict_id" in str(item) for item in edited.get("warnings", [])) or True
+    # The forged field is reported as an ignored unknown field, not honored.
+    assert any("applying_conflict_id" in str(item) for item in edited.get("warnings", []))
 
 
 # ── spec item 19: result bookkeeping separate from the detection snapshot ───
@@ -507,3 +531,121 @@ def test_memory_record_conflict_wrapper_returns_structured_error(tmp_path: Path)
     result = tools.memory_record_conflict(1, 2, "legacy call")
     assert result["ok"] is False
     assert "memory_repair" in result["data"]["error"]
+
+
+# ── 2026-08-21 review round 2: blocker + regression fixes ───────────────────
+
+def test_scan_reverse_only_extraction_grounds_each_member_to_own_value(tmp_path: Path) -> None:
+    """Round-2 blocker: a reverse-only (B->A) extraction must stamp each member
+    with its OWN value, not its peer's."""
+    import tests.test_vnext_evidence as tv
+    from memory_arbiter.semantic_conflict import ModelSignal
+
+    tools = tv.make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "production"}
+    a = tools.memory_write(content="生产数据库使用 mysql 方案", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(content="生产数据库使用 sqlite 方案", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+
+    class RevOnly:
+        @staticmethod
+        def classify_pair(left, right, *, deadline_monotonic=None):
+            if "mysql" in str(left["quote"]).casefold():  # forward A->B: invalid
+                return ModelSignal(False, "invalid_schema", None, "", None, "bad")
+            parsed = {"attribute_a": "数据库选型", "value_a": "sqlite",
+                      "attribute_b": "数据库选型", "value_b": "mysql"}
+            return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+    tools._ensure_semantic_backend = lambda: RevOnly()
+
+    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10})
+    enriched = [c for c in result["data"]["candidates"] if c.get("value_groups")]
+    assert enriched
+    by_mid = {m["memory_id"]: m["normalized_value"] for m in enriched[0]["members"]}
+    assert by_mid[a["id"]] == "mysql"
+    assert by_mid[b["id"]] == "sqlite"
+
+
+def test_detector_version_wedge_is_recoverable_by_rearm(tmp_path: Path) -> None:
+    """Round-2 blocker: a database carrying the old persisted detector string
+    (pre-rename) must not wedge conflict_scan_required forever."""
+    from memory_arbiter.config import Settings
+    from memory_arbiter.db import MemoryDB
+    from memory_arbiter.db_generation import CONFLICT_DETECTOR_VERSION
+    from memory_arbiter.models import MemoryRecord
+    from memory_arbiter.vnext_migration import _mark_conflict_rebuild_ready
+
+    settings = Settings(db_path=tmp_path / "wedge.db", backup_jsonl=tmp_path / "b.jsonl")
+    db = MemoryDB(settings)
+    db.insert_memory(
+        MemoryRecord.from_input({"content": "x", "subject": "s", "workspace": "w"}, settings.defaults()),
+        "w",
+    )
+    _mark_conflict_rebuild_ready(db)
+    # Simulate a dev2 db that persisted the OLD detector identity.
+    with db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE migration_state SET value='conflict_group_detector_v1' "
+            "WHERE key='conflict_scan_detector_version'"
+        )
+    assert db.rearm_conflict_scan_if_drifted() is True
+    state = db.conflict_scan_state()
+    assert state["detector_version"] == CONFLICT_DETECTOR_VERSION
+    assert db.record_conflict_scan_page(
+        epoch=state["epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
+        boundary=state["boundary"], after_memory_id=0, next_anchor_memory_id=None,
+        anchors_scanned=1, workspace=None,
+    ) is True
+    assert db.complete_conflict_scan(
+        epoch=state["epoch"], detector_version=CONFLICT_DETECTOR_VERSION, boundary=state["boundary"],
+    ) is True
+    assert db.conflict_scan_state()["required"] is False
+
+
+def test_needs_authorization_step_routes_to_replan_not_livelock(tmp_path: Path) -> None:
+    """Round-2 high: a needs_authorization step must not wedge applying."""
+    tools, db = _tools(tmp_path)
+    a, b = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
+    conflict_id = tools.memory_repair("record_conflict", _record_payload(a, b))["data"]["conflict_id"]
+    _judge(tools, conflict_id, [{"memory_id": a, "action": "needs_authorization"}], resolution=b)
+    result = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": conflict_id, "expected_revision": 2, "memory_id": a,
+        "action": "needs_authorization", "authorized": True,
+    })
+    assert result["ok"] is False
+    assert result["data"]["action_required"] == "replan_conflict"
+    row = db.get_conflict(conflict_id)
+    assert row["status"] == "applying"
+    assert row["apply_summary"]["plan"][0]["status"] == "blocked"
+    # Guidance surfaces route to replan, not back to the failing apply call.
+    detail = tools.memory_review("conflict_detail", {"conflict_id": conflict_id})
+    assert detail["data"]["next_executable_call"]["action"] == "replan_conflict"
+    # Replan to an executable plan then finish.
+    replanned = tools.memory_govern("replan_conflict", {
+        "conflict_id": conflict_id, "expected_revision": row["revision"],
+        "apply_plan": [{"memory_id": a, "action": "update_current_claim"}],
+        "authorized": True,
+    })
+    assert replanned["ok"] is True
+
+
+def test_none_explicit_filter_scopes_before_limit(tmp_path: Path) -> None:
+    """Round-2 high: the none-mode explicit filter must scope in SQL so the
+    limit is applied after scoping (no silent truncation to empty)."""
+    import tests.test_vnext_evidence as tv
+    tools = tv.make_tools(tmp_path)
+    # Many higher-ranking projB memories, one projA memory.
+    for i in range(8):
+        tools.memory_write(content=f"marketing note {i}", workspace="projB", subject=f"b{i}", tags=[])
+    tools.memory_write(content="marketing note target", workspace="projA", subject="a", tags=[])
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    caller_canonical = tools._caller_workspace("projA").canonical
+    res = tools.memory_search(query="marketing", workspace="projA", limit=3)
+    results = res["data"]["results"]
+    assert results, "explicit projA filter must not truncate to empty"
+    # Every returned row is in the caller's canonical scope (FakeEmbedder maps
+    # all workspace names to one canonical, so scoping is by canonical here).
+    assert all(
+        (r.get("workspace_canonical") or r.get("workspace")) == caller_canonical
+        for r in results
+    )

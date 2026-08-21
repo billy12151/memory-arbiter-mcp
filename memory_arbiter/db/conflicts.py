@@ -350,13 +350,29 @@ class ConflictStore:
                     if collision_row["candidate_key"] == combined_candidate:
                         return {"outcome": "deduped", "conflict_id": collision_row["id"], "revision": collision_row["revision"]}
                     return {"outcome": "identity_collision", "conflict_id": collision_row["id"]}
-                cur = conn.execute(
-                    "UPDATE conflicts SET revision=revision+1,member_versions=?,member_fingerprint=?,"
-                    "value_groups=?,candidate_key=?,candidate_key_hash=?,refreshed_at=? "
-                    "WHERE id=? AND status='open' AND revision=?",
-                    (members_json, fingerprint, groups_json, _canonical_json(combined_candidate), combined_hash,
-                     now, current["id"], current["revision"]),
-                )
+                try:
+                    cur = conn.execute(
+                        "UPDATE conflicts SET revision=revision+1,member_versions=?,member_fingerprint=?,"
+                        "value_groups=?,candidate_key=?,candidate_key_hash=?,refreshed_at=? "
+                        "WHERE id=? AND status='open' AND revision=?",
+                        (members_json, fingerprint, groups_json, _canonical_json(combined_candidate), combined_hash,
+                         now, current["id"], current["revision"]),
+                    )
+                except sqlite3.IntegrityError:
+                    # The event-snapshot index (workspace_canonical, slot_key_hash,
+                    # member_fingerprint) excludes detector_version, so a resolved /
+                    # not_a_conflict row recorded under a different detector can own
+                    # the combined fingerprint. Return a structured outcome rather
+                    # than leaking a raw IntegrityError through the tool layer.
+                    snapshot_row = conn.execute(
+                        "SELECT id,revision FROM conflicts WHERE workspace_canonical=? "
+                        "AND slot_key_hash=? AND member_fingerprint=? AND id<>?",
+                        (workspace_canonical, slot_hash, fingerprint, current["id"]),
+                    ).fetchone()
+                    if snapshot_row is not None:
+                        return {"outcome": "duplicate_event", "conflict_id": int(snapshot_row["id"]),
+                                "revision": int(snapshot_row["revision"])}
+                    raise
                 if cur.rowcount != 1:
                     return {"outcome": "stale_conflict", "conflict_id": current["id"]}
                 return {"outcome": "appended", "conflict_id": current["id"], "revision": current["revision"] + 1}

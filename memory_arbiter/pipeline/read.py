@@ -102,6 +102,9 @@ class ReadPipeline:
         explicit_filter = isolation != "none" or caller.source == "explicit"
         ws_canonical = caller.canonical if explicit_filter else None
         workspace = caller.workspace if explicit_filter else workspace
+        # A none/weak explicit filter scopes recall in SQL (hard_scope) so the
+        # limit is applied AFTER workspace scoping — never a post-page truncation.
+        hard_scope = isolation == "none" and caller.source == "explicit" and bool(caller.canonical)
         if isolation == "strict" and not ws_canonical:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
@@ -121,25 +124,13 @@ class ReadPipeline:
             source_type=source_type,
             ws_canonical=ws_canonical,
             isolation=isolation,
+            hard_scope=hard_scope,
         )
         results = outcome.results
         warnings = outcome.warnings
         has_more = outcome.has_more
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
-        # Spec §15.6: a none-mode EXPLICIT workspace filter canonicalizes and
-        # filters. The recall engine hard-filters only under strict, so apply
-        # the explicit scope here; omitted workspace still spans everything.
-        if isolation == "none" and caller.source == "explicit" and caller.canonical:
-            before = len(results)
-            results = [
-                r for r in results
-                if str(r.get("workspace_canonical") or r.get("workspace") or "") == caller.canonical
-            ]
-            if len(results) != before:
-                extra_warnings.append(
-                    f"explicit_workspace_filter={caller.canonical} removed {before - len(results)} result(s)"
-                )
         # v0.7.6: attach conflict signals (open_table / conflict_guidance
         # sources), only on genuine query hits (direct mode). Failures degrade
         # silently.
@@ -318,6 +309,7 @@ class ReadPipeline:
         explicit_filter = isolation != "none" or caller.source == "explicit"
         ws_canonical = caller.canonical if explicit_filter else None
         workspace = caller.workspace if explicit_filter else workspace
+        hard_scope = isolation == "none" and caller.source == "explicit" and bool(caller.canonical)
         if isolation == "strict" and not ws_canonical:
             return self.db.state.response(
                 {
@@ -343,18 +335,13 @@ class ReadPipeline:
             offset=effective_offset,
             ws_canonical=ws_canonical,
             isolation=isolation,
+            hard_scope=hard_scope,
         )
         results = outcome.results
         warnings = outcome.warnings
         has_more = outcome.has_more
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
-        # Same none-mode explicit-filter contract as active search (spec §15.6).
-        if isolation == "none" and caller.source == "explicit" and caller.canonical:
-            results = [
-                r for r in results
-                if str(r.get("workspace_canonical") or r.get("workspace") or "") == caller.canonical
-            ]
 
         # v0.7.6: attach conflict signals (strict expired results are non-active
         # and may lack safe workspace summaries; fail closed by omitting signals).

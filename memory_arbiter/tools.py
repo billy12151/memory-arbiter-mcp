@@ -656,7 +656,7 @@ class MemoryTools:
         """
         import json as _json
 
-        from .semantic_conflict import evaluate_pair_extractions, signal_extraction, PAIR_PROMPT_VERSION
+        from .semantic_conflict import evaluate_pair_extractions, normalize_value as _normalize_value, signal_extraction, PAIR_PROMPT_VERSION
 
         pool = result.pop("similarity_pool", None) or []
         max_pairs = max(0, int(getattr(self.settings, "semantic_conflict_scan_max_pairs", 8)))
@@ -726,19 +726,25 @@ class MemoryTools:
             else:
                 display_a, display_b = reverse_parsed.get("value_b"), reverse_parsed.get("value_a")
                 attribute_raw = reverse_parsed.get("attribute_b")
+            # gate.value_a/value_b follow the surviving extraction's OWN input
+            # order (reverse = B->A), but display_a/display_b and members[0/1]
+            # are in left/right order. Normalize each side's own display value so
+            # the stored value is grounded to that member (not its peer).
+            norm_a = _normalize_value(str(display_a)) if display_a else gate.value_a
+            norm_b = _normalize_value(str(display_b)) if display_b else gate.value_b
             members = item.get("members") or []
             for index, member in enumerate(members):
                 member["attribute_raw"] = str(attribute_raw or gate.attribute)
                 member["value_raw"] = str(display_a if index == 0 else display_b)
                 member["normalized_attribute"] = gate.attribute
-                member["normalized_value"] = gate.value_a if index == 0 else gate.value_b
+                member["normalized_value"] = norm_a if index == 0 else norm_b
                 member["direction"] = "a_to_b" if forward_parsed else "b_to_a"
                 member["prompt_version"] = PAIR_PROMPT_VERSION
             refs = [f"{int(m['memory_id'])}@{int(m['version'])}" for m in members]
             item["value_groups"] = [
-                {"normalized_value": gate.value_a, "display_value": str(display_a or gate.value_a),
+                {"normalized_value": norm_a, "display_value": str(display_a or norm_a),
                  "members": [refs[0]] if refs else []},
-                {"normalized_value": gate.value_b, "display_value": str(display_b or gate.value_b),
+                {"normalized_value": norm_b, "display_value": str(display_b or norm_b),
                  "members": [refs[1]] if len(refs) > 1 else []},
             ]
             if gate.state == "notice_ready":
@@ -757,13 +763,20 @@ class MemoryTools:
                 }
                 slot_json = _json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 group = slot_groups.setdefault(slot_json, {
-                    "slot_key": slot_key, "members": {}, "value_groups": {}, "candidate_pairs": [],
+                    "slot_key": slot_key, "members": {}, "value_groups": {},
+                    "candidate_pairs": [], "value_conflict": False,
                 })
                 for index, member in enumerate(members):
                     ref = f"{int(member['memory_id'])}@{int(member['version'])}"
-                    group["members"][ref] = member.get("normalized_value")
-                    value = gate.value_a if index == 0 else gate.value_b
+                    value = norm_a if index == 0 else norm_b
                     display = str(display_a if index == 0 else display_b) or value
+                    prior = group["members"].get(ref)
+                    if prior is not None and prior != value:
+                        # The same memory extracted a different value in another
+                        # same-slot pair: an un-recordable payload. Flag it for
+                        # agent deep-read instead of emitting a bad group.
+                        group["value_conflict"] = True
+                    group["members"][ref] = value
                     entry = group["value_groups"].setdefault(
                         value, {"normalized_value": value, "display_value": display, "members": set()},
                     )
@@ -809,6 +822,10 @@ class MemoryTools:
                         for entry in sorted(group["value_groups"].values(), key=lambda e: e["normalized_value"])
                     ],
                     "candidate_pairs": group["candidate_pairs"],
+                    # A member with disagreeing values across same-slot pairs
+                    # cannot be recorded as one group: hand it to deep-read.
+                    "value_conflict": bool(group.get("value_conflict")),
+                    "route": "review_candidate" if group.get("value_conflict") else "recordable",
                 }
                 for group in slot_groups.values()
             ]

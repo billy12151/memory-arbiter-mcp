@@ -90,17 +90,20 @@ class MetaStore:
         }
 
     def rearm_conflict_scan_if_drifted(self) -> bool:
-        """Re-baseline a required scan whose live active set drifted.
+        """Re-baseline a required scan whose live set or detector drifted.
 
         A memory write between the upgrade and scan completion changes the
         live active-set boundary, so pages recorded against the persisted
-        boundary can never validate again. Without a re-arm the
-        ``conflict_scan_required`` flag would stay true forever. Drift is
-        resolved by atomically persisting the CURRENT live boundary under a
-        fresh epoch and resetting progress, so one subsequent full scan of the
-        current set clears the flag.
+        boundary can never validate again. Separately, a detector-version
+        change between releases leaves a stale ``conflict_scan_detector_version``
+        persisted that no running scan can match. Either would wedge
+        ``conflict_scan_required`` forever. Both are resolved by atomically
+        persisting the CURRENT live boundary and running detector under a fresh
+        epoch and resetting progress, so one subsequent full scan clears it.
         """
         import uuid
+
+        from ..db_generation import CONFLICT_DETECTOR_VERSION
 
         with self._db.write_transaction() as conn:
             state = self._migration_state(conn)
@@ -108,7 +111,8 @@ class MetaStore:
                 return False
             persisted = state.get("conflict_scan_boundary") or ""
             live = canonical_scan_boundary(active_scan_boundary_on_connection(conn))
-            if persisted == live:
+            detector_drift = state.get("conflict_scan_detector_version") != CONFLICT_DETECTOR_VERSION
+            if persisted == live and not detector_drift:
                 return False
             conn.execute(
                 """INSERT INTO migration_state(key,value,updated_at)
@@ -121,6 +125,12 @@ class MetaStore:
                    VALUES('conflict_scan_boundary',?,CURRENT_TIMESTAMP)
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
                 (live,),
+            )
+            conn.execute(
+                """INSERT INTO migration_state(key,value,updated_at)
+                   VALUES('conflict_scan_detector_version',?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                (CONFLICT_DETECTOR_VERSION,),
             )
             conn.execute("DELETE FROM migration_state WHERE key='conflict_scan_progress'")
             return True

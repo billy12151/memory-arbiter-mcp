@@ -169,3 +169,35 @@ def test_unit_spelling_variants_normalize_equal_at_post_gate() -> None:
     )
     assert result.state == "review_candidate"
     assert result.reason == "not_same_attribute_different_value"
+
+
+# ── 2026-08-21 review round 2: normalization edge cases ─────────────────────
+
+def test_decimal_point_preserved_in_normalization() -> None:
+    from memory_arbiter.semantic_conflict import normalize_value
+    assert normalize_value("1.5s") != normalize_value("15s")
+    # Integer/fractional pair stays distinct.
+    assert normalize_value("1.5") != normalize_value("15")
+
+
+def test_unknown_sentinel_rejection_is_case_insensitive() -> None:
+    raw = '{"attribute_a":"db","value_a":"__UNKNOWN__","attribute_b":"db","value_b":"SQLite"}'
+    extraction, error = extraction_from_text(raw)
+    assert extraction is None
+    assert error == "unknown_field"
+
+
+def test_prose_prefixed_array_is_rejected() -> None:
+    raw = 'Result: [ {"attribute_a":"db","value_a":"MySQL","attribute_b":"db","value_b":"SQLite"} ]'
+    extraction, error = extraction_from_text(raw)
+    assert extraction is None
+    assert error is not None and error.startswith("invalid_schema")
+
+
+def test_evolution_veto_covers_bian_wei_family() -> None:
+    assert coexistence_veto(
+        {"quote": "网关由 A 变为 B"}, {"quote": "当前网关是 B"},
+    ) == "coexist_explicit_evolution"
+    assert coexistence_veto(
+        {"quote": "旧配置调整为新值"}, {"quote": "现在使用新值"},
+    ) == "coexist_explicit_evolution"

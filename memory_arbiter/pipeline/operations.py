@@ -188,7 +188,11 @@ class OperationsPipeline:
                 if action in {"preserve_historical_record", "use_as_resolution"}:
                     edited = {"outcome": "no_change", "record": current}
                 elif action == "needs_authorization":
-                    raise ValueError("needs_authorization_replan")
+                    # Not executable by apply: mark it blocked (committed below)
+                    # so the guidance surfaces route to replan instead of looping
+                    # back to a call that always fails (spec 10.6 keeps applying
+                    # and preserves the remaining plan).
+                    edited = {"outcome": "blocked", "record": current}
                 else:
                     edited = self.db.edit_memory_intent(
                         target_id, new_content=content, old_text=old_text, new_text=new_text,
@@ -200,7 +204,12 @@ class OperationsPipeline:
                 updated = edited.get("record") or current
                 chosen = str(conflict.get("chosen_value") or "")
                 updated_content = str(updated.get("content") or "")
-                if action in {"update_current_claim", "use_as_resolution"} and not value_is_grounded(
+                if edited.get("outcome") == "blocked":
+                    # needs_authorization: recorded blocked so guidance routes to
+                    # replan; no edit happened.
+                    step.update(status="blocked", result_version=None, result_hash=None,
+                                error="needs_authorization")
+                elif action in {"update_current_claim", "use_as_resolution"} and not value_is_grounded(
                     chosen, updated_content
                 ):
                     # The memory edit (if any) and failure bookkeeping must commit
@@ -243,7 +252,7 @@ class OperationsPipeline:
                 )
             return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
         successful = step.get("status") == "completed"
-        result = {"outcome": "completed" if successful else "apply_failed", "conflict_id": conflict_id_int, "revision": revision + 1, "memory_id": target_id, "action": action, "apply_summary": {"plan": plan}}
+        result = {"outcome": "completed" if successful else "apply_failed", "conflict_id": conflict_id_int, "revision": revision + 1, "memory_id": target_id, "action": action, "apply_summary": summary}
         if successful and action not in {"preserve_historical_record", "use_as_resolution"}:
             # Post-commit only: index the committed result, then let the normal
             # semantic worker re-enter. Its task remains allowed to discover

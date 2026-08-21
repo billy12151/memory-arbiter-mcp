@@ -425,9 +425,12 @@ def extraction_from_text(raw: str) -> tuple[Optional[AttributeValueExtraction], 
     snippet = _extract_first_json_object(raw or "")
     if not snippet:
         return None, "missing_json"
-    if (raw or "").lstrip().startswith("["):
-        # A top-level array is extra top-level structure the protocol rejects,
-        # not prose to dig an object out of (spec §15.4).
+    text = raw or ""
+    bracket, brace = text.find("["), text.find("{")
+    if bracket != -1 and (brace == -1 or bracket < brace):
+        # The first structural token is an array (bare or prose-prefixed): extra
+        # top-level structure the protocol rejects, not an object to dig out of
+        # prose (spec §15.4).
         return None, "invalid_schema:array_wrapper"
 
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -457,7 +460,7 @@ def extraction_from_text(raw: str) -> tuple[Optional[AttributeValueExtraction], 
         if not value or len(value) > limit or "\n" in value or "\r" in value:
             return None, f"invalid_{field_name}"
         values[field_name] = value
-    if any(value == _UNKNOWN_SENTINEL for value in values.values()):
+    if any(value.casefold() == _UNKNOWN_SENTINEL for value in values.values()):
         # The protocol-legal "cannot reliably extract" marker: a valid model
         # response, but never a usable extraction for any gate (spec §15.4).
         return None, "unknown_field"
@@ -472,7 +475,13 @@ def _mechanical_normalize(value: str) -> str:
     # Unit-spelling compaction mirroring the recall guard's equivalences so
     # "8GB" and "8G" normalize equal at the post-gate too.
     normalized = re.sub(r"(?<=\d)\s*(gb|kb|mb|tb)(?![a-z0-9])", lambda match: match.group(1)[0], normalized)
-    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
+    # Strip separators/punctuation but PRESERVE a decimal point between digits,
+    # so 1.5 and 15 do not collapse. Keep word chars and ".", drop "_", then
+    # remove any "." not flanked by digits (so dotnet/a.b are unaffected).
+    normalized = re.sub(r"[^\w.]+", "", normalized, flags=re.UNICODE)
+    normalized = normalized.replace("_", "")
+    normalized = re.sub(r"(?<!\d)\.|\.(?!\d)", "", normalized)
+    return normalized
 
 
 def normalize_attribute(value: str) -> str:
@@ -535,7 +544,11 @@ def coexistence_veto(left: dict[str, Any], right: dict[str, Any]) -> Optional[st
     for code, pairs in dimension_markers.items():
         if any((a in left_text and b in right_text) or (b in left_text and a in right_text) for a, b in pairs):
             return code
-    evolution = ("替换为", "升级为", "迁移到", "不再采用", "改为", "切换到", "切换为", "换成")
+    evolution = (
+        "替换为", "替换成", "升级为", "升级到", "迁移到", "迁移至", "不再采用",
+        "改为", "改成", "切换到", "切换为", "换成", "变为", "变更为", "调整为",
+        "更新为", "更改为",
+    )
     if any(term in left_text or term in right_text for term in evolution) and any(
         marker in left_text or marker in right_text
         for marker in ("旧", "新", "此前", "现在", "当前", "之前", "原来", "原先")

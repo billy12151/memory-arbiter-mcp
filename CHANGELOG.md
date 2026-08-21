@@ -3,6 +3,24 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.0.dev4] — 2026-08-21
+
+Second independent adversarial review round on the dev3 fixes. Closes 2 blockers and several regressions the dev3 changes introduced.
+
+### Fixed
+
+- **Scan reverse-only value mapping (blocker)** — in the new scan Qwen enhancement, a single-direction (B→A) extraction stamped each member with its peer's value because `gate.value_a/value_b` follow the surviving extraction's own input order while members are ordered left/right. Each member is now grounded to its own side's display value, and `value_groups`/`slot_groups` use the corrected per-side values.
+- **Detector-version wedge (blocker)** — the dev3 rename of `CONFLICT_DETECTOR_VERSION` to `attribute-value-v1`, combined with the running-vs-persisted gate comparison, could permanently wedge `conflict_scan_required=true` on a database upgraded under dev2 (which persisted the old string). `rearm_conflict_scan_if_drifted` now also treats a persisted-vs-running detector mismatch as drift and re-stamps `conflict_scan_detector_version`, so one full scan clears the flag.
+- **record_conflict append IntegrityError (high)** — the open-group append now wraps its CAS UPDATE and returns a structured `duplicate_event` when the event-snapshot index collides with a resolved/not_a_conflict row recorded under a different detector, instead of leaking a raw exception through the tool layer.
+- **none-mode explicit filter truncation (high)** — an explicit none-mode workspace filter is now pushed into the recall SQL (`hard_scope`) so the limit applies after scoping; it previously post-filtered the already-limited page and could return empty when the target workspace ranked below the cutoff. weak mode still never hard-filters.
+- **needs_authorization livelock (high)** — a `needs_authorization` apply step is now recorded `blocked` (committed) and routed to `replan_conflict` by both guidance surfaces, instead of raising forever with no machine-executable exit.
+- **Applying re-entry over-broad suppression** — suppression is now strictly slot-scoped and applied only after the gate resolves the candidate's `slot_key` (with §15.3 revision/action/target preconditions on the trusted context); a different conflict between two co-members of an applying group is examined and surfaced, and an unexamined skip can no longer report `checked_no_notice`.
+- **Normalization edge cases** — `_mechanical_normalize` preserves a decimal point between digits (`1.5s` ≠ `15s`) while still compacting size units (`8GB` = `8G`) without corrupting non-numeric tokens (`dotnet` intact); the `__unknown__` sentinel check is case-insensitive; a prose-prefixed top-level array is rejected; the coexistence evolution veto covers the 变为/变更为/调整为/更新为 replacement-verb family.
+- **workspace_decision_reason** — admission/inference deadline errors (which say "deadline expired", not "timeout") and other backend errors now map to `qwen_timeout`/`qwen_backend_error` instead of a fabricated `qwen_low_conf`.
+- **slot_groups value disagreement** — when one memory extracts different values across two same-slot pairs, the emitted slot group is flagged `value_conflict`/`route=review_candidate` instead of an un-recordable payload.
+- **apply response history** — `apply_conflict_action` returns the persisted `apply_summary` (including `history`) instead of a hardcoded `{"plan": ...}`.
+- **Docs/tests** — removed a duplicated README sentence; replaced two `or True` tautological assertions and a misleading escalate test with real coverage of the `linked`/`applying_group_exists` outcomes; added regression tests for both blockers and the high/medium fixes.
+
 ## [0.14.0.dev3] — 2026-08-21
 
 Post-review hardening of the dev2 baseline: closes the findings of an independent adversarial review round (conflict store CAS paths, applying re-entry, scan wide gate, upgrade scan gate, workspace contracts, and help/doc truthfulness).

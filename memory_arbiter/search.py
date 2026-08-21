@@ -950,6 +950,7 @@ def search_memories(
     offset: int = 0,
     ws_canonical: Optional[str] = None,
     isolation: str = "none",
+    hard_scope: bool = False,
 ) -> SearchOutcome:
     """v0.9.4: returns a SearchOutcome with retrieval_mode.
 
@@ -969,6 +970,9 @@ def search_memories(
     limit = max(1, min(int(limit), 100))
     offset = max(0, min(int(offset), 10000))
     query = (query or "").strip()
+    # An explicit none-mode workspace filter (hard_scope) scopes recall in the
+    # SQL itself so the limit is applied AFTER scoping; strict always scopes.
+    scope_ws = ws_canonical if (hard_scope and ws_canonical) else strict_ws(isolation, ws_canonical)
     mode = _get_ranking_mode()
     # v0.3.1: when a query_embedding is supplied but sqlite-vec is not active,
     # warn so the caller knows the semantic channel was silently skipped.
@@ -1021,7 +1025,7 @@ def search_memories(
         result, bm_warnings, bm_has_more, bm_total = _search_bm25(
             db, query, workspace, tags, limit, status_clause, like_status_clause, warnings, debug_ranking,
             offset=offset,
-            ws_canonical=strict_ws(isolation, ws_canonical),
+            ws_canonical=scope_ws,
         )
         # Infer retrieval_mode for the legacy bm25 path: _search_bm25 internally
         # falls back to _recent_fallback when query has no hit (appending its
@@ -1047,7 +1051,7 @@ def search_memories(
     # 继续往下（wide_recall 内部仍会因 not query 返 []，post-filter 后仍空，
     # 最终走第二步的 "query required for filter-aware recall" 精准 warning）。
     if not query and not has_filters:
-        fb_ws = strict_ws(isolation, ws_canonical)
+        fb_ws = scope_ws
         fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(
             db, workspace, tags, limit, like_status_clause, warnings, offset=offset, ws_canonical=fb_ws,
         )
@@ -1059,7 +1063,7 @@ def search_memories(
     # 解锁 list-by-tag / by-source_type / by-time。v0.9.4 adds SQL OFFSET for
     # expired audit pagination.
     if not query and has_filters:
-        strict_ws_filter = strict_ws(isolation, ws_canonical)
+        strict_ws_filter = scope_ws
         rows = db.recall_by_filters(
             like_status_clause, tags_filter, after_dt, before_dt, source_type, limit, offset,
             ws_canonical=strict_ws_filter,
@@ -1090,7 +1094,7 @@ def search_memories(
                         status_filter=status_filter, query_embedding=query_embedding,
                         pool_cap=pool_cap,
                         content_like_cap=db.settings.content_like_cap,
-                        ws_canonical=strict_ws(isolation, ws_canonical))
+                        ws_canonical=scope_ws)
 
     # v0.9.7: strict isolation — hard-filter the candidate pool to the query's
     # canonical workspace. weak does NOT filter (it only nudges ranking in
@@ -1142,7 +1146,7 @@ def search_memories(
     if has_filters:
         total_estimate = db.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
-            ws_canonical=strict_ws(isolation, ws_canonical),
+            ws_canonical=scope_ws,
         )
     else:
         total_estimate = len(pool)
