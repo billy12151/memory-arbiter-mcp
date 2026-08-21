@@ -59,9 +59,9 @@ Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责�
 
 ## 0.14.0.dev2 破坏性升级
 
-当前 runtime 只接受 `conflict_groups_v2`。紧邻的 `local_text_evidence_v1` 和更老的 claim/memory-vector/section-vector 库都会只读识别为 legacy，并统一走公开的旁路 `mema upgrade`，没有公开的原地 conflict-only 升级。
+当前 runtime 只接受 `conflict_groups_v2`。紧邻的 `local_text_evidence_v1` 和更老的 claim/memory-vector/section-vector 库都会只读识别为 legacy，并统一通过公开的旁路 `mema upgrade`：前者走快速 conflict-only 路径并原样复用 evidence/vector，后者才重建 evidence/vector；两者都不在原库原地修改。
 
-升级必须停止旧 writer，并 drain/停止 semantic worker 后在排他窗口执行。先用 `PRAGMA wal_checkpoint(TRUNCATE)`（busy 必须为 0）再复制主库做回滚备份，不能在 WAL 尚有已提交帧时只复制 `.sqlite3`。升级保留记忆正文/历史、workspace alias/canonical、audit、backup receipt 和逻辑 evidence units，但重建 FTS 与 evidence vectors；旧 `conflicts`、`conflict_judgments`、`semantic_notices` 历史不迁移。目标通过 coverage/fingerprint 和 WAL checkpoint 后才切配置。`--yes` 只跳过“writer 已停且接受历史丢失”的确认，不会替你停进程、checkpoint 或备份。
+升级必须停止旧 writer，并 drain/停止 semantic worker 后在排他窗口执行。先用 `PRAGMA wal_checkpoint(TRUNCATE)`（busy 必须为 0）再复制主库做回滚备份，不能在 WAL 尚有已提交帧时只复制 `.sqlite3`。升级保留记忆正文/历史、workspace alias/canonical、audit、backup receipt 和 evidence；`local_text_evidence_v1` 的 FTS/evidence/vector 原样复用，更老架构才重建。旧 `conflicts`、`conflict_judgments`、`semantic_notices` 历史不迁移。目标通过 fingerprint 和 WAL checkpoint 后才切配置。`--yes` 只跳过“writer 已停且接受历史丢失”的确认，不会替你停进程、checkpoint 或备份。
 
 重建后设置持久化 `conflict_scan_required=true` 和 scan epoch。只有覆盖升级时 active memory 集合、且 detector version 匹配的完整全库 scan 成功后，才能用 CAS 清除该标志；部分分页、失败或旧 detector scan 都不能清除。仍成立的冲突由 scan 重新发现，已经通过正文更新解决的旧冲突不得复活。
 

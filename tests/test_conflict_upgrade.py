@@ -14,6 +14,7 @@ from memory_arbiter.db_generation import (
 from memory_arbiter.models import MemoryRecord
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.vnext_migration import (
+    build_conflict_only,
     _copy_preserved_tables,
     _fingerprint,
     _mark_conflict_rebuild_ready,
@@ -52,6 +53,15 @@ def test_destructive_copy_preserves_core_data_but_not_conflict_history(tmp_path:
         conn.execute("INSERT INTO semantic_notices VALUES(1,'legacy notice')")
         conn.execute("CREATE TABLE conflict_judgments(id INTEGER PRIMARY KEY, reason TEXT)")
         conn.execute("INSERT INTO conflict_judgments VALUES(1,'legacy judgment')")
+        conn.execute(
+            "INSERT INTO backup_replay_log("
+            "replay_key,memory_id,payload_hash,replayed_at,postprocess_status,"
+            "postprocess_stages,postprocess_error_code) VALUES(?,?,?,?,?,?,?)",
+            (
+                "receipt-1", memory_id, "payload-hash", "2026-08-20T00:00:00Z",
+                "failed", '{"evidence":"complete","semantic":"failed"}', "model_timeout",
+            ),
+        )
 
     target = MemoryDB(_settings(target_path, tmp_path))
     _copy_preserved_tables(source_path, target)
@@ -60,6 +70,14 @@ def test_destructive_copy_preserves_core_data_but_not_conflict_history(tmp_path:
         assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM memory_history").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM workspace_aliases").fetchone()[0] == 1
+        receipt = conn.execute(
+            "SELECT replay_key,memory_id,payload_hash,replayed_at,postprocess_status,"
+            "postprocess_stages,postprocess_error_code FROM backup_replay_log"
+        ).fetchone()
+        assert tuple(receipt) == (
+            "receipt-1", memory_id, "payload-hash", "2026-08-20T00:00:00Z",
+            "failed", '{"evidence":"complete","semantic":"failed"}', "model_timeout",
+        )
         assert conn.execute("SELECT COUNT(*) FROM conflicts").fetchone()[0] == 0
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='semantic_notices'"
@@ -194,6 +212,49 @@ def test_previous_generation_is_refused_until_destructive_upgrade(tmp_path: Path
         )
     assert CURRENT_SCHEMA_GENERATION != "local_text_evidence_v1"
     assert detect_database_generation(path) == "legacy"
+
+
+def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Path) -> None:
+    source_path = tmp_path / "previous.sqlite3"
+    target_path = tmp_path / "current.sqlite3"
+    settings = _settings(source_path, tmp_path)
+    source = MemoryDB(settings)
+    memory_id, _ = source.insert_memory(_memory(settings.defaults()), "project")
+    assert memory_id is not None
+    with source.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO memory_evidence("
+            "memory_id,memory_version,content_hash,unit_index,kind,text,start_offset,end_offset,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            (memory_id, 1, "a" * 64, 0, "text", "数据库使用 SQLite。", 0, 12, "2026-08-20T00:00:00Z"),
+        )
+        conn.execute(
+            "UPDATE migration_state SET value='local_text_evidence_v1' "
+            "WHERE key='schema_generation'"
+        )
+    before = _fingerprint(source_path)
+
+    result = build_conflict_only(source_path, target_path, settings)
+
+    assert result["ok"] is True
+    assert result["indexed"] == 0
+    assert result["evidence_reused"] is True
+    assert result["source_fingerprint"] == result["target_fingerprint"] == before
+    assert detect_database_generation(target_path) == "current"
+    with sqlite3.connect(target_path) as conn:
+        state = dict(conn.execute("SELECT key,value FROM migration_state"))
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(conflicts)")}
+        assert conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM conflicts").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='semantic_notices'"
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='conflict_judgments'"
+        ).fetchone() is None
+    assert {"revision", "member_versions", "value_groups", "notice_type"} <= columns
+    assert state["schema_generation"] == CURRENT_SCHEMA_GENERATION
+    assert state["conflict_scan_required"] == "true"
 
 
 def test_generation_switch_marker_is_atomic_with_scan_metadata(tmp_path: Path) -> None:

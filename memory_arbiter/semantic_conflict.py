@@ -46,10 +46,27 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
+PAIR_PROMPT_VERSION = "pair-v3"
+
+_PAIR_RESPONSE_FORMAT = {
+    "type": "json_object",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "attribute_a": {"type": "string"},
+            "value_a": {"type": "string"},
+            "attribute_b": {"type": "string"},
+            "value_b": {"type": "string"},
+        },
+        "required": ["attribute_a", "value_a", "attribute_b", "value_b"],
+        "additionalProperties": False,
+    },
+}
+
 _PAIR_PROMPT = """你只做条件抽槽，只输出一个 JSON 对象，不要解释或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
 attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中的数字、名称、状态或短策略。
-若任一侧不能可靠抽取，仍保留四键并将不能抽取的字段设为 null。不要输出 conflict、coexistence、winner、confidence 或额外字段。
+无论是否能可靠抽取，都必须输出全部四个字符串字段，不得省略字段。无法可靠抽取时将对应字段写成字符串 "__unknown__"；不要输出 null、conflict、coexistence、winner、confidence 或额外字段。
 例：A=生产数据库使用 MySQL。B=生产数据库使用 SQLite。
 输出：{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}"""
 
@@ -692,8 +709,29 @@ class LocalGGUFSemanticBackend:
     def _memory_text(record: dict[str, Any]) -> str:
         subject = record.get("subject") or ""
         tags = ", ".join(record.get("tags") or []) if isinstance(record.get("tags"), list) else str(record.get("tags") or "")
-        content = record.get("content") or ""
-        return f"subject: {subject}\ntags: {tags}\ncontent: {content}".strip()
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        fields = (
+            ("subject", subject), ("tags", tags),
+            ("workspace_canonical", record.get("workspace_canonical")),
+            ("memory_id", record.get("memory_id")), ("version", record.get("version")),
+            ("event_time", record.get("event_time")),
+            ("entity", metadata.get("entity")), ("scope", metadata.get("scope")),
+        )
+        return "; ".join(
+            f"{key}={value}" for key, value in fields if value not in (None, "", [])
+        )
+
+    @classmethod
+    def _pair_text(cls, left: dict[str, Any], right: dict[str, Any]) -> str:
+        """Serialize metadata first and leave both bounded quotes nearest the output."""
+        left_quote = str(left.get("quote") or left.get("content") or "")
+        right_quote = str(right.get("quote") or right.get("content") or "")
+        return (
+            f"A metadata: {cls._memory_text(left)}\n"
+            f"B metadata: {cls._memory_text(right)}\n"
+            "只根据以下证据原文抽取 attribute/value：\n"
+            f"A证据原文={left_quote}\nB证据原文={right_quote}"
+        )
 
     def _acquire_llm_for_call(self) -> Any | None:
         with self._cond:
@@ -743,7 +781,7 @@ class LocalGGUFSemanticBackend:
             if llm is None:
                 return ModelSignal(False, "backend_unavailable", None, "", None, "disabled")
             acquired = True
-            text = f"A: {self._memory_text(left)}\nB: {self._memory_text(right)}"
+            text = self._pair_text(left, right)
             with self._infer_lock:
                 out = llm.create_chat_completion(
                     messages=[{"role": "system", "content": _PAIR_PROMPT}, {"role": "user", "content": f"输入: {text}\n输出:"}],
@@ -751,6 +789,7 @@ class LocalGGUFSemanticBackend:
                     temperature=0.0,
                     top_p=0.9,
                     stop=["\n\n", "</s>"],
+                    response_format=_PAIR_RESPONSE_FORMAT,
                 )
             raw = out["choices"][0]["message"]["content"]
             return model_signal_from_text(raw)

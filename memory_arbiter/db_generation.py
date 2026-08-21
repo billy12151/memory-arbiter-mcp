@@ -89,8 +89,9 @@ def legacy_database_message(path: Path) -> str:
         "Stop every process that can write to this database, then run `mema upgrade`. "
         "Use `mema upgrade --dry-run` first to inspect prerequisites and the side-by-side "
         "target. The old database is kept for rollback, but old conflict, decision, and "
-        "semantic-notice history is not copied. Reindexing requires sqlite-vec, a local "
-        "GGUF embedding model, and llama-cpp-python."
+        "semantic-notice history is not copied. The immediately previous evidence schema "
+        "uses a fast conflict-only path; older schemas additionally require sqlite-vec, "
+        "a local GGUF embedding model, and llama-cpp-python for reindexing."
     )
 
 

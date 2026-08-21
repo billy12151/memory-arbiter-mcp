@@ -8,6 +8,7 @@ from typing import Any, TYPE_CHECKING
 from ..evidence import evidence_content_hash, local_text_units
 from ..semantic_conflict import (
     AttributeValueExtraction,
+    PAIR_PROMPT_VERSION,
     decide_evidence,
     evaluate_pair_extractions,
     notice_dedupe_key,
@@ -78,14 +79,24 @@ class EvidencePipeline:
             if self.settings.isolation == "strict" else None
         )
         by_peer: dict[int, tuple[dict[str, Any], Any, Any]] = {}
-        for unit in local_text_units(str(record.get("subject") or ""), content):
-            if unit.kind != "text":
-                continue
-            embedded = embedder.embed_text(prefix="", body=unit.text)
-            if not embedded.embedding:
-                continue
+        content_hash = evidence_content_hash(content)
+        unit_vectors = self.db.evidence.current_text_vectors(
+            int(memory_id), int(record.get("version") or 1), content_hash,
+        )
+        if not unit_vectors:
+            # Recovery fallback for an incomplete/legacy evidence publish. The
+            # normal write path has just published these vectors, so avoid a
+            # second GGUF embedding pass in the common synchronous-notice path.
+            unit_vectors = []
+            for unit in local_text_units(str(record.get("subject") or ""), content):
+                if unit.kind != "text":
+                    continue
+                embedded = embedder.embed_text(prefix="", body=unit.text)
+                if embedded.embedding:
+                    unit_vectors.append((unit, list(embedded.embedding)))
+        for unit, embedding in unit_vectors:
             for hit in self.db.evidence_knn(
-                embedded.embedding, k=5, workspace=workspace,
+                embedding, k=5, workspace=workspace,
                 exclude_memory_id=memory_id,
             ):
                 if hit.get("kind") != "text":
@@ -219,6 +230,7 @@ class EvidencePipeline:
                 title=f"Possible memory change with #{peer_id}", message=decision.reason,
                 payload={
                     "route": "notice_ready", "reason": gate.reason,
+                    "prompt_version": PAIR_PROMPT_VERSION,
                     "anchors": decision.anchors,
                     "slot_key": {"entity": entity, "attribute": gate.attribute, "scope": scope},
                     "slot_provenance": {"entity": "metadata", "scope": "metadata", "attribute": "bidirectional_extraction"},

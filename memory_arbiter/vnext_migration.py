@@ -20,6 +20,7 @@ from .db import MemoryDB
 from .db_generation import (
     CONFLICT_DETECTOR_VERSION,
     CURRENT_SCHEMA_GENERATION,
+    PREVIOUS_SCHEMA_GENERATIONS,
     detect_database_generation,
 )
 from .evidence import local_text_units
@@ -42,6 +43,20 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone() is not None
+
+
+def is_previous_evidence_generation(path: Path) -> bool:
+    """Return whether path uses the immediately previous evidence schema."""
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+            if not _table_exists(conn, "migration_state"):
+                return False
+            row = conn.execute(
+                "SELECT value FROM migration_state WHERE key='schema_generation'"
+            ).fetchone()
+            return bool(row and str(row[0]) in PREVIOUS_SCHEMA_GENERATIONS)
+    except sqlite3.Error:
+        return False
 
 
 def _counts_on_connection(conn: sqlite3.Connection) -> dict[str, int]:
@@ -75,6 +90,7 @@ def _fingerprint_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
         ("workspace_canonicals", "id"),
         ("workspace_aliases", "alias_workspace"),
         ("workspace_alias_events", "id"),
+        ("backup_replay_log", "replay_key"),
     ):
         digest = hashlib.sha256()
         count = 0
@@ -128,7 +144,11 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
         )
     finally:
         conn.close()
-    vector_bytes = units * int((settings.vec_dim if settings is not None else Settings.vec_dim)) * 4
+    conflict_only = is_previous_evidence_generation(source)
+    vector_bytes = (
+        0 if conflict_only
+        else units * int((settings.vec_dim if settings is not None else Settings.vec_dim)) * 4
+    )
     # build()/final_sync() create the parent directory themselves; inspect
     # may run first (dry run) against a not-yet-existing path.
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +156,7 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
     required = source.stat().st_size + vector_bytes * 2 + 64 * 1024 * 1024
     return {
         "source": str(source), "target": str(target),
+        "upgrade_mode": "conflict_only" if conflict_only else "full_evidence_rebuild",
         "source_bytes": source.stat().st_size, "counts": _counts(source),
         "destructive_history_loss": list(DESTRUCTIVELY_REBUILT_TABLES),
         "destructive_history_counts": _destructive_counts(source),
@@ -143,6 +164,99 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
         "estimated_vector_bytes": vector_bytes,
         "free_bytes": free_bytes, "required_bytes": required,
         "disk_ok": free_bytes >= required, "target_exists": target.exists(),
+    }
+
+
+def _current_conflict_schema(settings: Settings) -> list[str]:
+    """Generate current conflict DDL from the authoritative schema definition."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        from .db.schema import SchemaStore
+
+        fake_db = type("SchemaTemplateDB", (), {
+            "settings": replace(settings, enable_sqlite_vec=False),
+            "state": type("State", (), {"warn": lambda *_args: None})(),
+            "_sqlite_vec_loadable": False,
+        })()
+        SchemaStore(fake_db)._init_schema(conn)
+        rows = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='conflicts' AND sql IS NOT NULL "
+            "ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END,name"
+        ).fetchall()
+        return [str(row["sql"]) for row in rows]
+    finally:
+        conn.close()
+
+
+def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[str, Any]:
+    """Clone a dev1 evidence DB and transactionally replace only conflict state."""
+    plan = inspect(source, target, settings)
+    if target.exists():
+        return {"ok": False, "error": "target_exists_use_new_path", "plan": plan}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source_conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    target_conn = sqlite3.connect(target)
+    try:
+        source_conn.backup(target_conn)
+    finally:
+        source_conn.close()
+        target_conn.close()
+    os.chmod(target, 0o600)
+
+    source_fp = _fingerprint(source)
+    epoch = uuid.uuid4().hex
+    conn = sqlite3.connect(target)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DROP TABLE IF EXISTS semantic_notices")
+        conn.execute("DROP TABLE IF EXISTS conflict_judgments")
+        conn.execute("DROP TABLE IF EXISTS conflicts")
+        for statement in _current_conflict_schema(settings):
+            conn.execute(statement)
+        boundary = canonical_scan_boundary(active_scan_boundary_on_connection(conn))
+        state = {
+            "schema_generation": CURRENT_SCHEMA_GENERATION,
+            "phase": "ready",
+            "source_path": str(source),
+            "conflict_scan_required": "true",
+            "conflict_scan_epoch": epoch,
+            "conflict_scan_detector_version": CONFLICT_DETECTOR_VERSION,
+            "conflict_scan_boundary": boundary,
+        }
+        for key, value in state.items():
+            conn.execute(
+                "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+                (key, value),
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    target_fp = _fingerprint(target)
+    preserved = all(source_fp.get(key) == target_fp.get(key) for key in source_fp)
+    destructive_empty = all(value == 0 for value in _destructive_counts(target).values())
+    switch_ready = preserved and destructive_empty and _checkpoint(target)
+    if switch_ready:
+        _remove_sidecars(target)
+    return {
+        "ok": switch_ready,
+        "target": str(target),
+        "upgrade_mode": "conflict_only",
+        "indexed": 0,
+        "evidence_reused": True,
+        "source_stable": preserved,
+        "source_fingerprint": source_fp,
+        "target_fingerprint": target_fp,
+        "destructive_tables_empty": destructive_empty,
+        "conflict_scan": state,
+        "switch_ready": switch_ready,
     }
 
 
@@ -279,6 +393,10 @@ def _target_owned_by_source(target: Path, source: Path) -> bool:
 
 
 def build(source: Path, target: Path, settings: Settings, *, resume: bool = False, progress: bool = True) -> dict[str, Any]:
+    if is_previous_evidence_generation(source):
+        if resume:
+            return {"ok": False, "error": "conflict_only_upgrade_is_not_resumable"}
+        return build_conflict_only(source, target, settings)
     plan = inspect(source, target, settings)
     if plan.get("ok") is False:
         return dict(plan)

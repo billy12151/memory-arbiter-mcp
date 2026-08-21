@@ -273,3 +273,28 @@ def test_doctor_cli_deep_probe_uses_settings_embedder(monkeypatch, tmp_path) -> 
     assert probes and probes[0].status == "pass"
     assert "skipped" in probes[0].detail
     assert report.overall.value == "info"
+
+
+def test_doctor_cli_reports_legacy_database_as_upgrade_required(tmp_path: Path) -> None:
+    from memory_arbiter.db import MemoryDB
+    from memory_arbiter.doctor import doctor_overview_cli, report_to_dict
+
+    settings = Settings(
+        db_path=tmp_path / "legacy.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+    )
+    db = MemoryDB(settings)
+    with db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE migration_state SET value='local_text_evidence_v1' "
+            "WHERE key='schema_generation'"
+        )
+
+    report = doctor_overview_cli(settings)
+    payload = report_to_dict(report)
+    assert payload["overall"] == "critical"
+    assert payload["summary"]["mode"] == "upgrade_required"
+    assert payload["findings"][0]["check_id"] == "database.upgrade_required"
+    assert payload["findings"][0]["evidence"]["generation"] == "legacy"
+    assert "mema upgrade --dry-run" in payload["findings"][0]["fix_hint"]
+    assert "notice_type" not in payload["findings"][0]["detail"]

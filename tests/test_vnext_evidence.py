@@ -40,6 +40,15 @@ class FakeEmbedder:
         return EmbedResult(vector, False, len(text), len(text))
 
 
+class CountingEmbedder(FakeEmbedder):
+    calls = 0
+
+    @classmethod
+    def embed_text(cls, prefix: str, body: str, max_body_chars=None) -> EmbedResult:
+        cls.calls += 1
+        return super().embed_text(prefix, body, max_body_chars)
+
+
 def make_tools(tmp_path: Path, *, semantic_enabled: bool = False) -> MemoryTools:
     pytest.importorskip("sqlite_vec")
     model = tmp_path / "fake.gguf"
@@ -110,6 +119,32 @@ def test_write_notice_requires_consistent_bidirectional_qwen_mapping() -> None:
     )
     assert rejected.state == "review_candidate"
     assert rejected.reason == "bidirectional_mapping_mismatch"
+
+
+def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> None:
+    from memory_arbiter.semantic_conflict import (
+        LocalGGUFSemanticBackend, PAIR_PROMPT_VERSION, _PAIR_PROMPT,
+        _PAIR_RESPONSE_FORMAT,
+    )
+
+    text = LocalGGUFSemanticBackend._pair_text(
+        {"subject": "数据库", "quote": "数据库为 MySQL。", "content": "不应使用的全文",
+         "metadata": {"entity": "checkout", "scope": "global"}},
+        {"subject": "数据库", "quote": "数据库为 SQLite。"},
+    )
+    assert text.index("A metadata:") < text.index("A证据原文=数据库为 MySQL。")
+    assert text.index("B metadata:") < text.index("B证据原文=数据库为 SQLite。")
+    assert "entity=checkout" in text and "scope=global" in text
+    assert "不应使用的全文" not in text
+    assert PAIR_PROMPT_VERSION == "pair-v3"
+    assert "必须输出全部四个字符串字段" in _PAIR_PROMPT
+    assert '"__unknown__"' in _PAIR_PROMPT
+    assert "设为 null" not in _PAIR_PROMPT
+    schema = _PAIR_RESPONSE_FORMAT["schema"]
+    assert set(schema["required"]) == {
+        "attribute_a", "value_a", "attribute_b", "value_b",
+    }
+    assert schema["additionalProperties"] is False
 
 
 def test_write_notice_rejects_whole_quote_values_but_accepts_short_values() -> None:
@@ -283,6 +318,22 @@ def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, mo
     # The enqueue observation is taken inside the evidence worker after
     # publish, so this still proves semantic work was chained behind evidence.
     assert calls == [(result["data"]["id"], True, 1)]
+
+
+def test_semantic_job_reuses_just_published_evidence_vectors(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path, semantic_enabled=False)
+    tools.settings.semantic_conflict_on_write = "off"
+    CountingEmbedder.calls = 0
+    tools._embedder = CountingEmbedder()
+    written = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    indexed_calls = CountingEmbedder.calls
+    assert indexed_calls > 0
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
+    tools._process_semantic_conflict_job(written["id"], _job_snapshot(tools, written["id"]))
+
+    assert CountingEmbedder.calls == indexed_calls
 
 
 def test_evidence_publish_rejects_stale_snapshot(tmp_path: Path) -> None:

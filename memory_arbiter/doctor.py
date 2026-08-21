@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from .config import Settings
+from .db_generation import detect_database_generation
 from .degrade import DegradeState
 from .models import utc_now_iso
 
@@ -152,6 +153,24 @@ def open_ro_connection(path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def doctor_overview_cli(settings: Settings, deep: bool = False) -> OverviewReport:
+    generation = detect_database_generation(settings.db_path)
+    if generation == "legacy":
+        return OverviewReport(
+            utc_now_iso(),
+            Severity.CRITICAL,
+            [Finding(
+                "database.upgrade_required",
+                "database",
+                Severity.CRITICAL,
+                "error",
+                "database.upgrade_required",
+                "legacy database generation; current code will not open or modify it",
+                {"generation": generation, "path": str(settings.db_path)},
+                "Stop all writers, then run `mema upgrade --dry-run` before `mema upgrade`.",
+            )],
+            {"mode": "upgrade_required", "total_memories": 0},
+        )
+
     def _cli_embedder_probe() -> tuple[Any, list[str]]:
         # The CLI ambulance path has no MemoryTools; build the embedder
         # directly from settings so --deep actually probes the model its

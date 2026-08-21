@@ -32,19 +32,31 @@ def _format_bytes(value: int) -> str:
 
 
 def _render_plan(plan: dict[str, Any]) -> str:
+    conflict_only = plan.get("upgrade_mode") == "conflict_only"
+    mode_lines = (
+        [
+            "This is a conflict-domain-only upgrade from the previous evidence schema.",
+            "Existing memory_evidence and vector tables are cloned unchanged; no model",
+            "loading or embedding recomputation is performed.",
+        ]
+        if conflict_only else
+        [
+            "The database structure and evidence index must be rebuilt side by side.",
+            "Reindex prerequisites: sqlite-vec, llama-cpp-python, and a configured local",
+            "GGUF embedding model. Run with --dry-run first to verify them and disk space.",
+        ]
+    )
     return "\n".join([
         "Memory Arbiter upgrade",
         "",
         "This upgrade significantly improves long-document recall and conflict discovery.",
-        "The database structure and evidence index must be rebuilt side by side.",
+        *mode_lines,
         "STOP all MCP servers, consoles, workers, and other processes that can write",
         "to the source database for the entire migration. Otherwise the upgrade refuses",
         "to publish the target. The source database remains unchanged for rollback.",
         "WARNING: old conflict, decision, and semantic-notice records are permanently",
         "excluded from the new database; they remain only in the old database.",
         "Memories, memory history, workspace governance, and evidence are preserved.",
-        "Reindex prerequisites: sqlite-vec, llama-cpp-python, and a configured local",
-        "GGUF embedding model. Run with --dry-run first to verify them and disk space.",
         "",
         f"Memories: {int((plan.get('counts') or {}).get('memories') or 0)}",
         f"Estimated evidence units: {int(plan.get('estimated_evidence_units') or 0)}",
@@ -161,9 +173,9 @@ def run_upgrade(
         epilog=(
             "Before execution, stop every MCP server, console, worker, or other writer "
             "using the source. The source is retained, but old conflict, decision, and "
-            "semantic-notice records are not copied to the target. Reindexing requires "
-            "sqlite-vec, llama-cpp-python, and a configured local GGUF embedding model. "
-            "Run --dry-run first."
+            "semantic-notice records are not copied to the target. The previous evidence "
+            "schema uses a fast conflict-only path; older schemas require sqlite-vec, "
+            "llama-cpp-python, and a configured local GGUF embedding model. Run --dry-run first."
         ),
     )
     parser.add_argument("--source", type=Path, help="Legacy source database (default: configured db_path).")
@@ -201,7 +213,11 @@ def run_upgrade(
         print(json.dumps(result, indent=2) if args.json else result["error"], file=sys.stderr)
         return 2
 
-    preflight_errors = _preflight(settings, target)
+    plan = inspect(source, target, settings)
+    preflight_errors = (
+        [] if plan.get("upgrade_mode") == "conflict_only"
+        else _preflight(settings, target)
+    )
     if preflight_errors:
         result = {
             "ok": False,
@@ -218,7 +234,6 @@ def run_upgrade(
         )
         return 2
 
-    plan = inspect(source, target, settings)
     if plan.get("ok") is False:
         error = plan.get("error", "inspect_failed")
         result = {"ok": False, "error": error, "plan": plan}

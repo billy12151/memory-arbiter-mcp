@@ -134,6 +134,40 @@ class EvidenceStore:
             "vectors": vectors,
         }
 
+    def current_text_vectors(
+        self, memory_id: int, memory_version: int, content_hash: str,
+    ) -> list[tuple[EvidenceUnit, list[float]]]:
+        """Return the exact current text units and their already-published vectors."""
+        if not self._db.state.sqlite_vec_available:
+            return []
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    """SELECT e.unit_index,e.kind,e.text,e.start_offset,e.end_offset,
+                              v.embedding
+                       FROM memory_evidence e
+                       JOIN memory_evidence_vec v ON v.id=e.id
+                       WHERE e.memory_id=? AND e.memory_version=? AND e.content_hash=?
+                         AND e.kind='text'
+                       ORDER BY e.unit_index""",
+                    (int(memory_id), int(memory_version), str(content_hash)),
+                ).fetchall()
+            return [
+                (
+                    EvidenceUnit(
+                        kind=str(row["kind"]), text=str(row["text"]),
+                        start_offset=int(row["start_offset"]),
+                        end_offset=int(row["end_offset"]),
+                        unit_index=int(row["unit_index"]),
+                    ),
+                    self._blob_to_vector(bytes(row["embedding"])),
+                )
+                for row in rows
+                if row["embedding"] is not None
+            ]
+        except (sqlite3.Error, TypeError, ValueError, struct.error):
+            return []
+
     def knn(
         self,
         query_embedding: list[float],

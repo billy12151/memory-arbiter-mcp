@@ -103,11 +103,11 @@ JSONL replay is previewable without authorization. Applying replay requires expl
 | Source database | Runtime behavior | Public upgrade path | Retained / rebuilt |
 | --- | --- | --- | --- |
 | New/empty or `conflict_groups_v2` | Starts normally; current additive migrations may run | None | Existing current data |
-| `local_text_evidence_v1` (immediately previous generation) | Refused without modification | Side-by-side `mema upgrade` | Core/public data retained; conflict history omitted; evidence vectors rebuilt |
+| `local_text_evidence_v1` (immediately previous generation) | Refused without modification | Side-by-side `mema upgrade`, fast conflict-only path | Core/public data retained; conflict history omitted; evidence/vector tables reused unchanged |
 | Older claim + memory/section-vector generations | Refused without modification | Same side-by-side `mema upgrade` | Core/public data retained; evidence units generated/retained and vectors rebuilt |
 | Unknown, partial, failed/resuming target | Refused | Diagnose with `mema doctor --json`; repair/resume only with the lower-level migration workflow | Never open as current until verification succeeds |
 
-There is no public in-place conflict-only upgrade. `mema upgrade` requires sqlite-vec, a readable configured GGUF embedding model, `llama-cpp-python` (the `semantic-local` extra also supplies the embedding runtime), a writable target directory, and enough free space. The separate optional semantic-conflict Qwen model is not a migration prerequisite.
+There is no public in-place upgrade: both paths build and verify a side-by-side target. The older-generation full rebuild requires sqlite-vec, a readable configured GGUF embedding model, `llama-cpp-python` (the `semantic-local` extra also supplies the embedding runtime), a writable target directory, and enough free space. The `local_text_evidence_v1` conflict-only path reuses existing evidence/vector state and does not load a model. The separate optional semantic-conflict Qwen model is not a migration prerequisite.
 
 ### WAL-safe procedure
 
@@ -124,7 +124,7 @@ There is no public in-place conflict-only upgrade. `mema upgrade` requires sqlit
 4. Run `mema upgrade`; restart and verify with `mema doctor --json`.
 5. Complete the epoch-pinned full `scan_candidates` pass shown by status/doctor.
 
-The side-by-side copy retains memory content/history, backup replay receipts, workspace aliases/canonicals, audit, and logical evidence units. It rebuilds FTS and republishes vectors in the configured embedding space. It intentionally starts with empty new conflict/notice state: old `conflicts`, `conflict_judgments`, and `semantic_notices` history are not migrated. Target publication requires row/fingerprint stability, complete eligible evidence coverage, empty destructive tables, and a successful target `wal_checkpoint(TRUNCATE)` before WAL/SHM removal and config switch.
+The side-by-side copy retains memory content/history, backup replay receipts, workspace aliases/canonicals, audit, and evidence. The previous evidence generation clones FTS/evidence/vector tables unchanged and replaces only the conflict domain; older generations rebuild and republish vectors. It intentionally starts with empty new conflict/notice state: old `conflicts`, `conflict_judgments`, and `semantic_notices` history are not migrated. Target publication requires fingerprint stability, empty destructive tables, and a successful target `wal_checkpoint(TRUNCATE)` before WAL/SHM removal and config switch; the full-rebuild path additionally requires complete eligible evidence coverage.
 
 On success `conflict_scan_required=true` and a persistent epoch are recorded. Only a full scan covering the upgrade-time active set with the matching detector can CAS-clear it. A partial page, failed scan, or old detector cannot. `--yes` only skips the prompt acknowledging writer shutdown and permanent conflict/judgment/notice-history loss; it does not stop processes, checkpoint/back up the source, or relax verification. `--no-switch` leaves configuration untouched. Environment-overridden/mismatched config paths require the printed manual switch.
 
