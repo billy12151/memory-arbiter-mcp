@@ -100,25 +100,22 @@ class EvidencePipeline:
                 trusted_memory = int(trusted.get("memory_id") or 0)
                 trusted_revision = trusted.get("revision")
                 trusted_action = str(trusted.get("action") or "")
-                # Spec §15.3 preconditions: applying status, revision match,
-                # target in the plan (or the resolution memory), and an action
-                # consistent with that plan step.
+                # Spec §15.3 preconditions: applying status, exact revision,
+                # target in the plan, and the exact action from that plan step.
                 revision_ok = (
-                    trusted_revision is None
-                    or int(trusted_revision) == int(live.get("revision") or 0)
+                    trusted_revision is not None
+                    and int(trusted_revision) == int(live.get("revision") or 0)
                 )
                 step = next(
                     (item for item in plan if int(item.get("memory_id") or 0) == trusted_memory),
                     None,
                 )
                 action_ok = (
-                    not trusted_action or step is None
-                    or str(step.get("action") or "") == trusted_action
+                    bool(trusted_action)
+                    and step is not None
+                    and str(step.get("action") or "") == trusted_action
                 )
-                target_ok = trusted_memory in plan_ids or (
-                    live.get("resolution_memory_id") is not None
-                    and trusted_memory == int(live["resolution_memory_id"])
-                )
+                target_ok = trusted_memory in plan_ids
                 if revision_ok and action_ok and target_ok:
                     applying_groups.append(live)
         applying_groups.extend(

@@ -1131,7 +1131,8 @@ def search_memories(
                     False, 0, "empty",
                 )
             fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(
-                db, workspace, tags, limit, like_status_clause, warnings, offset=offset,
+                db, workspace, tags, limit, like_status_clause, warnings,
+                offset=offset, ws_canonical=scope_ws,
             )
             return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_fallback")
 

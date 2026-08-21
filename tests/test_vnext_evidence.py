@@ -2253,6 +2253,130 @@ def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkey
     assert fresh == []
 
 
+def test_applying_reentry_does_not_suppress_different_slot(tmp_path: Path, monkeypatch) -> None:
+    """Two applying-group members can still surface a conflict on another slot."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "production"}
+    a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+
+    from memory_arbiter.models import ConflictMember, ConflictValueGroup
+
+    def member(mid, value):
+        quote = f"database is {value}"
+        return ConflictMember(
+            memory_id=mid, version=1, attribute_raw="数据库选型", value_raw=value,
+            normalized_attribute="数据库选型", normalized_value=value, evidence_quote=quote,
+            evidence_span=(0, len(quote)), content_hash=(str(mid) * 64)[:64],
+            direction="a_to_b", prompt_version="p1", detector_version="d1",
+        ).to_dict()
+
+    recorded = tools.memory_repair("record_conflict", {
+        "slot_key": {"entity": "svc", "attribute": "数据库选型", "scope": "production"},
+        "members": [member(a["id"], "mysql"), member(b["id"], "sqlite")],
+        "value_groups": [
+            ConflictValueGroup("mysql", "MySQL", (f"{a['id']}@1",)).to_dict(),
+            ConflictValueGroup("sqlite", "SQLite", (f"{b['id']}@1",)).to_dict(),
+        ],
+        "detector_version": "d1", "prompt_version": "p1", "source": "scan",
+        "reason": "db conflict", "status": "open",
+    })
+    conflict_id = recorded["data"]["conflict_id"]
+    tools.memory("judge", {
+        "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"},
+                       {"memory_id": b["id"], "action": "use_as_resolution"}],
+        "resolution_memory_id": b["id"],
+    })
+
+    tools.db.edit_memory_intent(a["id"], new_content="连接池上限为 99。", reason="apply")
+    updated = tools.db.get_memory(a["id"])
+    hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "连接池上限为 10。",
+             "start_offset": 0, "end_offset": 11, "distance": 0.1}]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: list(hits))
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
+    snapshot = {
+        "memory_id": a["id"], "version": updated["version"],
+        "content_hash": evidence_content_hash(updated["content"]),
+        "trusted_applying_context": {
+            "conflict_id": conflict_id, "revision": 2, "memory_id": a["id"],
+            "action": "update_current_claim", "chosen_value": "sqlite",
+        },
+    }
+
+    result = tools._process_semantic_conflict_job(a["id"], snapshot)
+
+    assert result["outcome"] == "notices_created"
+    assert result["notices_created"] == 1
+    notices = [n for n in tools.db.list_semantic_notices(status="open")
+               if {n.get("memory_id"), n.get("peer_id")} == {a["id"], b["id"]}]
+    assert len(notices) == 1
+    assert notices[0]["slot_key"]["attribute"] == "连接池上限"
+
+
+@pytest.mark.parametrize("missing_field", ["revision", "action"])
+def test_applying_reentry_context_requires_revision_and_action(
+    tmp_path: Path, monkeypatch, missing_field: str,
+) -> None:
+    """Incomplete trusted context must fail closed instead of suppressing a notice."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "production"}
+    a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+
+    from memory_arbiter.models import ConflictMember, ConflictValueGroup
+
+    def member(mid, value):
+        quote = f"database is {value}"
+        return ConflictMember(
+            memory_id=mid, version=1, attribute_raw="数据库选型", value_raw=value,
+            normalized_attribute="数据库选型", normalized_value=value, evidence_quote=quote,
+            evidence_span=(0, len(quote)), content_hash=(str(mid) * 64)[:64],
+            direction="a_to_b", prompt_version="p1", detector_version="d1",
+        ).to_dict()
+
+    recorded = tools.memory_repair("record_conflict", {
+        "slot_key": {"entity": "svc", "attribute": "数据库选型", "scope": "production"},
+        "members": [member(a["id"], "mysql"), member(b["id"], "sqlite")],
+        "value_groups": [
+            ConflictValueGroup("mysql", "MySQL", (f"{a['id']}@1",)).to_dict(),
+            ConflictValueGroup("sqlite", "SQLite", (f"{b['id']}@1",)).to_dict(),
+        ],
+        "detector_version": "d1", "prompt_version": "p1", "source": "scan",
+        "reason": "db conflict", "status": "open",
+    })
+    conflict_id = recorded["data"]["conflict_id"]
+    tools.memory("judge", {
+        "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"},
+                       {"memory_id": b["id"], "action": "use_as_resolution"}],
+        "resolution_memory_id": b["id"],
+    })
+    monkeypatch.setattr(tools.db, "list_open_conflicts_for_memory_ids", lambda *a_, **k: [])
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
+    hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
+             "start_offset": 0, "end_offset": 18, "distance": 0.1}]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: list(hits))
+    context = {
+        "conflict_id": conflict_id, "revision": 2, "memory_id": a["id"],
+        "action": "update_current_claim", "chosen_value": "sqlite",
+    }
+    context.pop(missing_field)
+    snapshot = _job_snapshot(tools, a["id"])
+    snapshot["trusted_applying_context"] = context
+
+    result = tools._process_semantic_conflict_job(a["id"], snapshot)
+
+    assert result["outcome"] == "notices_created"
+    assert result["notices_created"] == 1
+
+
 def test_scan_candidates_qwen_enhancement_populates_value_groups(tmp_path: Path, monkeypatch) -> None:
     """Spec §7.1: bounded Qwen enhancement enriches rule candidates in-place."""
     tools = make_tools(tmp_path)

@@ -1,7 +1,8 @@
 """Workspace three-tier isolation + alias canonicalization (none/weak/strict).
 
 Design (see memory: workspace-isolation-design):
-  - none   : workspace ignored on recall; no ordering effect; new ws silent.
+  - none   : an explicit workspace scopes that query; omission spans the library;
+             no ranking effect; new ws silent.
   - weak   : recall always whole-DB (never filtered); passing ws only soft-reranks
              (same-ws boost, cross-ws penalty). New ws → write_hint.
   - strict : write requires ws (empty → error); recall without ws → error;
@@ -10,8 +11,8 @@ Design (see memory: workspace-isolation-design):
              memory_activate(authorized=true).
 
 Alias canonicalization (double-store): memories.workspace (raw) +
-memories.workspace_canonical (resolved). Runs only when isolation != none.
-Without an embedder it degrades to exact string identity.
+memories.workspace_canonical (resolved). Runs in every isolation mode; without an
+embedder it degrades to exact string identity.
 """
 from pathlib import Path
 import hashlib
@@ -269,6 +270,51 @@ def test_none_explicit_workspace_filter_scopes_results(tmp_path):
     # Explicit filter scopes to that workspace only; no filter spans all.
     assert [m["workspace"] for m in with_ws] == ["projA"]
     assert sorted(m["workspace"] for m in without) == ["projA", "projB"]
+
+
+def test_none_explicit_workspace_filter_scopes_empty_query_pagination(tmp_path):
+    tools = make_tools(tmp_path, "none")
+    for index in range(3):
+        _write(tools, f"alpha browse {index}", "projA")
+        _write(tools, f"beta browse {index}", "projB")
+
+    first = tools.memory_search(query="", workspace="projA", limit=2)
+    second = tools.memory_search(query="", workspace="projA", limit=2, offset=2)
+
+    assert [m["workspace"] for m in _results(first)] == ["projA", "projA"]
+    assert [m["workspace"] for m in _results(second)] == ["projA"]
+    assert first["data"]["total_estimate"] == 3
+    assert first["data"]["has_more"] is True
+    assert second["data"]["has_more"] is False
+
+
+def test_none_explicit_workspace_filter_scopes_recent_fallback(tmp_path):
+    tools = make_tools(tmp_path, "none")
+    _write(tools, "alpha recent", "projA")
+    _write(tools, "beta recent", "projB")
+
+    result = tools.memory_search(query="no-direct-hit-zzzz", workspace="projA", limit=10)
+
+    assert result["data"]["retrieval_mode"] == "recent_fallback"
+    assert [m["workspace"] for m in _results(result)] == ["projA"]
+    assert result["data"]["total_estimate"] == 1
+
+
+def test_none_explicit_workspace_filter_scopes_expired_paths(tmp_path):
+    tools = make_tools(tmp_path, "none")
+    alpha_ids = [_write(tools, f"alpha archived {index}", "projA")["data"]["id"] for index in range(3)]
+    beta_id = _write(tools, "beta archived", "projB")["data"]["id"]
+    for memory_id in [*alpha_ids, beta_id]:
+        tools.memory_supersede(memory_id=memory_id, reason="archived", authorized=True)
+
+    direct = tools.memory_search_expired(query="archived", workspace="projA", limit=10)
+    fallback = tools.memory_search_expired(query="no-direct-hit-zzzz", workspace="projA", limit=2, offset=1)
+
+    assert [m["workspace"] for m in _results(direct)] == ["projA", "projA", "projA"]
+    assert [m["workspace"] for m in _results(fallback)] == ["projA", "projA"]
+    assert fallback["data"]["retrieval_mode"] == "recent_fallback"
+    assert fallback["data"]["total_estimate"] == 3
+    assert fallback["data"]["has_more"] is False
 
 
 # ── strict: mandatory ws, hard filter, blocking new ws ──────────────────────
