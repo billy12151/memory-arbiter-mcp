@@ -58,6 +58,12 @@ class Settings:
     # Lower = stricter. ~0.16 merges 金营项目/金科营销项目; ~0.43 keeps unrelated
     # projects distinct, so 0.25 cleanly separates synonyms from distinct workspaces.
     workspace_match_distance: float = 0.25
+    # Spec §11: Qwen arbitrates only among candidates the vector already brought
+    # within range; it must not resurrect an over-distance name into an AUTO
+    # merge. Defaults to the merge threshold, and the pool is capped at top-3
+    # (a real-library A/B showed top-5 strictly worse: more misses, no gains).
+    workspace_qwen_candidate_distance: float = 0.25
+    workspace_qwen_candidate_top_k: int = 3
     update_check_enabled: bool = True
     tool_profile: str = "product"
     semantic_conflict_enabled: bool = False
@@ -278,6 +284,14 @@ class Settings:
             workspace_match_distance=clamp_float(
                 pick_float_field(cfg.get("workspace_match_distance"), "MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE", 0.25, name="workspace_match_distance"),
                 0.0, 2.0, name="workspace_match_distance", warnings=config_warnings,
+            ),
+            workspace_qwen_candidate_distance=clamp_float(
+                pick_float_field(cfg.get("workspace_qwen_candidate_distance"), "MEMORY_ARBITER_WORKSPACE_QWEN_CANDIDATE_DISTANCE", 0.25, name="workspace_qwen_candidate_distance"),
+                0.0, 2.0, name="workspace_qwen_candidate_distance", warnings=config_warnings,
+            ),
+            workspace_qwen_candidate_top_k=clamp_int(
+                pick_int_field(cfg.get("workspace_qwen_candidate_top_k"), "MEMORY_ARBITER_WORKSPACE_QWEN_CANDIDATE_TOP_K", 3, name="workspace_qwen_candidate_top_k"),
+                1, 5, name="workspace_qwen_candidate_top_k", warnings=config_warnings,
             ),
             update_check_enabled=update_check_enabled,
             tool_profile=tool_profile,

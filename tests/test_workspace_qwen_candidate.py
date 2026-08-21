@@ -72,12 +72,17 @@ def make_tools(tmp_path: Path, isolation: str) -> MemoryTools:
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
 
-def _force_undecided_with_candidate(t: MemoryTools, backend, similar_name="金营项目"):
-    """Patch resolver → undecided + a candidate, and inject a stub backend."""
+def _force_undecided_with_candidate(t: MemoryTools, backend, similar_name="金营项目", distance=0.2):
+    """Patch resolver → undecided + a candidate, and inject a stub backend.
+
+    The candidate distance defaults to 0.2 (inside workspace_match_distance): a
+    real near-miss the vector brought within range, which is the only situation
+    where Qwen is allowed to arbitrate an AUTO merge. Over-distance candidates
+    (e.g. 0.4) are filtered out before Qwen sees them by design."""
     def fake_resolve(ws_raw, embedder=None, *, match_distance=None, register_new=True):
         return {
             "canonical": ws_raw, "is_new": True, "matched_by": "new",
-            "distance": None, "similar": [{"name": similar_name, "distance": 0.4}],
+            "distance": None, "similar": [{"name": similar_name, "distance": distance}],
             "rejected_canonicals": [],
         }
     t.db.resolve_workspace_canonical = fake_resolve  # type: ignore
@@ -193,8 +198,8 @@ def test_rejected_candidate_reason_is_qwen_rejected(tmp_path):
         return {
             "canonical": ws_raw, "is_new": True, "matched_by": "new", "distance": None,
             "similar": [
-                {"name": "金营项目", "distance": 0.4},
-                {"name": "别的项目", "distance": 0.45},
+                {"name": "金营项目", "distance": 0.18},
+                {"name": "别的项目", "distance": 0.22},
             ],
             "rejected_canonicals": ["金营项目"],
         }
@@ -256,3 +261,60 @@ def test_workspace_suggester_uses_constrained_decoding() -> None:
     assert signal.candidate == "金营项目"
     assert signal.relation == "alias"
     assert signal.error is None
+
+
+# ── Qwen only arbitrates in-threshold candidates (2026-08-21 real-lib A/B) ───
+#
+# A dry-run over the real 547-memory library had Qwen answer
+# "same_project@0.95" merging openclaw into proto-test at cosine 0.357 — far
+# past the 0.25 threshold — because the AUTO gate looked at Qwen confidence but
+# not vector distance. Fix: _suggest_workspace_candidate drops candidates beyond
+# workspace_qwen_candidate_distance before Qwen sees them, so an over-distance
+# name can never be resurrected into an AUTO merge.
+
+def test_over_distance_candidate_is_filtered_before_qwen(tmp_path):
+    t = make_tools(tmp_path, "none")
+    calls = []
+
+    class _SpyBackend:
+        def suggest_workspace_candidate(self, ws_raw, evidence, candidates, **kw):
+            calls.append(list(candidates))
+            return WorkspaceCandidateSignal(candidates[0] if candidates else None,
+                                            "same_project", 0.95, "hallucinated")
+
+    # Only over-distance neighbors (0.357 > 0.25): Qwen must not even be asked.
+    _force_undecided_with_candidate(t, _SpyBackend(), similar_name="proto-test", distance=0.357)
+    r = t.memory_write(content="x", workspace="openclaw", source_type="agent_generated", subject="s")
+    assert calls == []  # no candidate survived the distance bound
+    assert r["data"]["workspace_canonical"] == "openclaw"  # stays NEW, not merged
+    assert r["data"]["workspace_decision"] == "ASK"
+
+
+def test_in_threshold_candidate_still_reaches_qwen_and_auto_merges(tmp_path):
+    t = make_tools(tmp_path, "none")
+    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "same_project", 0.95, "同项目"))
+    _force_undecided_with_candidate(t, backend, distance=0.2)  # inside threshold
+    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="s")
+    assert r["data"]["workspace_canonical"] == "金营项目"
+    assert r["data"]["workspace_decision"] == "AUTO"
+
+
+def test_qwen_candidate_pool_capped_at_top_k(tmp_path):
+    t = make_tools(tmp_path, "none")
+    seen = []
+
+    class _SpyBackend:
+        def suggest_workspace_candidate(self, ws_raw, evidence, candidates, **kw):
+            seen.append(list(candidates))
+            return WorkspaceCandidateSignal(None, "uncertain", None, "")
+
+    def fake_resolve(ws_raw, embedder=None, *, match_distance=None, register_new=True):
+        # Five in-threshold neighbors; only top-3 should reach Qwen.
+        return {"canonical": ws_raw, "is_new": True, "matched_by": "new", "distance": None,
+                "similar": [{"name": f"c{i}", "distance": 0.10 + i * 0.02} for i in range(5)],
+                "rejected_canonicals": []}
+    t.db.resolve_workspace_canonical = fake_resolve  # type: ignore
+    t._ensure_semantic_backend = lambda: _SpyBackend()  # type: ignore
+    t.memory_write(content="x", workspace="w", source_type="agent_generated", subject="s")
+    assert seen and len(seen[0]) == 3
+    assert seen[0] == ["c0", "c1", "c2"]

@@ -12,6 +12,8 @@
   "tool_profile": "product",
   "isolation": "none",
   "workspace_match_distance": 0.25,
+  "workspace_qwen_candidate_distance": 0.25,
+  "workspace_qwen_candidate_top_k": 3,
   "vec": {
     "enabled": true,
     "dim": 768

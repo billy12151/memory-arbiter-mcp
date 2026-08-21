@@ -598,7 +598,17 @@ class MemoryTools:
         backend = self._ensure_semantic_backend()
         if backend is None or not hasattr(backend, "suggest_workspace_candidate"):
             return None
-        candidates = [s["name"] for s in (similar or []) if s.get("name")][:5]
+        # Spec §11: Qwen only arbitrates among candidates the vector already
+        # brought within range. Bounding the pool by distance stops the model
+        # from resurrecting an over-distance name (a real-library dry-run had
+        # Qwen "same_project@0.95" merge openclaw into proto-test at cosine
+        # 0.357, far past the 0.25 threshold). Cap at top-K (A/B: 3 beats 5).
+        max_distance = float(getattr(self.settings, "workspace_qwen_candidate_distance", 0.25))
+        top_k = max(1, int(getattr(self.settings, "workspace_qwen_candidate_top_k", 3)))
+        candidates = [
+            s["name"] for s in (similar or [])
+            if s.get("name") and float(s.get("distance", 9.0)) <= max_distance
+        ][:top_k]
         if not candidates:
             return None
         budget_ms = max(0, min(5000, int(getattr(self.settings, "workspace_qwen_budget_ms", 750))))
