@@ -760,7 +760,8 @@ class LocalGGUFSemanticBackend:
     def _memory_text(record: dict[str, Any]) -> str:
         subject = record.get("subject") or ""
         tags = ", ".join(record.get("tags") or []) if isinstance(record.get("tags"), list) else str(record.get("tags") or "")
-        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        raw_metadata = record.get("metadata")
+        metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
         fields = (
             ("subject", subject), ("tags", tags),
             ("workspace_canonical", record.get("workspace_canonical")),

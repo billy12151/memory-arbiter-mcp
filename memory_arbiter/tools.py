@@ -749,8 +749,10 @@ class MemoryTools:
             ]
             if gate.state == "notice_ready":
                 item["state"] = item["route"] = "notice_ready"
-            left_meta = left_mem.get("metadata") if isinstance(left_mem.get("metadata"), dict) else {}
-            right_meta = right_mem.get("metadata") if isinstance(right_mem.get("metadata"), dict) else {}
+            left_raw_meta = left_mem.get("metadata")
+            right_raw_meta = right_mem.get("metadata")
+            left_meta: dict[str, Any] = left_raw_meta if isinstance(left_raw_meta, dict) else {}
+            right_meta: dict[str, Any] = right_raw_meta if isinstance(right_raw_meta, dict) else {}
             entity = left_meta.get("entity") if left_meta.get("entity") == right_meta.get("entity") else None
             scope = left_meta.get("scope") if left_meta.get("scope") == right_meta.get("scope") else None
             if entity and scope:
