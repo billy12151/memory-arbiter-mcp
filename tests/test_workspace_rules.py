@@ -155,3 +155,42 @@ def test_write_auto_for_specific_workspace(tmp_path):
     t = make_tools(tmp_path)
     r = t.memory_write(content="alpha", workspace="金营项目", source_type="agent_generated", subject="test")
     assert r["data"]["workspace_decision"] == "AUTO"
+
+
+# ── mechanical variant of an existing canonical (2026-08-21) ─────────────────
+#
+# A real-library dry-run showed agent-lane failing to reach its existing
+# AgentLane canonical: exact match is case/separator sensitive and the vector
+# tier could miss a low-frequency canonical. A deterministic case/hyphen/
+# underscore/whitespace fold reuses the registered spelling without vector/Qwen.
+
+def test_mechanical_variant_reuses_existing_canonical(tmp_path):
+    t = make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute("INSERT OR IGNORE INTO workspace_canonicals(name,created_at) VALUES('AgentLane',datetime('now'))")
+
+    for raw in ["agent-lane", "AGENTLANE", "agent_lane", "Agent Lane"]:
+        r = db.resolve_workspace_canonical(raw, None, register_new=False)
+        assert r["canonical"] == "AgentLane", raw
+        assert r["matched_by"] == "mechanical_variant", raw
+
+    # Exact spelling still takes the exact tier.
+    exact = db.resolve_workspace_canonical("AgentLane", None, register_new=False)
+    assert exact["matched_by"] == "exact"
+
+    # A genuinely different name is NOT folded into the canonical.
+    other = db.resolve_workspace_canonical("agentlanes-cli", None, register_new=False)
+    assert other["matched_by"] == "new"
+    assert other["canonical"] == "agentlanes-cli"
+
+
+def test_mechanical_variant_does_not_collapse_blanks(tmp_path):
+    # Empty/whitespace keys must never collide via the mechanical fold.
+    t = make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute("INSERT OR IGNORE INTO workspace_canonicals(name,created_at) VALUES('AgentLane',datetime('now'))")
+    r = db.resolve_workspace_canonical("   ", None, register_new=False)
+    assert r["canonical"] == "default"
+    assert r["matched_by"] == "fallback"

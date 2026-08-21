@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from typing import Any, Optional, Tuple, TYPE_CHECKING
@@ -26,6 +27,21 @@ def _normalize_alias_key(ws: Optional[str]) -> str:
     if not s:
         return ""
     return " ".join(s.split()).casefold()
+
+
+def _mechanical_ws_key(ws: Optional[str]) -> str:
+    """Fold a workspace string to a deterministic case/separator-insensitive key.
+
+    Unlike _normalize_alias_key (which only case-folds + collapses whitespace
+    for the governance table), this also strips hyphens and underscores so pure
+    spelling variants of one canonical collide: AgentLane / agent-lane /
+    agent_lane -> "agentlane". Used only to reuse an EXISTING canonical, never to
+    invent a new spelling. Returns "" for empty/whitespace input so blank
+    workspaces never collapse together here.
+    """
+    if not isinstance(ws, str):
+        ws = "" if ws is None else str(ws)
+    return re.sub(r"[\s_\-]+", "", ws).casefold()
 
 
 def _coerce_ws(ws: Any) -> str:
@@ -304,6 +320,31 @@ class WorkspaceStore:
                                     f"workspace canonical vector publish failed for {raw!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
                                 )
                     return result
+
+                # 1b. Mechanical variant of an existing canonical: same string
+                #     once case, whitespace, hyphens and underscores are folded
+                #     (AgentLane / agent-lane / agent_lane). This is a purely
+                #     deterministic identity with no semantic risk, so spec §11
+                #     allows it to reuse the canonical without vector or Qwen.
+                #     The already-registered spelling wins; a new variant never
+                #     renames it.
+                variant_key = _mechanical_ws_key(raw)
+                if variant_key:
+                    variant = next(
+                        (
+                            row for row in conn.execute(
+                                "SELECT id, name FROM workspace_canonicals"
+                            ).fetchall()
+                            if _mechanical_ws_key(str(row["name"])) == variant_key
+                        ),
+                        None,
+                    )
+                    if variant is not None:
+                        result.update({
+                            "canonical": variant["name"], "is_new": False,
+                            "matched_by": "mechanical_variant", "distance": 0.0,
+                        })
+                        return result
 
                 # 2. Vector nearest-canonical (only when embedding is available).
                 vec_ok = self.state.sqlite_vec_available and embedder is not None
