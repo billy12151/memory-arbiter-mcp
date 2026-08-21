@@ -206,3 +206,53 @@ def test_rejected_candidate_reason_is_qwen_rejected(tmp_path):
     assert d["workspace_decision"] == "ASK"
     assert d["workspace_canonical"] == "金营"
     assert d["workspace_decision_reason"] == "qwen_rejected_candidate"
+
+
+# ── constrained decoding at the inference call site (2026-08-21 dry-run) ─────
+#
+# A real-library dry-run showed every workspace suggestion failing with
+# missing_json: Qwen2.5-0.5B answered in prose ("candidate: AgentLane\nrelation:
+# same_family") because suggest_workspace_candidate never passed a
+# response_format, unlike classify_pair. The parser tests above could not catch
+# it — only the call site can — so assert the schema is wired in and bounded.
+
+def test_workspace_suggester_uses_constrained_decoding() -> None:
+    from memory_arbiter.semantic_conflict import (
+        LocalGGUFSemanticBackend, _WORKSPACE_PROMPT, _WORKSPACE_RESPONSE_FORMAT,
+    )
+
+    schema = _WORKSPACE_RESPONSE_FORMAT["schema"]
+    assert _WORKSPACE_RESPONSE_FORMAT["type"] == "json_object"
+    assert set(schema["required"]) == {"candidate", "relation", "confidence", "evidence"}
+    assert schema["additionalProperties"] is False
+    # relation is constrained to the spec's enum, so the model cannot invent one.
+    assert set(schema["properties"]["relation"]["enum"]) == {
+        "alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain",
+    }
+    # evidence is bounded: an unbounded field let the model paste whole memory
+    # bodies in and blow past max_tokens, truncating the JSON.
+    assert schema["properties"]["evidence"]["maxLength"] == 200
+    assert "只输出 JSON" in _WORKSPACE_PROMPT
+
+    captured: dict = {}
+
+    class _Llm:
+        @staticmethod
+        def create_chat_completion(**kwargs):
+            captured.update(kwargs)
+            return {"choices": [{"message": {"content": '{"candidate":"金营项目","relation":"alias","confidence":0.9,"evidence":"同项目"}'}}]}
+
+    backend = LocalGGUFSemanticBackend.__new__(LocalGGUFSemanticBackend)
+    import threading
+    backend._infer_lock = threading.Lock()
+    backend._cond = threading.Condition(threading.Lock())
+    backend._acquire_llm_for_call = lambda: _Llm()          # type: ignore[method-assign]
+    backend._release_llm_for_call = lambda: None            # type: ignore[method-assign]
+
+    signal = backend.suggest_workspace_candidate(
+        "金营", {"title": "金营项目排期", "key_sentences": ["交付计划"]}, ["金营项目"],
+    )
+    assert captured.get("response_format") is _WORKSPACE_RESPONSE_FORMAT
+    assert signal.candidate == "金营项目"
+    assert signal.relation == "alias"
+    assert signal.error is None

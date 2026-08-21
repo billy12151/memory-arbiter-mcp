@@ -71,6 +71,24 @@ attribute 是两侧正在回答的最小可比较问题，不包含具体值、�
 输出：{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}"""
 
 
+_WORKSPACE_RESPONSE_FORMAT = {
+    "type": "json_object",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "candidate": {"type": ["string", "null"]},
+            "relation": {
+                "type": "string",
+                "enum": ["alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain"],
+            },
+            "confidence": {"type": "number"},
+            "evidence": {"type": "string", "maxLength": 200},
+        },
+        "required": ["candidate", "relation", "confidence", "evidence"],
+        "additionalProperties": False,
+    },
+}
+
 _WORKSPACE_PROMPT = """你是 mema 的 workspace 归一候选建议器，只输出 JSON，不要解释。
 输入是一个新记忆的 workspace 原文 + 短证据(标题/关键句) + 若干候选 workspace。
 任务：判断该 workspace 是否应归一到某个候选，只做建议，不做最终裁决。
@@ -954,6 +972,7 @@ class LocalGGUFSemanticBackend:
                     temperature=0.0,
                     top_p=0.9,
                     stop=["\n\n", "</s>"],
+                    response_format=_WORKSPACE_RESPONSE_FORMAT,
                 )
             raw = out["choices"][0]["message"]["content"]
             return workspace_candidate_from_text(raw, candidates)
