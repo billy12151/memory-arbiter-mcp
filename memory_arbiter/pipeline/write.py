@@ -1,7 +1,7 @@
 """Memory write path for the local-text evidence architecture."""
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 from .. import workspace_rules
 from ..models import MemoryRecord, MemoryStatus
@@ -188,8 +188,58 @@ class WritePipeline:
                     result["decision_reason"] = "qwen_unrelated"
                 else:
                     result["decision_reason"] = "qwen_low_conf"
+        # Empty/default workspace: offer a NON-binding placement suggestion from
+        # the memory's own subject (thought A: nearest existing memory's
+        # workspace). A real-library A/B showed this is accurate but its
+        # distance scale is not comparable to the name-vector threshold, so it
+        # must never auto-assign — global memories (user prefs/identity) belong
+        # in default. Read-only: suggest, let the agent/user decide.
+        if str(result["canonical"] or "").strip().casefold() in {"", "default"}:
+            result["placement_suggestion"] = self._suggest_placement_for_default(record)
         result["strict_block"] = isolation == "strict" and result["is_new"]
         return result
+
+    def _suggest_placement_for_default(self, record: MemoryRecord) -> Optional[dict[str, Any]]:
+        """Read-only subject-based placement hint for a default/empty workspace.
+
+        Embeds the subject and finds the nearest existing memory that lives in a
+        real (non-default) workspace. Returns a suggestion dict or None. Never
+        writes, never auto-assigns; global memories intentionally stay in
+        default when no confident neighbor exists.
+        """
+        subject = str(getattr(record, "subject", None) or "").strip()
+        if not subject:
+            return None
+        embedder, _ = self._ensure_embedder()
+        if embedder is None or not self.db.state.sqlite_vec_available:
+            return None
+        try:
+            er = embedder.embed_text(prefix="", body=subject)
+        except Exception:
+            return None
+        if not er or not er.embedding:
+            return None
+        try:
+            hits = self.db.evidence_knn(list(er.embedding), k=8)
+        except Exception:
+            return None
+        for hit in hits:
+            peer = self.db.get_memory(int(hit.get("memory_id") or 0))
+            if not peer or peer.get("status") != "active":
+                continue
+            ws = str(peer.get("workspace_canonical") or peer.get("workspace") or "").strip()
+            if ws and ws.casefold() not in {"", "default"}:
+                return {
+                    "suggested_workspace": ws,
+                    "from_memory_id": int(peer.get("id") or 0),
+                    "basis": "subject_nearest_memory",
+                    "note": (
+                        "Not auto-assigned: this memory is in 'default'. Its subject is "
+                        f"closest to memory #{peer.get('id')} in workspace {ws!r}. If it belongs "
+                        "there, rewrite with that workspace or use governance to move it."
+                    ),
+                }
+        return None
 
     def _apply_workspace_response(self, data: dict[str, Any], workspace: dict[str, Any]) -> None:
         if workspace["vector_publish_pending"]:
@@ -237,3 +287,9 @@ class WritePipeline:
                 "similar_workspaces": workspace["similar"],
                 "how_to_confirm": "memory_govern accept_workspace_alias / reject_workspace_alias",
             }
+        placement = workspace.get("placement_suggestion")
+        if placement:
+            # Non-binding: the memory was still written to default. Surface a
+            # subject-based placement hint so the agent/user can move it if it
+            # truly belongs elsewhere.
+            data.setdefault("write_hints", {})["placement_suggestion"] = placement

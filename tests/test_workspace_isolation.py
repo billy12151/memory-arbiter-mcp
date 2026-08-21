@@ -652,3 +652,85 @@ def test_strict_evidence_knn_excludes_closer_cross_workspace_vector(tmp_path):
     assert all(r.get("workspace") == "projA" for r in knn_a)
     knn_b = db.evidence_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projB")
     assert all(r.get("workspace") == "projB" for r in knn_b)
+
+
+# ── empty/default workspace placement suggestion (2026-08-21) ────────────────
+#
+# A real-library A/B chose "default + non-binding subject hint": the memory
+# still lands in default, but the response suggests the workspace of the nearest
+# existing memory by subject. Never auto-assigns (thought-A distance is not
+# comparable to the name-vector threshold; global memories belong in default).
+
+class _StubEmbedder:
+    embedding_space_id = "stub"
+    last_encode_error = None
+
+    @staticmethod
+    def embed_text(prefix, body, max_body_chars=None):
+        from memory_arbiter.embedder import EmbedResult
+        return EmbedResult([1.0, 0.0], False, len(body), len(body))
+
+
+def _placement_tools(tmp_path):
+    t = make_tools(tmp_path, "none")
+    t._embedder = _StubEmbedder()
+    t._embedder_loaded = True
+    t.db.state.sqlite_vec_available = True
+    return t
+
+
+def test_placement_suggestion_for_empty_workspace(tmp_path):
+    from memory_arbiter.models import MemoryRecord
+    t = _placement_tools(tmp_path)
+    # Nearest neighbor lives in a real workspace.
+    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 42, "distance": 5.0}]  # type: ignore
+    t.db.get_memory = lambda mid: {"id": 42, "status": "active", "workspace": "金营项目",  # type: ignore
+                                   "workspace_canonical": "金营项目"} if mid == 42 else None
+    rec = MemoryRecord.from_input(
+        {"content": "排期正文", "subject": "金营项目 Q3 排期", "workspace": ""},
+        t.settings.defaults(),
+    )
+    ws = t._write_pipeline._resolve_write_workspace(rec)
+    assert str(ws["canonical"]).casefold() in {"", "default"}   # NOT auto-assigned
+    sug = ws["placement_suggestion"]
+    assert sug and sug["suggested_workspace"] == "金营项目"
+    assert sug["from_memory_id"] == 42
+
+
+def test_no_placement_suggestion_when_neighbor_is_default(tmp_path):
+    from memory_arbiter.models import MemoryRecord
+    t = _placement_tools(tmp_path)
+    # Only default-workspace neighbors → global memory stays in default, no hint.
+    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 7, "distance": 5.0}]  # type: ignore
+    t.db.get_memory = lambda mid: {"id": 7, "status": "active", "workspace": "default",  # type: ignore
+                                   "workspace_canonical": "default"} if mid == 7 else None
+    rec = MemoryRecord.from_input(
+        {"content": "偏好正文", "subject": "今天想吃什么", "workspace": ""},
+        t.settings.defaults(),
+    )
+    ws = t._write_pipeline._resolve_write_workspace(rec)
+    assert ws["placement_suggestion"] is None
+
+
+def test_no_placement_suggestion_without_subject(tmp_path):
+    from memory_arbiter.models import MemoryRecord
+    t = _placement_tools(tmp_path)
+    t.db.evidence_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not embed"))  # type: ignore
+    rec = MemoryRecord.from_input(
+        {"content": "正文", "subject": "", "workspace": ""},
+        t.settings.defaults(),
+    )
+    ws = t._write_pipeline._resolve_write_workspace(rec)
+    assert ws["placement_suggestion"] is None
+
+
+def test_non_default_workspace_gets_no_placement_suggestion(tmp_path):
+    from memory_arbiter.models import MemoryRecord
+    t = _placement_tools(tmp_path)
+    t.db.evidence_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run for a real ws"))  # type: ignore
+    rec = MemoryRecord.from_input(
+        {"content": "正文", "subject": "某主题", "workspace": "some-real-project"},
+        t.settings.defaults(),
+    )
+    ws = t._write_pipeline._resolve_write_workspace(rec)
+    assert "placement_suggestion" not in ws or ws.get("placement_suggestion") is None
