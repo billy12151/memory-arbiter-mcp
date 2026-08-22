@@ -3,6 +3,37 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.1.dev1] — 2026-08-22
+
+Development self-test build restoring the Chinese documentation surface and closing findings from a fresh three-track adversarial review of the 0.14.1.dev0 push (whose vec-less Core CI jobs were red on arrival).
+
+### Added
+
+- **Full Chinese documentation** — new `README.zh-CN.md` (plain-language, with diagrams, aimed at non-developer readers) and `docs/INTEGRATION.zh-CN.md` (precise contract mirror) with top-of-file cross-links in both directions. The bilingual mirror that the evidence-pipeline refactor dropped is back as standalone files so each language can be maintained independently. `AGENT_ONBOARDING.md` intentionally stays single-file English: it is packaged and served verbatim to agents via `help(topic="agent_onboarding")` with no language negotiation, and duplicating it would double every injection's token cost.
+
+### Fixed
+
+- **Notice resolve created zombie open conflicts (blocker, regression from d3729ce)** — `update_semantic_notice_status(..., "resolved")` wrote the *decoded* status into `conflicts.status`; decoding maps delivery pending/delivered to `open`, so every resolved notice became a formal open conflict (occupying the per-slot unique index; a subsequent formal group on that slot crashed with a raw `sqlite3.IntegrityError`). Resolved notices now keep their raw terminal `candidate` status; the UPDATE is guarded by a structured `slot_occupied` outcome (defensive — unreachable once status no longer flips to open), and regression tests pin status-keeping plus "a later formal group on the same slot records without a raw IntegrityError."
+- **Scan epoch wedge (medium)** — a completed `conflict_scan_progress` row surviving into a fresh epoch (side-by-side migration copies `migration_state`) made `record_conflict_scan_page` reject every page of the new epoch, wedging `conflict_scan_required` until the next memory write. Progress from a superseded epoch is now treated as absent, and both epoch-stamping migration paths delete the stale progress row.
+- **Grounding-failed apply left a silent orphaned edit (medium)** — `apply_conflict_action(update_current_claim/use_as_resolution)` commits the content edit together with failure bookkeeping by design, but the old evidence rows were already deleted and no re-index was enqueued. The failed-but-committed path now re-enqueues untrusted evidence indexing and marks the step/response with `orphaned_edit: true` so a replan accounts for the changed member.
+- **CI: vec-less Core jobs red on 0.14.1.dev0** — four vec-dependent tests in `tests/test_workspace_default_insulation.py` queried `workspace_canonicals_vec` without the `sqlite-vec not installed` skip guard used by sibling files; they now skip cleanly when sqlite-vec is absent.
+- **HTTP identity fail-closed hardening** — `_identity_for_tool` no longer swallows an `IdentityHeaderError` from the current MCP request and falls back to the session ContextVar (a potentially stale initialize-request identity). Headers present but invalid now surface as an error; the ContextVar fallback only applies when no request/headers exist (stdio). Unreachable with mcp 1.29 today; closes the fail-open direction against future SDK divergence.
+- **Strict isolation placement-hint leak** — the default-workspace placement suggestion ran an unscoped evidence KNN and returned a foreign workspace's canonical name and memory id to strict callers whose read ACL hides both. The hint is now skipped under `isolation="strict"` (it is a none/weak convenience).
+- **Scan enhancement fail-open hardening** — a backend whose `classify_pair` raises (not merely returns an invalid signal) no longer escapes `_enhance_scan_candidates` and discards the deterministic baseline; per-pair failures degrade to `error` and the page continues.
+- **Judge `stale_member` guidance** — the note recommended retrying judge "with a plan pinned to the members' current versions", which deterministically fails because judge pins versions from the recorded group snapshot. It now directs the caller to register the new member version via `record_conflict` first (or plan around the member).
+- **Config edge** — `mcp.http.path="//"` passed validation then `rstrip("/")` collapsed to an unservable empty route; an all-slash path now warns and resets to `/mcp`.
+- **Documentation corrections** — README's upgrade publication gate no longer claims complete eligible evidence coverage for both paths (only the full-rebuild path requires it; conflict-only clones evidence unchanged); INTRO.md's workspace-governance list now includes full-registry confirmation (`confirm_workspaces`); the Integration Guide uses the exact `alias|typo|same_project` enum and notes that read-classified notice surfaces (list/read, `memory(status)` delivery) still advance `pending → delivered`/`stale` state, including for policy-denied HTTP identities.
+- **Dead code** — removed the uncalled duplicate `_agent_onboarding_guide`/`AGENT_ONBOARDING_TOPIC` from `tools.py` (the live copy is `surfaces.py`).
+
+### Reviewed, no change
+
+- `confirm_pending_workspace` under strict without an explicit `workspace` skips caller binding by design: the action is user-authorized per call, its documented purpose is assigning (possibly remapping) the pending memory's canonical with an internal redirect, and pre-existing strict tests pin deliberate remap success. Caller binding applies when a workspace is asserted.
+- Deep-verify that a resolved conflict's final member states all match the chosen value remains a known design gap (orphaned edits are now re-indexed and flagged, but `resolve_conflict` does not re-ground members); deferred as a design decision, not a silent fix.
+
+### Verification
+
+- 732 tests pass locally in the vec-equipped environment (729 baseline + 3 new regression tests); strict mypy, Ruff, compileall, and `git diff --check` pass; `scripts/sync_version.py --check` passes (server.json intentionally remains at 0.13.1).
+
 ## [0.14.1.dev0] — 2026-08-22
 
 Development self-test build for one localhost Streamable HTTP MCP server shared by multiple local AI clients. It retains stdio as the default and treats request headers as local provenance/policy input, not authentication or tenant isolation.

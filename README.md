@@ -1,8 +1,10 @@
 # Memory Arbiter MCP
 
+**English | [中文](README.zh-CN.md)**
+
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Development documentation: `0.14.1.dev0` (localhost Streamable HTTP identity plus workspace admission/review contract; destructive conflict-history upgrade described below).
+> Development documentation: `0.14.1.dev1` (localhost Streamable HTTP identity plus workspace admission/review contract; destructive conflict-history upgrade described below).
 
 ## Why trust it
 
@@ -80,11 +82,11 @@ Evidence/semantic queues are process-local, so a crash or forced shutdown can lo
 
 ## Upgrading from an older database
 
-**Development upgrade warning for 0.14.1.dev0:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`; the two immediately previous evidence-capable generations use the conflict-only path, reuse evidence/vector tables, compact current workspace redirect/negative-decision state, and discard the obsolete workspace decision event ledger. Older generations rebuild evidence and vectors.
+**Development upgrade warning for 0.14.1.dev1:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`; the two immediately previous evidence-capable generations use the conflict-only path, reuse evidence/vector tables, compact current workspace redirect/negative-decision state, and discard the obsolete workspace decision event ledger. Older generations rebuild evidence and vectors.
 
 The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, audit, and logical `memory_evidence` source units. The obsolete workspace decision event ledger is not copied. From `local_text_evidence_v1`, it clones existing FTS/evidence/vector state unchanged and transactionally rebuilds only the conflict domain. From older generations it rebuilds FTS and republishes evidence vectors in the configured embedding space. Both paths intentionally start with empty new `conflicts`/notice state and do not copy old `conflicts`, append-only `conflict_judgments`, or `semantic_notices` history. Current contradictions must be rediscovered by a scheduled full-library scan.
 
-After rebuild, status/doctor reports `conflict_scan_required=true` with a persistent scan epoch. Only a successful full scan covering the upgrade-time active-memory set with the matching detector version may CAS-clear that flag; partial pages, failed scans, and older-detector scans do not. The target is published only after row/fingerprint checks, complete eligible evidence coverage, a successful `PRAGMA wal_checkpoint(TRUNCATE)`, and removal of target WAL/SHM sidecars; the source database is never deleted.
+After rebuild, status/doctor reports `conflict_scan_required=true` with a persistent scan epoch. Only a successful full scan covering the upgrade-time active-memory set with the matching detector version may CAS-clear that flag; partial pages, failed scans, and older-detector scans do not. The target is published only after row/fingerprint checks, a successful `PRAGMA wal_checkpoint(TRUNCATE)`, and removal of target WAL/SHM sidecars — the full-rebuild path additionally requires complete eligible evidence coverage; the source database is never deleted.
 
 ```bash
 # Preview only.
@@ -136,6 +138,25 @@ See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.conf
 | `semantic_conflict.job_timeout_ms` | Between-pair asynchronous job budget |
 | `semantic_conflict.inference_timeout_ms` | Hard timeout for one Qwen call |
 
+## HTTP mode: sharing one local server
+
+stdio (the default) needs no background process: each MCP client launches `mema` as its own short-lived child process. Switch to `streamable-http` only when you want **one long-lived local server that several clients connect to**.
+
+| | stdio (default) | streamable-http |
+| --- | --- | --- |
+| Who starts mema | each client spawns a child process | you run one persistent process; clients connect to it |
+| Background process needed | **no** | **yes** — otherwise it dies when the terminal closes |
+| Client config | command + args | url + two fixed request headers |
+| Good for | one person, one client | several clients on one machine sharing one memory store |
+
+Setting it up:
+
+1. **Config**: set `mcp.transport` to `"streamable-http"` in `~/.config/memory-arbiter/config.json` (or `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`).
+2. **Keep it running**: mema has **no built-in daemon** — use a process manager. On macOS, the launchd template at [`examples/com.memory-arbiter.mema.plist`](examples/com.memory-arbiter.mema.plist) runs it at load, restarts on crash, and logs to `/tmp/mema.{out,err}.log` (replace `__MEMA_BIN__` with the absolute path `which mema` prints; put it in `~/Library/LaunchAgents/` then `launchctl load`). For a quick try, `tmux new -d -s mema 'mema'` works.
+3. **Client**: copy [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json), filling in `X-Mema-Client` and `X-Mema-Agent-Id`.
+
+Notes: the client sends the fixed headers automatically on every HTTP MCP request — agents must not add identity to individual tool `data`, or it is rejected. Missing/empty/duplicate/conflicting identity fails closed (400), never falling back to defaults. The service binds to loopback only; these headers are provenance, **not authentication**. Because launchd does not inherit your shell PATH or expand `~`, put absolute paths in `ProgramArguments` and for any GGUF `model_path` in config.json.
+
 ## Degradation
 
 - Without sqlite-vec or an embedding model, lexical recall and memory governance continue; evidence indexing is unavailable.
@@ -153,4 +174,4 @@ During development, package/docs may describe an unreleased dev version while `s
 
 ## 中文摘要
 
-Memory Arbiter（迷码）是面向 AI Agent 的本地可信事实层：每条事实只存一份完整原文，向量与检索均为可重建的派生索引。冲突 scan 走宽门召回，write-time notice 走双向四字段 Qwen 抽槽与严格 grounding；单一 `conflicts` 表保存一对多事件，生命周期为 `open → applying → resolved` 或 `not_a_conflict`。裁决后按 `judge → apply_conflict_action → resolve_conflict` 顺序治理。`none/weak/strict` 都做 workspace 归一；strict 可选 guarded vector admission，default 池不进入项目 scope。`workspace_state_v1` 升级会清除旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并要求完成带 epoch 的全库 scan。详见 [INTRO.md](INTRO.md) 与 [docs/INTEGRATION.md](docs/INTEGRATION.md)。
+Memory Arbiter（迷码）是面向 AI Agent 的本地可信事实层：每条事实只存一份完整原文，向量与检索均为可重建的派生索引。冲突 scan 走宽门召回，write-time notice 走双向四字段 Qwen 抽槽与严格 grounding；单一 `conflicts` 表保存一对多事件，生命周期为 `open → applying → resolved` 或 `not_a_conflict`。裁决后按 `judge → apply_conflict_action → resolve_conflict` 顺序治理。`none/weak/strict` 都做 workspace 归一；strict 可选 guarded vector admission，default 池不进入项目 scope。`workspace_state_v1` 升级会清除旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并要求完成带 epoch 的全库 scan。**完整中文文档见 [README.zh-CN.md](README.zh-CN.md)**；另见 [INTRO.md](INTRO.md) 与 [docs/INTEGRATION.zh-CN.md](docs/INTEGRATION.zh-CN.md)。

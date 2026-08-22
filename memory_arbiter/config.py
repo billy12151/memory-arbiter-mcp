@@ -254,6 +254,11 @@ class Settings:
             mcp_http_path = "/mcp"
         if len(mcp_http_path) > 1:
             mcp_http_path = mcp_http_path.rstrip("/")
+            if not mcp_http_path:
+                config_warnings.append(
+                    "mcp.http.path collapsed to empty after trimming; using /mcp"
+                )
+                mcp_http_path = "/mcp"
 
         semantic_backend = str(
             semantic_cfg.get("backend")

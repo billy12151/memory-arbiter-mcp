@@ -1,0 +1,133 @@
+# 集成指南
+
+**[English](INTEGRATION.md) | 中文**
+
+本指南描述 `0.14.1.dev1` 的开发契约。
+
+## MCP 接口面
+
+把命令配置为 `mema`，使用四个产品工具。用 `memory(action="help")` 或对应工具的 help 发现当前字段。
+
+stdio 是默认传输。要让多个本地客户端共享一个社区版进程，设置 `mcp.transport="streamable-http"`，把每个客户端连接到 `http://127.0.0.1:8000/mcp`。在每个 MCP server 配置中设置固定的 `X-Mema-Client` 和 `X-Mema-Agent-Id` 请求头；客户端随后会在 initialize、工具发现和工具调用时自动携带。**不要**让 agent 往工具 `data` 里动态附加身份。任一请求头缺失、为空、非法、重复或与工具数据冲突时，HTTP 模式都会 fail closed。它只绑定 loopback：请求头提供的是本地来源标记和策略输入，不是认证、租户隔离，也不是把服务暴露到公网的许可。
+
+写入要求非空 `subject`；已知时带上 `source_type`、`event_time`、`source_ref` 和有用的 tags。项目事实传真实的项目 `workspace`。只有刻意要存进全局池的事实才显式传 `workspace="default"`；不要依赖省略，因为客户端配置可能已提供 workspace。strict 隔离要求必须有 workspace。`user_confirmed` 只用于用户显式验证过的事实。当新来源替换已有 current 来源时，先 find/read 找到原记忆再做 `update`，而不是创建第二条 active 副本。
+
+## 证据召回
+
+配置 sqlite-vec 和本地 embedding 模型后，写入会异步发布从已存原文派生的句子/段落级证据。字面和证据通道独立召回，按记忆用倒数排名融合合并，再经过信任、时间、过滤和 workspace 调整。证据偏移量定位相关原文。
+
+`memory(action="read", data={"memory_id":42})` 返回完整原文。加 `"span":{"start":120,"end":640}` 则只返回 `data.memory.content[120:640]` 外加 `data.span.{start,end,total_chars}`。边界必须是严格 JSON 整数且满足 `0 <= start < end`；超大的 end 裁剪到正文长度，而 start 超出正文会报错。`scan_candidates.deep_read` 可能提供可直接使用的 span；语义 notice 的 read call 按设计是整记忆读取，需要完整上下文时不要带 span 参数。
+
+用 `memory_repair(task="rebuild_evidence", data={"dry_run":true})` 检查缺失/过期的覆盖率，再排队有界的重建页。重复执行 execute/dry-run 直到没有剩余 id、status 报告合格覆盖完整。embedding 空间变化会报告 `state=mismatch` 并停用证据通道，直到每条合格记忆都重新发布。证据单元和向量都是派生的。从 `local_text_evidence_v1` 的 conflict-only 升级复用其现有证据/向量状态；更老代次的升级会在配置的 embedding 空间重建向量。
+
+## 冲突检测契约
+
+### 双向四字段抽取
+
+证据 KNN 只提供有界的短 pair 召回和排序。可选的本地 Qwen2.5-0.5B 分别以 A→B 和 B→A 各跑一次。每次结果必须是恰好四个有界字符串字段的严格 JSON 对象：
+
+```json
+{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}
+```
+
+模型不得输出最终的 conflict/coexistence 判定、赢家或任何修改。代码校验：
+
+1. 每个方向都有具体的同属性/不同值抽取；
+2. 交换两侧后，两个方向在归一属性和值到来源的映射上互相一致；
+3. 值在对应证据引用中有 grounding，机械的大小写/单位/数字/已确认别名推导除外；
+4. 归一后的值确实不同；
+5. 确定性的重复、兼容、环境/版本/地域/对象、观察时间、历史/当前、演进和测量范围 veto 均不命中；
+6. 正式槽位具备充分的 `workspace_canonical + entity + attribute + scope` 来源。
+
+模糊的属性相似不能创建正式槽位。Qwen 失败或缺席无权否决确定性的扫描候选。
+
+### 定时扫描：宽门
+
+`memory_repair(task="scan_candidates")` 枚举有界的 KNN/规则候选，不需要把整个库读进 agent 会话。扫描保留确定性基线，并且当 `semantic_conflict.scan_enhance=true`（默认）且本地 Qwen 后端可用时，对该页执行有界增强：规则候选被丰富为带抽取的 `attribute/value` 成员字段和 `value_groups`；原本需 `include_check` 显式开启的纯相似 pair，只要在任一方向抽取出合法的同属性/不同值，就并入 `candidates`。`semantic_conflict.scan_max_pairs`（默认 8，0 表示关闭）限制每页 Qwen pair 评估数，`semantic_conflict.scan_budget_ms`（默认 60000）限制单页截止时间；元数据 `entity/scope` 一致的已验证候选聚合为 `slot_groups`。单向输出、grounding 弱或 entity/scope 缺失保留为 `review_candidate`，供 agent 深读；Qwen 缺席/非法/超时/预算失败永远不会缩小基线集合，也不会移除任何规则候选。
+
+候选携带成员版本、证据 span、候选身份和深读调用。`scan_candidates` 本身不持久化分诊结果。对每个已复查候选，调用 `memory_repair(task="record_conflict")` 并传 `status="open"` 或 `status="not_a_conflict"`；否则它可能在后续扫描中再次出现。`slot_key` 只在 `status="open"` 时传——`not_a_conflict` 分诊仅通过 `candidate_key` 记录；若该槽位已有 open 组，会返回 `open_group_exists`。仅候选的 `not_a_conflict` 行使用 `candidate_key`，不会虚构 `scope="unknown"`。
+
+### 写入时 notice：严门
+
+一条用户可见 notice 要求：两个方向都合法、方向映射一致、严格引用 grounding、归一值确实不同、槽位来源完整、无共存 veto。任何失败都会关闭 notice 路径，把该案例留给定时扫描复查。Notice 快照冻结成员版本、值分组、槽位来源、detector/prompt 版本、任务 id 和去重键。
+
+写入成功后，服务器最多等待 `semantic_conflict.notice_sync_wait_ms`（默认 3000，范围 0–5000 ms）以完成有界的 notice 任务。`0` 表示完全异步。等待超时后写入照常成功返回，同一个已接受任务继续异步执行——不会被取消或重算。队列满/入队被拒是另一回事：那时根本没有可等待的任务。`checked_no_notice` 只表示该有界写入时任务内的每个候选都完成了严门检查，**不是**全库无冲突的声明。定时扫描仍是持久的召回兜底。
+
+## 单一冲突表
+
+没有独立的公开裁决存储。一行 `conflicts` 代表一次一对多事件，保留其不可变检测快照、`value_groups`、裁决和应用结果。重要的身份/并发字段包括 `revision`、`workspace_canonical`、`slot_key`、`slot_key_hash`、`candidate_key`、`candidate_key_hash`、`member_versions` 和 `member_fingerprint`。
+
+公开生命周期：
+
+- `open`：已确认值得治理；scan 可以用 `expected_revision` CAS 为同一槽位追加新成员。
+- `applying`：已有裁决和应用计划；普通成员不能再追加，重复提醒只对已验证的计划动作抑制。
+- `resolved`：所有计划修改完成并复查通过；事件关闭，永不扩张。
+- `not_a_conflict`：该候选快照经复查为可共存/误报。
+
+同一 canonical workspace+slot 只能存在一条 `open`/`applying` 行。解决之后出现新值/新版本会创建新事件。
+
+## 裁决工作流
+
+1. 读 `memory_review(view="conflict_detail")` 和所有相关记忆。展示共享槽位、每个值分组及其成员。
+2. 用当前 `expected_revision`、选定值、裁决依据/理由、resolution memory 和逐成员计划调用 `memory(action="judge")`。这一步把 `open` 推进到 `applying`。
+3. 跟随返回的机器调用。一次执行一条带授权的 `memory_govern(action="apply_conflict_action")`，每步使用最新 revision。永远不要并发执行预计算步骤。
+4. 遇到 `stale_conflict` 或 `stale_member` 时重读/重计划。失败的 apply 返回 `ok=false` 及 `data.action_required="replan_conflict"` 和 `data.replan`；部分失败保持 `applying`。重读冲突组和成员后，用当前 revision、替换 `apply_plan` 和可选的替换 `resolution_memory_id` 调用授权的 `memory_govern(action="replan_conflict")`。replan 保留之前的计划历史并递增 revision。
+5. 当前计划的每一步都成功后，用最新 revision 调用授权的 `memory_govern(action="resolve_conflict")`。
+
+优先修正不正确的 current 事实；历史/外部/锁定的上下文酌情保留；可能时复用一条已存在的正确 active 记忆作为 `resolution_memory_id`。普通 `memory(update)` 不能把 conflict id 当作 notice 抑制开关使用。
+
+## Workspace 归一与 ACL
+
+Canonical 归一在每种隔离模式下都会运行，与 ACL 相互独立：
+
+- `none`：精确/确认/向量/规则/Qwen 归一行为与 weak 相同，但不应用 workspace ACL。省略 workspace 过滤时返回所有 workspace。
+- `weak`：同样的归一，外加软性排序/提示；没有硬可见性过滤。
+- `strict`：精确/确认和安全的机械规则可以复用 canonical；Qwen 不能静默合并。新 workspace 保持 pending，直到授权的 `confirm_pending_workspace`。可见性默认是精确 canonical。`workspace_recall_admission=true` 时，workspace 敏感的 recall/read/repair 操作、冲突/notice 工作流和 console 内容/计数视图共享调用方 canonical 加上所有在 `workspace_recall_cutoff`（默认 0.25）之内、且通过 default 池、`workspace_min_name_len` 和泛化子串 guard 的 canonical。进程级维护（如语义运行时控制、备份回放、doctor、settings）不按此限定。向量缺失或 sqlite-vec 降级时回退到精确 canonical 作用域；绝缘的 `default` 池永远不会被准入 strict 项目作用域。
+
+解析顺序是：内部已确认/负向 workspace 决策 → 精确 canonical → 有界向量候选 → 确定性 `AUTO|KEEP|ASK` → 仅对未决近似项调 Qwen。Qwen 必须从提供的候选中选择，可以提示 `alias`/`typo`/`same_project` 关系，但自动归一只写记忆的 `workspace_canonical`，不创建持久 redirect。负决策抑制重复提议。产品治理使用 rename、migrate、pending 确认和全注册表复查；内部决策行不是产品工作流。
+
+Workspace 和冲突推理共享一个串行本地 worker。`semantic_conflict.workspace_qwen_budget_ms`（默认 750，范围 50–5000 ms）是独立的短预算：超时/忙碌时保留原始 canonical 并返回复查提示，而不是阻塞写入时 notice 门。
+
+## 响应信封
+
+四个产品工具都返回 `{ok, mode, warnings, degraded, data}`。操作结果和所需步骤在 `data` 下，例如 `data.action_required`、`data.next_action` 或 `data.replan`。仅在成功响应上，投递侧通道可以附加顶层 `notices` 数组。语义 notice 存根的 `action_required` 和 `read_call` 位于该 notice 项内部。客户端应同时检查 `response.data.action_required` 和每个 `response.notices[*].action_required`；没有通用的顶层 action-required 字段。
+
+## Notice 生命周期与恢复
+
+Notice 投递是原子、尽力而为的数据库认领，不是传输层 exactly-once。内部的 `pending` 和 `delivered` 对外都显示为 `open`；附加存根把 `pending` 变为 `delivered` 并设置 `delivered_at`。公开的终态动作是 `dismiss`（误报，冲突变为 `not_a_conflict`）和 `resolve`（已处理）。如果投递前任一钉住的记忆快照已变化，服务器可能内部把该 notice 标记为 `stale`。投递本身不修改记忆、不裁决/解决正式冲突，也不会 supersede 任何一侧。注意：被归类为只读的接口仍会推进投递状态——notice list/read 和 `memory(action="status")` 的投递会认领 pending notice（`pending → delivered`，或钉住快照已变时标记 `stale`）；对被策略拒绝的 HTTP 身份也是如此，因为它们按设计是只读的。
+
+证据和语义队列是进程内的。崩溃、强制关停、队列满丢弃或模型子进程重启都可能丢失未处理的索引/分类工作，即使记忆写入已提交。恢复是覆盖率驱动的：查看 `memory(action="status")`，反复运行 `rebuild_evidence` 直到 dry-run 为空、合格覆盖完整、向量状态 ready；然后分页 `scan_candidates` 并记录每个已复查候选。不要假设重启能重建旧队列。`rebuild_evidence` 恢复源派生单元/向量；随后的扫描找回错过的冲突发现。
+
+## 备份与升级
+
+JSONL 回放无需授权即可预览。应用回放需要显式用户授权，并按回放键/载荷哈希幂等。JSONL 只存记忆记录及其选定的 canonical；不恢复内部 redirect 或负决策。需要 workspace 决策状态存活时，保留 SQLite 源库/升级产物。
+
+### 升级矩阵
+
+| 源数据库 | 运行时行为 | 公开升级路径 | 保留 / 重建 |
+| --- | --- | --- | --- |
+| 新建/空库或 `workspace_state_v1` | 正常启动 | 无 | 现有 current 数据 |
+| `conflict_groups_v2` 或 `local_text_evidence_v1` | 原样拒绝启动 | Side-by-side `mema upgrade`，conflict-only 路径 | 核心/公开数据保留；冲突历史和旧 workspace 决策事件省略；FTS/证据/向量复用 |
+| 更老的 claim + memory/section-vector 代次 | 原样拒绝启动 | 同样的 side-by-side `mema upgrade` | 核心/公开数据保留；证据单元生成/保留，向量重建 |
+| 未知、不完整、失败/恢复中的目标库 | 拒绝 | 用 `mema doctor --json` 诊断；只能用低层迁移工作流修复/续跑 | 验证成功前永远不作为 current 打开 |
+
+没有公开的原地升级：两条路径都构建并验证一个 side-by-side 目标。更老代次的完整重建需要 sqlite-vec、可读的已配置 GGUF embedding 模型、`llama-cpp-python`（`semantic-local` extra 同时提供 embedding 运行时）、可写目标目录和足够磁盘。`local_text_evidence_v1` conflict-only 路径复用现有证据/向量状态，不加载模型。独立的可选语义冲突 Qwen 模型不是迁移前置条件。
+
+### WAL 安全流程
+
+1. 用 `mema upgrade --dry-run` 预览。
+2. 停掉所有旧版本写入方/客户端，排空或终止语义 worker。
+3. 只在 checkpoint 已停止的源库之后创建回滚副本：
+
+   ```bash
+   sqlite3 /absolute/path/to/memory.sqlite3 "PRAGMA wal_checkpoint(TRUNCATE);"
+   cp /absolute/path/to/memory.sqlite3 /absolute/path/to/memory.pre-0.14.sqlite3
+   ```
+
+   checkpoint 报告非零 `busy` 时中止；当 `-wal` 中还有已提交帧时只拷贝主文件是不完整的。关闭前用 SQLite 的在线 `.backup` 命令也是安全的。
+4. 运行 `mema upgrade`；重启并用 `mema doctor --json` 验证。
+5. 完成 status/doctor 显示的带 epoch 固定的完整 `scan_candidates` 全库扫描。
+
+side-by-side 拷贝保留记忆内容/历史、备份回放回执、workspace canonical 和当前 redirect/负决策状态、审计和证据。已废弃的 workspace 决策事件账本被刻意省略。上一代证据代次原样克隆 FTS/证据/向量表，只替换冲突域；更老代次重建并重新发布向量。它刻意以空的冲突/notice 状态开始：旧 `conflicts`、`conflict_judgments` 和 `semantic_notices` 历史不迁移。目标发布要求指纹稳定、破坏性表为空、在移除 WAL/SHM 并切换配置前目标 `wal_checkpoint(TRUNCATE)` 成功；完整重建路径额外要求合格证据全覆盖。
+
+成功时记录 `conflict_scan_required=true` 和一个持久 epoch。只有覆盖升级时活跃集且 detector 匹配的完整扫描才能 CAS 清除它。部分页、失败扫描或旧 detector 都不能。`--yes` 只跳过"确认写入方已停止、冲突/裁决/notice 历史永久丢失"的提示；它不会停止进程、checkpoint/备份源库，也不放松验证。`--no-switch` 不动配置。被环境变量覆盖/不匹配的配置路径需要按打印的手动步骤切换。

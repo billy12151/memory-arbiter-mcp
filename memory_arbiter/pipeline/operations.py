@@ -243,10 +243,13 @@ class OperationsPipeline:
                     # The memory edit (if any) and failure bookkeeping must commit
                     # together: applying remains retryable/replannable and history
                     # accurately records that this attempt did not establish the
-                    # chosen value.
+                    # chosen value. orphaned_edit flags that the content actually
+                    # changed (update_current_claim) so a replan accounts for it;
+                    # use_as_resolution takes the no_change path and is not orphaned.
+                    edit_committed = edited.get("outcome") == "edited"
                     step.update(status="failed", result_version=int(updated.get("version") or 0),
                                 result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
-                                error="chosen_value_not_grounded")
+                                error="chosen_value_not_grounded", orphaned_edit=edit_committed)
                 else:
                     step.update(status="completed", result_version=int(updated.get("version") or step["expected_version"]),
                                 result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(), error=None)
@@ -293,6 +296,16 @@ class OperationsPipeline:
                     "memory_id": target_id, "action": action,
                     "chosen_value": conflict.get("chosen_value"),
                 },
+            )
+        elif not successful and step.get("error") == "chosen_value_not_grounded" and step.get("orphaned_edit"):
+            # A grounding-failed edit committed without a post-commit re-index
+            # (edit_memory_intent already dropped the old evidence rows). Re-index
+            # the orphaned edit — untrusted, so the semantic worker re-checks it —
+            # and surface the flag so a replan knows the member content changed.
+            # The no_change path (use_as_resolution) has no committed edit to re-index.
+            result["orphaned_edit"] = True
+            result["evidence_index"], result["semantic_conflict_check"] = self._enqueue_content_postcommit(
+                target_id, self.db.get_memory(target_id),
             )
         next_step = next((item for item in plan if item.get("status") == "pending"), None)
         if successful:
@@ -1216,8 +1229,11 @@ class OperationsPipeline:
                 }
         elif result.get("outcome") in {"stale_conflict", "stale_member"}:
             result["note"] = (
-                "re-read memory_review(view='conflict_detail') and the member memories, then retry "
-                "judge with the current revision and a plan pinned to the members' current versions"
+                "re-read memory_review(view='conflict_detail') and the member memories, then retry judge "
+                "with the current revision. For stale_member a member was edited outside the plan: judge "
+                "pins versions from the recorded group snapshot, so first register the member's new version "
+                "via memory_repair(task='record_conflict') with status='open' and the current "
+                "expected_revision (or plan around that member) before retrying."
             )
         return self.db.state.response(result, ok=result.get("outcome") == "applying", extra_warnings=list(caller.warnings))
 

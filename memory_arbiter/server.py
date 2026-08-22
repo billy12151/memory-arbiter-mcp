@@ -160,10 +160,14 @@ def _identity_for_tool(app: Any) -> Optional[RequestIdentity]:
         try:
             request = get_context().request_context.request
             headers = getattr(request, "headers", None)
-            if headers is not None:
-                return parse_identity_headers(headers)
         except (AttributeError, LookupError, TypeError, ValueError):
-            pass
+            # No live request (stdio, direct call) — ContextVar fallback below.
+            headers = None
+        if headers is not None:
+            # Fail closed: an HTTP request whose identity headers do not parse
+            # must surface as an error, never fall back to a possibly-stale
+            # session ContextVar identity.
+            return parse_identity_headers(headers)
     return get_request_identity()
 
 

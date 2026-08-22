@@ -204,6 +204,63 @@ def test_escalate_links_when_members_already_covered(tmp_path: Path) -> None:
     assert db.get_conflict(notice_id)["notice_delivery_status"] == "resolved"
 
 
+def test_notice_resolve_keeps_candidate_status_out_of_open_conflicts(tmp_path: Path) -> None:
+    """Regression (0.14.1.dev0 review): resolving a notice wrote the DECODED
+    status ("open" for pending/delivered) into conflicts.status, turning the
+    handled notice into a zombie formal open conflict and wedging the per-slot
+    unique index. A resolved notice must stay a terminal candidate."""
+    tools, db = _tools(tmp_path)
+    a, b = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
+    notice_id = _structured_notice(db, tools, a, b)
+
+    resolved = tools.memory_repair("notice", {
+        "action": "resolve", "notice_id": notice_id, "reason": "handled",
+    })
+    assert resolved["ok"] is True, resolved
+
+    row = db.get_conflict(notice_id)
+    assert row["status"] == "candidate"
+    assert row["notice_delivery_status"] == "resolved"
+    open_ids = {c["conflict_id"] for c in db.list_conflicts(status="open")}
+    assert notice_id not in open_ids
+
+    # The slot stays free: a formal group on the same slot with a different
+    # member pair records cleanly instead of hitting the zombie-open unique
+    # index. (Re-recording the same pair is dedupe-guarded by the resolved
+    # notice's frozen snapshot — a separate, intended contract.)
+    c = _memory(db, "database is postgres")
+    recorded = tools.memory_repair("record_conflict", {
+        **_record_payload(a, c),
+        "members": [_member(a, 1, "mysql"), _member(c, 1, "postgres")],
+        "value_groups": [
+            ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
+            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+        ],
+    })
+    assert recorded["ok"] is True, recorded
+
+
+def test_notice_resolve_with_formal_group_on_slot_returns_structured(tmp_path: Path) -> None:
+    """Resolving a notice while a formal open group owns the slot must return
+    a structured outcome, never leak a raw sqlite3.IntegrityError."""
+    tools, db = _tools(tmp_path)
+    a, b, c = _memory(db, "database is mysql"), _memory(db, "database is sqlite"), _memory(db, "database is postgres")
+    notice_id = _structured_notice(db, tools, a, b)
+    tools.memory_repair("record_conflict", {
+        **_record_payload(a, c),
+        "members": [_member(a, 1, "mysql"), _member(c, 1, "postgres")],
+        "value_groups": [
+            ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
+            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+        ],
+    })
+    resolved = tools.memory_repair("notice", {
+        "action": "resolve", "notice_id": notice_id, "reason": "already handled via group",
+    })
+    assert resolved["ok"] is True, resolved
+    assert db.get_conflict(notice_id)["status"] == "candidate"
+
+
 def test_escalate_reports_applying_group_exists(tmp_path: Path) -> None:
     """Escalating onto a slot whose group is already applying is refused
     structurally, not with a raw exception."""

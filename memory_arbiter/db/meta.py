@@ -170,6 +170,10 @@ class MetaStore:
                 progress = json.loads(progress_raw) if progress_raw else None
             except json.JSONDecodeError:
                 return False
+            if progress is not None and str(progress.get("epoch") or "") != str(epoch):
+                # Stale progress from a superseded epoch (e.g. a completed row
+                # copied by side-by-side migration) must not wedge the new one.
+                progress = None
             expected_after = 0 if progress is None else int(progress.get("next_after_memory_id", -1))
             if progress is not None and bool(progress.get("complete")):
                 return False

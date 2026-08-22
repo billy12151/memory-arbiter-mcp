@@ -211,6 +211,11 @@ class WritePipeline:
         writes, never auto-assigns; global memories intentionally stay in
         default when no confident neighbor exists.
         """
+        # Under strict isolation the unscoped KNN would leak the existence and
+        # canonical name of a foreign workspace's memory to a caller whose read
+        # ACL hides it; the hint is a none/weak convenience only.
+        if getattr(self.settings, "isolation", "none") == "strict":
+            return None
         subject = str(getattr(record, "subject", None) or "").strip()
         if not subject:
             return None

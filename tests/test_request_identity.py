@@ -313,6 +313,26 @@ def test_tool_identity_prefers_current_mcp_request_over_stale_context(
     bundle.tools.shutdown(timeout=1)
 
 
+def test_tool_identity_invalid_request_headers_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _runtime(tmp_path, monkeypatch)
+
+    class RequestContext:
+        request = type("Request", (), {"headers": {
+            CLIENT_HEADER: "", AGENT_ID_HEADER: "current-agent",
+        }})()
+
+    class Context:
+        request_context = RequestContext()
+
+    bundle.app.get_context = lambda: Context()
+    with request_identity_scope(RequestIdentity(client="stale-client", agent_id="stale-agent")):
+        with pytest.raises(IdentityHeaderError):
+            bundle.app.tools["memory"](action="status", data={})
+    bundle.tools.shutdown(timeout=1)
+
+
 def test_stdio_write_keeps_settings_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = _runtime(tmp_path, monkeypatch)
     written = bundle.app.tools["memory"](

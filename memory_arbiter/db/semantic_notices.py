@@ -475,7 +475,14 @@ class SemanticNoticeStore:
                 return {"outcome": "stale_snapshot", "status": "stale"}
             if notice["notice_delivery_status"] not in {"pending", "delivered"}:
                 return {"outcome": "already_terminal", "status": notice["notice_delivery_status"]}
-            conflict_status = "not_a_conflict" if status == "dismissed" else notice["status"]
+            # Use the raw conflict status, not the decoded one: decoding maps
+            # delivery pending/delivered to "open", which would turn a resolved
+            # notice into a formal open conflict and wedge the per-slot unique
+            # index. A notice stays a terminal candidate unless escalated.
+            conflict_status = "not_a_conflict" if status == "dismissed" else str(row["status"] or "candidate")
             now = utc_now_iso()
-            cur = conn.execute("UPDATE conflicts SET status=?,notice_delivery_status=?,notice_resolution_reason=?,revision=revision+1,refreshed_at=?,resolved_at=CASE WHEN ?='not_a_conflict' THEN ? ELSE resolved_at END WHERE id=? AND notice_delivery_status IN ('pending','delivered')", (conflict_status, status, str(reason), now, conflict_status, now, int(notice_id)))
+            try:
+                cur = conn.execute("UPDATE conflicts SET status=?,notice_delivery_status=?,notice_resolution_reason=?,revision=revision+1,refreshed_at=?,resolved_at=CASE WHEN ?='not_a_conflict' THEN ? ELSE resolved_at END WHERE id=? AND notice_delivery_status IN ('pending','delivered')", (conflict_status, status, str(reason), now, conflict_status, now, int(notice_id)))
+            except sqlite3.IntegrityError:
+                return {"outcome": "slot_occupied", "status": status}
         return {"outcome": "updated" if cur.rowcount else "already_terminal", "status": status}

@@ -20,6 +20,14 @@ from memory_arbiter.tools import MemoryTools
 
 NON_EMPTY_DEFAULT_TERMS = sorted(t for t in DEFAULT_TERMS if t)
 
+try:
+    import sqlite_vec  # type: ignore  # noqa: F401
+    _VEC_AVAILABLE = True
+except Exception:
+    _VEC_AVAILABLE = False
+
+requires_vec = pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not installed")
+
 
 def make_tools(tmp_path: Path, isolation: str = "none", *, vec: bool = False) -> MemoryTools:
     settings = Settings(
@@ -76,6 +84,7 @@ def _canonical_vec_row(tools: MemoryTools, name: str):
 
 # ── KNN exclusion (改动1) ────────────────────────────────────────────────────
 
+@requires_vec
 def test_knn_never_merges_into_default_even_with_published_vector(tmp_path):
     tools = make_tools(tmp_path, vec=True)
     assert tools.db.state.sqlite_vec_available
@@ -103,6 +112,7 @@ def test_knn_never_merges_into_default_even_with_published_vector(tmp_path):
     assert "default" not in [s["name"] for s in resolved["similar"]]
 
 
+@requires_vec
 @pytest.mark.parametrize("term", NON_EMPTY_DEFAULT_TERMS)
 def test_knn_excludes_every_default_synonym_canonical(tmp_path, term):
     tools = make_tools(tmp_path, vec=True)
@@ -130,6 +140,7 @@ def test_default_synonyms_resolve_to_single_pool(tmp_path, term):
 
 # ── vector publish insulation (改动2) ────────────────────────────────────────
 
+@requires_vec
 def test_vector_publish_paths_skip_default_terms(tmp_path):
     tools = make_tools(tmp_path, vec=True)
     store = tools.db.workspaces
@@ -229,6 +240,7 @@ def test_default_write_and_synonym_recall_regression(tmp_path):
     assert w2["data"]["id"] in ids
 
 
+@requires_vec
 def test_placement_hint_still_fires_for_default_synonym(tmp_path, monkeypatch):
     tools = make_tools(tmp_path, vec=True)  # placement hint requires sqlite_vec
     proj = _write(tools, "projA memory", "projA", subject="projA subject")

@@ -1,6 +1,6 @@
 # Memory Arbiter MCP
 
-Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.1.dev0` 开发状态。
+Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.1.dev1` 开发状态。
 
 ## 单一 Evidence 主线
 
@@ -46,7 +46,7 @@ Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责�
 - `weak`：同样归一，并把 workspace 用作软排序和提示信号。
 - `strict`：exact/confirmed 和安全机械规则可复用 canonical；Qwen 不得静默合并，新 workspace 保持 pending，需用户确认。默认只允许 caller canonical；启用 `workspace_recall_admission=true` 后，workspace-sensitive 的 recall/read/repair、冲突/notice 流程和 console 内容/计数视图共用同一准入集合：caller canonical 加上 cosine 距离不超过 `workspace_recall_cutoff`（默认 0.25）且通过 default 绝缘、短名和通用子串护栏的 canonical。semantic runtime control、backup replay、doctor、settings 等进程级操作不属于 workspace 内容视图。sqlite-vec/向量不可用时回退精确 canonical。`default` 全局池不进入 strict 项目 scope。
 
-自动 vector/Qwen 结果只写本条 memory 的 `workspace_canonical`，不会创建持久转发。内部 negative decision 会阻止同一候选被模型重复推荐；日常治理只使用 rename/migrate/confirm-pending，不需要理解内部状态表。workspace Qwen 使用独立 `workspace_qwen_budget_ms`（默认 750 ms）；超时保留 raw canonical 并返回 review hint，不阻塞 notice 门禁。
+自动 vector/Qwen 结果只写本条 memory 的 `workspace_canonical`，不会创建持久转发。内部 negative decision 会阻止同一候选被模型重复推荐；日常治理使用 rename/migrate/confirm-pending 和全注册表确认（`confirm_workspaces`），不需要理解内部状态表。workspace Qwen 使用独立 `workspace_qwen_budget_ms`（默认 750 ms）；超时保留 raw canonical 并返回 review hint，不阻塞 notice 门禁。
 
 ## 四个产品工具
 

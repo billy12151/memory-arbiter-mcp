@@ -237,6 +237,9 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
                 (key, value),
             )
+        # A progress row copied from the source (e.g. a completed scan) belongs
+        # to a superseded epoch and must not wedge the fresh one.
+        conn.execute("DELETE FROM migration_state WHERE key='conflict_scan_progress'")
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -343,6 +346,9 @@ def _mark_conflict_rebuild_ready(db: MemoryDB) -> dict[str, str]:
         "conflict_scan_boundary": boundary,
     }
     _set_state(db, values)
+    # Drop any progress row from a superseded epoch so the fresh scan starts clean.
+    with db.write_transaction() as conn:
+        conn.execute("DELETE FROM migration_state WHERE key='conflict_scan_progress'")
     return values
 
 

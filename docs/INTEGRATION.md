@@ -1,6 +1,8 @@
 # Integration Guide
 
-This guide describes the `0.14.1.dev0` development contract.
+**English | [中文](INTEGRATION.zh-CN.md)**
+
+This guide describes the `0.14.1.dev1` development contract.
 
 ## MCP Surface
 
@@ -82,7 +84,7 @@ Canonical normalization runs under every isolation mode and is independent from 
 - `weak`: same normalization plus soft ranking/hints; no hard visibility filter.
 - `strict`: exact/confirmed and safe mechanical rules may reuse a canonical; Qwen cannot silently merge. A new workspace remains pending until authorized `confirm_pending_workspace`. Visibility is exact-canonical by default. With `workspace_recall_admission=true`, workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share the caller canonical plus every canonical within `workspace_recall_cutoff` (default 0.25) that passes default-pool, `workspace_min_name_len`, and generic-substring guards. Process-global maintenance such as semantic runtime control, backup replay, doctor, and settings is not scoped this way. Missing vectors or sqlite-vec degradation falls back to exact-canonical scope; the insulated `default` pool is never admitted into a strict project scope.
 
-Resolution order is internal confirmed/negative workspace decisions, exact canonical, bounded vector candidates, deterministic `AUTO|KEEP|ASK`, then Qwen only for an undecided near-match. Qwen must choose from the supplied candidates and may suggest an identity/typo/project relationship, but automatic normalization writes only the memory's `workspace_canonical`; it does not create a persistent redirect. Negative decisions suppress repeated proposals. Product governance uses rename, migrate, pending confirmation, and full-registry review; internal decision rows are not a product workflow.
+Resolution order is internal confirmed/negative workspace decisions, exact canonical, bounded vector candidates, deterministic `AUTO|KEEP|ASK`, then Qwen only for an undecided near-match. Qwen must choose from the supplied candidates and may suggest an `alias`/`typo`/`same_project` relationship, but automatic normalization writes only the memory's `workspace_canonical`; it does not create a persistent redirect. Negative decisions suppress repeated proposals. Product governance uses rename, migrate, pending confirmation, and full-registry review; internal decision rows are not a product workflow.
 
 Workspace and conflict inference share a serial local worker. `semantic_conflict.workspace_qwen_budget_ms` (default 750, range 50–5000 ms) is an independent short budget: timeout/busy preserves the raw canonical and returns a review hint rather than blocking the write-time notice gate.
 
@@ -92,7 +94,7 @@ All four product tools return `{ok, mode, warnings, degraded, data}`. Operation 
 
 ## Notice Lifecycle and Recovery
 
-Notice delivery is an atomic best-effort database claim, not transport exactly-once. Internal `pending` and `delivered` both appear publicly as `open`; attaching a stub changes `pending → delivered` and sets `delivered_at`. Public terminal actions are `dismiss` (false positive, conflict becomes `not_a_conflict`) and `resolve` (already handled). If either pinned memory snapshot has changed before delivery, the server may internally mark the notice `stale`. Delivery itself does not edit memory, judge/resolve a formal conflict, or supersede either side.
+Notice delivery is an atomic best-effort database claim, not transport exactly-once. Internal `pending` and `delivered` both appear publicly as `open`; attaching a stub changes `pending → delivered` and sets `delivered_at`. Public terminal actions are `dismiss` (false positive, conflict becomes `not_a_conflict`) and `resolve` (already handled). If either pinned memory snapshot has changed before delivery, the server may internally mark the notice `stale`. Delivery itself does not edit memory, judge/resolve a formal conflict, or supersede either side. Note that read-classified surfaces still advance delivery state: notice list/read and `memory(action="status")` delivery claim pending notices (`pending → delivered`, or `stale` when a pinned snapshot changed), including for policy-denied HTTP identities, which are read-only by design.
 
 The evidence and semantic queues are process-local. A crash, forced shutdown, queue-full drop, or model-subprocess restart can lose unprocessed indexing/classification work even though the memory write committed. Recovery is coverage-driven: inspect `memory(action="status")`, run `rebuild_evidence` repeatedly until dry-run is empty, eligible coverage is complete, and vector state is ready; then paginate `scan_candidates` and record each reviewed candidate. Do not assume restart reconstructs the old queue. `rebuild_evidence` restores source-derived units/vectors; the subsequent scan restores missed conflict discovery.
 
@@ -132,4 +134,4 @@ On success `conflict_scan_required=true` and a persistent epoch are recorded. On
 
 ## 中文摘要
 
-0.14.1.dev0 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。
+0.14.1.dev1 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。**完整中文集成指南见 [INTEGRATION.zh-CN.md](INTEGRATION.zh-CN.md)。**

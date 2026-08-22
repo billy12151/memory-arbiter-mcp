@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd template — run the mema MCP server as a persistent
+  Streamable HTTP service shared by multiple local AI clients.
+
+  WHEN TO USE THIS
+    stdio (the default) needs no background process: each MCP client launches
+    `mema` as its own short-lived child process. Use this plist only when you
+    set mcp.transport=streamable-http and want one long-lived local server that
+    several clients connect to over http://127.0.0.1:8000/mcp.
+
+  SETUP (3 edits)
+    1. ProgramArguments below: replace __MEMA_BIN__ with the absolute path
+       `which mema` prints (e.g. /Users/you/.local/bin/mema). launchd does not
+       inherit your shell PATH, so a bare `mema` won't be found.
+    2. StandardOutPath / StandardErrorPath: optional, defaults below are fine.
+    3. Transport is set via EnvironmentVariables below. You may instead set
+       mcp.transport in ~/.config/memory-arbiter/config.json and remove the
+       EnvironmentVariables dict — config.json wins over env for matching keys.
+
+  INSTALL
+    cp com.memory-arbiter.mema.plist ~/Library/LaunchAgents/
+    launchctl load   ~/Library/LaunchAgents/com.memory-arbiter.mema.plist
+    launchctl unload ~/Library/LaunchAgents/com.memory-arbiter.mema.plist   # stop
+    tail -f /tmp/mema.err.log                                                # logs
+
+  NOTES
+    - mema binds only to localhost; this plist does not expose it remotely.
+      X-Mema-Client / X-Mema-Agent-Id headers are provenance, not auth.
+    - KeepAlive restarts on crash and at login. Set it to false if you prefer
+      to start/stop manually.
+    - If you use a GGUF model, give its path as an absolute path in
+      config.json (not ~); launchd does not expand the shell home.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.memory-arbiter.mema</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__MEMA_BIN__</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MEMORY_ARBITER_MCP_TRANSPORT</key>
+    <string>streamable-http</string>
+    <!-- Optional; unset uses 127.0.0.1:8000/mcp
+    <key>MEMORY_ARBITER_MCP_HTTP_HOST</key>
+    <string>127.0.0.1</string>
+    <key>MEMORY_ARBITER_MCP_HTTP_PORT</key>
+    <string>8000</string>
+    <key>MEMORY_ARBITER_MCP_HTTP_PATH</key>
+    <string>/mcp</string>
+    -->
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/mema.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/mema.err.log</string>
+</dict>
+</plist>

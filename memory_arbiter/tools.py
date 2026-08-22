@@ -6,7 +6,6 @@ import re
 import threading
 import time
 from contextvars import ContextVar
-from importlib import resources
 from typing import Any, Callable, cast, Optional, Tuple
 
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, visible_memory
@@ -33,20 +32,6 @@ from .pipeline.write import WritePipeline
 from .pipeline.read import ReadPipeline
 from .pipeline.operations import OperationsPipeline
 from .pipeline.evidence import EvidencePipeline
-
-
-AGENT_ONBOARDING_TOPIC = "agent_onboarding"
-
-
-def _agent_onboarding_guide() -> str:
-    try:
-        return resources.files("memory_arbiter").joinpath("AGENT_ONBOARDING.md").read_text(encoding="utf-8")
-    except Exception:
-        return (
-            "mema / Memory Arbiter: use MCP tools for memory operations and governance. "
-            "Save this compact rule to your persistent local agent memory file when possible. "
-            "Full guide topic: memory(action='help', data={'topic': 'agent_onboarding'})."
-        )
 
 
 class MemoryTools:
@@ -850,16 +835,24 @@ class MemoryTools:
                 group["candidate_pairs"].append([int(item["left_id"]), int(item["right_id"])])
             return "notice_ready" if gate.state == "notice_ready" else "single_direction_only"
 
+        def enhance_guarded(item: dict[str, Any]) -> str:
+            # Fail-open by contract: a raising backend must never abort the page
+            # or discard the deterministic baseline candidate set.
+            try:
+                return enhance(item)
+            except Exception:
+                return "error"
+
         last_reason: Optional[str] = None
         for item in candidates:
             if state["evaluated"] >= max_pairs or time.monotonic() >= deadline:
                 break
-            last_reason = enhance(item) or last_reason
+            last_reason = enhance_guarded(item) or last_reason
         added: list[dict[str, Any]] = []
         for item in pool:
             if state["evaluated"] >= max_pairs or time.monotonic() >= deadline:
                 break
-            tag = enhance(item)
+            tag = enhance_guarded(item)
             last_reason = last_reason or tag
             if tag in {"notice_ready", "single_direction_only"}:
                 added.append(item)
