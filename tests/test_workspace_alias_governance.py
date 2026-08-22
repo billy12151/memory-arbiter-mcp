@@ -15,7 +15,7 @@ import pytest
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB, _normalize_alias_key
-from memory_arbiter.models import MemoryStatus
+from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryStatus
 from memory_arbiter.tools import MemoryTools
 
 
@@ -46,6 +46,30 @@ def write(tools: MemoryTools, workspace: str, content: str = "workspace fact") -
         content=content, subject="workspace", workspace=workspace,
         source_type="agent_generated",
     )["data"]["id"])
+
+
+def record_conflict(tools: MemoryTools, workspace: str, left: int, right: int) -> int:
+    members = [
+        ConflictMember(
+            memory_id=memory_id, version=1, attribute_raw="database", value_raw=value,
+            normalized_attribute="database", normalized_value=value,
+            evidence_quote=value, evidence_span=(0, len(value)), content_hash=char * 64,
+            direction="a_to_b", prompt_version="p1", detector_version="d1",
+        )
+        for memory_id, value, char in ((left, "mysql", "a"), (right, "sqlite", "b"))
+    ]
+    outcome = tools.db.record_conflict_group(
+        workspace_canonical=workspace,
+        slot_key={"entity": "svc", "attribute": "database", "scope": "production"},
+        members=members,
+        value_groups=[
+            ConflictValueGroup("mysql", "MySQL", (f"{left}@1",)),
+            ConflictValueGroup("sqlite", "SQLite", (f"{right}@1",)),
+        ],
+        detection_reason="different", source="scan", detector_version="d1",
+    )
+    assert outcome["outcome"] == "inserted"
+    return int(outcome["conflict_id"])
 
 
 def test_normalize_workspace_decision_key() -> None:
@@ -169,6 +193,24 @@ def test_rename_moves_memories_and_prevents_old_name_resplit(tmp_path: Path) -> 
     assert resolved["matched_by"] == "confirmed_alias"
 
 
+def test_rename_moves_conflicts_with_their_members(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    left = write(tools, "OldName", "database is mysql")
+    right = write(tools, "OldName", "database is sqlite")
+    conflict_id = record_conflict(tools, "OldName", left, right)
+
+    result = tools.memory_govern("rename_workspace_canonical", {
+        "old": "OldName", "new": "NewName", "authorized": True,
+    })
+
+    assert result["ok"] is True
+    conflict = tools.db.get_conflict(conflict_id)
+    assert conflict["workspace_canonical"] == "NewName"
+    assert tools.memory_review(
+        "conflict_detail", {"conflict_id": conflict_id, "workspace": "NewName"},
+    )["ok"] is True
+
+
 def test_migrate_moves_memories_and_prevents_source_resplit(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     memory_id = write(tools, "Sub2")
@@ -180,6 +222,41 @@ def test_migrate_moves_memories_and_prevents_source_resplit(tmp_path: Path) -> N
     resolved = tools.db.resolve_workspace_canonical("Sub2", None, register_new=False)
     assert resolved["canonical"] == "Main"
     assert resolved["matched_by"] == "confirmed_alias"
+
+
+def test_migrate_moves_conflicts_with_their_members(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    left = write(tools, "Sub2", "database is mysql")
+    right = write(tools, "Sub2", "database is sqlite")
+    conflict_id = record_conflict(tools, "Sub2", left, right)
+
+    result = tools.memory_govern("migrate_workspace", {
+        "from": "Sub2", "to": "Main", "authorized": True,
+    })
+
+    assert result["ok"] is True
+    assert tools.db.get_conflict(conflict_id)["workspace_canonical"] == "Main"
+
+
+def test_migrate_conflict_slot_collision_rolls_back_everything(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    old_left = write(tools, "Old", "old mysql")
+    old_right = write(tools, "Old", "old sqlite")
+    new_left = write(tools, "New", "new mysql")
+    new_right = write(tools, "New", "new sqlite")
+    old_conflict = record_conflict(tools, "Old", old_left, old_right)
+    new_conflict = record_conflict(tools, "New", new_left, new_right)
+
+    result = tools.memory_govern("migrate_workspace", {
+        "from": "Old", "to": "New", "authorized": True,
+    })
+
+    assert result["ok"] is False
+    assert any("migrate_workspace failed" in warning for warning in result["warnings"])
+    assert tools.db.get_memory(old_left)["workspace_canonical"] == "Old"
+    assert tools.db.get_memory(old_right)["workspace_canonical"] == "Old"
+    assert tools.db.get_conflict(old_conflict)["workspace_canonical"] == "Old"
+    assert tools.db.get_conflict(new_conflict)["workspace_canonical"] == "New"
 
 
 def test_migrate_without_existing_rows_installs_redirect(tmp_path: Path) -> None:

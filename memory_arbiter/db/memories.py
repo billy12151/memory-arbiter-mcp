@@ -432,6 +432,8 @@ class MemoriesStore:
         add_tags: Optional[list[str]] = None,
         remove_tags: Optional[list[str]] = None,
         authorized: bool = False,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> dict[str, Any]:
         """v0.7.6: low-side-effect tag-only update.
 
@@ -452,82 +454,88 @@ class MemoriesStore:
           ``unavailable``   — DB not writable.
           ``error``         — sqlite3.Error mid-transaction; fully rolled back.
         """
+        if conn is not None:
+            return self.update_tags_low_side_effect_on_conn(
+                conn, memory_id, add_tags=add_tags,
+                remove_tags=remove_tags, authorized=authorized,
+            )
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable", "memory_id": memory_id}
         try:
             with self.write_transaction() as conn:
-                current = self._fetch_memory(conn, memory_id)
-                if not current:
-                    return {"outcome": "not_found", "memory_id": memory_id}
-                status = current.get("status")
-                if status != "active":
-                    return {"outcome": "not_active", "memory_id": memory_id, "status": status}
-                raw_tags = current.get("tags")
-                if isinstance(raw_tags, list):
-                    old_tags = raw_tags
-                elif isinstance(raw_tags, str):
-                    try:
-                        parsed = json.loads(raw_tags)
-                        old_tags = parsed if isinstance(parsed, list) else []
-                    except (json.JSONDecodeError, ValueError):
-                        old_tags = []
-                else:
-                    old_tags = []
-
-                # Protection check inside the transaction (TOCTOU-safe).
-                protection = current.get("protection_level")
-                source_type = current.get("source_type")
-                is_protected = protection == "locked" or source_type == "user_confirmed"
-                if is_protected and not authorized:
-                    return {
-                        "outcome": "forbidden",
-                        "memory_id": memory_id,
-                        "protection_level": protection,
-                        "source_type": source_type,
-                    }
-
-                # Compute new tags preserving order + deduping.
-                current_set: set[str] = set(old_tags)
-                new_tags_list = list(old_tags)
-                for t in (remove_tags or []):
-                    if t in current_set:
-                        current_set.discard(t)
-                        new_tags_list = [x for x in new_tags_list if x != t]
-                for t in (add_tags or []):
-                    if t not in current_set:
-                        current_set.add(t)
-                        new_tags_list.append(t)
-
-                if new_tags_list == old_tags:
-                    # Zero-write no-op (covers idempotent remove of absent tag).
-                    return {"outcome": "no_change", "memory_id": memory_id, "tags": old_tags}
-
-                new_tags_json = json.dumps(new_tags_list, ensure_ascii=False)
-                conn.execute(
-                    "UPDATE memories SET tags=? WHERE id=?",
-                    (new_tags_json, memory_id),
+                return self.update_tags_low_side_effect_on_conn(
+                    conn, memory_id, add_tags=add_tags,
+                    remove_tags=remove_tags, authorized=authorized,
                 )
-                if self.state.fts5_available:
-                    old_content = current["content"]
-                    old_subject = current.get("subject")
-                    conn.execute(
-                        "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) "
-                        "VALUES('delete', ?, ?, ?, ?)",
-                        (memory_id, old_content, " ".join(old_tags), old_subject or ""),
-                    )
-                    conn.execute(
-                        "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
-                        (memory_id, old_content, " ".join(new_tags_list), old_subject or ""),
-                    )
-                # write_transaction() commits on normal exit; rolls back on raise.
-                return {
-                    "outcome": "updated",
-                    "memory_id": memory_id,
-                    "tags": new_tags_list,
-                    "semantic_content_changed": False,
-                }
         except sqlite3.Error:
             return {"outcome": "error", "memory_id": memory_id}
+
+    def update_tags_low_side_effect_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: int,
+        add_tags: Optional[list[str]] = None,
+        remove_tags: Optional[list[str]] = None,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """Update tags using a caller-owned write transaction."""
+        current = self._fetch_memory(conn, memory_id)
+        if not current:
+            return {"outcome": "not_found", "memory_id": memory_id}
+        status = current.get("status")
+        if status != "active":
+            return {"outcome": "not_active", "memory_id": memory_id, "status": status}
+        raw_tags = current.get("tags")
+        if isinstance(raw_tags, list):
+            old_tags = raw_tags
+        elif isinstance(raw_tags, str):
+            try:
+                parsed = json.loads(raw_tags)
+                old_tags = parsed if isinstance(parsed, list) else []
+            except (json.JSONDecodeError, ValueError):
+                old_tags = []
+        else:
+            old_tags = []
+        protection = current.get("protection_level")
+        source_type = current.get("source_type")
+        is_protected = protection == "locked" or source_type == "user_confirmed"
+        if is_protected and not authorized:
+            return {
+                "outcome": "forbidden", "memory_id": memory_id,
+                "protection_level": protection, "source_type": source_type,
+            }
+        current_set: set[str] = set(old_tags)
+        new_tags_list = list(old_tags)
+        for tag in remove_tags or []:
+            if tag in current_set:
+                current_set.discard(tag)
+                new_tags_list = [item for item in new_tags_list if item != tag]
+        for tag in add_tags or []:
+            if tag not in current_set:
+                current_set.add(tag)
+                new_tags_list.append(tag)
+        if new_tags_list == old_tags:
+            return {"outcome": "no_change", "memory_id": memory_id, "tags": old_tags}
+        conn.execute(
+            "UPDATE memories SET tags=? WHERE id=?",
+            (json.dumps(new_tags_list, ensure_ascii=False), memory_id),
+        )
+        if self.state.fts5_available:
+            old_content = current["content"]
+            old_subject = current.get("subject")
+            conn.execute(
+                "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) "
+                "VALUES('delete', ?, ?, ?, ?)",
+                (memory_id, old_content, " ".join(old_tags), old_subject or ""),
+            )
+            conn.execute(
+                "INSERT INTO memories_fts(rowid, content, tags, subject) VALUES (?, ?, ?, ?)",
+                (memory_id, old_content, " ".join(new_tags_list), old_subject or ""),
+            )
+        return {
+            "outcome": "updated", "memory_id": memory_id,
+            "tags": new_tags_list, "semantic_content_changed": False,
+        }
 
     def update_metadata_fields_low_side_effect(
         self,
@@ -539,25 +547,39 @@ class MemoriesStore:
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable", "memory_id": memory_id}
         with self.write_transaction() as conn:
-            current = self._fetch_memory(conn, int(memory_id))
-            if not current:
-                return {"outcome": "not_found", "memory_id": memory_id}
-            if current.get("status") != "active":
-                return {"outcome": "not_active", "memory_id": memory_id}
-            if (current.get("protection_level") == "locked" or current.get("source_type") == "user_confirmed") and not authorized:
-                return {"outcome": "forbidden", "memory_id": memory_id}
-            metadata = dict(current.get("metadata") or {})
-            before = dict(metadata)
-            for key in clear_fields or []:
-                metadata.pop(str(key), None)
-            metadata.update(set_fields or {})
-            if metadata == before:
-                return {"outcome": "no_change", "memory_id": memory_id, "metadata": metadata}
-            conn.execute(
-                "UPDATE memories SET metadata=?,version=version+1 WHERE id=?",
-                (json.dumps(metadata, ensure_ascii=False), int(memory_id)),
+            return self.update_metadata_fields_low_side_effect_on_conn(
+                conn, memory_id, set_fields=set_fields,
+                clear_fields=clear_fields, authorized=authorized,
             )
-            return {"outcome": "updated", "memory_id": memory_id, "metadata": metadata}
+
+    def update_metadata_fields_low_side_effect_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: int,
+        set_fields: Optional[dict[str, Any]] = None,
+        clear_fields: Optional[list[str]] = None,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """Update metadata using a caller-owned write transaction."""
+        current = self._fetch_memory(conn, int(memory_id))
+        if not current:
+            return {"outcome": "not_found", "memory_id": memory_id}
+        if current.get("status") != "active":
+            return {"outcome": "not_active", "memory_id": memory_id}
+        if (current.get("protection_level") == "locked" or current.get("source_type") == "user_confirmed") and not authorized:
+            return {"outcome": "forbidden", "memory_id": memory_id}
+        metadata = dict(current.get("metadata") or {})
+        before = dict(metadata)
+        for key in clear_fields or []:
+            metadata.pop(str(key), None)
+        metadata.update(set_fields or {})
+        if metadata == before:
+            return {"outcome": "no_change", "memory_id": memory_id, "metadata": metadata}
+        conn.execute(
+            "UPDATE memories SET metadata=?,version=version+1 WHERE id=?",
+            (json.dumps(metadata, ensure_ascii=False), int(memory_id)),
+        )
+        return {"outcome": "updated", "memory_id": memory_id, "metadata": metadata}
 
     def list_entities(
         self,
@@ -1074,7 +1096,10 @@ class MemoriesStore:
             ).fetchall()
             return [_row_to_dict(row) for row in rows]
 
-    def cleanup_history(self, memory_id: Optional[int] = None, older_than_days: Optional[int] = None) -> int:
+    def cleanup_history(
+        self, memory_id: Optional[int] = None, older_than_days: Optional[int] = None,
+        *, conn: Optional[sqlite3.Connection] = None,
+    ) -> int:
         """Delete historical snapshots from memory_history.
 
         SAFETY RED LINE: only ever issues DELETE against memory_history.
@@ -1093,9 +1118,11 @@ class MemoriesStore:
             clauses.append("changed_at < ?")
             params.append(cutoff)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self.connection() as conn:
+        if conn is not None:
             cur = conn.execute(f"DELETE FROM memory_history {where}", params)
-            conn.commit()
+            return int(cur.rowcount)
+        with self.write_transaction() as txn_conn:
+            cur = txn_conn.execute(f"DELETE FROM memory_history {where}", params)
             return int(cur.rowcount)
 
     # ------------------------------------------------------------------

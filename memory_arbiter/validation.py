@@ -19,6 +19,13 @@ MAX_METADATA_BYTES = 256 * 1024
 MAX_TEXT_FIELD_CHARS = 2_000
 MAX_REPLACEMENT_TEXT_CHARS = 1_000_000
 MAX_BATCH_IDS = 1_000
+MAX_CONFLICT_MEMBERS = 256
+MAX_CONFLICT_MEMBERS_BYTES = 256 * 1024
+MAX_CONFLICT_VALUE_GROUPS_BYTES = 128 * 1024
+MAX_CONFLICT_CANDIDATE_KEY_BYTES = 64 * 1024
+MAX_CONFLICT_SLOT_KEY_BYTES = 4 * 1024
+MAX_APPLY_PLAN_ITEMS = 256
+MAX_APPLY_PLAN_BYTES = 128 * 1024
 MAX_REVISION = 2_147_483_647
 SEMANTIC_CONTROL_MAX_TIMEOUT = 600.0
 MAX_RESULT_LIMIT = 100
@@ -218,6 +225,10 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         "agent_id": MAX_TEXT_FIELD_CHARS,
         "client": MAX_TEXT_FIELD_CHARS,
         "reason": MAX_TEXT_FIELD_CHARS,
+        "ref": MAX_TEXT_FIELD_CHARS,
+        "chosen_value": MAX_TEXT_FIELD_CHARS,
+        "detector_version": MAX_TEXT_FIELD_CHARS,
+        "prompt_version": MAX_TEXT_FIELD_CHARS,
         "canonical": MAX_TEXT_FIELD_CHARS,
         "old": MAX_TEXT_FIELD_CHARS,
         "new": MAX_TEXT_FIELD_CHARS,
@@ -261,6 +272,66 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             return result
         if metadata_size > MAX_METADATA_BYTES:
             result.error = {"error": "resource_limit_exceeded", "field": "metadata", "max_bytes": MAX_METADATA_BYTES}
+            return result
+
+    structured_limits = {
+        "members": (MAX_CONFLICT_MEMBERS, MAX_CONFLICT_MEMBERS_BYTES),
+        "value_groups": (MAX_CONFLICT_MEMBERS, MAX_CONFLICT_VALUE_GROUPS_BYTES),
+        "apply_plan": (MAX_APPLY_PLAN_ITEMS, MAX_APPLY_PLAN_BYTES),
+    }
+    for key, (max_items, max_bytes) in structured_limits.items():
+        value = payload.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list) or len(value) > max_items:
+            result.error = _error(key, f"must be a list with at most {max_items} items")
+            return result
+        if any(not isinstance(item, dict) for item in value):
+            result.error = _error(key, "must contain only JSON objects")
+            return result
+        try:
+            actual_bytes = _json_size(value)
+        except (TypeError, ValueError, RecursionError):
+            result.error = _error(key, "must contain only JSON-serializable values")
+            return result
+        if actual_bytes > max_bytes:
+            result.error = {
+                "error": "resource_limit_exceeded", "field": key,
+                "actual_bytes": actual_bytes, "max_bytes": max_bytes,
+            }
+            return result
+    candidate_key = payload.get("candidate_key")
+    if candidate_key is not None:
+        if not isinstance(candidate_key, dict):
+            result.error = _error("candidate_key", "must be a JSON object")
+            return result
+        try:
+            candidate_bytes = _json_size(candidate_key)
+        except (TypeError, ValueError, RecursionError):
+            result.error = _error("candidate_key", "must contain only JSON-serializable values")
+            return result
+        if candidate_bytes > MAX_CONFLICT_CANDIDATE_KEY_BYTES:
+            result.error = {
+                "error": "resource_limit_exceeded", "field": "candidate_key",
+                "actual_bytes": candidate_bytes,
+                "max_bytes": MAX_CONFLICT_CANDIDATE_KEY_BYTES,
+            }
+            return result
+    slot_key = payload.get("slot_key")
+    if slot_key is not None:
+        if not isinstance(slot_key, dict):
+            result.error = _error("slot_key", "must be a JSON object or null")
+            return result
+        try:
+            slot_bytes = _json_size(slot_key)
+        except (TypeError, ValueError, RecursionError):
+            result.error = _error("slot_key", "must contain only JSON-serializable values")
+            return result
+        if slot_bytes > MAX_CONFLICT_SLOT_KEY_BYTES:
+            result.error = {
+                "error": "resource_limit_exceeded", "field": "slot_key",
+                "actual_bytes": slot_bytes, "max_bytes": MAX_CONFLICT_SLOT_KEY_BYTES,
+            }
             return result
 
     for key in ("memory_ids",):
@@ -345,14 +416,16 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         except (TypeError, ValueError):
             result.error = _error("confidence", "must be a finite number between 0 and 1")
             return result
-        if not math.isfinite(parsed_confidence) or not 0.0 <= parsed_confidence <= 1.0:
+        if isinstance(value, bool) or not math.isfinite(parsed_confidence) or not 0.0 <= parsed_confidence <= 1.0:
             result.error = _error("confidence", "must be a finite number between 0 and 1")
             return result
+        payload["confidence"] = parsed_confidence
     for key in ("event_time", "ingest_time", "after_time", "before_time"):
         value = payload.get(key)
-        if value is not None and parse_iso8601_utc(value) is None:
-            result.error = _error(key, "must be a valid ISO 8601 timestamp")
-            return result
+        if value is not None:
+            if not isinstance(value, str) or len(value) > 128 or parse_iso8601_utc(value) is None:
+                result.error = _error(key, "must be a valid ISO 8601 timestamp of at most 128 characters")
+                return result
     enums = {
         "source_type": {item.value for item in SourceType},
         "protection_level": {item.value for item in ProtectionLevel},

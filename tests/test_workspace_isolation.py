@@ -407,6 +407,66 @@ def test_memory_activate_rejects_non_pending(tmp_path):
     assert r["ok"] is False
 
 
+def test_memory_activate_rechecks_status_inside_write_transaction(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path, "none")
+    mid = _write(tools, "pending", "projA", status="pending")["data"]["id"]
+    stale_pending = tools.db.get_memory(mid)
+    assert stale_pending["status"] == MemoryStatus.PENDING.value
+    assert tools.db.update_memory(mid, {"status": "superseded"}) is True
+
+    # Old code trusted this pre-transaction snapshot and could reactivate it.
+    monkeypatch.setattr(tools, "_get_memory_visible", lambda *_args, **_kwargs: stale_pending)
+    rejected = tools.memory_activate(memory_id=mid, authorized=True)
+
+    assert rejected["ok"] is False
+    assert "not pending" in rejected["data"]["error"]
+    assert tools.db.get_memory(mid)["status"] == "superseded"
+
+
+def test_strict_mutations_recheck_workspace_inside_write_transaction(tmp_path, monkeypatch):
+    tools = make_tools(tmp_path, "strict")
+    ids = [
+        _active_write(tools, f"content {index}", "projA", subject=f"s{index}")
+        for index in range(5)
+    ]
+    history_id = ids[4]
+    assert tools.memory_edit(
+        memory_id=history_id, new_content="content 4 edited", workspace="projA",
+    )["ok"] is True
+    stale = {memory_id: tools.db.get_memory(memory_id) for memory_id in ids}
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE memories SET workspace_canonical='projB' WHERE id IN (?,?,?,?,?)",
+            ids,
+        )
+
+    monkeypatch.setattr(
+        tools, "_get_memory_visible",
+        lambda memory_id, _caller=None: stale.get(int(memory_id)),
+    )
+    outcomes = [
+        tools.memory_edit(memory_id=ids[0], new_content="forbidden", workspace="projA"),
+        tools.memory_edit(
+            memory_id=ids[1], tags_only=True, add_tags=["forbidden"], workspace="projA",
+        ),
+        tools.memory_set_entity(memory_id=ids[2], entity="forbidden", workspace="projA"),
+        tools.memory_supersede(
+            memory_id=ids[3], reason="forbidden", authorized=True, workspace="projA",
+        ),
+        tools.memory_cleanup_history(
+            memory_id=history_id, authorized=True, workspace="projA",
+        ),
+    ]
+
+    assert all(result["ok"] is False for result in outcomes)
+    assert all(result["data"]["error"] == "forbidden_strict_workspace" for result in outcomes)
+    assert tools.db.get_memory(ids[0])["content"] == "content 0"
+    assert "forbidden" not in tools.db.get_memory(ids[1])["tags"]
+    assert "entity" not in tools.db.get_memory(ids[2])["metadata"]
+    assert tools.db.get_memory(ids[3])["status"] == "active"
+    assert len(tools.db.list_history(history_id)) == 1
+
+
 def test_strict_hard_filter_same_canonical_only(tmp_path):
     tools = make_tools(tmp_path, "strict")
     # activate both distinct workspaces

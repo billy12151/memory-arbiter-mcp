@@ -150,8 +150,38 @@ class MemoryIdentityMiddleware:
             )
             return
 
+        downstream_receive = receive
+        if str(scope.get("method") or "").upper() in {"POST", "PUT", "PATCH"}:
+            buffered: list[MutableMapping[str, Any]] = []
+            received_bytes = 0
+            while True:
+                message = await receive()
+                buffered.append(message)
+                if message.get("type") != "http.request":
+                    break
+                received_bytes += len(message.get("body") or b"")
+                if received_bytes > self.max_request_body_size:
+                    await self._json_error(
+                        send, status=413, error="request_too_large",
+                        message=f"Request body exceeds {self.max_request_body_size} bytes.",
+                    )
+                    return
+                if not message.get("more_body", False):
+                    break
+            replay_index = 0
+
+            async def receive_buffered() -> MutableMapping[str, Any]:
+                nonlocal replay_index
+                if replay_index < len(buffered):
+                    message = buffered[replay_index]
+                    replay_index += 1
+                    return message
+                return await receive()
+
+            downstream_receive = receive_buffered
+
         with request_identity_scope(identity):
-            await self.app(scope, receive, send)
+            await self.app(scope, downstream_receive, send)
 
 
 def _identity_for_tool(app: Any) -> Optional[RequestIdentity]:

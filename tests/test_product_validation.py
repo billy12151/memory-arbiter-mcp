@@ -5,7 +5,10 @@ from memory_arbiter.config import AgentPolicy, Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.validation import (
+    MAX_APPLY_PLAN_ITEMS,
     MAX_CONTENT_BYTES,
+    MAX_CONFLICT_MEMBERS,
+    MAX_CONFLICT_SLOT_KEY_BYTES,
     MAX_REPLACEMENT_TEXT_CHARS,
     MAX_TEXT_FIELD_CHARS,
     PRODUCT_FIELD_REGISTRY,
@@ -48,6 +51,21 @@ def test_memory_write_guard_rejects_lifecycle_status_without_surface_validation(
     assert result["data"]["error"] == "invalid_input"
     assert result["data"]["field"] == "status"
     assert tools.db.get_memory(result["data"].get("id") or 0) is None
+
+
+def test_memory_write_direct_guard_rejects_invalid_structured_fields(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    cases = [
+        ({"confidence": True}, "confidence"),
+        ({"confidence": math.nan}, "confidence"),
+        ({"source_type": "bogus"}, "source_type"),
+        ({"protection_level": "root"}, "protection_level"),
+        ({"event_time": "yesterday"}, "event_time"),
+    ]
+    for extra, field in cases:
+        result = tools.memory_write(content="x", subject="s", **extra)
+        assert result["ok"] is False
+        assert result["data"]["field"] == field
 
 
 def test_content_limit_is_utf8_bytes_and_inclusive(tmp_path: Path) -> None:
@@ -95,7 +113,8 @@ def test_product_ids_must_be_positive(tmp_path: Path) -> None:
 
 def test_non_finite_confidence_and_bad_time_rejected(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    assert tools.memory("remember", {"content": "x", "subject": "s", "confidence": "NaN"})["ok"] is False
+    for confidence in ("NaN", True, False):
+        assert tools.memory("remember", {"content": "x", "subject": "s", "confidence": confidence})["ok"] is False
     result = tools.memory("remember", {"content": "x", "subject": "s", "event_time": "yesterday"})
     assert result["ok"] is False
     assert result["data"]["field"] == "event_time"
@@ -187,14 +206,77 @@ def test_textual_resource_boundaries(tmp_path: Path) -> None:
     memory_id = tools.memory("remember", {"content": "abc", "subject": "s"})["data"]["id"]
     cases = [
         ("memory", "update", {"memory_id": memory_id, "old_text": "x" * (MAX_REPLACEMENT_TEXT_CHARS + 1), "new_text": "y"}, "old_text"),
+        ("memory", "judge", {"ref": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "ref"),
+        ("memory", "judge", {"chosen_value": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "chosen_value"),
         ("memory_govern", "rename_workspace_canonical", {"old": "x" * (MAX_TEXT_FIELD_CHARS + 1), "new": "c", "authorized": True}, "old"),
         ("memory_repair", "set_entity", {"memory_id": memory_id, "entity": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "entity"),
+        ("memory_repair", "record_conflict", {"detector_version": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "detector_version"),
+        ("memory_repair", "record_conflict", {"prompt_version": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "prompt_version"),
     ]
     dispatch = {"memory": tools.memory, "memory_govern": tools.memory_govern, "memory_repair": tools.memory_repair}
     for surface, operation, payload, field in cases:
         result = dispatch[surface](operation, payload)
         assert result["ok"] is False
         assert result["data"]["field"] == field
+
+
+def test_timestamp_fields_reject_non_strings_and_oversized_values() -> None:
+    for value in (True, 123, "2" * 129):
+        result = validate_product_payload(
+            "memory", "remember",
+            {"content": "x", "subject": "s", "event_time": value}, vec_dim=2,
+        )
+        assert result.error is not None
+        assert result.error["field"] == "event_time"
+
+
+def test_conflict_structured_payload_limits_reject_oversized_arrays() -> None:
+    cases = [
+        ("memory", "judge", "apply_plan", [{}] * (MAX_APPLY_PLAN_ITEMS + 1)),
+        ("memory_govern", "replan_conflict", "apply_plan", [{}] * (MAX_APPLY_PLAN_ITEMS + 1)),
+        ("memory_repair", "record_conflict", "members", [{}] * (MAX_CONFLICT_MEMBERS + 1)),
+        ("memory_repair", "record_conflict", "value_groups", [{}] * (MAX_CONFLICT_MEMBERS + 1)),
+    ]
+    for surface, operation, field, value in cases:
+        payload = {field: value}
+        result = validate_product_payload(surface, operation, payload, vec_dim=2)
+        assert result.error is not None
+        assert result.error["field"] == field
+
+
+def test_conflict_structured_payload_limits_require_json_values() -> None:
+    for surface, operation, field, value in (
+        ("memory", "judge", "apply_plan", [{"bad": object()}]),
+        ("memory_repair", "record_conflict", "members", [{"bad": object()}]),
+        ("memory_repair", "record_conflict", "value_groups", [{"bad": object()}]),
+        ("memory_repair", "record_conflict", "candidate_key", {"bad": object()}),
+    ):
+        result = validate_product_payload(
+            surface, operation, {field: value}, vec_dim=2,
+        )
+        assert result.error is not None
+        assert result.error["field"] == field
+
+
+def test_conflict_slot_key_limit_matches_database_schema() -> None:
+    oversized = {"entity": "x" * MAX_CONFLICT_SLOT_KEY_BYTES, "attribute": "a", "scope": "s"}
+    result = validate_product_payload(
+        "memory_repair", "record_conflict", {"slot_key": oversized}, vec_dim=2,
+    )
+    assert result.error is not None
+    assert result.error["field"] == "slot_key"
+
+    for surface, operation, field in (
+        ("memory", "judge", "apply_plan"),
+        ("memory_govern", "replan_conflict", "apply_plan"),
+        ("memory_repair", "record_conflict", "members"),
+        ("memory_repair", "record_conflict", "value_groups"),
+    ):
+        result = validate_product_payload(
+            surface, operation, {field: ["not-an-object"]}, vec_dim=2,
+        )
+        assert result.error is not None
+        assert result.error["field"] == field
 
 
 def test_notice_authorized_is_not_registered_and_notice_remains_unauthorized(tmp_path: Path) -> None:

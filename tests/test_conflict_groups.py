@@ -145,6 +145,31 @@ def test_open_applying_apply_bookkeeping_and_resolve_only_completed(tmp_path: Pa
     assert _record(db, [_member(other_mysql, "mysql"), _member(other_sqlite, "sqlite")], expected_revision=resolved["revision"])["outcome"] != "appended"
 
 
+def test_judge_and_replan_reject_non_object_plan_entries(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    left, right = _memory(db, "mysql"), _memory(db, "sqlite")
+    created = _record(db, [_member(left, "mysql"), _member(right, "sqlite")])
+
+    judged = db.judge_conflict(
+        created["conflict_id"], expected_revision=1, chosen_value="sqlite",
+        decided_by="user", decided_ref="chat", decision_reason="confirmed",
+        apply_plan=["bad"],
+    )
+    assert judged["outcome"] == "invalid_plan"
+
+    applying = db.judge_conflict(
+        created["conflict_id"], expected_revision=1, chosen_value="sqlite",
+        decided_by="user", decided_ref="chat", decision_reason="confirmed",
+        apply_plan=[{"memory_id": left, "action": "preserve_historical_record"}],
+    )
+    assert applying["outcome"] == "applying"
+    replanned = db.conflicts.replan_conflict(
+        created["conflict_id"], expected_revision=applying["revision"],
+        apply_plan=["bad"],
+    )
+    assert replanned["outcome"] == "invalid_plan"
+
+
 def test_conflict_detail_exposes_group_snapshot_resolution_and_next_call(tmp_path: Path) -> None:
     db = _db(tmp_path)
     tools = MemoryTools(db.settings, db)
@@ -267,6 +292,11 @@ def test_candidate_key_and_value_groups_are_exactly_verified(tmp_path: Path) -> 
     wrong_value = _groups(*members)
     wrong_value[0] = ConflictValueGroup("wrong", wrong_value[0].display_value, wrong_value[0].members)
     assert db.record_conflict_group(**{**base, "value_groups": wrong_value, "candidate_key": None})["outcome"] == "invalid_input"
+
+    oversized_slot = {"entity": "x" * 4096, "attribute": "database", "scope": "global"}
+    oversized = db.record_conflict_group(**{**base, "slot_key": oversized_slot, "candidate_key": None})
+    assert oversized["outcome"] == "invalid_input"
+    assert "slot_key exceeds" in oversized["error"]
 
 
 def test_member_linkage_and_dismissal_have_no_result_caps(tmp_path: Path) -> None:

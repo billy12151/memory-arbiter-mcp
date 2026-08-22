@@ -80,15 +80,22 @@ async def _call_asgi(
     path: str = "/mcp",
     client: tuple[str, int] = ("127.0.0.1", 4321),
     headers: list[tuple[bytes, bytes]] | None = None,
+    body_chunks: list[bytes] | None = None,
+    method: str = "POST",
 ) -> list[dict[str, Any]]:
     sent: list[dict[str, Any]] = []
-    received = False
+    chunks = list(body_chunks) if body_chunks is not None else [b""]
+    receive_index = 0
 
     async def receive() -> dict[str, Any]:
-        nonlocal received
-        if not received:
-            received = True
-            return {"type": "http.request", "body": b"", "more_body": False}
+        nonlocal receive_index
+        if receive_index < len(chunks):
+            body = chunks[receive_index]
+            receive_index += 1
+            return {
+                "type": "http.request", "body": body,
+                "more_body": receive_index < len(chunks),
+            }
         await asyncio.sleep(0)
         return {"type": "http.disconnect"}
 
@@ -99,7 +106,7 @@ async def _call_asgi(
     if not any(name.lower() == b"host" for name, _value in supplied_headers):
         supplied_headers.append((b"host", b"127.0.0.1:8000"))
     scope: dict[str, Any] = {
-        "type": "http", "method": "POST", "path": path,
+        "type": "http", "method": method, "path": path,
         "headers": supplied_headers, "client": client,
     }
     await app(scope, receive, send)
@@ -177,6 +184,60 @@ def test_identity_middleware_sets_and_resets_request_context() -> None:
     assert result[0]["status"] == 204
     assert observed == [RequestIdentity(client="claude", agent_id="agent-a")]
     assert get_request_identity() is None
+
+
+def test_identity_middleware_enforces_actual_chunked_body_size() -> None:
+    observed: list[bytes] = []
+
+    async def inner(_scope: Any, receive: Any, send: Any) -> None:
+        while True:
+            message = await receive()
+            if message.get("type") != "http.request":
+                break
+            observed.append(message.get("body") or b"")
+            if not message.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    headers = [
+        (CLIENT_HEADER.lower().encode(), b"client"),
+        (AGENT_ID_HEADER.lower().encode(), b"agent"),
+    ]
+    accepted = asyncio.run(_call_asgi(
+        MemoryIdentityMiddleware(inner, max_request_body_size=4),
+        headers=headers, body_chunks=[b"ab", b"cd"],
+    ))
+    assert accepted[0]["status"] == 204
+    assert observed == [b"ab", b"cd"]
+
+    observed.clear()
+    rejected = asyncio.run(_call_asgi(
+        MemoryIdentityMiddleware(inner, max_request_body_size=4),
+        headers=headers, body_chunks=[b"abc", b"de"],
+    ))
+    assert rejected[0]["status"] == 413
+    assert observed == []
+
+
+def test_identity_middleware_does_not_preread_sse_get_body() -> None:
+    reached = False
+
+    async def inner(_scope: Any, _receive: Any, send: Any) -> None:
+        nonlocal reached
+        reached = True
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    headers = [
+        (CLIENT_HEADER.lower().encode(), b"client"),
+        (AGENT_ID_HEADER.lower().encode(), b"agent"),
+    ]
+    result = asyncio.run(_call_asgi(
+        MemoryIdentityMiddleware(inner), headers=headers, method="GET",
+    ))
+    assert result[0]["status"] == 200
+    assert reached is True
 
 
 def test_identity_middleware_isolates_concurrent_requests() -> None:

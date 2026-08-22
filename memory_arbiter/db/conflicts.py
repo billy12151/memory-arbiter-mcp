@@ -22,6 +22,8 @@ _MAX_MEMBERS = 256
 _MAX_FIELD_CHARS = 16_384
 _MAX_MEMBER_JSON = 262_144
 _MAX_VALUE_JSON = 131_072
+_MAX_APPLY_PLAN_JSON = 131_072
+_MAX_SLOT_JSON = 4_096
 _ALLOWED_ACTIONS = {
     "update_current_claim", "append_superseded_context",
     "preserve_historical_record", "use_as_resolution", "needs_authorization",
@@ -69,6 +71,8 @@ class ConflictStore:
             raise ValueError("slot_key entity, attribute, and scope must be reliable and non-empty")
         if any(len(value) > _MAX_FIELD_CHARS for value in normalized.values()):
             raise ValueError("slot_key field exceeds size bound")
+        if len(_canonical_json(normalized)) > _MAX_SLOT_JSON:
+            raise ValueError("slot_key exceeds size bound")
         return normalized
 
     @staticmethod
@@ -641,6 +645,10 @@ class ConflictStore:
     ) -> dict[str, Any]:
         if decided_by not in {"user", "agent"} or not chosen_value:
             return {"outcome": "invalid_input"}
+        if not isinstance(apply_plan, list) or len(apply_plan) > _MAX_MEMBERS or any(
+            not isinstance(item, dict) for item in apply_plan
+        ):
+            return {"outcome": "invalid_plan"}
         with self.write_transaction() as conn:
             row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
             if not row:
@@ -705,13 +713,16 @@ class ConflictStore:
                     return {"outcome": "invalid_resolution_memory"}
                 resolution_version = int(resolution["version"])
             now = utc_now_iso()
+            summary_json = _canonical_json({"plan": plan})
+            if len(summary_json.encode("utf-8")) > _MAX_APPLY_PLAN_JSON:
+                return {"outcome": "invalid_plan"}
             cur = conn.execute(
                 """UPDATE conflicts SET status='applying',revision=revision+1,chosen_value=?,
                    resolution_memory_id=?,resolution_memory_version=?,decided_by=?,decided_ref=?,
                    decision_reason=?,decided_at=?,apply_summary=?,refreshed_at=?
                    WHERE id=? AND status='open' AND revision=?""",
                 (chosen_value, resolution_memory_id, resolution_version, decided_by, decided_ref,
-                 decision_reason, now, _canonical_json({"plan": plan}), now, int(conflict_id), int(expected_revision)),
+                 decision_reason, now, summary_json, now, int(conflict_id), int(expected_revision)),
             )
             if cur.rowcount != 1:
                 return {"outcome": "stale_conflict"}
@@ -724,6 +735,10 @@ class ConflictStore:
         strict_workspace: "WorkspaceScope" = None,
     ) -> dict[str, Any]:
         """CAS-reset an applying plan while retaining every prior plan snapshot."""
+        if not isinstance(apply_plan, list) or len(apply_plan) > _MAX_MEMBERS or any(
+            not isinstance(item, dict) for item in apply_plan
+        ):
+            return {"outcome": "invalid_plan"}
         with self.write_transaction() as conn:
             row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
             if not row:
@@ -778,11 +793,14 @@ class ConflictStore:
             history = list(previous.get("history") or [])
             history.append({"revision": int(expected_revision), "plan": previous.get("plan") or []})
             summary = {"plan": plan, "history": history}
+            summary_json = _canonical_json(summary)
+            if len(summary_json.encode("utf-8")) > _MAX_APPLY_PLAN_JSON:
+                return {"outcome": "invalid_plan"}
             now = utc_now_iso()
             cur = conn.execute(
                 "UPDATE conflicts SET revision=revision+1,apply_summary=?,resolution_memory_id=?,"
                 "resolution_memory_version=?,refreshed_at=? WHERE id=? AND status='applying' AND revision=?",
-                (_canonical_json(summary), resolution_id, resolution_version, now,
+                (summary_json, resolution_id, resolution_version, now,
                  int(conflict_id), int(expected_revision)),
             )
             if cur.rowcount != 1:
@@ -826,11 +844,13 @@ class ConflictStore:
                 ):
                     return {"outcome": "stale_resolution_memory"}
             now = utc_now_iso()
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE conflicts SET status='resolved',revision=revision+1,decision_reason=CASE WHEN ?='' "
                 "THEN decision_reason ELSE ? END,resolved_at=?,refreshed_at=? WHERE id=? AND revision=?",
                 (reason, reason, now, now, int(conflict_id), int(expected_revision)),
             )
+            if cur.rowcount != 1:
+                return {"outcome": "stale_conflict"}
             return {"outcome": "resolved", "conflict_id": int(conflict_id), "revision": int(expected_revision) + 1}
 
     def list_open_conflicts_for_memory_ids(

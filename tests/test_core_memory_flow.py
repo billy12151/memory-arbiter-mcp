@@ -458,6 +458,27 @@ def test_confirm_rejects_inactive_memory(tmp_path: Path) -> None:
     assert tools.db.get_memory(old_id)["status"] == "superseded"
 
 
+def test_confirm_rechecks_status_inside_write_transaction(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="fact", subject="fact", source_type="agent_generated",
+    )
+    memory_id = written["data"]["id"]
+    stale_active = tools.db.get_memory(memory_id)
+    assert stale_active is not None
+    assert tools.db.update_memory(memory_id, {"status": "superseded"}) is True
+
+    # Old code trusted this pre-transaction read and could reactivate the row.
+    monkeypatch.setattr(tools, "_get_memory_visible", lambda *_args, **_kwargs: stale_active)
+    rejected = tools.memory_confirm(memory_id, source_ref="chat", authorized=True)
+
+    assert rejected["ok"] is False
+    assert "not active" in rejected["data"]["error"]
+    current = tools.db.get_memory(memory_id)
+    assert current["status"] == "superseded"
+    assert current["source_type"] == "agent_generated"
+
+
 def test_confirm_requires_authorization(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     written = tools.memory_write(content="a fact to confirm", source_type="agent_generated", subject="fact-to-confirm")
@@ -477,6 +498,19 @@ def test_confirm_requires_authorization(tmp_path: Path) -> None:
     assert confirmed["ok"] is True
     assert confirmed["data"]["record"]["source_type"] == SourceType.USER_CONFIRMED.value
     assert confirmed["data"]["record"]["protection_level"] == "locked"
+
+
+def test_direct_confirm_rejects_invalid_confidence(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    memory_id = tools.memory_write(content="fact", subject="s")["data"]["id"]
+    for confidence in (True, False, -0.1, 1.1, float("nan"), "nan"):
+        result = tools.memory_confirm(
+            memory_id=memory_id, confidence=confidence, authorized=True,
+        )
+        assert result["ok"] is False
+        assert "confidence" in result["data"]["error"]
+    current = tools.db.get_memory(memory_id)
+    assert current["source_type"] != SourceType.USER_CONFIRMED.value
 
 
 def test_supersede_requires_authorization(tmp_path: Path) -> None:
@@ -918,5 +952,3 @@ try:
     _VEC_AVAILABLE = True
 except Exception:
     _VEC_AVAILABLE = False
-
-

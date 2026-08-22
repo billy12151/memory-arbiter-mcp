@@ -3,6 +3,22 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.2] — 2026-08-23
+
+Independent whole-project adversarial hardening release. No schema generation change is required; 0.14.1 databases remain current.
+
+### Fixed
+
+- **Lifecycle mutations are transactionally authoritative** — memory confirmation and pending activation now re-read status and strict workspace visibility under the same `BEGIN IMMEDIATE` transaction as their update, preventing a concurrent retirement or workspace move from being overwritten by a stale preflight snapshot. Strict content/tag edits, entity assignment, retirement, and per-memory history cleanup likewise re-check workspace access inside their write transaction.
+- **Workspace moves retain conflict ownership** — canonical rename/migration now moves unified conflict and notice rows in the same transaction as their member memories. A target-workspace slot collision rejects and rolls back the entire move instead of leaving conflicts invisible under the old canonical.
+- **HTTP body limits cover chunked requests** — Streamable HTTP now bounds the actual accumulated POST/PUT/PATCH body before entering FastMCP, so omitting `Content-Length` cannot bypass `mcp.http.max_request_body_size`; GET/SSE requests remain streaming and are not pre-read.
+- **Structured conflict inputs are bounded and typed** — conflict members, value groups, candidate keys, slot keys, and judge/replan apply plans now have matching item/JSON-size bounds at the product and DB layers. Non-object entries return structured validation outcomes instead of raw Python or SQLite exceptions.
+- **Direct-call validation parity** — the authoritative `memory_write` path now applies the same input contract as the product wrapper, and direct `memory_confirm` rejects boolean, non-finite, and out-of-range confidence values. Persisted conflict text/version fields and timestamps are bounded before storage.
+
+### Verification
+
+- 752 tests pass locally in the vec-equipped environment; strict mypy, Ruff, compileall, pip-audit, build, twine check, and isolated wheel smoke pass after the adversarial fixes.
+
 ## [0.14.1] — 2026-08-22
 
 Stable release restoring the Chinese documentation surface, closing findings from a fresh three-track adversarial review of the 0.14.1.dev0 push, and correcting semantic timeout scheduling before release.

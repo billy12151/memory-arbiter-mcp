@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -374,37 +375,63 @@ class OperationsPipeline:
                 {"error": "authorized=True is required to confirm a memory", "confirmed": False},
                 ok=False,
             )
+        if isinstance(confidence, bool):
+            return self.db.state.response(
+                {"error": "confidence must be a finite number between 0 and 1", "confirmed": False},
+                ok=False,
+            )
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            return self.db.state.response(
+                {"error": "confidence must be a finite number between 0 and 1", "confirmed": False},
+                ok=False,
+            )
+        if not math.isfinite(confidence_value) or not 0.0 <= confidence_value <= 1.0:
+            return self.db.state.response(
+                {"error": "confidence must be a finite number between 0 and 1", "confirmed": False},
+                ok=False,
+            )
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
-        memory = self._get_memory_visible(int(memory_id), caller)
-        if not memory:
-            data: dict[str, Any] = {"error": "memory id not found"}
+        updated: Optional[dict[str, Any]] = None
+        error: Optional[str] = None
+        try:
+            with self.db.write_transaction() as conn:
+                memory = self.db.get_memory_on_conn(conn, int(memory_id))
+                if not memory:
+                    error = "memory id not found"
+                elif caller.isolation == "strict" and raw_workspace(memory) not in set(caller.scope_canonicals()):
+                    error = "memory id not found"
+                elif memory.get("status") != "active":
+                    error = f"memory is not active (status={memory.get('status')}); cannot confirm inactive memory"
+                else:
+                    metadata = dict(memory.get("metadata") or {})
+                    metadata["confirmed_from"] = source_ref or "manual"
+                    ok = self.db.update_memory_on_conn(
+                        conn,
+                        int(memory_id),
+                        {
+                            "source_type": SourceType.USER_CONFIRMED.value,
+                            "confidence": confidence_value,
+                            "protection_level": ProtectionLevel.LOCKED.value,
+                            "metadata": metadata,
+                        },
+                    )
+                    if not ok:
+                        error = "failed to confirm memory"
+                    else:
+                        updated = self.db.get_memory_on_conn(conn, int(memory_id))
+        except sqlite3.Error as exc:
+            error = f"confirm failed; transaction rolled back: {exc}"
+        if error is not None:
+            data: dict[str, Any] = {"error": error, "confirmed": False}
             if caller.isolation == "strict":
                 data.update(caller.response_fields())
             return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
-        if memory.get("status") != "active":
-            return self.db.state.response(
-                {
-                    "error": f"memory is not active (status={memory.get('status')}); cannot confirm inactive memory",
-                    "confirmed": False,
-                },
-                ok=False,
-            )
-        metadata = dict(memory.get("metadata") or {})
-        metadata["confirmed_from"] = source_ref or "manual"
-        ok = self.db.update_memory(
-            int(memory_id),
-            {
-                "source_type": SourceType.USER_CONFIRMED.value,
-                "confidence": float(confidence),
-                "protection_level": ProtectionLevel.LOCKED.value,
-                "status": "active",
-                "metadata": metadata,
-            },
-        )
-        updated = self.db.get_memory(int(memory_id)) if ok else memory
+        ok = updated is not None
         data = {"confirmed": ok, "record": updated}
         if ok:
             data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), updated)
@@ -735,50 +762,61 @@ class OperationsPipeline:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
                 return denied
-        memory = self._get_memory_visible(int(memory_id), caller) if caller is not None else self.db.get_memory(int(memory_id))
-        if not memory:
-            data = {"error": "memory id not found", "activated": False}
-            missing_warnings = list(caller.warnings) if caller is not None else []
+        updated: Optional[dict[str, Any]] = None
+        error: Optional[str] = None
+        action_required = False
+        canonical = ""
+        try:
+            with self.db.write_transaction() as conn:
+                memory = self.db.get_memory_on_conn(conn, int(memory_id))
+                if not memory:
+                    error = "memory id not found"
+                elif caller is not None and caller.isolation == "strict" and raw_workspace(memory) not in set(caller.scope_canonicals()):
+                    error = "memory id not found"
+                elif memory.get("status") != MemoryStatus.PENDING.value:
+                    error = f"memory is not pending (status={memory.get('status')}); only pending memories can be activated"
+                else:
+                    canonical = raw_workspace(memory)
+                    if caller is not None and caller.isolation == "strict":
+                        registered = conn.execute(
+                            "SELECT 1 FROM workspace_canonicals WHERE name=?",
+                            (canonical,),
+                        ).fetchone()
+                        if registered is None:
+                            error = "strict new workspaces require confirm_pending_workspace"
+                            action_required = True
+                    if error is None:
+                        ok = self.db.update_memory_on_conn(
+                            conn, int(memory_id), {"status": MemoryStatus.ACTIVE.value},
+                        )
+                        if not ok:
+                            error = "failed to activate pending memory"
+                        else:
+                            updated = self.db.get_memory_on_conn(conn, int(memory_id))
+        except sqlite3.Error as exc:
+            error = f"activate pending failed; transaction rolled back: {exc}"
+        if error is not None:
+            data: dict[str, Any] = {"error": error, "activated": False}
+            if action_required and caller is not None:
+                data.update({
+                    "action_required": "confirm_new_workspace",
+                    "next_call": {
+                        "tool": "memory_govern",
+                        "action": "confirm_pending_workspace",
+                        "data": {
+                            "memory_id": int(memory_id), "canonical": canonical,
+                            "workspace": caller.workspace,
+                        },
+                        "authorization_required": True,
+                    },
+                })
             if caller is not None and caller.isolation == "strict":
                 data.update(caller.response_fields())
-            return self.db.state.response(data, ok=False, extra_warnings=missing_warnings)
-        if memory.get("status") != MemoryStatus.PENDING.value:
             return self.db.state.response(
-                {
-                    "error": f"memory is not pending (status={memory.get('status')}); only pending memories can be activated",
-                    "activated": False,
-                },
-                ok=False,
+                data, ok=False,
+                extra_warnings=list(caller.warnings) if caller is not None else [],
             )
-        if caller is not None and caller.isolation == "strict":
-            canonical = raw_workspace(memory)
-            with self.db.connection() as conn:
-                registered = conn.execute(
-                    "SELECT 1 FROM workspace_canonicals WHERE name=?",
-                    (canonical,),
-                ).fetchone()
-            if registered is None:
-                return self.db.state.response(
-                    {
-                        "error": "strict new workspaces require confirm_pending_workspace",
-                        "activated": False,
-                        "action_required": "confirm_new_workspace",
-                        "next_call": {
-                            "tool": "memory_govern",
-                            "action": "confirm_pending_workspace",
-                            "data": {
-                                "memory_id": int(memory_id),
-                                "canonical": canonical,
-                                "workspace": caller.workspace,
-                            },
-                            "authorization_required": True,
-                        },
-                        **caller.response_fields(),
-                    },
-                    ok=False, extra_warnings=list(caller.warnings),
-                )
-        ok = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
-        updated = self.db.get_memory(int(memory_id)) if ok else memory
+        ok = updated is not None
         data = {"activated": ok, "record": updated}
         warnings: list[str] = list(caller.warnings) if caller is not None else []
         if caller is not None and caller.isolation == "strict":
@@ -832,12 +870,16 @@ class OperationsPipeline:
                 memory = self.db.get_memory_on_conn(conn, int(memory_id))
                 if not memory:
                     raise ValueError("memory id not found")
+                if caller.isolation == "strict" and raw_workspace(memory) not in set(caller.scope_canonicals()):
+                    raise PermissionError("forbidden")
                 if memory.get("status") in {"superseded", "deleted"}:
                     raise ValueError(f"memory already {memory.get('status')}")
                 if superseded_by is not None:
                     replacement = self.db.get_memory_on_conn(conn, int(superseded_by))
                     if not replacement:
                         raise ValueError("superseded_by memory id not found")
+                    if caller.isolation == "strict" and raw_workspace(replacement) not in set(caller.scope_canonicals()):
+                        raise PermissionError("replacement_workspace_acl")
                     if replacement.get("status") != "active":
                         raise ValueError(
                             f"superseded_by target is not active (status={replacement.get('status')}); pick a live replacement to avoid a broken chain"
@@ -851,6 +893,14 @@ class OperationsPipeline:
                     raise ValueError("failed to update memory status")
                 resolved = self.db.resolve_conflicts_for_on_conn(conn, int(memory_id))
                 updated = self.db.get_memory_on_conn(conn, int(memory_id))
+        except PermissionError as exc:
+            return self.db.state.response(
+                forbidden_payload(
+                    "memory", workspace=caller,
+                    reason="replacement_workspace_acl" if str(exc) == "replacement_workspace_acl" else "workspace_acl",
+                ),
+                ok=False, extra_warnings=list(caller.warnings),
+            )
         except ValueError as exc:
             return self.db.state.response({"error": str(exc), "superseded": False}, ok=False)
         except sqlite3.Error as exc:
@@ -1014,10 +1064,20 @@ class OperationsPipeline:
                 set_fields["scope"] = canonical_scope
             else:
                 clear_fields.append("scope")
-        result = self.db.update_metadata_fields_low_side_effect(
-            memory_id_int, set_fields=set_fields, clear_fields=clear_fields,
-            authorized=authorized,
-        )
+        try:
+            with self.db.write_transaction() as conn:
+                current = self.db.get_memory_on_conn(conn, memory_id_int)
+                if current is None:
+                    result = {"outcome": "not_found", "memory_id": memory_id_int}
+                elif caller.isolation == "strict" and raw_workspace(current) not in set(caller.scope_canonicals()):
+                    result = {"outcome": "workspace_mismatch", "memory_id": memory_id_int}
+                else:
+                    result = self.db.update_metadata_fields_low_side_effect_on_conn(
+                        conn, memory_id_int, set_fields=set_fields,
+                        clear_fields=clear_fields, authorized=authorized,
+                    )
+        except sqlite3.Error:
+            result = {"outcome": "error", "memory_id": memory_id_int}
         outcome = result.get("outcome")
         if outcome not in {"updated", "no_change"}:
             ok = False
@@ -1026,7 +1086,13 @@ class OperationsPipeline:
                 "not_found": "memory id not found",
                 "not_active": "memory is not active",
                 "unavailable": "database not available",
+                "workspace_mismatch": "forbidden_strict_workspace",
             }.get(str(outcome), "entity update failed")
+            if outcome == "workspace_mismatch":
+                return self.db.state.response(
+                    forbidden_payload("memory", workspace=caller), ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
             return self.db.state.response({"error": error, **result}, ok=ok)
         data: dict[str, Any] = {
             "updated": outcome == "updated", "outcome": outcome,
@@ -1357,20 +1423,37 @@ class OperationsPipeline:
 
         # ---- tags-only fast path (v0.7.6) ----
         if tags_only:
-            result = self.db.update_tags_low_side_effect(
-                memory_id_int,
-                add_tags=add_tags or [],
-                remove_tags=remove_tags or [],
-                authorized=authorized,
-            )
-            outcome = result.get("outcome")
+            tag_result: dict[str, Any]
+            try:
+                with self.db.write_transaction() as conn:
+                    current = self.db.get_memory_on_conn(conn, memory_id_int)
+                    if current is None:
+                        tag_result = {"outcome": "not_found", "memory_id": memory_id_int}
+                    elif caller.isolation == "strict" and raw_workspace(current) not in set(caller.scope_canonicals()):
+                        tag_result = {"outcome": "workspace_mismatch", "memory_id": memory_id_int}
+                    else:
+                        tag_result = self.db.update_tags_low_side_effect(
+                            memory_id_int,
+                            add_tags=add_tags or [],
+                            remove_tags=remove_tags or [],
+                            authorized=authorized,
+                            conn=conn,
+                        )
+            except sqlite3.Error:
+                tag_result = {"outcome": "error", "memory_id": memory_id_int}
+            outcome = tag_result.get("outcome")
+            if outcome == "workspace_mismatch":
+                return self.db.state.response(
+                    forbidden_payload("memory", workspace=caller), ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
             if outcome == "updated":
                 updated_mem = self.db.get_memory(memory_id_int)
                 data = {
                     "edited": True,
                     "tags_only": True,
                     "memory_id": memory_id_int,
-                    "tags": result.get("tags"),
+                    "tags": tag_result.get("tags"),
                     "record": updated_mem,
                 }
                 return self.db.state.response(data)
@@ -1380,13 +1463,13 @@ class OperationsPipeline:
                     "tags_only": True,
                     "already_completed": True,
                     "memory_id": memory_id_int,
-                    "tags": result.get("tags"),
+                    "tags": tag_result.get("tags"),
                 })
             if outcome == "forbidden":
                 return self.db.state.response({
                     "error": (
-                        f"memory is protected (protection_level={result.get('protection_level')}, "
-                        f"source_type={result.get('source_type')}); authorized=True required to edit tags"
+                        f"memory is protected (protection_level={tag_result.get('protection_level')}, "
+                        f"source_type={tag_result.get('source_type')}); authorized=True required to edit tags"
                     ),
                     "edited": False,
                 }, ok=False)
@@ -1394,7 +1477,7 @@ class OperationsPipeline:
                 return self.db.state.response({"error": f"memory id {memory_id_int} not found", "edited": False}, ok=False)
             if outcome == "not_active":
                 return self.db.state.response({
-                    "error": f"memory is not active (status={result.get('status')}); cannot edit tags",
+                    "error": f"memory is not active (status={tag_result.get('status')}); cannot edit tags",
                     "edited": False,
                 }, ok=False)
             if outcome == "unavailable":
@@ -1406,44 +1489,61 @@ class OperationsPipeline:
             )
 
         # ---- full / partial content edit ----
+        edit_result: dict[str, Any]
         expected_version_raw = _.get("expected_version")
         expected_hash = _.get("expected_content_hash") or _.get("content_hash")
         try:
             expected_version = int(expected_version_raw) if expected_version_raw is not None else None
         except (TypeError, ValueError):
             return self.db.state.response({"error": "expected_version must be an integer", "edited": False}, ok=False)
-        result = self.db.edit_memory_intent(
-            memory_id_int,
-            new_content=new_content,
-            old_text=old_text,
-            new_text=new_text,
-            new_subject=new_subject,
-            new_tags=new_tags,
-            add_tags=add_tags,
-            remove_tags=remove_tags,
-            reason=reason or None,
-            authorized=authorized,
-            expected_version=expected_version,
-            expected_content_hash=str(expected_hash) if expected_hash is not None else None,
-        )
-        outcome = result.get("outcome")
+        try:
+            with self.db.write_transaction() as conn:
+                current = self.db.get_memory_on_conn(conn, memory_id_int)
+                if current is None:
+                    edit_result = {"outcome": "not_found", "memory_id": memory_id_int}
+                elif caller.isolation == "strict" and raw_workspace(current) not in set(caller.scope_canonicals()):
+                    edit_result = {"outcome": "workspace_mismatch", "memory_id": memory_id_int}
+                else:
+                    edit_result = self.db.edit_memory_intent(
+                        memory_id_int,
+                        new_content=new_content,
+                        old_text=old_text,
+                        new_text=new_text,
+                        new_subject=new_subject,
+                        new_tags=new_tags,
+                        add_tags=add_tags,
+                        remove_tags=remove_tags,
+                        reason=reason or None,
+                        authorized=authorized,
+                        expected_version=expected_version,
+                        expected_content_hash=str(expected_hash) if expected_hash is not None else None,
+                        conn=conn,
+                    )
+        except sqlite3.Error:
+            edit_result = {"outcome": "error", "memory_id": memory_id_int}
+        outcome = edit_result.get("outcome")
         if outcome != "edited":
+            if outcome == "workspace_mismatch":
+                return self.db.state.response(
+                    forbidden_payload("memory", workspace=caller), ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
             if outcome == "not_found":
                 error = "memory id not found"
             elif outcome == "not_active":
-                status = result.get("status")
+                status = edit_result.get("status")
                 error = f"memory already {status}" if status in {"superseded", "deleted"} else f"memory is not active (status={status}); cannot edit"
             elif outcome == "forbidden":
                 error = "authorized=True is required to edit a locked/user_confirmed memory"
             elif outcome == "stale_edit":
-                error = result.get("error") or f"stale_edit: {result.get('reason') or 'current memory changed'}"
+                error = edit_result.get("error") or f"stale_edit: {edit_result.get('reason') or 'current memory changed'}"
             elif outcome == "unavailable":
                 error = "database not available"
             else:
-                error = result.get("error") or "edit failed (db not writable)"
-            return self.db.state.response({"error": error, "edited": False, **result}, ok=False)
-        history_id = int(result["history_id"])
-        updated = result.get("record") or self.db.get_memory(memory_id_int)
+                error = edit_result.get("error") or "edit failed (db not writable)"
+            return self.db.state.response({"error": error, "edited": False, **edit_result}, ok=False)
+        history_id = int(edit_result["history_id"])
+        updated = edit_result.get("record") or self.db.get_memory(memory_id_int)
         data = {
             "edited": True,
             "memory_id": memory_id_int,
@@ -1530,7 +1630,23 @@ class OperationsPipeline:
                     ok=False,
                     extra_warnings=list(caller.warnings),
                 )
-        cleaned = self.db.cleanup_history(memory_id=memory_id, older_than_days=older_than_days)
+        try:
+            with self.db.write_transaction() as conn:
+                if caller.isolation == "strict" and memory_id is not None:
+                    current = self.db.get_memory_on_conn(conn, int(memory_id))
+                    if current is None or raw_workspace(current) not in set(caller.scope_canonicals()):
+                        return self.db.state.response(
+                            forbidden_payload("memory_history", workspace=caller),
+                            ok=False, extra_warnings=list(caller.warnings),
+                        )
+                cleaned = self.db.cleanup_history(
+                    memory_id=memory_id, older_than_days=older_than_days, conn=conn,
+                )
+        except sqlite3.Error as exc:
+            return self.db.state.response(
+                {"error": f"history cleanup failed; transaction rolled back: {exc}", "cleaned": 0},
+                ok=False, extra_warnings=list(caller.warnings),
+            )
         scope = "full" if full_cleanup else ("memory" if memory_id is not None else "by_age")
         data = {
             "cleaned": cleaned,
@@ -1695,4 +1811,3 @@ class OperationsPipeline:
             ok=not conflicts,
             extra_warnings=warnings,
         )
-

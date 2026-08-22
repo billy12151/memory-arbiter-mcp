@@ -623,8 +623,12 @@ class MemoryDB:
         add_tags: Optional[list[str]] = None,
         remove_tags: Optional[list[str]] = None,
         authorized: bool = False,
+        *,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> dict[str, Any]:
-        return self.memories.update_tags_low_side_effect(memory_id, add_tags, remove_tags, authorized)
+        return self.memories.update_tags_low_side_effect(
+            memory_id, add_tags, remove_tags, authorized, conn=conn,
+        )
 
     def update_metadata_fields_low_side_effect(
         self,
@@ -635,6 +639,19 @@ class MemoryDB:
     ) -> dict[str, Any]:
         return self.memories.update_metadata_fields_low_side_effect(
             memory_id, set_fields=set_fields, clear_fields=clear_fields, authorized=authorized,
+        )
+
+    def update_metadata_fields_low_side_effect_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: int,
+        set_fields: Optional[dict[str, Any]] = None,
+        clear_fields: Optional[list[str]] = None,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        return self.memories.update_metadata_fields_low_side_effect_on_conn(
+            conn, memory_id, set_fields=set_fields,
+            clear_fields=clear_fields, authorized=authorized,
         )
 
     def list_entities(
@@ -730,8 +747,11 @@ class MemoryDB:
     def list_history(self, memory_id: int) -> list[dict[str, Any]]:
         return self.memories.list_history(memory_id)
 
-    def cleanup_history(self, memory_id: Optional[int] = None, older_than_days: Optional[int] = None) -> int:
-        return self.memories.cleanup_history(memory_id, older_than_days)
+    def cleanup_history(
+        self, memory_id: Optional[int] = None, older_than_days: Optional[int] = None,
+        *, conn: Optional[sqlite3.Connection] = None,
+    ) -> int:
+        return self.memories.cleanup_history(memory_id, older_than_days, conn=conn)
 
     def audit_summary(self) -> dict[str, Any]:
         return self.audit.audit_summary()

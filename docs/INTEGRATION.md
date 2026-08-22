@@ -2,7 +2,7 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.14.1` contract.
+This guide describes the `0.14.2` contract.
 
 ## MCP Surface
 
@@ -136,4 +136,4 @@ On success `conflict_scan_required=true` and a persistent epoch are recorded. On
 
 ## 中文摘要
 
-0.14.1 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。**完整中文集成指南见 [INTEGRATION.zh-CN.md](INTEGRATION.zh-CN.md)。**
+0.14.2 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。**完整中文集成指南见 [INTEGRATION.zh-CN.md](INTEGRATION.zh-CN.md)。**

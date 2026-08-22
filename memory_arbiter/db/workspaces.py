@@ -809,6 +809,10 @@ class WorkspaceStore:
                     (new, old),
                 )
                 updated = cur.rowcount or 0
+                conn.execute(
+                    "UPDATE conflicts SET workspace_canonical=? WHERE workspace_canonical=?",
+                    (new, old),
+                )
                 # If `new` already exists, a plain rename would hit UNIQUE(name)
                 # and (with OR IGNORE) silently orphan `old`. Instead merge: drop
                 # the old row so the surviving `new` canonical is authoritative.
@@ -904,6 +908,10 @@ class WorkspaceStore:
                     (to_ws, from_ws),
                 )
                 updated = cur.rowcount or 0
+                conn.execute(
+                    "UPDATE conflicts SET workspace_canonical=? WHERE workspace_canonical=?",
+                    (to_ws, from_ws),
+                )
                 conn.execute(
                     "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
                     (to_ws, now),

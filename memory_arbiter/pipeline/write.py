@@ -6,6 +6,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from .. import workspace_rules
 from ..constants import is_default_workspace_term
 from ..models import MemoryRecord, MemoryStatus
+from ..validation import validate_product_payload
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
@@ -19,6 +20,17 @@ class WritePipeline:
         return getattr(self._tools, name)
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
+        payload = dict(payload)
+        validation = validate_product_payload(
+            "memory", "remember", payload, vec_dim=int(self.settings.vec_dim),
+        )
+        if validation.error is not None:
+            error = dict(validation.error)
+            if error.get("field") in {"content", "subject"} and str(error.get("reason") or "").startswith("is required"):
+                error["error"] = f"{error['field']} is required"
+            return self._tools.db.state.response(
+                {"written": False, **error}, ok=False,
+            )
         allowed, policy_warnings = self._allowed(payload.get("agent_id"), payload.get("client"))
         if not allowed:
             return self._tools.db.state.response(
@@ -77,12 +89,14 @@ class WritePipeline:
                 )
             return self._tools.db.state.response(
                 data,
-                extra_warnings=policy_warnings + write_warnings + workspace["warnings"],
+                extra_warnings=(
+                    policy_warnings + validation.warnings + write_warnings + workspace["warnings"]
+                ),
             )
         except Exception as exc:
             return self._tools.db.state.response(
                 {"written": False, "error": str(exc)},
-                ok=False, extra_warnings=policy_warnings,
+                ok=False, extra_warnings=policy_warnings + validation.warnings,
             )
 
     def _resolve_write_workspace(self, record: MemoryRecord) -> dict[str, Any]:
