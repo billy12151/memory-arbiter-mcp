@@ -1,6 +1,6 @@
 # Memory Arbiter MCP
 
-Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.1.dev1` 开发状态。
+Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.1` 正式版本。
 
 ## 单一 Evidence 主线
 
@@ -19,7 +19,7 @@ Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责�
 - Scheduled scan 是宽门：规则/KNN 基础候选始终保留，任一方向合法可增强召回；单向失败、grounding 弱、entity/scope 不足都保留为 `review_candidate`。Qwen 缺失、超时或非法不会缩小基础候选集。
 - Write-time notice 是严门：两方向都必须是合法四字段且交换后映射一致，值严格 grounding、槽位完整、无共存 veto，才可形成用户 notice；否则转入 scan，不向用户倾倒不确定候选。
 
-`notice_sync_wait_ms` 默认 3000 ms，只决定同步返回或已接受的同一任务继续异步，不参与识别；`0` 表示完全异步，queue full 则根本没有已接受任务。`checked_no_notice` 仅表示本次有界检查完成，不代表全库无冲突。evidence/semantic 队列都是进程内队列，崩溃、强制关停、queue full 或模型子进程重启后要按 coverage 恢复：先反复 `rebuild_evidence` 到 eligible coverage 完整/向量 ready，再分页执行 `scan_candidates`。
+`notice_sync_wait_ms` 默认 5000 ms，只决定同步返回或已接受的同一任务继续异步，不参与识别；`0` 表示完全异步，queue full 则根本没有已接受任务。`job_timeout_ms` 默认 5000 ms，只在 semantic 队列已有积压时作为 pair 间让路预算；空队列时不生效，已启动的 Qwen 推理只受 `inference_timeout_ms` 控制。`checked_no_notice` 仅表示本次有界检查完成，不代表全库无冲突。evidence/semantic 队列都是进程内队列，崩溃、强制关停、queue full 或模型子进程重启后要按 coverage 恢复：先反复 `rebuild_evidence` 到 eligible coverage 完整/向量 ready，再分页执行 `scan_candidates`。
 
 ## 单一冲突表与治理协议
 

@@ -147,7 +147,7 @@ class MemoryTools:
             memory_id, record, trusted_applying_context=trusted_applying_context,
         )
         task_id = index.get("semantic_task_id")
-        wait_ms = max(0, min(5000, int(getattr(self.settings, "notice_sync_wait_ms", 3000))))
+        wait_ms = max(0, min(5000, int(getattr(self.settings, "notice_sync_wait_ms", 5000))))
         can_check = bool(self._embedding_configured()) and self.settings.semantic_conflict_on_write != "off"
         completed = (
             self._semantic_worker.wait_task(str(task_id), wait_ms / 1000.0)
@@ -917,12 +917,14 @@ class MemoryTools:
             "inference_timeout_ms": int(self.settings.semantic_conflict_inference_timeout_ms),
             "load_timeout_ms": int(self.settings.semantic_conflict_load_timeout_ms),
             "min_pair_budget_ms": int(self.settings.semantic_conflict_min_pair_budget_ms),
+            "notice_sync_wait_ms": int(self.settings.notice_sync_wait_ms),
             "last_pair_duration_ms": self._last_pair_duration_ms,
             "check_degradation": self._check_degradation_status(),
             "job_deadline_behavior": (
-                "The job budget gates between pairs. Each production GGUF inference runs "
-                "in one strictly serial resident child process and has a hard timeout; a "
-                "timed-out child is terminated and the next request starts a new generation."
+                "The job budget activates only while another semantic job is queued and "
+                "gates between pairs. An inference already in flight is governed only by "
+                "inference_timeout_ms; a timed-out child is terminated and the next request "
+                "starts a new generation."
             ),
             "worker": self._semantic_worker.status(),
             "backend": backend_status,

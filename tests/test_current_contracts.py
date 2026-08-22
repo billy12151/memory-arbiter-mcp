@@ -26,6 +26,18 @@ def test_config_registry_only_describes_current_architecture() -> None:
     assert not any("claim" in path or "split" in path or "pair_text_gate" in path for path in paths)
     assert sum(len(group["items"]) for group in grouped_descriptors()) == len(CONFIG_DESCRIPTORS)
     assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
+    notice_wait = next(
+        item for item in CONFIG_DESCRIPTORS
+        if item["path"] == "semantic_conflict.notice_sync_wait_ms"
+    )
+    assert notice_wait["default"] == 5000
+
+
+def test_notice_sync_wait_default_is_five_seconds() -> None:
+    settings = Settings(
+        db_path=Path("memory.sqlite3"), backup_jsonl=Path("memory.backup.jsonl"),
+    )
+    assert settings.notice_sync_wait_ms == 5000
 
 
 def _record_current_group(tool: MemoryTools, left: int, right: int) -> dict:

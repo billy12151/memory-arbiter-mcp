@@ -128,8 +128,14 @@ class EvidencePipeline:
                 applying_slots.add(json.dumps(
                     group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 ))
-        deadline = time.monotonic() + self.settings.semantic_conflict_job_timeout_ms / 1000.0
         min_budget = self.settings.semantic_conflict_min_pair_budget_ms / 1000.0
+
+        def backlog_deadline() -> float | None:
+            value = self._semantic_worker.pending_job_deadline(
+                self.settings.semantic_conflict_job_timeout_ms / 1000.0,
+            )
+            return float(value) if value is not None else None
+
         max_units = max(1, int(getattr(
             self.settings, "semantic_conflict_max_evidence_units", 24,
         )))
@@ -156,7 +162,10 @@ class EvidencePipeline:
         units_examined = 0
         gathering_truncated = False
         for unit, embedding in unit_vectors:
-            if units_examined >= max_units or time.monotonic() >= deadline:
+            active_deadline = backlog_deadline()
+            if units_examined >= max_units or (
+                active_deadline is not None and time.monotonic() >= active_deadline
+            ):
                 # Spec §15.5: a bounded check that ran out of budget must not
                 # later claim checked_no_notice.
                 gathering_truncated = True
@@ -214,7 +223,9 @@ class EvidencePipeline:
 
         def classify(left_env: dict[str, Any], right_env: dict[str, Any]) -> Any:
             try:
-                return backend.classify_pair(left_env, right_env, deadline_monotonic=deadline)
+                # Once a pair starts, only the inference hard timeout may stop
+                # it. The job budget is a fairness gate between pairs.
+                return backend.classify_pair(left_env, right_env, deadline_monotonic=None)
             except TypeError:
                 # Test/legacy backends implementing the original two-arg protocol.
                 return backend.classify_pair(left_env, right_env)
@@ -234,7 +245,8 @@ class EvidencePipeline:
                 self._tools._record_check_degradation("qwen_unavailable")
                 incomplete_reason = "qwen_unavailable"
                 continue
-            if deadline - time.monotonic() < min_budget * 2:
+            active_deadline = backlog_deadline()
+            if active_deadline is not None and active_deadline - time.monotonic() < min_budget * 2:
                 self._tools._record_check_degradation("qwen_budget_exhausted")
                 incomplete_reason = "qwen_budget_exhausted"
                 continue

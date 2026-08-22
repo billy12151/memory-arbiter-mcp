@@ -64,7 +64,7 @@
     "scan_enhance": true,
     "scan_max_pairs": 8,
     "scan_budget_ms": 60000,
-    "notice_sync_wait_ms": 3000,
+    "notice_sync_wait_ms": 5000,
     "workspace_qwen_budget_ms": 750
   }
 }

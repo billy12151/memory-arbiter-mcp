@@ -4,7 +4,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Development documentation: `0.14.1.dev1` (localhost Streamable HTTP identity plus workspace admission/review contract; destructive conflict-history upgrade described below).
+> Current release: `0.14.1` (localhost Streamable HTTP identity plus workspace admission/review contract; destructive conflict-history upgrade described below).
 
 ## Why trust it
 
@@ -82,7 +82,7 @@ Evidence/semantic queues are process-local, so a crash or forced shutdown can lo
 
 ## Upgrading from an older database
 
-**Development upgrade warning for 0.14.1.dev1:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`; the two immediately previous evidence-capable generations use the conflict-only path, reuse evidence/vector tables, compact current workspace redirect/negative-decision state, and discard the obsolete workspace decision event ledger. Older generations rebuild evidence and vectors.
+**Upgrade warning for 0.14.1:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`; the two immediately previous evidence-capable generations use the conflict-only path, reuse evidence/vector tables, compact current workspace redirect/negative-decision state, and discard the obsolete workspace decision event ledger. Older generations rebuild evidence and vectors.
 
 The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, audit, and logical `memory_evidence` source units. The obsolete workspace decision event ledger is not copied. From `local_text_evidence_v1`, it clones existing FTS/evidence/vector state unchanged and transactionally rebuilds only the conflict domain. From older generations it rebuilds FTS and republishes evidence vectors in the configured embedding space. Both paths intentionally start with empty new `conflicts`/notice state and do not copy old `conflicts`, append-only `conflict_judgments`, or `semantic_notices` history. Current contradictions must be rediscovered by a scheduled full-library scan.
 
@@ -133,7 +133,7 @@ See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.conf
 | `embedding.max_unit_chars` | Safety bound for one evidence embedding call |
 | `isolation` | `none`, `weak`, or `strict` workspace behavior |
 | `semantic_conflict.model_path` | Optional local Qwen2.5-0.5B GGUF for bidirectional four-field extraction |
-| `semantic_conflict.notice_sync_wait_ms` | Write-time notice delivery wait (`0..5000`, default `3000` ms); timeout continues the same task asynchronously |
+| `semantic_conflict.notice_sync_wait_ms` | Write-time notice delivery wait (`0..5000`, default `5000` ms); timeout continues the same task asynchronously |
 | `semantic_conflict.workspace_qwen_budget_ms` | Independent workspace near-match Qwen budget (`50..5000`, default `750` ms) |
 | `semantic_conflict.job_timeout_ms` | Between-pair asynchronous job budget |
 | `semantic_conflict.inference_timeout_ms` | Hard timeout for one Qwen call |

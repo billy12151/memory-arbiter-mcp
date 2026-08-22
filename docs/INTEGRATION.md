@@ -2,7 +2,7 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.14.1.dev1` development contract.
+This guide describes the `0.14.1` contract.
 
 ## MCP Surface
 
@@ -51,7 +51,9 @@ Candidates carry member versions, evidence spans, candidate identity, and deep-r
 
 A user-visible notice requires both valid directions, consistent side mapping, strict quote grounding, distinct normalized values, complete slot provenance, and no coexistence veto. Any failure closes the notice path and leaves the case for scheduled scan review. Notice snapshots freeze member versions, value groups, slot provenance, detector/prompt version, task id, and dedupe key.
 
-After a successful write, the server waits at most `semantic_conflict.notice_sync_wait_ms` (default 3000, range 0–5000 ms) for the bounded notice task. `0` is fully asynchronous. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the strict gate; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
+After a successful write, the server waits at most `semantic_conflict.notice_sync_wait_ms` (default 5000, range 0–5000 ms) for the bounded notice task. `0` is fully asynchronous. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the strict gate; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
+
+`semantic_conflict.job_timeout_ms` (default 5000) is a queue-fairness budget, not an inference timeout. It activates only when another semantic job is waiting and is checked between candidate pairs. An already-started Qwen request runs under `semantic_conflict.inference_timeout_ms` (default 30000) even if the job budget expires; after that pair finishes, the worker yields before starting another pair. With no backlog, the job budget is inactive.
 
 ## One Conflicts Table
 
@@ -134,4 +136,4 @@ On success `conflict_scan_required=true` and a persistent epoch are recorded. On
 
 ## 中文摘要
 
-0.14.1.dev1 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。**完整中文集成指南见 [INTEGRATION.zh-CN.md](INTEGRATION.zh-CN.md)。**
+0.14.1 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。**完整中文集成指南见 [INTEGRATION.zh-CN.md](INTEGRATION.zh-CN.md)。**

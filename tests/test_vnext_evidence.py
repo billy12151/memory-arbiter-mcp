@@ -2196,6 +2196,130 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
     assert degradation["last_reason"] != "not_same_attribute_different_value"
 
 
+def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monkeypatch) -> None:
+    """With no backlog, even a tiny job budget must not truncate inference."""
+    import time
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    tools.settings.semantic_conflict_job_timeout_ms = 10
+    tools.settings.semantic_conflict_min_pair_budget_ms = 5
+    metadata = {"entity": "svc", "scope": "production"}
+    peer = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=metadata)["data"]
+    new = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=metadata)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql",
+             "start_offset": 0, "end_offset": 17, "distance": 0.1}]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+
+    deadlines = []
+    base = _grounded_db_backend()
+
+    class SlowBackend:
+        @staticmethod
+        def classify_pair(left, right, *, deadline_monotonic=None):
+            deadlines.append(deadline_monotonic)
+            time.sleep(0.02)
+            return base.classify_pair(left, right, deadline_monotonic=deadline_monotonic)
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: SlowBackend())
+    monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", lambda timeout: None)
+
+    result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+
+    assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1}
+    assert deadlines == [None, None]
+
+
+def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path: Path, monkeypatch) -> None:
+    """A queued job enables fairness, but the current pair gets its full hard timeout."""
+    import time
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    tools.settings.semantic_conflict_job_timeout_ms = 40
+    tools.settings.semantic_conflict_min_pair_budget_ms = 5
+    tools.settings.semantic_conflict_max_notice_pairs = 3
+    metadata = {"entity": "svc", "scope": "production"}
+    peer_values = ("mysql", "postgres")
+    peers = [
+        tools.memory_write(content=f"database is {value}", subject=value, tags=[], metadata=metadata)["data"]
+        for value in peer_values
+    ]
+    new = tools.memory_write(content="database is sqlite", subject="sqlite", tags=[], metadata=metadata)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    hits = [
+        {"memory_id": peer["id"], "id": index + 1, "kind": "text", "text": f"database is {peer_values[index]}",
+         "start_offset": 0, "end_offset": len(f"database is {peer_values[index]}"), "distance": 0.1 + index * 0.01}
+        for index, peer in enumerate(peers)
+    ]
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    fairness_deadline = time.monotonic() + 0.04
+    monkeypatch.setattr(
+        tools._semantic_worker, "pending_job_deadline", lambda timeout: fairness_deadline,
+    )
+
+    deadlines = []
+    base = _grounded_db_backend()
+
+    class SlowBackend:
+        @staticmethod
+        def classify_pair(left, right, *, deadline_monotonic=None):
+            deadlines.append(deadline_monotonic)
+            time.sleep(0.025)
+            return base.classify_pair(left, right, deadline_monotonic=deadline_monotonic)
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: SlowBackend())
+
+    result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+
+    assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1}
+    assert deadlines == [None, None]
+    assert len(tools.db.list_semantic_notices(status="open", limit=10)) == 1
+
+
+def test_pending_job_deadline_uses_actual_enqueue_time(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from memory_arbiter.workers import SemanticConflictWorker
+
+    now = 100.0
+    monkeypatch.setattr("memory_arbiter.workers.time.monotonic", lambda: now)
+
+    class Tools:
+        settings = SimpleNamespace(
+            semantic_conflict_on_write="async", semantic_conflict_preload=False,
+            semantic_conflict_queue_max_size=10,
+        )
+
+    worker = SemanticConflictWorker(Tools())
+    worker._ensure_thread = lambda: None
+    worker.enqueue(42, {"version": 1, "task_id": "semantic:42@1"})
+    assert worker.pending_job_deadline(5.0) == 105.0
+
+    now = 120.0
+    # The deadline does not restart when the in-flight job notices the backlog.
+    assert worker.pending_job_deadline(5.0) == 105.0
+    worker.shutdown(discard_pending=True)
+
+
+def test_semantic_wait_drained_includes_pending_jobs() -> None:
+    from types import SimpleNamespace
+    from memory_arbiter.workers import SemanticConflictWorker
+
+    class Tools:
+        settings = SimpleNamespace(
+            semantic_conflict_on_write="async", semantic_conflict_preload=False,
+            semantic_conflict_queue_max_size=10,
+        )
+
+    worker = SemanticConflictWorker(Tools())
+    worker._ensure_thread = lambda: None
+    worker.enqueue(42, {"version": 1, "task_id": "semantic:42@1"})
+    assert worker.wait_drained(timeout=0) is False
+    worker.shutdown(discard_pending=True)
+    assert worker.wait_drained(timeout=0) is True
+
+
 def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkeypatch) -> None:
     """Spec §5/§15.3: an apply-plan edit does not re-notice the same conflict."""
     tools = make_tools(tmp_path)

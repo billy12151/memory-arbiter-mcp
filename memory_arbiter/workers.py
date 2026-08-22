@@ -193,7 +193,12 @@ class SemanticConflictWorker:
 
     def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         task_id = str(snapshot.get("task_id") or f"semantic:{int(memory_id)}@{int(snapshot.get('version') or 1)}")
-        snapshot = {**snapshot, "task_id": task_id, "dedupe_key": task_id}
+        snapshot = {
+            **snapshot,
+            "task_id": task_id,
+            "dedupe_key": task_id,
+            "_queued_at_monotonic": time.monotonic(),
+        }
         with self._cond:
             if task_id in self._completed:
                 return {"status": "completed", "task_id": task_id, "dedupe_key": task_id}
@@ -265,6 +270,17 @@ class SemanticConflictWorker:
                 "last_error": self._last_error,
             }
 
+    def pending_job_deadline(self, timeout_seconds: float) -> Optional[float]:
+        """Return the fairness deadline implied by the oldest queued job."""
+        with self._cond:
+            if not self._pending:
+                return None
+            oldest = min(
+                float(snapshot.get("_queued_at_monotonic") or time.monotonic())
+                for snapshot in self._pending.values()
+            )
+            return oldest + max(0.0, float(timeout_seconds))
+
     def pause(self) -> None:
         with self._cond:
             self._paused = True
@@ -291,7 +307,7 @@ class SemanticConflictWorker:
     def wait_drained(self, timeout: float = 30.0) -> bool:
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self._cond:
-            while self._inflight:
+            while self._pending or self._inflight:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False

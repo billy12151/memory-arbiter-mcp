@@ -112,7 +112,7 @@ class Settings:
     semantic_conflict_scan_enhance: bool = True
     semantic_conflict_scan_max_pairs: int = 8
     semantic_conflict_scan_budget_ms: int = 60000
-    notice_sync_wait_ms: int = 3000
+    notice_sync_wait_ms: int = 5000
     workspace_qwen_budget_ms: int = 750
     config_warnings: list[str] = field(default_factory=list)
 
@@ -470,7 +470,7 @@ class Settings:
                 5000, 600000, name="semantic_conflict.scan_budget_ms", warnings=config_warnings,
             ),
             notice_sync_wait_ms=clamp_int(
-                pick_int_field(semantic_cfg.get("notice_sync_wait_ms"), "MEMORY_ARBITER_NOTICE_SYNC_WAIT_MS", 3000, name="semantic_conflict.notice_sync_wait_ms"),
+                pick_int_field(semantic_cfg.get("notice_sync_wait_ms"), "MEMORY_ARBITER_NOTICE_SYNC_WAIT_MS", 5000, name="semantic_conflict.notice_sync_wait_ms"),
                 0, 5000, name="semantic_conflict.notice_sync_wait_ms", warnings=config_warnings,
             ),
             workspace_qwen_budget_ms=clamp_int(

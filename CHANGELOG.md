@@ -3,9 +3,9 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
-## [0.14.1.dev1] — 2026-08-22
+## [0.14.1] — 2026-08-22
 
-Development self-test build restoring the Chinese documentation surface and closing findings from a fresh three-track adversarial review of the 0.14.1.dev0 push (whose vec-less Core CI jobs were red on arrival).
+Stable release restoring the Chinese documentation surface, closing findings from a fresh three-track adversarial review of the 0.14.1.dev0 push, and correcting semantic timeout scheduling before release.
 
 ### Added
 
@@ -13,6 +13,7 @@ Development self-test build restoring the Chinese documentation surface and clos
 
 ### Fixed
 
+- **Semantic timing semantics** — `job_timeout_ms` now activates only when another semantic job is waiting, starts from the oldest pending job's enqueue time, and is checked between candidate pairs as a queue-fairness budget. An inference already started is governed solely by `inference_timeout_ms`; `notice_sync_wait_ms` remains a delivery wait and its default increases from 3000 to 5000 ms so more normal low-load checks can return their notice synchronously. Semantic drain now waits for both queued and in-flight work, and semantic status exposes the effective sync-wait value.
 - **Notice resolve created zombie open conflicts (blocker, regression from d3729ce)** — `update_semantic_notice_status(..., "resolved")` wrote the *decoded* status into `conflicts.status`; decoding maps delivery pending/delivered to `open`, so every resolved notice became a formal open conflict (occupying the per-slot unique index; a subsequent formal group on that slot crashed with a raw `sqlite3.IntegrityError`). Resolved notices now keep their raw terminal `candidate` status; the UPDATE is guarded by a structured `slot_occupied` outcome (defensive — unreachable once status no longer flips to open), and regression tests pin status-keeping plus "a later formal group on the same slot records without a raw IntegrityError."
 - **Scan epoch wedge (medium)** — a completed `conflict_scan_progress` row surviving into a fresh epoch (side-by-side migration copies `migration_state`) made `record_conflict_scan_page` reject every page of the new epoch, wedging `conflict_scan_required` until the next memory write. Progress from a superseded epoch is now treated as absent, and both epoch-stamping migration paths delete the stale progress row.
 - **Grounding-failed apply left a silent orphaned edit (medium)** — `apply_conflict_action(update_current_claim/use_as_resolution)` commits the content edit together with failure bookkeeping by design, but the old evidence rows were already deleted and no re-index was enqueued. The failed-but-committed path now re-enqueues untrusted evidence indexing and marks the step/response with `orphaned_edit: true` so a replan accounts for the changed member.
@@ -32,7 +33,7 @@ Development self-test build restoring the Chinese documentation surface and clos
 
 ### Verification
 
-- 732 tests pass locally in the vec-equipped environment (729 baseline + 3 new regression tests); strict mypy, Ruff, compileall, and `git diff --check` pass; `scripts/sync_version.py --check` passes (server.json intentionally remains at 0.13.1).
+- 737 tests pass locally in the vec-equipped environment; strict mypy, Ruff, compileall, and `git diff --check` pass; `scripts/sync_version.py --check` passes.
 
 ## [0.14.1.dev0] — 2026-08-22
 
