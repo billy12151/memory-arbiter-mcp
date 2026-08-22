@@ -105,9 +105,13 @@ class ConsoleAPI:
             return counts
         try:
             caller = self.tools._caller_workspace(workspace)
-            if caller.isolation == "strict" and caller.canonical:
+            explicit_none_scope = (
+                caller.isolation == "none" and bool(str(workspace or "").strip())
+            )
+            if (caller.isolation == "strict" or explicit_none_scope) and caller.canonical:
                 scope_sql, scope_params = workspace_scope_sql(
-                    "COALESCE(NULLIF(workspace_canonical, ''), workspace)", caller.scope_canonicals(),
+                    "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
+                    caller.scope_canonicals() if caller.isolation == "strict" else caller.canonical,
                 )
                 with self.tools.db.connection() as conn:
                     rows = conn.execute(
@@ -119,7 +123,14 @@ class ConsoleAPI:
                         count = int(row["count"] or 0)
                         counts[status] = count
                         counts["total"] += count
-                conflicts = self._payload(self.tools.memory_list_conflicts(status="open", limit=10000, workspace=caller.workspace)).get("conflicts") or []
+                if caller.isolation == "strict":
+                    conflicts = self._payload(self.tools.memory_list_conflicts(
+                        status="open", limit=10000, workspace=caller.workspace,
+                    )).get("conflicts") or []
+                else:
+                    conflicts = self.tools.db.list_conflicts(
+                        status="open", limit=10000, workspace=caller.canonical,
+                    )
                 counts["open_conflicts"] = len(conflicts)
             else:
                 with self.tools.db.connection() as conn:
@@ -282,9 +293,11 @@ class ConsoleAPI:
             return {"error": "forbidden_strict_workspace", "_http_status": 400, **caller.response_fields()}
         try:
             with db.connection() as conn:
-                if isolation == "strict":
+                explicit_none_scope = isolation == "none" and bool(str(workspace or "").strip())
+                if isolation == "strict" or explicit_none_scope:
                     scope_sql, scope_params = workspace_scope_sql(
-                        "COALESCE(NULLIF(workspace_canonical, ''), workspace)", caller.scope_canonicals(),
+                        "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
+                        caller.scope_canonicals() if isolation == "strict" else caller.canonical,
                     )
                     total = int(conn.execute(
                         f"SELECT COUNT(*) FROM memories WHERE status='active' AND {scope_sql}",

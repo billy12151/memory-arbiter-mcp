@@ -39,6 +39,7 @@ def test_overview_returns_counts_and_brand(tmp_path: Path) -> None:
 
 
 def _record_group(api: ConsoleAPI, left: int, right: int, *, point: str = "scope", extra: int | None = None) -> dict:
+    workspace = api.tools.db.get_memory(left)["workspace_canonical"]
     members = [
         ConflictMember(left, 1, point, "old", point, "old", "old", (0, 3), "a" * 64, "a_to_b", "p1", "d1"),
         ConflictMember(right, 1, point, "new", point, "new", "new", (0, 3), "b" * 64, "b_to_a", "p1", "d1"),
@@ -46,7 +47,7 @@ def _record_group(api: ConsoleAPI, left: int, right: int, *, point: str = "scope
     if extra is not None:
         members.append(ConflictMember(extra, 1, point, "new", point, "new", "new", (0, 3), "c" * 64, "a_to_b", "p1", "d1"))
     return api.tools.db.record_conflict_group(
-        workspace_canonical="console-ws",
+        workspace_canonical=workspace,
         slot_key={"entity": "console", "attribute": point, "scope": "global"},
         members=members,
         value_groups=[
@@ -269,6 +270,71 @@ def test_recent_browse_count_is_total_not_page_size(tmp_path: Path) -> None:
     assert last["total"] == 7
     assert last["total_precise"] is True
     assert last["has_more"] is False
+
+
+def test_recent_browse_explicit_workspace_filters_in_none_mode(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    alpha = api.tools.memory_write(
+        content="alpha", subject="alpha", workspace="alpha",
+    )["data"]["id"]
+    api.tools.memory_write(content="beta", subject="beta", workspace="beta")
+
+    result = api.memories(status="active", workspace="alpha")
+
+    assert [item["id"] for item in result["items"]] == [alpha]
+    assert result["total"] == 1
+
+
+def test_overview_explicit_workspace_filters_counts_in_none_mode(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    api.tools.memory_write(content="alpha", subject="alpha", workspace="alpha")
+    api.tools.memory_write(content="beta", subject="beta", workspace="beta")
+
+    result = api.overview(workspace="alpha")
+
+    assert result["counts"]["total"] == 1
+    assert result["counts"]["active"] == 1
+    assert result["by_workspace"] == {"alpha": 1}
+
+
+def test_explicit_workspace_remains_soft_in_weak_console_mode(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "console.sqlite3",
+        backup_jsonl=tmp_path / "console.jsonl",
+        client="pytest", agent_id="console-test", workspace="default",
+        isolation="weak",
+    )
+    api = ConsoleAPI(MemoryTools(settings))
+    api.tools.memory_write(content="alpha", subject="alpha", workspace="alpha")
+    api.tools.memory_write(content="beta", subject="beta", workspace="beta")
+
+    browse = api.memories(status="active", workspace="alpha")
+    overview = api.overview(workspace="alpha")
+
+    assert browse["total"] == 2
+    assert overview["counts"]["total"] == 2
+    assert set(overview["by_workspace"]) == {"alpha", "beta"}
+
+
+def test_console_conflicts_respect_explicit_workspace_in_none_mode(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    alpha_ids = [
+        api.tools.memory_write(content=f"alpha {i}", subject=f"a{i}", workspace="alpha")["data"]["id"]
+        for i in range(2)
+    ]
+    beta_ids = [
+        api.tools.memory_write(content=f"beta {i}", subject=f"b{i}", workspace="beta")["data"]["id"]
+        for i in range(2)
+    ]
+    alpha_conflict = _record_group(api, *alpha_ids, point="alpha")
+    beta_conflict = _record_group(api, *beta_ids, point="beta")
+
+    listed = api.conflicts(workspace="alpha")
+
+    assert [item["id"] for item in listed["items"]] == [alpha_conflict["conflict_id"]]
+    assert api.conflict_detail(alpha_conflict["conflict_id"], workspace="alpha")["conflict"]["id"] == alpha_conflict["conflict_id"]
+    hidden = api.conflict_detail(beta_conflict["conflict_id"], workspace="alpha")
+    assert hidden["_http_status"] == 404
 
 
 def test_expired_search_without_query_is_precise_total(tmp_path: Path) -> None:

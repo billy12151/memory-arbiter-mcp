@@ -686,6 +686,22 @@ def test_audit_summary_aggregates_per_workspace(tmp_path: Path) -> None:
     assert data["workspaces"]["repo-b"]["count"] == 1
 
 
+def test_audit_summary_groups_by_canonical_workspace(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="one", subject="one", workspace="Canonical")
+    second = tools.memory_write(content="two", subject="two", workspace="Canonical")
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE memories SET workspace='raw-alias' WHERE id=?",
+            (second["data"]["id"],),
+        )
+
+    summary = tools.memory_audit_summary()["data"]
+
+    assert summary["workspaces"]["Canonical"]["count"] == 2
+    assert "raw-alias" not in summary["workspaces"]
+
+
 def test_audit_summary_empty_when_no_memories(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     summary = tools.memory_audit_summary()
@@ -900,6 +916,20 @@ def test_supersede_rejects_non_active_replacement(tmp_path: Path) -> None:
     # C must remain active (the supersede was blocked before any state change).
     c_record = tools.db.get_memory(c_id)
     assert c_record["status"] == "active"
+
+
+def test_supersede_rejects_self_replacement(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    memory_id = tools.memory_write(content="active", subject="s")["data"]["id"]
+
+    rejected = tools.memory_supersede(
+        memory_id=memory_id, superseded_by=memory_id,
+        reason="invalid self replacement", authorized=True,
+    )
+
+    assert rejected["ok"] is False
+    assert "different active memory" in rejected["data"]["error"]
+    assert tools.db.get_memory(memory_id)["status"] == "active"
 
 
 def test_superseded_always_ranked_below_active_even_with_higher_score(tmp_path: Path) -> None:

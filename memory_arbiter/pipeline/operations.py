@@ -116,11 +116,13 @@ class OperationsPipeline:
             return denied
         conflicts: list[dict[str, Any]] = []
         raw_limit = max(int(limit), 1)
+        explicit_none_scope = caller.isolation == "none" and caller.source == "explicit"
         if caller.isolation != "strict":
             conflicts = [
                 self._with_resolution_guidance(c)
                 for c in self.db.list_conflicts(
                     status=status, limit=raw_limit, source=source,
+                    workspace=caller.canonical if explicit_none_scope else None,
                 )
             ]
         else:
@@ -851,6 +853,11 @@ class OperationsPipeline:
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
+        if superseded_by is not None and int(superseded_by) == int(memory_id):
+            return self.db.state.response(
+                {"error": "superseded_by must identify a different active memory", "superseded": False},
+                ok=False, extra_warnings=list(caller.warnings),
+            )
         if caller.isolation == "strict" and self._get_memory_visible(int(memory_id), caller) is None:
             return self.db.state.response(
                 forbidden_payload("memory", workspace=caller),
@@ -1308,12 +1315,18 @@ class OperationsPipeline:
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
-        if caller.isolation != "strict":
+        scoped = caller.isolation == "strict" or (
+            caller.isolation == "none" and caller.source == "explicit"
+        )
+        if not scoped:
             summary = self.db.audit_summary()
             return self.db.state.response(summary)
+        workspace_scope = (
+            caller.scope_canonicals() if caller.isolation == "strict" else caller.canonical
+        )
         with self.db.connection() as conn:
             scope_sql, scope_params = workspace_scope_sql(
-                "COALESCE(NULLIF(workspace_canonical, ''), workspace)", caller.scope_canonicals(),
+                "COALESCE(NULLIF(workspace_canonical, ''), workspace)", workspace_scope,
             )
             mem_rows = conn.execute(
                 "SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS workspace, "
@@ -1332,8 +1345,13 @@ class OperationsPipeline:
         # response shape when the caller owns zero memories and makes each
         # admitted workspace explicit rather than synthesizing buckets only
         # when rows happen to exist.
+        scope_names_value = (
+            caller.scope_canonicals()
+            if caller.isolation == "strict"
+            else ((caller.canonical,) if caller.canonical else ())
+        )
         workspaces: dict[str, dict[str, Any]] = {
-            name: _empty_workspace_bucket() for name in caller.scope_canonicals()
+            name: _empty_workspace_bucket() for name in scope_names_value
         }
         total_count = 0
         for row in mem_rows:
@@ -1350,9 +1368,14 @@ class OperationsPipeline:
                 source_type = str(row["source_type"])
                 by_source_type = bucket["by_source_type"]
                 by_source_type[source_type] = by_source_type.get(source_type, 0) + count
-        conflicts = self.memory_list_conflicts(
-            status="open", limit=10000, workspace=caller.workspace,
-        ).get("data", {}).get("conflicts", [])
+        if caller.isolation == "strict":
+            conflicts = self.memory_list_conflicts(
+                status="open", limit=10000, workspace=caller.workspace,
+            ).get("data", {}).get("conflicts", [])
+        else:
+            conflicts = self.db.list_conflicts(
+                status="open", limit=10000, workspace=workspace_scope,
+            )
         for conflict in conflicts:
             ws_name = str(conflict.get("workspace_canonical") or "").strip()
             if ws_name in workspaces:

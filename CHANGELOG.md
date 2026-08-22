@@ -14,10 +14,12 @@ Independent whole-project adversarial hardening release. No schema generation ch
 - **HTTP body limits cover chunked requests** — Streamable HTTP now bounds the actual accumulated POST/PUT/PATCH body before entering FastMCP, so omitting `Content-Length` cannot bypass `mcp.http.max_request_body_size`; GET/SSE requests remain streaming and are not pre-read.
 - **Structured conflict inputs are bounded and typed** — conflict members, value groups, candidate keys, slot keys, and judge/replan apply plans now have matching item/JSON-size bounds at the product and DB layers. Non-object entries return structured validation outcomes instead of raw Python or SQLite exceptions.
 - **Direct-call validation parity** — the authoritative `memory_write` path now applies the same input contract as the product wrapper, and direct `memory_confirm` rejects boolean, non-finite, and out-of-range confidence values. Persisted conflict text/version fields and timestamps are bounded before storage.
+- **Console workspace views stay coherent** — in `isolation=none`, an explicitly selected workspace now scopes recent browse, overview counters, audit buckets, conflict lists, and conflict detail to the same canonical workspace; `weak` remains whole-library soft ranking. Audit aggregation uses canonical rather than raw workspace names.
+- **Retirement rejects self-replacement** — `superseded_by` must identify a different active memory, preventing a logically impossible self-replacement operation from being accepted.
 
 ### Verification
 
-- 752 tests pass locally in the vec-equipped environment; strict mypy, Ruff, compileall, pip-audit, build, twine check, and isolated wheel smoke pass after the adversarial fixes.
+- 758 tests pass locally in the vec-equipped environment; strict mypy, Ruff, compileall, pip-audit, build, twine check, and isolated wheel smoke pass after the adversarial fixes.
 
 ## [0.14.1] — 2026-08-22
 

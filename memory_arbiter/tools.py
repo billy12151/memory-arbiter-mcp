@@ -534,6 +534,11 @@ class MemoryTools:
         conflict = self.db.get_conflict(int(conflict_id))
         if conflict is None:
             return None
+        if (
+            caller.isolation == "none" and caller.source == "explicit"
+            and str(conflict.get("workspace_canonical") or "") != str(caller.canonical or "")
+        ):
+            return None
         member_ids = sorted({int(member["memory_id"]) for member in conflict.get("member_versions") or []})
         resolution_id = conflict.get("resolution_memory_id")
         lookup_ids = member_ids + ([int(resolution_id)] if resolution_id is not None else [])

@@ -112,14 +112,14 @@ class AuditStore:
         with db.connection() as conn:
             mem_rows = conn.execute(
                 """
-                SELECT workspace,
+                SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS workspace,
                        COUNT(*) AS count,
                        MIN(event_time) AS oldest,
                        MAX(event_time) AS newest,
                        source_type
                 FROM memories
                 WHERE status != 'deleted'
-                GROUP BY workspace, source_type
+                GROUP BY COALESCE(NULLIF(workspace_canonical, ''), workspace), source_type
                 """
             ).fetchall()
 
