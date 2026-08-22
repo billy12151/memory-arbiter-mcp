@@ -4,6 +4,7 @@ from typing import Any
 
 GROUPS = [
     {"key": "paths", "label_en": "Paths", "label_zh": "基础路径"},
+    {"key": "server", "label_en": "MCP server", "label_zh": "MCP 服务"},
     {"key": "retrieval", "label_en": "Retrieval", "label_zh": "召回"},
     {"key": "embedding", "label_en": "Evidence embedding", "label_zh": "Evidence 向量"},
     {"key": "semantic", "label_en": "Conflict filtering", "label_zh": "冲突降噪"},
@@ -23,6 +24,10 @@ def _item(path: str, group: str, attr: str | None = None, default: Any = None) -
 
 CONFIG_DESCRIPTORS = [
     _item("db_path", "paths"), _item("backup_jsonl", "paths"),
+    _item("mcp.transport", "server", "mcp_transport", "stdio"),
+    _item("mcp.http.host", "server", "mcp_http_host", "127.0.0.1"),
+    _item("mcp.http.port", "server", "mcp_http_port", 8000),
+    _item("mcp.http.path", "server", "mcp_http_path", "/mcp"),
     _item("recall_pool_cap", "retrieval", default=50), _item("content_like_cap", "retrieval", default=30),
     _item("vec.enabled", "embedding", "enable_sqlite_vec", False), _item("vec.dim", "embedding", "vec_dim", 768),
     _item("embedding.provider", "embedding", "embedding_provider"), _item("embedding.model_path", "embedding", "embedding_model_path"),

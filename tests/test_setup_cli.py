@@ -58,6 +58,10 @@ def test_config_template_has_required_fields():
         backup_jsonl=Path("/tmp/bak.jsonl"),
     )
     assert cfg["tool_profile"] == "product"
+    assert cfg["mcp"] == {
+        "transport": "stdio",
+        "http": {"host": "127.0.0.1", "port": 8000, "path": "/mcp"},
+    }
     assert cfg["isolation"] == "none"
     assert cfg["workspace_match_distance"] == 0.25
     assert cfg["workspace_weak_vector_weight"] is False

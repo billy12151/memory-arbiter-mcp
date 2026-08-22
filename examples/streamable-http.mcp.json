@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "memory-arbiter": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "X-Mema-Client": "your-client",
+        "X-Mema-Agent-Id": "your-agent"
+      }
+    }
+  }
+}

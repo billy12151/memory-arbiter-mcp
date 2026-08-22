@@ -2,7 +2,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Development documentation: `0.14.0.dev5` (workspace admission and full workspace-review contract; destructive conflict-history upgrade described below).
+> Development documentation: `0.14.1.dev0` (localhost Streamable HTTP identity plus workspace admission/review contract; destructive conflict-history upgrade described below).
 
 ## Why trust it
 
@@ -22,7 +22,9 @@ pip install "memory-arbiter-mcp[vec]"            # sqlite-vec evidence recall
 pip install "memory-arbiter-mcp[semantic-local]" # local GGUF runtime (embeddings + Qwen)
 ```
 
-Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Its starter template includes DB/backup paths, tool profile, core workspace controls (`isolation`, canonical matching, weak weighting, strict admission, cutoff/guard), vec, embedding, recall caps, and `update_check.enabled=true`. The reference `examples/memory-arbiter.config.example.json` additionally shows optional workspace-Qwen and semantic-conflict tuning. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Its starter template includes DB/backup paths, stdio/localhost HTTP transport, core workspace controls (`isolation`, canonical matching, weak weighting, strict admission, cutoff/guard), vec, embedding, recall caps, and `update_check.enabled=true`. The reference `examples/memory-arbiter.config.example.json` additionally shows optional workspace-Qwen and semantic-conflict tuning. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+
+stdio remains the default. For one local server shared by several clients, set `mcp.transport` to `streamable-http` (or `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`) and connect to `http://127.0.0.1:8000/mcp`. Each client's MCP server entry must set fixed `X-Mema-Client` and `X-Mema-Agent-Id` headers; see [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json). The client sends them automatically on every HTTP MCP request—agents should not add identity to individual tool calls. Missing, empty, invalid, duplicated, or conflicting identity is rejected instead of falling back to defaults. Community HTTP mode binds only to localhost, and these headers are advisory provenance and policy input, **not authentication or multi-tenant isolation**.
 
 The daily loop is four calls — `remember` a reusable fact, `find` to recall, `read` for exact lookup, `update` when a newer source replaces an existing current memory (never create a second active copy of one source of truth). Point any agent at the packaged rule:
 
@@ -78,7 +80,7 @@ Evidence/semantic queues are process-local, so a crash or forced shutdown can lo
 
 ## Upgrading from an older database
 
-**Development upgrade warning for 0.14.0.dev5:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`; the two immediately previous evidence-capable generations use the conflict-only path, reuse evidence/vector tables, compact current workspace redirect/negative-decision state, and discard the obsolete workspace decision event ledger. Older generations rebuild evidence and vectors.
+**Development upgrade warning for 0.14.1.dev0:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`; the two immediately previous evidence-capable generations use the conflict-only path, reuse evidence/vector tables, compact current workspace redirect/negative-decision state, and discard the obsolete workspace decision event ledger. Older generations rebuild evidence and vectors.
 
 The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, audit, and logical `memory_evidence` source units. The obsolete workspace decision event ledger is not copied. From `local_text_evidence_v1`, it clones existing FTS/evidence/vector state unchanged and transactionally rebuilds only the conflict domain. From older generations it rebuilds FTS and republishes evidence vectors in the configured embedding space. Both paths intentionally start with empty new `conflicts`/notice state and do not copy old `conflicts`, append-only `conflict_judgments`, or `semantic_notices` history. Current contradictions must be rediscovered by a scheduled full-library scan.
 
@@ -121,6 +123,8 @@ See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.conf
 | --- | --- |
 | `db_path` | Current SQLite database |
 | `backup_jsonl` | Append-only fallback when SQLite cannot write |
+| `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
+| `mcp.http.host` / `port` / `path` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000/mcp` |
 | `update_check.enabled` | Optional one-shot background PyPI discovery (default `true`); the only network call, with cached/suppressed notices and no auto-upgrade |
 | `vec.enabled` | Enables sqlite-vec evidence recall |
 | `embedding.model_path` | Local GGUF embedding model |

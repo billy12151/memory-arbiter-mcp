@@ -23,6 +23,7 @@ from .semantic_conflict import (
     SemanticBackend,
 )
 from .update_monitor import UpdateMonitor
+from .request_identity import get_request_identity
 from . import __version__
 from . import workspace_rules
 from .workers import LocalTextIndexWorker, SemanticConflictWorker
@@ -178,10 +179,18 @@ class MemoryTools:
     def start_semantic_worker(self) -> None:
         self._semantic_worker.start()
 
+    def current_client(self) -> str:
+        identity = get_request_identity()
+        return identity.client if identity is not None else self.settings.client
+
+    def current_agent_id(self) -> str:
+        identity = get_request_identity()
+        return identity.agent_id if identity is not None else self.settings.agent_id
+
     def _consume_notices(self) -> list[dict[str, Any]]:
         notices: list[dict[str, Any]] = []
         if self._update_monitor is not None:
-            notices.extend(self._update_monitor.consume_agent_onboarding_notice(self.settings.agent_id))
+            notices.extend(self._update_monitor.consume_agent_onboarding_notice(self.current_agent_id()))
             notices.extend(self._update_monitor.consume_notices())
         try:
             source_signature = self.db.backup_replay.state_signature()
@@ -295,8 +304,8 @@ class MemoryTools:
             pass  # non-fatal: state init failure shouldn't block startup
 
     def _allowed(self, agent_id: Optional[str] = None, client: Optional[str] = None) -> Tuple[bool, list[str]]:
-        actual_agent = agent_id or self.settings.agent_id
-        actual_client = client or self.settings.client
+        actual_agent = agent_id or self.current_agent_id()
+        actual_client = client or self.current_client()
         if self.settings.policy.enabled_for(actual_client, actual_agent):
             return True, []
         return False, [f"Memory arbiter disabled by policy for client={actual_client}, agent_id={actual_agent}."]

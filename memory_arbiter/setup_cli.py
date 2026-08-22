@@ -66,6 +66,10 @@ def _default_config_dict(model_path: Path, db_path: Path, backup_jsonl: Path) ->
         "db_path": str(db_path),
         "backup_jsonl": str(backup_jsonl),
         "tool_profile": "product",
+        "mcp": {
+            "transport": "stdio",
+            "http": {"host": "127.0.0.1", "port": 8000, "path": "/mcp"},
+        },
         "isolation": "none",
         "workspace_match_distance": 0.25,
         "workspace_weak_vector_weight": False,

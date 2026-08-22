@@ -1,10 +1,12 @@
 # Integration Guide
 
-This guide describes the `0.14.0.dev5` development contract.
+This guide describes the `0.14.1.dev0` development contract.
 
 ## MCP Surface
 
 Configure the command as `mema` and use the four product tools. Call `memory(action="help")` or the corresponding tool help to discover current fields.
+
+stdio is the default transport. To share one Community process among local clients, set `mcp.transport="streamable-http"` and connect each client to `http://127.0.0.1:8000/mcp`. In each MCP server configuration, set fixed `X-Mema-Client` and `X-Mema-Agent-Id` request headers; the client then sends them automatically on initialize, tool discovery, and tool calls. Do not have the agent dynamically add identity to tool `data`. HTTP mode fails closed when either header is missing, empty, invalid, duplicated, or conflicts with tool data. It is restricted to loopback: the headers provide local provenance and policy input, not authentication, tenant isolation, or permission to expose the service publicly.
 
 Writes require a non-empty `subject`; include `source_type`, `event_time`, `source_ref`, and useful tags when known. Pass the real project `workspace` for project facts. Use explicit `workspace="default"` only for facts intentionally stored in the global pool; do not rely on omission because client settings may supply a workspace. Strict isolation requires a workspace. Use `user_confirmed` only for facts explicitly verified by the user. When a new source replaces an existing current source, find/read the existing memory and update it instead of creating a second active copy.
 
@@ -130,4 +132,4 @@ On success `conflict_scan_required=true` and a persistent epoch are recorded. On
 
 ## 中文摘要
 
-0.14.0.dev5 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。
+0.14.1.dev0 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。

@@ -1,6 +1,6 @@
 # Memory Arbiter MCP
 
-Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.0.dev5` 开发状态。
+Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.1.dev0` 开发状态。
 
 ## 单一 Evidence 主线
 
@@ -57,7 +57,7 @@ Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责�
 
 所有产品响应固定为 `{ok, mode, warnings, degraded, data}`：操作自己的 `action_required/next_action/replan` 在 `data` 内；成功响应可另带顶层 `notices`，notice 的动作在各 `notices[*]` 内。不要把 `action_required` 当成通用顶层字段。`memory(read)` 默认返回全文，也可传严格整数 `span={start,end}` 只读局部窗口；返回切片在 `data.memory.content`，实际范围在 `data.span`。
 
-## 0.14.0.dev5 结构升级
+## 0.14.1.dev0 结构升级
 
 当前 runtime 只接受 `workspace_state_v1`。`conflict_groups_v2`、`local_text_evidence_v1` 和更老的 claim/memory-vector/section-vector 库都会只读识别为 legacy，并统一通过公开的旁路 `mema upgrade`：前两者走 conflict-only 路径、原样复用 evidence/vector，同时压缩 workspace redirect/negative-decision 当前状态并删除旧事件账本；更老架构才重建 evidence/vector。所有路径都不在原库原地修改。
 

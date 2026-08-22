@@ -10,6 +10,14 @@
   "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
   "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
   "tool_profile": "product",
+  "mcp": {
+    "transport": "stdio",
+    "http": {
+      "host": "127.0.0.1",
+      "port": 8000,
+      "path": "/mcp"
+    }
+  },
   "isolation": "none",
   "workspace_match_distance": 0.25,
   "workspace_qwen_candidate_distance": 0.25,

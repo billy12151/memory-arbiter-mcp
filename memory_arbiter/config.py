@@ -38,6 +38,13 @@ class Settings:
     client: str = "codex"
     agent_id: str = "default"
     workspace: str = "default"
+    mcp_transport: str = "stdio"
+    mcp_http_host: str = "127.0.0.1"
+    mcp_http_port: int = 8000
+    mcp_http_path: str = "/mcp"
+    mcp_http_max_request_body_size: int = 4 * 1024 * 1024
+    mcp_http_stateless: bool = False
+    mcp_http_json_response: bool = False
     enable_sqlite_vec: bool = False
     vec_dim: int = 768
     recall_pool_cap: int = 50
@@ -130,6 +137,16 @@ class Settings:
             config_warnings.append(f"semantic_conflict={semantic_cfg!r} invalid; using env/defaults")
             semantic_cfg = {}
         semantic_cfg = {str(k): v for k, v in semantic_cfg.items() if not str(k).startswith("_")}
+        mcp_cfg = cfg.get("mcp") or {}
+        if not isinstance(mcp_cfg, dict):
+            config_warnings.append(f"mcp={mcp_cfg!r} invalid; using env/defaults")
+            mcp_cfg = {}
+        mcp_cfg = {str(k): v for k, v in mcp_cfg.items() if not str(k).startswith("_")}
+        mcp_http_cfg = mcp_cfg.get("http") or {}
+        if not isinstance(mcp_http_cfg, dict):
+            config_warnings.append(f"mcp.http={mcp_http_cfg!r} invalid; using env/defaults")
+            mcp_http_cfg = {}
+        mcp_http_cfg = {str(k): v for k, v in mcp_http_cfg.items() if not str(k).startswith("_")}
         update_cfg_raw = cfg.get("update_check", {})
         update_check_enabled = True
         if isinstance(update_cfg_raw, dict):
@@ -215,6 +232,29 @@ class Settings:
             )
             tool_profile = "product"
 
+        mcp_transport = str(
+            mcp_cfg.get("transport")
+            or os.getenv("MEMORY_ARBITER_MCP_TRANSPORT")
+            or "stdio"
+        ).strip().lower().replace("_", "-")
+        if mcp_transport not in {"stdio", "streamable-http"}:
+            config_warnings.append(
+                f"mcp.transport={mcp_transport!r} invalid; using stdio"
+            )
+            mcp_transport = "stdio"
+        mcp_http_path = str(
+            mcp_http_cfg.get("path")
+            or os.getenv("MEMORY_ARBITER_MCP_HTTP_PATH")
+            or "/mcp"
+        ).strip()
+        if not mcp_http_path.startswith("/") or "?" in mcp_http_path or "#" in mcp_http_path:
+            config_warnings.append(
+                f"mcp.http.path={mcp_http_path!r} invalid; using /mcp"
+            )
+            mcp_http_path = "/mcp"
+        if len(mcp_http_path) > 1:
+            mcp_http_path = mcp_http_path.rstrip("/")
+
         semantic_backend = str(
             semantic_cfg.get("backend")
             or os.getenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_BACKEND")
@@ -265,6 +305,38 @@ class Settings:
             client=pick_str("client", "MEMORY_ARBITER_CLIENT", "codex"),
             agent_id=pick_str("agent_id", "MEMORY_ARBITER_AGENT_ID", "default"),
             workspace=pick_str("workspace", "MEMORY_ARBITER_WORKSPACE", "default"),
+            mcp_transport=mcp_transport,
+            mcp_http_host=str(
+                mcp_http_cfg.get("host")
+                or os.getenv("MEMORY_ARBITER_MCP_HTTP_HOST")
+                or "127.0.0.1"
+            ).strip(),
+            mcp_http_port=clamp_int(
+                pick_int_field(
+                    mcp_http_cfg.get("port"), "MEMORY_ARBITER_MCP_HTTP_PORT", 8000,
+                    name="mcp.http.port",
+                ),
+                1, 65535, name="mcp.http.port", warnings=config_warnings,
+            ),
+            mcp_http_path=mcp_http_path,
+            mcp_http_max_request_body_size=clamp_int(
+                pick_int_field(
+                    mcp_http_cfg.get("max_request_body_size"),
+                    "MEMORY_ARBITER_MCP_HTTP_MAX_REQUEST_BODY_SIZE",
+                    4 * 1024 * 1024,
+                    name="mcp.http.max_request_body_size",
+                ),
+                1024, 16 * 1024 * 1024,
+                name="mcp.http.max_request_body_size", warnings=config_warnings,
+            ),
+            mcp_http_stateless=pick_bool_field(
+                mcp_http_cfg.get("stateless"), "MEMORY_ARBITER_MCP_HTTP_STATELESS",
+                "false", name="mcp.http.stateless", default_bool=False,
+            ),
+            mcp_http_json_response=pick_bool_field(
+                mcp_http_cfg.get("json_response"), "MEMORY_ARBITER_MCP_HTTP_JSON_RESPONSE",
+                "false", name="mcp.http.json_response", default_bool=False,
+            ),
             enable_sqlite_vec=pick_bool_field(
                 vec_cfg.get("enabled"), "MEMORY_ARBITER_ENABLE_SQLITE_VEC", "false", name="vec.enabled", default_bool=False
             ),

@@ -2,14 +2,31 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import signal
 import sys
-from typing import Any, NamedTuple, Optional
+from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple, Optional
 
 from .config import Settings
 from .db_generation import database_startup_lock, require_current_or_new_database
+from .request_identity import (
+    AGENT_ID_HEADER,
+    CLIENT_HEADER,
+    IdentityHeaderError,
+    RequestIdentity,
+    get_request_identity,
+    host_header_name,
+    is_loopback_host,
+    parse_identity_headers,
+    request_identity_scope,
+)
 from .tools import MemoryTools
+
+ASGIScope = MutableMapping[str, Any]
+ASGIReceive = Callable[[], Awaitable[MutableMapping[str, Any]]]
+ASGISend = Callable[[MutableMapping[str, Any]], Awaitable[None]]
+ASGIApp = Callable[[ASGIScope, ASGIReceive, ASGISend], Awaitable[None]]
 
 
 class ServerBundle(NamedTuple):
@@ -17,8 +34,235 @@ class ServerBundle(NamedTuple):
     tools: MemoryTools
 
 
+class MemoryIdentityMiddleware:
+    """Require advisory caller identity on the localhost HTTP MCP endpoint."""
+
+    def __init__(
+        self, app: ASGIApp, *, path: str = "/mcp", max_request_body_size: int = 4 * 1024 * 1024,
+    ) -> None:
+        self.app = app
+        self.path = path.rstrip("/") or "/"
+        self.max_request_body_size = max_request_body_size
+
+    def _matches(self, scope: ASGIScope) -> bool:
+        path = str(scope.get("path") or "")
+        return path == self.path or (self.path != "/" and path == self.path + "/")
+
+    @staticmethod
+    async def _json_error(
+        send: ASGISend, *, status: int, error: str, message: str,
+    ) -> None:
+        body = json.dumps(
+            {"ok": False, "error": error, "message": message},
+            ensure_ascii=True,
+        ).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json; charset=utf-8"),
+                (b"content-length", str(len(body)).encode("ascii")),
+                (b"cache-control", b"no-store"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    def _headers(scope: ASGIScope) -> dict[str, list[str]]:
+        headers: dict[str, list[str]] = {}
+        for raw_name, raw_value in scope.get("headers") or []:
+            name = bytes(raw_name).decode("latin-1").casefold()
+            value = bytes(raw_value).decode("latin-1")
+            headers.setdefault(name, []).append(value)
+        return headers
+
+    async def __call__(self, scope: ASGIScope, receive: ASGIReceive, send: ASGISend) -> None:
+        if scope.get("type") == "lifespan":
+            await self.app(scope, receive, send)
+            return
+        if scope.get("type") != "http":
+            await self._json_error(
+                send, status=404, error="not_found", message="HTTP endpoint not found."
+            )
+            return
+        if not self._matches(scope):
+            await self._json_error(
+                send, status=404, error="not_found", message="HTTP endpoint not found."
+            )
+            return
+
+        client = scope.get("client")
+        client_host = str(client[0]) if isinstance(client, (tuple, list)) and client else ""
+        if not is_loopback_host(client_host):
+            await self._json_error(
+                send,
+                status=403,
+                error="localhost_required",
+                message=(
+                    "Community Streamable HTTP MCP accepts localhost callers only; "
+                    "X-Mema-* headers are advisory provenance, not authentication."
+                ),
+            )
+            return
+
+        raw_headers = self._headers(scope)
+        host_values = raw_headers.get("host", [])
+        if (
+            len(host_values) != 1
+            or not is_loopback_host(host_header_name(host_values[0]) or "")
+        ):
+            await self._json_error(
+                send,
+                status=421,
+                error="invalid_host",
+                message="Host must identify localhost for Community Streamable HTTP MCP.",
+            )
+            return
+        content_length_values = raw_headers.get("content-length", [])
+        if content_length_values:
+            try:
+                content_length = int(content_length_values[0]) if len(content_length_values) == 1 else -1
+            except ValueError:
+                content_length = -1
+            if content_length < 0:
+                await self._json_error(
+                    send, status=400, error="invalid_content_length",
+                    message="Content-Length must be one non-negative integer.",
+                )
+                return
+            if content_length > self.max_request_body_size:
+                await self._json_error(
+                    send, status=413, error="request_too_large",
+                    message=f"Request body exceeds {self.max_request_body_size} bytes.",
+                )
+                return
+
+        class ScopeHeaders(dict[str, str]):
+            def getlist(self, name: str) -> list[str]:
+                return list(raw_headers.get(name.casefold(), []))
+
+        headers = ScopeHeaders({name: values[0] for name, values in raw_headers.items() if values})
+        try:
+            identity = parse_identity_headers(headers)
+        except IdentityHeaderError as exc:
+            await self._json_error(
+                send, status=400, error="invalid_mema_identity", message=str(exc),
+            )
+            return
+
+        with request_identity_scope(identity):
+            await self.app(scope, receive, send)
+
+
+def _identity_for_tool(app: Any) -> Optional[RequestIdentity]:
+    get_context = getattr(app, "get_context", None)
+    if callable(get_context):
+        try:
+            request = get_context().request_context.request
+            headers = getattr(request, "headers", None)
+            if headers is not None:
+                return parse_identity_headers(headers)
+        except (AttributeError, LookupError, TypeError, ValueError):
+            pass
+    return get_request_identity()
+
+
+def _identity_mismatch(
+    tools: MemoryTools, *, field: str, expected: str, received: Any,
+) -> dict[str, Any]:
+    return tools.db.state.response(
+        {
+            "error": "identity_mismatch",
+            "field": field,
+            "expected": expected,
+            "received": received,
+            "reason": (
+                f"Streamable HTTP identity comes from {CLIENT_HEADER} and "
+                f"{AGENT_ID_HEADER}. Remove the conflicting tool-data identity "
+                "or fix this MCP server's fixed headers, then retry."
+            ),
+        },
+        ok=False,
+    )
+
+
+def _policy_denied(tools: MemoryTools, identity: RequestIdentity) -> Optional[dict[str, Any]]:
+    allowed, warnings = tools._allowed(identity.agent_id, identity.client)
+    if allowed:
+        return None
+    return tools.db.state.response(
+        {"error": "agent_policy_denied", "client": identity.client, "agent_id": identity.agent_id},
+        ok=False,
+        extra_warnings=warnings,
+    )
+
+
+def _repair_policy_check(task: str, data: Optional[dict[str, Any]]) -> bool:
+    operation = task.strip().lower()
+    payload = data if isinstance(data, dict) else {}
+    if operation == "help":
+        return False
+    if operation in {"rebuild_evidence", "replay_backup"}:
+        dry_run = payload.get("dry_run", True)
+        if isinstance(dry_run, str):
+            is_dry_run = dry_run.strip().lower() in {"true", "1", "yes", "on"}
+        elif isinstance(dry_run, (bool, int, float)):
+            is_dry_run = bool(dry_run)
+        else:
+            is_dry_run = False
+        return not is_dry_run
+    if operation == "semantic_control":
+        return str(payload.get("action") or "status").strip().lower() != "status"
+    if operation == "notice":
+        return str(payload.get("action") or "list").strip().lower() not in {"list", "read"}
+    return operation != "help"
+
+
+def _invoke_with_identity(
+    tools: MemoryTools,
+    identity: Optional[RequestIdentity],
+    fn: Callable[..., dict[str, Any]],
+    *,
+    policy_check: bool,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    if identity is not None and policy_check:
+        denied = _policy_denied(tools, identity)
+        if denied is not None:
+            return denied
+    with request_identity_scope(identity):
+        return fn(**kwargs)
+
+
+def _data_with_request_identity(
+    tools: MemoryTools,
+    data: Optional[dict[str, Any]],
+    identity: Optional[RequestIdentity],
+    *,
+    inject: bool,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    if identity is None or not isinstance(data, dict):
+        return data, None
+    payload = dict(data)
+    expected = {"client": identity.client, "agent_id": identity.agent_id}
+    for field, value in expected.items():
+        if field in payload and payload[field] != value:
+            return None, _identity_mismatch(
+                tools, field=field, expected=value, received=payload[field],
+            )
+        payload.pop(field, None)
+    if inject:
+        payload.update(expected)
+    return payload, None
+
+
 def build_runtime() -> ServerBundle:
     settings = Settings.from_env()
+    if settings.mcp_transport == "streamable-http" and not is_loopback_host(settings.mcp_http_host):
+        raise RuntimeError(
+            "Community Streamable HTTP MCP may bind only to localhost "
+            "(127.0.0.1, ::1, or localhost); X-Mema-* headers are not authentication."
+        )
     # Same startup lock as MemoryDB.__init__: never race another first-start's
     # in-flight schema creation with this pre-flight generation check.
     with database_startup_lock(settings.db_path):
@@ -28,7 +272,15 @@ def build_runtime() -> ServerBundle:
     except Exception as exc:
         raise RuntimeError("MCP Python SDK is not installed") from exc
 
-    app = FastMCP("memory-arbiter-mcp")
+    app = FastMCP(
+        "memory-arbiter-mcp",
+        host=settings.mcp_http_host,
+        port=settings.mcp_http_port,
+        streamable_http_path=settings.mcp_http_path,
+        stateless_http=settings.mcp_http_stateless,
+        json_response=settings.mcp_http_json_response,
+        max_request_body_size=settings.mcp_http_max_request_body_size,
+    )
     tools = MemoryTools(settings)
     tools.start_update_monitor()
     tools.start_evidence_worker()
@@ -42,7 +294,16 @@ def build_runtime() -> ServerBundle:
         value enums, update modes, and action_required paths before relying on a
         result that requests attention.
         """
-        return tools.memory(action=action, data={} if data is None else data)
+        identity = _identity_for_tool(app)
+        payload, error = _data_with_request_identity(
+            tools, {} if data is None else data, identity,
+            inject=action.strip().lower() == "remember",
+        )
+        return error or _invoke_with_identity(
+            tools, identity, tools.memory,
+            policy_check=action.strip().lower() in {"update", "judge"},
+            action=action, data=payload,
+        )
 
     @app.tool()
     def memory_review(view: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -52,7 +313,14 @@ def build_runtime() -> ServerBundle:
         before judging a conflict so its members, value groups, revision, and apply
         state are visible.
         """
-        return tools.memory_review(view=view, data={} if data is None else data)
+        identity = _identity_for_tool(app)
+        payload, error = _data_with_request_identity(
+            tools, {} if data is None else data, identity, inject=False,
+        )
+        return error or _invoke_with_identity(
+            tools, identity, tools.memory_review,
+            policy_check=False, view=view, data=payload,
+        )
 
     @app.tool()
     def memory_govern(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -62,7 +330,14 @@ def build_runtime() -> ServerBundle:
         action, then authorized=true. Call memory_govern(action="help") for exact
         actions, accepted fields, impact notes, and confirmation semantics.
         """
-        return tools.memory_govern(action=action, data={} if data is None else data)
+        identity = _identity_for_tool(app)
+        payload, error = _data_with_request_identity(
+            tools, {} if data is None else data, identity, inject=False,
+        )
+        return error or _invoke_with_identity(
+            tools, identity, tools.memory_govern,
+            policy_check=action.strip().lower() != "help", action=action, data=payload,
+        )
 
     @app.tool()
     def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -72,13 +347,53 @@ def build_runtime() -> ServerBundle:
         actions. Semantic notices are advisory; read both memories before dismiss
         or resolve, and never pass a notice directly to judge or resolve_conflict.
         """
-        return tools.memory_repair(task=task, data={} if data is None else data)
+        identity = _identity_for_tool(app)
+        payload, error = _data_with_request_identity(
+            tools, {} if data is None else data, identity, inject=False,
+        )
+        return error or _invoke_with_identity(
+            tools, identity, tools.memory_repair,
+            policy_check=_repair_policy_check(task, payload), task=task, data=payload,
+        )
 
     return ServerBundle(app, tools)
 
 
+def build_http_app(bundle: ServerBundle) -> ASGIApp:
+    settings = bundle.tools.settings
+    if not is_loopback_host(settings.mcp_http_host):
+        raise RuntimeError(
+            "Community Streamable HTTP MCP may bind only to localhost "
+            "(127.0.0.1, ::1, or localhost)."
+        )
+    return MemoryIdentityMiddleware(
+        bundle.app.streamable_http_app(),
+        path=settings.mcp_http_path,
+        max_request_body_size=settings.mcp_http_max_request_body_size,
+    )
+
+
+def run_streamable_http(bundle: ServerBundle) -> None:
+    try:
+        import uvicorn
+    except Exception as exc:
+        raise RuntimeError("uvicorn is required for Streamable HTTP MCP") from exc
+    settings = bundle.tools.settings
+    server = uvicorn.Server(uvicorn.Config(
+        build_http_app(bundle),
+        host=settings.mcp_http_host,
+        port=settings.mcp_http_port,
+        log_level="info",
+    ))
+    server.run()
+
+
 def run() -> None:
-    build_runtime().app.run()
+    bundle = build_runtime()
+    if bundle.tools.settings.mcp_transport == "streamable-http":
+        run_streamable_http(bundle)
+    else:
+        bundle.app.run()
 
 
 def build_server() -> Any:
@@ -155,7 +470,10 @@ def main() -> None:
 
         signal.signal(signal.SIGTERM, handle_signal)
         signal.signal(signal.SIGINT, handle_signal)
-        bundle.app.run()
+        if bundle.tools.settings.mcp_transport == "streamable-http":
+            run_streamable_http(bundle)
+        else:
+            bundle.app.run()
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from exc

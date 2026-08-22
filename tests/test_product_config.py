@@ -107,7 +107,7 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     """
 
     class FakeFastMCP:
-        def __init__(self, _name: str) -> None:
+        def __init__(self, _name: str, **_kwargs) -> None:
             self.tools = {}
 
         def tool(self):
@@ -164,7 +164,7 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
 
 def test_server_always_exposes_only_product_tools(tmp_path: Path, monkeypatch) -> None:
     class FakeFastMCP:
-        def __init__(self, _name: str) -> None:
+        def __init__(self, _name: str, **_kwargs) -> None:
             self.tools = {}
 
         def tool(self):
@@ -846,7 +846,7 @@ def test_embedding_model_path_without_provider_defaults_to_gguf(tmp_path: Path, 
 
 def test_server_build_runtime_exposes_tools_for_shutdown(tmp_path: Path, monkeypatch) -> None:
     class FakeFastMCP:
-        def __init__(self, _name: str) -> None:
+        def __init__(self, _name: str, **_kwargs) -> None:
             self.tools = {}
 
         def tool(self):
@@ -882,7 +882,7 @@ def test_server_build_runtime_exposes_tools_for_shutdown(tmp_path: Path, monkeyp
 
 def test_real_server_product_wrappers_preserve_non_object_data(tmp_path: Path, monkeypatch) -> None:
     class FakeFastMCP:
-        def __init__(self, _name: str) -> None:
+        def __init__(self, _name: str, **_kwargs) -> None:
             self.tools = {}
 
         def tool(self):

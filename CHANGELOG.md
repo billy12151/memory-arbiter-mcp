@@ -3,6 +3,30 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.1.dev0] — 2026-08-22
+
+Development self-test build for one localhost Streamable HTTP MCP server shared by multiple local AI clients. It retains stdio as the default and treats request headers as local provenance/policy input, not authentication or tenant isolation.
+
+### Added
+
+- **Local Streamable HTTP MCP transport** — opt-in `mcp.transport=streamable-http` serves the four product tools at `http://127.0.0.1:8000/mcp`; host, port, path, body bound, stateful/stateless mode, and JSON-response mode are configurable. Community mode refuses non-loopback binds and hides non-MCP routes.
+- **Per-request advisory identity** — every HTTP MCP request requires fixed `X-Mema-Client` and `X-Mema-Agent-Id` headers. Missing, empty, duplicate, malformed, overlong, or tool-data-conflicting identities fail closed; stdio keeps its existing Settings/env identity behavior.
+- **HTTP client example and integration contract** — setup/config templates, registry descriptors, `.env.example`, README, Integration Guide, and `examples/streamable-http.mcp.json` document fixed client headers and the Community-vs-Team trust boundary.
+
+### Fixed
+
+- **Stateful-session identity isolation** — each tool call reads the current MCP request headers before the inherited ContextVar and re-enters a request identity scope, so an initialization request cannot pin later writes, status, notices, or policy checks to stale identity.
+- **Mutation policy coverage** — denied HTTP identities cannot mutate through update/judge, governance, repair, or persistent conflict-scan progress. Read-only status/review, notice list/read, semantic status, and evidence/backup dry-runs remain available.
+- **HTTP boundary hardening** — validates loopback peer and Host, exact MCP path, duplicate headers, configured request-body size, and current Header/body identity consistency. `memory(status)` and onboarding notice delivery use the effective request identity.
+- **MCP SDK compatibility** — raises and locks the supported SDK floor to `mcp>=1.29.0,<2`, the tested line used by the HTTP request context and body-limit implementation.
+- **Two adversarial review rounds** — fixed stale stateful identity, mutation-policy fail-open paths, SDK-range/runtime mismatch, over-broad repair denial, persistent `scan_candidates` policy bypass, and dry-run default/string normalization. Final re-review reported no confirmed findings.
+
+### Verification
+
+- Locked MCP 1.29 environment: 729 tests passed; strict mypy, Ruff, compileall, and `git diff --check` passed.
+- Wheel build and Twine metadata check passed.
+- Real Streamable HTTP MCP initialize/list-tools/call-tool smoke passed; missing headers returned 400 and valid headers produced the expected write/status identity.
+
 ## [0.14.0.dev5] — 2026-08-22
 
 Implements phases 0–3 of the workspace recall + doctor full-confirmation plan (mema 721). Strict vector admission is opt-in and disabled by default.
