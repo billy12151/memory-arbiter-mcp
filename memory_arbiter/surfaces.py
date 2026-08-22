@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib import resources
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
+from .acl import WorkspaceScope, forbidden_payload, raw_workspace
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .models import MemoryStatus, ProtectionLevel, SourceType
 from .validation import PRODUCT_FIELD_REGISTRY, _controlled_integer, validate_product_payload
@@ -36,11 +37,10 @@ class ProductSurfaces:
         "apply_conflict_action": "Atomically applies one planned member change and records its result in the conflict.",
         "replan_conflict": "CAS-replaces a stale or failed applying plan while preserving prior plan history.",
         "confirm": "Promotes the memory to user_confirmed and locks it against ordinary changes.",
-        "accept_workspace_alias": "Makes future reads and writes resolve the alias to the canonical workspace.",
-        "reject_workspace_alias": "Suppresses this workspace alias candidate in future normalization.",
         "rename_workspace_canonical": "Renames a canonical workspace and reroutes all affected memories.",
         "migrate_workspace": "Bulk-moves memories to another canonical workspace and records the alias.",
         "confirm_pending_workspace": "Assigns the canonical workspace and activates the pending memory for recall.",
+        "confirm_workspaces": "Records the reviewed workspace registry snapshot that doctor's workspace.review diffs against; unconfirmed new workspaces keep the check warning.",
     }
 
     def __init__(self, tools: "MemoryTools"):
@@ -165,16 +165,15 @@ class ProductSurfaces:
             },
             "memory_govern": {
                 "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
-                "actions": ["retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"],
+                "actions": ["retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "confirm_workspaces", "help"],
                 "examples": {
                     "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
                     "apply_conflict_action": {"action": "apply_conflict_action", "data": {"conflict_id": 1, "expected_revision": 2, "memory_id": 12, "action": "update_current_claim", "content": "The database is SQLite.", "reason": "Apply the confirmed conflict decision.", "authorized": True}},
                     "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "expected_revision": 4, "reason": "All planned member actions completed.", "authorized": True}},
-                    "accept_workspace_alias": {"action": "accept_workspace_alias", "data": {"alias": "金营二期", "canonical": "金营项目", "reason": "User confirmed these are the same project.", "authorized": True}},
-                    "reject_workspace_alias": {"action": "reject_workspace_alias", "data": {"alias": "金营培训", "canonical": "金营项目", "reason": "User confirmed these are distinct workspaces.", "authorized": True}},
                     "rename_workspace_canonical": {"action": "rename_workspace_canonical", "data": {"old": "旧项目名", "new": "新项目名", "reason": "User confirmed the rename.", "authorized": True}},
                     "migrate_workspace": {"action": "migrate_workspace", "data": {"from": "金营二期", "to": "金营项目", "reason": "User confirmed the merge.", "authorized": True}},
                     "confirm_pending_workspace": {"action": "confirm_pending_workspace", "data": {"memory_id": 123, "canonical": "金营项目", "authorized": True}},
+                    "confirm_workspaces": {"action": "confirm_workspaces", "data": {"reason": "Reviewed the registry after renaming duplicates; snapshots the current registry.", "authorized": True}},
                 },
                 "safety_note": "Set authorized=true only after the user explicitly confirms the specific governance action. Retire only whole memories; for partial updates or current-document replacement, update the existing memory instead.",
                 "authorization_rule": "All state-changing actions require authorized=true. Without it, the response returns action_required=ask_user_for_authorization and an impact description.",
@@ -182,6 +181,11 @@ class ProductSurfaces:
                     "confirm": "Promote one memory to user_confirmed and lock it against ordinary changes.",
                     "confirm_pending_workspace": (
                         "Confirm a new canonical workspace under strict isolation and activate its pending memory."
+                    ),
+                    "confirm_workspaces": (
+                        "Record the reviewed workspace snapshot after rename/merge cleanup. "
+                        "Omit workspaces to snapshot the current registry and clear workspace.review; "
+                        "an explicit subset confirms only those names, so other current names remain warnings."
                     ),
                 },
             },
@@ -384,16 +388,20 @@ class ProductSurfaces:
 
     def _notice_workspace_scope(
         self, response: dict[str, Any], data: Optional[dict[str, Any]],
-    ) -> Optional[str]:
+    ) -> "WorkspaceScope":
+        """Scope automatic notice delivery like every other strict read.
+
+        delivery uses the full admitted set, not only the response's
+        single ``caller_workspace_canonical`` field. The returned notice's retry
+        payload still echoes one valid workspace string (the caller canonical).
+        """
         if self.settings.isolation != "strict":
             return None
-        response_data = response.get("data")
-        if isinstance(response_data, dict):
-            canonical = response_data.get("caller_workspace_canonical")
-            if isinstance(canonical, str) and canonical.strip():
-                return canonical.strip()
+        cached = self._tools._product_caller.get()
+        if cached is not None and cached.isolation == "strict":
+            return cached.scope_canonicals()
         raw = data.get("workspace") if isinstance(data, dict) else None
-        return self._caller_workspace(raw).canonical
+        return self._caller_workspace(raw).scope_canonicals()
 
     def _deliver_product_notices(
         self, response: dict[str, Any], data: Optional[dict[str, Any]],
@@ -430,21 +438,25 @@ class ProductSurfaces:
 
     def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         operation = str(action or "help").strip().lower()
+        self._tools._product_caller.set(None)
         response = self._validated_product_call("memory", operation, data, self._memory)
         return self._deliver_product_notices(response, data)
 
     def memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         operation = str(view or "help").strip().lower()
+        self._tools._product_caller.set(None)
         response = self._validated_product_call("memory_review", operation, data, self._memory_review)
         return self._deliver_product_notices(response, data)
 
     def memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         operation = str(action or "help").strip().lower()
+        self._tools._product_caller.set(None)
         response = self._validated_product_call("memory_govern", operation, data, self._memory_govern)
         return self._deliver_product_notices(response, data)
 
     def memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
         operation = str(task or "help").strip().lower()
+        self._tools._product_caller.set(None)
         response = self._validated_product_call("memory_repair", operation, data, self._memory_repair)
         return self._deliver_product_notices(response, data)
 
@@ -650,26 +662,58 @@ class ProductSurfaces:
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self.memory_confirm, **payload)
-        if action == "accept_workspace_alias":
-            if not payload.get("alias") or not payload.get("canonical"):
-                return self._invalid_product_call("memory_govern", "accept_workspace_alias requires alias and canonical", action)
-            bad = self._require_ws_strings(payload, ("alias", "canonical"), "memory_govern", action)
-            if bad is not None:
-                return bad
-            auth_error = self._governance_authorization_error(action, payload)
-            if auth_error is not None:
-                return auth_error
-            return self._forward("memory_govern", action, self.memory_accept_workspace_alias, **payload)
-        if action == "reject_workspace_alias":
-            if not payload.get("alias") or not payload.get("canonical"):
-                return self._invalid_product_call("memory_govern", "reject_workspace_alias requires alias and canonical", action)
-            bad = self._require_ws_strings(payload, ("alias", "canonical"), "memory_govern", action)
-            if bad is not None:
-                return bad
-            auth_error = self._governance_authorization_error(action, payload)
-            if auth_error is not None:
-                return auth_error
-            return self._forward("memory_govern", action, self.memory_reject_workspace_alias, **payload)
+        if action in {"accept_workspace_alias", "reject_workspace_alias"}:
+            alias = payload.get("alias")
+            canonical = payload.get("canonical")
+            replacements: list[dict[str, Any]] = []
+            if action == "accept_workspace_alias":
+                if isinstance(alias, str) and alias.strip() and isinstance(canonical, str) and canonical.strip():
+                    replacements.extend([
+                        {
+                            "use_when": "merge the source workspace into the canonical and forward its old name",
+                            "suggested_call": {
+                                "tool": "memory_govern", "action": "migrate_workspace",
+                                "data": {"from": alias, "to": canonical},
+                            },
+                            "authorization_required": True,
+                        },
+                        {
+                            "use_when": "rename or merge a canonical workspace",
+                            "suggested_call": {
+                                "tool": "memory_govern", "action": "rename_workspace_canonical",
+                                "data": {"old": alias, "new": canonical},
+                            },
+                            "authorization_required": True,
+                        },
+                    ])
+                replacements.append({
+                    "use_when": "activate a strict pending memory under the selected canonical",
+                    "suggested_call": {
+                        "tool": "memory_govern", "action": "confirm_pending_workspace",
+                        "data": {"canonical": canonical} if isinstance(canonical, str) else {},
+                    },
+                    "required_input": ["memory_id"],
+                    "authorization_required": True,
+                })
+            else:
+                replacements.append({
+                    "use_when": "keep the workspaces separate",
+                    "suggested_call": None,
+                    "note": "No pairwise governance call is needed.",
+                })
+            return self.db.state.response(
+                {
+                    "outcome": "removed",
+                    "error_code": "workspace_alias_action_removed",
+                    "removed_action": action,
+                    "error": (
+                        "pairwise workspace alias actions were removed; use workspace "
+                        "rename/migration or pending confirmation instead"
+                    ),
+                    "replacements": replacements,
+                },
+                ok=False,
+            )
         if action == "rename_workspace_canonical":
             if not payload.get("old") or not payload.get("new"):
                 return self._invalid_product_call("memory_govern", "rename_workspace_canonical requires old and new", action)
@@ -703,6 +747,23 @@ class ProductSurfaces:
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self.memory_confirm_pending_workspace, **payload)
+        if action == "confirm_workspaces":
+            raw_list = payload.get("workspaces")
+            if raw_list is not None and (
+                not isinstance(raw_list, list)
+                or not raw_list
+                or any(not isinstance(item, str) or not item.strip() for item in raw_list)
+            ):
+                return self._invalid_product_call(
+                    "memory_govern",
+                    "confirm_workspaces workspaces must be a non-empty list of workspace "
+                    "name strings (omit it to confirm the current registry snapshot)",
+                    action,
+                )
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
+            return self._forward("memory_govern", action, self.memory_confirm_workspaces, **payload)
         return self._invalid_product_call("memory_govern", f"unknown action: {action}", action)
 
     def _memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
@@ -735,7 +796,7 @@ class ProductSurfaces:
                 return self._invalid_product_call("memory_repair", "scan_candidates batch/k/anchor_memory_id must be integers and max_distance a number", task)
             if not (1 <= batch_value <= 200) or not (1 <= k_value <= 20) or anchor_value < 0:
                 return self._invalid_product_call("memory_repair", "scan_candidates requires 1<=batch<=200, 1<=k<=20, anchor_memory_id>=0", task)
-            scan_workspace = caller.canonical if caller.isolation == "strict" else None
+            scan_workspace = caller.scope_canonicals() if caller.isolation == "strict" else None
             scan_enhance = bool(getattr(self.settings, "semantic_conflict_scan_enhance", True))
             result = self.db.scan_rule_candidates(
                 after_memory_id=anchor_value,
@@ -815,7 +876,35 @@ class ProductSurfaces:
                 )
             if not isinstance(payload.get("members"), list) or not isinstance(payload.get("value_groups"), list):
                 return self._invalid_product_call("memory_repair", "members and value_groups must be arrays", task)
-            workspace_canonical = caller.canonical or str(payload.get("workspace") or self.settings.workspace or "").strip()
+            if caller.isolation == "strict":
+                try:
+                    member_ids = [int(member["memory_id"]) for member in payload["members"]]
+                except (TypeError, ValueError, KeyError):
+                    return self._invalid_product_call(
+                        "memory_repair", "every conflict member requires an integer memory_id", task,
+                    )
+                visible_members = [
+                    self._get_memory_visible(memory_id, caller) for memory_id in member_ids
+                ]
+                if not member_ids or any(memory is None for memory in visible_members):
+                    return self.db.state.response(
+                        forbidden_payload("conflict_members", workspace=caller),
+                        ok=False, extra_warnings=list(caller.warnings),
+                    )
+                member_workspaces = {
+                    raw_workspace(memory) for memory in visible_members if memory is not None
+                }
+                if len(member_workspaces) != 1:
+                    return self._invalid_product_call(
+                        "memory_repair",
+                        "record_conflict members must belong to one admitted canonical workspace",
+                        task,
+                    )
+                workspace_canonical = next(iter(member_workspaces))
+            else:
+                workspace_canonical = caller.canonical or str(
+                    payload.get("workspace") or self.settings.workspace or ""
+                ).strip()
             result = self.db.record_conflict_group(
                 workspace_canonical=workspace_canonical,
                 slot_key=payload.get("slot_key"),
@@ -858,7 +947,7 @@ class ProductSurfaces:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
                 return denied
-            workspace = caller.canonical if caller.isolation == "strict" else None
+            workspace = caller.scope_canonicals() if caller.isolation == "strict" else None
             if action == "list":
                 try:
                     notice_limit = int(payload.get("limit") or 10)

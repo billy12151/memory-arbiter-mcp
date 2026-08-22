@@ -1,6 +1,6 @@
 # Memory Arbiter MCP
 
-Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.0.dev4` 开发状态。
+Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.0.dev5` 开发状态。
 
 ## 单一 Evidence 主线
 
@@ -44,9 +44,9 @@ Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责�
 
 - `none`：按与 weak 相同的 exact/confirmed/vector/rule/Qwen 流程归一，但不启用 workspace ACL；未指定 workspace 的查询仍跨全库。
 - `weak`：同样归一，并把 workspace 用作软排序和提示信号。
-- `strict`：exact/confirmed 和安全机械规则可复用 canonical；Qwen 不得静默合并，新 workspace 保持 pending，需用户确认。
+- `strict`：exact/confirmed 和安全机械规则可复用 canonical；Qwen 不得静默合并，新 workspace 保持 pending，需用户确认。默认只允许 caller canonical；启用 `workspace_recall_admission=true` 后，workspace-sensitive 的 recall/read/repair、冲突/notice 流程和 console 内容/计数视图共用同一准入集合：caller canonical 加上 cosine 距离不超过 `workspace_recall_cutoff`（默认 0.25）且通过 default 绝缘、短名和通用子串护栏的 canonical。semantic runtime control、backup replay、doctor、settings 等进程级操作不属于 workspace 内容视图。sqlite-vec/向量不可用时回退精确 canonical。`default` 全局池不进入 strict 项目 scope。
 
-自动 vector/Qwen 结果只写本条 memory 的 `workspace_canonical`，不会生成 confirmed alias。rejected alias 永不被模型重新推荐。workspace Qwen 使用独立 `workspace_qwen_budget_ms`（默认 750 ms）；超时保留 raw canonical 并返回 review hint，不阻塞 notice 门禁。
+自动 vector/Qwen 结果只写本条 memory 的 `workspace_canonical`，不会创建持久转发。内部 negative decision 会阻止同一候选被模型重复推荐；日常治理只使用 rename/migrate/confirm-pending，不需要理解内部状态表。workspace Qwen 使用独立 `workspace_qwen_budget_ms`（默认 750 ms）；超时保留 raw canonical 并返回 review hint，不阻塞 notice 门禁。
 
 ## 四个产品工具
 
@@ -57,11 +57,11 @@ Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责�
 
 所有产品响应固定为 `{ok, mode, warnings, degraded, data}`：操作自己的 `action_required/next_action/replan` 在 `data` 内；成功响应可另带顶层 `notices`，notice 的动作在各 `notices[*]` 内。不要把 `action_required` 当成通用顶层字段。`memory(read)` 默认返回全文，也可传严格整数 `span={start,end}` 只读局部窗口；返回切片在 `data.memory.content`，实际范围在 `data.span`。
 
-## 0.14.0.dev2 破坏性升级
+## 0.14.0.dev5 结构升级
 
-当前 runtime 只接受 `conflict_groups_v2`。紧邻的 `local_text_evidence_v1` 和更老的 claim/memory-vector/section-vector 库都会只读识别为 legacy，并统一通过公开的旁路 `mema upgrade`：前者走快速 conflict-only 路径并原样复用 evidence/vector，后者才重建 evidence/vector；两者都不在原库原地修改。
+当前 runtime 只接受 `workspace_state_v1`。`conflict_groups_v2`、`local_text_evidence_v1` 和更老的 claim/memory-vector/section-vector 库都会只读识别为 legacy，并统一通过公开的旁路 `mema upgrade`：前两者走 conflict-only 路径、原样复用 evidence/vector，同时压缩 workspace redirect/negative-decision 当前状态并删除旧事件账本；更老架构才重建 evidence/vector。所有路径都不在原库原地修改。
 
-升级必须停止旧 writer，并 drain/停止 semantic worker 后在排他窗口执行。先用 `PRAGMA wal_checkpoint(TRUNCATE)`（busy 必须为 0）再复制主库做回滚备份，不能在 WAL 尚有已提交帧时只复制 `.sqlite3`。升级保留记忆正文/历史、workspace alias/canonical、audit、backup receipt 和 evidence；`local_text_evidence_v1` 的 FTS/evidence/vector 原样复用，更老架构才重建。旧 `conflicts`、`conflict_judgments`、`semantic_notices` 历史不迁移。目标通过 fingerprint 和 WAL checkpoint 后才切配置。`--yes` 只跳过“writer 已停且接受历史丢失”的确认，不会替你停进程、checkpoint 或备份。
+升级必须停止旧 writer，并 drain/停止 semantic worker 后在排他窗口执行。先用 `PRAGMA wal_checkpoint(TRUNCATE)`（busy 必须为 0）再复制主库做回滚备份，不能在 WAL 尚有已提交帧时只复制 `.sqlite3`。升级保留记忆正文/历史、workspace canonical 与当前转发/negative decision、audit、backup receipt 和 evidence；旧 workspace decision event ledger 不迁移。`local_text_evidence_v1` 的 FTS/evidence/vector 原样复用，更老架构才重建。旧 `conflicts`、`conflict_judgments`、`semantic_notices` 历史不迁移。目标通过 fingerprint 和 WAL checkpoint 后才切配置。`--yes` 只跳过“writer 已停且接受历史丢失”的确认，不会替你停进程、checkpoint 或备份。
 
 重建后设置持久化 `conflict_scan_required=true` 和 scan epoch。只有覆盖升级时 active memory 集合、且 detector version 匹配的完整全库 scan 成功后，才能用 CAS 清除该标志；部分分页、失败或旧 detector scan 都不能清除。仍成立的冲突由 scan 重新发现，已经通过正文更新解决的旧冲突不得复活。
 

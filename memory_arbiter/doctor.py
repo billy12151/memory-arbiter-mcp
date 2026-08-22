@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from .config import Settings
+from .constants import is_default_workspace_term
 from .db_generation import detect_database_generation
 from .degrade import DegradeState
 from .models import utc_now_iso
@@ -18,6 +19,75 @@ from .models import utc_now_iso
 
 class Severity(str, Enum):
     INFO = "info"; WARNING = "warning"; CRITICAL = "critical"
+
+
+WORKSPACE_REVIEW_SIDECAR = "workspace_review.json"
+
+
+def _workspace_review_finding(conn: sqlite3.Connection, settings: Settings) -> Finding:
+    """workspace.review — full-registry confirmation diff.
+
+    Diffs workspace_canonicals (minus reserved default terms) against the
+    workspace_review.json sidecar that ONLY the authorized
+    memory_govern(action='confirm_workspaces') action writes. One-way diff:
+    new canonicals surface for review; names that disappeared (merged away,
+    renamed) are silently ignored. Missing or corrupt sidecar = empty
+    snapshot = first full review. Read-only — a doctor run must never refresh
+    the snapshot, or an unattended routine run would silently mark unreviewed
+    workspaces confirmed. The finding is WARNING (never critical); the CLI
+    exits 1 while this finding is active. After a full-registry confirmation
+    this check passes; unrelated warnings may still keep the overall exit at 1.
+    """
+    sidecar = Path(settings.db_path).parent / WORKSPACE_REVIEW_SIDECAR
+    current: list[str] = []
+    try:
+        rows = conn.execute(
+            "SELECT name FROM workspace_canonicals ORDER BY name"
+        ).fetchall()
+        current = [
+            str(row["name"]) for row in rows
+            if not is_default_workspace_term(str(row["name"]))
+        ]
+    except sqlite3.Error:
+        # Registry unreadable (legacy shape): report pass so a read hiccup
+        # can't mask the real findings or wedge the exit code.
+        return _finding("workspace.review", True, "workspace registry unavailable; review skipped")
+    confirmed: list[str] = []
+    if sidecar.exists():
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            data = None
+        raw_confirmed = data.get("confirmed_workspaces") if isinstance(data, dict) else None
+        if isinstance(raw_confirmed, list):
+            confirmed = [
+                str(name) for name in raw_confirmed
+                if isinstance(name, str) and not is_default_workspace_term(name)
+            ]
+    new_items = sorted(set(current) - set(confirmed))
+    evidence = {
+        "confirmed": len(confirmed),
+        "current": current,
+        "new": new_items,
+        "sidecar": str(sidecar),
+    }
+    if not new_items:
+        return _finding(
+            "workspace.review", True,
+            f"{len(current)} workspace(s) confirmed (registry matches snapshot)",
+            evidence=evidence,
+        )
+    return _finding(
+        "workspace.review", False,
+        f"{len(new_items)} unconfirmed workspace(s): {', '.join(new_items)}. "
+        f"Full registry ({len(current)}): {', '.join(current)}. Merge duplicates via "
+        "memory_govern(action='rename_workspace_canonical'), then record the reviewed "
+        "set with memory_govern(action='confirm_workspaces', authorized=true). A name "
+        "reappearing here after a rename has an existing keep-separate decision "
+        "that blocked old-name forwarding; merge it deliberately or confirm it "
+        "as its own workspace.",
+        evidence=evidence,
+    )
 
 
 @dataclass
@@ -91,6 +161,9 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
         f"{attention_recent} attention events in 7 days ({attention_lines} total)",
         evidence={"recent_7d": attention_recent, "total_lines": attention_lines},
     ))
+    # full-registry workspace confirmation (read-only; the snapshot
+    # is only ever written by the authorized confirm_workspaces action).
+    findings.append(_workspace_review_finding(conn, settings))
     if settings.config_warnings:
         findings.append(_finding("config.warnings", False, "; ".join(settings.config_warnings)))
     if deep:

@@ -6,6 +6,7 @@ import sqlite3
 import uuid
 from typing import Any, Optional, TYPE_CHECKING
 
+from ..acl import WorkspaceScope, workspace_scope_sql
 from ..evidence import INDEXABLE_PREFILTER_SQL, has_indexable_text
 
 
@@ -144,10 +145,14 @@ class MetaStore:
         after_memory_id: int,
         next_anchor_memory_id: int | None,
         anchors_scanned: int,
-        workspace: str | None,
+        workspace: Any = None,
     ) -> bool:
-        """Persist one contiguous server-enumerated page of a rebuild full scan."""
-        if workspace is not None:
+        """Persist one contiguous server-enumerated page of a rebuild full scan.
+
+        A workspace-scoped scan (strict caller, any scope shape) can never
+        advance the global rebuild progress — it saw only part of the library.
+        """
+        if workspace:
             return False
         boundary_json = canonical_scan_boundary(boundary)
         with self._db.write_transaction() as conn:
@@ -334,21 +339,21 @@ class MetaStore:
                             break
         return ids
 
-    def stale_index_ids(self, limit: int, workspace: Optional[str] = None) -> list[int]:
+    def stale_index_ids(self, limit: int, workspace: WorkspaceScope = None) -> list[int]:
         """Ready-mode candidates: indexable memories lacking current-version evidence.
 
         Same screen-then-verify shape as space_rebuild_pending_ids so a
         zero-unit legacy row is never queued (it would be re-enqueued on
-        every call forever). Strict-isolation callers pass their workspace
-        and only see their own rows."""
+        every call forever). Strict callers pass their admitted canonical set;
+        with admission off this collapses to the previous single equality.
+        """
         db = self._db
         if not db._db_available:
             return []
-        workspace_sql = ""
-        params: list[Any] = []
-        if workspace:
-            workspace_sql = "AND COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)=? "
-            params.append(workspace)
+        scope_sql, params = workspace_scope_sql(
+            "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)", workspace,
+        )
+        workspace_sql = f"AND {scope_sql} " if scope_sql else ""
         wanted = max(1, int(limit))
         ids: list[int] = []
         with db.connection() as conn:

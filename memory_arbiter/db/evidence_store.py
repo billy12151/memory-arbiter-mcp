@@ -9,6 +9,7 @@ import struct
 from typing import Any, TYPE_CHECKING
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
+from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..evidence import EvidenceUnit, has_indexable_text, INDEXABLE_PREFILTER_SQL
 from ..models import utc_now_iso
 
@@ -175,7 +176,7 @@ class EvidenceStore:
         *,
         k: int = 100,
         parent_status_filter: str = "active",
-        workspace: str | None = None,
+        workspace: "WorkspaceScope" = None,
         exclude_memory_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """KNN over evidence vectors, filtered by parent lifecycle state.
@@ -184,9 +185,14 @@ class EvidenceStore:
         into the KNN itself; the workspace and exclude predicates filter
         joined tables *after* the global top-k. To keep per-workspace recall
         from collapsing when other workspaces own the globally nearest rows,
-        callers with those filters get a bounded over-fetch factor. A full
-        pre-filter would need a workspace partition key on the vec0 table
-        (deferred, spec §19).
+        callers with those filters grow the global KNN window until enough
+        scoped rows are found or the complete lifecycle-eligible vector domain
+        has been considered. A true pre-filter would need a workspace partition
+        key on the vec0 table (deferred, spec §19).
+
+        ``workspace`` may be an admitted canonical set (one name or the
+        strict in-radius neighbourhood); the same over-fetch loop compensates
+        for the post-KNN membership filter.
         """
         if not self._db.state.sqlite_vec_available or not query_embedding:
             return []
@@ -203,11 +209,14 @@ class EvidenceStore:
         # update), so the authoritative memories.status is enforced too.
         clauses = [status_sql, memory_status_sql]
         requested_k = max(1, int(k))
-        filtered = bool(workspace or exclude_memory_id is not None)
+        workspace_sql, workspace_params = workspace_scope_sql(
+            "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)", workspace,
+        )
+        filtered = bool(workspace_sql or exclude_memory_id is not None)
         filter_params: list[Any] = []
-        if workspace:
-            clauses.append("COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)=?")
-            filter_params.append(workspace)
+        if workspace_sql:
+            clauses.append(workspace_sql)
+            filter_params.extend(workspace_params)
         if exclude_memory_id is not None:
             clauses.append("e.memory_id!=?")
             filter_params.append(int(exclude_memory_id))
@@ -224,7 +233,11 @@ class EvidenceStore:
                             WHERE {status_sql} AND {memory_status_sql}"""
                     ).fetchone()[0]
                 )
-                max_fetch = min(max(1, candidate_count), 2048)
+                # Grow to the complete candidate domain if necessary. A fixed
+                # global cap can permanently starve a sparse admitted workspace
+                # when closer rows belong to other workspaces. The loop still
+                # stops as soon as requested_k scoped rows are found.
+                max_fetch = max(1, candidate_count)
                 fetch_k = min(max_fetch, requested_k * 4) if filtered else requested_k
                 rows: list[Any] = []
                 while fetch_k > 0:
@@ -258,7 +271,7 @@ class EvidenceStore:
         neighbor_k: int = 10,
         include_check: bool = False,
         max_distance: float | None = None,
-        workspace: str | None = None,
+        workspace: "WorkspaceScope" = None,
         similarity_pool_limit: int = 0,
     ) -> dict[str, Any]:
         """Enumerate conflict-candidate pairs for an external scan loop.
@@ -287,13 +300,17 @@ class EvidenceStore:
             return {"error": "sqlite_vec_unavailable"}
         workspace_anchor_sql = ""
         anchor_params: list[Any] = []
+        workspace_names = scope_names(workspace)
+        echo_workspace = workspace_names[0] if workspace_names else None
         if workspace is not None:
             # Strict callers must not anchor on — or leak snippets from —
-            # memories outside their workspace.
-            workspace_anchor_sql = (
-                "AND COALESCE(NULLIF(workspace_canonical,''),workspace)=? "
+            # memories outside their admitted workspace set.
+            anchor_scope_sql, anchor_scope_params = workspace_scope_sql(
+                "COALESCE(NULLIF(workspace_canonical,''),workspace)", workspace,
             )
-            anchor_params.append(workspace)
+            if anchor_scope_sql:
+                workspace_anchor_sql = f"AND {anchor_scope_sql} "
+                anchor_params.extend(anchor_scope_params)
         with db.connection() as conn:
             anchors = [
                 int(row["id"]) for row in conn.execute(
@@ -538,10 +555,16 @@ class EvidenceStore:
                                 # triggering region (plus context) instead of
                                 # the full text keeps triage token cost low.
                                 "deep_read": {
-                                    "left": {"memory_id": pair[0],
-                                             "span": anchor_span if pair[0] == anchor_id else peer_span},
-                                    "right": {"memory_id": pair[1],
-                                              "span": peer_span if pair[0] == anchor_id else anchor_span},
+                                    "left": {
+                                        "memory_id": pair[0],
+                                        "span": anchor_span if pair[0] == anchor_id else peer_span,
+                                        **({"workspace": echo_workspace} if echo_workspace else {}),
+                                    },
+                                    "right": {
+                                        "memory_id": pair[1],
+                                        "span": peer_span if pair[0] == anchor_id else anchor_span,
+                                        **({"workspace": echo_workspace} if echo_workspace else {}),
+                                    },
                                 },
                             }
                         else:
@@ -555,10 +578,16 @@ class EvidenceStore:
                                 existing["left_snippet"] = text[:200] if pair[0] == anchor_id else hit_text[:200]
                                 existing["right_snippet"] = hit_text[:200] if pair[0] == anchor_id else text[:200]
                                 existing["deep_read"] = {
-                                    "left": {"memory_id": pair[0],
-                                             "span": anchor_span if pair[0] == anchor_id else peer_span},
-                                    "right": {"memory_id": pair[1],
-                                              "span": peer_span if pair[0] == anchor_id else anchor_span},
+                                    "left": {
+                                        "memory_id": pair[0],
+                                        "span": anchor_span if pair[0] == anchor_id else peer_span,
+                                        **({"workspace": echo_workspace} if echo_workspace else {}),
+                                    },
+                                    "right": {
+                                        "memory_id": pair[1],
+                                        "span": peer_span if pair[0] == anchor_id else anchor_span,
+                                        **({"workspace": echo_workspace} if echo_workspace else {}),
+                                    },
                                 }
                             existing["reasons"].add(decision.reason)
                             existing["distance"] = min(existing["distance"], distance)

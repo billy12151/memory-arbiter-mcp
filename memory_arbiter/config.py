@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,9 +53,10 @@ class Settings:
     embedding_reserved_tokens: int = 64
     # Maximum text passed to one embedding call.
     max_section_chars: int = 3600
-    # Workspace isolation level: none (default, ws ignored) | weak (soft rerank) | strict (hard filter).
+    # Workspace isolation: none (omitted workspace spans the library; an explicit
+    # workspace scopes that read) | weak (soft rerank) | strict (hard scope).
     isolation: str = "none"
-    # Cosine-distance cutoff for workspace alias canonicalization (vec KNN).
+    # Cosine-distance cutoff for workspace canonicalization candidates (vec KNN).
     # Lower = stricter. ~0.16 merges 金营项目/金科营销项目; ~0.43 keeps unrelated
     # projects distinct, so 0.25 cleanly separates synonyms from distinct workspaces.
     workspace_match_distance: float = 0.25
@@ -64,6 +66,23 @@ class Settings:
     # (a real-library A/B showed top-5 strictly worse: more misses, no gains).
     workspace_qwen_candidate_distance: float = 0.25
     workspace_qwen_candidate_top_k: int = 3
+    # weak-isolation continuous vector weighting. Off = the v0.9.7
+    # binary step (same-ws +0.30 / cross-ws -0.15). On = precompute canonical
+    # distances and weight on the 0.15/0.30 curve; guarded pairs (default /
+    # short names / generic-only proximity / missing vectors) keep the binary
+    # fallback.
+    workspace_weak_vector_weight: bool = False
+    # Shared admission short-name guard: canonicals shorter than this never
+    # vector-admit (exact equality only).
+    workspace_min_name_len: int = 3
+    # strict vector admission. Off (default) = strict isolation is an
+    # exact same-canonical filter (v0.12.5 behavior). On = a strict caller also
+    # sees canonicals within workspace_recall_cutoff of its own (same shared
+    # guards: default insulation, short-name, generic-only proximity). The
+    # admitted set always contains the caller's own canonical, so off collapses
+    # every IN (...) scope to the single-canonical equality filter.
+    workspace_recall_admission: bool = False
+    workspace_recall_cutoff: float = 0.25
     update_check_enabled: bool = True
     tool_profile: str = "product"
     semantic_conflict_enabled: bool = False
@@ -181,14 +200,10 @@ class Settings:
             )
             isolation = "none"
         if isolation == "strict":
-            # 636 §9: strict decides visibility, so unconfirmed workspace
-            # aliases silently hide memories. Nudge the operator to govern
-            # workspaces (accept/reject/pending) before relying on strict.
             config_warnings.append(
-                "isolation=strict: confirm workspace aliases via "
-                "memory_govern (accept/reject_workspace_alias, "
-                "confirm_pending_workspace) so new/aliased workspaces are not "
-                "silently excluded from recall."
+                "isolation=strict: review new workspaces before relying on scoped recall; "
+                "use confirm_pending_workspace for pending writes, rename/migrate to merge "
+                "duplicates, and confirm_workspaces after reviewing the registry."
             )
 
         tool_profile = pick_str(
@@ -292,6 +307,22 @@ class Settings:
             workspace_qwen_candidate_top_k=clamp_int(
                 pick_int_field(cfg.get("workspace_qwen_candidate_top_k"), "MEMORY_ARBITER_WORKSPACE_QWEN_CANDIDATE_TOP_K", 3, name="workspace_qwen_candidate_top_k"),
                 1, 5, name="workspace_qwen_candidate_top_k", warnings=config_warnings,
+            ),
+            workspace_weak_vector_weight=pick_bool_field(
+                cfg.get("workspace_weak_vector_weight"), "MEMORY_ARBITER_WORKSPACE_WEAK_VECTOR_WEIGHT",
+                "false", name="workspace_weak_vector_weight", default_bool=False,
+            ),
+            workspace_min_name_len=clamp_int(
+                pick_int_field(cfg.get("workspace_min_name_len"), "MEMORY_ARBITER_WORKSPACE_MIN_NAME_LEN", 3, name="workspace_min_name_len"),
+                1, 64, name="workspace_min_name_len", warnings=config_warnings,
+            ),
+            workspace_recall_admission=pick_bool_field(
+                cfg.get("workspace_recall_admission"), "MEMORY_ARBITER_WORKSPACE_RECALL_ADMISSION",
+                "false", name="workspace_recall_admission", default_bool=False,
+            ),
+            workspace_recall_cutoff=clamp_float(
+                pick_float_field(cfg.get("workspace_recall_cutoff"), "MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF", 0.25, name="workspace_recall_cutoff"),
+                0.0, 2.0, name="workspace_recall_cutoff", warnings=config_warnings,
             ),
             update_check_enabled=update_check_enabled,
             tool_profile=tool_profile,
@@ -460,7 +491,11 @@ def clamp_int(val: int, lo: int, hi: int, name: str = "", warnings: Optional[lis
 
 
 def clamp_float(val: float, lo: float, hi: float, name: str = "", warnings: Optional[list[str]] = None) -> float:
-    """Clamp a float to [lo, hi], emitting a warning when out of range."""
+    """Clamp a finite float to [lo, hi], warning and using lo for NaN/Inf."""
+    if not math.isfinite(val):
+        if warnings is not None:
+            warnings.append(f"{name}={val} is not finite; using minimum {lo}")
+        return lo
     if val < lo:
         if warnings is not None:
             warnings.append(f"{name}={val} below minimum {lo}; clamped to {lo}")

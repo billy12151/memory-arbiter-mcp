@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
 
 from ..config import Settings
+from ..acl import WorkspaceScope
 from ..degrade import DegradeState
 from ..db_generation import (
     LegacyDatabaseError,
@@ -279,78 +280,43 @@ class MemoryDB:
             ws_raw, embedder, match_distance=match_distance, register_new=register_new,
         )
 
-    def upsert_workspace_alias(
+    def record_workspace_decision(
         self,
-        alias: str,
+        workspace_name: str,
         canonical: str,
         *,
-        relation: str = "alias",
         status: str = "confirmed",
-        source: str = "user",
-        action: str = "accept",
-        judge_type: str = "user",
-        reason: Optional[str] = None,
         force: bool = False,
     ) -> Tuple[bool, list[str]]:
-        return self.workspaces.upsert_workspace_alias(
-            alias, canonical,
-            relation=relation,
-            status=status,
-            source=source,
-            action=action,
-            judge_type=judge_type,
-            reason=reason,
-            force=force,
+        return self.workspaces.record_workspace_decision(
+            workspace_name, canonical, status=status, force=force,
         )
 
-    def upsert_workspace_alias_on_conn(
+    def record_workspace_decision_on_conn(
         self,
         conn: sqlite3.Connection,
-        alias: str,
+        workspace_name: str,
         canonical: str,
         *,
-        relation: str = "alias",
         status: str = "confirmed",
-        source: str = "user",
-        action: str = "accept",
-        judge_type: str = "user",
-        reason: Optional[str] = None,
         force: bool = False,
     ) -> Tuple[bool, list[str]]:
-        return self.workspaces.upsert_workspace_alias(
-            alias, canonical,
-            relation=relation,
-            status=status,
-            source=source,
-            action=action,
-            judge_type=judge_type,
-            reason=reason,
-            force=force,
-            conn=conn,
+        return self.workspaces.record_workspace_decision(
+            workspace_name, canonical, status=status, force=force, conn=conn,
         )
 
-    def get_workspace_alias(self, alias: str) -> Optional[dict[str, Any]]:
-        return self.workspaces.get_workspace_alias(alias)
-
-    def list_workspace_alias_events(
-        self, alias: Optional[str] = None, *, limit: int = 200
-    ) -> list[dict[str, Any]]:
-        return self.workspaces.list_workspace_alias_events(alias, limit=limit)
+    def get_workspace_decision(self, workspace_name: str) -> Optional[dict[str, Any]]:
+        return self.workspaces.get_workspace_decision(workspace_name)
 
     def rename_workspace_canonical(
-        self, old: str, new: str, *, judge_type: str = "user", reason: Optional[str] = None
+        self, old: str, new: str,
     ) -> Tuple[int, list[str]]:
-        return self.workspaces.rename_workspace_canonical(
-            old, new, judge_type=judge_type, reason=reason,
-        )
+        return self.workspaces.rename_workspace_canonical(old, new)
 
     def migrate_workspace(
-        self, from_ws: str, to_ws: str, *, judge_type: str = "user",
-        reason: Optional[str] = None, embedder: Any = None,
+        self, from_ws: str, to_ws: str, *, embedder: Any = None,
     ) -> Tuple[int, list[str]]:
-        return self.workspaces.migrate_workspace(
-            from_ws, to_ws, judge_type=judge_type, reason=reason, embedder=embedder,
-        )
+        return self.workspaces.migrate_workspace(from_ws, to_ws, embedder=embedder)
 
     def prepare_workspace_canonical_embedding(
         self, canonical: str, embedder: Any = None,
@@ -382,14 +348,14 @@ class MemoryDB:
 
     def evidence_knn(
         self, query_embedding: list[float], *, k: int = 100, parent_status_filter: str = "active",
-        workspace: Optional[str] = None, exclude_memory_id: Optional[int] = None,
+        workspace: WorkspaceScope = None, exclude_memory_id: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id)
 
     def scan_rule_candidates(
         self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
         include_check: bool = False, max_distance: Optional[float] = None,
-        workspace: Optional[str] = None, similarity_pool_limit: int = 0,
+        workspace: WorkspaceScope = None, similarity_pool_limit: int = 0,
     ) -> dict[str, Any]:
         return self.evidence.scan_rule_candidates(
             after_memory_id=after_memory_id, anchor_batch=anchor_batch,
@@ -403,8 +369,13 @@ class MemoryDB:
         record: MemoryRecord,
         workspace_canonical: Optional[str] = None,
         workspace_embedding: Optional[list[float]] = None,
+        *,
+        register_workspace_canonical: bool = True,
     ) -> Tuple[Optional[int], list[str]]:
-        return self.memories.insert_memory(record, workspace_canonical, workspace_embedding)
+        return self.memories.insert_memory(
+            record, workspace_canonical, workspace_embedding,
+            register_workspace_canonical=register_workspace_canonical,
+        )
 
     def insert_memory_on_conn(
         self, conn: sqlite3.Connection, record: MemoryRecord,
@@ -425,11 +396,15 @@ class MemoryDB:
     def get_memory(self, memory_id: int) -> Optional[dict[str, Any]]:
         return self.memories.get_memory(memory_id)
 
-    def get_memory_for_workspace(self, memory_id: int, ws_canonical: str) -> Optional[dict[str, Any]]:
-        return self.memories.get_memory_for_workspace(memory_id, ws_canonical)
+    def get_memory_for_workspace(
+        self, memory_id: int, ws_canonical: str, admitted: "WorkspaceScope" = None,
+    ) -> Optional[dict[str, Any]]:
+        return self.memories.get_memory_for_workspace(memory_id, ws_canonical, admitted)
 
-    def list_memories_for_workspace(self, ws_canonical: str, limit: int = 50) -> list[dict[str, Any]]:
-        return self.memories.list_memories_for_workspace(ws_canonical, limit)
+    def list_memories_for_workspace(
+        self, ws_canonical: str, limit: int = 50, admitted: "WorkspaceScope" = None,
+    ) -> list[dict[str, Any]]:
+        return self.memories.list_memories_for_workspace(ws_canonical, limit, admitted)
 
     def update_memory(self, memory_id: int, updates: dict[str, Any]) -> bool:
         return self.memories.update_memory(memory_id, updates)
@@ -459,7 +434,7 @@ class MemoryDB:
         after_dt: Optional[datetime],
         before_dt: Optional[datetime],
         source_type: Optional[str],
-        ws_canonical: Optional[str] = None,
+        ws_canonical: WorkspaceScope = None,
     ) -> int:
         return self.memories.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type, ws_canonical,
@@ -474,7 +449,7 @@ class MemoryDB:
         source_type: Optional[str],
         limit: int,
         offset: int = 0,
-        ws_canonical: Optional[str] = None,
+        ws_canonical: WorkspaceScope = None,
     ) -> list[dict[str, Any]]:
         return self.memories.recall_by_filters(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
@@ -499,8 +474,15 @@ class MemoryDB:
     def resolve_conflicts_for_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> int:
         return self.conflicts.resolve_conflicts_for_on_conn(conn, memory_id)
 
-    def list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None) -> list[dict[str, Any]]:
-        return self.conflicts.list_conflicts(status, limit, source)
+    def list_conflicts(
+        self,
+        status: str = "open",
+        limit: int = 50,
+        source: Optional[str] = None,
+        workspace: WorkspaceScope = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.conflicts.list_conflicts(status, limit, source, workspace, offset)
 
     def list_open_conflicts_for_memory_ids(
         self, memory_ids: list[int], *, include_applying: bool = False,
@@ -564,23 +546,23 @@ class MemoryDB:
             source=source,
         )
 
-    def claim_next_semantic_notice(self, workspace_canonical: Optional[str] = None) -> Optional[dict[str, Any]]:
+    def claim_next_semantic_notice(self, workspace_canonical: WorkspaceScope = None) -> Optional[dict[str, Any]]:
         return self.semantic_notices.claim_next_semantic_notice(workspace_canonical)
 
     def read_semantic_notice(
-        self, notice_id: int, workspace_canonical: Optional[str] = None,
+        self, notice_id: int, workspace_canonical: WorkspaceScope = None,
     ) -> Optional[dict[str, Any]]:
         return self.semantic_notices.read_semantic_notice(notice_id, workspace_canonical)
 
     def list_semantic_notices(
-        self, status: str = "open", limit: int = 10, workspace_canonical: Optional[str] = None,
+        self, status: str = "open", limit: int = 10, workspace_canonical: WorkspaceScope = None,
     ) -> list[dict[str, Any]]:
         return self.semantic_notices.list_semantic_notices(
             status=status, limit=limit, workspace_canonical=workspace_canonical,
         )
 
     def semantic_notice_counts(
-        self, workspace_canonical: Optional[str] = None,
+        self, workspace_canonical: WorkspaceScope = None,
     ) -> dict[str, int]:
         return self.semantic_notices.semantic_notice_counts(workspace_canonical)
 
@@ -601,7 +583,7 @@ class MemoryDB:
         notice_id: int,
         status: str,
         reason: str = "",
-        workspace_canonical: Optional[str] = None,
+        workspace_canonical: WorkspaceScope = None,
         conflict_id: Optional[int] = None,
     ) -> dict[str, Any]:
         return self.semantic_notices.update_semantic_notice_status(
@@ -787,7 +769,7 @@ class MemoryDB:
         after_memory_id: int,
         next_anchor_memory_id: int | None,
         anchors_scanned: int,
-        workspace: str | None,
+        workspace: WorkspaceScope = None,
     ) -> bool:
         return self.meta.record_conflict_scan_page(
             epoch=epoch,
@@ -815,7 +797,7 @@ class MemoryDB:
     def space_rebuild_pending_ids(self, limit: int) -> list[int]:
         return self.meta.space_rebuild_pending_ids(limit)
 
-    def stale_index_ids(self, limit: int, workspace: Optional[str] = None) -> list[int]:
+    def stale_index_ids(self, limit: int, workspace: WorkspaceScope = None) -> list[int]:
         return self.meta.stale_index_ids(limit, workspace)
 
     def maybe_complete_space_rebuild(self, embedding_space_id: str) -> bool:

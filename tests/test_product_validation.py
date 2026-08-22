@@ -187,7 +187,7 @@ def test_textual_resource_boundaries(tmp_path: Path) -> None:
     memory_id = tools.memory("remember", {"content": "abc", "subject": "s"})["data"]["id"]
     cases = [
         ("memory", "update", {"memory_id": memory_id, "old_text": "x" * (MAX_REPLACEMENT_TEXT_CHARS + 1), "new_text": "y"}, "old_text"),
-        ("memory_govern", "accept_workspace_alias", {"alias": "x" * (MAX_TEXT_FIELD_CHARS + 1), "canonical": "c", "authorized": True}, "alias"),
+        ("memory_govern", "rename_workspace_canonical", {"old": "x" * (MAX_TEXT_FIELD_CHARS + 1), "new": "c", "authorized": True}, "old"),
         ("memory_repair", "set_entity", {"memory_id": memory_id, "entity": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "entity"),
     ]
     dispatch = {"memory": tools.memory, "memory_govern": tools.memory_govern, "memory_repair": tools.memory_repair}
@@ -209,7 +209,7 @@ def test_product_field_registry_covers_all_declared_surface_operations() -> None
     expected = {
         "memory": {"help", "status", "remember", "find", "read", "update", "judge"},
         "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "history", "expired", "entities", "help"},
-        "memory_govern": {"retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "help"},
+        "memory_govern": {"retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "confirm_workspaces", "help"},
         "memory_repair": {"rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "semantic_control", "notice", "record_conflict", "replay_backup", "help"},
     }
     actual = {

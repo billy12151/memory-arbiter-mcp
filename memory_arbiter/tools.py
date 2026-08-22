@@ -5,10 +5,11 @@ import json
 import re
 import threading
 import time
+from contextvars import ContextVar
 from importlib import resources
 from typing import Any, Callable, cast, Optional, Tuple
 
-from .acl import CallerWorkspace, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, visible_memory
+from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, visible_memory
 from .arbitration import compare_memories
 from .config import Settings
 from .constants import strict_ws
@@ -70,6 +71,12 @@ class MemoryTools:
         self._shutdown_lock = threading.Lock()
         self._shutdown_started = False
         self._shutdown_complete = False
+        # Per-product-call caller cache. ContextVar isolates concurrent MCP
+        # tasks; the product wrapper clears it before dispatch and automatic
+        # notice delivery reuses the scope computed by the operation.
+        self._product_caller: ContextVar[Optional[CallerWorkspace]] = ContextVar(
+            "memory_arbiter_product_caller", default=None,
+        )
         self._last_pair_duration_ms: Optional[int] = None
         # Spec §7: check-route fail-closed degradation must stay observable
         # (qwen unavailable / per-job budget exhausted), not silently skipped.
@@ -411,6 +418,7 @@ class MemoryTools:
             workspace = str(getattr(self.settings, "workspace", "") or "").strip()
         warnings: list[str] = []
         canonical: Optional[str] = None
+        admitted: tuple[str, ...] = ()
         if workspace:
             # Explicit filters are canonicalized in every isolation mode. In
             # none an explicit filter scopes the query (canonicalize-then-
@@ -423,17 +431,36 @@ class MemoryTools:
                 canonical = str(resolved.get("canonical") or workspace)
             except Exception:
                 canonical = workspace
+            # under strict isolation the readable set is the caller's
+            # own canonical PLUS any within the recall cutoff (vector
+            # admission). Off / degraded → (canonical,), i.e. the single-canonical
+            # scope. Only strict consults it; none/weak never hard-scope by it.
+            if isolation == "strict" and canonical:
+                if getattr(self.settings, "workspace_recall_admission", False):
+                    try:
+                        admitted = self.db.workspaces.admitted_canonicals(
+                            canonical,
+                            cutoff=float(getattr(self.settings, "workspace_recall_cutoff", 0.25)),
+                            min_name_len=int(getattr(self.settings, "workspace_min_name_len", 3)),
+                        )
+                    except Exception:
+                        admitted = (canonical,)
+                else:
+                    admitted = (canonical,)
         elif isolation == "strict":
             warnings.append("isolation=strict has no caller workspace; read denied")
         if isolation == "strict" and source == "settings":
             warnings.append(f"strict read ACL using settings.workspace={workspace or '<empty>'!r}")
-        return CallerWorkspace(
+        caller = CallerWorkspace(
             isolation=isolation,
             workspace=workspace or None,
             canonical=canonical,
             source=source,
             warnings=tuple(warnings),
+            admitted=admitted,
         )
+        self._product_caller.set(caller)
+        return caller
 
     def _strict_acl_unavailable(self, caller: CallerWorkspace) -> Optional[dict[str, Any]]:
         if caller.isolation == "strict" and not caller.canonical:
@@ -449,7 +476,9 @@ class MemoryTools:
         if caller.isolation == "strict":
             if not caller.canonical:
                 return None
-            return self.db.get_memory_for_workspace(int(memory_id), caller.canonical)
+            return self.db.get_memory_for_workspace(
+                int(memory_id), caller.canonical, caller.scope_canonicals(),
+            )
         return self.db.get_memory(int(memory_id))
 
     def _memory_acl_response_fields(self, caller: CallerWorkspace) -> dict[str, Any]:
@@ -458,17 +487,27 @@ class MemoryTools:
     def _strict_filter_records(self, records: list[dict[str, Any]], caller: CallerWorkspace) -> list[dict[str, Any]]:
         if caller.isolation != "strict" or not caller.canonical:
             return records
-        return [r for r in records if raw_workspace(r) == caller.canonical]
+        allowed = {str(a or "").strip() for a in caller.scope_canonicals() if str(a or "").strip()}
+        return [r for r in records if raw_workspace(r) in allowed]
 
     @staticmethod
-    def _conflict_next_call(conflict: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def _conflict_next_call(
+        conflict: dict[str, Any], workspace: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
         conflict_id = int(conflict["id"])
         revision = int(conflict["revision"])
         status = conflict.get("status")
+
+        def data(**values: Any) -> dict[str, Any]:
+            payload = dict(values)
+            if workspace:
+                payload["workspace"] = workspace
+            return payload
+
         if status == "open":
             return {
                 "tool": "memory", "action": "judge",
-                "data": {"conflict_id": conflict_id, "expected_revision": revision},
+                "data": data(conflict_id=conflict_id, expected_revision=revision),
             }
         if status == "applying":
             plan = (conflict.get("apply_summary") or {}).get("plan") or []
@@ -476,24 +515,21 @@ class MemoryTools:
             if pending is not None:
                 return {
                     "tool": "memory_govern", "action": "apply_conflict_action",
-                    "data": {
-                        "conflict_id": conflict_id, "expected_revision": revision,
-                        "memory_id": pending.get("memory_id"), "action": pending.get("action"),
-                    },
+                    "data": data(
+                        conflict_id=conflict_id, expected_revision=revision,
+                        memory_id=pending.get("memory_id"), action=pending.get("action"),
+                    ),
                     "authorization_required": True,
                 }
             if any(item.get("status") not in {"pending", "completed"} for item in plan):
-                # A failed step with nothing pending: resolve_conflict would
-                # deterministically fail with apply_incomplete; the recovery
-                # path is an authorized replan.
                 return {
                     "tool": "memory_govern", "action": "replan_conflict",
-                    "data": {"conflict_id": conflict_id, "expected_revision": revision},
+                    "data": data(conflict_id=conflict_id, expected_revision=revision),
                     "authorization_required": True,
                 }
             return {
                 "tool": "memory_govern", "action": "resolve_conflict",
-                "data": {"conflict_id": conflict_id, "expected_revision": revision},
+                "data": data(conflict_id=conflict_id, expected_revision=revision),
                 "authorization_required": True,
             }
         return None
@@ -514,7 +550,9 @@ class MemoryTools:
         }
         if caller.isolation == "strict":
             visible = {
-                memory_id: visible_memory(memories.get(memory_id), caller.canonical)
+                memory_id: visible_memory(
+                    memories.get(memory_id), caller.canonical, caller.scope_canonicals(),
+                )
                 for memory_id in lookup_ids
             }
             visible_member_count = sum(bool(visible.get(memory_id, False)) for memory_id in member_ids)
@@ -544,7 +582,10 @@ class MemoryTools:
             "resolution_memory": resolution,
             "resolution_memory_version": conflict.get("resolution_memory_version"),
             "apply_summary": conflict.get("apply_summary") or {"plan": []},
-            "next_executable_call": self._conflict_next_call(conflict),
+            "next_executable_call": self._conflict_next_call(
+                conflict,
+                caller.workspace if caller.isolation == "strict" else None,
+            ),
             "all_members_visible": True,
         }
         if caller.isolation == "strict":
@@ -633,11 +674,15 @@ class MemoryTools:
                     pass
         return suggestion
 
-    def _semantic_notice_workspace_scope(self, workspace: Any = None) -> Optional[str]:
-        """Use the shared read-only caller resolver for notice API/count scope."""
+    def _semantic_notice_workspace_scope(self, workspace: Any = None) -> "WorkspaceScope":
+        """Use the shared read-only caller resolver for notice API/count scope.
+
+        returns the admitted canonical set so strict notice reads widen
+        with the same vector admission as search/conflict (off → single canonical).
+        """
         if self.settings.isolation != "strict":
             return None
-        return self._caller_workspace(workspace).canonical
+        return self._caller_workspace(workspace).scope_canonicals()
 
     @staticmethod
     def _scan_envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
@@ -843,7 +888,7 @@ class MemoryTools:
             ]
         return result
 
-    def _semantic_status(self, workspace_canonical: Optional[str] = None) -> dict[str, Any]:
+    def _semantic_status(self, workspace_canonical: WorkspaceScope = None) -> dict[str, Any]:
         backend = self._get_semantic_backend_ref()
         backend_status = (
             backend.status()
@@ -1084,21 +1129,6 @@ class MemoryTools:
             memory_id, source_ref, confidence, self._is_truthy(authorized), **_,
         )
 
-    def memory_accept_workspace_alias(
-        self, alias: str, canonical: str, relation: str = "alias",
-        reason: Optional[str] = None, source: str = "user",
-        authorized: bool = False, **_: Any,
-    ) -> dict[str, Any]:
-        return self._operations.memory_accept_workspace_alias(
-            alias, canonical, relation, reason, source, authorized, **_,
-        )
-
-    def memory_reject_workspace_alias(
-        self, alias: str, canonical: str, reason: Optional[str] = None,
-        source: str = "user", **_: Any,
-    ) -> dict[str, Any]:
-        return self._operations.memory_reject_workspace_alias(alias, canonical, reason, source, **_)
-
     def memory_rename_workspace_canonical(
         self, old: str, new: str, reason: Optional[str] = None, **_: Any,
     ) -> dict[str, Any]:
@@ -1115,6 +1145,17 @@ class MemoryTools:
     ) -> dict[str, Any]:
         return self._operations.memory_confirm_pending_workspace(
             memory_id, canonical, reason, self._is_truthy(authorized), **_,
+        )
+
+    def memory_confirm_workspaces(
+        self,
+        workspaces: Optional[list[str]] = None,
+        reason: Optional[str] = None,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        return self._operations.memory_confirm_workspaces(
+            workspaces, reason, self._is_truthy(authorized), **_,
         )
 
     def memory_activate(

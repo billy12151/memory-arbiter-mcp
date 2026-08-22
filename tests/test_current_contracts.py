@@ -19,6 +19,10 @@ def write(tool: MemoryTools, content: str) -> int:
 def test_config_registry_only_describes_current_architecture() -> None:
     paths = {item["path"] for item in CONFIG_DESCRIPTORS}
     assert "embedding.max_unit_chars" in paths
+    assert {
+        "workspace_weak_vector_weight", "workspace_min_name_len",
+        "workspace_recall_admission", "workspace_recall_cutoff",
+    } <= paths
     assert not any("claim" in path or "split" in path or "pair_text_gate" in path for path in paths)
     assert sum(len(group["items"]) for group in grouped_descriptors()) == len(CONFIG_DESCRIPTORS)
     assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
@@ -172,6 +176,72 @@ def test_backup_replay_is_authorized_and_idempotent(tmp_path: Path) -> None:
     assert first["data"]["imported_count"] == 1
     second = tool.memory_repair(task="replay_backup", data={"dry_run": False, "authorized": True})
     assert second["data"]["already_replayed_count"] == 1
+
+
+def test_strict_backup_replay_keeps_unconfirmed_workspace_pending(tmp_path: Path) -> None:
+    setting = Settings(
+        db_path=tmp_path / "strict-replay.db",
+        backup_jsonl=tmp_path / "strict-replay.jsonl",
+        isolation="strict", workspace="default",
+    )
+    tool = MemoryTools(setting)
+    envelope = {
+        "backup_schema": 1, "replay_key": "strict-one",
+        "backup_written_at": utc_now_iso(), "workspace_canonical": "ReplayNew",
+        "record": {
+            "content": "restored", "subject": "restore", "workspace": "ReplayNew",
+            "source_type": "agent_generated", "event_time": utc_now_iso(),
+        },
+    }
+    tool.settings.backup_jsonl.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+    replayed = tool.memory_repair("replay_backup", {"dry_run": False, "authorized": True})
+    assert replayed["data"]["imported_count"] == 1
+    with tool.db.connection() as conn:
+        memory = conn.execute(
+            "SELECT status FROM memories WHERE workspace_canonical='ReplayNew'"
+        ).fetchone()
+        canonical = conn.execute(
+            "SELECT 1 FROM workspace_canonicals WHERE name='ReplayNew'"
+        ).fetchone()
+    assert memory["status"] == "pending"
+    assert canonical is None
+    retried = tool.memory_write(
+        content="second", subject="second", workspace="ReplayNew",
+        source_type="agent_generated",
+    )
+    assert retried["data"]["record"]["status"] == "pending"
+    assert retried["data"]["action_required"] == "confirm_new_workspace"
+
+
+def test_backup_replay_follows_current_workspace_redirect(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    tool.memory_write(
+        content="old", subject="old", workspace="Old", source_type="agent_generated",
+    )
+    moved = tool.memory_govern("rename_workspace_canonical", {
+        "old": "Old", "new": "New", "authorized": True,
+    })
+    assert moved["ok"] is True
+    envelope = {
+        "backup_schema": 1, "replay_key": "moved-one",
+        "backup_written_at": utc_now_iso(), "workspace_canonical": "Old",
+        "record": {
+            "content": "restored old", "subject": "restore", "workspace": "Old",
+            "source_type": "agent_generated", "event_time": utc_now_iso(),
+        },
+    }
+    tool.settings.backup_jsonl.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+    replayed = tool.memory_repair("replay_backup", {"dry_run": False, "authorized": True})
+    assert replayed["data"]["imported_count"] == 1
+    with tool.db.connection() as conn:
+        restored = conn.execute(
+            "SELECT workspace_canonical FROM memories WHERE content='restored old'"
+        ).fetchone()
+        old_registry = conn.execute(
+            "SELECT 1 FROM workspace_canonicals WHERE name='Old'"
+        ).fetchone()
+    assert restored["workspace_canonical"] == "New"
+    assert old_registry is None
 
 
 def test_doctor_text_renderer_shows_every_dimension_and_current_summary() -> None:

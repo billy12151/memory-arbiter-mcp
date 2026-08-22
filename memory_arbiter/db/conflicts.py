@@ -11,6 +11,7 @@ import json
 import sqlite3
 from typing import Any, Optional, TYPE_CHECKING
 
+from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..models import ConflictMember, ConflictValueGroup, utc_now_iso
 from ..semantic_conflict import normalize_value
 
@@ -193,12 +194,20 @@ class ConflictStore:
 
     @staticmethod
     def _active_members_match_workspace(
-        conn: sqlite3.Connection, conflict: dict[str, Any], caller_workspace: Optional[str] = None,
+        conn: sqlite3.Connection, conflict: dict[str, Any],
+        caller_workspace: "WorkspaceScope" = None,
     ) -> bool:
-        """Revalidate every current member against the conflict and strict caller workspace."""
+        """Revalidate every current member against the conflict and strict caller scope.
+
+        The group's own ``workspace_canonical`` is authoritative: every live
+        member must still sit in it. Strict admission widens the CALLER side only — a
+        strict caller may act on a group whose canonical is any of its admitted
+        canonicals (its own plus in-radius neighbours). With vector admission
+        off the scope is the single caller canonical, i.e. the single-name equality.
+        """
         expected_workspace = str(conflict.get("workspace_canonical") or "").strip()
-        caller = str(caller_workspace or "").strip()
-        if not expected_workspace or (caller and caller != expected_workspace):
+        allowed = set(scope_names(caller_workspace))
+        if not expected_workspace or (allowed and expected_workspace not in allowed):
             return False
         members = conflict.get("member_versions") or []
         if not members:
@@ -211,7 +220,6 @@ class ConflictStore:
             if (
                 current is None or current["status"] != "active"
                 or str(current["workspace"] or "").strip() != expected_workspace
-                or (caller and str(current["workspace"] or "").strip() != caller)
             ):
                 return False
         return True
@@ -223,7 +231,14 @@ class ConflictStore:
             row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
         return _decode_row(row) if row else None
 
-    def list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None) -> list[dict[str, Any]]:
+    def list_conflicts(
+        self,
+        status: str = "open",
+        limit: int = 50,
+        source: Optional[str] = None,
+        workspace: "WorkspaceScope" = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         if not self._db_available:
             return []
         sql = "SELECT * FROM conflicts WHERE status=?"
@@ -231,8 +246,12 @@ class ConflictStore:
         if source is not None:
             sql += " AND source=?"
             params.append(source)
-        sql += " ORDER BY created_at DESC,id DESC LIMIT ?"
-        params.append(max(1, int(limit)))
+        scope_sql, scope_params = workspace_scope_sql("workspace_canonical", workspace)
+        if scope_sql:
+            sql += f" AND {scope_sql}"
+            params.extend(scope_params)
+        sql += " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, int(limit)), max(0, int(offset))])
         with self.connection() as conn:
             return [_decode_row(row) for row in conn.execute(sql, params).fetchall()]
 
@@ -482,7 +501,7 @@ class ConflictStore:
             return {"outcome": "inserted", "conflict_id": int(cur.lastrowid), "revision": 1}
 
     def escalate_structured_notice(
-        self, notice_id: int, *, workspace_canonical: Optional[str], reason: str,
+        self, notice_id: int, *, workspace_canonical: "WorkspaceScope", reason: str,
     ) -> dict[str, Any]:
         """Atomically validate and promote a complete frozen notice snapshot."""
         now = utc_now_iso()
@@ -490,8 +509,10 @@ class ConflictStore:
             sql = "SELECT * FROM conflicts WHERE id=? AND notice_type IS NOT NULL"
             args: list[Any] = [int(notice_id)]
             if workspace_canonical is not None:
-                sql += " AND workspace_canonical=?"
-                args.append(workspace_canonical)
+                scope_sql, scope_params = workspace_scope_sql("workspace_canonical", workspace_canonical)
+                if scope_sql:
+                    sql += f" AND {scope_sql}"
+                    args.extend(scope_params)
             row = conn.execute(sql, args).fetchone()
             if row is None:
                 return {"outcome": "not_found"}
@@ -506,15 +527,28 @@ class ConflictStore:
             except (TypeError, ValueError) as exc:
                 return {"outcome": "structured_group_required", "error": str(exc)}
             checks: list[dict[str, Any]] = []
+            notice_workspace = str(notice.get("workspace_canonical") or "").strip()
             for member in members:
                 current = conn.execute(
-                    "SELECT version,status FROM memories WHERE id=?", (member["memory_id"],),
+                    "SELECT version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=?",
+                    (member["memory_id"],),
                 ).fetchone()
-                fresh = bool(current and current["status"] == "active" and int(current["version"]) == int(member["version"]))
+                member_workspace = str(current["workspace"] or "").strip() if current else None
+                fresh = bool(
+                    current and current["status"] == "active"
+                    and int(current["version"]) == int(member["version"])
+                    and notice_workspace
+                    and member_workspace == notice_workspace
+                )
                 checks.append({
-                    "memory_id": member["memory_id"], "expected_version": member["version"],
+                    "memory_id": member["memory_id"],
+                    "expected_version": member["version"],
                     "current_version": current["version"] if current else None,
-                    "status": current["status"] if current else None, "fresh": fresh,
+                    "status": current["status"] if current else None,
+                    "expected_workspace": notice_workspace,
+                    "workspace": member_workspace,
+                    "fresh": fresh,
                 })
             if not all(check["fresh"] for check in checks):
                 return {"outcome": "stale_snapshot", "freshness": {"fresh": False, "checks": checks}}
@@ -603,7 +637,7 @@ class ConflictStore:
         self, conflict_id: int, *, expected_revision: int, chosen_value: str,
         decided_by: str, decided_ref: Optional[str], decision_reason: str,
         apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int] = None,
-        strict_workspace: Optional[str] = None,
+        strict_workspace: "WorkspaceScope" = None,
     ) -> dict[str, Any]:
         if decided_by not in {"user", "agent"} or not chosen_value:
             return {"outcome": "invalid_input"}
@@ -687,7 +721,7 @@ class ConflictStore:
     def replan_conflict(
         self, conflict_id: int, *, expected_revision: int,
         apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int] = None,
-        strict_workspace: Optional[str] = None,
+        strict_workspace: "WorkspaceScope" = None,
     ) -> dict[str, Any]:
         """CAS-reset an applying plan while retaining every prior plan snapshot."""
         with self.write_transaction() as conn:
@@ -758,7 +792,7 @@ class ConflictStore:
 
     def resolve_conflict(
         self, conflict_id: int, reason: str = "", status: str = "resolved", *,
-        expected_revision: Optional[int] = None, strict_workspace: Optional[str] = None,
+        expected_revision: Optional[int] = None, strict_workspace: "WorkspaceScope" = None,
     ) -> dict[str, Any]:
         if status != "resolved":
             return {"outcome": "invalid_status", "conflict_id": int(conflict_id)}

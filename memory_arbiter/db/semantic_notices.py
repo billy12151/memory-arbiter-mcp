@@ -6,6 +6,7 @@ import json
 import sqlite3
 from typing import Any, cast, Optional, TYPE_CHECKING
 
+from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..models import utc_now_iso
 
 if TYPE_CHECKING:
@@ -63,8 +64,20 @@ class SemanticNoticeStore:
         }
 
     @staticmethod
-    def _workspace_clause(workspace: Optional[str]) -> tuple[str, list[Any]]:
-        return ("", []) if workspace is None else (" AND workspace_canonical=?", [workspace])
+    def _workspace_clause(workspace: "WorkspaceScope") -> tuple[str, list[Any]]:
+        """Scope notices to the caller's admitted canonical set.
+
+        ``None`` means unscoped. A single name yields the single-name equality; a
+        set yields IN (...). Legacy rows with a NULL/empty workspace_canonical
+        stay out of every scoped read, exactly as before.
+        """
+        if workspace is None:
+            return ("", [])
+        scope_sql, params = workspace_scope_sql("workspace_canonical", workspace)
+        if not scope_sql:
+            # An empty scope must not silently widen to "all notices".
+            return (" AND 1=0", [])
+        return (f" AND {scope_sql}", list(params))
 
     @staticmethod
     def _snapshot(payload: dict[str, Any], memory_id: int, peer_id: int, left_version: int, right_version: int, detector_version: str, prompt_version: Optional[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -136,8 +149,29 @@ class SemanticNoticeStore:
         slot = payload.get("slot_key") if isinstance(payload.get("slot_key"), dict) else None
         workspace = ""
         with db.connection() as conn:
-            row = conn.execute("SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace FROM memories WHERE id=?", (int(memory_id),)).fetchone()
-            workspace = str(row["workspace"] if row else "")
+            member_ids = [int(member["memory_id"]) for member in members]
+            if not member_ids:
+                return {"outcome": "invalid_snapshot"}
+            placeholders = ",".join("?" for _ in member_ids)
+            rows = conn.execute(
+                "SELECT id,version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                f"FROM memories WHERE id IN ({placeholders})",
+                member_ids,
+            ).fetchall()
+            current = {int(row["id"]): row for row in rows}
+            member_workspaces: set[str] = set()
+            for member in members:
+                row = current.get(int(member["memory_id"]))
+                if row is None:
+                    return {"outcome": "invalid_snapshot"}
+                member_workspaces.add(str(row["workspace"] or "").strip())
+            # A notice must be promotable to one formal conflict group. Mixed-
+            # workspace snapshots cannot satisfy that invariant and, under
+            # strict isolation, would leak a hidden member through the visible
+            # notice row. Reject them before persistence.
+            if len(member_workspaces) != 1 or not next(iter(member_workspaces), ""):
+                return {"outcome": "workspace_mismatch"}
+            workspace = next(iter(member_workspaces))
         now = utc_now_iso()
         candidate_hash = _sha(candidate)
         slot_hash = _sha(slot) if slot else None
@@ -171,10 +205,29 @@ class SemanticNoticeStore:
     def _freshness(conn: sqlite3.Connection, notice: dict[str, Any]) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
         fresh = True
+        expected_workspace = str(notice.get("workspace_canonical") or "").strip()
         for member in notice.get("member_versions") or []:
-            row = conn.execute("SELECT version,status FROM memories WHERE id=?", (int(member["memory_id"]),)).fetchone()
-            ok = bool(row and row["status"] == "active" and int(row["version"]) == int(member["version"]))
-            checks.append({"memory_id": member["memory_id"], "expected_version": member["version"], "current_version": row["version"] if row else None, "status": row["status"] if row else None, "fresh": ok})
+            row = conn.execute(
+                "SELECT version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                "FROM memories WHERE id=?",
+                (int(member["memory_id"]),),
+            ).fetchone()
+            actual_workspace = str(row["workspace"] or "").strip() if row else None
+            ok = bool(
+                row and row["status"] == "active"
+                and int(row["version"]) == int(member["version"])
+                and expected_workspace
+                and actual_workspace == expected_workspace
+            )
+            checks.append({
+                "memory_id": member["memory_id"],
+                "expected_version": member["version"],
+                "current_version": row["version"] if row else None,
+                "status": row["status"] if row else None,
+                "expected_workspace": expected_workspace,
+                "workspace": actual_workspace,
+                "fresh": ok,
+            })
             fresh = fresh and ok
         return {"fresh": fresh, "checks": checks}
 
@@ -193,43 +246,109 @@ class SemanticNoticeStore:
         return bool(cur.rowcount)
 
     @staticmethod
-    def _read_calls(notice: dict[str, Any], workspace_canonical: Optional[str]) -> list[dict[str, Any]]:
+    def _members_visible_in_scope(
+        conn: sqlite3.Connection,
+        notice: dict[str, Any],
+        workspace_canonical: "WorkspaceScope",
+    ) -> bool:
+        """Whether every current member remains readable by a scoped caller.
+
+        A stale notice may still be inspected when only a member version/status
+        changed, but never after a member moved outside the caller's admitted
+        workspace set: the frozen values, evidence, and member IDs are a
+        correlated snapshot and must fail closed like conflict detail.
+        """
+        if workspace_canonical is None:
+            return True
+        allowed = set(scope_names(workspace_canonical))
+        members = notice.get("member_versions") or []
+        if not allowed or not members:
+            return False
+        for member in members:
+            row = conn.execute(
+                "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                "FROM memories WHERE id=?",
+                (int(member["memory_id"]),),
+            ).fetchone()
+            if row is None or str(row["workspace"] or "").strip() not in allowed:
+                return False
+        return True
+
+    @staticmethod
+    def _echo_workspace(workspace_canonical: "WorkspaceScope") -> Optional[str]:
+        """The single workspace string to echo back in a suggested call.
+
+        A scope may be the caller's admitted set ; the caller's own
+        canonical is always its first element, and that is what a retry call
+        must carry — a set is not a valid ``workspace`` payload value.
+        """
+        names = scope_names(workspace_canonical)
+        return names[0] if names else None
+
+    @staticmethod
+    def _read_calls(notice: dict[str, Any], workspace_canonical: "WorkspaceScope") -> list[dict[str, Any]]:
         calls: list[dict[str, Any]] = []
+        echo = SemanticNoticeStore._echo_workspace(workspace_canonical)
         for member in notice.get("member_versions") or []:
             data: dict[str, Any] = {"memory_id": int(member["memory_id"])}
-            if workspace_canonical is not None:
-                data["workspace"] = workspace_canonical
+            if echo is not None:
+                data["workspace"] = echo
             calls.append({"tool": "memory", "action": "read", "data": data})
         return calls
 
-    def claim_next_semantic_notice(self, workspace_canonical: Optional[str] = None) -> Optional[dict[str, Any]]:
+    def claim_next_semantic_notice(self, workspace_canonical: "WorkspaceScope" = None) -> Optional[dict[str, Any]]:
         workspace_sql, args = self._workspace_clause(workspace_canonical)
         with self._db.write_transaction() as conn:
-            rows = conn.execute(
-                "SELECT * FROM conflicts WHERE notice_delivery_status='pending'" + workspace_sql +
-                " ORDER BY CASE lower(notice_severity) WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'warning' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,created_at,id LIMIT ?",
-                (*args, NOTICE_SCAN_LIMIT),
-            ).fetchall()
-            for row in rows:
-                notice = self._decode(row)
-                if self._mark_stale(conn, notice):
-                    continue
-                now = utc_now_iso()
-                cur = conn.execute("UPDATE conflicts SET notice_delivery_status='delivered',notice_delivered_at=?,refreshed_at=? WHERE id=? AND notice_delivery_status='pending'", (now, now, notice["id"]))
-                if cur.rowcount:
-                    data: dict[str, Any] = {"action": "read", "notice_id": notice["id"]}
-                    if workspace_canonical is not None:
-                        data["workspace"] = workspace_canonical
-                    return {"notice_id": notice["id"], "severity": notice["severity"], "type": notice["notice_type"], "action_required": "read_semantic_notice", "read_call": {"tool": "memory_repair", "task": "notice", "data": data}}
-        return None
+            while True:
+                rows = conn.execute(
+                    "SELECT * FROM conflicts WHERE notice_delivery_status='pending'" + workspace_sql +
+                    " ORDER BY CASE lower(notice_severity) WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'warning' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,created_at,id LIMIT ?",
+                    (*args, NOTICE_SCAN_LIMIT),
+                ).fetchall()
+                if not rows:
+                    return None
+                transitioned = False
+                for row in rows:
+                    notice = self._decode(row)
+                    if not self._members_visible_in_scope(conn, notice, workspace_canonical):
+                        transitioned = self._mark_stale(conn, notice) or transitioned
+                        continue
+                    if self._mark_stale(conn, notice):
+                        transitioned = True
+                        continue
+                    now = utc_now_iso()
+                    cur = conn.execute(
+                        "UPDATE conflicts SET notice_delivery_status='delivered',notice_delivered_at=?,refreshed_at=? "
+                        "WHERE id=? AND notice_delivery_status='pending'",
+                        (now, now, notice["id"]),
+                    )
+                    if cur.rowcount:
+                        data: dict[str, Any] = {"action": "read", "notice_id": notice["id"]}
+                        echo = self._echo_workspace(workspace_canonical)
+                        if echo is not None:
+                            data["workspace"] = echo
+                        return {
+                            "notice_id": notice["id"], "severity": notice["severity"],
+                            "type": notice["notice_type"],
+                            "action_required": "read_semantic_notice",
+                            "read_call": {"tool": "memory_repair", "task": "notice", "data": data},
+                        }
+                # Rows marked stale leave the pending query; retry immediately
+                # so a valid notice behind a full stale/hidden page is delivered
+                # on this same product call, not a later one.
+                if not transitioned:
+                    return None
 
-    def read_semantic_notice(self, notice_id: int, workspace_canonical: Optional[str] = None) -> Optional[dict[str, Any]]:
+    def read_semantic_notice(self, notice_id: int, workspace_canonical: "WorkspaceScope" = None) -> Optional[dict[str, Any]]:
         workspace_sql, args = self._workspace_clause(workspace_canonical)
         with self._db.write_transaction() as conn:
             row = conn.execute("SELECT * FROM conflicts WHERE id=? AND notice_type IS NOT NULL" + workspace_sql, (int(notice_id), *args)).fetchone()
             if row is None:
                 return None
             notice = self._decode(row)
+            if not self._members_visible_in_scope(conn, notice, workspace_canonical):
+                self._mark_stale(conn, notice)
+                return None
             if self._mark_stale(conn, notice):
                 notice["notice_delivery_status"] = "stale"
                 notice["status"] = "stale"
@@ -244,7 +363,7 @@ class SemanticNoticeStore:
             )
             return notice
 
-    def list_semantic_notices(self, status: str = "open", limit: int = 10, workspace_canonical: Optional[str] = None) -> list[dict[str, Any]]:
+    def list_semantic_notices(self, status: str = "open", limit: int = 10, workspace_canonical: "WorkspaceScope" = None) -> list[dict[str, Any]]:
         status = str(status).lower()
         if status not in NOTICE_STATUSES:
             raise ValueError("invalid_notice_status")
@@ -253,28 +372,76 @@ class SemanticNoticeStore:
         placeholders = ",".join("?" for _ in delivery)
         with self._db.write_transaction() as conn:
             if status in {"open", "stale"}:
-                sweep_rows = conn.execute(
-                    "SELECT * FROM conflicts WHERE notice_delivery_status IN ('pending','delivered')"
-                    + workspace_sql + " ORDER BY id LIMIT ?",
-                    (*args, NOTICE_SCAN_LIMIT),
+                last_id = 0
+                while True:
+                    sweep_rows = conn.execute(
+                        "SELECT * FROM conflicts WHERE notice_delivery_status IN ('pending','delivered') "
+                        "AND id>?" + workspace_sql + " ORDER BY id LIMIT ?",
+                        (last_id, *args, NOTICE_SCAN_LIMIT),
+                    ).fetchall()
+                    if not sweep_rows:
+                        break
+                    for sweep_row in sweep_rows:
+                        self._mark_stale(conn, self._decode(sweep_row))
+                    last_id = int(sweep_rows[-1]["id"])
+                    if len(sweep_rows) < NOTICE_SCAN_LIMIT:
+                        break
+            requested = max(1, min(100, int(limit)))
+            notices: list[dict[str, Any]] = []
+            offset = 0
+            page_size = max(NOTICE_SCAN_LIMIT, requested)
+            while len(notices) < requested:
+                rows = conn.execute(
+                    "SELECT * FROM conflicts WHERE notice_delivery_status IN (" + placeholders + ")"
+                    + workspace_sql + " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+                    (*delivery, *args, page_size, offset),
                 ).fetchall()
-                for sweep_row in sweep_rows:
-                    self._mark_stale(conn, self._decode(sweep_row))
-            rows = conn.execute("SELECT * FROM conflicts WHERE notice_delivery_status IN (" + placeholders + ")" + workspace_sql + " ORDER BY created_at DESC,id DESC LIMIT ?", (*delivery, *args, max(1, min(100, int(limit))))).fetchall()
-            notices = [self._decode(row) for row in rows]
-            for notice in notices:
-                notice["freshness"] = self._freshness(conn, notice)
+                if not rows:
+                    break
+                for row in rows:
+                    notice = self._decode(row)
+                    if not self._members_visible_in_scope(conn, notice, workspace_canonical):
+                        continue
+                    notice["freshness"] = self._freshness(conn, notice)
+                    notices.append(notice)
+                    if len(notices) >= requested:
+                        break
+                offset += len(rows)
+                if len(rows) < page_size:
+                    break
             return notices
 
-    def semantic_notice_counts(self, workspace_canonical: Optional[str] = None) -> dict[str, int]:
+    def semantic_notice_counts(self, workspace_canonical: "WorkspaceScope" = None) -> dict[str, int]:
         workspace_sql, args = self._workspace_clause(workspace_canonical)
-        with self._db.connection() as conn:
-            rows = conn.execute("SELECT notice_delivery_status,COUNT(*) AS count FROM conflicts WHERE notice_type IS NOT NULL" + workspace_sql + " GROUP BY notice_delivery_status", args).fetchall()
-        result: dict[str, int] = {}
-        for row in rows:
-            key = "open" if row["notice_delivery_status"] in {"pending", "delivered"} else str(row["notice_delivery_status"])
-            result[key] = result.get(key, 0) + int(row["count"])
-        return result
+        if workspace_canonical is None:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT notice_delivery_status,COUNT(*) AS count FROM conflicts "
+                    "WHERE notice_type IS NOT NULL GROUP BY notice_delivery_status"
+                ).fetchall()
+            result: dict[str, int] = {}
+            for row in rows:
+                key = "open" if row["notice_delivery_status"] in {"pending", "delivered"} else str(row["notice_delivery_status"])
+                result[key] = result.get(key, 0) + int(row["count"])
+            return result
+        with self._db.write_transaction() as conn:
+            rows = conn.execute(
+                "SELECT * FROM conflicts WHERE notice_type IS NOT NULL" + workspace_sql,
+                args,
+            ).fetchall()
+            result = {}
+            for row in rows:
+                notice = self._decode(row)
+                visible = self._members_visible_in_scope(conn, notice, workspace_canonical)
+                if notice.get("notice_delivery_status") in {"pending", "delivered"}:
+                    if self._mark_stale(conn, notice):
+                        notice["notice_delivery_status"] = "stale"
+                if not visible:
+                    continue
+                delivery = str(notice.get("notice_delivery_status") or "")
+                key = "open" if delivery in {"pending", "delivered"} else delivery
+                result[key] = result.get(key, 0) + 1
+            return result
 
     def is_semantic_pair_closed(self, left_id: int, right_id: int, left_version: Optional[int] = None, right_version: Optional[int] = None, notice_type: str = "semantic_evidence") -> bool:
         for notice in self.list_semantic_notices("dismissed", 10000) + self.list_semantic_notices("resolved", 10000):
@@ -288,18 +455,27 @@ class SemanticNoticeStore:
                 return True
         return False
 
-    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "", workspace_canonical: Optional[str] = None, conflict_id: Optional[int] = None) -> dict[str, Any]:
+    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "", workspace_canonical: "WorkspaceScope" = None, conflict_id: Optional[int] = None) -> dict[str, Any]:
         status = str(status).lower()
         if status not in {"dismissed", "resolved"}:
             return {"outcome": "invalid_status"}
         workspace_sql, args = self._workspace_clause(workspace_canonical)
         with self._db.write_transaction() as conn:
-            row = conn.execute("SELECT status,notice_delivery_status FROM conflicts WHERE id=? AND notice_type IS NOT NULL" + workspace_sql, (int(notice_id), *args)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM conflicts WHERE id=? AND notice_type IS NOT NULL" + workspace_sql,
+                (int(notice_id), *args),
+            ).fetchone()
             if row is None:
                 return {"outcome": "not_found"}
-            if row["notice_delivery_status"] not in {"pending", "delivered"}:
-                return {"outcome": "already_terminal", "status": row["notice_delivery_status"]}
-            conflict_status = "not_a_conflict" if status == "dismissed" else row["status"]
+            notice = self._decode(row)
+            if not self._members_visible_in_scope(conn, notice, workspace_canonical):
+                self._mark_stale(conn, notice)
+                return {"outcome": "not_found"}
+            if self._mark_stale(conn, notice):
+                return {"outcome": "stale_snapshot", "status": "stale"}
+            if notice["notice_delivery_status"] not in {"pending", "delivered"}:
+                return {"outcome": "already_terminal", "status": notice["notice_delivery_status"]}
+            conflict_status = "not_a_conflict" if status == "dismissed" else notice["status"]
             now = utc_now_iso()
             cur = conn.execute("UPDATE conflicts SET status=?,notice_delivery_status=?,notice_resolution_reason=?,revision=revision+1,refreshed_at=?,resolved_at=CASE WHEN ?='not_a_conflict' THEN ? ELSE resolved_at END WHERE id=? AND notice_delivery_status IN ('pending','delivered')", (conflict_status, status, str(reason), now, conflict_status, now, int(notice_id)))
         return {"outcome": "updated" if cur.rowcount else "already_terminal", "status": status}

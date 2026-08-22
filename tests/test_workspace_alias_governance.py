@@ -1,9 +1,17 @@
-"""Workspace alias governance (design 637): confirmed/rejected current-state
-table + append-only event log, no CAS. Covers resolver short-circuit, rejected
-suppression, rename/migrate, confirm-pending, and audit-trail append-only.
+"""Internal workspace redirect and negative-decision state.
+
+Pairwise alias actions are intentionally absent from the product surface. Tests
+cover the behaviors that remain load-bearing: deterministic resolver redirects,
+negative candidate suppression, rename/migrate forwarding, strict pending
+confirmation, collision safety, compact persistence, and rollback.
 """
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+import sqlite3
 import threading
+
+import pytest
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB, _normalize_alias_key
@@ -11,845 +19,414 @@ from memory_arbiter.models import MemoryStatus
 from memory_arbiter.tools import MemoryTools
 
 
-def make_tools(tmp_path: Path, isolation: str = "weak") -> MemoryTools:
+def make_tools(
+    tmp_path: Path, isolation: str = "weak", *, vec: bool = False,
+) -> MemoryTools:
     settings = Settings(
         db_path=tmp_path / "gov.sqlite3",
         backup_jsonl=tmp_path / "gov.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="default",
-        enable_sqlite_vec=False,
-        vec_dim=2,
-        isolation=isolation,
+        client="codex", agent_id="agent-a", workspace="default",
+        enable_sqlite_vec=vec, vec_dim=2, isolation=isolation,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
 
-# ── normalization ───────────────────────────────────────────────────────────
+def decide(
+    tools: MemoryTools, workspace: str, canonical: str,
+    *, status: str = "confirmed", force: bool = False,
+) -> None:
+    ok, warnings = tools.db.record_workspace_decision(
+        workspace, canonical, status=status, force=force,
+    )
+    assert ok, warnings
 
-def test_normalize_alias_key_casefold_and_whitespace():
+
+def write(tools: MemoryTools, workspace: str, content: str = "workspace fact") -> int:
+    return int(tools.memory_write(
+        content=content, subject="workspace", workspace=workspace,
+        source_type="agent_generated",
+    )["data"]["id"])
+
+
+def test_normalize_workspace_decision_key() -> None:
     assert _normalize_alias_key("  金营项目 ") == _normalize_alias_key("金营项目")
     assert _normalize_alias_key("Project  X") == _normalize_alias_key("project x")
     assert _normalize_alias_key("") == ""
     assert _normalize_alias_key(None) == ""
 
 
-# ── accept → confirmed short-circuit ─────────────────────────────────────────
+def test_compact_schema_has_no_event_ledger(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    with tools.db.connection() as conn:
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(workspace_aliases)")]
+        events = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_alias_events'"
+        ).fetchone()
+    assert columns == ["alias_workspace", "canonical", "status", "updated_at"]
+    assert events is None
 
-def test_accept_alias_short_circuits_resolver(tmp_path):
-    t = make_tools(tmp_path)
-    r = t.memory_govern("accept_workspace_alias",
-                        {"authorized": True, "alias": "金营二期", "canonical": "金营项目", "reason": "same project"})
-    assert r["ok"] is True
-    resolved = t.db.resolve_workspace_canonical("金营二期", None, register_new=False)
+
+def test_confirmed_redirect_short_circuits_resolver(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    decide(tools, "金营二期", "金营项目")
+    resolved = tools.db.resolve_workspace_canonical(" 金营二期 ", None, register_new=False)
     assert resolved["canonical"] == "金营项目"
     assert resolved["matched_by"] == "confirmed_alias"
+    state = tools.db.get_workspace_decision("金营二期")
+    assert state["status"] == "confirmed"
 
 
-def test_accept_alias_is_casefold_stable(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "Project X", "canonical": "project-x"})
-    resolved = t.db.resolve_workspace_canonical("  project  x ", None, register_new=False)
-    assert resolved["canonical"] == "project-x"
-    assert resolved["matched_by"] == "confirmed_alias"
-
-
-# ── reject → suppression ─────────────────────────────────────────────────────
-
-def test_rejected_aliases_accumulate_per_pair_and_confirmed_alias_wins(tmp_path):
-    t = make_tools(tmp_path)
-    assert t.db.upsert_workspace_alias("raw", "candidate-a", status="rejected", action="reject")[0]
-    assert t.db.upsert_workspace_alias("raw", "candidate-b", status="rejected", action="reject")[0]
-    with t.db.connection() as conn:
+def test_negative_decisions_accumulate_and_suppress_candidates(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    decide(tools, "raw", "candidate-a", status="rejected")
+    decide(tools, "raw", "candidate-b", status="rejected")
+    resolved = tools.db.resolve_workspace_canonical("raw", None, register_new=False)
+    assert set(resolved["rejected_canonicals"]) == {"candidate-a", "candidate-b"}
+    with tools.db.connection() as conn:
         rows = conn.execute(
-            "SELECT canonical,status FROM workspace_aliases WHERE alias_workspace='raw' ORDER BY canonical"
+            "SELECT canonical,status FROM workspace_aliases "
+            "WHERE alias_workspace='raw' ORDER BY canonical"
         ).fetchall()
-    assert [(row["canonical"], row["status"]) for row in rows] == [
+    assert [tuple(row) for row in rows] == [
         ("candidate-a", "rejected"), ("candidate-b", "rejected"),
     ]
-    resolved = t.db.resolve_workspace_canonical("raw", None, register_new=False)
-    assert set(resolved["rejected_canonicals"]) == {"candidate-a", "candidate-b"}
-
-    assert t.db.upsert_workspace_alias("raw", "canonical", status="confirmed", action="accept")[0]
-    assert t.db.get_workspace_alias("raw")["canonical"] == "canonical"
-    assert t.db.resolve_workspace_canonical("raw", None, register_new=False)["matched_by"] == "confirmed_alias"
-    with t.db.connection() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM workspace_aliases WHERE alias_workspace='raw' AND status='rejected'"
-        ).fetchone()[0] == 2
-        assert conn.execute(
-            "SELECT COUNT(*) FROM workspace_aliases WHERE alias_workspace='raw' AND status='confirmed'"
-        ).fetchone()[0] == 1
 
 
-def test_reject_alias_records_rejected_canonical(tmp_path):
-    t = make_tools(tmp_path)
-    r = t.memory_govern("reject_workspace_alias",
-                        {"authorized": True, "alias": "金营培训", "canonical": "金营项目", "reason": "distinct"})
-    assert r["ok"] is True
-    resolved = t.db.resolve_workspace_canonical("金营培训", None, register_new=False)
-    # not merged to the rejected canonical
-    assert resolved["canonical"] != "金营项目"
-    assert "金营项目" in resolved["rejected_canonicals"]
+def test_exact_negative_requires_force_to_reverse(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    decide(tools, "raw", "target", status="rejected")
+    ok, warnings = tools.db.record_workspace_decision("raw", "target")
+    assert ok is False and "kept separate" in warnings[0]
+    decide(tools, "raw", "target", force=True)
+    assert tools.db.get_workspace_decision("raw")["status"] == "confirmed"
 
 
-# ── validation ───────────────────────────────────────────────────────────────
-
-def test_accept_alias_requires_alias_and_canonical(tmp_path):
-    t = make_tools(tmp_path)
-    assert t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "x"})["ok"] is False
-    assert t.memory_govern("accept_workspace_alias", {"authorized": True, "canonical": "y"})["ok"] is False
-
-
-def test_unknown_govern_action(tmp_path):
-    t = make_tools(tmp_path)
-    assert t.memory_govern("frobnicate", {})["ok"] is False
-
-
-# ── audit trail is append-only ───────────────────────────────────────────────
-
-def test_events_are_appended_not_overwritten(tmp_path):
-    t = make_tools(tmp_path)
-    # Two confirmed writes to the same key (no rejection in between) → 2 events,
-    # append-only, current state = last write.
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c1"})
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c2"})
-    events = t.db.list_workspace_alias_events("a")
-    assert len(events) == 2
-    cur = t.db.get_workspace_alias("a")
-    assert cur["canonical"] == "c2" and cur["status"] == "confirmed"
-    # earlier event still records the old snapshot (append-only, not overwritten)
-    assert any(e["new_canonical"] == "c1" for e in events)
+def test_one_confirmed_redirect_preserves_unrelated_negatives(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    decide(tools, "raw", "candidate-a", status="rejected")
+    decide(tools, "raw", "canonical")
+    decide(tools, "raw", "new-canonical")
+    with tools.db.connection() as conn:
+        confirmed = conn.execute(
+            "SELECT canonical FROM workspace_aliases "
+            "WHERE alias_workspace='raw' AND status='confirmed'"
+        ).fetchall()
+        rejected = conn.execute(
+            "SELECT canonical FROM workspace_aliases "
+            "WHERE alias_workspace='raw' AND status='rejected'"
+        ).fetchall()
+    assert [row["canonical"] for row in confirmed] == ["new-canonical"]
+    assert [row["canonical"] for row in rejected] == ["candidate-a"]
 
 
-def test_accept_after_reject_requires_then_honors_authorization(tmp_path):
-    # A prior rejection must not be reversed without a fresh user-authorized call.
-    t = make_tools(tmp_path)
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c1"})
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c1"})
-    denied = t.memory_govern("accept_workspace_alias", {"alias": "a", "canonical": "c2"})
-    assert denied["ok"] is False
-    assert denied["data"]["action_required"] == "ask_user_for_authorization"
-    assert t.db.get_workspace_alias("a")["status"] == "rejected"
-    # The explicit authorization receipt permits the deliberate reversal.
-    r2 = t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c2"})
-    assert r2["ok"] is True
-    cur = t.db.get_workspace_alias("a")
-    assert cur["status"] == "confirmed" and cur["canonical"] == "c2"
+def test_removed_pairwise_actions_are_non_mutating_tombstones(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    for action in ("accept_workspace_alias", "reject_workspace_alias"):
+        result = tools.memory_govern(action, {
+            "alias": "raw", "canonical": "target", "authorized": True,
+        })
+        assert result["ok"] is False
+        assert result["data"]["outcome"] == "removed"
+        assert result["data"]["error_code"] == "workspace_alias_action_removed"
+        assert result["data"]["removed_action"] == action
+    with tools.db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM workspace_aliases").fetchone()[0] == 0
 
 
-# ── rename ───────────────────────────────────────────────────────────────────
-
-def test_rename_canonical_updates_memories(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_write(content="alpha note", workspace="OldName", source_type="agent_generated", subject="test")
-    r = t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "OldName", "new": "NewName"})
-    assert r["ok"] is True
-    assert r["data"]["memories_updated"] >= 1
-    events = t.db.list_workspace_alias_events()
-    assert any(e["action"] == "rename" for e in events)
-
-
-# ── migrate ──────────────────────────────────────────────────────────────────
-
-def test_migrate_moves_memories_and_records_alias(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_write(content="beta note", workspace="Sub2", source_type="agent_generated", subject="test")
-    r = t.memory_govern("migrate_workspace", {"authorized": True, "from": "Sub2", "to": "Main"})
-    assert r["ok"] is True
-    assert r["data"]["memories_updated"] >= 1
-    # alias recorded so future writes short-circuit
-    resolved = t.db.resolve_workspace_canonical("Sub2", None, register_new=False)
-    assert resolved["canonical"] == "Main"
-    assert resolved["matched_by"] == "confirmed_alias"
-
-
-# ── confirm pending workspace (strict flow) ──────────────────────────────────
-
-def test_confirm_pending_workspace_activates_and_aliases(tmp_path):
-    t = make_tools(tmp_path, isolation="strict")
-    w = t.memory_write(content="gamma note", workspace="BrandNew", source_type="agent_generated", subject="test")
-    mid = w["data"]["id"]
-    # strict + new workspace → pending
-    assert t.db.get_memory(mid)["status"] == MemoryStatus.PENDING.value
-    r = t.memory_govern("confirm_pending_workspace", {"authorized": True, "memory_id": mid, "canonical": "BrandNew"})
-    assert r["ok"] is True
-    assert r["data"]["activated"] is True
-    assert t.db.get_memory(mid)["status"] == MemoryStatus.ACTIVE.value
-    # raw workspace now confirmed-aliased to canonical
-    resolved = t.db.resolve_workspace_canonical("BrandNew", None, register_new=False)
-    assert resolved["matched_by"] == "confirmed_alias"
-
-
-def test_confirm_pending_workspace_surfaces_vector_publish_retry(tmp_path, monkeypatch):
-    t = make_tools(tmp_path, isolation="strict")
-    written = t.memory_write(
-        content="gamma note", workspace="BrandNew", source_type="agent_generated", subject="test"
+def test_removed_accept_guides_to_supported_flows(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    result = tools.memory_govern("accept_workspace_alias", {
+        "alias": "raw", "canonical": "target",
+    })
+    actions = {
+        item.get("suggested_call", {}).get("action")
+        for item in result["data"]["replacements"]
+        if item.get("suggested_call")
+    }
+    assert {"migrate_workspace", "rename_workspace_canonical", "confirm_pending_workspace"} <= actions
+    migrate = next(
+        item["suggested_call"] for item in result["data"]["replacements"]
+        if (item.get("suggested_call") or {}).get("action") == "migrate_workspace"
     )
-    memory_id = written["data"]["id"]
-    original = t.db.set_memory_workspace_canonical_on_conn
+    assert migrate == {
+        "tool": "memory_govern", "action": "migrate_workspace",
+        "data": {"from": "raw", "to": "target"},
+    }
+    reject = tools.memory_govern("reject_workspace_alias", {})
+    assert reject["data"]["replacements"][0]["suggested_call"] is None
 
-    def publish_warning(*args, **kwargs):
-        updated, warnings = original(*args, **kwargs)
-        return updated, warnings + [
-            "workspace canonical vector publish failed for 'BrandNew'; retry a write using this workspace after sqlite-vec and embedding configuration recover: injected"
-        ]
 
-    monkeypatch.setattr(t.db, "set_memory_workspace_canonical_on_conn", publish_warning)
-    result = t.memory_govern(
-        "confirm_pending_workspace",
-        {"authorized": True, "memory_id": memory_id, "canonical": "BrandNew"},
-    )
+def test_rename_moves_memories_and_prevents_old_name_resplit(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    memory_id = write(tools, "OldName")
+    result = tools.memory_govern("rename_workspace_canonical", {
+        "old": "OldName", "new": "NewName", "authorized": True,
+    })
     assert result["ok"] is True
-    assert result["data"]["confirmed"] is True
-    assert result["data"]["activated"] is True
-    publish = result["data"]["workspace_vector_publish"]
-    assert publish["status"] == "pending_retry"
-    assert publish["repair_task_available"] is False
-
-
-def test_migrate_workspace_surfaces_vector_publish_retry_without_false_failure(tmp_path, monkeypatch):
-    t = make_tools(tmp_path)
-    t.memory_write(content="beta note", workspace="Sub2", source_type="agent_generated", subject="test")
-    original = t.db.migrate_workspace
-
-    def migrate_with_warning(*args, **kwargs):
-        updated, warnings = original(*args, **kwargs)
-        return updated, warnings + [
-            "workspace canonical vector publish failed for 'Main'; retry a write using this workspace after sqlite-vec and embedding configuration recover: injected"
-        ]
-
-    monkeypatch.setattr(t.db, "migrate_workspace", migrate_with_warning)
-    result = t.memory_govern(
-        "migrate_workspace",
-        {"authorized": True, "from": "Sub2", "to": "Main"},
-    )
-    assert result["ok"] is True
-    assert result["data"]["migrated"] is True
-    assert result["data"]["memories_updated"] >= 1
-    publish = result["data"]["workspace_vector_publish"]
-    assert publish["status"] == "pending_retry"
-    assert publish["repair_task_available"] is False
-
-
-# ── review hardening: non-string inputs must not crash (tools.py 698/2474/2499)
-
-def test_nonstring_alias_returns_structured_error_not_crash(tmp_path):
-    t = make_tools(tmp_path)
-    # int / list / dict must degrade to a structured ok=False, never AttributeError
-    for bad in (5, ["x"], {"a": 1}):
-        r = t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": bad, "canonical": "c"})
-        assert isinstance(r, dict)  # did not raise
-        r2 = t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "a", "canonical": bad})
-        assert isinstance(r2, dict)
-
-
-def test_nonstring_rename_migrate_do_not_crash(tmp_path):
-    t = make_tools(tmp_path)
-    assert isinstance(t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": {"a": 1}, "new": "p"}), dict)
-    assert isinstance(t.memory_govern("migrate_workspace", {"authorized": True, "from": ["x"], "to": "p"}), dict)
-    assert isinstance(t.memory_govern("confirm_pending_workspace", {"authorized": True, "memory_id": 1, "canonical": ["p"]}), dict)
-
-
-# ── review hardening: rename into an existing canonical must merge, not orphan
-
-def test_rename_into_existing_canonical_merges(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="OldName", source_type="agent_generated", subject="test")
-    t.memory_write(content="b", workspace="NewName", source_type="agent_generated", subject="test")
-    r = t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "OldName", "new": "NewName"})
-    assert r["ok"] is True
-    # old canonical row must be gone (merged), not silently left behind
-    with t.db.connection() as conn:
-        rows = [row["name"] for row in conn.execute("SELECT name FROM workspace_canonicals")]
-    assert "OldName" not in rows
-    assert "NewName" in rows
-
-
-def test_rename_repoints_confirmed_alias(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="OldName", source_type="agent_generated", subject="test")
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "jinying", "canonical": "OldName"})
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "OldName", "new": "NewName"})
-    # alias must now resolve to the renamed canonical, not the dead old name
-    resolved = t.db.resolve_workspace_canonical("jinying", None, register_new=False)
+    assert tools.db.get_memory(memory_id)["workspace_canonical"] == "NewName"
+    resolved = tools.db.resolve_workspace_canonical("OldName", None, register_new=False)
     assert resolved["canonical"] == "NewName"
-
-
-# ── review hardening: migrate records alias atomically (same call)
-
-def test_migrate_records_alias_in_same_call(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "Sub2", "to": "Main"})
-    # alias present immediately (no separate-transaction gap)
-    cur = t.db.get_workspace_alias("Sub2")
-    assert cur is not None and cur["canonical"] == "Main" and cur["status"] == "confirmed"
-    events = t.db.list_workspace_alias_events("Sub2")
-    assert any(e["action"] == "migrate" for e in events)
-
-
-# ── round-2 review: confirm_pending actually writes the canonical column ──────
-
-def test_confirm_pending_actually_sets_canonical_column(tmp_path):
-    t = make_tools(tmp_path, isolation="strict")
-    w = t.memory_write(content="g", workspace="金营二期", source_type="agent_generated", subject="test")
-    mid = w["data"]["id"]
-    r = t.memory_govern("confirm_pending_workspace", {"authorized": True, "memory_id": mid, "canonical": "金营项目"})
-    assert r["ok"] is True and r["data"]["confirmed"] is True
-    # the column must actually be written (update_memory whitelist used to drop it)
-    assert t.db.get_memory(mid)["workspace_canonical"] == "金营项目"
-
-
-# ── round-2 review: non-string workspace fields → structured error, not garbage
-
-def test_nonstring_workspace_rejected_not_stringified(tmp_path):
-    t = make_tools(tmp_path)
-    r = t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "realproj", "canonical": ["x"]})
-    assert r["ok"] is False  # rejected, not stored as "['x']"
-    # nothing got written under the garbage canonical
-    resolved = t.db.resolve_workspace_canonical("realproj", None, register_new=False)
-    assert resolved["matched_by"] != "confirmed_alias"
-
-    r2 = t.memory_govern("migrate_workspace", {"authorized": True, "from": "SubProj", "to": ["Main"]})
-    assert r2["ok"] is False
-
-
-# ── round-2 review: rename inserts forwarding alias, no re-split ──────────────
-
-def test_rename_inserts_forwarding_alias_no_resplit(tmp_path):
-    t = make_tools(tmp_path)
-    t.db.resolve_workspace_canonical("Foo", None, register_new=True)
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "Foo", "new": "Bar"})
-    # re-submitting the OLD raw workspace must resolve to the new canonical,
-    # not re-register "Foo" as a fresh split canonical.
-    resolved = t.db.resolve_workspace_canonical("Foo", None, register_new=True)
-    assert resolved["canonical"] == "Bar"
-    assert resolved["matched_by"] == "confirmed_alias"
-    assert resolved["is_new"] is False
-
-
-# ── round-3 review: rename must not clobber a rejected alias with the same key
-
-def test_rename_preserves_rejected_alias(tmp_path):
-    t = make_tools(tmp_path)
-    # Register canonicals so the rejected alias targets a real one.
-    t.db.resolve_workspace_canonical("Foo", None, register_new=True)
-    t.db.resolve_workspace_canonical("BarBaz", None, register_new=True)
-    # User explicitly rejects: "Foo is NOT BarBaz"
-    r = t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "Foo", "canonical": "BarBaz"})
-    assert r["ok"] is True
-    # Now admin renames the canonical Foo -> NewFoo. The rejection concerns a
-    # DIFFERENT canonical (BarBaz) and must survive — silently flipping it to
-    # confirmed=NewFoo would reverse the user's decision.
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "Foo", "new": "NewFoo"})
-    row = t.db.get_workspace_alias("Foo")
-    assert row is not None
-    assert row["status"] == "rejected", f"rejection was silently flipped: {row}"
-    assert row["canonical"] == "BarBaz"
-
-
-def test_rename_chain_forwards_correctly(tmp_path):
-    # Foo -> Bar -> Baz : the Foo forwarding alias must chain to Baz, not stay at Bar.
-    t = make_tools(tmp_path)
-    t.db.resolve_workspace_canonical("Foo", None, register_new=True)
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "Foo", "new": "Bar"})
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "Bar", "new": "Baz"})
-    resolved = t.db.resolve_workspace_canonical("Foo", None, register_new=False)
-    assert resolved["canonical"] == "Baz"
     assert resolved["matched_by"] == "confirmed_alias"
 
 
-# ── round-3 review: confirm_pending must NOT activate on canonical-write failure
-
-def test_confirm_pending_fails_cleanly_on_missing_memory(tmp_path):
-    t = make_tools(tmp_path, isolation="strict")
-    # No such memory id → early ok=False, memory never activated.
-    r = t.memory_govern("confirm_pending_workspace", {"authorized": True, "memory_id": 9999, "canonical": "X"})
-    assert r["ok"] is False
-    assert not r["data"].get("activated")
-
-
-# ── round-4 review: migrate registers to_ws + repoints aliases ───────────────
-
-def test_migrate_registers_destination_canonical(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="A", source_type="agent_generated", subject="test")
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "A", "to": "NewProj"})
-    # destination must be a registered canonical, not a phantom
-    with t.db.connection() as conn:
-        names = [r["name"] for r in conn.execute("SELECT name FROM workspace_canonicals")]
-    assert "NewProj" in names
-    # a later write to the destination is NOT treated as brand-new
-    resolved = t.db.resolve_workspace_canonical("NewProj", None, register_new=False)
-    assert resolved["is_new"] is False
-
-
-def test_migrate_repoints_existing_alias(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "X", "canonical": "Sub2"})
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "Sub2", "to": "Main"})
-    # alias X must now forward to Main, not dangle at the migrated-away Sub2
-    resolved = t.db.resolve_workspace_canonical("X", None, register_new=False)
+def test_migrate_moves_memories_and_prevents_source_resplit(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    memory_id = write(tools, "Sub2")
+    result = tools.memory_govern("migrate_workspace", {
+        "from": "Sub2", "to": "Main", "authorized": True,
+    })
+    assert result["ok"] is True
+    assert tools.db.get_memory(memory_id)["workspace_canonical"] == "Main"
+    resolved = tools.db.resolve_workspace_canonical("Sub2", None, register_new=False)
     assert resolved["canonical"] == "Main"
-
-
-# ── round-4 review: confirm_pending must not silently reverse a rejection ─────
-
-def test_confirm_pending_rejected_alias_requires_then_honors_authorization(tmp_path):
-    t = make_tools(tmp_path, isolation="strict")
-    t.db.resolve_workspace_canonical("金科营销项目", None, register_new=True)
-    # user rejects 项目 == 金科营销项目
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "项目", "canonical": "金科营销项目"})
-    w = t.memory_write(content="x", workspace="项目", source_type="agent_generated", subject="test")
-    mid = w["data"]["id"]
-    r = t.memory_govern("confirm_pending_workspace", {"memory_id": mid, "canonical": "金科营销项目"})
-    assert r["ok"] is False
-    assert r["data"]["action_required"] == "ask_user_for_authorization"
-    assert t.db.get_workspace_alias("项目")["status"] == "rejected"
-    # A fresh user authorization deliberately reverses the rejection.
-    r2 = t.memory_govern("confirm_pending_workspace",
-                         {"authorized": True, "memory_id": mid, "canonical": "金科营销项目"})
-    assert r2["ok"] is True
-    assert t.db.get_workspace_alias("项目")["status"] == "confirmed"
-
-
-# ── full-review round: canonical registration & rejection integrity ─────────
-
-def test_confirm_pending_rolls_back_alias_when_canonical_step_raises(monkeypatch, tmp_path):
-    t = make_tools(tmp_path, isolation="strict")
-    w = t.memory_write(content="rollback note", workspace="RollbackWS", source_type="agent_generated", subject="test")
-    mid = w["data"]["id"]
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("canonical write exploded")
-
-    monkeypatch.setattr(t.db, "set_memory_workspace_canonical_on_conn", boom)
-    r = t.memory_govern("confirm_pending_workspace", {"authorized": True, "memory_id": mid, "canonical": "CanonicalWS"})
-
-    assert r["ok"] is False
-    assert t.db.get_workspace_alias("RollbackWS") is None
-    record = t.db.get_memory(mid)
-    assert record["status"] == MemoryStatus.PENDING.value
-    assert record["workspace_canonical"] == "RollbackWS"
-
-
-def test_confirm_pending_does_not_embed_canonical(monkeypatch, tmp_path):
-    from contextlib import contextmanager
-    from memory_arbiter.embedder import EmbedResult
-
-    t = make_tools(tmp_path, isolation="strict")
-    t.db.state.sqlite_vec_available = True
-    w = t.memory_write(content="embed order", workspace="SlowWS", source_type="agent_generated", subject="test")
-    mid = w["data"]["id"]
-    assert t.wait_evidence_worker_drained(timeout=2)
-    calls = []
-    original_write_transaction = t.db.write_transaction
-    # Track the txn OWNER thread, not a global flag: the async evidence worker
-    # legitimately embeds outside the lock on its own thread, and a global
-    # boolean would false-positive when that overlaps an unrelated main-thread
-    # write transaction (observed as a flaky failure on slower CI runners).
-    txn_owner = {"thread": None}
-
-    @contextmanager
-    def spy_write_transaction():
-        with original_write_transaction() as conn:
-            txn_owner["thread"] = threading.current_thread()
-            try:
-                yield conn
-            finally:
-                txn_owner["thread"] = None
-
-    class SpyEmbedder:
-        def embed_text(self, prefix="", body="", max_body_chars=None):
-            under_lock = (
-                txn_owner["thread"] is not None
-                and txn_owner["thread"] is threading.current_thread()
-            )
-            calls.append((body, under_lock))
-            return EmbedResult(embedding=[0.1, 0.2], truncated=False, original_tokens=0, used_tokens=0)
-
-    monkeypatch.setattr(t.db, "write_transaction", spy_write_transaction)
-    monkeypatch.setattr(t, "_ensure_embedder", lambda: (SpyEmbedder(), []))
-
-    r = t.memory_govern("confirm_pending_workspace", {"authorized": True, "memory_id": mid, "canonical": "CanonicalSlow"})
-
-    assert r["ok"] is True
-    # memory_govern's outer notice-delivery scope may resolve the configured
-    # caller workspace after the operation, but confirm-pending itself must not
-    # embed the selected canonical or run any model under the write lock.
-    assert ("CanonicalSlow", False) not in calls
-    assert t.wait_evidence_worker_drained(timeout=2)
-    assert all(under_lock is False for _, under_lock in calls)
-
-    # resolver's KNN can fuzzy-merge later near-misses. Otherwise a near-string
-    # falls through to a fresh sibling canonical, defeating the alias intent.
-    t = make_tools(tmp_path)
-    r = t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "foo", "canonical": "Bar"})
-    assert r["ok"] is True
-    with t.db.connection() as c:
-        names = [row["name"] for row in c.execute("SELECT name FROM workspace_canonicals")]
-    assert "Bar" in names
-
-
-def test_string_false_authorized_does_not_bypass_rejection_guard(tmp_path):
-    # bool("false") is True in Python — a client sending the JSON string
-    # "false" for authorized must NOT be treated as a truthy override.
-    t = make_tools(tmp_path)
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c1"})
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c1"})
-    r = t.memory_govern("accept_workspace_alias",
-                        {"alias": "a", "canonical": "c2", "authorized": "false"})
-    assert r["ok"] is False  # not overridden
-    assert t.db.get_workspace_alias("a")["status"] == "rejected"
-
-
-def test_unrecognized_authorized_string_does_not_override(tmp_path):
-    # An authorization flag uses an allow-list: only true/1/yes/on grant it.
-    # "null"/"maybe"/"" must NOT be treated as an override.
-    t = make_tools(tmp_path)
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c1"})
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "a", "canonical": "c1"})
-    for bad in ("null", "maybe", "", "0", "no"):
-        r = t.memory_govern("accept_workspace_alias",
-                            {"alias": "a", "canonical": "c2", "authorized": bad})
-        assert r["ok"] is False, f"authorized={bad!r} wrongly granted override"
-    # genuine true tokens work
-    r = t.memory_govern("accept_workspace_alias",
-                        {"alias": "a", "canonical": "c2", "authorized": "true"})
-    assert r["ok"] is True
-
-
-def test_rename_repoints_rejected_alias_targeting_old(tmp_path):
-    # rename(old→new) means the canonical formerly-called-`old` IS now `new`.
-    # A rejection "foo is not old" must FOLLOW to "foo is not new" — otherwise
-    # the rejected row is stranded on a name the resolver never returns from
-    # KNN, and a later write auto-merges foo→new via the vector path,
-    # silently reversing the user's decision.
-    t = make_tools(tmp_path)
-    t.db.resolve_workspace_canonical("old", None, register_new=True)
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "foo", "canonical": "old"})
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "old", "new": "new"})
-    row = t.db.get_workspace_alias("foo")
-    # rejection now targets the renamed canonical, still status=rejected
-    assert row["status"] == "rejected"
-    assert row["canonical"] == "new"
-    # and the resolver's rejected filter correctly suppresses `new` for `foo`
-    resolved = t.db.resolve_workspace_canonical("foo", None, register_new=False)
-    assert "new" in (resolved.get("rejected_canonicals") or [])
-
-
-def test_merge_rename_repoints_rejected_alias(tmp_path):
-    # rename's MERGE branch (new already exists → old canonical row deleted)
-    # must also carry the rejection to `new`, not strand it on the deleted `old`.
-    t = make_tools(tmp_path)
-    t.db.resolve_workspace_canonical("old", None, register_new=True)
-    t.db.resolve_workspace_canonical("new", None, register_new=True)
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "foo", "canonical": "old"})
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "old", "new": "new"})
-    row = t.db.get_workspace_alias("foo")
-    assert row["status"] == "rejected" and row["canonical"] == "new"
-
-
-def test_migrate_repoints_rejected_alias(tmp_path):
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "foo", "canonical": "Sub2"})
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "Sub2", "to": "Main"})
-    row = t.db.get_workspace_alias("foo")
-    assert row["status"] == "rejected" and row["canonical"] == "Main"
-
-
-def test_resolver_similar_excludes_rejected(tmp_path):
-    # Downstream write-hints must never re-surface a rejected pair. The
-    # resolver's `similar` list must be filtered.
-    from memory_arbiter.config import Settings
-    from memory_arbiter.db import MemoryDB
-    # This test doesn't need vec — the filter runs even when vec is off.
-    t = make_tools(tmp_path)
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "queried", "canonical": "SomeProj"})
-    resolved = t.db.resolve_workspace_canonical("queried", None, register_new=False)
-    names = [s.get("name") for s in resolved.get("similar", [])]
-    assert "SomeProj" not in names
-
-
-def test_qwen_related_relation_does_not_silent_merge(tmp_path):
-    # Weak-mode Qwen merge must gate on relation ∈ {alias,typo,same_project}.
-    # A high-confidence 'related' or 'unrelated' must NOT silently merge.
-    from memory_arbiter.semantic_conflict import WorkspaceCandidateSignal
-
-    class StubBackend:
-        def __init__(self, sig): self._sig = sig
-        def suggest_workspace_candidate(self, ws, ev, cs): return self._sig
-
-    t = make_tools(tmp_path, isolation="weak")
-
-    def fake_resolve(ws_raw, embedder=None, *, match_distance=None, register_new=True):
-        return {"canonical": ws_raw, "is_new": True, "matched_by": "new",
-                "distance": None, "similar": [{"name": "金营项目", "distance": 0.4}],
-                "rejected_canonicals": []}
-    t.db.resolve_workspace_canonical = fake_resolve  # type: ignore
-    t._ensure_semantic_backend = lambda: StubBackend(  # type: ignore
-        WorkspaceCandidateSignal("金营项目", "related", 0.95, "topical only")
-    )
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    # NOT merged — related@0.95 is not identity-grade
-    assert r["data"]["workspace_canonical"] != "金营项目"
-    assert r["data"]["workspace_decision"] == "ASK"
-
-
-# ── round-7 redesign: migrate/rename × rejected structural invariants ────────
-
-def test_migrate_deletes_phantom_source_canonical(tmp_path):
-    # migrate subsumes from_ws into to_ws; the from_ws canonical row must be
-    # gone so a later raw-from_ws write doesn't exact-match a phantom.
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "Sub2", "to": "Main"})
-    with t.db.connection() as c:
-        names = [r["name"] for r in c.execute("SELECT name FROM workspace_canonicals")]
-    assert "Sub2" not in names, f"phantom source canonical survived: {names}"
-    assert "Main" in names
-
-
-def test_migrate_no_self_alias_when_rejection_uses_to_key(tmp_path):
-    # reject(Main, Sub2) then migrate(Sub2 → Main) must not leave a
-    # "Main is not Main" self-alias row.
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "Main", "canonical": "Sub2"})
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "Sub2", "to": "Main"})
-    row = t.db.get_workspace_alias("Main")
-    if row is not None:
-        assert row["canonical"] != "Main", f"self-alias survived: {row}"
-
-
-def test_rename_no_self_alias_when_rejection_uses_new_key(tmp_path):
-    # Symmetric to migrate self-alias test — for rename.
-    t = make_tools(tmp_path)
-    t.db.resolve_workspace_canonical("OldName", None, register_new=True)
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "NewName", "canonical": "OldName"})
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "OldName", "new": "NewName"})
-    row = t.db.get_workspace_alias("NewName")
-    if row is not None:
-        assert row["canonical"] != "NewName"
-
-
-def test_migrate_forwarding_event_records_true_prior_snapshot(tmp_path):
-    # When the forwarding key was rejected, the guard fires and the audit event
-    # must record the REAL prior canonical/status (not a repoint-mutated value).
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="Sub2", source_type="agent_generated", subject="test")
-    # forwarding-key rejection: normalize("Sub2") rejected against "Sub2" is
-    # degenerate; use a rejection keyed on Sub2 pointing at some other canonical.
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "Sub2", "canonical": "Other"})
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "Sub2", "to": "Main"})
-    # rejection preserved (not silently confirmed)
-    row = t.db.get_workspace_alias("Sub2")
-    assert row["status"] == "rejected"
-    events = [e for e in t.db.list_workspace_alias_events("Sub2") if e["action"] == "migrate"]
-    assert events, "no migrate event recorded"
-    ev = events[0]
-    assert ev["old_status"] == "rejected" and ev["new_status"] == "rejected"
-
-
-def test_chained_migrate_with_rejection_stays_consistent(tmp_path):
-    # migrate A→B then B→C, with a rejection on an unrelated key targeting A.
-    t = make_tools(tmp_path)
-    t.memory_write(content="a", workspace="A", source_type="agent_generated", subject="test")
-    t.memory_govern("reject_workspace_alias", {"authorized": True, "alias": "foo", "canonical": "A"})
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "A", "to": "B"})
-    t.memory_govern("migrate_workspace", {"authorized": True, "from": "B", "to": "C"})
-    # the foo rejection followed the chain to C
-    row = t.db.get_workspace_alias("foo")
-    assert row["status"] == "rejected" and row["canonical"] == "C"
-    # A and B are gone as canonicals; only C survives
-    with t.db.connection() as c:
-        names = [r["name"] for r in c.execute("SELECT name FROM workspace_canonicals")]
-    assert "A" not in names and "B" not in names and "C" in names
-
-
-def test_rename_repoints_confirmed_forwarding_row(tmp_path):
-    # A confirmed alias keyed on normalize(old) pointing at old must be
-    # repointed to new (not stranded on the deleted old canonical).
-    t = make_tools(tmp_path)
-    t.db.resolve_workspace_canonical("old", None, register_new=True)
-    # confirmed alias whose key normalizes to 'old' and targets 'old' is
-    # degenerate; instead: confirmed alias 'OLD' (key 'old') → 'old'.
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "OLD", "canonical": "old"})
-    t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "old", "new": "new"})
-    row = t.db.get_workspace_alias("OLD")
-    assert row["status"] == "confirmed" and row["canonical"] == "new"
-
-
-def test_migrate_rejected_survives_real_vector_path(tmp_path):
-    # The gap that hid the rejection-reversal class for 5 rounds: tests ran with
-    # vec off, so the KNN filter was never exercised. Here we use the real
-    # resolver KNN with a controlled embedder and assert a rejection made before
-    # a migrate is NOT silently reversed via the vector path afterward.
-    from types import SimpleNamespace
-    from memory_arbiter.config import Settings
-    from memory_arbiter.db import MemoryDB
-    from memory_arbiter.tools import MemoryTools
-
-    vecs = {"Sub2": [1.0, 0.0], "Main": [0.0, 1.0], "foo": [0.999, 0.001]}
-
-    class FakeEmbedder:
-        def embed_text(self, prefix="", body=""):
-            v = vecs.get(body, [0.5, 0.5])
-            return SimpleNamespace(embedding=v, truncated=False,
-                                   used_tokens=1, original_tokens=1)
-
-    settings = Settings(
-        db_path=tmp_path / "e2e.sqlite3", backup_jsonl=tmp_path / "e2e.jsonl",
-        client="codex", agent_id="a", workspace="default",
-        enable_sqlite_vec=True, vec_dim=2, isolation="weak",
-    )
-    db = MemoryDB(settings)
-    if not db.state.sqlite_vec_available:
-        import pytest
-        pytest.skip("sqlite-vec unavailable")
-    emb = FakeEmbedder()
-    # register Sub2 as a canonical with a vec row
-    db.resolve_workspace_canonical("Sub2", emb, register_new=True)
-    # user rejects: foo is NOT Sub2
-    db.upsert_workspace_alias("foo", "Sub2", status="rejected", action="reject")
-    # migrate Sub2 -> Main (rejection must follow to Main)
-    db.migrate_workspace("Sub2", "Main", embedder=emb)
-    # now resolve 'foo' with the real vector path: Main is near foo, but the
-    # rejection (now foo↛Main) must suppress the auto-merge.
-    resolved = db.resolve_workspace_canonical("foo", emb, register_new=False)
-    assert resolved["matched_by"] != "vector" or resolved["canonical"] != "Main", (
-        f"rejection silently reversed via vector path: {resolved}"
-    )
-    assert "Main" in (resolved.get("rejected_canonicals") or [])
-
-
-def test_case_only_rename_preserves_forwarding_alias(tmp_path):
-    # rename('Foo'→'foo'): distinct under Python != but same normalized key.
-    # The forwarding alias must survive (canonical refreshed to 'foo'), not be
-    # destroyed by the self-alias DELETE — otherwise 'Foo' re-splits.
-    t = make_tools(tmp_path)
-    t.db.resolve_workspace_canonical("Foo", None, register_new=True)
-    t.memory_govern("accept_workspace_alias", {"authorized": True, "alias": "Foo", "canonical": "Foo"})
-    r = t.memory_govern("rename_workspace_canonical", {"authorized": True, "old": "Foo", "new": "foo"})
-    assert r["ok"] is True
-    row = t.db.get_workspace_alias("Foo")
-    assert row is not None and row["status"] == "confirmed" and row["canonical"] == "foo"
-    resolved = t.db.resolve_workspace_canonical("Foo", None, register_new=False)
-    assert resolved["is_new"] is False
     assert resolved["matched_by"] == "confirmed_alias"
 
-def _make_vec_tools(tmp_path):
-    import pytest
 
-    settings = Settings(
-        db_path=tmp_path / "alias-vector.sqlite3",
-        backup_jsonl=tmp_path / "alias-vector.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="default",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        isolation="weak",
+def test_migrate_without_existing_rows_installs_redirect(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    result = tools.memory_govern("migrate_workspace", {
+        "from": "mema", "to": "memory-arbiter-mcp", "authorized": True,
+    })
+    assert result["ok"] is True
+    assert result["data"]["memories_updated"] == 0
+    resolved = tools.db.resolve_workspace_canonical("mema", None, register_new=False)
+    assert resolved["canonical"] == "memory-arbiter-mcp"
+
+
+def test_exact_negative_blocks_rename_forwarding(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    write(tools, "Old")
+    decide(tools, "Old", "New", status="rejected")
+    result = tools.memory_govern("rename_workspace_canonical", {
+        "old": "Old", "new": "New", "authorized": True,
+    })
+    assert result["ok"] is True
+    resolved = tools.db.resolve_workspace_canonical("Old", None, register_new=False)
+    assert resolved["matched_by"] != "confirmed_alias"
+    assert "New" in resolved["rejected_canonicals"]
+
+
+def test_unrelated_negative_does_not_block_rename_forwarding(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    write(tools, "Old")
+    decide(tools, "Old", "Other", status="rejected")
+    tools.memory_govern("rename_workspace_canonical", {
+        "old": "Old", "new": "New", "authorized": True,
+    })
+    resolved = tools.db.resolve_workspace_canonical("Old", None, register_new=False)
+    assert resolved["canonical"] == "New"
+    with tools.db.connection() as conn:
+        rejected = conn.execute(
+            "SELECT canonical FROM workspace_aliases "
+            "WHERE alias_workspace='old' AND status='rejected'"
+        ).fetchall()
+    assert [row["canonical"] for row in rejected] == ["Other"]
+
+
+def test_repoint_is_collision_safe_and_preserves_existing_decision(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    write(tools, "Old")
+    decide(tools, "foo", "Old", status="rejected")
+    decide(tools, "foo", "New", status="rejected")
+    result = tools.memory_govern("rename_workspace_canonical", {
+        "old": "Old", "new": "New", "authorized": True,
+    })
+    assert result["ok"] is True
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT canonical,status FROM workspace_aliases "
+            "WHERE alias_workspace='foo'"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [("New", "rejected")]
+
+
+def test_case_only_rename_leaves_no_self_redirect(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    memory_id = write(tools, "ProjectX")
+    result = tools.memory_govern("rename_workspace_canonical", {
+        "old": "ProjectX", "new": "projectx", "authorized": True,
+    })
+    assert result["ok"] is True
+    assert tools.db.get_memory(memory_id)["workspace_canonical"] == "projectx"
+    with tools.db.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM workspace_aliases "
+            "WHERE alias_workspace='projectx' AND canonical='projectx'"
+        ).fetchone()[0] == 0
+
+
+def test_strict_retries_remain_pending_until_confirmation(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path, isolation="strict")
+    first = write(tools, "Unconfirmed")
+    second = write(tools, "Unconfirmed", "second fact")
+    assert tools.db.get_memory(first)["status"] == MemoryStatus.PENDING.value
+    assert tools.db.get_memory(second)["status"] == MemoryStatus.PENDING.value
+    with tools.db.connection() as conn:
+        canonical = conn.execute(
+            "SELECT 1 FROM workspace_canonicals WHERE name='Unconfirmed'"
+        ).fetchone()
+    assert canonical is None
+
+
+def test_confirm_pending_case_variant_reuses_raw_spelling(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path, isolation="strict")
+    memory_id = write(tools, "BrandNew")
+    result = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id, "canonical": "brandnew", "authorized": True,
+    })
+    assert result["ok"] is True
+    assert tools.db.get_memory(memory_id)["workspace_canonical"] == "BrandNew"
+    with tools.db.connection() as conn:
+        names = [row["name"] for row in conn.execute(
+            "SELECT name FROM workspace_canonicals WHERE lower(name)='brandnew'"
+        )]
+    assert names == ["BrandNew"]
+
+
+def test_default_pending_cannot_be_confirmed_into_project(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path, isolation="strict")
+    written = tools.memory_write(
+        content="global pending", subject="global", workspace="default",
+        source_type="agent_generated", status="pending",
     )
-    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    result = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": written["data"]["id"], "canonical": "ProjectX", "authorized": True,
+    })
+    assert result["ok"] is False
+    assert "reserved default" in result["data"]["error"]
+    assert tools.db.get_memory(written["data"]["id"])["status"] == MemoryStatus.PENDING.value
+
+
+def test_competing_move_does_not_split_memory_and_redirect(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    memory_id = write(tools, "Old")
+    first = tools.memory_govern("rename_workspace_canonical", {
+        "old": "Old", "new": "A", "authorized": True,
+    })
+    second = tools.memory_govern("rename_workspace_canonical", {
+        "old": "Old", "new": "B", "authorized": True,
+    })
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert tools.db.get_memory(memory_id)["workspace_canonical"] == "A"
+    assert tools.db.resolve_workspace_canonical("Old", None, register_new=False)["canonical"] == "A"
+
+
+def test_confirm_pending_exact_name_activates_without_self_redirect(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path, isolation="strict")
+    memory_id = write(tools, "BrandNew")
+    assert tools.db.get_memory(memory_id)["status"] == MemoryStatus.PENDING.value
+    result = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id, "canonical": "BrandNew", "authorized": True,
+    })
+    assert result["ok"] is True
+    assert tools.db.get_memory(memory_id)["status"] == MemoryStatus.ACTIVE.value
+    with tools.db.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM workspace_aliases WHERE alias_workspace='brandnew'"
+        ).fetchone()[0] == 0
+
+
+def test_confirm_pending_different_name_records_redirect_atomically(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path, isolation="strict")
+    memory_id = write(tools, "abbrev")
+    result = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id, "canonical": "CanonicalProject", "authorized": True,
+    })
+    assert result["ok"] is True
+    record = tools.db.get_memory(memory_id)
+    assert record["status"] == MemoryStatus.ACTIVE.value
+    assert record["workspace_canonical"] == "CanonicalProject"
+    assert tools.db.resolve_workspace_canonical("abbrev", None, register_new=False)["canonical"] == "CanonicalProject"
+
+
+def test_confirm_pending_rolls_back_decision_assignment_and_activation(tmp_path: Path, monkeypatch) -> None:
+    tools = make_tools(tmp_path, isolation="strict")
+    memory_id = write(tools, "abbrev")
+    original = tools.db.set_memory_workspace_canonical_on_conn
+
+    def fail(*args, **kwargs):
+        return False, ["injected failure"]
+
+    monkeypatch.setattr(tools.db, "set_memory_workspace_canonical_on_conn", fail)
+    result = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id, "canonical": "CanonicalProject", "authorized": True,
+    })
+    assert result["ok"] is False
+    monkeypatch.setattr(tools.db, "set_memory_workspace_canonical_on_conn", original)
+    assert tools.db.get_memory(memory_id)["status"] == MemoryStatus.PENDING.value
+    assert tools.db.get_workspace_decision("abbrev") is None
+
+
+def test_confirm_pending_error_does_not_leak_foreign_record(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path, isolation="strict")
+    memory_id = write(tools, "Other", "TOP SECRET")
+    result = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id, "canonical": "Caller",
+        "workspace": "Caller", "authorized": True,
+    })
+    assert result["ok"] is False
+    assert result["data"]["record"] is None
+    assert "TOP SECRET" not in str(result)
+
+
+def test_default_pool_cannot_enter_internal_decision_state(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    for left, right in (("default", "project"), ("project", "默认")):
+        ok, warnings = tools.db.record_workspace_decision(left, right)
+        assert ok is False
+        assert "reserved global pool" in warnings[0]
+
+
+def test_concurrent_confirmed_decisions_leave_one_redirect(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    barrier = threading.Barrier(2)
+    outcomes: list[bool] = []
+
+    def worker(target: str) -> None:
+        barrier.wait()
+        outcomes.append(tools.db.record_workspace_decision("raw", target)[0])
+
+    threads = [threading.Thread(target=worker, args=(target,)) for target in ("A", "B")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert all(outcomes)
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT canonical FROM workspace_aliases "
+            "WHERE alias_workspace='raw' AND status='confirmed'"
+        ).fetchall()
+    assert len(rows) == 1
+
+
+def test_negative_decision_filters_real_vector_candidate(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path, vec=True)
     if not tools.db.state.sqlite_vec_available:
         pytest.skip("sqlite-vec unavailable")
-    return tools
-
-
-def test_self_alias_write_backfills_missing_canonical_vector(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    tools = _make_vec_tools(tmp_path)
-    calls = []
-
-    class Embedder:
-        def embed_text(self, prefix="", body=""):
-            calls.append(body)
-            return SimpleNamespace(embedding=[1.0, 0.0])
-
-    tools.db.upsert_workspace_alias("SelfProject", "SelfProject")
-    monkeypatch.setattr(tools, "_ensure_embedder", lambda: (Embedder(), []))
-
-    result = tools.memory_write(content="first", subject="self", workspace="SelfProject")
-
-    assert result["ok"] is True
-    assert result["data"]["workspace_matched_by"] == "confirmed_alias"
-    with tools.db.connection() as conn:
-        row = conn.execute(
-            "SELECT v.id FROM workspace_canonicals c "
-            "JOIN workspace_canonicals_vec v ON v.id = c.id WHERE c.name = ?",
-            ("SelfProject",),
-        ).fetchone()
-    assert row is not None
-    assert calls.count("SelfProject") == 1
-
-
-def test_nonself_alias_write_backfills_canonical_vector_without_reembedding_existing(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    tools = _make_vec_tools(tmp_path)
-    calls = []
-
-    class Embedder:
-        def embed_text(self, prefix="", body=""):
-            calls.append(body)
-            return SimpleNamespace(embedding=[0.0, 1.0])
-
-    tools.db.upsert_workspace_alias("Project Raw", "Project Canonical")
-    monkeypatch.setattr(tools, "_ensure_embedder", lambda: (Embedder(), []))
-
-    first = tools.memory_write(content="first", subject="alias", workspace="Project Raw")
-    second = tools.memory_write(content="second", subject="alias", workspace="Project Raw")
-
-    assert first["ok"] is True and second["ok"] is True
-    assert first["data"]["workspace_canonical"] == "Project Canonical"
-    assert second["data"]["workspace_matched_by"] == "confirmed_alias"
-    assert calls.count("Project Canonical") == 1
-
-
-def test_confirmed_alias_vector_backfill_failure_surfaces_pending_retry(tmp_path, monkeypatch):
-    import sqlite3
-    from contextlib import contextmanager
-    from types import SimpleNamespace
-
-    tools = _make_vec_tools(tmp_path)
 
     class Embedder:
         def embed_text(self, prefix="", body=""):
             return SimpleNamespace(embedding=[1.0, 0.0])
 
-    tools.db.upsert_workspace_alias("Retry Raw", "Retry Canonical")
-    monkeypatch.setattr(tools, "_ensure_embedder", lambda: (Embedder(), []))
-    original_write_transaction = tools.db.workspaces.write_transaction
+    embedder = Embedder()
+    tools.db.resolve_workspace_canonical("Target", embedder, register_new=True)
+    decide(tools, "raw", "Target", status="rejected")
+    resolved = tools.db.resolve_workspace_canonical("raw", embedder, register_new=False)
+    assert resolved["canonical"] != "Target"
+    assert "Target" not in [item["name"] for item in resolved["similar"]]
 
-    class FailingConnection:
-        def __init__(self, conn):
-            self._conn = conn
 
-        def execute(self, sql, params=()):
-            if "INSERT OR IGNORE INTO workspace_canonicals_vec" in sql:
-                raise sqlite3.OperationalError("injected alias vector failure")
-            return self._conn.execute(sql, params)
-
-    @contextmanager
-    def failing_write_transaction():
-        with original_write_transaction() as conn:
-            yield FailingConnection(conn)
-
-    monkeypatch.setattr(tools.db.workspaces, "write_transaction", failing_write_transaction)
-
-    result = tools.memory_write(content="retry", subject="alias", workspace="Retry Raw")
-
-    assert result["ok"] is True
-    publish = result["data"]["workspace_vector_publish"]
-    assert publish["status"] == "pending_retry"
-    assert publish["canonical"] == "Retry Canonical"
-    assert any(
-        "workspace canonical vector publish failed for 'Retry Canonical'" in warning
-        for warning in result["warnings"]
-    )
-
+def test_workspace_decision_schema_normalization_is_idempotent(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    tools = make_tools(tmp_path)
+    decide(tools, "raw", "candidate-a", status="rejected")
+    del tools
+    reopened = MemoryDB(Settings(
+        db_path=path if path.exists() else tmp_path / "gov.sqlite3",
+        backup_jsonl=tmp_path / "other.jsonl",
+    ))
+    with reopened.connection() as conn:
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(workspace_aliases)")]
+    assert columns == ["alias_workspace", "canonical", "status", "updated_at"]

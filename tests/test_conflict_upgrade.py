@@ -4,6 +4,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.db_generation import (
@@ -44,8 +46,8 @@ def test_destructive_copy_preserves_core_data_but_not_conflict_history(tmp_path:
             (memory_id, "old", "数据库选型", "[]", 1, "2026-08-20T00:00:00Z", "test"),
         )
         conn.execute(
-            "INSERT INTO workspace_aliases(alias_workspace,canonical,relation,status,source,updated_at) VALUES(?,?,?,?,?,?)",
-            ("proj", "project", "alias", "confirmed", "user", "2026-08-20T00:00:00Z"),
+            "INSERT INTO workspace_aliases(alias_workspace,canonical,status,updated_at) VALUES(?,?,?,?)",
+            ("proj", "project", "confirmed", "2026-08-20T00:00:00Z"),
         )
         # Removed tables may exist in a previous-generation source even though
         # current runtime schema intentionally does not create them.
@@ -101,14 +103,114 @@ def test_startup_migrates_legacy_alias_unique_key_to_pair_key(tmp_path: Path) ->
         )
         conn.execute("DROP TABLE workspace_aliases_new")
     reopened = MemoryDB(_settings(path, tmp_path))
-    assert reopened.upsert_workspace_alias("raw", "candidate-b", status="rejected")[0]
+    assert reopened.record_workspace_decision("raw", "candidate-b", status="rejected")[0]
     with reopened.connection() as conn:
         rows = conn.execute(
             "SELECT canonical FROM workspace_aliases WHERE alias_workspace='raw' ORDER BY canonical"
         ).fetchall()
-        pk = [row["name"] for row in conn.execute("PRAGMA table_info(workspace_aliases)") if row["pk"]]
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(workspace_aliases)")]
+        events = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_alias_events'"
+        ).fetchone()
     assert [row["canonical"] for row in rows] == ["candidate-a", "candidate-b"]
-    assert pk == ["alias_workspace", "canonical"]
+    assert columns == ["alias_workspace", "canonical", "status", "updated_at"]
+    assert events is None
+
+
+def test_startup_refuses_partial_workspace_decision_schema_without_data_loss(tmp_path: Path) -> None:
+    path = tmp_path / "partial.sqlite3"
+    db = MemoryDB(_settings(path, tmp_path))
+    with db.write_transaction() as conn:
+        conn.execute("ALTER TABLE workspace_aliases RENAME TO workspace_aliases_good")
+        conn.execute(
+            "CREATE TABLE workspace_aliases(alias_workspace TEXT,canonical TEXT,updated_at TEXT)"
+        )
+        conn.execute("INSERT INTO workspace_aliases VALUES('raw','target','2026-01-01')")
+        conn.execute("DROP TABLE workspace_aliases_good")
+    reopened = MemoryDB(_settings(path, tmp_path))
+    assert reopened.db_available is False
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM workspace_aliases").fetchone()[0] == 1
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(workspace_aliases)")]
+    assert columns == ["alias_workspace", "canonical", "updated_at"]
+
+
+def test_startup_refuses_invalid_compact_workspace_decisions(tmp_path: Path) -> None:
+    path = tmp_path / "invalid.sqlite3"
+    db = MemoryDB(_settings(path, tmp_path))
+    with db.write_transaction() as conn:
+        conn.execute("ALTER TABLE workspace_aliases RENAME TO workspace_aliases_good")
+        conn.execute(
+            "CREATE TABLE workspace_aliases("
+            "alias_workspace TEXT,canonical TEXT,status TEXT,updated_at TEXT,"
+            "PRIMARY KEY(alias_workspace,canonical))"
+        )
+        conn.execute("INSERT INTO workspace_aliases VALUES('raw','target','bogus','2026-01-01')")
+        conn.execute("DROP TABLE workspace_aliases_good")
+    reopened = MemoryDB(_settings(path, tmp_path))
+    assert reopened.db_available is False
+    with sqlite3.connect(path) as conn:
+        row = conn.execute("SELECT status FROM workspace_aliases").fetchone()
+    assert row[0] == "bogus"
+
+
+def test_startup_recovers_interrupted_legacy_workspace_migration(tmp_path: Path) -> None:
+    path = tmp_path / "interrupted.sqlite3"
+    db = MemoryDB(_settings(path, tmp_path))
+    assert db.record_workspace_decision("raw", "target")[0]
+    with db.write_transaction() as conn:
+        conn.execute("ALTER TABLE workspace_aliases RENAME TO workspace_aliases_legacy")
+    reopened = MemoryDB(_settings(path, tmp_path))
+    assert reopened.db_available is True
+    assert reopened.resolve_workspace_canonical("raw", None, register_new=False)["canonical"] == "target"
+    with reopened.connection() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='workspace_aliases_legacy'"
+        ).fetchone() is None
+
+
+def test_full_build_copy_failure_never_leaves_current_target(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from memory_arbiter import vnext_migration
+
+    source_path = tmp_path / "source-current.sqlite3"
+    target_path = tmp_path / "target-partial.sqlite3"
+    MemoryDB(_settings(source_path, tmp_path))
+
+    def fail_copy(*args, **kwargs):
+        raise sqlite3.IntegrityError("injected copy failure")
+
+    monkeypatch.setattr(vnext_migration, "_copy_preserved_tables", fail_copy)
+    with pytest.raises(sqlite3.IntegrityError):
+        vnext_migration.build(
+            source_path, target_path, _settings(source_path, tmp_path), progress=False,
+        )
+    assert detect_database_generation(target_path) != "current"
+    with sqlite3.connect(target_path) as conn:
+        state = dict(conn.execute("SELECT key,value FROM migration_state"))
+    assert state["phase"] == "failed"
+    assert state["schema_generation"].endswith(":building")
+
+
+def test_full_build_checkpoint_failure_marks_target_failed(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from memory_arbiter import vnext_migration
+
+    source_path = tmp_path / "source-empty.sqlite3"
+    target_path = tmp_path / "target-checkpoint.sqlite3"
+    MemoryDB(_settings(source_path, tmp_path))
+    monkeypatch.setattr(vnext_migration, "_checkpoint", lambda _path: False)
+    result = vnext_migration.build(
+        source_path, target_path, _settings(source_path, tmp_path), progress=False,
+    )
+    assert result["ok"] is False
+    assert result["switch_ready"] is False
+    assert detect_database_generation(target_path) != "current"
+    with sqlite3.connect(target_path) as conn:
+        state = dict(conn.execute("SELECT key,value FROM migration_state"))
+    assert state["phase"] == "failed"
 
 
 def test_scan_gate_requires_matching_epoch_detector_boundary_and_live_set(tmp_path: Path) -> None:
@@ -212,6 +314,56 @@ def test_previous_generation_is_refused_until_destructive_upgrade(tmp_path: Path
         )
     assert CURRENT_SCHEMA_GENERATION != "local_text_evidence_v1"
     assert detect_database_generation(path) == "legacy"
+
+
+def test_previous_conflict_generation_is_refused_until_upgrade(tmp_path: Path) -> None:
+    path = tmp_path / "conflict-v2.sqlite3"
+    db = MemoryDB(_settings(path, tmp_path))
+    with db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE migration_state SET value='conflict_groups_v2' "
+            "WHERE key='schema_generation'"
+        )
+    assert detect_database_generation(path) == "legacy"
+
+
+def test_conflict_only_upgrade_compacts_workspace_state_and_drops_events(tmp_path: Path) -> None:
+    source_path = tmp_path / "conflict-v2.sqlite3"
+    target_path = tmp_path / "workspace-v1.sqlite3"
+    source = MemoryDB(_settings(source_path, tmp_path))
+    assert source.record_workspace_decision("raw", "target")[0]
+    with source.write_transaction() as conn:
+        conn.execute("ALTER TABLE workspace_aliases RENAME TO workspace_aliases_compact")
+        conn.execute(
+            "CREATE TABLE workspace_aliases("
+            "alias_workspace TEXT NOT NULL,canonical TEXT NOT NULL,relation TEXT NOT NULL,"
+            "status TEXT NOT NULL,source TEXT NOT NULL,updated_at TEXT NOT NULL,"
+            "PRIMARY KEY(alias_workspace,canonical))"
+        )
+        conn.execute(
+            "INSERT INTO workspace_aliases SELECT alias_workspace,canonical,'alias',"
+            "status,'user',updated_at FROM workspace_aliases_compact"
+        )
+        conn.execute("DROP TABLE workspace_aliases_compact")
+        conn.execute(
+            "CREATE TABLE workspace_alias_events("
+            "id INTEGER PRIMARY KEY,alias_workspace TEXT,action TEXT)"
+        )
+        conn.execute("INSERT INTO workspace_alias_events VALUES(1,'raw','accept')")
+        conn.execute(
+            "UPDATE migration_state SET value='conflict_groups_v2' "
+            "WHERE key='schema_generation'"
+        )
+    result = build_conflict_only(source_path, target_path, _settings(source_path, tmp_path))
+    assert result["ok"] is True, result
+    with sqlite3.connect(target_path) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(workspace_aliases)")]
+        events = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='workspace_alias_events'"
+        ).fetchone()
+    assert columns == ["alias_workspace", "canonical", "status", "updated_at"]
+    assert events is None
+    assert detect_database_generation(target_path) == "current"
 
 
 def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Path) -> None:

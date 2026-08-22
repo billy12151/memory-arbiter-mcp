@@ -14,6 +14,10 @@
   "workspace_match_distance": 0.25,
   "workspace_qwen_candidate_distance": 0.25,
   "workspace_qwen_candidate_top_k": 3,
+  "workspace_weak_vector_weight": false,
+  "workspace_min_name_len": 3,
+  "workspace_recall_admission": false,
+  "workspace_recall_cutoff": 0.25,
   "vec": {
     "enabled": true,
     "dim": 768

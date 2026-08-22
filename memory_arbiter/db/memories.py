@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
+from ..acl import WorkspaceScope, workspace_scope_sql
 from ..models import MemoryRecord, utc_now_iso
 from ..text import (
     canon_entity as _canon_entity,
@@ -44,6 +45,8 @@ class MemoriesStore:
         record: MemoryRecord,
         workspace_canonical: Optional[str] = None,
         workspace_embedding: Optional[list[float]] = None,
+        *,
+        register_workspace_canonical: bool = True,
     ) -> Tuple[Optional[int], list[str]]:
         warnings: list[str] = []
         if not record.content:
@@ -62,19 +65,18 @@ class MemoriesStore:
         # resolver/model runs before this transaction and must never register the
         # raw near-miss workspace (which would leave a phantom canonical).
         with self.write_transaction() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
-                (canonical, utc_now_iso()),
-            )
+            if register_workspace_canonical:
+                conn.execute(
+                    "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                    (canonical, utc_now_iso()),
+                )
             memory_id = self.insert_memory_on_conn(conn, record, canonical)
-        # Vector publication is a derived-index side effect. Keep canonical
-        # registration + memory insertion atomic above, then degrade a vector
-        # failure to a warning without rolling back the authoritative write.
-        warnings.extend(
-            self._db.workspaces.publish_workspace_canonical_vector(
-                canonical, workspace_embedding,
+        if register_workspace_canonical:
+            warnings.extend(
+                self._db.workspaces.publish_workspace_canonical_vector(
+                    canonical, workspace_embedding,
+                )
             )
-        )
         return memory_id, warnings
 
     def insert_memory_on_conn(
@@ -170,28 +172,49 @@ class MemoriesStore:
         with self.connection() as conn:
             return self._fetch_memory(conn, memory_id)
 
-    def get_memory_for_workspace(self, memory_id: int, ws_canonical: str) -> Optional[dict[str, Any]]:
-        """ACL-specific read-by-id helper; does not change get_memory semantics."""
+    def get_memory_for_workspace(
+        self, memory_id: int, ws_canonical: str,
+        admitted: WorkspaceScope = None,
+    ) -> Optional[dict[str, Any]]:
+        """ACL-specific read-by-id helper; does not change get_memory semantics.
+
+        ``admitted`` (defaulting to just ``ws_canonical``) is the strict
+        vector-admission set. A single element yields the single-name equality
+        filter; a larger set widens visibility to the in-radius neighbourhood.
+        """
         if not self._db_available or not str(ws_canonical or "").strip():
+            return None
+        scope_sql, scope_params = workspace_scope_sql(
+            "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
+            admitted if admitted else ws_canonical,
+        )
+        if not scope_sql:
             return None
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM memories WHERE id = ? "
-                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
-                (int(memory_id), str(ws_canonical)),
+                f"SELECT * FROM memories WHERE id = ? AND {scope_sql}",
+                (int(memory_id), *scope_params),
             ).fetchone()
             return _row_to_dict(row) if row else None
 
-    def list_memories_for_workspace(self, ws_canonical: str, limit: int = 50) -> list[dict[str, Any]]:
-        """ACL-specific recent/list helper scoped to one canonical workspace."""
+    def list_memories_for_workspace(
+        self, ws_canonical: str, limit: int = 50,
+        admitted: WorkspaceScope = None,
+    ) -> list[dict[str, Any]]:
+        """ACL-specific recent/list helper scoped to the admitted canonical set."""
         if not self._db_available or not str(ws_canonical or "").strip():
+            return []
+        scope_sql, scope_params = workspace_scope_sql(
+            "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
+            admitted if admitted else ws_canonical,
+        )
+        if not scope_sql:
             return []
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM memories WHERE status != 'deleted' "
-                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? "
+                f"SELECT * FROM memories WHERE status != 'deleted' AND {scope_sql} "
                 "ORDER BY event_time DESC, ingest_time DESC LIMIT ?",
-                (str(ws_canonical), int(limit)),
+                (*scope_params, int(limit)),
             ).fetchall()
             return [_row_to_dict(row) for row in rows]
 
@@ -330,22 +353,26 @@ class MemoriesStore:
         after_dt: Optional[datetime],
         before_dt: Optional[datetime],
         source_type: Optional[str],
-        ws_canonical: Optional[str] = None,
+        ws_canonical: WorkspaceScope = None,
     ) -> int:
         """v0.7.3: COUNT(*) under the same filters used by search's _passes_filters.
 
         Only called when has_filters=True. Clauses are built by _filter_clauses so the
         SQL count and the SQL recall (recall_by_filters) share one source of truth.
         Cross-workspace (v0.7.4) — workspace is not filtered, EXCEPT under strict
-        isolation (v0.9.7) where ``ws_canonical`` scopes the count to one canonical
-        workspace so the total matches the paginated recall.
+        isolation where ``ws_canonical`` scopes the count. Strict admission widens
+        it from one name to the admitted canonical set, so the total keeps
+        matching the paginated recall under vector admission.
         """
         if not self._db_available:
             return 0
         clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
-        if ws_canonical:
-            clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
-            params.append(ws_canonical)
+        scope_sql, scope_params = workspace_scope_sql(
+            "COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical,
+        )
+        if scope_sql:
+            clauses.append(scope_sql)
+            params.extend(scope_params)
         sql = f"SELECT COUNT(*) AS c FROM memories WHERE {' AND '.join(clauses)}"
         with self.connection() as conn:
             try:
@@ -363,7 +390,7 @@ class MemoriesStore:
         source_type: Optional[str],
         limit: int,
         offset: int = 0,
-        ws_canonical: Optional[str] = None,
+        ws_canonical: WorkspaceScope = None,
     ) -> list[dict[str, Any]]:
         """G6 (v0.8.5): filter-driven recall for empty-query + filters in memory_search.
 
@@ -374,15 +401,19 @@ class MemoriesStore:
 
         v0.9.4: ``offset`` adds SQL OFFSET for cursor pagination on the
         exact-count filter path (used by ``memory_search_expired``).
-        v0.9.7: ``ws_canonical`` hard-scopes to one canonical workspace under
-        strict isolation (filters in SQL so pagination and totals stay correct).
+        v0.9.7/``ws_canonical`` hard-scopes to the admitted canonical
+        set in SQL, so pagination and totals stay correct (a Python post-filter
+        on an already-paginated page would not).
         """
         if not self._db_available:
             return []
         clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
-        if ws_canonical:
-            clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
-            params.append(ws_canonical)
+        scope_sql, scope_params = workspace_scope_sql(
+            "COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical,
+        )
+        if scope_sql:
+            clauses.append(scope_sql)
+            params.extend(scope_params)
         sql = f"SELECT * FROM memories WHERE {' AND '.join(clauses)} ORDER BY ingest_time DESC LIMIT ? OFFSET ?"
         with self.connection() as conn:
             try:

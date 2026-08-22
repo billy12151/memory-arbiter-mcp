@@ -35,7 +35,12 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.max_notice_pairs", "semantic", "semantic_conflict_max_notice_pairs", 2),
     _item("semantic_conflict.notice_sync_wait_ms", "semantic", "notice_sync_wait_ms", 3000),
     _item("semantic_conflict.workspace_qwen_budget_ms", "semantic", "workspace_qwen_budget_ms", 750),
-    _item("isolation", "workspace", default="none"), _item("workspace_match_distance", "workspace", default=0.25),
+    _item("isolation", "workspace", default="none"),
+    _item("workspace_match_distance", "workspace", default=0.25),
+    _item("workspace_weak_vector_weight", "workspace", default=False),
+    _item("workspace_min_name_len", "workspace", default=3),
+    _item("workspace_recall_admission", "workspace", default=False),
+    _item("workspace_recall_cutoff", "workspace", default=0.25),
 ]
 
 for _descriptor in CONFIG_DESCRIPTORS:

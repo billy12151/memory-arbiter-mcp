@@ -80,11 +80,10 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "resolution_memory_id", "authorized", "workspace",
     },
     ("memory_govern", "confirm"): {"id", "memory_id", "source_ref", "confidence", "authorized", "workspace"},
-    ("memory_govern", "accept_workspace_alias"): {"alias", "canonical", "relation", "reason", "source", "authorized"},
-    ("memory_govern", "reject_workspace_alias"): {"alias", "canonical", "reason", "source", "authorized"},
     ("memory_govern", "rename_workspace_canonical"): {"old", "new", "reason", "authorized"},
     ("memory_govern", "migrate_workspace"): {"from", "to", "reason", "authorized"},
     ("memory_govern", "confirm_pending_workspace"): {"id", "memory_id", "canonical", "reason", "authorized", "workspace"},
+    ("memory_govern", "confirm_workspaces"): {"workspaces", "reason", "authorized"},
     ("memory_govern", "help"): {"topic", "action"},
     ("memory_repair", "rebuild_evidence"): {"memory_ids", "dry_run", "batch_size", "workspace"},
     ("memory_repair", "cleanup_history"): {"id", "memory_id", "older_than_days", "authorized", "workspace"},
@@ -219,7 +218,6 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         "agent_id": MAX_TEXT_FIELD_CHARS,
         "client": MAX_TEXT_FIELD_CHARS,
         "reason": MAX_TEXT_FIELD_CHARS,
-        "alias": MAX_TEXT_FIELD_CHARS,
         "canonical": MAX_TEXT_FIELD_CHARS,
         "old": MAX_TEXT_FIELD_CHARS,
         "new": MAX_TEXT_FIELD_CHARS,
@@ -237,7 +235,6 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         "judge_ref": MAX_TEXT_FIELD_CHARS,
         "usage_context": MAX_TEXT_FIELD_CHARS,
         "source": MAX_TEXT_FIELD_CHARS,
-        "relation": MAX_TEXT_FIELD_CHARS,
     }
     for key, maximum in bounded_strings.items():
         value = payload.get(key)
@@ -281,6 +278,21 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
                 return result
             parsed_items.append(parsed_item)
         payload[key] = parsed_items
+
+    # confirm_workspaces list: bounded like tags (count) and text fields (per-
+    # item length) so one authorized call cannot persist an unbounded sidecar.
+    workspaces_value = payload.get("workspaces")
+    if workspaces_value is not None:
+        if (
+            not isinstance(workspaces_value, list)
+            or len(workspaces_value) > 100
+            or any(not isinstance(item, str) or len(item) > MAX_TEXT_FIELD_CHARS for item in workspaces_value)
+        ):
+            result.error = _error(
+                "workspaces",
+                f"must be a list of at most 100 strings, each at most {MAX_TEXT_FIELD_CHARS} characters",
+            )
+            return result
 
     integer_limits = {
         "limit": (1, 10_000 if (surface, operation) == ("memory_repair", "replay_backup") else MAX_RESULT_LIMIT),

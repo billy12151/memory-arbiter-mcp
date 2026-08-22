@@ -82,6 +82,10 @@ def clear_config_env(monkeypatch) -> None:
         "MEMORY_ARBITER_WORKSPACE",
         "MEMORY_ARBITER_ENABLE_SQLITE_VEC",
         "MEMORY_ARBITER_VEC_DIM",
+        "MEMORY_ARBITER_WORKSPACE_RECALL_ADMISSION",
+        "MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF",
+        "MEMORY_ARBITER_WORKSPACE_WEAK_VECTOR_WEIGHT",
+        "MEMORY_ARBITER_WORKSPACE_MIN_NAME_LEN",
         "MEMORY_ARBITER_RECALL_POOL_CAP",
         "MEMORY_ARBITER_CONTENT_LIKE_CAP",
         "MEMORY_ARBITER_EMBEDDING_PROVIDER",
@@ -358,8 +362,6 @@ def test_all_governance_actions_require_explicit_user_authorization(tmp_path: Pa
             "conflict_id": 1, "expected_revision": 2, "memory_id": 1,
             "action": "update_current_claim", "content": "corrected fact",
         },
-        "accept_workspace_alias": {"alias": "alias", "canonical": "canonical"},
-        "reject_workspace_alias": {"alias": "alias", "canonical": "canonical"},
         "rename_workspace_canonical": {"old": "old", "new": "new"},
         "migrate_workspace": {"from": "old", "to": "new"},
         "confirm_pending_workspace": {"memory_id": 1, "canonical": "canonical"},
@@ -427,9 +429,11 @@ def test_product_judge_help_exposes_group_decision_constraints(tmp_path: Path) -
     assert gov_help["judge_constraints"] == constraints
     assert gov_help["actions"] == [
         "retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm",
-        "accept_workspace_alias", "reject_workspace_alias", "rename_workspace_canonical",
-        "migrate_workspace", "confirm_pending_workspace", "help",
+        "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace",
+        "confirm_workspaces", "help",
     ]
+    assert "accept_workspace_alias" not in gov_help["examples"]
+    assert "reject_workspace_alias" not in gov_help["accepted_fields"]
 
     missing = tools.memory(action="judge", data={"id": 1})
     assert missing["ok"] is False
@@ -443,10 +447,13 @@ def test_product_help_exposes_agent_onboarding_topic(tmp_path: Path) -> None:
     assert help_doc["topic"] == "agent_onboarding"
     assert help_doc["notice"] == "agent-onboarding:v1"
     assert help_doc["guide_file"] == "memory_arbiter/AGENT_ONBOARDING.md"
-    assert "Compact Rule" in help_doc["content"]
-    assert "record_conflict" in help_doc["content"]
-    assert "apply_conflict_action" in help_doc["content"]
-    assert "memory(action=\"find\")" in help_doc["content"]
+    content = help_doc["content"]
+    assert "Memory Arbiter Agent Rule" in content
+    assert "memory(action" not in content  # compact prose, not a duplicate API manual
+    assert "memory_govern" in content
+    assert "strict project scope" in content
+    assert "authorized=true" in content
+    assert len(content.encode("utf-8")) < 3000
 
 
 def test_product_help_exposes_agent_decision_paths(tmp_path: Path) -> None:
@@ -746,6 +753,24 @@ def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch) -> None:
     assert settings.vec_dim == 1024
     assert settings.embedding_provider == "gguf"
     assert settings.embedding_model_path == tmp_path / "legacy.gguf"
+
+
+def test_non_finite_workspace_recall_cutoff_falls_back_with_warning(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import math
+
+    for raw in ("nan", "inf", "-inf"):
+        clear_config_env(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / raw.replace("-", "neg")))
+        monkeypatch.setenv("MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF", raw)
+        settings = Settings.from_env()
+        assert settings.workspace_recall_cutoff == 0.0
+        assert math.isfinite(settings.workspace_recall_cutoff)
+        assert any(
+            "workspace_recall_cutoff" in warning and "not finite" in warning
+            for warning in settings.config_warnings
+        )
 
 
 def test_config_file_parse_error_graceful(tmp_path: Path, monkeypatch) -> None:

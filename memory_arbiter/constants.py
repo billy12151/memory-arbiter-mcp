@@ -17,6 +17,25 @@ NO_DIRECT_MATCH_PREFIX = "No direct memory match"
 
 
 # ---------------------------------------------------------------------------
+# Reserved default workspace pool (single source).
+# ---------------------------------------------------------------------------
+# Raw workspace strings that mean "no project" resolve to ONE global default
+# pool. Every consumer (resolver, publish guards, internal workspace decisions,
+# doctor) must test membership through these definitions — never the "default" literal,
+# which silently misses 默认/none/null/unknown/未知 and lets a synonym act as a
+# second, phantom default pool.
+DEFAULT_WORKSPACE_NAME = "default"
+DEFAULT_TERMS = frozenset({"", DEFAULT_WORKSPACE_NAME, "默认", "none", "null", "unknown", "未知"})
+
+
+def is_default_workspace_term(name: Optional[str]) -> bool:
+    """True when a workspace string is a reserved default-pool synonym."""
+    if name is None:
+        return False
+    return name.strip().casefold() in DEFAULT_TERMS
+
+
+# ---------------------------------------------------------------------------
 # Workspace isolation levels (single source for the three literals).
 # ---------------------------------------------------------------------------
 # These values are part of the persisted/API contract (settings, env, payload
@@ -28,9 +47,9 @@ NO_DIRECT_MATCH_PREFIX = "No direct memory match"
 class Isolation:
     """Workspace isolation level literals + predicates.
 
-    none  — workspace fully ignored on the read/write path.
-    weak  — soft rerank nudge toward the query workspace; empty workspace allowed.
-    strict— hard filter to the query workspace; workspace required on every op.
+    none  — omitted workspace spans the library; an explicit workspace scopes that read.
+    weak  — no hard ACL; workspace provides a soft ranking/hint signal.
+    strict— hard scope to the caller canonical; optional guarded vector admission may add neighbors.
     """
 
     NONE = "none"
@@ -42,7 +61,11 @@ class Isolation:
 
 
 def isolation_active(level: str) -> bool:
-    """True when the workspace is consulted at all (weak or strict)."""
+    """True when isolation policy applies by default (weak or strict).
+
+    In ``none`` mode an explicitly supplied workspace can still scope one read;
+    this predicate only answers whether the configured mode itself is active.
+    """
     return level != Isolation.NONE
 
 

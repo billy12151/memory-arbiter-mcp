@@ -48,9 +48,20 @@ def _results(search: dict) -> list:
     return (search.get("data") or {}).get("results") or []
 
 
+def _confirm_pending(tools: MemoryTools, memory_id: int) -> dict:
+    record = tools.db.get_memory(memory_id)
+    if record["status"] != MemoryStatus.PENDING.value:
+        return {"ok": True, "data": {"record": record}}
+    return tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id,
+        "canonical": record["workspace_canonical"] or record["workspace"],
+        "authorized": True,
+    })
+
+
 def _active_write(tools: MemoryTools, content: str, workspace: str, subject: str = "test", **kw) -> int:
     mid = _write(tools, content, workspace, subject=subject, **kw)["data"]["id"]
-    tools.memory_activate(memory_id=mid, authorized=True)
+    assert _confirm_pending(tools, mid)["ok"] is True
     return mid
 
 
@@ -368,16 +379,17 @@ def test_strict_new_workspace_blocks_as_pending(tmp_path):
     assert (d.get("record") or {}).get("status") == MemoryStatus.PENDING.value
 
 
-def test_strict_pending_excluded_from_recall_until_activated(tmp_path):
+def test_strict_pending_requires_workspace_confirmation(tmp_path):
     tools = make_tools(tmp_path, "strict")
     r = _write(tools, "pending content", "projA")
     mid = r["data"]["id"]
-    # pending → excluded from same-ws recall
     assert _results(tools.memory_search(query="pending", workspace="projA")) == []
-    act = tools.memory_activate(memory_id=mid, authorized=True)
-    assert act["data"]["activated"] is True
-    assert (act["data"]["record"]).get("status") == MemoryStatus.ACTIVE.value
-    # now recallable
+    blocked = tools.memory_activate(memory_id=mid, authorized=True, workspace="projA")
+    assert blocked["ok"] is False
+    assert blocked["data"]["action_required"] == "confirm_new_workspace"
+    confirmed = _confirm_pending(tools, mid)
+    assert confirmed["ok"] is True
+    assert tools.db.get_memory(mid)["status"] == MemoryStatus.ACTIVE.value
     assert len(_results(tools.memory_search(query="pending", workspace="projA"))) == 1
 
 
@@ -400,7 +412,7 @@ def test_strict_hard_filter_same_canonical_only(tmp_path):
     # activate both distinct workspaces
     for ws, content in [("projA", "apple content"), ("projB", "apple content two")]:
         mid = _write(tools, content, ws)["data"]["id"]
-        tools.memory_activate(memory_id=mid, authorized=True)
+        assert _confirm_pending(tools, mid)["ok"] is True
     res = _results(tools.memory_search(query="apple", workspace="projA", limit=10))
     assert {m["workspace"] for m in res} == {"projA"}
 
@@ -416,8 +428,8 @@ def test_strict_no_leak_when_query_hits_other_workspace(tmp_path):
     tools = make_tools(tmp_path, "strict")
     a_mid = _write(tools, "alpha deployment notes", "projA")["data"]["id"]
     b_mid = _write(tools, "beta release notes uniquebeta", "projB")["data"]["id"]
-    tools.memory_activate(memory_id=a_mid, authorized=True)
-    tools.memory_activate(memory_id=b_mid, authorized=True)
+    assert _confirm_pending(tools, a_mid)["ok"] is True
+    assert _confirm_pending(tools, b_mid)["ok"] is True
     # 'uniquebeta' exists only in projB; a projA search must stay empty.
     res = _results(tools.memory_search(query="uniquebeta", workspace="projA", limit=10))
     assert res == [], f"strict leaked cross-workspace memory: {[m['workspace'] for m in res]}"
@@ -433,8 +445,8 @@ def test_strict_no_leak_when_query_matches_nothing(tmp_path):
     tools = make_tools(tmp_path, "strict")
     a_mid = _write(tools, "alpha deployment notes", "projA")["data"]["id"]
     b_mid = _write(tools, "beta release notes", "projB")["data"]["id"]
-    tools.memory_activate(memory_id=a_mid, authorized=True)
-    tools.memory_activate(memory_id=b_mid, authorized=True)
+    assert _confirm_pending(tools, a_mid)["ok"] is True
+    assert _confirm_pending(tools, b_mid)["ok"] is True
     res = _results(tools.memory_search(query="nomatchterm_zzz", workspace="projA", limit=10))
     assert res == [], f"strict leaked cross-workspace memory on no-match: {[m['workspace'] for m in res]}"
 
@@ -451,7 +463,7 @@ def test_strict_bm25_direct_hits_are_workspace_scoped(tmp_path, monkeypatch):
     tools = make_tools(tmp_path, "strict")
     for ws, content in [("projA", "apple alpha"), ("projB", "apple beta")]:
         mid = _write(tools, content, ws)["data"]["id"]
-        tools.memory_activate(memory_id=mid, authorized=True)
+        assert _confirm_pending(tools, mid)["ok"] is True
 
     res = _results(tools.memory_search(query="apple", workspace="projA", limit=10))
 
@@ -463,9 +475,9 @@ def test_strict_recall_pool_saturation_does_not_hide_same_workspace_hit(tmp_path
     tools.settings.recall_pool_cap = 50
     for i in range(60):
         mid = _write(tools, f"apple shared beta {i:02d}", "projB")["data"]["id"]
-        tools.memory_activate(memory_id=mid, authorized=True)
+        assert _confirm_pending(tools, mid)["ok"] is True
     expected_id = _write(tools, "apple shared alpha should be found", "projA")["data"]["id"]
-    tools.memory_activate(memory_id=expected_id, authorized=True)
+    assert _confirm_pending(tools, expected_id)["ok"] is True
 
     res = _results(tools.memory_search(query="apple", workspace="projA", limit=10))
 
@@ -476,9 +488,9 @@ def test_strict_recall_pool_saturation_does_not_hide_same_workspace_hit(tmp_path
 def test_strict_linked_open_items_are_workspace_scoped(tmp_path):
     tools = make_tools(tmp_path, "strict")
     main_id = _write(tools, "auth bug main", "projA", tags=["auth"])["data"]["id"]
-    tools.memory_activate(memory_id=main_id, authorized=True)
+    assert _confirm_pending(tools, main_id)["ok"] is True
     beta_todo_id = _write(tools, "todo in beta", "projB", tags=["todo", "auth"])["data"]["id"]
-    tools.memory_activate(memory_id=beta_todo_id, authorized=True)
+    assert _confirm_pending(tools, beta_todo_id)["ok"] is True
 
     res = tools.memory_search(query="auth", workspace="projA", limit=10)
 
@@ -489,10 +501,10 @@ def test_strict_linked_open_items_are_workspace_scoped(tmp_path):
 def test_strict_filter_counts_are_workspace_scoped(tmp_path):
     tools = make_tools(tmp_path, "strict")
     alpha_id = _write(tools, "apple alpha", "projA", tags=["fruit"])["data"]["id"]
-    tools.memory_activate(memory_id=alpha_id, authorized=True)
+    assert _confirm_pending(tools, alpha_id)["ok"] is True
     for i in range(3):
         mid = _write(tools, f"banana beta {i}", "projB", tags=["fruit"])["data"]["id"]
-        tools.memory_activate(memory_id=mid, authorized=True)
+        assert _confirm_pending(tools, mid)["ok"] is True
 
     res = tools.memory_search(query="apple", workspace="projA", tags_filter=["fruit"], limit=10)
 
@@ -561,10 +573,10 @@ def test_strict_offset_beyond_same_workspace_set_does_not_leak(tmp_path):
     db = tools.db
     for i in range(3):
         mid = _write(tools, f"apple alpha {i}", "projA")["data"]["id"]
-        tools.memory_activate(memory_id=mid, authorized=True)
+        assert _confirm_pending(tools, mid)["ok"] is True
     for i in range(5):
         mid = _write(tools, f"apple beta {i}", "projB")["data"]["id"]
-        tools.memory_activate(memory_id=mid, authorized=True)
+        assert _confirm_pending(tools, mid)["ok"] is True
     # offset beyond projA's 3 matches — page must be empty, not projB.
     outcome = search_memories(
         db, "apple", "projA", None, 10,
@@ -577,18 +589,18 @@ def test_strict_offset_beyond_same_workspace_set_does_not_leak(tmp_path):
 def test_strict_alias_canonicalization_keeps_distinct_workspaces_separate(tmp_path):
     """strict + alias resolution (no embedder → exact-string): two distinct
     workspace strings stay distinct; searching one does not leak the other.
-    Also covers the double-store (raw + canonical) and same-ws 2nd-write not
-    re-blocking."""
+    Also covers double-store raw/canonical values and repeated pending writes."""
     tools = make_tools(tmp_path, "strict")
     db = tools.db
     r1 = _write(tools, "apple alpha one", "projA")
     r2 = _write(tools, "apple alpha two", "projA")
-    # 1st projA write is a new canonical (blocked as pending); 2nd is not new.
+    # Every write remains pending until the canonical is explicitly confirmed;
+    # an unconfirmed first write does not register a canonical that retries can bypass.
     assert r1["data"].get("action_required") == "confirm_new_workspace"
-    assert r2["data"].get("action_required") is None
-    tools.memory_activate(memory_id=r1["data"]["id"], authorized=True)
+    assert r2["data"].get("action_required") == "confirm_new_workspace"
+    assert _confirm_pending(tools, r1["data"]["id"])["ok"] is True
     r3 = _write(tools, "apple beta three", "projB")
-    tools.memory_activate(memory_id=r3["data"]["id"], authorized=True)
+    assert _confirm_pending(tools, r3["data"]["id"])["ok"] is True
     # strict search projA returns only projA's memories.
     res = _results(tools.memory_search(query="apple", workspace="projA", limit=10))
     assert {m["workspace"] for m in res} == {"projA"}
@@ -636,9 +648,9 @@ def test_strict_evidence_knn_excludes_closer_cross_workspace_vector(tmp_path):
     # query vector [1.0, 0.0]; projA same-ws [0.9, 0.1] (L2~0.14);
     # projB cross-ws [1.0, 0.0] (L2=0.0, exact match — closer!).
     a_mid = _write(tools, "alpha same ws", "projA")["data"]["id"]
-    tools.memory_activate(memory_id=a_mid, authorized=True)
+    assert _confirm_pending(tools, a_mid)["ok"] is True
     b_mid = _write(tools, "beta cross ws exact", "projB")["data"]["id"]
-    tools.memory_activate(memory_id=b_mid, authorized=True)
+    assert _confirm_pending(tools, b_mid)["ok"] is True
     from memory_arbiter.evidence import EvidenceUnit, evidence_content_hash
     db.evidence.publish(a_mid, 2, evidence_content_hash("alpha same ws"), [EvidenceUnit("text", "alpha same ws", 0, 13, 0)], [[0.9, 0.1]])
     db.evidence.publish(b_mid, 2, evidence_content_hash("beta cross ws exact"), [EvidenceUnit("text", "beta cross ws exact", 0, 19, 0)], [[1.0, 0.0]])

@@ -15,6 +15,8 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from .constants import DEFAULT_TERMS, is_default_workspace_term  # re-exported below
+
 # ── workspace-string quality ────────────────────────────────────────────────
 
 # Generic project-shell terms that are NOT workspace-identifying on their own —
@@ -27,7 +29,11 @@ GENERIC_TERMS = {
     "工作", "文档", "资料", "通用",
 }
 
-DEFAULT_TERMS = {"", "default", "默认", "none", "null", "unknown", "未知"}
+# Single source: constants.DEFAULT_TERMS; re-exported here so
+# existing ``from .workspace_rules import DEFAULT_TERMS`` keeps working.
+
+# Case-folded view of GENERIC_TERMS for token-level guards.
+_GENERIC_TERMS_CF = {t.casefold() for t in GENERIC_TERMS}
 
 # Reference / borrowed-material cues: content that merely *references* a project
 # should stay in its own workspace, not be merged into the referenced one.
@@ -57,6 +63,120 @@ def classify_workspace_quality(ws_raw: Optional[str]) -> str:
     if low in {t.casefold() for t in GENERIC_TERMS}:
         return "generic"
     return "specific"
+
+
+# ── shared vector admission (Shared admission — 期1 weak weighting / 期3 strict) ─────
+
+# Short-name guard default: canonicals shorter than this never vector-admit
+# (a 1-2 char name is within cosine reach of many unrelated projects).
+DEFAULT_MIN_NAME_LEN = 3
+
+# weak-isolation continuous weighting curve anchors :
+# full +0.30 inside 0.15, linear decay to 0 at 0.30, 0 beyond. The 0.30 cap
+# keeps the nudge at ~5% of a subject-medium hit (6.0) — same magnitude
+# discipline as trust/recency bonuses.
+WEAK_VECTOR_WEIGHT_MAX = 0.30
+WEAK_VECTOR_DISTANCE_NEAR = 0.15
+WEAK_VECTOR_DISTANCE_FAR = 0.30
+
+
+def _ws_name_fold(name: str) -> str:
+    """Fold to alphanumerics-only (separators/case dropped) for containment."""
+    return re.sub(r"[\W_]+", "", name, flags=re.UNICODE).casefold()
+
+
+def _ws_name_tokens(name: str) -> set[str]:
+    """Split on non-alphanumeric separators; CJK runs stay single tokens."""
+    return {tok.casefold() for tok in re.split(r"[\W_]+", name) if tok}
+
+
+def _generic_only_proximity(query: str, record: str) -> bool:
+    """True when two names look close only through non-identifying material.
+
+    Two hazards, both measured on real embeddings:
+      (a) pure substring containment — ``main`` ⊂ ``openclaw-main`` sits at
+          cosine 0.132 (inside even the weak full-bonus zone) while sharing
+          nothing but the substring;
+      (b) token overlap made exclusively of GENERIC_TERMS — ``project-alpha``
+          vs ``project-beta`` share only "project".
+    """
+    fq, fr = _ws_name_fold(query), _ws_name_fold(record)
+    if fq and fr and fq != fr and (fq in fr or fr in fq):
+        return True
+    tokens_q = _ws_name_tokens(query)
+    tokens_r = _ws_name_tokens(record)
+    shared = tokens_q & tokens_r
+    if shared and shared <= _GENERIC_TERMS_CF:
+        if not (tokens_q - _GENERIC_TERMS_CF) & (tokens_r - _GENERIC_TERMS_CF):
+            return True
+    return False
+
+
+def workspace_vector_distance(
+    query_canonical: Optional[str],
+    record_canonical: Optional[str],
+    distance_map: Optional[dict[str, float]],
+    *,
+    min_name_len: int = DEFAULT_MIN_NAME_LEN,
+) -> Optional[float]:
+    """Guarded cosine distance between two workspace canonicals (Shared admission).
+
+    Returns the usable distance from ``distance_map`` (keyed by record
+    canonical), or None when a guard fires and the caller must fall back to
+    exact-equality semantics:
+      - either side is a reserved default-pool term (default is insulated
+        from the whole vector system, in both directions);
+      - either side is shorter than ``min_name_len`` (short-name guard);
+      - the pair is close only through generic/substring material;
+      - the record canonical has no entry in the map (no vector / degraded).
+    Identical canonicals always return 0.0 — the same workspace needs no
+    vector evidence.
+    """
+    q = (query_canonical or "").strip()
+    r = (record_canonical or "").strip()
+    if not q or not r:
+        return None
+    if q == r:
+        return 0.0
+    if is_default_workspace_term(q) or is_default_workspace_term(r):
+        return None
+    if len(q) < min_name_len or len(r) < min_name_len:
+        return None
+    if _generic_only_proximity(q, r):
+        return None
+    if not distance_map:
+        return None
+    distance = distance_map.get(r)
+    if distance is None:
+        return None
+    return float(distance)
+
+
+def workspace_admit(
+    query_canonical: Optional[str],
+    record_canonical: Optional[str],
+    distance_map: Optional[dict[str, float]],
+    cutoff: float,
+    *,
+    min_name_len: int = DEFAULT_MIN_NAME_LEN,
+) -> bool:
+    """Vector-admission predicate: same-domain iff the guarded
+    canonical-to-canonical distance is available and ≤ cutoff."""
+    distance = workspace_vector_distance(
+        query_canonical, record_canonical, distance_map, min_name_len=min_name_len,
+    )
+    return distance is not None and distance <= float(cutoff)
+
+
+def weak_workspace_vector_weight(distance: float) -> float:
+    """Weak-isolation weight from a guarded cosine distance ."""
+    d = float(distance)
+    if d < WEAK_VECTOR_DISTANCE_NEAR:
+        return WEAK_VECTOR_WEIGHT_MAX
+    if d <= WEAK_VECTOR_DISTANCE_FAR:
+        span = WEAK_VECTOR_DISTANCE_FAR - WEAK_VECTOR_DISTANCE_NEAR
+        return WEAK_VECTOR_WEIGHT_MAX * (WEAK_VECTOR_DISTANCE_FAR - d) / span
+    return 0.0
 
 
 # ── evidence extraction (636 §3) ─────────────────────────────────────────────

@@ -68,6 +68,10 @@ def _default_config_dict(model_path: Path, db_path: Path, backup_jsonl: Path) ->
         "tool_profile": "product",
         "isolation": "none",
         "workspace_match_distance": 0.25,
+        "workspace_weak_vector_weight": False,
+        "workspace_min_name_len": 3,
+        "workspace_recall_admission": False,
+        "workspace_recall_cutoff": 0.25,
         "vec": {"enabled": True, "dim": 768},
         "embedding": {
             "provider": "gguf",

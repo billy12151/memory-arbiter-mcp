@@ -1,12 +1,12 @@
 # Integration Guide
 
-This guide describes the `0.14.0.dev4` development contract.
+This guide describes the `0.14.0.dev5` development contract.
 
 ## MCP Surface
 
 Configure the command as `mema` and use the four product tools. Call `memory(action="help")` or the corresponding tool help to discover current fields.
 
-Writes should include `subject`, `source_type`, `event_time`, `workspace`, `source_ref`, and useful tags. Use `user_confirmed` only for facts explicitly verified by the user. When a new source replaces an existing current source, find/read the existing memory and update it instead of creating a second active copy.
+Writes require a non-empty `subject`; include `source_type`, `event_time`, `source_ref`, and useful tags when known. Pass the real project `workspace` for project facts. Use explicit `workspace="default"` only for facts intentionally stored in the global pool; do not rely on omission because client settings may supply a workspace. Strict isolation requires a workspace. Use `user_confirmed` only for facts explicitly verified by the user. When a new source replaces an existing current source, find/read the existing memory and update it instead of creating a second active copy.
 
 ## Evidence Recall
 
@@ -14,7 +14,7 @@ With sqlite-vec and a local embedding model configured, writes asynchronously pu
 
 `memory(action="read", data={"memory_id":42})` returns the complete source. Add `"span":{"start":120,"end":640}` to return only `data.memory.content[120:640]` plus `data.span.{start,end,total_chars}`. Bounds must be strict JSON integers with `0 <= start < end`; an oversized end clips to content length, while a start beyond content fails. `scan_candidates.deep_read` may provide ready-to-use spans; semantic-notice read calls are full-memory reads by design, so omit the span parameter there whenever full context is needed.
 
-Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect missing/stale coverage, then queue bounded rebuild pages. Repeat execute/dry-run until no ids remain and status reports complete eligible coverage. A changed embedding space reports `state=mismatch` and disables the evidence channel until every eligible memory is republished. Evidence units and vectors are derived: a migration may retain the logical source units, but vectors are always rebuilt in the configured space.
+Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect missing/stale coverage, then queue bounded rebuild pages. Repeat execute/dry-run until no ids remain and status reports complete eligible coverage. A changed embedding space reports `state=mismatch` and disables the evidence channel until every eligible memory is republished. Evidence units and vectors are derived. The conflict-only upgrade from `local_text_evidence_v1` reuses its existing evidence/vector state; older-generation upgrades rebuild vectors in the configured embedding space.
 
 ## Conflict Detection Contract
 
@@ -78,9 +78,9 @@ Canonical normalization runs under every isolation mode and is independent from 
 
 - `none`: exact/confirmed/vector/rule/Qwen normalization behaves like weak mode, but no workspace ACL is applied. An omitted workspace filter returns all workspaces.
 - `weak`: same normalization plus soft ranking/hints; no hard visibility filter.
-- `strict`: exact/confirmed and safe mechanical rules may reuse a canonical; Qwen cannot silently merge. A new workspace remains pending until authorized `confirm_pending_workspace`.
+- `strict`: exact/confirmed and safe mechanical rules may reuse a canonical; Qwen cannot silently merge. A new workspace remains pending until authorized `confirm_pending_workspace`. Visibility is exact-canonical by default. With `workspace_recall_admission=true`, workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share the caller canonical plus every canonical within `workspace_recall_cutoff` (default 0.25) that passes default-pool, `workspace_min_name_len`, and generic-substring guards. Process-global maintenance such as semantic runtime control, backup replay, doctor, and settings is not scoped this way. Missing vectors or sqlite-vec degradation falls back to exact-canonical scope; the insulated `default` pool is never admitted into a strict project scope.
 
-Resolution order is confirmed/rejected alias, exact canonical, bounded vector candidates, deterministic `AUTO|KEEP|ASK`, then Qwen only for an undecided near-match. Qwen must choose from at most five supplied candidates and may suggest `alias|typo|same_project|same_family|related|unrelated|uncertain`. Automatic vector/Qwen normalization writes only the memory's `workspace_canonical`; it does not create a confirmed alias. A rejected alias is never re-proposed.
+Resolution order is internal confirmed/negative workspace decisions, exact canonical, bounded vector candidates, deterministic `AUTO|KEEP|ASK`, then Qwen only for an undecided near-match. Qwen must choose from the supplied candidates and may suggest an identity/typo/project relationship, but automatic normalization writes only the memory's `workspace_canonical`; it does not create a persistent redirect. Negative decisions suppress repeated proposals. Product governance uses rename, migrate, pending confirmation, and full-registry review; internal decision rows are not a product workflow.
 
 Workspace and conflict inference share a serial local worker. `semantic_conflict.workspace_qwen_budget_ms` (default 750, range 50–5000 ms) is an independent short budget: timeout/busy preserves the raw canonical and returns a review hint rather than blocking the write-time notice gate.
 
@@ -96,14 +96,14 @@ The evidence and semantic queues are process-local. A crash, forced shutdown, qu
 
 ## Backup and Upgrade
 
-JSONL replay is previewable without authorization. Applying replay requires explicit user authorization and is idempotent by replay key/payload hash.
+JSONL replay is previewable without authorization. Applying replay requires explicit user authorization and is idempotent by replay key/payload hash. JSONL stores memory records and their selected canonical only; it does not restore internal redirects or negative decisions. Retain the SQLite source/upgrade artifact when workspace decision state must survive.
 
 ### Upgrade matrix
 
 | Source database | Runtime behavior | Public upgrade path | Retained / rebuilt |
 | --- | --- | --- | --- |
-| New/empty or `conflict_groups_v2` | Starts normally; current additive migrations may run | None | Existing current data |
-| `local_text_evidence_v1` (immediately previous generation) | Refused without modification | Side-by-side `mema upgrade`, fast conflict-only path | Core/public data retained; conflict history omitted; evidence/vector tables reused unchanged |
+| New/empty or `workspace_state_v1` | Starts normally | None | Existing current data |
+| `conflict_groups_v2` or `local_text_evidence_v1` | Refused without modification | Side-by-side `mema upgrade`, conflict-only path | Core/public data retained; conflict history and old workspace decision events omitted; FTS/evidence/vector reused |
 | Older claim + memory/section-vector generations | Refused without modification | Same side-by-side `mema upgrade` | Core/public data retained; evidence units generated/retained and vectors rebuilt |
 | Unknown, partial, failed/resuming target | Refused | Diagnose with `mema doctor --json`; repair/resume only with the lower-level migration workflow | Never open as current until verification succeeds |
 
@@ -124,10 +124,10 @@ There is no public in-place upgrade: both paths build and verify a side-by-side 
 4. Run `mema upgrade`; restart and verify with `mema doctor --json`.
 5. Complete the epoch-pinned full `scan_candidates` pass shown by status/doctor.
 
-The side-by-side copy retains memory content/history, backup replay receipts, workspace aliases/canonicals, audit, and evidence. The previous evidence generation clones FTS/evidence/vector tables unchanged and replaces only the conflict domain; older generations rebuild and republish vectors. It intentionally starts with empty new conflict/notice state: old `conflicts`, `conflict_judgments`, and `semantic_notices` history are not migrated. Target publication requires fingerprint stability, empty destructive tables, and a successful target `wal_checkpoint(TRUNCATE)` before WAL/SHM removal and config switch; the full-rebuild path additionally requires complete eligible evidence coverage.
+The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, audit, and evidence. The obsolete workspace decision event ledger is intentionally omitted. The previous evidence generation clones FTS/evidence/vector tables unchanged and replaces only the conflict domain; older generations rebuild and republish vectors. It intentionally starts with empty new conflict/notice state: old `conflicts`, `conflict_judgments`, and `semantic_notices` history are not migrated. Target publication requires fingerprint stability, empty destructive tables, and a successful target `wal_checkpoint(TRUNCATE)` before WAL/SHM removal and config switch; the full-rebuild path additionally requires complete eligible evidence coverage.
 
 On success `conflict_scan_required=true` and a persistent epoch are recorded. Only a full scan covering the upgrade-time active set with the matching detector can CAS-clear it. A partial page, failed scan, or old detector cannot. `--yes` only skips the prompt acknowledging writer shutdown and permanent conflict/judgment/notice-history loss; it does not stop processes, checkpoint/back up the source, or relax verification. `--no-switch` leaves configuration untouched. Environment-overridden/mismatched config paths require the printed manual switch.
 
 ## 中文摘要
 
-0.14.0.dev2 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization，`none` 只是不启用 ACL。升级会丢弃旧 conflict/judgment/notice 历史，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。
+0.14.0.dev5 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。

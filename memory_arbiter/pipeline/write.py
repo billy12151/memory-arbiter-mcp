@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Optional, TYPE_CHECKING
 
 from .. import workspace_rules
+from ..constants import is_default_workspace_term
 from ..models import MemoryRecord, MemoryStatus
 
 if TYPE_CHECKING:
@@ -58,6 +59,7 @@ class WritePipeline:
 
             memory_id, write_warnings = self.db.insert_memory(
                 record, workspace["canonical"], workspace.get("canonical_embedding"),
+                register_workspace_canonical=not workspace["strict_block"],
             )
             if any("workspace canonical vector publish failed" in warning for warning in write_warnings):
                 workspace["vector_publish_pending"] = True
@@ -194,7 +196,9 @@ class WritePipeline:
         # distance scale is not comparable to the name-vector threshold, so it
         # must never auto-assign — global memories (user prefs/identity) belong
         # in default. Read-only: suggest, let the agent/user decide.
-        if str(result["canonical"] or "").strip().casefold() in {"", "default"}:
+        # all reserved default synonyms resolve to the same canonical
+        # ("default"), so the hint fires for 默认/none/未知 writes too.
+        if is_default_workspace_term(str(result["canonical"] or "")):
             result["placement_suggestion"] = self._suggest_placement_for_default(record)
         result["strict_block"] = isolation == "strict" and result["is_new"]
         return result
@@ -228,7 +232,7 @@ class WritePipeline:
             if not peer or peer.get("status") != "active":
                 continue
             ws = str(peer.get("workspace_canonical") or peer.get("workspace") or "").strip()
-            if ws and ws.casefold() not in {"", "default"}:
+            if ws and not is_default_workspace_term(ws):
                 return {
                     "suggested_workspace": ws,
                     "from_memory_id": int(peer.get("id") or 0),
@@ -281,11 +285,29 @@ class WritePipeline:
                 "evidence": suggestion.evidence,
             }
         if workspace["decision"] == "ASK" and not workspace["strict_block"]:
+            similar = workspace["similar"]
+            options: list[dict[str, Any]] = [
+                {"decision": "keep_separate", "action": None},
+            ]
+            if similar:
+                options.insert(0, {
+                    "decision": "merge",
+                    "call": {
+                        "tool": "memory_govern",
+                        "action": "migrate_workspace",
+                        "data": {
+                            "from": data["record"]["workspace"],
+                            "to": similar[0].get("name"),
+                        },
+                    },
+                    "authorization_required": True,
+                })
             data.setdefault("write_hints", {})["workspace_review"] = {
                 "raw": data["record"]["workspace"],
                 "reason": workspace["decision_reason"],
-                "similar_workspaces": workspace["similar"],
-                "how_to_confirm": "memory_govern accept_workspace_alias / reject_workspace_alias",
+                "similar_workspaces": similar,
+                "options": options,
+                "note": "Merge only after user confirmation; otherwise keep the workspace separate.",
             }
         placement = workspace.get("placement_suggestion")
         if placement:

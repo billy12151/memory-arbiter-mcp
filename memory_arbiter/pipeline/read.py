@@ -111,6 +111,9 @@ class ReadPipeline:
                 data = denied.get("data") or {}
                 data.update({"results": [], "count": 0})
                 return denied
+        # strict recall/ACL scope is the admitted canonical set (own +
+        # in-radius neighbours). None/weak never hard-scope by it.
+        ws_scope = caller.scope_canonicals() if isolation == "strict" and ws_canonical else None
         # v0.9.4: search_memories now uses status_filter instead of include_superseded
         outcome = self._search_memories(
             self.db, query, workspace, tags, limit,
@@ -125,6 +128,7 @@ class ReadPipeline:
             ws_canonical=ws_canonical,
             isolation=isolation,
             hard_scope=hard_scope,
+            ws_scope=ws_scope,
         )
         results = outcome.results
         warnings = outcome.warnings
@@ -197,7 +201,7 @@ class ReadPipeline:
         if include_linked_open_items and retrieval_mode == "direct" and results:
             linked = self._linked_open_items_for_search(
                 self.db, results, extra_warnings,
-                ws_canonical=strict_ws(isolation, ws_canonical),
+                ws_canonical=ws_scope,
             )
         response_data = {
             "results": results,
@@ -336,6 +340,7 @@ class ReadPipeline:
             ws_canonical=ws_canonical,
             isolation=isolation,
             hard_scope=hard_scope,
+            ws_scope=caller.scope_canonicals() if isolation == "strict" and ws_canonical else None,
         )
         results = outcome.results
         warnings = outcome.warnings
@@ -498,7 +503,9 @@ class ReadPipeline:
         if denied is not None:
             return denied
         if caller.isolation == "strict" and caller.canonical:
-            results = self.db.list_memories_for_workspace(caller.canonical, limit=limit)
+            results = self.db.list_memories_for_workspace(
+                caller.canonical, limit=limit, admitted=caller.scope_canonicals(),
+            )
         else:
             results = self.db.list_memories(limit=limit)
         data = {"results": results, "count": len(results)}

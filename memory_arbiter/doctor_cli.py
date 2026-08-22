@@ -73,7 +73,7 @@ def _render_text(report: OverviewReport, use_color: bool, update_check: Optional
     # Known dimensions render in a stable order first; any dimension the
     # checks grow later appends after them in first-seen order so a new
     # finding can never be silently dropped from the text report.
-    dim_order = ["config", "evidence", "conflicts", "notices"]
+    dim_order = ["config", "evidence", "conflicts", "notices", "workspace", "capacity"]
     ordered_dims = dim_order + [d for d in dims if d not in dim_order]
     for dim in ordered_dims:
         items = dims.get(dim)

@@ -159,23 +159,9 @@ class SchemaStore:
             CREATE TABLE IF NOT EXISTS workspace_aliases (
               alias_workspace TEXT NOT NULL,
               canonical TEXT NOT NULL,
-              relation TEXT NOT NULL,
               status TEXT NOT NULL CHECK(status IN ('confirmed','rejected')),
-              source TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               PRIMARY KEY(alias_workspace, canonical)
-            );
-            CREATE TABLE IF NOT EXISTS workspace_alias_events (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              alias_workspace TEXT NOT NULL,
-              old_canonical TEXT,
-              new_canonical TEXT,
-              old_status TEXT,
-              new_status TEXT,
-              action TEXT NOT NULL,
-              judge_type TEXT NOT NULL,
-              reason TEXT,
-              created_at TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(workspace, agent_id, status);
@@ -197,48 +183,100 @@ class SchemaStore:
             CREATE INDEX IF NOT EXISTS idx_conflicts_notice_delivery
               ON conflicts(notice_delivery_status, created_at, id)
               WHERE notice_delivery_status='pending';
-            CREATE INDEX IF NOT EXISTS idx_ws_alias_events
-              ON workspace_alias_events(alias_workspace, created_at);
             """
         )
-        self._migrate_workspace_alias_pairs(conn)
+        self._normalize_workspace_alias_schema(conn)
         conn.execute(
             "INSERT INTO migration_state(key,value,updated_at) "
             "VALUES('schema_generation',?,CURRENT_TIMESTAMP) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+            "ON CONFLICT(key) DO UPDATE SET "
+            "value=CASE WHEN migration_state.value LIKE '%:building' "
+            "THEN migration_state.value ELSE excluded.value END,"
+            "updated_at=CURRENT_TIMESTAMP",
             (CURRENT_SCHEMA_GENERATION,),
         )
         conn.commit()
 
     @staticmethod
-    def _migrate_workspace_alias_pairs(conn: sqlite3.Connection) -> None:
-        """Upgrade the old one-row-per-raw alias table without losing decisions."""
-        columns = conn.execute("PRAGMA table_info(workspace_aliases)").fetchall()
+    def _normalize_workspace_alias_schema(conn: sqlite3.Connection) -> None:
+        """Compact legacy alias rows into the internal decision-state table."""
+        table_info = conn.execute("PRAGMA table_info(workspace_aliases)").fetchall()
+        columns = [str(row[1]) for row in table_info]
+        required = {"alias_workspace", "canonical", "status"}
+        if not required <= set(columns):
+            raise sqlite3.DatabaseError(
+                "workspace_aliases is missing required decision-state columns"
+            )
         pk_columns = [
             str(row[1])
-            for row in sorted(columns, key=lambda item: int(item[5] or 0))
+            for row in sorted(table_info, key=lambda item: int(item[5] or 0))
             if int(row[5] or 0) > 0
         ]
-        if pk_columns == ["alias_workspace", "canonical"]:
-            return
-        conn.executescript(
-            """
-            ALTER TABLE workspace_aliases RENAME TO workspace_aliases_legacy;
-            CREATE TABLE workspace_aliases (
-              alias_workspace TEXT NOT NULL,
-              canonical TEXT NOT NULL,
-              relation TEXT NOT NULL,
-              status TEXT NOT NULL CHECK(status IN ('confirmed','rejected')),
-              source TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              PRIMARY KEY(alias_workspace, canonical)
-            );
-            INSERT INTO workspace_aliases(alias_workspace,canonical,relation,status,source,updated_at)
-              SELECT alias_workspace,canonical,relation,status,source,updated_at
-              FROM workspace_aliases_legacy;
-            DROP TABLE workspace_aliases_legacy;
-            """
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='workspace_aliases'"
+        ).fetchone()
+        table_sql = str(sql_row[0] or "").replace(" ", "").casefold() if sql_row else ""
+        compact_shape = columns == ["alias_workspace", "canonical", "status", "updated_at"]
+        compact_constraints = (
+            pk_columns == ["alias_workspace", "canonical"]
+            and all(int(row[3] or 0) == 1 for row in table_info)
+            and all(str(row[2] or "").casefold() == "text" for row in table_info)
+            and "check(statusin('confirmed','rejected'))" in table_sql
         )
+        legacy_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_aliases_legacy'"
+        ).fetchone() is not None
+        if not compact_shape or not compact_constraints or legacy_exists:
+            sources = ["workspace_aliases_legacy", "workspace_aliases"] if legacy_exists else ["workspace_aliases"]
+            for source in sources:
+                source_columns = {
+                    str(row[1]) for row in conn.execute(f"PRAGMA table_info({source})")
+                }
+                if not required <= source_columns:
+                    raise sqlite3.DatabaseError(
+                        f"{source} is missing required decision-state columns"
+                    )
+            conn.execute("SAVEPOINT compact_workspace_aliases")
+            try:
+                conn.execute("DROP TABLE IF EXISTS workspace_aliases_compact")
+                conn.execute(
+                    "CREATE TABLE workspace_aliases_compact ("
+                    "alias_workspace TEXT NOT NULL,canonical TEXT NOT NULL,"
+                    "status TEXT NOT NULL CHECK(status IN ('confirmed','rejected')),"
+                    "updated_at TEXT NOT NULL,PRIMARY KEY(alias_workspace,canonical))"
+                )
+                for source in sources:
+                    source_columns = {
+                        str(row[1]) for row in conn.execute(f"PRAGMA table_info({source})")
+                    }
+                    invalid = int(conn.execute(
+                        f"SELECT COUNT(*) FROM {source} "
+                        "WHERE status NOT IN ('confirmed','rejected') OR status IS NULL"
+                    ).fetchone()[0])
+                    if invalid:
+                        raise sqlite3.DatabaseError(
+                            f"{source} contains invalid workspace decision states"
+                        )
+                    updated_expr = (
+                        "COALESCE(updated_at,CURRENT_TIMESTAMP)"
+                        if "updated_at" in source_columns else "CURRENT_TIMESTAMP"
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO workspace_aliases_compact("
+                        "alias_workspace,canonical,status,updated_at) "
+                        "SELECT alias_workspace,canonical,status," + updated_expr + " "
+                        f"FROM {source}"
+                    )
+                conn.execute("DROP TABLE workspace_aliases")
+                conn.execute("DROP TABLE IF EXISTS workspace_aliases_legacy")
+                conn.execute("ALTER TABLE workspace_aliases_compact RENAME TO workspace_aliases")
+                conn.execute("RELEASE compact_workspace_aliases")
+            except BaseException:
+                conn.execute("ROLLBACK TO compact_workspace_aliases")
+                conn.execute("RELEASE compact_workspace_aliases")
+                raise
+        conn.execute("DROP INDEX IF EXISTS idx_ws_alias_events")
+        conn.execute("DROP TABLE IF EXISTS workspace_alias_events")
 
     def _probe_features(self, conn: sqlite3.Connection) -> None:
         if self.settings.enable_sqlite_vec:

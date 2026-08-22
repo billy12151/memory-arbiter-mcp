@@ -2,7 +2,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Development documentation: `0.14.0.dev2` (memory 715 baseline; destructive conflict-history upgrade described below).
+> Development documentation: `0.14.0.dev5` (workspace admission and full workspace-review contract; destructive conflict-history upgrade described below).
 
 ## Why trust it
 
@@ -22,7 +22,7 @@ pip install "memory-arbiter-mcp[vec]"            # sqlite-vec evidence recall
 pip install "memory-arbiter-mcp[semantic-local]" # local GGUF runtime (embeddings + Qwen)
 ```
 
-Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Its packaged inline template is deliberately smaller than the reference example: it writes DB/backup, tool profile, workspace-isolation defaults (`isolation`, `workspace_match_distance`), vec, embedding, recall caps, and `update_check.enabled=true`; only the semantic-conflict keys are omitted. Add those from `examples/memory-arbiter.config.example.json` when needed. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Its starter template includes DB/backup paths, tool profile, core workspace controls (`isolation`, canonical matching, weak weighting, strict admission, cutoff/guard), vec, embedding, recall caps, and `update_check.enabled=true`. The reference `examples/memory-arbiter.config.example.json` additionally shows optional workspace-Qwen and semantic-conflict tuning. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
 
 The daily loop is four calls — `remember` a reusable fact, `find` to recall, `read` for exact lookup, `update` when a newer source replaces an existing current memory (never create a second active copy of one source of truth). Point any agent at the packaged rule:
 
@@ -65,11 +65,11 @@ The single `conflicts` table stores one one-to-many event and its immutable memb
 
 ## Workspaces
 
-Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` performs the same canonical normalization as `weak` but applies no workspace ACL; an unscoped read still spans all workspaces, while a workspace passed explicitly on a read is canonicalized and used to scope that query. `weak` additionally uses workspace as a soft ranking/hint signal. Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it, and reads/governance are scoped to the canonical workspace. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; only explicit governance creates confirmed/rejected aliases.
+Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` applies no workspace ACL: an omitted workspace spans the library, while an explicitly supplied workspace is canonicalized and scopes that read. `weak` adds a soft ranking/hint signal; `workspace_weak_vector_weight=true` makes that nudge decay continuously with guarded canonical-vector distance. Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it. Strict visibility is exact-canonical by default. When `workspace_recall_admission=true`, workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share one admitted set: the caller canonical plus every canonical at or below `workspace_recall_cutoff` (default `0.25`) after default-pool, short-name (`workspace_min_name_len`), and generic-substring guards. Process-global maintenance (for example semantic runtime control, backup replay, doctor, and settings) is not a workspace-scoped content view. Missing vectors or sqlite-vec degradation fall back to the exact caller canonical. The reserved `default` pool is insulated and is not visible from a strict project scope. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; supported workspace governance uses rename, migrate, pending confirmation, and full-registry confirmation. Internal redirect/negative-decision state prevents old names from re-splitting and suppressed candidates from reappearing, but is not a user-facing workflow.
 
 ## Operating mema
 
-- `mema doctor [--json|--deep]` — read-only health checks; `--deep` loads the GGUF model and probes the live embedding dimension.
+- `mema doctor [--json|--deep]` — read-only health checks; `--deep` loads the GGUF model and probes the live embedding dimension. `workspace.review` warns (CLI exit 1) for canonicals missing from the reviewed snapshot. Rename/merge duplicates first, then call authorized `memory_govern(confirm_workspaces)` without an explicit list to snapshot the current registry and return this check to pass. The overall CLI exits 0 only when no other warning remains.
 - `mema console` — read-only local console on 127.0.0.1.
 - `memory(action="status")` — surfaces `local_text_evidence` coverage, `vec_index_state`, the process-local index queue, and `semantic_conflict` runtime including queue drops/restarts and `check_degradation.last_reason`.
 - Maintenance tasks on `memory_repair`: `rebuild_evidence` (dry-run then batched execute; after an embedding-model change the index reports `state=mismatch` and rebuild flips it back to `ready` automatically), `semantic_control` (`status/pause/resume/enable/unload/disable`), `replay_backup` (dry-run then authorized execute), `cleanup_history`, `set_entity`, `activate_pending`.
@@ -78,9 +78,9 @@ Evidence/semantic queues are process-local, so a crash or forced shutdown can lo
 
 ## Upgrading from an older database
 
-**Development upgrade warning for 0.14.0.dev2:** current runtime startup accepts only schema generation `conflict_groups_v2`. Both the immediately previous `local_text_evidence_v1` database and older claim/memory-vector/section-vector databases are classified as legacy and refused without modification. Both use the public side-by-side `mema upgrade` command, but the work differs: `local_text_evidence_v1` takes the fast conflict-only path and reuses evidence/vector tables unchanged; older generations rebuild evidence and vectors.
+**Development upgrade warning for 0.14.0.dev5:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`; the two immediately previous evidence-capable generations use the conflict-only path, reuse evidence/vector tables, compact current workspace redirect/negative-decision state, and discard the obsolete workspace decision event ledger. Older generations rebuild evidence and vectors.
 
-The side-by-side copy retains memory content/history, backup replay receipts, workspace canonical/alias governance, audit, and logical `memory_evidence` source units. From `local_text_evidence_v1`, it clones existing FTS/evidence/vector state unchanged and transactionally rebuilds only the conflict domain. From older generations it rebuilds FTS and republishes evidence vectors in the configured embedding space. Both paths intentionally start with empty new `conflicts`/notice state and do not copy old `conflicts`, append-only `conflict_judgments`, or `semantic_notices` history. Current contradictions must be rediscovered by a scheduled full-library scan.
+The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, audit, and logical `memory_evidence` source units. The obsolete workspace decision event ledger is not copied. From `local_text_evidence_v1`, it clones existing FTS/evidence/vector state unchanged and transactionally rebuilds only the conflict domain. From older generations it rebuilds FTS and republishes evidence vectors in the configured embedding space. Both paths intentionally start with empty new `conflicts`/notice state and do not copy old `conflicts`, append-only `conflict_judgments`, or `semantic_notices` history. Current contradictions must be rediscovered by a scheduled full-library scan.
 
 After rebuild, status/doctor reports `conflict_scan_required=true` with a persistent scan epoch. Only a successful full scan covering the upgrade-time active-memory set with the matching detector version may CAS-clear that flag; partial pages, failed scans, and older-detector scans do not. The target is published only after row/fingerprint checks, complete eligible evidence coverage, a successful `PRAGMA wal_checkpoint(TRUNCATE)`, and removal of target WAL/SHM sidecars; the source database is never deleted.
 
@@ -136,7 +136,7 @@ See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.conf
 
 - Without sqlite-vec or an embedding model, lexical recall and memory governance continue; evidence indexing is unavailable.
 - Without Qwen, strict write-time model-dependent notices fail closed; scheduled scan continues returning its deterministic KNN/rule baseline candidates.
-- If SQLite is unavailable or unwritable, writes use the append-only JSONL envelope only when that write succeeds.
+- If SQLite is unavailable or unwritable, writes use the append-only JSONL envelope only when that write succeeds. JSONL contains memory records and their selected canonical, not internal redirects or negative decisions; preserve or upgrade the SQLite database to retain workspace decision state.
 
 ## Development
 
@@ -149,4 +149,4 @@ During development, package/docs may describe an unreleased dev version while `s
 
 ## 中文摘要
 
-Memory Arbiter（迷码）是面向 AI Agent 的本地可信事实层：每条事实只存一份完整原文，向量与检索均为可重建的派生索引。冲突 scan 走宽门召回，write-time notice 走双向四字段 Qwen 抽槽与严格 grounding；单一 `conflicts` 表保存一对多事件，生命周期为 `open → applying → resolved` 或 `not_a_conflict`。裁决后按 `judge → apply_conflict_action → resolve_conflict` 顺序治理。`none/weak/strict` 都做 workspace 归一，`none` 仅代表无 ACL。0.14.0.dev2 升级会清除旧 conflict/judgment/notice 历史并要求完成带 epoch 的全库 scan。详见 [INTRO.md](INTRO.md) 与 [docs/INTEGRATION.md](docs/INTEGRATION.md)。
+Memory Arbiter（迷码）是面向 AI Agent 的本地可信事实层：每条事实只存一份完整原文，向量与检索均为可重建的派生索引。冲突 scan 走宽门召回，write-time notice 走双向四字段 Qwen 抽槽与严格 grounding；单一 `conflicts` 表保存一对多事件，生命周期为 `open → applying → resolved` 或 `not_a_conflict`。裁决后按 `judge → apply_conflict_action → resolve_conflict` 顺序治理。`none/weak/strict` 都做 workspace 归一；strict 可选 guarded vector admission，default 池不进入项目 scope。`workspace_state_v1` 升级会清除旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并要求完成带 epoch 的全库 scan。详见 [INTRO.md](INTRO.md) 与 [docs/INTEGRATION.md](docs/INTEGRATION.md)。

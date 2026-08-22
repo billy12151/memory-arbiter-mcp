@@ -7,10 +7,48 @@ semantics of general-purpose DB reads such as ``get_memory``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence, Union
 
 
 WORKSPACE_EXPR = "COALESCE(NULLIF(workspace_canonical, ''), workspace)"
+
+#: A workspace scope is either one canonical name or the admitted set.
+WorkspaceScope = Union[str, Sequence[str], None]
+
+
+def scope_names(scope: WorkspaceScope) -> list[str]:
+    """Normalize a scope (None / one name / a set) to a deduped name list."""
+    if scope is None:
+        return []
+    values: Sequence[Any] = [scope] if isinstance(scope, str) else scope
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        names.append(text)
+    return names
+
+
+def workspace_scope_sql(expr: str, scope: WorkspaceScope) -> tuple[str, list[str]]:
+    """Build a workspace-scoping SQL fragment over an admitted canonical set.
+
+    strict scoping is an admitted-set membership, not a single equality.
+    A single-element scope produces ``EXPR = ?`` — byte-identical to the previous
+    equality filter — so with vector admission off (the admitted set collapses
+    to just the caller's own canonical) every call site keeps its old plan.
+    Multiple canonicals produce ``EXPR IN (?, ?, ...)``. Empty scope →
+    ``("", [])`` so the caller adds no clause.
+    """
+    names = scope_names(scope)
+    if not names:
+        return "", []
+    if len(names) == 1:
+        return f"{expr} = ?", [names[0]]
+    placeholders = ",".join("?" for _ in names)
+    return f"{expr} IN ({placeholders})", names
 
 
 @dataclass(frozen=True)
@@ -20,10 +58,25 @@ class CallerWorkspace:
     canonical: Optional[str]
     source: str
     warnings: tuple[str, ...] = ()
+    #: canonicals a strict caller may read/act on — its own plus any
+    #: within the recall cutoff (vector admission). Always contains ``canonical``
+    #: when set. Empty for non-strict callers (they never hard-scope by it).
+    admitted: tuple[str, ...] = ()
 
     @property
     def strict(self) -> bool:
         return self.isolation == "strict"
+
+    def scope_canonicals(self) -> tuple[str, ...]:
+        """Admitted set for strict SQL/visibility scoping.
+
+        Falls back to ``(canonical,)`` so a caller constructed without an
+        explicit admitted set (legacy call sites, tests) behaves exactly like
+        the single-canonical equality filter.
+        """
+        if self.admitted:
+            return self.admitted
+        return (self.canonical,) if self.canonical else ()
 
     def response_fields(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -41,10 +94,26 @@ def raw_workspace(record: Optional[dict[str, Any]]) -> str:
     return str((record.get("workspace_canonical") or record.get("workspace") or "")).strip()
 
 
-def visible_memory(record: Optional[dict[str, Any]], canonical: Optional[str]) -> bool:
+def visible_memory(
+    record: Optional[dict[str, Any]],
+    canonical: Optional[str],
+    admitted: WorkspaceScope = None,
+) -> bool:
+    """Strict read-ACL predicate.
+
+    when an ``admitted`` scope is supplied the record is visible if its
+    workspace is any admitted canonical (vector-admission neighbourhood);
+    otherwise the single-canonical-canonical check applies. ``canonical=None``
+    means no ACL (non-strict).
+    """
     if canonical is None:
         return record is not None
-    return record is not None and raw_workspace(record) == canonical
+    if record is None:
+        return False
+    allowed = scope_names(admitted)
+    if allowed:
+        return raw_workspace(record) in set(allowed)
+    return raw_workspace(record) == canonical
 
 
 def forbidden_payload(kind: str, *, workspace: CallerWorkspace, reason: str = "workspace_acl") -> dict[str, Any]:

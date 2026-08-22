@@ -30,11 +30,10 @@ from .tools import MemoryTools
 
 PRESERVED_TABLES = (
     "memories", "memory_history", "memory_evidence",
-    "workspace_canonicals", "workspace_aliases", "workspace_alias_events",
-    "backup_replay_log",
+    "workspace_canonicals", "workspace_aliases", "backup_replay_log",
 )
 DESTRUCTIVELY_REBUILT_TABLES = (
-    "conflicts", "conflict_judgments", "semantic_notices",
+    "conflicts", "conflict_judgments", "semantic_notices", "workspace_alias_events",
 )
 _BUILDING_SCHEMA_GENERATION = f"{CURRENT_SCHEMA_GENERATION}:building"
 
@@ -88,8 +87,7 @@ def _fingerprint_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
         ("memory_history", "id"),
         ("memory_evidence", "id"),
         ("workspace_canonicals", "id"),
-        ("workspace_aliases", "alias_workspace"),
-        ("workspace_alias_events", "id"),
+        ("workspace_aliases", "alias_workspace,canonical"),
         ("backup_replay_log", "replay_key"),
     ):
         digest = hashlib.sha256()
@@ -100,6 +98,11 @@ def _fingerprint_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
                     """SELECT memory_id,memory_version,content_hash,unit_index,kind,
                               text,start_offset,end_offset
                        FROM memory_evidence ORDER BY memory_id,unit_index"""
+                )
+            elif table == "workspace_aliases":
+                rows = conn.execute(
+                    "SELECT alias_workspace,canonical,status,updated_at "
+                    "FROM workspace_aliases ORDER BY alias_workspace,canonical"
                 )
             else:
                 rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by}")
@@ -211,6 +214,8 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
     try:
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("BEGIN IMMEDIATE")
+        from .db.schema import SchemaStore
+        SchemaStore._normalize_workspace_alias_schema(conn)
         conn.execute("DROP TABLE IF EXISTS semantic_notices")
         conn.execute("DROP TABLE IF EXISTS conflict_judgments")
         conn.execute("DROP TABLE IF EXISTS conflicts")
@@ -424,11 +429,32 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     target.parent.mkdir(parents=True, exist_ok=True)
     target_settings = replace(settings, db_path=target, semantic_conflict_on_write="off")
     if not target.exists():
-        db = MemoryDB(target_settings)
-        os.chmod(target, 0o600)
-        _copy_preserved_tables(source, db)
-        with db.connection() as conn:
-            db.schema._rebuild_fts(conn)
+        # Seed an incomplete generation before constructing MemoryDB. Schema
+        # initialization preserves the :building marker, so a crash during
+        # table copy is never classified as a current/openable database.
+        with contextlib.closing(sqlite3.connect(target)) as seed:
+            seed.execute(
+                "CREATE TABLE migration_state("
+                "key TEXT PRIMARY KEY,value TEXT NOT NULL,"
+                "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            seed.execute(
+                "INSERT INTO migration_state(key,value) VALUES('schema_generation',?)",
+                (_BUILDING_SCHEMA_GENERATION,),
+            )
+            seed.execute(
+                "INSERT INTO migration_state(key,value) VALUES('phase','building')"
+            )
+            seed.commit()
+        try:
+            db = MemoryDB(target_settings, allow_incomplete=True)
+            os.chmod(target, 0o600)
+            _copy_preserved_tables(source, db)
+            with db.connection() as conn:
+                db.schema._rebuild_fts(conn)
+        except BaseException:
+            _reset_phase_to_failed(target)
+            raise
     else:
         # Classify by content, not by detect(): a crashed vnext target
         # (current schema, phase failed/backfill/resuming) is exactly what
@@ -536,8 +562,9 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     if source_fp.get("memory_evidence_count", 0):
         stable_keys.extend(["memory_evidence_count", "memory_evidence_digest"])
     source_stable = all(source_fp.get(key) == target_fp.get(key) for key in stable_keys)
+    destructive_counts = _destructive_counts(target)
     destructive_tables_empty = all(
-        target_counts.get(table, 0) == 0 for table in DESTRUCTIVELY_REBUILT_TABLES
+        destructive_counts.get(table, 0) == 0 for table in DESTRUCTIVELY_REBUILT_TABLES
     )
     complete = (
         not failed
@@ -564,6 +591,9 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         switch_ready = _checkpoint(target)
         if switch_ready:
             _remove_sidecars(target)
+        else:
+            _reset_phase_to_failed(target)
+            complete = False
         os.chmod(target, 0o600)
     return {
         "ok": complete, "target": str(target), "indexed": indexed,

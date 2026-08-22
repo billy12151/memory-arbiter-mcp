@@ -16,8 +16,10 @@ except ImportError:  # pragma: no cover - Windows lacks fcntl; startup stays bes
 
 
 DatabaseGeneration = Literal["missing", "empty", "current", "legacy", "unknown"]
-CURRENT_SCHEMA_GENERATION = "conflict_groups_v2"
-PREVIOUS_SCHEMA_GENERATIONS = frozenset({"local_text_evidence_v1"})
+CURRENT_SCHEMA_GENERATION = "workspace_state_v1"
+PREVIOUS_SCHEMA_GENERATIONS = frozenset({
+    "conflict_groups_v2", "local_text_evidence_v1",
+})
 # The single identity of the running conflict-detection pipeline (deterministic
 # rules + Qwen pair extraction). The scan-clearing gate compares the PERSISTED
 # requirement against this running constant, and scan candidate keys stamp it;

@@ -1904,6 +1904,10 @@ def test_scan_candidates_strict_workspace_does_not_leak(tmp_path: Path) -> None:
     assert result["data"]["next_anchor_memory_id"] is None
     for clue in result["data"]["candidates"]:
         assert "postgres" not in clue["left_snippet"] and "postgres" not in clue["right_snippet"]
+        for deep_read in clue["deep_read"].values():
+            assert deep_read["workspace"] == "apisvc"
+            executed = tools.memory("read", deep_read)
+            assert executed["ok"] is True, executed
         for side in (clue["left_id"], clue["right_id"]):
             record = tools.db.get_memory(side)
             canonical = record.get("workspace_canonical") or record.get("workspace")

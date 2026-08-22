@@ -242,6 +242,11 @@ class BackupReplayStore:
         if not self._db.db_available or not self._db.state.sqlite_writable:
             return {"outcome": "sqlite_unavailable", "replay_key": entry["replay_key"]}
         record = MemoryRecord.from_input(entry["record"], self._db.settings.defaults())
+        captured_workspace = str(entry.get("workspace_canonical") or record.workspace)
+        resolved = self._db.resolve_workspace_canonical(
+            captured_workspace, None, register_new=False,
+        )
+        canonical = str(resolved.get("canonical") or captured_workspace)
         replay_key = str(entry["replay_key"])
         payload_hash = str(entry["payload_hash"])
         try:
@@ -254,21 +259,23 @@ class BackupReplayStore:
                 if prior is not None:
                     outcome = "already_replayed" if prior["payload_hash"] == payload_hash else "receipt_hash_conflict"
                     return self._receipt_result(prior, replay_key, outcome)
-                canonical = str(entry.get("workspace_canonical") or record.workspace)
                 if self._db.settings.isolation == "strict":
-                    # Registry presence is not confirmation: replay itself registers
-                    # canonicals, so only an existing active memory proves visibility.
                     confirmed = conn.execute(
-                        "SELECT 1 FROM memories WHERE workspace_canonical=? AND status='active' LIMIT 1",
+                        "SELECT 1 FROM memories WHERE workspace_canonical=? "
+                        "AND status='active' LIMIT 1",
                         (canonical,),
                     ).fetchone()
                     if confirmed is None:
                         record.status = "pending"
                 memory_id = self._db.insert_memory_on_conn(conn, record, canonical)
-                conn.execute(
-                    "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
-                    (canonical, utc_now_iso()),
-                )
+                if not (
+                    self._db.settings.isolation == "strict"
+                    and record.status == "pending"
+                ):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                        (canonical, utc_now_iso()),
+                    )
                 conn.execute(
                     "INSERT INTO backup_replay_log(replay_key, memory_id, payload_hash, replayed_at, postprocess_status) VALUES (?, ?, ?, ?, 'pending')",
                     (replay_key, memory_id, payload_hash, utc_now_iso()),

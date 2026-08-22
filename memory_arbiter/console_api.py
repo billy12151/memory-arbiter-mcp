@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__
+from .acl import workspace_scope_sql
 from .config import Settings, _find_config_file
 from .config_registry import CONFIG_DESCRIPTORS, grouped_descriptors
 from .tools import MemoryTools
@@ -64,7 +65,7 @@ class ConsoleAPI:
         if denied is not None:
             payload = self._payload(denied)
             return {"error": payload.get("error") or "forbidden_strict_workspace", "_http_status": 403, **caller.response_fields()}
-        status = self._payload(self.tools.memory_status())
+        status = self._payload(self.tools.memory_status(workspace=workspace))
         audit = self._payload(self.tools.memory_audit_summary(workspace=workspace))
         doctor = self._payload(self.tools.memory_doctor_overview(deep=False))
         counts = self._status_counts(workspace=workspace)
@@ -105,11 +106,13 @@ class ConsoleAPI:
         try:
             caller = self.tools._caller_workspace(workspace)
             if caller.isolation == "strict" and caller.canonical:
+                scope_sql, scope_params = workspace_scope_sql(
+                    "COALESCE(NULLIF(workspace_canonical, ''), workspace)", caller.scope_canonicals(),
+                )
                 with self.tools.db.connection() as conn:
                     rows = conn.execute(
-                        "SELECT status, COUNT(*) AS count FROM memories "
-                        "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? GROUP BY status",
-                        (caller.canonical,),
+                        f"SELECT status, COUNT(*) AS count FROM memories WHERE {scope_sql} GROUP BY status",
+                        scope_params,
                     ).fetchall()
                     for row in rows:
                         status = row["status"] or "unknown"
@@ -280,16 +283,17 @@ class ConsoleAPI:
         try:
             with db.connection() as conn:
                 if isolation == "strict":
+                    scope_sql, scope_params = workspace_scope_sql(
+                        "COALESCE(NULLIF(workspace_canonical, ''), workspace)", caller.scope_canonicals(),
+                    )
                     total = int(conn.execute(
-                        "SELECT COUNT(*) FROM memories WHERE status='active' "
-                        "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
-                        (caller.canonical,),
+                        f"SELECT COUNT(*) FROM memories WHERE status='active' AND {scope_sql}",
+                        scope_params,
                     ).fetchone()[0] or 0)
                     rows = conn.execute(
-                        "SELECT * FROM memories WHERE status='active' "
-                        "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? "
+                        f"SELECT * FROM memories WHERE status='active' AND {scope_sql} "
                         "ORDER BY ingest_time DESC, id DESC LIMIT ? OFFSET ?",
-                        (caller.canonical, limit, offset),
+                        (*scope_params, limit, offset),
                     ).fetchall()
                 else:
                     total = int(conn.execute(

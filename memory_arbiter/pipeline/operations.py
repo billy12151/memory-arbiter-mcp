@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import threading
 import time
+from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
 from .. import __version__
-from ..acl import forbidden_payload, raw_workspace
+from ..acl import WorkspaceScope, scope_names, workspace_scope_sql, forbidden_payload, raw_workspace
 from ..arbitration import compare_memories
-from ..db import MemoryDB
+from ..constants import DEFAULT_WORKSPACE_NAME, is_default_workspace_term
+from ..db import MemoryDB, _normalize_alias_key
+from ..db.workspaces import _mechanical_ws_key
 from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
@@ -108,19 +113,39 @@ class OperationsPipeline:
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
-        conflicts = []
+        conflicts: list[dict[str, Any]] = []
         raw_limit = max(int(limit), 1)
-        scan_limit = 10000 if caller.isolation == "strict" else raw_limit
-        for c in self.db.list_conflicts(status=status, limit=scan_limit, source=source):
-            if caller.isolation == "strict":
-                detail = self._conflict_detail_for_workspace(int(c.get("id")), caller)
-                if detail is None:
-                    continue
-                conflicts.append(detail["conflict"])
-                if len(conflicts) >= raw_limit:
+        if caller.isolation != "strict":
+            conflicts = [
+                self._with_resolution_guidance(c)
+                for c in self.db.list_conflicts(
+                    status=status, limit=raw_limit, source=source,
+                )
+            ]
+        else:
+            # Scope in SQL BEFORE LIMIT so large out-of-scope backlogs cannot
+            # hide an admitted workspace's older conflicts. Page through rows
+            # because member revalidation may still discard stale/malformed
+            # groups after SQL scoping.
+            scope = caller.scope_canonicals()
+            page_size = min(max(raw_limit, 50), 1000)
+            offset = 0
+            while len(conflicts) < raw_limit:
+                rows = self.db.list_conflicts(
+                    status=status, limit=page_size, source=source,
+                    workspace=scope, offset=offset,
+                )
+                if not rows:
                     break
-            else:
-                conflicts.append(self._with_resolution_guidance(c))
+                for c in rows:
+                    detail = self._conflict_detail_for_workspace(int(c.get("id")), caller)
+                    if detail is not None:
+                        conflicts.append(detail["conflict"])
+                        if len(conflicts) >= raw_limit:
+                            break
+                offset += len(rows)
+                if len(rows) < page_size:
+                    break
         data = {"conflicts": conflicts, "count": len(conflicts)}
         if caller.isolation == "strict":
             data.update(caller.response_fields())
@@ -134,11 +159,14 @@ class OperationsPipeline:
         if denied is not None:
             return denied
         conflict = self.db.get_conflict(int(conflict_id))
-        if conflict is None or (caller.isolation == "strict" and conflict.get("workspace_canonical") != caller.canonical):
+        if conflict is None or (
+            caller.isolation == "strict"
+            and str(conflict.get("workspace_canonical") or "") not in set(caller.scope_canonicals())
+        ):
             return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
         result = self.db.conflicts.resolve_conflict(
             int(conflict_id), reason=reason, expected_revision=int(expected_revision),
-            strict_workspace=caller.canonical if caller.isolation == "strict" else None,
+            strict_workspace=caller.scope_canonicals() if caller.isolation == "strict" else None,
         )
         return self.db.state.response(
             result, ok=result.get("outcome") == "resolved", extra_warnings=list(caller.warnings),
@@ -175,7 +203,7 @@ class OperationsPipeline:
                 if int(conflict.get("revision") or 0) != revision:
                     raise ValueError(f"stale_conflict:{conflict.get('revision')}")
                 if caller.isolation == "strict" and not self.db.conflicts._active_members_match_workspace(
-                    conn, conflict, caller.canonical,
+                    conn, conflict, caller.scope_canonicals(),
                 ):
                     raise PermissionError("forbidden")
                 plan = (conflict.get("apply_summary") or {}).get("plan", [])
@@ -268,10 +296,36 @@ class OperationsPipeline:
             )
         next_step = next((item for item in plan if item.get("status") == "pending"), None)
         if successful:
-            result["next_action"] = ({"tool": "memory_govern", "action": "apply_conflict_action", "data": {"conflict_id": conflict_id_int, "expected_revision": revision + 1, "memory_id": next_step["memory_id"], "action": next_step["action"], "authorized": True}} if next_step else {"tool": "memory_govern", "action": "resolve_conflict", "data": {"conflict_id": conflict_id_int, "expected_revision": revision + 1, "authorized": True}})
+            next_data = {
+                "conflict_id": conflict_id_int,
+                "expected_revision": revision + 1,
+                "authorized": True,
+            }
+            if caller.isolation == "strict" and caller.workspace:
+                next_data["workspace"] = caller.workspace
+            if next_step:
+                next_data.update({
+                    "memory_id": next_step["memory_id"], "action": next_step["action"],
+                })
+                result["next_action"] = {
+                    "tool": "memory_govern", "action": "apply_conflict_action", "data": next_data,
+                }
+            else:
+                result["next_action"] = {
+                    "tool": "memory_govern", "action": "resolve_conflict", "data": next_data,
+                }
         else:
+            replan_data: dict[str, Any] = {
+                "conflict_id": conflict_id_int,
+                "expected_revision": revision + 1,
+                "authorized": True,
+            }
+            if caller.isolation == "strict" and caller.workspace:
+                replan_data["workspace"] = caller.workspace
             result["action_required"] = "replan_conflict"
-            result["replan"] = {"tool": "memory_govern", "action": "replan_conflict", "data": {"conflict_id": conflict_id_int, "expected_revision": revision + 1, "authorized": True}}
+            result["replan"] = {
+                "tool": "memory_govern", "action": "replan_conflict", "data": replan_data,
+            }
         return self.db.state.response(result, ok=successful, extra_warnings=list(caller.warnings))
 
     def memory_replan_conflict(
@@ -286,7 +340,8 @@ class OperationsPipeline:
             return denied
         conflict = self.db.get_conflict(int(conflict_id))
         if conflict is None or (
-            caller.isolation == "strict" and conflict.get("workspace_canonical") != caller.canonical
+            caller.isolation == "strict"
+            and str(conflict.get("workspace_canonical") or "") not in set(caller.scope_canonicals())
         ):
             return self.db.state.response(
                 forbidden_payload("conflict", workspace=caller), ok=False,
@@ -295,7 +350,7 @@ class OperationsPipeline:
         result = self.db.conflicts.replan_conflict(
             int(conflict_id), expected_revision=int(expected_revision), apply_plan=apply_plan,
             resolution_memory_id=resolution_memory_id,
-            strict_workspace=caller.canonical if caller.isolation == "strict" else None,
+            strict_workspace=caller.scope_canonicals() if caller.isolation == "strict" else None,
         )
         return self.db.state.response(result, ok=result.get("outcome") == "replanned", extra_warnings=list(caller.warnings))
 
@@ -345,63 +400,27 @@ class OperationsPipeline:
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     # ------------------------------------------------------------------
-    #  Workspace alias governance (design 636 §8 / 637). User-authorized
-    #  accept/reject/rename/migrate/confirm-pending.
+    #  Workspace rename/migration and strict pending confirmation.
     # ------------------------------------------------------------------
-    def memory_accept_workspace_alias(
-        self, alias: str, canonical: str, relation: str = "alias",
-        reason: Optional[str] = None, source: str = "user",
-        authorized: bool = False, **_: Any,
-    ) -> dict[str, Any]:
-        """Confirm that `alias` is the same workspace as `canonical`.
-
-        Future writes/queries with `alias` resolve straight to `canonical` — no
-        vector/Qwen round-trip, no repeat prompt (636 §8). If the pair was
-        previously rejected, pass authorized=true to deliberately reverse it.
-        """
-        ok, warnings = self.db.upsert_workspace_alias(
-            alias, canonical, relation=str(relation or "alias"), status="confirmed",
-            source=str(source or "user"), action="accept", judge_type="user",
-            reason=reason, force=self._is_truthy(authorized),
-        )
-        return self.db.state.response(
-            {"accepted": ok, "alias": alias, "canonical": canonical, "status": "confirmed"},
-            ok=ok, extra_warnings=warnings,
-        )
-
-    def memory_reject_workspace_alias(
-        self, alias: str, canonical: str, reason: Optional[str] = None,
-        source: str = "user", **_: Any,
-    ) -> dict[str, Any]:
-        """Record that `alias` is NOT `canonical`.
-
-        Suppresses this pair in future candidate ranking so it stops being
-        proposed (636 §4,8).
-        """
-        ok, warnings = self.db.upsert_workspace_alias(
-            alias, canonical, relation="unrelated", status="rejected",
-            source=str(source or "user"), action="reject", judge_type="user",
-            reason=reason,
-        )
-        return self.db.state.response(
-            {"rejected": ok, "alias": alias, "canonical": canonical, "status": "rejected"},
-            ok=ok, extra_warnings=warnings,
-        )
-
     def memory_rename_workspace_canonical(
         self, old: str, new: str, reason: Optional[str] = None, **_: Any,
     ) -> dict[str, Any]:
-        """Rename a canonical workspace everywhere (memories + registry + audit)."""
-        updated, warnings = self.db.rename_workspace_canonical(old, new, judge_type="user", reason=reason)
+        """Rename a canonical workspace and maintain internal forwarding."""
+        updated, warnings = self.db.rename_workspace_canonical(old, new)
         return self.db.state.response(
-            {"renamed": True, "old": old, "new": new, "memories_updated": updated},
+            {
+                "renamed": not warnings,
+                "old": old,
+                "new": new,
+                "memories_updated": updated,
+            },
             ok=not warnings, extra_warnings=warnings,
         )
 
     def memory_migrate_workspace(
         self, reason: Optional[str] = None, **payload: Any,
     ) -> dict[str, Any]:
-        """Bulk-move memories from one workspace to another; record the alias.
+        """Merge one workspace into another and maintain internal forwarding.
 
         `from`/`to` are reserved words so they arrive via **payload.
         """
@@ -409,7 +428,7 @@ class OperationsPipeline:
         to_ws = str(payload.get("to") or "")
         embedder, ensure_warnings = self._ensure_embedder()
         updated, warnings = self.db.migrate_workspace(
-            from_ws, to_ws, judge_type="user", reason=reason, embedder=embedder,
+            from_ws, to_ws, embedder=embedder,
         )
         vector_publish_pending = any("workspace canonical vector publish failed" in warning for warning in warnings)
         operation_warnings = [
@@ -441,13 +460,10 @@ class OperationsPipeline:
         self, memory_id: int, canonical: str, reason: Optional[str] = None,
         authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
-        """Confirm a strict-blocked pending memory's workspace and activate it.
+        """Assign a pending memory's canonical workspace and activate it.
 
-        Records a confirmed alias (raw workspace -> canonical), sets the
-        memory's canonical, and flips status pending -> active. If the raw
-        workspace was previously rejected as an alias of `canonical`, this call
-        fails (ok=False) unless authorized=true — a rejection is a user
-        decision and must not be silently reversed by a confirm-pending flow.
+        When the raw and selected canonical names differ, an internal redirect
+        is recorded so future writes using the old raw name do not re-split.
         """
         authorized = self._is_truthy(authorized)
         explicit_workspace = _.get("workspace")
@@ -457,6 +473,12 @@ class OperationsPipeline:
             if denied is not None:
                 return denied
         warnings: list[str] = list(caller.warnings) if caller is not None else []
+
+        def visible_error_record() -> Optional[dict[str, Any]]:
+            if caller is not None:
+                return self._get_memory_visible(int(memory_id), caller)
+            return self.db.get_memory(int(memory_id))
+
         # Confirmation assigns an already user-selected canonical. It must not
         # invoke embedding/model work; a later ordinary write can publish the
         # canonical vector through the normal retry path.
@@ -472,19 +494,48 @@ class OperationsPipeline:
                         f"memory is not pending (status={memory.get('status')}); only pending memories can be confirmed"
                     )
                 raw_ws = memory.get("workspace") or ""
+                if is_default_workspace_term(raw_ws):
+                    if not is_default_workspace_term(canonical):
+                        raise ValueError(
+                            "reserved default workspace cannot be confirmed into a project canonical"
+                        )
+                    canonical = DEFAULT_WORKSPACE_NAME
+                else:
+                    if _mechanical_ws_key(raw_ws) == _mechanical_ws_key(canonical):
+                        canonical = str(raw_ws).strip()
+                    else:
+                        resolved_canonical = self.db.resolve_workspace_canonical(
+                            canonical, None, register_new=False,
+                        )
+                        canonical = str(
+                            resolved_canonical.get("canonical") or canonical
+                        ).strip()
                 if caller is not None and caller.isolation == "strict":
                     memory_workspace = raw_workspace(memory)
                     if not memory_workspace or memory_workspace != caller.canonical:
                         raise ValueError("forbidden_strict_workspace: pending memory is outside caller workspace")
                     if str(canonical or "").strip() != caller.canonical:
                         raise ValueError("forbidden_strict_workspace: canonical must match caller workspace")
-                ok_alias, alias_warnings = self.db.upsert_workspace_alias_on_conn(
-                    conn, raw_ws, canonical, relation="alias", status="confirmed",
-                    source="user", action="accept", judge_type="user", reason=reason,
-                    force=self._is_truthy(authorized),
-                )
+                alias_warnings: list[str]
+                if is_default_workspace_term(raw_ws):
+                    # a reserved default synonym raw is already the global
+                    # pool; no internal redirect is meaningful for it. Fold
+                    # a default-term canonical to the one true spelling so a
+                    # synonym can never be re-persisted as a phantom canonical
+                    # (round-2 review: the bypass must not drop the
+                    # canonical-side default-term guard either).
+                    if is_default_workspace_term(canonical):
+                        canonical = DEFAULT_WORKSPACE_NAME
+                    ok_alias, alias_warnings = True, []
+                elif _normalize_alias_key(raw_ws) == _normalize_alias_key(canonical):
+                    ok_alias, alias_warnings = True, []
+                else:
+                    ok_alias, alias_warnings = self.db.record_workspace_decision_on_conn(
+                        conn, raw_ws, canonical, status="confirmed",
+                        force=self._is_truthy(authorized),
+                    )
                 if not ok_alias:
-                    raise ValueError("; ".join(alias_warnings) or "workspace alias not written")
+                    raise ValueError("; ".join(alias_warnings) or "workspace redirect not written")
                 warnings.extend(alias_warnings)
                 canonical_set, canonical_warnings = self.db.set_memory_workspace_canonical_on_conn(
                     conn, int(memory_id), canonical,
@@ -503,7 +554,7 @@ class OperationsPipeline:
                 "confirmed": False,
                 "activated": False,
                 "canonical": canonical,
-                "record": self.db.get_memory(int(memory_id)),
+                "record": visible_error_record(),
                 "error": str(exc),
             }
             return self.db.state.response(data, ok=False, extra_warnings=warnings)
@@ -512,7 +563,7 @@ class OperationsPipeline:
                 "confirmed": False,
                 "activated": False,
                 "canonical": canonical,
-                "record": self.db.get_memory(int(memory_id)),
+                "record": visible_error_record(),
                 "error": f"confirm pending workspace failed: {exc}",
             }
             return self.db.state.response(data, ok=False, extra_warnings=warnings)
@@ -521,7 +572,7 @@ class OperationsPipeline:
                 "confirmed": False,
                 "activated": False,
                 "canonical": canonical,
-                "record": self.db.get_memory(int(memory_id)),
+                "record": visible_error_record(),
                 "error": f"confirm pending workspace failed: {exc}",
             }
             return self.db.state.response(data, ok=False, extra_warnings=warnings)
@@ -545,6 +596,107 @@ class OperationsPipeline:
             data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), data["record"])
         return self.db.state.response(data, ok=True, extra_warnings=warnings)
 
+    def memory_confirm_workspaces(
+        self,
+        workspaces: Optional[list[str]] = None,
+        reason: Optional[str] = None,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Record the user-confirmed workspace registry snapshot.
+
+        Writes workspace_review.json next to the DB — the baseline doctor's
+        workspace.review diffs against. Explicit governance action only:
+        doctor never refreshes the snapshot itself, otherwise a routine run
+        would silently mark unreviewed workspaces confirmed. Default is to
+        snapshot the CURRENT workspace_canonicals registry — run it after
+        rename/migrate merges so the final normalized set is recorded; an
+        explicit ``workspaces`` list overrides (e.g. to confirm a subset).
+        Reserved default terms are never stored in the snapshot.
+        """
+        if not self._is_truthy(authorized):
+            return self.db.state.response(
+                {"error": "authorized=True is required to confirm workspaces", "confirmed": False},
+                ok=False,
+            )
+        from ..doctor import WORKSPACE_REVIEW_SIDECAR
+        from ..models import utc_now_iso
+
+        if workspaces is None:
+            try:
+                with self.db.connection() as conn:
+                    rows = conn.execute(
+                        "SELECT name FROM workspace_canonicals ORDER BY name"
+                    ).fetchall()
+                names = [str(row["name"]) for row in rows]
+            except sqlite3.Error as exc:
+                return self.db.state.response(
+                    {"confirmed": False, "error": f"workspace registry unreadable: {exc}"},
+                    ok=False,
+                )
+        else:
+            # Authoritative guard for direct callers that bypass the product
+            # surface (validation.py + surfaces dispatch type-check too): a
+            # non-list input must be refused, not str()-iterated into
+            # single-character names. Bounded like every other product list
+            # field (≤100 items × 2000 chars).
+            if not isinstance(workspaces, list) or any(
+                not isinstance(name, str) for name in workspaces
+            ):
+                return self.db.state.response(
+                    {"confirmed": False, "error": "workspaces must be a list of workspace name strings"},
+                    ok=False,
+                )
+            names = list(workspaces)
+            if len(names) > 100 or any(len(name) > 2000 for name in names):
+                return self.db.state.response(
+                    {"confirmed": False, "error": "workspaces must be at most 100 items of at most 2000 characters each"},
+                    ok=False,
+                )
+        confirmed = sorted({
+            name.strip() for name in names
+            if name.strip() and not is_default_workspace_term(name)
+        })
+        sidecar = Path(self.settings.db_path).parent / WORKSPACE_REVIEW_SIDECAR
+        snapshot = {
+            "confirmed_workspaces": confirmed,
+            "confirmed_at": utc_now_iso(),
+            "version": 1,
+        }
+        reason_text = str(reason or "").strip()
+        if reason_text:
+            # Accepted-and-bounded by validation; persist it so the snapshot
+            # answers "who confirmed what, why" like the alias audit trail.
+            snapshot["reason"] = reason_text[:2000]
+        try:
+            # Unique tmp name + os.replace so neither a concurrent confirm
+            # (same fixed tmp path would collide) nor a concurrent doctor read
+            # can observe a torn file (which would degrade to a spurious full
+            # re-review).
+            tmp_path = sidecar.with_name(
+                f"{sidecar.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            tmp_path.write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(tmp_path, sidecar)
+        except OSError as exc:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            return self.db.state.response(
+                {"confirmed": False, "error": f"workspace review snapshot write failed: {exc}"},
+                ok=False,
+            )
+        return self.db.state.response({
+            "confirmed": True,
+            "confirmed_workspaces": confirmed,
+            "count": len(confirmed),
+            "sidecar": str(sidecar),
+        })
+
     def memory_activate(
         self, memory_id: int, authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
@@ -562,7 +714,10 @@ class OperationsPipeline:
                 ok=False,
             )
         explicit_workspace = _.get("workspace")
-        caller = self._caller_workspace(explicit_workspace) if explicit_workspace else None
+        caller = (
+            self._caller_workspace(explicit_workspace)
+            if explicit_workspace or self.settings.isolation == "strict" else None
+        )
         if caller is not None:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
@@ -582,6 +737,33 @@ class OperationsPipeline:
                 },
                 ok=False,
             )
+        if caller is not None and caller.isolation == "strict":
+            canonical = raw_workspace(memory)
+            with self.db.connection() as conn:
+                registered = conn.execute(
+                    "SELECT 1 FROM workspace_canonicals WHERE name=?",
+                    (canonical,),
+                ).fetchone()
+            if registered is None:
+                return self.db.state.response(
+                    {
+                        "error": "strict new workspaces require confirm_pending_workspace",
+                        "activated": False,
+                        "action_required": "confirm_new_workspace",
+                        "next_call": {
+                            "tool": "memory_govern",
+                            "action": "confirm_pending_workspace",
+                            "data": {
+                                "memory_id": int(memory_id),
+                                "canonical": canonical,
+                                "workspace": caller.workspace,
+                            },
+                            "authorization_required": True,
+                        },
+                        **caller.response_fields(),
+                    },
+                    ok=False, extra_warnings=list(caller.warnings),
+                )
         ok = self.db.update_memory(int(memory_id), {"status": MemoryStatus.ACTIVE.value})
         updated = self.db.get_memory(int(memory_id)) if ok else memory
         data = {"activated": ok, "record": updated}
@@ -726,6 +908,17 @@ class OperationsPipeline:
                 "conflict_scan_required": conflict_scan["required"],
                 "local_text_index_worker": self._evidence_worker.status(),
                 "isolation": self.settings.isolation,
+                "workspace_recall": {
+                    "admission_enabled": self.settings.workspace_recall_admission,
+                    "cutoff": self.settings.workspace_recall_cutoff,
+                    "min_name_len": self.settings.workspace_min_name_len,
+                    "weak_vector_weight": self.settings.workspace_weak_vector_weight,
+                    "strict_scope_behavior": (
+                        "guarded_vector_neighbors"
+                        if self.settings.workspace_recall_admission
+                        else "exact_canonical"
+                    ),
+                },
                 "tool_surface": {
                     "profile": self.settings.tool_profile,
                     "default_profile": "product",
@@ -853,10 +1046,12 @@ class OperationsPipeline:
         unassigned: list[int] = []
         total = 0
         with self.db.connection() as conn:
+            scope_sql, scope_params = workspace_scope_sql(
+                "COALESCE(NULLIF(workspace_canonical, ''), workspace)", caller.scope_canonicals(),
+            )
             rows = conn.execute(
-                "SELECT id, metadata FROM memories WHERE status='active' "
-                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? ORDER BY id",
-                (caller.canonical,),
+                f"SELECT id, metadata FROM memories WHERE status='active' AND {scope_sql} ORDER BY id",
+                scope_params,
             ).fetchall()
         for row in rows:
             total += 1
@@ -931,7 +1126,7 @@ class OperationsPipeline:
             else:
                 ids = self.db.stale_index_ids(
                     batch,
-                    workspace=caller.canonical if caller.isolation == "strict" else None,
+                    workspace=caller.scope_canonicals() if caller.isolation == "strict" else None,
                 )
         else:
             try:
@@ -990,22 +1185,34 @@ class OperationsPipeline:
         if denied is not None:
             return denied
         conflict = self.db.get_conflict(conflict_id_int)
-        if conflict is None or (caller.isolation == "strict" and conflict.get("workspace_canonical") != caller.canonical):
+        if conflict is None or (
+            caller.isolation == "strict"
+            and str(conflict.get("workspace_canonical") or "") not in set(caller.scope_canonicals())
+        ):
             return self.db.state.response(forbidden_payload("conflict", workspace=caller), ok=False, extra_warnings=list(caller.warnings))
         result = self.db.judge_conflict(
             conflict_id_int, expected_revision=revision, chosen_value=str(chosen_value),
             decided_by=str(decided_by), decided_ref=ref, decision_reason=str(reason),
             apply_plan=apply_plan, resolution_memory_id=resolution_id,
-            strict_workspace=caller.canonical if caller.isolation == "strict" else None,
+            strict_workspace=caller.scope_canonicals() if caller.isolation == "strict" else None,
         )
         if result.get("outcome") == "applying":
             plan = (result.get("apply_summary") or {}).get("plan", [])
             pending = next((item for item in plan if item.get("status") == "pending"), None)
             if pending is not None:
+                next_data: dict[str, Any] = {
+                    "conflict_id": conflict_id_int,
+                    "expected_revision": result["revision"],
+                    "memory_id": pending["memory_id"],
+                    "action": pending["action"],
+                    "authorized": True,
+                }
+                if caller.isolation == "strict" and caller.workspace:
+                    next_data["workspace"] = caller.workspace
                 result["next_action"] = {
-                    "tool": "memory_govern", "action": "apply_conflict_action",
-                    "data": {"conflict_id": conflict_id_int, "expected_revision": result["revision"],
-                             "memory_id": pending["memory_id"], "action": pending["action"], "authorized": True},
+                    "tool": "memory_govern",
+                    "action": "apply_conflict_action",
+                    "data": next_data,
                 }
         elif result.get("outcome") in {"stale_conflict", "stale_member"}:
             result["note"] = (
@@ -1023,31 +1230,55 @@ class OperationsPipeline:
             summary = self.db.audit_summary()
             return self.db.state.response(summary)
         with self.db.connection() as conn:
+            scope_sql, scope_params = workspace_scope_sql(
+                "COALESCE(NULLIF(workspace_canonical, ''), workspace)", caller.scope_canonicals(),
+            )
             mem_rows = conn.execute(
                 "SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS workspace, "
                 "COUNT(*) AS count, MIN(event_time) AS oldest, MAX(event_time) AS newest, source_type "
-                "FROM memories WHERE status != 'deleted' "
-                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ? "
+                f"FROM memories WHERE status != 'deleted' AND {scope_sql} "
                 "GROUP BY workspace, source_type",
-                (caller.canonical,),
+                scope_params,
             ).fetchall()
-        by_source_type: dict[str, int] = {}
-        bucket: dict[str, Any] = {"count": 0, "oldest": None, "newest": None, "open_conflicts": 0, "by_source_type": by_source_type}
+        def _empty_workspace_bucket() -> dict[str, Any]:
+            return {
+                "count": 0, "oldest": None, "newest": None,
+                "open_conflicts": 0, "by_source_type": {},
+            }
+
+        # Pre-seed every admitted workspace. This preserves the single-canonical strict
+        # response shape when the caller owns zero memories and makes each
+        # admitted workspace explicit rather than synthesizing buckets only
+        # when rows happen to exist.
+        workspaces: dict[str, dict[str, Any]] = {
+            name: _empty_workspace_bucket() for name in caller.scope_canonicals()
+        }
+        total_count = 0
         for row in mem_rows:
+            ws_name = str(row["workspace"] or caller.canonical or "")
+            bucket = workspaces.setdefault(ws_name, _empty_workspace_bucket())
             count = int(row["count"] or 0)
             bucket["count"] = int(bucket["count"] or 0) + count
+            total_count += count
             if row["oldest"] is not None and (bucket["oldest"] is None or row["oldest"] < bucket["oldest"]):
                 bucket["oldest"] = row["oldest"]
             if row["newest"] is not None and (bucket["newest"] is None or row["newest"] > bucket["newest"]):
                 bucket["newest"] = row["newest"]
             if row["source_type"] is not None:
                 source_type = str(row["source_type"])
+                by_source_type = bucket["by_source_type"]
                 by_source_type[source_type] = by_source_type.get(source_type, 0) + count
-        conflicts = self.memory_list_conflicts(status="open", limit=10000, workspace=caller.workspace).get("data", {}).get("conflicts", [])
-        bucket["open_conflicts"] = len(conflicts)
+        conflicts = self.memory_list_conflicts(
+            status="open", limit=10000, workspace=caller.workspace,
+        ).get("data", {}).get("conflicts", [])
+        for conflict in conflicts:
+            ws_name = str(conflict.get("workspace_canonical") or "").strip()
+            if ws_name in workspaces:
+                bucket = workspaces[ws_name]
+                bucket["open_conflicts"] = int(bucket["open_conflicts"] or 0) + 1
         summary = {
-            "workspaces": {caller.canonical: bucket} if caller.canonical else {},
-            "total_memories": bucket["count"],
+            "workspaces": workspaces,
+            "total_memories": total_count,
             "total_open_conflicts": len(conflicts),
             **caller.response_fields(),
         }

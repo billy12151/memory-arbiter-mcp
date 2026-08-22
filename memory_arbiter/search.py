@@ -13,6 +13,7 @@ from .anchors import (
     extract_anchors,
     score_anchor_overlap,
 )
+from .acl import WORKSPACE_EXPR, WorkspaceScope, scope_names, workspace_scope_sql
 from .db import MemoryDB, row_to_dict
 
 # v0.7.4 (M2): retrieval_mode classifies how the returned rows were produced.
@@ -32,7 +33,7 @@ RetrievalMode = Literal[
 # Tests match on the prefix substring, so keep the prefix stable.
 # Single source: constants.NO_DIRECT_MATCH_PREFIX (Phase 1); re-exported here.
 from .constants import NO_DIRECT_MATCH_PREFIX as _NO_DIRECT_MATCH_PREFIX
-from .constants import strict_ws
+from .constants import Isolation, is_default_workspace_term, strict_ws
 
 
 @dataclass
@@ -50,6 +51,8 @@ import re
 
 # Single source: text.CJK_RE_SEARCH (Phase 1). Re-exported here for back-compat.
 from .text import CJK_RE_SEARCH as _CJK_RE
+# shared vector-admission helpers + the weak weighting curve.
+from .workspace_rules import weak_workspace_vector_weight, workspace_vector_distance
 
 
 def _is_cjk_token(token: str) -> bool:
@@ -234,13 +237,33 @@ _WS_BONUS_SAME = 0.30      # ~5% of a subject-medium hit (6.0), like recency max
 _WS_PENALTY_CROSS = -0.15  # gentler penalty so cross-ws stays reachable
 
 
-def _workspace_bonus(record: dict[str, Any], ws_canonical: Optional[str], isolation: str) -> float:
-    """Soft workspace nudge for weak isolation. 0 outside weak mode."""
+def _workspace_bonus(
+    record: dict[str, Any],
+    ws_canonical: Optional[str],
+    isolation: str,
+    distance_map: Optional[dict[str, float]] = None,
+    min_name_len: int = 3,
+) -> float:
+    """Soft workspace nudge for weak isolation. 0 outside weak mode.
+
+    With vector weighting enabled, when the caller precomputed a distance_map, the binary
+    step becomes a continuous vector weight — full +0.30 inside 0.15, linear
+    decay to 0 at 0.30, 0 beyond (a known-far workspace no longer eats the
+    -0.15 hard penalty). Every guarded pair (reserved default term, short
+    name, generic-only proximity, or a canonical missing from the map) falls
+    back to the original binary step, so degradation is exactly v0.9.7.
+    """
     if isolation != "weak" or not ws_canonical:
         return 0.0
     rec_ws = record.get("workspace_canonical") or record.get("workspace") or ""
     if not rec_ws:
         return 0.0
+    if distance_map is not None:
+        distance = workspace_vector_distance(
+            ws_canonical, rec_ws, distance_map, min_name_len=min_name_len,
+        )
+        if distance is not None:
+            return weak_workspace_vector_weight(distance)
     return _WS_BONUS_SAME if rec_ws == ws_canonical else _WS_PENALTY_CROSS
 
 
@@ -396,12 +419,19 @@ def _soft_rerank(
     candidates: list[dict[str, Any]],
     ws_canonical: Optional[str] = None,
     isolation: str = "none",
+    distance_map: Optional[dict[str, float]] = None,
+    ws_min_name_len: int = 3,
 ) -> list[dict[str, Any]]:
     """Apply soft-rerank to a wide-recall candidate pool.
 
     Adds debug fields (_subject_level, _tag_level, _match_reason, _ranking_notes)
     to each row but does NOT mutate original fields. Returns new list sorted
     by final_score descending.
+
+    ``distance_map`` is the precomputed {record canonical → cosine
+    distance to the query canonical} dict; when present and isolation is weak,
+    _workspace_bonus weights on the continuous curve instead of the binary
+    step. ``None`` keeps the v0.9.7 binary behaviour.
     """
     if not candidates:
         return []
@@ -472,7 +502,10 @@ def _soft_rerank(
 
         trust = _trust_bonus(rec)
         recency = _recency_bonus(rec)
-        ws_adjust = _workspace_bonus(rec, ws_canonical, isolation)
+        ws_adjust = _workspace_bonus(
+            rec, ws_canonical, isolation,
+            distance_map=distance_map, min_name_len=ws_min_name_len,
+        )
         # Superseded always sinks below active regardless of score (r4 carries
         # this forward from v0.2.6).
         superseded_sink = 1 if rec.get("status") == "superseded" else 0
@@ -546,7 +579,7 @@ def _wide_recall(
     content_like_fallback: bool = True,
     query_embedding: Optional[list[float]] = None,
     content_like_cap: int = 30,
-    ws_canonical: Optional[str] = None,
+    ws_canonical: "WorkspaceScope" = None,
 ) -> list[dict[str, Any]]:
     """v0.3.0 wide recall: merge multiple retrieval channels into a candidate pool.
 
@@ -562,17 +595,21 @@ def _wide_recall(
 
     Returns dedup'd candidate pool (list of dict rows). Each row already has
     its raw fields; soft-rerank will add scoring fields.
+
+    ``ws_canonical`` may be an admitted canonical set (one name or the
+    strict in-radius neighbourhood). Every channel scopes in SQL — never a
+    Python post-filter — so COUNT/pagination/df stay consistent and the
+    admission genuinely widens recall rather than being a no-op over a pool the
+    SQL already locked to one canonical.
     """
     if not db.db_available or not query:
         return []
     pool: dict[int, dict[str, Any]] = {}
-    workspace_clause_m = ""
-    workspace_clause = ""
-    workspace_params: list[Any] = []
-    if ws_canonical:
-        workspace_clause_m = " AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
-        workspace_clause = " AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?"
-        workspace_params.append(ws_canonical)
+    scope_m_sql, scope_params = workspace_scope_sql("COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", ws_canonical)
+    scope_plain_sql, _ = workspace_scope_sql("COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical)
+    workspace_clause_m = f" AND {scope_m_sql}" if scope_m_sql else ""
+    workspace_clause = f" AND {scope_plain_sql}" if scope_plain_sql else ""
+    workspace_params: list[Any] = list(scope_params)
     conn = db._new_connection()
     try:
         # Channel 1+2: FTS main + OR. _sanitize_fts_query already OR-joins CJK
@@ -628,8 +665,8 @@ def _wide_recall(
             for tag in tags or []:
                 clauses.append("tags LIKE ?")
                 params.append(f"%{tag}%")
-            if ws_canonical:
-                clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+            if scope_plain_sql:
+                clauses.append(scope_plain_sql)
                 params.extend(workspace_params)
             params.append(pool_cap)
             sql = f"""SELECT *, 0 AS score FROM memories
@@ -657,8 +694,8 @@ def _wide_recall(
                 for tag in tags or []:
                     clauses.append("tags LIKE ?")
                     params.append(f"%{tag}%")
-                if ws_canonical:
-                    clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+                if scope_plain_sql:
+                    clauses.append(scope_plain_sql)
                     params.extend(workspace_params)
                 params.append(content_like_cap)  # cap content-LIKE gap-fill (configurable via MEMORY_ARBITER_CONTENT_LIKE_CAP)
                 sql = f"""SELECT *, 0 AS score FROM memories
@@ -951,6 +988,7 @@ def search_memories(
     ws_canonical: Optional[str] = None,
     isolation: str = "none",
     hard_scope: bool = False,
+    ws_scope: "WorkspaceScope" = None,
 ) -> SearchOutcome:
     """v0.9.4: returns a SearchOutcome with retrieval_mode.
 
@@ -963,6 +1001,12 @@ def search_memories(
     the query-recall path it widens the candidate pool to cover the offset
     window — best-effort, since relevance-ranked recall has no exact total and
     the pool cap bounds the reachable depth (deep pages may return empty).
+
+    ``ws_scope`` is the strict caller's admitted canonical set (its own
+    plus in-radius neighbours). It replaces the single-canonical strict scope in
+    the recall SQL; with vector admission off it is just ``(ws_canonical,)`` so
+    the SQL is byte-identical to v0.12.5. ``ws_canonical`` stays the single
+    center used for weak weighting and the empty-scope fallback.
     """
     warnings: list[str] = []
     if not db.db_available:
@@ -972,7 +1016,14 @@ def search_memories(
     query = (query or "").strip()
     # An explicit none-mode workspace filter (hard_scope) scopes recall in the
     # SQL itself so the limit is applied AFTER scoping; strict always scopes.
-    scope_ws = ws_canonical if (hard_scope and ws_canonical) else strict_ws(isolation, ws_canonical)
+    # under strict the scope is the admitted canonical set (falls back
+    # to the single canonical when no set was supplied / admission is off).
+    if hard_scope and ws_canonical:
+        scope_ws: "WorkspaceScope" = ws_canonical
+    elif isolation == Isolation.STRICT and ws_canonical:
+        scope_ws = ws_scope if ws_scope else ws_canonical
+    else:
+        scope_ws = None
     mode = _get_ranking_mode()
     # v0.3.1: when a query_embedding is supplied but sqlite-vec is not active,
     # warn so the caller knows the semantic channel was silently skipped.
@@ -1097,12 +1148,16 @@ def search_memories(
                         ws_canonical=scope_ws)
 
     # v0.9.7: strict isolation — hard-filter the candidate pool to the query's
-    # canonical workspace. weak does NOT filter (it only nudges ranking in
-    # _soft_rerank); none ignores workspace entirely.
-    if isolation == "strict" and ws_canonical:
+    # workspace. weak does NOT filter (it only nudges ranking in _soft_rerank);
+    # none ignores workspace entirely.
+    # the SQL above already scoped every channel to the admitted set,
+    # so this is a defense-in-depth membership check over the SAME set — never
+    # the narrower single canonical, which would silently undo the admission.
+    if isolation == Isolation.STRICT and ws_canonical:
+        admitted_set = set(scope_names(scope_ws)) or {ws_canonical}
         pool = [
             r for r in pool
-            if (r.get("workspace_canonical") or r.get("workspace")) == ws_canonical
+            if (r.get("workspace_canonical") or r.get("workspace")) in admitted_set
         ]
 
     if has_filters:
@@ -1136,7 +1191,35 @@ def search_memories(
             )
             return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_fallback")
 
-    reranked = _soft_rerank(query, pool, ws_canonical=ws_canonical, isolation=isolation)
+    # precompute the canonical distance map once, after the pool
+    # is assembled, so the weak-isolation rerank can weight on real vector
+    # distance without any scoring leaf touching the DB. Read-only; a default
+    # query canonical never enters the vector system; degradation returns an
+    # empty map (scoring falls back to the binary step per record).
+    weak_distance_map: Optional[dict[str, float]] = None
+    if (
+        isolation == "weak"
+        and ws_canonical
+        and not is_default_workspace_term(ws_canonical)
+        and getattr(db.settings, "workspace_weak_vector_weight", False)
+        and pool
+    ):
+        pool_canonicals = {
+            str(r.get("workspace_canonical") or r.get("workspace") or "").strip()
+            for r in pool
+        }
+        pool_canonicals.discard("")
+        if pool_canonicals:
+            weak_distance_map = db.workspaces.canonical_distance_map(
+                ws_canonical, pool_canonicals,
+            )
+
+    reranked = _soft_rerank(
+        query, pool,
+        ws_canonical=ws_canonical, isolation=isolation,
+        distance_map=weak_distance_map,
+        ws_min_name_len=int(getattr(db.settings, "workspace_min_name_len", 3)),
+    )
     # Slice to the requested page window.
     page = reranked[offset:offset + limit]
 
@@ -1179,7 +1262,7 @@ def _linked_open_items_for_search(
     results: list[dict[str, Any]],
     warnings: list[str],
     max_items: int = 5,
-    ws_canonical: Optional[str] = None,
+    ws_canonical: "WorkspaceScope" = None,
 ) -> list[dict[str, Any]]:
     """v0.7.4: attach up to ``max_items`` active todo memories that share
     meaningful tags with the current result set (linked_open_items).
@@ -1236,11 +1319,11 @@ def _linked_open_items_for_search(
 
     try:
         conn = db._new_connection()
-        workspace_clause = ""
-        workspace_params: list[Any] = []
-        if ws_canonical:
-            workspace_clause = "AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
-            workspace_params.append(ws_canonical)
+        scope_sql, scope_params = workspace_scope_sql(
+            "COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", ws_canonical,
+        )
+        workspace_clause = f"AND {scope_sql}" if scope_sql else ""
+        workspace_params: list[Any] = list(scope_params)
         try:
             # --- L1: EXISTS check for active+todo memories ---
             todo_exists = conn.execute(
@@ -1364,17 +1447,19 @@ def _search_bm25(
     warnings: list[str],
     debug_ranking: bool,
     offset: int = 0,
-    ws_canonical: Optional[str] = None,
+    ws_canonical: "WorkspaceScope" = None,
 ) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
-    """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback."""
+    """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback.
+
+    scopes to the admitted canonical set like the hybrid path, so
+    RANKING_MODE=bm25 does not silently ignore vector admission.
+    """
     rows = []
-    workspace_clause_m = ""
-    workspace_clause = ""
-    workspace_params: list[Any] = []
-    if ws_canonical:
-        workspace_clause_m = " AND COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace) = ?"
-        workspace_clause = "COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?"
-        workspace_params.append(ws_canonical)
+    scope_m_sql, scope_params = workspace_scope_sql("COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", ws_canonical)
+    scope_plain_sql, _ = workspace_scope_sql("COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical)
+    workspace_clause_m = f" AND {scope_m_sql}" if scope_m_sql else ""
+    workspace_clause = scope_plain_sql
+    workspace_params: list[Any] = list(scope_params)
     conn = db._new_connection()
     if db.state.fts5_available and query:
         sql = f"""
@@ -1401,7 +1486,7 @@ def _search_bm25(
         for tag in tags or []:
             clauses.append("tags LIKE ?")
             params.append(f"%{tag}%")
-        if ws_canonical:
+        if workspace_clause:
             clauses.append(workspace_clause)
             params.extend(workspace_params)
         params.extend([limit + 1, offset])
@@ -1447,7 +1532,7 @@ def _recent_fallback(
     like_status_clause: str,
     warnings: list[str],
     offset: int = 0,
-    ws_canonical: Optional[str] = None,
+    ws_canonical: "WorkspaceScope" = None,
 ) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
     """Recent-memory fallback when no direct match found (r4 §4.2 safety net)."""
     clauses = [like_status_clause]
@@ -1455,14 +1540,17 @@ def _recent_fallback(
     for tag in tags or []:
         clauses.append("tags LIKE ?")
         params.append(f"%{tag}%")
-    # strict isolation: filter to the query's canonical workspace INSIDE the SQL
-    # so COUNT and the paginated window agree — a Python post-filter on an
+    # strict isolation: filter to the caller's admitted workspace set INSIDE the
+    # SQL so COUNT and the paginated window agree — a Python post-filter on an
     # already-paginated page reports a wrong total and can under-fill the page.
     # Match canonical with a raw fallback for rows written before the column
     # existed (workspace_canonical NULL → compare against raw workspace).
-    if ws_canonical:
-        clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
-        params.append(ws_canonical)
+    scope_sql, scope_params = workspace_scope_sql(
+        "COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical,
+    )
+    if scope_sql:
+        clauses.append(scope_sql)
+        params.extend(scope_params)
     conn = db._new_connection()
     try:
         count_row = conn.execute(

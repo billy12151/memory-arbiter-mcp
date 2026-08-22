@@ -106,7 +106,7 @@ def test_none_high_confidence_normalizes_without_acl_or_confirmed_alias(tmp_path
     _force_undecided_with_candidate(t, backend)
     r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
     assert r["data"]["workspace_canonical"] == "金营项目"
-    assert t.db.get_workspace_alias("金营") is None
+    assert t.db.get_workspace_decision("金营") is None
     # none stays ACL-free: an unscoped search spans all workspaces, while an
     # explicit filter canonicalizes then scopes that one query (spec §15.6).
     # (The stub backend normalizes both writes to the same canonical.)
@@ -126,7 +126,11 @@ def test_weak_low_confidence_asks_not_merge(tmp_path):
     assert d["workspace_decision"] == "ASK"
     # NOT silently merged
     assert d["workspace_canonical"] != "金营项目"
-    assert d.get("write_hints", {}).get("workspace_review")
+    review = d.get("write_hints", {}).get("workspace_review")
+    assert review
+    merge = next(option for option in review["options"] if option["decision"] == "merge")
+    assert merge["authorization_required"] is True
+    assert "authorized" not in merge["call"]["data"]
 
 
 def test_near_miss_registers_only_final_canonical(tmp_path):
@@ -163,7 +167,7 @@ def test_no_backend_falls_back_to_ask(tmp_path):
 def test_strict_emits_governance_advisory(monkeypatch):
     monkeypatch.setenv("MEMORY_ARBITER_ISOLATION", "strict")
     s = Settings.from_env()
-    assert any("memory_govern" in w for w in s.config_warnings)
+    assert any("confirm_pending_workspace" in w and "migrate" in w for w in s.config_warnings)
 
 
 # ── decision-reason distinguishes model-absent from low-confidence (spec §8) ──
