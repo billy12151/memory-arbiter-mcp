@@ -28,6 +28,7 @@ CONFIG_DESCRIPTORS = [
     _item("mcp.http.host", "server", "mcp_http_host", "127.0.0.1"),
     _item("mcp.http.port", "server", "mcp_http_port", 8000),
     _item("mcp.http.path", "server", "mcp_http_path", "/mcp"),
+    _item("mcp.http.stateless", "server", "mcp_http_stateless", True),
     _item("recall_pool_cap", "retrieval", default=50), _item("content_like_cap", "retrieval", default=30),
     _item("vec.enabled", "embedding", "enable_sqlite_vec", False), _item("vec.dim", "embedding", "vec_dim", 768),
     _item("embedding.provider", "embedding", "embedding_provider"), _item("embedding.model_path", "embedding", "embedding_model_path"),

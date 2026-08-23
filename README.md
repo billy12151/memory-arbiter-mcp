@@ -127,6 +127,7 @@ See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.conf
 | `backup_jsonl` | Append-only fallback when SQLite cannot write |
 | `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
 | `mcp.http.host` / `port` / `path` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000/mcp` |
+| `mcp.http.stateless` | Stateless Streamable HTTP (default `true`); set `false` only for clients that require server-side MCP sessions |
 | `update_check.enabled` | Optional one-shot background PyPI discovery (default `true`); the only network call, with cached/suppressed notices and no auto-upgrade |
 | `vec.enabled` | Enables sqlite-vec evidence recall |
 | `embedding.model_path` | Local GGUF embedding model |
@@ -155,7 +156,9 @@ Setting it up:
 2. **Keep it running**: mema has **no built-in daemon** — use a process manager. On macOS, the launchd template at [`examples/com.memory-arbiter.mema.plist`](examples/com.memory-arbiter.mema.plist) runs it at load, restarts on crash, and logs to `/tmp/mema.{out,err}.log` (replace `__MEMA_BIN__` with the absolute path `which mema` prints; put it in `~/Library/LaunchAgents/` then `launchctl load`). For a quick try, `tmux new -d -s mema 'mema'` works.
 3. **Client**: copy [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json), filling in `X-Mema-Client` and `X-Mema-Agent-Id`.
 
-Notes: the client sends the fixed headers automatically on every HTTP MCP request — agents must not add identity to individual tool `data`, or it is rejected. Missing/empty/duplicate/conflicting identity fails closed (400), never falling back to defaults. The service binds to loopback only; these headers are provenance, **not authentication**. Because launchd does not inherit your shell PATH or expand `~`, put absolute paths in `ProgramArguments` and for any GGUF `model_path` in config.json.
+Notes: HTTP defaults to stateless request handling because mema keeps memory and semantic-notice state in SQLite, not in an MCP session. A service restart therefore does not leave clients holding an expired server session. Semantic notices created asynchronously are claimed from SQLite and attached to a later successful tool response as before; only a worker job that has not yet persisted its notice can be interrupted by a process restart. Set `mcp.http.stateless=false` only when a client specifically requires server-side MCP sessions or server-initiated SSE messages.
+
+The client sends the fixed headers automatically on every HTTP MCP request — agents must not add identity to individual tool `data`, or it is rejected. Missing/empty/duplicate/conflicting identity fails closed (400), never falling back to defaults. The service binds to loopback only; these headers are provenance, **not authentication**. Because launchd does not inherit your shell PATH or expand `~`, put absolute paths in `ProgramArguments` and for any GGUF `model_path` in config.json.
 
 ### Claude Desktop / Claude Code through localhost HTTP
 

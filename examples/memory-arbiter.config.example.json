@@ -15,7 +15,8 @@
     "http": {
       "host": "127.0.0.1",
       "port": 8000,
-      "path": "/mcp"
+      "path": "/mcp",
+      "stateless": true
     }
   },
   "isolation": "none",

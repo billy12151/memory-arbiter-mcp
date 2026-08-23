@@ -43,7 +43,10 @@ class Settings:
     mcp_http_port: int = 8000
     mcp_http_path: str = "/mcp"
     mcp_http_max_request_body_size: int = 4 * 1024 * 1024
-    mcp_http_stateless: bool = False
+    # Product tools are request/response operations backed by SQLite. Keeping
+    # HTTP transport sessions adds restart-sensitive state without carrying
+    # memory or semantic-notice delivery state.
+    mcp_http_stateless: bool = True
     mcp_http_json_response: bool = False
     enable_sqlite_vec: bool = False
     vec_dim: int = 768
@@ -336,7 +339,7 @@ class Settings:
             ),
             mcp_http_stateless=pick_bool_field(
                 mcp_http_cfg.get("stateless"), "MEMORY_ARBITER_MCP_HTTP_STATELESS",
-                "false", name="mcp.http.stateless", default_bool=False,
+                "true", name="mcp.http.stateless", default_bool=True,
             ),
             mcp_http_json_response=pick_bool_field(
                 mcp_http_cfg.get("json_response"), "MEMORY_ARBITER_MCP_HTTP_JSON_RESPONSE",

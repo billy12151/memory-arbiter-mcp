@@ -501,6 +501,7 @@ def test_settings_parse_http_transport_and_server_passes_options(
     assert settings.mcp_http_host == "localhost"
     assert settings.mcp_http_port == 8123
     assert settings.mcp_http_path == "/memory"
+    assert settings.mcp_http_stateless is True
 
     from memory_arbiter import server
     monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: settings))
@@ -509,6 +510,33 @@ def test_settings_parse_http_transport_and_server_passes_options(
     assert fake.last_kwargs["host"] == "localhost"
     assert fake.last_kwargs["port"] == 8123
     assert fake.last_kwargs["streamable_http_path"] == "/memory"
+    assert fake.last_kwargs["stateless_http"] is True
+    bundle.tools.shutdown(timeout=1)
+
+
+def test_http_stateful_mode_remains_an_explicit_compatibility_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({
+        "db_path": str(tmp_path / "db.sqlite3"),
+        "backup_jsonl": str(tmp_path / "backup.jsonl"),
+        "mcp": {
+            "transport": "streamable-http",
+            "http": {"stateless": False},
+        },
+        "update_check": {"enabled": False},
+    }), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg))
+
+    settings = Settings.from_env()
+    assert settings.mcp_http_stateless is False
+
+    from memory_arbiter import server
+    monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: settings))
+    fake = _install_fake_fastmcp(monkeypatch)
+    bundle = server.build_runtime()
+    assert fake.last_kwargs["stateless_http"] is False
     bundle.tools.shutdown(timeout=1)
 
 

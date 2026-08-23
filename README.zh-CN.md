@@ -160,6 +160,7 @@ mema doctor --json
 | --- | --- | --- |
 | `db_path` | 数据库文件放哪 | 安装时生成 |
 | `mcp.transport` | `stdio`（默认，一对一）或 `streamable-http`（多个客户端共享一个本地服务） | `stdio` |
+| `mcp.http.stateless` | HTTP 请求无状态处理；服务重启后客户端不会持有失效 session | `true` |
 | `isolation` | workspace 隔离档：`none` / `weak` / `strict` | `none` |
 | `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
 | `vec.enabled` | 开启后支持"按意思搜" | 关闭 |
@@ -189,6 +190,7 @@ mema doctor --json
 
 几个关键提醒：
 
+- **HTTP 默认无状态**：迷码的记忆和 semantic notice 状态在 SQLite，不在 MCP session。服务重启后，客户端不会因为旧 session ID 卡住；异步生成并已落库的 notice 仍会附在后续成功的工具响应里。只有尚未落库、仍停留在进程内 worker 队列中的任务可能被进程重启中断。只有客户端明确依赖服务端 MCP session 或主动 SSE 消息时，才设置 `mcp.http.stateless=false`。
 - **请求头客户端写死一次**，每次请求自动带，别让 agent 在单次工具调用里动态加身份，那样会被拒。任一头缺失/为空/重复/冲突 → 直接 400 拒绝，不回退默认身份。
 - **只监听 127.0.0.1**，迷码不会绑公网。这两个头只是"是谁在写"的来源标记，**不是密码**。要给远程机器用，自己在前面加带认证的反代，别让迷码直接暴露。
 - **launchd 跑的时候 PATH 和工作目录跟你终端不一样**：`ProgramArguments` 里直接写 `mema` 的**绝对路径**；GGUF 模型路径在 config.json 里也写绝对路径，别用 `~`。

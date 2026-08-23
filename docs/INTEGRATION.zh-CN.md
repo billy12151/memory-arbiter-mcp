@@ -8,7 +8,9 @@
 
 把命令配置为 `mema`，使用四个产品工具。用 `memory(action="help")` 或对应工具的 help 发现当前字段。
 
-stdio 是默认传输。要让多个本地客户端共享一个社区版进程，设置 `mcp.transport="streamable-http"`，把每个客户端连接到 `http://127.0.0.1:8000/mcp`。在每个 MCP server 配置中设置固定的 `X-Mema-Client` 和 `X-Mema-Agent-Id` 请求头；客户端随后会在 initialize、工具发现和工具调用时自动携带。**不要**让 agent 往工具 `data` 里动态附加身份。任一请求头缺失、为空、非法、重复或与工具数据冲突时，HTTP 模式都会 fail closed。它只绑定 loopback：请求头提供的是本地来源标记和策略输入，不是认证、租户隔离，也不是把服务暴露到公网的许可。
+stdio 是默认传输。要让多个本地客户端共享一个社区版进程，设置 `mcp.transport="streamable-http"`，把每个客户端连接到 `http://127.0.0.1:8000/mcp`。HTTP 默认按无状态请求处理（`mcp.http.stateless=true`）：记忆和 semantic notice 保存在 SQLite 中，异步任务产生的 pending notice 会由后续任一次成功工具调用领取，不依赖发起任务时的 MCP 连接；服务重启也不会让客户端卡在已失效的内存 session。只有客户端明确需要服务端 MCP session 或主动 SSE 消息时才设为 `false`。进程重启仍可能中断尚未把 notice 落库的 worker 任务。
+
+在每个 MCP server 配置中设置固定的 `X-Mema-Client` 和 `X-Mema-Agent-Id` 请求头；客户端随后会在 initialize、工具发现和工具调用时自动携带。**不要**让 agent 往工具 `data` 里动态附加身份。任一请求头缺失、为空、非法、重复或与工具数据冲突时，HTTP 模式都会 fail closed。它只绑定 loopback：请求头提供的是本地来源标记和策略输入，不是认证、租户隔离，也不是把服务暴露到公网的许可。
 
 写入要求非空 `subject`；已知时带上 `source_type`、`event_time`、`source_ref` 和有用的 tags。项目事实传真实的项目 `workspace`。只有刻意要存进全局池的事实才显式传 `workspace="default"`；不要依赖省略，因为客户端配置可能已提供 workspace。strict 隔离要求必须有 workspace。`user_confirmed` 只用于用户显式验证过的事实。当新来源替换已有 current 来源时，先 find/read 找到原记忆再做 `update`，而不是创建第二条 active 副本。
 

@@ -60,7 +60,10 @@ def test_config_template_has_required_fields():
     assert cfg["tool_profile"] == "product"
     assert cfg["mcp"] == {
         "transport": "stdio",
-        "http": {"host": "127.0.0.1", "port": 8000, "path": "/mcp"},
+        "http": {
+            "host": "127.0.0.1", "port": 8000, "path": "/mcp",
+            "stateless": True,
+        },
     }
     assert cfg["isolation"] == "none"
     assert cfg["workspace_match_distance"] == 0.25

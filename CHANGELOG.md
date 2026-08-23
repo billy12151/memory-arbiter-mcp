@@ -3,6 +3,12 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## Unreleased
+
+### Changed
+
+- **Restart-safe localhost HTTP default** — Streamable HTTP now defaults to stateless request handling because product state and semantic notices are SQLite-backed rather than MCP-session-backed. Explicit `mcp.http.stateless=false` remains available for clients that require server-side sessions or server-initiated SSE messages.
+
 ## [0.14.3] — 2026-08-24
 
 ### Fixed

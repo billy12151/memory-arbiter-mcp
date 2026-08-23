@@ -47,6 +47,8 @@
   <dict>
     <key>MEMORY_ARBITER_MCP_TRANSPORT</key>
     <string>streamable-http</string>
+    <!-- Stateless is the default. It avoids expired client sessions after a
+         service restart; persisted semantic notices still arrive later. -->
     <!-- Optional; unset uses 127.0.0.1:8000/mcp
     <key>MEMORY_ARBITER_MCP_HTTP_HOST</key>
     <string>127.0.0.1</string>
