@@ -442,6 +442,20 @@ class MetaStore:
                     "SELECT e.id FROM memory_evidence e LEFT JOIN memories m "
                     "ON m.id=e.memory_id WHERE m.id IS NULL OR m.status='deleted')"
                 )
+            orphan_vector_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT v.id FROM memory_evidence_vec v "
+                    "LEFT JOIN memory_evidence e ON e.id=v.id WHERE e.id IS NULL"
+                )
+            ]
+            for start in range(0, len(orphan_vector_ids), 500):
+                chunk = orphan_vector_ids[start:start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})",
+                    chunk,
+                )
             evidence_ids = {
                 int(row["id"]) for row in conn.execute("SELECT id FROM memory_evidence")
             }

@@ -11,6 +11,10 @@ Versions follow semantic versioning.
 - **Space recovery rebuilds every derived vector family** — `rebuild_evidence` now atomically replaces workspace-canonical vectors for the target space, removes obsolete deleted-memory evidence, verifies one vector per evidence unit, and refuses the final `ready` transition while any derived index is incomplete. Resuming a failed full rebuild under a different embedding space clears partial derived state and starts again.
 - **Claude localhost HTTP setup documented** — README examples show the tested pinned `mcp-remote` bridge for Claude Desktop/Cowork and Claude Code, including fixed identity headers and removal of duplicate direct-stdio server entries.
 
+### Verification
+
+- 769 tests pass locally in the vec-equipped environment; strict mypy, Ruff, compileall, pip-audit, version synchronization, build, and production-index recovery checks pass.
+
 ## [0.14.2] — 2026-08-23
 
 Independent whole-project adversarial hardening release. No schema generation change is required; 0.14.1 databases remain current.

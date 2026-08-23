@@ -1091,6 +1091,10 @@ def test_space_rebuild_completion_purges_deleted_evidence_and_requires_vectors(
                 ("workspace_rebuild_space_id", "space-b"),
             ),
         )
+        conn.execute(
+            "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES(?,?,?)",
+            (999999, "active", "[0.0,1.0]"),
+        )
     assert tools.db.maybe_complete_space_rebuild("space-b") is False
     with tools.db.write_transaction() as conn:
         conn.execute(
@@ -1106,6 +1110,9 @@ def test_space_rebuild_completion_purges_deleted_evidence_and_requires_vectors(
             "SELECT COUNT(*) FROM memory_evidence_vec WHERE id IN ("
             + ",".join("?" for _ in deleted_evidence) + ")",
             tuple(int(row["id"]) for row in deleted_evidence),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_evidence_vec WHERE id=999999"
         ).fetchone()[0] == 0
 
 
