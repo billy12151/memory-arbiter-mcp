@@ -210,6 +210,82 @@ class WorkspaceStore:
                 f"configuration recover: {exc}"
             ]
 
+    def rebuild_workspace_canonical_vectors(
+        self, embedder: Any, embedding_space_id: str,
+    ) -> dict[str, Any]:
+        """Atomically replace every non-default canonical vector."""
+        if embedder is None or not self.state.sqlite_vec_available:
+            return {"ok": False, "error": "workspace_vector_runtime_unavailable"}
+        try:
+            with self.connection() as conn:
+                marker = conn.execute(
+                    "SELECT value FROM _vec_index_meta "
+                    "WHERE key='workspace_rebuild_space_id'"
+                ).fetchone()
+                names = [
+                    str(row["name"])
+                    for row in conn.execute(
+                        "SELECT name FROM workspace_canonicals ORDER BY id"
+                    )
+                    if not is_default_workspace_term(str(row["name"] or ""))
+                ]
+                expected_ids = {
+                    int(row["id"])
+                    for row in conn.execute("SELECT id,name FROM workspace_canonicals")
+                    if not is_default_workspace_term(str(row["name"] or ""))
+                }
+                vector_ids = {
+                    int(row["id"])
+                    for row in conn.execute("SELECT id FROM workspace_canonicals_vec")
+                }
+                if (
+                    marker is not None
+                    and str(marker["value"]) == embedding_space_id
+                    and vector_ids == expected_ids
+                ):
+                    return {"ok": True, "rebuilt": 0, "already_current": True}
+            vectors: dict[str, list[float]] = {}
+            for name in names:
+                result = embedder.embed_text(prefix="", body=name)
+                embedding = list(result.embedding) if result and result.embedding else []
+                if not embedding:
+                    return {
+                        "ok": False,
+                        "error": "workspace_vector_embedding_failed",
+                        "canonical": name,
+                    }
+                vectors[name] = embedding
+            with self.write_transaction() as conn:
+                current = [
+                    str(row["name"])
+                    for row in conn.execute(
+                        "SELECT name FROM workspace_canonicals ORDER BY id"
+                    )
+                    if not is_default_workspace_term(str(row["name"] or ""))
+                ]
+                if current != names:
+                    return {"ok": False, "error": "workspace_registry_changed"}
+                conn.execute("DELETE FROM workspace_canonicals_vec")
+                for name in names:
+                    row = conn.execute(
+                        "SELECT id FROM workspace_canonicals WHERE name=?", (name,),
+                    ).fetchone()
+                    if row is None:
+                        raise sqlite3.IntegrityError("workspace canonical disappeared")
+                    conn.execute(
+                        "INSERT INTO workspace_canonicals_vec(id,embedding) VALUES(?,?)",
+                        (int(row["id"]), json.dumps(vectors[name])),
+                    )
+                conn.execute(
+                    "INSERT INTO _vec_index_meta(key,value) VALUES("
+                    "'workspace_rebuild_space_id',?) ON CONFLICT(key) DO UPDATE "
+                    "SET value=excluded.value",
+                    (embedding_space_id,),
+                )
+            return {"ok": True, "rebuilt": len(names), "already_current": False}
+        except sqlite3.Error as exc:
+            return {"ok": False, "error": f"workspace_vector_rebuild_failed: {exc}"}
+
     def resolve_workspace_canonical(
         self,
         ws_raw: Optional[str],

@@ -1182,6 +1182,8 @@ class OperationsPipeline:
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
+        mismatch_rebuild = False
+        workspace_rebuild: dict[str, Any] = {"ok": True, "rebuilt": 0}
         if memory_ids is None:
             # Embedding-space mismatch is a whole-index condition: existing
             # rows may be healthy-looking but live in the old space, so the
@@ -1201,6 +1203,38 @@ class OperationsPipeline:
             )
             if mismatch_rebuild:
                 if not dry_run:
+                    embedder, embedder_warnings = self._ensure_embedder()
+                    if embedder is None:
+                        return self.db.state.response(
+                            {
+                                "error": "embedding runtime unavailable for space rebuild",
+                                "dry_run": False,
+                                "queued": 0,
+                                "failed": 0,
+                                "results": [],
+                                "workspace_vector_rebuild": {
+                                    "ok": False,
+                                    "error": "embedding_runtime_unavailable",
+                                },
+                                "vec_index_state": self.db.get_vec_index_state(),
+                            },
+                            ok=False,
+                            extra_warnings=list(caller.warnings) + list(embedder_warnings),
+                        )
+                    workspace_rebuild = self.db.rebuild_workspace_canonical_vectors(
+                        embedder, embedder.embedding_space_id,
+                    )
+                    if not workspace_rebuild.get("ok"):
+                        return self.db.state.response(
+                            {
+                                "error": "workspace vector rebuild failed",
+                                "workspace_vector_rebuild": workspace_rebuild,
+                                "dry_run": False,
+                                "vec_index_state": self.db.get_vec_index_state(),
+                            },
+                            ok=False,
+                            extra_warnings=list(caller.warnings),
+                        )
                     self.db.mark_space_rebuild_started()
                 ids = self.db.space_rebuild_pending_ids(batch)
                 if not dry_run and not ids:
@@ -1229,6 +1263,7 @@ class OperationsPipeline:
                     "dry_run": True,
                     "memory_ids": ids,
                     "count": len(ids),
+                    "workspace_vectors": "rebuild_required" if mismatch_rebuild else "unchanged",
                     "vec_index_state": self.db.get_vec_index_state(),
                 },
                 extra_warnings=list(caller.warnings),
@@ -1244,6 +1279,9 @@ class OperationsPipeline:
                 "queued": len(results) - failed,
                 "failed": failed,
                 "results": results,
+                "workspace_vector_rebuild": (
+                    workspace_rebuild if mismatch_rebuild else {"ok": True, "rebuilt": 0}
+                ),
                 # Surfaces a skipped flip (e.g. embedder unavailable with an
                 # empty pending set): without it, "queued=0" is
                 # indistinguishable from a settled mismatch->ready flip.

@@ -7,6 +7,7 @@ import gc
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Settings
+from .constants import is_default_workspace_term
 from .db import MemoryDB
 from .db_generation import (
     CONFLICT_DETECTOR_VERSION,
@@ -28,7 +30,7 @@ from .embedder import (
     compute_embedding_space_id,
     compute_model_digest,
 )
-from .evidence import local_text_units
+from .evidence import evidence_content_hash, local_text_units
 from .db.meta import active_scan_boundary_on_connection, canonical_scan_boundary
 from .tools import MemoryTools
 
@@ -36,6 +38,9 @@ from .tools import MemoryTools
 PRESERVED_TABLES = (
     "memories", "memory_history", "memory_evidence",
     "workspace_canonicals", "workspace_aliases", "backup_replay_log",
+)
+FULL_REBUILD_COPY_TABLES = tuple(
+    table for table in PRESERVED_TABLES if table != "memory_evidence"
 )
 DESTRUCTIVELY_REBUILT_TABLES = (
     "conflicts", "conflict_judgments", "semantic_notices", "workspace_alias_events",
@@ -104,6 +109,90 @@ def _source_vec_state(path: Path) -> dict[str, str]:
         return {}
 
 
+def _vec_table_dimension(conn: sqlite3.Connection, table: str) -> int | None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,),
+    ).fetchone()
+    if row is None:
+        return None
+    match = re.search(r"embedding\s+float\[(\d+)]", str(row[0] or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _source_evidence_complete(path: Path, expected_dim: int) -> tuple[bool, str]:
+    """Verify current logical evidence and one vector row for every unit."""
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                import sqlite_vec
+
+                conn.enable_load_extension(True)
+                sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+            except (ImportError, sqlite3.Error):
+                return False, "source_vectors_unverifiable"
+            if not _table_exists(conn, "memory_evidence"):
+                return False, "source_evidence_missing"
+            if not _table_exists(conn, "memory_evidence_vec"):
+                return False, "source_vectors_missing"
+            if _vec_table_dimension(conn, "memory_evidence_vec") != int(expected_dim):
+                return False, "source_vector_dimension_mismatch"
+            if _vec_table_dimension(conn, "workspace_canonicals_vec") != int(expected_dim):
+                return False, "source_workspace_vector_dimension_mismatch"
+            expected_ids: set[int] = set()
+            for memory in conn.execute(
+                "SELECT id,version,content,subject FROM memories "
+                "WHERE status!='deleted' ORDER BY id"
+            ):
+                memory_id = int(memory["id"])
+                version = int(memory["version"] or 1)
+                content = str(memory["content"] or "")
+                units = local_text_units(str(memory["subject"] or ""), content)
+                rows = conn.execute(
+                    "SELECT id,memory_version,content_hash,unit_index,kind,text,"
+                    "start_offset,end_offset FROM memory_evidence "
+                    "WHERE memory_id=? ORDER BY unit_index",
+                    (memory_id,),
+                ).fetchall()
+                if len(rows) != len(units):
+                    return False, "source_evidence_incomplete"
+                content_hash = evidence_content_hash(content)
+                for row, unit in zip(rows, units):
+                    if (
+                        int(row["memory_version"]) != version
+                        or str(row["content_hash"]) != content_hash
+                        or int(row["unit_index"]) != int(unit.unit_index)
+                        or str(row["kind"]) != unit.kind
+                        or str(row["text"]) != unit.text
+                        or int(row["start_offset"]) != int(unit.start_offset)
+                        or int(row["end_offset"]) != int(unit.end_offset)
+                    ):
+                        return False, "source_evidence_stale"
+                    expected_ids.add(int(row["id"]))
+            all_evidence_ids = {
+                int(row[0]) for row in conn.execute("SELECT id FROM memory_evidence")
+            }
+            if all_evidence_ids != expected_ids:
+                return False, "source_evidence_orphaned"
+            vector_ids = {int(row[0]) for row in conn.execute("SELECT id FROM memory_evidence_vec")}
+            if vector_ids != expected_ids:
+                return False, "source_vectors_incomplete"
+            expected_workspace_ids = {
+                int(row["id"])
+                for row in conn.execute("SELECT id,name FROM workspace_canonicals")
+                if not is_default_workspace_term(str(row["name"] or ""))
+            }
+            workspace_vector_ids = {
+                int(row[0]) for row in conn.execute("SELECT id FROM workspace_canonicals_vec")
+            }
+            if workspace_vector_ids != expected_workspace_ids:
+                return False, "source_workspace_vectors_incomplete"
+    except (sqlite3.Error, TypeError, ValueError):
+        return False, "source_evidence_unverifiable"
+    return True, "source_evidence_complete"
+
+
 def _can_reuse_evidence_space(source: Path, settings: Settings | None) -> tuple[bool, str]:
     """Require proof that cloned evidence/vectors match the running pipeline."""
     state = _source_vec_state(source)
@@ -114,6 +203,10 @@ def _can_reuse_evidence_space(source: Path, settings: Settings | None) -> tuple[
         return False, "configured_embedding_space_unavailable"
     if state.get("active_space_id") != expected:
         return False, "embedding_space_mismatch"
+    assert settings is not None
+    complete, reason = _source_evidence_complete(source, settings.vec_dim)
+    if not complete:
+        return False, reason
     return True, "embedding_space_match"
 
 
@@ -319,15 +412,12 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
     target_fp = _fingerprint(target)
     preserved = all(source_fp.get(key) == target_fp.get(key) for key in source_fp)
     destructive_empty = all(value == 0 for value in _destructive_counts(target).values())
-    target_space_reusable, target_space_reason = _can_reuse_evidence_space(
-        target, settings,
+    checkpoint_ok = preserved and destructive_empty and _checkpoint(target)
+    target_space_reusable, target_space_reason = (
+        _can_reuse_evidence_space(target, settings)
+        if checkpoint_ok else (False, "target_checkpoint_or_validation_failed")
     )
-    switch_ready = (
-        preserved
-        and destructive_empty
-        and target_space_reusable
-        and _checkpoint(target)
-    )
+    switch_ready = checkpoint_ok and target_space_reusable
     if switch_ready:
         _remove_sidecars(target)
     else:
@@ -372,7 +462,7 @@ def _copy_preserved_tables(source: Path, db: MemoryDB, *, chunk_size: int = 500)
     src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
     try:
-        for table in PRESERVED_TABLES:
+        for table in FULL_REBUILD_COPY_TABLES:
             if not _table_exists(src, table):
                 continue
             with db.connection() as dst_probe:
@@ -591,6 +681,40 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     expected_space_id = (
         rebuild_embedder.embedding_space_id if rebuild_embedder is not None else None
     )
+    if expected_space_id is not None:
+        try:
+            with db.write_transaction() as conn:
+                row = conn.execute(
+                    "SELECT value FROM migration_state WHERE key='evidence_rebuild_space_id'"
+                ).fetchone()
+                prior_rebuild_space = str(row["value"]) if row is not None else None
+                cursor_row = conn.execute(
+                    "SELECT value FROM migration_state WHERE key='cursor_memory_id'"
+                ).fetchone()
+                cursor_started = cursor_row is not None and int(cursor_row["value"] or 0) > 0
+                if (
+                    (prior_rebuild_space is not None and prior_rebuild_space != expected_space_id)
+                    or (prior_rebuild_space is None and cursor_started)
+                ):
+                    conn.execute("DELETE FROM memory_evidence_vec")
+                    conn.execute("DELETE FROM memory_evidence")
+                    conn.execute("DELETE FROM workspace_canonicals_vec")
+                    conn.execute("DELETE FROM migration_state WHERE key='cursor_memory_id'")
+                    conn.execute("DELETE FROM _vec_index_meta")
+                    conn.executemany(
+                        "INSERT INTO _vec_index_meta(key,value) VALUES(?,?)",
+                        (("state", "ready"), ("active_space_id", expected_space_id)),
+                    )
+                conn.execute(
+                    "INSERT INTO migration_state(key,value,updated_at) "
+                    "VALUES('evidence_rebuild_space_id',?,CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                    "updated_at=CURRENT_TIMESTAMP",
+                    (expected_space_id,),
+                )
+        except (sqlite3.Error, TypeError, ValueError) as exc:
+            _reset_phase_to_failed(target)
+            return {"ok": False, "error": f"rebuild_space_state_failed: {exc}"}
     try:
         _set_state(db, {
             "schema_generation": _BUILDING_SCHEMA_GENERATION,
@@ -607,6 +731,25 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
             "SELECT COUNT(*) FROM memories WHERE id>? AND status!='deleted'", (cursor,)
         ).fetchone()[0])
     failed: list[dict[str, Any]] = []
+    workspace_vector_failures: list[dict[str, Any]] = []
+    if rebuild_embedder is not None:
+        with db.connection() as conn:
+            canonical_names = [
+                str(row["name"])
+                for row in conn.execute("SELECT name FROM workspace_canonicals ORDER BY id")
+                if not is_default_workspace_term(str(row["name"] or ""))
+            ]
+        for canonical in canonical_names:
+            workspace_embedding = rebuild_embedder.embed_text(prefix="", body=canonical)
+            warnings = db.workspaces.publish_workspace_canonical_vector(
+                canonical,
+                list(workspace_embedding.embedding) if workspace_embedding.embedding else None,
+            )
+            if warnings or not workspace_embedding.embedding:
+                workspace_vector_failures.append({
+                    "canonical": canonical,
+                    "warnings": warnings or ["empty_embedding"],
+                })
     indexed = 0
     page_size = 100
     while not failed:
@@ -619,9 +762,9 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
             break
         for row in rows:
             memory = dict(row)
-            result = tools._index_local_text_evidence(int(memory["id"]), memory)
-            if result.get("status") != "indexed":
-                failed.append({"memory_id": int(memory["id"]), "result": result})
+            index_result = tools._index_local_text_evidence(int(memory["id"]), memory)
+            if index_result.get("status") != "indexed":
+                failed.append({"memory_id": int(memory["id"]), "result": index_result})
                 break
             cursor = int(memory["id"])
             indexed += 1
@@ -635,12 +778,12 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
 
     coverage = db.evidence.coverage()
     source_counts, target_counts = _counts(source), _counts(target)
-    # Evidence may be newly generated or deliberately replaced when the
-    # embedding pipeline changes, so derived rows are validated by coverage
-    # and target-space identity rather than source/target equality.
+    # Evidence is never copied by the full-rebuild path. Derived rows are
+    # validated by coverage and target-space identity instead of source/target
+    # equality.
     row_counts_match = all(
         source_counts.get(table, 0) == target_counts.get(table, 0)
-        for table in PRESERVED_TABLES if table != "memory_evidence"
+        for table in FULL_REBUILD_COPY_TABLES
     )
     source_fp, target_fp = _fingerprint(source), _fingerprint(target)
     stable_keys = [
@@ -657,6 +800,17 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         destructive_counts.get(table, 0) == 0 for table in DESTRUCTIVELY_REBUILT_TABLES
     )
     vec_state = db.get_vec_index_state()
+    with db.connection() as conn:
+        expected_workspace_vectors = sum(
+            1 for row in conn.execute("SELECT name FROM workspace_canonicals")
+            if not is_default_workspace_term(str(row["name"] or ""))
+        )
+        try:
+            workspace_vectors = int(
+                conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0]
+            )
+        except sqlite3.Error:
+            workspace_vectors = 0
     target_space_ready = bool(
         expected_space_id
         and vec_state.get("state") == "ready"
@@ -664,7 +818,10 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     )
     complete = (
         not failed
+        and not workspace_vector_failures
         and coverage["indexed_memories"] == coverage["eligible_memories"]
+        and coverage["vectors"] == coverage["units"]
+        and workspace_vectors == expected_workspace_vectors
         and row_counts_match
         and source_stable
         and destructive_tables_empty
@@ -678,6 +835,7 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         "row_counts_match": str(row_counts_match).lower(),
         "evidence_coverage": f"{coverage['indexed_memories']}/{coverage['eligible_memories']}",
         "failed_count": str(len(failed)), "source_stable": str(source_stable).lower(),
+        "workspace_vector_failures": str(len(workspace_vector_failures)),
         "destructive_tables_empty": str(destructive_tables_empty).lower(),
         "target_space_ready": str(target_space_ready).lower(),
     })
@@ -699,6 +857,11 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         "coverage": coverage, "row_counts_match": row_counts_match,
         "source_stable": source_stable, "source_fingerprint": source_fp,
         "target_fingerprint": target_fp, "failed": failed,
+        "workspace_vector_failures": workspace_vector_failures,
+        "workspace_vector_coverage": {
+            "expected": expected_workspace_vectors,
+            "vectors": workspace_vectors,
+        },
         "destructive_tables_empty": destructive_tables_empty,
         "target_space_ready": target_space_ready,
         "expected_space_id": expected_space_id,

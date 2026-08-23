@@ -7,6 +7,7 @@ import uuid
 from typing import Any, Optional, TYPE_CHECKING
 
 from ..acl import WorkspaceScope, workspace_scope_sql
+from ..constants import is_default_workspace_term
 from ..evidence import INDEXABLE_PREFILTER_SQL, has_indexable_text
 
 
@@ -396,6 +397,22 @@ class MetaStore:
             epoch = self.get_meta(conn, "space_rebuild_evidence_id")
             if state != "mismatch" or not target or epoch is None or target != embedding_space_id:
                 return False
+            if self.get_meta(conn, "workspace_rebuild_space_id") != embedding_space_id:
+                return False
+            expected_workspace_ids = {
+                int(row["id"])
+                for row in conn.execute("SELECT id,name FROM workspace_canonicals")
+                if not is_default_workspace_term(str(row["name"] or ""))
+            }
+            try:
+                workspace_vector_ids = {
+                    int(row["id"])
+                    for row in conn.execute("SELECT id FROM workspace_canonicals_vec")
+                }
+            except sqlite3.Error:
+                return False
+            if workspace_vector_ids != expected_workspace_ids:
+                return False
             cursor = conn.execute(
                 self._space_rebuild_pending_sql(), (int(epoch),)
             )
@@ -404,13 +421,43 @@ class MetaStore:
                     str(row["subject"] or ""), str(row["content"] or "")
                 ):
                     return False
+            obsolete_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT e.id FROM memory_evidence e "
+                    "LEFT JOIN memories m ON m.id=e.memory_id "
+                    "WHERE m.id IS NULL OR m.status='deleted'"
+                )
+            ]
+            for start in range(0, len(obsolete_ids), 500):
+                chunk = obsolete_ids[start:start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})",
+                    chunk,
+                )
+            if obsolete_ids:
+                conn.execute(
+                    "DELETE FROM memory_evidence WHERE id IN ("
+                    "SELECT e.id FROM memory_evidence e LEFT JOIN memories m "
+                    "ON m.id=e.memory_id WHERE m.id IS NULL OR m.status='deleted')"
+                )
+            evidence_ids = {
+                int(row["id"]) for row in conn.execute("SELECT id FROM memory_evidence")
+            }
+            vector_ids = {
+                int(row["id"])
+                for row in conn.execute("SELECT id FROM memory_evidence_vec")
+            }
+            if vector_ids != evidence_ids:
+                return False
             self.set_meta(conn, "state", "ready")
             self.set_meta(conn, "active_space_id", embedding_space_id)
             for key in (
                 "target_space_id", "space_rebuild_evidence_id",
                 "migration_cursor", "migration_epoch",
                 "migration_lease_owner", "migration_lease_expires_at",
-                "last_error",
+                "last_error", "workspace_rebuild_space_id",
             ):
                 self.delete_meta(conn, key)
             return True
@@ -475,7 +522,7 @@ class MetaStore:
                     "target_space_id", "space_rebuild_evidence_id",
                     "migration_cursor", "migration_epoch",
                     "migration_lease_owner", "migration_lease_expires_at",
-                    "last_error",
+                    "last_error", "workspace_rebuild_space_id",
                 ):
                     self.delete_meta(conn, key)
                 return
@@ -503,5 +550,6 @@ class MetaStore:
                     "space_rebuild_evidence_id", "migration_cursor",
                     "migration_lease_owner",
                     "migration_lease_expires_at", "last_error",
+                    "workspace_rebuild_space_id",
                 ):
                     self.delete_meta(conn, key)

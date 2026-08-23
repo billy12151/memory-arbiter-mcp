@@ -3,7 +3,7 @@
 **[English](README.md) | 中文**
 
 > 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.14.2`。
+> 当前正式版本 `0.14.3`。
 
 ## 一句话说明白
 
@@ -133,7 +133,7 @@ mema console         # 打开本地网页控制台（只读，看看库里都有
 
 ## 从旧版本升级（重要，先看再动）
 
-> ⚠️ **0.14.2 升级警告：** 这一代的存储结构和旧版不兼容，老数据库**直接启动会被拒绝**，必须走迁移命令。迁移会**丢弃旧的冲突/裁决/提醒历史**（记忆原文和历史都保留），升级完成后需要跑一遍全库扫描重新发现冲突。
+> ⚠️ **0.14.3 升级警告：** 这一代的存储结构和旧版不兼容，老数据库**直接启动会被拒绝**，必须走迁移命令。迁移会**丢弃旧的冲突/裁决/提醒历史**（记忆原文和历史都保留），升级完成后需要跑一遍全库扫描重新发现冲突。
 
 ```bash
 # 1. 先预览，看看会动什么（不动真格）
@@ -192,6 +192,36 @@ mema doctor --json
 - **请求头客户端写死一次**，每次请求自动带，别让 agent 在单次工具调用里动态加身份，那样会被拒。任一头缺失/为空/重复/冲突 → 直接 400 拒绝，不回退默认身份。
 - **只监听 127.0.0.1**，迷码不会绑公网。这两个头只是"是谁在写"的来源标记，**不是密码**。要给远程机器用，自己在前面加带认证的反代，别让迷码直接暴露。
 - **launchd 跑的时候 PATH 和工作目录跟你终端不一样**：`ProgramArguments` 里直接写 `mema` 的**绝对路径**；GGUF 模型路径在 config.json 里也写绝对路径，别用 `~`。
+
+### Claude Desktop / Claude Code 连接本机 HTTP
+
+Claude 的本地 MCP 配置入口启动的是 stdio 命令。要复用已经常驻的 mema HTTP 服务、避免再启动第二份 mema，可在 `~/.claude.json` 的 `mcpServers` 下保留这一条配置（当前 Claude Desktop/Cowork 与 Claude Code 可能共用这个用户级文件）：
+
+```json
+{
+  "mcpServers": {
+    "memory-arbiter": {
+      "command": "/opt/homebrew/bin/npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.1.43",
+        "http://127.0.0.1:8000/mcp",
+        "--allow-http",
+        "--transport", "http-only",
+        "--header", "X-Mema-Client:claude",
+        "--header", "X-Mema-Agent-Id:claude",
+        "--silent"
+      ],
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "NO_PROXY": "127.0.0.1,localhost"
+      }
+    }
+  }
+}
+```
+
+`command` 要换成你机器上 `which npx` 返回的绝对路径。删除原来直接启动 `mema` / `memory-arbiter-mcp` 的同名配置，否则 Claude 可能再拉起第二个服务进程。修改后完全退出并重开 Claude Desktop，Claude Code 会话也要重启。`mcp-remote` 是第三方桥接器，上面固定的是已与 mema 实测通过的版本。若你的 Claude 安装明确使用独立的 Desktop MCP 配置文件，就把同一条配置放在那里，但不要两边重复注册。
 
 ## 想深入了解
 

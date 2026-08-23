@@ -3,11 +3,13 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
-## [Unreleased]
+## [0.14.3] — 2026-08-24
 
 ### Fixed
 
-- **Upgrade evidence reuse is now space-safe** — side-by-side upgrade reuses a previous generation's evidence/vector index only when its state is `ready` and its active embedding-space ID exactly matches the configured model and pipeline. Missing, failed, rebuilding, or mismatched spaces take the full evidence-rebuild path, and publication now requires the rebuilt target to be `ready` in the actual runtime embedder space. This prevents a migration from reporting `ready` while carrying incompatible vectors.
+- **Upgrade evidence reuse is now space-safe** — side-by-side upgrade reuses a previous generation's evidence/vector index only when its state is `ready`, its active embedding-space ID and vec0 dimensions match the configured model/pipeline, and evidence plus workspace-canonical vector coverage is complete and current. Otherwise it performs a clean full rebuild, and publication requires the target to be `ready` in the actual runtime embedder space.
+- **Space recovery rebuilds every derived vector family** — `rebuild_evidence` now atomically replaces workspace-canonical vectors for the target space, removes obsolete deleted-memory evidence, verifies one vector per evidence unit, and refuses the final `ready` transition while any derived index is incomplete. Resuming a failed full rebuild under a different embedding space clears partial derived state and starts again.
+- **Claude localhost HTTP setup documented** — README examples show the tested pinned `mcp-remote` bridge for Claude Desktop/Cowork and Claude Code, including fixed identity headers and removal of duplicate direct-stdio server entries.
 
 ## [0.14.2] — 2026-08-23
 

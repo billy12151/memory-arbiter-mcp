@@ -323,6 +323,13 @@ class MemoryDB:
     ) -> Optional[list[float]]:
         return self.workspaces.prepare_workspace_canonical_embedding(canonical, embedder)
 
+    def rebuild_workspace_canonical_vectors(
+        self, embedder: Any, embedding_space_id: str,
+    ) -> dict[str, Any]:
+        return self.workspaces.rebuild_workspace_canonical_vectors(
+            embedder, embedding_space_id,
+        )
+
     def set_memory_workspace_canonical(
         self,
         memory_id: int,

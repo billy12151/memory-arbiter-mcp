@@ -13,7 +13,7 @@ from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.evidence import evidence_content_hash, local_text_units
-from memory_arbiter.models import ConflictMember, ConflictValueGroup
+from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryRecord
 from memory_arbiter.semantic_conflict import (
     AttributeValueExtraction,
     ModelSignal,
@@ -522,6 +522,71 @@ def test_previous_generation_old_space_is_rebuilt_into_runtime_space(
     assert "target_space_id" not in state
 
 
+def test_full_rebuild_does_not_copy_deleted_old_space_evidence(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    pytest.importorskip("sqlite_vec")
+    source_path = tmp_path / "previous.sqlite3"
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=source_path, backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True, vec_dim=2, embedding_provider="gguf",
+        embedding_model_path=model,
+    )
+    source_db = MemoryDB(settings)
+    source_tools = MemoryTools(settings, source_db)
+    old_embedder = FakeEmbedder()
+    old_embedder.embedding_space_id = "old-pipeline-space"
+    source_tools._embedder = old_embedder
+    source_tools._embedder_loaded = True
+    source_db.init_vec_index_state(old_embedder.embedding_space_id, True)
+    active = source_tools.memory_write(
+        content="active", subject="active", workspace="project-alpha",
+    )["data"]["id"]
+    deleted = source_tools.memory_write(
+        content="deleted", subject="deleted", workspace="project-beta",
+    )["data"]["id"]
+    assert source_tools.wait_evidence_worker_drained(timeout=5)
+    with source_db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET status='deleted' WHERE id=?", (deleted,))
+        conn.execute(
+            "UPDATE migration_state SET value='local_text_evidence_v1' "
+            "WHERE key='schema_generation'"
+        )
+
+    original_init = MemoryTools.__init__
+
+    def init_with_current_embedder(self, settings=None, db=None):
+        original_init(self, settings=settings, db=db)
+        self._embedder = FakeEmbedder()
+        self._embedder_loaded = True
+        self.db.init_vec_index_state(self._embedder.embedding_space_id, True)
+
+    monkeypatch.setattr(MemoryTools, "__init__", init_with_current_embedder)
+    target = tmp_path / "current.sqlite3"
+
+    result = build(source_path, target, settings, progress=False)
+
+    assert result["ok"] is True, result
+    target_db = MemoryDB(Settings(
+        db_path=target, backup_jsonl=tmp_path / "target-backup.jsonl",
+        enable_sqlite_vec=True, vec_dim=2,
+    ))
+    with target_db.connection() as conn:
+        evidence_memory_ids = {
+            int(row[0]) for row in conn.execute("SELECT DISTINCT memory_id FROM memory_evidence")
+        }
+        units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
+        vectors = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
+        workspace_vectors = int(
+            conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0]
+        )
+    assert evidence_memory_ids == {active}
+    assert units == vectors
+    assert workspace_vectors == 1
+
+
 def test_final_sync_next_step_does_not_request_another_final_sync(tmp_path: Path, monkeypatch, capsys) -> None:
     pytest.importorskip("sqlite_vec")
     source_settings = Settings(
@@ -961,7 +1026,9 @@ def test_final_sync_rejects_source_writes_landing_before_replace(tmp_path: Path,
 
 def test_space_rebuild_flips_mismatch_back_to_ready(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    first = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    first = tools.memory_write(
+        content="接口超时为 5 秒。", subject="timeout", tags=[], workspace="project",
+    )["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
     # Simulate a model swap: the active space no longer matches the live embedder.
     tools.db.init_vec_index_state("fake-vnext-space", True)
@@ -971,15 +1038,75 @@ def test_space_rebuild_flips_mismatch_back_to_ready(tmp_path: Path) -> None:
 
     tools._embedder = FakeEmbedder()
     tools._embedder.embedding_space_id = "new-space-v2"
+    with tools.db.write_transaction() as conn:
+        conn.execute("DELETE FROM workspace_canonicals_vec")
     rebuild = tools.memory_repair("rebuild_evidence", {"dry_run": False})
     assert rebuild["ok"] is True and rebuild["data"]["queued"] >= 1
+    assert rebuild["data"]["workspace_vector_rebuild"]["ok"] is True
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     state = tools.db.get_vec_index_state()
     assert state["state"] == "ready"
     assert state["active_space_id"] == "new-space-v2"
+    with tools.db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT 1 FROM _vec_index_meta WHERE key='workspace_rebuild_space_id'"
+        ).fetchone() is None
     result = tools.memory_search(query="接口超时")
     assert result["data"]["vector_lag"]["pending_evidence_index"] == 0
+
+
+def test_space_rebuild_completion_purges_deleted_evidence_and_requires_vectors(
+    tmp_path: Path,
+) -> None:
+    tools = make_tools(tmp_path)
+    active = tools.memory_write(content="active", subject="a", tags=[])["data"]["id"]
+    deleted = tools.memory_write(content="deleted", subject="d", tags=[])["data"]["id"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "space-b"
+    tools.db.init_vec_index_state("space-b", True)
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET status='deleted' WHERE id=?", (deleted,))
+    rebuild = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
+    assert rebuild["ok"] is True
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    with tools.db.write_transaction() as conn:
+        active_evidence = conn.execute(
+            "SELECT id FROM memory_evidence WHERE memory_id=? ORDER BY id", (active,),
+        ).fetchall()
+        deleted_evidence = conn.execute(
+            "SELECT id FROM memory_evidence WHERE memory_id=?", (deleted,),
+        ).fetchall()
+        missing_vector_id = int(active_evidence[0]["id"])
+        conn.execute("DELETE FROM memory_evidence_vec WHERE id=?", (missing_vector_id,))
+        conn.executemany(
+            "INSERT INTO _vec_index_meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (
+                ("state", "mismatch"),
+                ("target_space_id", "space-b"),
+                ("space_rebuild_evidence_id", "0"),
+                ("workspace_rebuild_space_id", "space-b"),
+            ),
+        )
+    assert tools.db.maybe_complete_space_rebuild("space-b") is False
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES(?,?,?)",
+            (missing_vector_id, "active", "[0.0,1.0]"),
+        )
+    assert tools.db.maybe_complete_space_rebuild("space-b") is True
+    with tools.db.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (deleted,)
+        ).fetchone()[0] == 0
+        assert not deleted_evidence or conn.execute(
+            "SELECT COUNT(*) FROM memory_evidence_vec WHERE id IN ("
+            + ",".join("?" for _ in deleted_evidence) + ")",
+            tuple(int(row["id"]) for row in deleted_evidence),
+        ).fetchone()[0] == 0
 
 
 def test_mismatch_rebuild_paginates_across_batches_and_flips_only_at_end(tmp_path: Path) -> None:
@@ -1042,7 +1169,11 @@ def test_rebuild_dry_run_has_no_side_effects_in_mismatch_mode(tmp_path: Path) ->
         epoch = conn.execute(
             "SELECT value FROM _vec_index_meta WHERE key='space_rebuild_evidence_id'"
         ).fetchone()
+        workspace_marker = conn.execute(
+            "SELECT value FROM _vec_index_meta WHERE key='workspace_rebuild_space_id'"
+        ).fetchone()
     assert epoch is None, "dry-run must not persist the rebuild epoch"
+    assert workspace_marker is None, "dry-run must not rebuild workspace vectors"
 
 
 def test_knn_truncates_to_requested_k_with_filters(tmp_path: Path) -> None:
@@ -1714,6 +1845,74 @@ def test_migration_resume_recovers_from_failed_build(tmp_path: Path, monkeypatch
     assert phase == "ready"
 
 
+def test_migration_resume_with_changed_space_restarts_derived_index(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    pytest.importorskip("sqlite_vec")
+    source = tmp_path / "legacy.sqlite3"
+    source_db = MemoryDB(Settings(db_path=source, backup_jsonl=tmp_path / "b.jsonl"))
+    for index in range(3):
+        source_db.insert_memory(
+            MemoryRecord.from_input(
+                {"content": f"内容 {index}", "subject": f"s{index}", "workspace": "project"},
+                source_db.settings.defaults(),
+            ),
+            "project",
+        )
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=source, backup_jsonl=tmp_path / "b.jsonl",
+        enable_sqlite_vec=True, vec_dim=2, embedding_provider="gguf",
+        embedding_model_path=model,
+    )
+    target = tmp_path / "target.sqlite3"
+    original_init = MemoryTools.__init__
+    calls = {"count": 0}
+
+    def init_old(self, settings=None, db=None):
+        original_init(self, settings=settings, db=db)
+        embedder = FakeEmbedder()
+        embedder.embedding_space_id = "space-old"
+        self._embedder = embedder
+        self._embedder_loaded = True
+        self.db.init_vec_index_state(embedder.embedding_space_id, True)
+
+    real_index = MemoryTools._index_local_text_evidence
+
+    def fail_second(self, memory_id, record=None, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            return {"status": "failed", "reason": "injected"}
+        return real_index(self, memory_id, record, **kwargs)
+
+    monkeypatch.setattr(MemoryTools, "__init__", init_old)
+    monkeypatch.setattr(MemoryTools, "_index_local_text_evidence", fail_second)
+    first = build(source, target, settings, progress=False)
+    assert first["ok"] is False
+
+    def init_new(self, settings=None, db=None):
+        original_init(self, settings=settings, db=db)
+        embedder = FakeEmbedder()
+        embedder.embedding_space_id = "space-new"
+        self._embedder = embedder
+        self._embedder_loaded = True
+        self.db.init_vec_index_state(embedder.embedding_space_id, True)
+
+    monkeypatch.setattr(MemoryTools, "__init__", init_new)
+    monkeypatch.setattr(MemoryTools, "_index_local_text_evidence", real_index)
+    resumed = build(source, target, settings, resume=True, progress=False)
+
+    assert resumed["ok"] is True, resumed
+    assert resumed["indexed"] == 3
+    with sqlite3.connect(target) as conn:
+        state = dict(conn.execute("SELECT key,value FROM _vec_index_meta"))
+        migration = dict(conn.execute("SELECT key,value FROM migration_state"))
+    assert state["state"] == "ready"
+    assert state["active_space_id"] == "space-new"
+    assert migration["evidence_rebuild_space_id"] == "space-new"
+
+
 def test_migration_inspect_accepts_missing_parent_dir(tmp_path: Path) -> None:
     source = tmp_path / "legacy.sqlite3"
     db = MemoryDB(Settings(db_path=source, backup_jsonl=tmp_path / "b.jsonl"))
@@ -2321,7 +2520,7 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
         for index, peer in enumerate(peers)
     ]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
-    fairness_deadline = time.monotonic() + 0.04
+    fairness_deadline = time.monotonic() + 0.08
     monkeypatch.setattr(
         tools._semantic_worker, "pending_job_deadline", lambda timeout: fairness_deadline,
     )

@@ -4,7 +4,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.14.2` (localhost Streamable HTTP identity plus workspace admission/review contract; destructive conflict-history upgrade described below).
+> Current release: `0.14.3` (space-safe upgrades, complete evidence/workspace-vector recovery, and localhost HTTP client guidance).
 
 ## Why trust it
 
@@ -82,7 +82,7 @@ Evidence/semantic queues are process-local, so a crash or forced shutdown can lo
 
 ## Upgrading from an older database
 
-**Upgrade warning for 0.14.2:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`. A previous evidence-capable generation uses the conflict-only path only when its vector index is `ready` and its active embedding-space ID exactly matches the configured model and pipeline; otherwise the upgrade automatically rebuilds evidence and vectors. Both paths compact current workspace redirect/negative-decision state and discard the obsolete workspace decision event ledger.
+**Upgrade warning for 0.14.3:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are classified as legacy and refused without modification. Run the public side-by-side `mema upgrade`. A previous evidence-capable generation uses the conflict-only path only when its vector index is `ready` and its active embedding-space ID exactly matches the configured model and pipeline; otherwise the upgrade automatically rebuilds evidence and vectors. Both paths compact current workspace redirect/negative-decision state and discard the obsolete workspace decision event ledger.
 
 The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, and audit. The obsolete workspace decision event ledger is not copied. A proven same-space source clones existing FTS/evidence/vector state unchanged and transactionally rebuilds only the conflict domain. A missing, non-ready, or different embedding space forces a full evidence/vector rebuild in the configured space. Both paths intentionally start with empty new `conflicts`/notice state and do not copy old `conflicts`, append-only `conflict_judgments`, or `semantic_notices` history. Current contradictions must be rediscovered by a scheduled full-library scan.
 
@@ -156,6 +156,36 @@ Setting it up:
 3. **Client**: copy [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json), filling in `X-Mema-Client` and `X-Mema-Agent-Id`.
 
 Notes: the client sends the fixed headers automatically on every HTTP MCP request — agents must not add identity to individual tool `data`, or it is rejected. Missing/empty/duplicate/conflicting identity fails closed (400), never falling back to defaults. The service binds to loopback only; these headers are provenance, **not authentication**. Because launchd does not inherit your shell PATH or expand `~`, put absolute paths in `ProgramArguments` and for any GGUF `model_path` in config.json.
+
+### Claude Desktop / Claude Code through localhost HTTP
+
+Claude's local MCP configuration launches stdio commands. To reuse one running mema HTTP service instead of spawning another mema process, put this single entry under `mcpServers` in `~/.claude.json` (current Claude Desktop/Cowork and Claude Code installations may share this user-level file):
+
+```json
+{
+  "mcpServers": {
+    "memory-arbiter": {
+      "command": "/opt/homebrew/bin/npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.1.43",
+        "http://127.0.0.1:8000/mcp",
+        "--allow-http",
+        "--transport", "http-only",
+        "--header", "X-Mema-Client:claude",
+        "--header", "X-Mema-Agent-Id:claude",
+        "--silent"
+      ],
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "NO_PROXY": "127.0.0.1,localhost"
+      }
+    }
+  }
+}
+```
+
+Use the absolute `npx` path from `which npx` on your machine. Remove any older `memory-arbiter` entry that directly launches `mema`/`memory-arbiter-mcp`, otherwise Claude may start a second server process. Fully quit and reopen Claude Desktop, and restart Claude Code sessions after changing the file. `mcp-remote` is a third-party bridge; the pinned version above is the configuration tested with mema. If your Claude installation uses a separate Desktop MCP file, place the same single entry there instead, but do not register both copies.
 
 ## Degradation
 
