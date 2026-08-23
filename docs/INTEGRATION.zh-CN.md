@@ -18,7 +18,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 `memory(action="read", data={"memory_id":42})` 返回完整原文。加 `"span":{"start":120,"end":640}` 则只返回 `data.memory.content[120:640]` 外加 `data.span.{start,end,total_chars}`。边界必须是严格 JSON 整数且满足 `0 <= start < end`；超大的 end 裁剪到正文长度，而 start 超出正文会报错。`scan_candidates.deep_read` 可能提供可直接使用的 span；语义 notice 的 read call 按设计是整记忆读取，需要完整上下文时不要带 span 参数。
 
-用 `memory_repair(task="rebuild_evidence", data={"dry_run":true})` 检查缺失/过期的覆盖率，再排队有界的重建页。重复执行 execute/dry-run 直到没有剩余 id、status 报告合格覆盖完整。embedding 空间变化会报告 `state=mismatch` 并停用证据通道，直到每条合格记忆都重新发布。证据单元和向量都是派生的。从 `local_text_evidence_v1` 的 conflict-only 升级复用其现有证据/向量状态；更老代次的升级会在配置的 embedding 空间重建向量。
+用 `memory_repair(task="rebuild_evidence", data={"dry_run":true})` 检查缺失/过期的覆盖率，再排队有界的重建页。重复执行 execute/dry-run 直到没有剩余 id、status 报告合格覆盖完整。embedding 空间变化会报告 `state=mismatch` 并停用证据通道，直到每条合格记忆都重新发布。证据单元和向量都是派生的。升级只在源向量索引为 `ready` 且 active space ID 与当前模型/管线空间完全一致时复用；否则在当前空间重建索引。
 
 ## 冲突检测契约
 
@@ -109,11 +109,11 @@ JSONL 回放无需授权即可预览。应用回放需要显式用户授权，�
 | 源数据库 | 运行时行为 | 公开升级路径 | 保留 / 重建 |
 | --- | --- | --- | --- |
 | 新建/空库或 `workspace_state_v1` | 正常启动 | 无 | 现有 current 数据 |
-| `conflict_groups_v2` 或 `local_text_evidence_v1` | 原样拒绝启动 | Side-by-side `mema upgrade`，conflict-only 路径 | 核心/公开数据保留；冲突历史和旧 workspace 决策事件省略；FTS/证据/向量复用 |
+| `conflict_groups_v2` 或 `local_text_evidence_v1` | 原样拒绝启动 | Side-by-side `mema upgrade`；仅空间完全匹配时走 conflict-only | 核心/公开数据保留；冲突历史和旧 workspace 决策事件省略；空间兼容时复用 FTS/证据/向量，否则重建 |
 | 更老的 claim + memory/section-vector 代次 | 原样拒绝启动 | 同样的 side-by-side `mema upgrade` | 核心/公开数据保留；证据单元生成/保留，向量重建 |
 | 未知、不完整、失败/恢复中的目标库 | 拒绝 | 用 `mema doctor --json` 诊断；只能用低层迁移工作流修复/续跑 | 验证成功前永远不作为 current 打开 |
 
-没有公开的原地升级：两条路径都构建并验证一个 side-by-side 目标。更老代次的完整重建需要 sqlite-vec、可读的已配置 GGUF embedding 模型、`llama-cpp-python`（`semantic-local` extra 同时提供 embedding 运行时）、可写目标目录和足够磁盘。`local_text_evidence_v1` conflict-only 路径复用现有证据/向量状态，不加载模型。独立的可选语义冲突 Qwen 模型不是迁移前置条件。
+没有公开的原地升级：两条路径都构建并验证一个 side-by-side 目标。完整重建需要 sqlite-vec、可读的已配置 GGUF embedding 模型、`llama-cpp-python`（`semantic-local` extra 同时提供 embedding 运行时）、可写目标目录和足够磁盘。只有源向量状态为 `ready` 且 active space ID 与当前模型/管线完全一致时，conflict-only 路径才复用现有证据/向量且不加载模型。独立的可选语义冲突 Qwen 模型不是迁移前置条件。
 
 ### WAL 安全流程
 
@@ -130,6 +130,6 @@ JSONL 回放无需授权即可预览。应用回放需要显式用户授权，�
 4. 运行 `mema upgrade`；重启并用 `mema doctor --json` 验证。
 5. 完成 status/doctor 显示的带 epoch 固定的完整 `scan_candidates` 全库扫描。
 
-side-by-side 拷贝保留记忆内容/历史、备份回放回执、workspace canonical 和当前 redirect/负决策状态、审计和证据。已废弃的 workspace 决策事件账本被刻意省略。上一代证据代次原样克隆 FTS/证据/向量表，只替换冲突域；更老代次重建并重新发布向量。它刻意以空的冲突/notice 状态开始：旧 `conflicts`、`conflict_judgments` 和 `semantic_notices` 历史不迁移。目标发布要求指纹稳定、破坏性表为空、在移除 WAL/SHM 并切换配置前目标 `wal_checkpoint(TRUNCATE)` 成功；完整重建路径额外要求合格证据全覆盖。
+side-by-side 拷贝保留记忆内容/历史、备份回放回执、workspace canonical 和当前 redirect/负决策状态及审计。已废弃的 workspace 决策事件账本被刻意省略。已证明同空间的源库原样克隆 FTS/证据/向量表，只替换冲突域；空间缺失、非 ready 或不一致时重建并重新发布证据向量。它刻意以空的冲突/notice 状态开始：旧 `conflicts`、`conflict_judgments` 和 `semantic_notices` 历史不迁移。目标发布要求指纹稳定、破坏性表为空、在移除 WAL/SHM 并切换配置前目标 `wal_checkpoint(TRUNCATE)` 成功；完整重建路径额外要求合格证据全覆盖，且目标向量状态在预期空间为 `ready`。
 
 成功时记录 `conflict_scan_required=true` 和一个持久 epoch。只有覆盖升级时活跃集且 detector 匹配的完整扫描才能 CAS 清除它。部分页、失败扫描或旧 detector 都不能。`--yes` 只跳过"确认写入方已停止、冲突/裁决/notice 历史永久丢失"的提示；它不会停止进程、checkpoint/备份源库，也不放松验证。`--no-switch` 不动配置。被环境变量覆盖/不匹配的配置路径需要按打印的手动步骤切换。

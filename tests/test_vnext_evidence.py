@@ -461,6 +461,67 @@ def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, m
     assert second["data"]["id"] in [row["id"] for row in searched["data"]["results"]]
 
 
+def test_previous_generation_old_space_is_rebuilt_into_runtime_space(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    pytest.importorskip("sqlite_vec")
+    source_path = tmp_path / "previous.sqlite3"
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=source_path,
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        vec_dim=2,
+        embedding_provider="gguf",
+        embedding_model_path=model,
+    )
+    source_db = MemoryDB(settings)
+    source_tools = MemoryTools(settings, source_db)
+    old_embedder = FakeEmbedder()
+    old_embedder.embedding_space_id = "old-pipeline-space"
+    source_tools._embedder = old_embedder
+    source_tools._embedder_loaded = True
+    source_db.init_vec_index_state(old_embedder.embedding_space_id, True)
+    written = source_tools.memory_write(
+        content="旧空间中的内容。", subject="旧空间", tags=[],
+    )
+    assert written["ok"] is True
+    assert source_tools.wait_evidence_worker_drained(timeout=5)
+    with source_db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE migration_state SET value='local_text_evidence_v1' "
+            "WHERE key='schema_generation'"
+        )
+
+    original_init = MemoryTools.__init__
+
+    def init_with_current_embedder(self, settings=None, db=None):
+        original_init(self, settings=settings, db=db)
+        self._embedder = FakeEmbedder()
+        self._embedder_loaded = True
+        self.db.init_vec_index_state(self._embedder.embedding_space_id, True)
+
+    monkeypatch.setattr(MemoryTools, "__init__", init_with_current_embedder)
+    target = tmp_path / "current.sqlite3"
+
+    plan = inspect(source_path, target, settings)
+    result = build(source_path, target, settings, progress=False)
+
+    assert plan["upgrade_mode"] == "full_evidence_rebuild"
+    assert plan["evidence_reuse_reason"] == "embedding_space_mismatch"
+    assert result["ok"] is True, result
+    assert result["upgrade_mode"] == "full_evidence_rebuild"
+    assert result["indexed"] == 1
+    assert result["target_space_ready"] is True
+    assert result["expected_space_id"] == FakeEmbedder.embedding_space_id
+    with sqlite3.connect(target) as conn:
+        state = dict(conn.execute("SELECT key,value FROM _vec_index_meta"))
+    assert state["state"] == "ready"
+    assert state["active_space_id"] == FakeEmbedder.embedding_space_id
+    assert "target_space_id" not in state
+
+
 def test_final_sync_next_step_does_not_request_another_final_sync(tmp_path: Path, monkeypatch, capsys) -> None:
     pytest.importorskip("sqlite_vec")
     source_settings = Settings(
@@ -840,7 +901,12 @@ def test_failed_migration_target_is_not_current_generation(tmp_path: Path, monke
     target = tmp_path / "target.sqlite3"
     monkeypatch.setattr(
         "memory_arbiter.vnext_migration.MemoryTools",
-        lambda **kwargs: type("FailingTools", (), {"_index_local_text_evidence": staticmethod(lambda *a, **k: {"status": "failed", "reason": "test"})})(),
+        lambda **kwargs: type("FailingTools", (), {
+            "_ensure_embedder": staticmethod(lambda: (FakeEmbedder(), [])),
+            "_index_local_text_evidence": staticmethod(
+                lambda *a, **k: {"status": "failed", "reason": "test"}
+            ),
+        })(),
     )
     result = build(legacy, target, tools.settings)
     assert result["ok"] is False
@@ -1628,6 +1694,7 @@ def test_migration_resume_recovers_from_failed_build(tmp_path: Path, monkeypatch
         real_init(self, settings=settings, db=db)
         self._embedder = FakeEmbedder()
         self._embedder_loaded = True
+        self.db.init_vec_index_state(self._embedder.embedding_space_id, True)
 
     monkeypatch.setattr(MemoryTools, "__init__", init_with_fake_embedder)
     monkeypatch.setattr(MemoryTools, "_index_local_text_evidence", flaky)

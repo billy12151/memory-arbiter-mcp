@@ -59,9 +59,9 @@ Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责�
 
 ## 0.14.1.dev0 结构升级
 
-当前 runtime 只接受 `workspace_state_v1`。`conflict_groups_v2`、`local_text_evidence_v1` 和更老的 claim/memory-vector/section-vector 库都会只读识别为 legacy，并统一通过公开的旁路 `mema upgrade`：前两者走 conflict-only 路径、原样复用 evidence/vector，同时压缩 workspace redirect/negative-decision 当前状态并删除旧事件账本；更老架构才重建 evidence/vector。所有路径都不在原库原地修改。
+当前 runtime 只接受 `workspace_state_v1`。`conflict_groups_v2`、`local_text_evidence_v1` 和更老的 claim/memory-vector/section-vector 库都会只读识别为 legacy，并统一通过公开的旁路 `mema upgrade`。只有源向量状态为 `ready` 且 active space ID 与当前模型/管线空间完全一致时，前两代才走 conflict-only 路径并原样复用 evidence/vector；否则自动完整重建。所有路径都会压缩 workspace redirect/negative-decision 当前状态并删除旧事件账本，且不在原库原地修改。
 
-升级必须停止旧 writer，并 drain/停止 semantic worker 后在排他窗口执行。先用 `PRAGMA wal_checkpoint(TRUNCATE)`（busy 必须为 0）再复制主库做回滚备份，不能在 WAL 尚有已提交帧时只复制 `.sqlite3`。升级保留记忆正文/历史、workspace canonical 与当前转发/negative decision、audit、backup receipt 和 evidence；旧 workspace decision event ledger 不迁移。`local_text_evidence_v1` 的 FTS/evidence/vector 原样复用，更老架构才重建。旧 `conflicts`、`conflict_judgments`、`semantic_notices` 历史不迁移。目标通过 fingerprint 和 WAL checkpoint 后才切配置。`--yes` 只跳过“writer 已停且接受历史丢失”的确认，不会替你停进程、checkpoint 或备份。
+升级必须停止旧 writer，并 drain/停止 semantic worker 后在排他窗口执行。先用 `PRAGMA wal_checkpoint(TRUNCATE)`（busy 必须为 0）再复制主库做回滚备份，不能在 WAL 尚有已提交帧时只复制 `.sqlite3`。升级保留记忆正文/历史、workspace canonical 与当前转发/negative decision、audit 和 backup receipt；旧 workspace decision event ledger 不迁移。同空间且 ready 的 FTS/evidence/vector 可以原样复用，空间缺失、非 ready 或不一致时必须重建。旧 `conflicts`、`conflict_judgments`、`semantic_notices` 历史不迁移。目标通过 fingerprint、目标空间 ready 校验和 WAL checkpoint 后才切配置。`--yes` 只跳过“writer 已停且接受历史丢失”的确认，不会替你停进程、checkpoint 或备份。
 
 重建后设置持久化 `conflict_scan_required=true` 和 scan epoch。只有覆盖升级时 active memory 集合、且 detector version 匹配的完整全库 scan 成功后，才能用 CAS 清除该标志；部分分页、失败或旧 detector scan 都不能清除。仍成立的冲突由 scan 重新发现，已经通过正文更新解决的旧冲突不得复活。
 

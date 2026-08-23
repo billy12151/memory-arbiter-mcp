@@ -3,6 +3,12 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **Upgrade evidence reuse is now space-safe** — side-by-side upgrade reuses a previous generation's evidence/vector index only when its state is `ready` and its active embedding-space ID exactly matches the configured model and pipeline. Missing, failed, rebuilding, or mismatched spaces take the full evidence-rebuild path, and publication now requires the rebuilt target to be `ready` in the actual runtime embedder space. This prevents a migration from reporting `ready` while carrying incompatible vectors.
+
 ## [0.14.2] — 2026-08-23
 
 Independent whole-project adversarial hardening release. No schema generation change is required; 0.14.1 databases remain current.

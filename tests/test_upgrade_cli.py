@@ -51,6 +51,24 @@ def test_upgrade_help_warns_about_writers_loss_target_and_reindex(capsys) -> Non
         assert phrase in output
 
 
+def test_upgrade_plan_explains_evidence_reuse_decision() -> None:
+    from memory_arbiter.upgrade_cli import _render_plan
+
+    output = _render_plan({
+        "upgrade_mode": "full_evidence_rebuild",
+        "evidence_reuse_reason": "embedding_space_mismatch",
+        "counts": {"memories": 2},
+        "estimated_evidence_units": 4,
+        "estimated_vector_bytes": 128,
+        "required_bytes": 1024,
+        "free_bytes": 2048,
+        "source": "/tmp/source.sqlite3",
+        "target": "/tmp/target.sqlite3",
+    })
+
+    assert "Evidence reuse decision: embedding_space_mismatch" in output
+
+
 @pytest.fixture(autouse=True)
 def _pass_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("memory_arbiter.upgrade_cli._preflight", lambda *_args: [])

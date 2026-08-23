@@ -35,9 +35,9 @@ def _render_plan(plan: dict[str, Any]) -> str:
     conflict_only = plan.get("upgrade_mode") == "conflict_only"
     mode_lines = (
         [
-            "This is a conflict-domain-only upgrade from the previous evidence schema.",
-            "Existing memory_evidence and vector tables are cloned unchanged; no model",
-            "loading or embedding recomputation is performed.",
+            "The source evidence index is ready in the configured embedding space.",
+            "Existing memory_evidence and vector tables can be cloned unchanged; no",
+            "model loading or embedding recomputation is required for this upgrade.",
         ]
         if conflict_only else
         [
@@ -63,6 +63,7 @@ def _render_plan(plan: dict[str, Any]) -> str:
         f"Estimated vector storage: {_format_bytes(int(plan.get('estimated_vector_bytes') or 0))}",
         f"Estimated additional space: {_format_bytes(int(plan.get('required_bytes') or 0))}",
         f"Free disk space: {_format_bytes(int(plan.get('free_bytes') or 0))}",
+        f"Evidence reuse decision: {plan.get('evidence_reuse_reason', 'unknown')}",
         f"Source database: {plan.get('source')}",
         f"New database: {plan.get('target')}",
     ])
@@ -174,8 +175,11 @@ def run_upgrade(
             "Before execution, stop every MCP server, console, worker, or other writer "
             "using the source. The source is retained, but old conflict, decision, and "
             "semantic-notice records are not copied to the target. The previous evidence "
-            "schema uses a fast conflict-only path; older schemas require sqlite-vec, "
-            "llama-cpp-python, and a configured local GGUF embedding model. Run --dry-run first."
+            "schema uses the fast conflict-only path only when its ready vector index "
+            "matches the configured embedding space; otherwise it requires sqlite-vec, "
+            "llama-cpp-python, and a configured local GGUF embedding model for "
+            "reindexing. Run "
+            "--dry-run first."
         ),
     )
     parser.add_argument("--source", type=Path, help="Legacy source database (default: configured db_path).")

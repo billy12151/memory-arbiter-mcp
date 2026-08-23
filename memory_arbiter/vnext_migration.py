@@ -23,6 +23,11 @@ from .db_generation import (
     PREVIOUS_SCHEMA_GENERATIONS,
     detect_database_generation,
 )
+from .embedder import (
+    EMBEDDING_PIPELINE_VERSION,
+    compute_embedding_space_id,
+    compute_model_digest,
+)
 from .evidence import local_text_units
 from .db.meta import active_scan_boundary_on_connection, canonical_scan_boundary
 from .tools import MemoryTools
@@ -56,6 +61,60 @@ def is_previous_evidence_generation(path: Path) -> bool:
             return bool(row and str(row[0]) in PREVIOUS_SCHEMA_GENERATIONS)
     except sqlite3.Error:
         return False
+
+
+def _configured_embedding_space_id(settings: Settings | None) -> str | None:
+    """Compute the configured space identity without loading the GGUF runtime."""
+    if (
+        settings is None
+        or not settings.enable_sqlite_vec
+        or settings.embedding_provider != "gguf"
+        or settings.embedding_model_path is None
+    ):
+        return None
+    model_path = settings.embedding_model_path.expanduser()
+    if not model_path.is_file():
+        return None
+    try:
+        digest = compute_model_digest(str(model_path))
+    except OSError:
+        return None
+    return compute_embedding_space_id(
+        digest,
+        settings.vec_dim,
+        EMBEDDING_PIPELINE_VERSION,
+        {
+            "n_ctx": settings.embedding_n_ctx,
+            "reserved_tokens": settings.embedding_reserved_tokens,
+            "max_section_chars": settings.max_section_chars,
+        },
+    )
+
+
+def _source_vec_state(path: Path) -> dict[str, str]:
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+            if not _table_exists(conn, "_vec_index_meta"):
+                return {}
+            return {
+                str(row[0]): str(row[1])
+                for row in conn.execute("SELECT key,value FROM _vec_index_meta")
+            }
+    except sqlite3.Error:
+        return {}
+
+
+def _can_reuse_evidence_space(source: Path, settings: Settings | None) -> tuple[bool, str]:
+    """Require proof that cloned evidence/vectors match the running pipeline."""
+    state = _source_vec_state(source)
+    if state.get("state") != "ready":
+        return False, f"source_vec_state_{state.get('state') or 'missing'}"
+    expected = _configured_embedding_space_id(settings)
+    if expected is None:
+        return False, "configured_embedding_space_unavailable"
+    if state.get("active_space_id") != expected:
+        return False, "embedding_space_mismatch"
+    return True, "embedding_space_match"
 
 
 def _counts_on_connection(conn: sqlite3.Connection) -> dict[str, int]:
@@ -147,7 +206,9 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
         )
     finally:
         conn.close()
-    conflict_only = is_previous_evidence_generation(source)
+    previous_evidence = is_previous_evidence_generation(source)
+    reusable, reuse_reason = _can_reuse_evidence_space(source, settings)
+    conflict_only = previous_evidence and reusable
     vector_bytes = (
         0 if conflict_only
         else units * int((settings.vec_dim if settings is not None else Settings.vec_dim)) * 4
@@ -160,6 +221,7 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
     return {
         "source": str(source), "target": str(target),
         "upgrade_mode": "conflict_only" if conflict_only else "full_evidence_rebuild",
+        "evidence_reuse_reason": reuse_reason if previous_evidence else "source_generation_requires_rebuild",
         "source_bytes": source.stat().st_size, "counts": _counts(source),
         "destructive_history_loss": list(DESTRUCTIVELY_REBUILT_TABLES),
         "destructive_history_counts": _destructive_counts(source),
@@ -195,6 +257,13 @@ def _current_conflict_schema(settings: Settings) -> list[str]:
 def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[str, Any]:
     """Clone a dev1 evidence DB and transactionally replace only conflict state."""
     plan = inspect(source, target, settings)
+    if plan.get("upgrade_mode") != "conflict_only":
+        return {
+            "ok": False,
+            "error": "evidence_space_not_reusable",
+            "reason": plan.get("evidence_reuse_reason"),
+            "plan": plan,
+        }
     if target.exists():
         return {"ok": False, "error": "target_exists_use_new_path", "plan": plan}
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -250,7 +319,15 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
     target_fp = _fingerprint(target)
     preserved = all(source_fp.get(key) == target_fp.get(key) for key in source_fp)
     destructive_empty = all(value == 0 for value in _destructive_counts(target).values())
-    switch_ready = preserved and destructive_empty and _checkpoint(target)
+    target_space_reusable, target_space_reason = _can_reuse_evidence_space(
+        target, settings,
+    )
+    switch_ready = (
+        preserved
+        and destructive_empty
+        and target_space_reusable
+        and _checkpoint(target)
+    )
     if switch_ready:
         _remove_sidecars(target)
     else:
@@ -280,6 +357,8 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
         "source_fingerprint": source_fp,
         "target_fingerprint": target_fp,
         "destructive_tables_empty": destructive_empty,
+        "target_space_reusable": target_space_reusable,
+        "target_space_reason": target_space_reason,
         "conflict_scan": state,
         "switch_ready": switch_ready,
     }
@@ -421,11 +500,11 @@ def _target_owned_by_source(target: Path, source: Path) -> bool:
 
 
 def build(source: Path, target: Path, settings: Settings, *, resume: bool = False, progress: bool = True) -> dict[str, Any]:
-    if is_previous_evidence_generation(source):
+    plan = inspect(source, target, settings)
+    if plan.get("upgrade_mode") == "conflict_only":
         if resume:
             return {"ok": False, "error": "conflict_only_upgrade_is_not_resumable"}
         return build_conflict_only(source, target, settings)
-    plan = inspect(source, target, settings)
     if plan.get("ok") is False:
         return dict(plan)
     if not plan["disk_ok"]:
@@ -508,6 +587,10 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
                 _reset_phase_to_failed(target)
                 raise
     tools = MemoryTools(settings=target_settings, db=db)
+    rebuild_embedder, rebuild_warnings = tools._ensure_embedder()
+    expected_space_id = (
+        rebuild_embedder.embedding_space_id if rebuild_embedder is not None else None
+    )
     try:
         _set_state(db, {
             "schema_generation": _BUILDING_SCHEMA_GENERATION,
@@ -552,10 +635,9 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
 
     coverage = db.evidence.coverage()
     source_counts, target_counts = _counts(source), _counts(target)
-    # Evidence may be newly generated for a pre-evidence source, so its row
-    # count is validated by coverage below rather than equality. When source
-    # evidence exists its logical fingerprint (excluding ids/timestamps) must
-    # remain identical after vector republish.
+    # Evidence may be newly generated or deliberately replaced when the
+    # embedding pipeline changes, so derived rows are validated by coverage
+    # and target-space identity rather than source/target equality.
     row_counts_match = all(
         source_counts.get(table, 0) == target_counts.get(table, 0)
         for table in PRESERVED_TABLES if table != "memory_evidence"
@@ -565,12 +647,20 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         key for key in source_fp
         if not key.startswith("memory_evidence_")
     ]
-    if source_fp.get("memory_evidence_count", 0):
-        stable_keys.extend(["memory_evidence_count", "memory_evidence_digest"])
+    # A full rebuild may intentionally change logical evidence text/offsets
+    # when the embedding pipeline version changes. Core source data remains
+    # fingerprint-stable; derived evidence is validated by coverage and the
+    # target-space gate below.
     source_stable = all(source_fp.get(key) == target_fp.get(key) for key in stable_keys)
     destructive_counts = _destructive_counts(target)
     destructive_tables_empty = all(
         destructive_counts.get(table, 0) == 0 for table in DESTRUCTIVELY_REBUILT_TABLES
+    )
+    vec_state = db.get_vec_index_state()
+    target_space_ready = bool(
+        expected_space_id
+        and vec_state.get("state") == "ready"
+        and vec_state.get("active_space_id") == expected_space_id
     )
     complete = (
         not failed
@@ -578,6 +668,7 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         and row_counts_match
         and source_stable
         and destructive_tables_empty
+        and target_space_ready
     )
     scan_state: dict[str, str] = {}
     if complete:
@@ -588,6 +679,7 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         "evidence_coverage": f"{coverage['indexed_memories']}/{coverage['eligible_memories']}",
         "failed_count": str(len(failed)), "source_stable": str(source_stable).lower(),
         "destructive_tables_empty": str(destructive_tables_empty).lower(),
+        "target_space_ready": str(target_space_ready).lower(),
     })
     switch_ready = False
     if complete:
@@ -603,10 +695,15 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         os.chmod(target, 0o600)
     return {
         "ok": complete, "target": str(target), "indexed": indexed,
+        "upgrade_mode": "full_evidence_rebuild",
         "coverage": coverage, "row_counts_match": row_counts_match,
         "source_stable": source_stable, "source_fingerprint": source_fp,
         "target_fingerprint": target_fp, "failed": failed,
         "destructive_tables_empty": destructive_tables_empty,
+        "target_space_ready": target_space_ready,
+        "expected_space_id": expected_space_id,
+        "vec_index_state": vec_state,
+        "embedding_warnings": rebuild_warnings,
         "conflict_scan": scan_state,
         "switch_ready": switch_ready,
         "next_step": "freeze writes and run --final-sync before switching db_path" if complete else "fix failures and rerun with --resume",

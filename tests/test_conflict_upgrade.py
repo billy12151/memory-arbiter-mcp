@@ -16,15 +16,42 @@ from memory_arbiter.db_generation import (
 from memory_arbiter.models import MemoryRecord
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.vnext_migration import (
+    _configured_embedding_space_id,
     build_conflict_only,
     _copy_preserved_tables,
     _fingerprint,
     _mark_conflict_rebuild_ready,
+    inspect,
 )
 
 
 def _settings(path: Path, tmp_path: Path) -> Settings:
     return Settings(db_path=path, backup_jsonl=tmp_path / "backup.jsonl")
+
+
+def _same_space_settings(path: Path, tmp_path: Path) -> Settings:
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"same-space-model")
+    return Settings(
+        db_path=path,
+        backup_jsonl=tmp_path / "backup.jsonl",
+        enable_sqlite_vec=True,
+        vec_dim=2,
+        embedding_provider="gguf",
+        embedding_model_path=model,
+    )
+
+
+def _mark_current_space(db: MemoryDB, settings: Settings) -> str:
+    space_id = _configured_embedding_space_id(settings)
+    assert space_id is not None
+    with db.write_transaction() as conn:
+        conn.execute("DELETE FROM _vec_index_meta")
+        conn.executemany(
+            "INSERT INTO _vec_index_meta(key,value) VALUES(?,?)",
+            (("state", "ready"), ("active_space_id", space_id)),
+        )
+    return space_id
 
 
 def _memory(defaults: dict[str, object]) -> MemoryRecord:
@@ -354,7 +381,9 @@ def test_conflict_only_upgrade_compacts_workspace_state_and_drops_events(tmp_pat
             "UPDATE migration_state SET value='conflict_groups_v2' "
             "WHERE key='schema_generation'"
         )
-    result = build_conflict_only(source_path, target_path, _settings(source_path, tmp_path))
+    migration_settings = _same_space_settings(source_path, tmp_path)
+    _mark_current_space(source, migration_settings)
+    result = build_conflict_only(source_path, target_path, migration_settings)
     assert result["ok"] is True, result
     with sqlite3.connect(target_path) as conn:
         columns = [row[1] for row in conn.execute("PRAGMA table_info(workspace_aliases)")]
@@ -369,9 +398,9 @@ def test_conflict_only_upgrade_compacts_workspace_state_and_drops_events(tmp_pat
 def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Path) -> None:
     source_path = tmp_path / "previous.sqlite3"
     target_path = tmp_path / "current.sqlite3"
-    settings = _settings(source_path, tmp_path)
-    source = MemoryDB(settings)
-    memory_id, _ = source.insert_memory(_memory(settings.defaults()), "project")
+    source_settings = _settings(source_path, tmp_path)
+    source = MemoryDB(source_settings)
+    memory_id, _ = source.insert_memory(_memory(source_settings.defaults()), "project")
     assert memory_id is not None
     with source.write_transaction() as conn:
         conn.execute(
@@ -384,6 +413,8 @@ def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Pa
             "UPDATE migration_state SET value='local_text_evidence_v1' "
             "WHERE key='schema_generation'"
         )
+    settings = _same_space_settings(source_path, tmp_path)
+    _mark_current_space(source, settings)
     before = _fingerprint(source_path)
 
     result = build_conflict_only(source_path, target_path, settings)
@@ -391,6 +422,8 @@ def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Pa
     assert result["ok"] is True
     assert result["indexed"] == 0
     assert result["evidence_reused"] is True
+    assert result["target_space_reusable"] is True
+    assert result["target_space_reason"] == "embedding_space_match"
     assert result["source_fingerprint"] == result["target_fingerprint"] == before
     assert detect_database_generation(target_path) == "current"
     with sqlite3.connect(target_path) as conn:
@@ -407,6 +440,56 @@ def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Pa
     assert {"revision", "member_versions", "value_groups", "notice_type"} <= columns
     assert state["schema_generation"] == CURRENT_SCHEMA_GENERATION
     assert state["conflict_scan_required"] == "true"
+
+
+def test_previous_generation_with_old_embedding_space_cannot_use_fast_path(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "previous.sqlite3"
+    target_path = tmp_path / "current.sqlite3"
+    source_settings = _settings(source_path, tmp_path)
+    source = MemoryDB(source_settings)
+    memory_id, _ = source.insert_memory(_memory(source_settings.defaults()), "project")
+    assert memory_id is not None
+    with source.write_transaction() as conn:
+        conn.execute(
+            "UPDATE migration_state SET value='local_text_evidence_v1' "
+            "WHERE key='schema_generation'"
+        )
+        conn.execute("DELETE FROM _vec_index_meta")
+        conn.executemany(
+            "INSERT INTO _vec_index_meta(key,value) VALUES(?,?)",
+            (("state", "ready"), ("active_space_id", "old-pipeline-space")),
+        )
+    settings = _same_space_settings(source_path, tmp_path)
+
+    plan = inspect(source_path, target_path, settings)
+    rejected = build_conflict_only(source_path, target_path, settings)
+
+    assert plan["upgrade_mode"] == "full_evidence_rebuild"
+    assert plan["evidence_reuse_reason"] == "embedding_space_mismatch"
+    assert rejected["ok"] is False
+    assert rejected["error"] == "evidence_space_not_reusable"
+    assert not target_path.exists()
+
+
+def test_previous_generation_without_verifiable_space_cannot_use_fast_path(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "previous.sqlite3"
+    target_path = tmp_path / "current.sqlite3"
+    settings = _settings(source_path, tmp_path)
+    source = MemoryDB(settings)
+    with source.write_transaction() as conn:
+        conn.execute(
+            "UPDATE migration_state SET value='local_text_evidence_v1' "
+            "WHERE key='schema_generation'"
+        )
+
+    plan = inspect(source_path, target_path, settings)
+
+    assert plan["upgrade_mode"] == "full_evidence_rebuild"
+    assert plan["evidence_reuse_reason"] == "source_vec_state_missing"
 
 
 def test_generation_switch_marker_is_atomic_with_scan_metadata(tmp_path: Path) -> None:
@@ -497,9 +580,9 @@ def test_conflict_only_validation_failure_marks_phase_failed(tmp_path: Path, mon
     import memory_arbiter.vnext_migration as vm
 
     source = tmp_path / "source.sqlite3"
-    settings = _settings(source, tmp_path)
-    db = MemoryDB(settings)
-    db.insert_memory(_memory(settings.defaults()), "project")
+    source_settings = _settings(source, tmp_path)
+    db = MemoryDB(source_settings)
+    db.insert_memory(_memory(source_settings.defaults()), "project")
     # Move it to the previous generation so build_conflict_only is the path.
     with db.write_transaction() as conn:
         conn.execute(
@@ -507,6 +590,8 @@ def test_conflict_only_validation_failure_marks_phase_failed(tmp_path: Path, mon
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
             ("local_text_evidence_v1",),
         )
+    settings = _same_space_settings(source, tmp_path)
+    _mark_current_space(db, settings)
 
     # Force validation to fail after the rebuild transaction commits.
     monkeypatch.setattr(vm, "_checkpoint", lambda *_a, **_k: False)
@@ -519,3 +604,42 @@ def test_conflict_only_validation_failure_marks_phase_failed(tmp_path: Path, mon
         conn.row_factory = sqlite3.Row
         phase = conn.execute("SELECT value FROM migration_state WHERE key='phase'").fetchone()
     assert phase is not None and phase["value"] == "failed"
+
+
+def test_conflict_only_revalidates_copied_target_space(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import memory_arbiter.vnext_migration as vm
+
+    source_path = tmp_path / "source.sqlite3"
+    target_path = tmp_path / "target.sqlite3"
+    source_settings = _settings(source_path, tmp_path)
+    source = MemoryDB(source_settings)
+    settings = _same_space_settings(source_path, tmp_path)
+    _mark_current_space(source, settings)
+    with source.write_transaction() as conn:
+        conn.execute(
+            "UPDATE migration_state SET value='local_text_evidence_v1' "
+            "WHERE key='schema_generation'"
+        )
+
+    real_check = vm._can_reuse_evidence_space
+
+    def target_fails_space_check(path: Path, checked_settings: Settings | None):
+        if path == target_path:
+            return False, "embedding_space_mismatch"
+        return real_check(path, checked_settings)
+
+    monkeypatch.setattr(vm, "_can_reuse_evidence_space", target_fails_space_check)
+
+    result = build_conflict_only(source_path, target_path, settings)
+
+    assert result["ok"] is False
+    assert result["target_space_reusable"] is False
+    assert result["target_space_reason"] == "embedding_space_mismatch"
+    assert detect_database_generation(target_path) != "current"
+    with sqlite3.connect(target_path) as conn:
+        phase = conn.execute(
+            "SELECT value FROM migration_state WHERE key='phase'"
+        ).fetchone()
+    assert phase is not None and phase[0] == "failed"
