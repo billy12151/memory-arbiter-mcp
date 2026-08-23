@@ -2506,8 +2506,6 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
 
 def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path: Path, monkeypatch) -> None:
     """A queued job enables fairness, but the current pair gets its full hard timeout."""
-    import time
-
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     tools.settings.semantic_conflict_job_timeout_ms = 40
@@ -2527,7 +2525,9 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
         for index, peer in enumerate(peers)
     ]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
-    fairness_deadline = time.monotonic() + 0.08
+    clock = {"now": 100.0}
+    fairness_deadline = 100.04
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.time.monotonic", lambda: clock["now"])
     monkeypatch.setattr(
         tools._semantic_worker, "pending_job_deadline", lambda timeout: fairness_deadline,
     )
@@ -2539,7 +2539,7 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
         @staticmethod
         def classify_pair(left, right, *, deadline_monotonic=None):
             deadlines.append(deadline_monotonic)
-            time.sleep(0.025)
+            clock["now"] += 0.02
             return base.classify_pair(left, right, deadline_monotonic=deadline_monotonic)
 
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: SlowBackend())
