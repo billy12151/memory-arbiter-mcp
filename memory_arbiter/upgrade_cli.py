@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .config import Settings, _find_config_file
-from .db_generation import detect_database_generation
+from .db_generation import detect_upgrade_source_generation
 from .vnext_migration import final_sync, inspect
 
 
@@ -63,7 +63,8 @@ def _render_plan(plan: dict[str, Any]) -> str:
         f"Estimated vector storage: {_format_bytes(int(plan.get('estimated_vector_bytes') or 0))}",
         f"Estimated additional space: {_format_bytes(int(plan.get('required_bytes') or 0))}",
         f"Free disk space: {_format_bytes(int(plan.get('free_bytes') or 0))}",
-        f"Evidence reuse decision: {plan.get('evidence_reuse_reason', 'unknown')}",
+        f"Vector effect: {(plan.get('schema_migration') or {}).get('vector_effect', 'unknown')}",
+        f"Vector compatibility: {plan.get('vector_compatibility', 'unknown')}",
         f"Source database: {plan.get('source')}",
         f"New database: {plan.get('target')}",
     ])
@@ -174,11 +175,11 @@ def run_upgrade(
         epilog=(
             "Before execution, stop every MCP server, console, worker, or other writer "
             "using the source. The source is retained, but old conflict, decision, and "
-            "semantic-notice records are not copied to the target. The previous evidence "
-            "schema uses the fast conflict-only path only when its ready vector index "
-            "matches the configured embedding space; otherwise it requires sqlite-vec, "
-            "llama-cpp-python, and a configured local GGUF embedding model for "
-            "reindexing. Run "
+            "semantic-notice records are not copied to the target. Schema migration "
+            "declares whether vectors are preserved or rebuilt; a preserved incompatible "
+            "space is disabled and repaired separately. A vector-rebuilding migration "
+            "requires sqlite-vec, llama-cpp-python, and a configured local GGUF embedding "
+            "model. Run "
             "--dry-run first."
         ),
     )
@@ -193,7 +194,7 @@ def run_upgrade(
     settings = Settings.from_env()
     source = (args.source or settings.db_path).expanduser().resolve()
     target = (args.target or _default_target(source)).expanduser().resolve()
-    generation = detect_database_generation(source)
+    generation = detect_upgrade_source_generation(source)
 
     if generation == "current":
         result = {

@@ -143,7 +143,7 @@ def test_destructive_copy_preserves_core_data_but_not_conflict_history(tmp_path:
     assert _fingerprint(source_path) == _fingerprint(target_path)
 
 
-def test_startup_migrates_legacy_alias_unique_key_to_pair_key(tmp_path: Path) -> None:
+def test_current_startup_does_not_run_schema_migrations(tmp_path: Path) -> None:
     path = tmp_path / "legacy-alias.sqlite3"
     db = MemoryDB(_settings(path, tmp_path))
     with db.write_transaction() as conn:
@@ -156,21 +156,15 @@ def test_startup_migrates_legacy_alias_unique_key_to_pair_key(tmp_path: Path) ->
         )
         conn.execute("DROP TABLE workspace_aliases_new")
     reopened = MemoryDB(_settings(path, tmp_path))
-    assert reopened.record_workspace_decision("raw", "candidate-b", status="rejected")[0]
+    assert reopened.db_available is True
     with reopened.connection() as conn:
-        rows = conn.execute(
-            "SELECT canonical FROM workspace_aliases WHERE alias_workspace='raw' ORDER BY canonical"
-        ).fetchall()
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(workspace_aliases)")]
-        events = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_alias_events'"
-        ).fetchone()
-    assert [row["canonical"] for row in rows] == ["candidate-a", "candidate-b"]
-    assert columns == ["alias_workspace", "canonical", "status", "updated_at"]
-    assert events is None
+    assert columns == [
+        "alias_workspace", "canonical", "relation", "status", "source", "updated_at",
+    ]
 
 
-def test_startup_refuses_partial_workspace_decision_schema_without_data_loss(tmp_path: Path) -> None:
+def test_startup_defers_partial_table_health_to_doctor_or_runtime(tmp_path: Path) -> None:
     path = tmp_path / "partial.sqlite3"
     db = MemoryDB(_settings(path, tmp_path))
     with db.write_transaction() as conn:
@@ -181,14 +175,14 @@ def test_startup_refuses_partial_workspace_decision_schema_without_data_loss(tmp
         conn.execute("INSERT INTO workspace_aliases VALUES('raw','target','2026-01-01')")
         conn.execute("DROP TABLE workspace_aliases_good")
     reopened = MemoryDB(_settings(path, tmp_path))
-    assert reopened.db_available is False
+    assert reopened.db_available is True
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM workspace_aliases").fetchone()[0] == 1
         columns = [row[1] for row in conn.execute("PRAGMA table_info(workspace_aliases)")]
     assert columns == ["alias_workspace", "canonical", "updated_at"]
 
 
-def test_startup_refuses_invalid_compact_workspace_decisions(tmp_path: Path) -> None:
+def test_startup_defers_invalid_compact_rows_to_doctor_or_runtime(tmp_path: Path) -> None:
     path = tmp_path / "invalid.sqlite3"
     db = MemoryDB(_settings(path, tmp_path))
     with db.write_transaction() as conn:
@@ -201,13 +195,13 @@ def test_startup_refuses_invalid_compact_workspace_decisions(tmp_path: Path) -> 
         conn.execute("INSERT INTO workspace_aliases VALUES('raw','target','bogus','2026-01-01')")
         conn.execute("DROP TABLE workspace_aliases_good")
     reopened = MemoryDB(_settings(path, tmp_path))
-    assert reopened.db_available is False
+    assert reopened.db_available is True
     with sqlite3.connect(path) as conn:
         row = conn.execute("SELECT status FROM workspace_aliases").fetchone()
     assert row[0] == "bogus"
 
 
-def test_startup_recovers_interrupted_legacy_workspace_migration(tmp_path: Path) -> None:
+def test_startup_does_not_repair_interrupted_table_migration(tmp_path: Path) -> None:
     path = tmp_path / "interrupted.sqlite3"
     db = MemoryDB(_settings(path, tmp_path))
     assert db.record_workspace_decision("raw", "target")[0]
@@ -215,11 +209,11 @@ def test_startup_recovers_interrupted_legacy_workspace_migration(tmp_path: Path)
         conn.execute("ALTER TABLE workspace_aliases RENAME TO workspace_aliases_legacy")
     reopened = MemoryDB(_settings(path, tmp_path))
     assert reopened.db_available is True
-    assert reopened.resolve_workspace_canonical("raw", None, register_new=False)["canonical"] == "target"
+    assert reopened.resolve_workspace_canonical("raw", None, register_new=False)["canonical"] == "raw"
     with reopened.connection() as conn:
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name='workspace_aliases_legacy'"
-        ).fetchone() is None
+        ).fetchone() is not None
 
 
 def test_full_build_copy_failure_never_leaves_current_target(
@@ -441,8 +435,8 @@ def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Pa
     assert result["ok"] is True
     assert result["indexed"] == 0
     assert result["evidence_reused"] is True
-    assert result["target_space_reusable"] is True
-    assert result["target_space_reason"] == "embedding_space_match"
+    assert result["vector_effect"] == "preserve"
+    assert result["vec_index_state"]["state"] == "ready"
     assert result["source_fingerprint"] == result["target_fingerprint"] == before
     assert detect_database_generation(target_path) == "current"
     with sqlite3.connect(target_path) as conn:
@@ -458,18 +452,23 @@ def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Pa
         ).fetchone() is None
     assert {"revision", "member_versions", "value_groups", "notice_type"} <= columns
     assert state["schema_generation"] == CURRENT_SCHEMA_GENERATION
+    assert state["migration_completed_at"]
+    assert "phase" not in state
+    assert state["source_path"] == str(source_path)
     assert state["conflict_scan_required"] == "true"
 
 
-def test_previous_generation_with_old_embedding_space_cannot_use_fast_path(
+def test_previous_generation_with_old_embedding_space_preserves_then_marks_mismatch(
     tmp_path: Path,
 ) -> None:
+    pytest.importorskip("sqlite_vec")
     source_path = tmp_path / "previous.sqlite3"
     target_path = tmp_path / "current.sqlite3"
-    source_settings = _settings(source_path, tmp_path)
+    source_settings = _same_space_settings(source_path, tmp_path)
     source = MemoryDB(source_settings)
     memory_id, _ = source.insert_memory(_memory(source_settings.defaults()), "project")
     assert memory_id is not None
+    _mark_current_space(source, source_settings)
     with source.write_transaction() as conn:
         conn.execute(
             "UPDATE migration_state SET value='local_text_evidence_v1' "
@@ -480,19 +479,38 @@ def test_previous_generation_with_old_embedding_space_cannot_use_fast_path(
             "INSERT INTO _vec_index_meta(key,value) VALUES(?,?)",
             (("state", "ready"), ("active_space_id", "old-pipeline-space")),
         )
-    settings = _same_space_settings(source_path, tmp_path)
+        source_vectors = [
+            tuple(row) for row in conn.execute(
+                "SELECT id,parent_status,hex(embedding) FROM memory_evidence_vec ORDER BY id"
+            ).fetchall()
+        ]
+    settings = source_settings
 
     plan = inspect(source_path, target_path, settings)
-    rejected = build_conflict_only(source_path, target_path, settings)
+    migrated = build_conflict_only(source_path, target_path, settings)
 
-    assert plan["upgrade_mode"] == "full_evidence_rebuild"
-    assert plan["evidence_reuse_reason"] == "embedding_space_mismatch"
-    assert rejected["ok"] is False
-    assert rejected["error"] == "evidence_space_not_reusable"
-    assert not target_path.exists()
+    assert plan["upgrade_mode"] == "conflict_only"
+    assert plan["schema_migration"]["vector_effect"] == "preserve"
+    assert plan["vector_compatibility"] == "mismatch"
+    assert migrated["ok"] is True
+    assert migrated["vec_index_state"]["state"] == "mismatch"
+    with sqlite3.connect(target_path) as conn:
+        import sqlite_vec
+
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        state = dict(conn.execute("SELECT key,value FROM _vec_index_meta"))
+        target_vectors = conn.execute(
+            "SELECT id,parent_status,hex(embedding) FROM memory_evidence_vec ORDER BY id"
+        ).fetchall()
+    assert state["state"] == "mismatch"
+    assert state["active_space_id"] == "old-pipeline-space"
+    assert state["target_space_id"] == plan["configured_space_id"]
+    assert target_vectors == source_vectors
 
 
-def test_previous_generation_without_verifiable_space_cannot_use_fast_path(
+def test_previous_generation_without_managed_space_still_preserves_vectors(
     tmp_path: Path,
 ) -> None:
     source_path = tmp_path / "previous.sqlite3"
@@ -507,11 +525,12 @@ def test_previous_generation_without_verifiable_space_cannot_use_fast_path(
 
     plan = inspect(source_path, target_path, settings)
 
-    assert plan["upgrade_mode"] == "full_evidence_rebuild"
-    assert plan["evidence_reuse_reason"] == "source_vec_state_missing"
+    assert plan["upgrade_mode"] == "conflict_only"
+    assert plan["schema_migration"]["vector_effect"] == "preserve"
+    assert plan["vector_compatibility"] == "unmanaged"
 
 
-def test_previous_generation_with_incomplete_same_space_index_rebuilds(
+def test_previous_generation_with_incomplete_same_space_index_defers_to_doctor(
     tmp_path: Path,
 ) -> None:
     pytest.importorskip("sqlite_vec")
@@ -535,11 +554,11 @@ def test_previous_generation_with_incomplete_same_space_index_rebuilds(
 
     plan = inspect(source_path, target_path, settings)
 
-    assert plan["upgrade_mode"] == "full_evidence_rebuild"
-    assert plan["evidence_reuse_reason"] == "source_vectors_incomplete"
+    assert plan["upgrade_mode"] == "conflict_only"
+    assert plan["schema_migration"]["vector_effect"] == "preserve"
 
 
-def test_previous_generation_with_stale_same_space_evidence_rebuilds(
+def test_previous_generation_with_stale_same_space_evidence_defers_to_doctor(
     tmp_path: Path,
 ) -> None:
     pytest.importorskip("sqlite_vec")
@@ -562,11 +581,11 @@ def test_previous_generation_with_stale_same_space_evidence_rebuilds(
 
     plan = inspect(source_path, target_path, settings)
 
-    assert plan["upgrade_mode"] == "full_evidence_rebuild"
-    assert plan["evidence_reuse_reason"] == "source_evidence_stale"
+    assert plan["upgrade_mode"] == "conflict_only"
+    assert plan["schema_migration"]["vector_effect"] == "preserve"
 
 
-def test_previous_generation_with_forged_space_but_wrong_vector_dimension_rebuilds(
+def test_previous_generation_with_wrong_vector_dimension_defers_to_deep_doctor(
     tmp_path: Path,
 ) -> None:
     pytest.importorskip("sqlite_vec")
@@ -598,8 +617,8 @@ def test_previous_generation_with_forged_space_but_wrong_vector_dimension_rebuil
 
     plan = inspect(source_path, target_path, mismatched_settings)
 
-    assert plan["upgrade_mode"] == "full_evidence_rebuild"
-    assert plan["evidence_reuse_reason"] == "source_vector_dimension_mismatch"
+    assert plan["upgrade_mode"] == "conflict_only"
+    assert plan["schema_migration"]["vector_effect"] == "preserve"
 
 
 def test_generation_switch_marker_is_atomic_with_scan_metadata(tmp_path: Path) -> None:
@@ -609,6 +628,8 @@ def test_generation_switch_marker_is_atomic_with_scan_metadata(tmp_path: Path) -
     with sqlite3.connect(path) as conn:
         state = dict(conn.execute("SELECT key,value FROM migration_state"))
     assert state["schema_generation"] == CURRENT_SCHEMA_GENERATION
+    assert state["migration_completed_at"]
+    assert "phase" not in state
     assert state["conflict_scan_required"] == "true"
     assert state["conflict_scan_detector_version"] == CONFLICT_DETECTOR_VERSION
     boundary = json.loads(state["conflict_scan_boundary"])
@@ -715,7 +736,7 @@ def test_conflict_only_validation_failure_marks_phase_failed(tmp_path: Path, mon
     assert phase is not None and phase["value"] == "failed"
 
 
-def test_conflict_only_revalidates_copied_target_space(
+def test_conflict_only_does_not_turn_post_publish_space_drift_into_schema_failure(
     tmp_path: Path, monkeypatch,
 ) -> None:
     import memory_arbiter.vnext_migration as vm
@@ -746,12 +767,10 @@ def test_conflict_only_revalidates_copied_target_space(
 
     result = build_conflict_only(source_path, target_path, settings)
 
-    assert result["ok"] is False
-    assert result["target_space_reusable"] is False
-    assert result["target_space_reason"] == "embedding_space_mismatch"
-    assert detect_database_generation(target_path) != "current"
+    assert result["ok"] is True
+    assert detect_database_generation(target_path) == "current"
     with sqlite3.connect(target_path) as conn:
         phase = conn.execute(
             "SELECT value FROM migration_state WHERE key='phase'"
         ).fetchone()
-    assert phase is not None and phase[0] == "failed"
+    assert phase is None

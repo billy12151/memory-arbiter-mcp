@@ -85,7 +85,16 @@ class ReadPipeline:
                 try:
                     er = embedder.embed_text(prefix="", body=query)
                     if er.embedding:
-                        query_embedding = er.embedding
+                        refreshed_state = self.db.get_vec_index_state()
+                        if refreshed_state.get("state") in {"mismatch", "failed"}:
+                            reason = (
+                                "embedding_space_mismatch"
+                                if refreshed_state.get("state") == "mismatch"
+                                else "embedding_migration_failed"
+                            )
+                            extra_warnings.append(f"vec_disabled={reason}")
+                        else:
+                            query_embedding = er.embedding
                     else:
                         extra_warnings.append(
                             f"auto-embedding query failed: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
@@ -290,7 +299,16 @@ class ReadPipeline:
                 try:
                     er = embedder.embed_text(prefix="", body=query)
                     if er.embedding:
-                        query_embedding = er.embedding
+                        refreshed_state = self.db.get_vec_index_state()
+                        if refreshed_state.get("state") in {"mismatch", "failed"}:
+                            reason = (
+                                "embedding_space_mismatch"
+                                if refreshed_state.get("state") == "mismatch"
+                                else "embedding_migration_failed"
+                            )
+                            extra_warnings.append(f"vec_disabled={reason}")
+                        else:
+                            query_embedding = er.embedding
                     else:
                         extra_warnings.append(
                             f"auto-embedding query failed: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"

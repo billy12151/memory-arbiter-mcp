@@ -923,7 +923,7 @@ def test_real_server_product_wrappers_preserve_non_object_data(tmp_path: Path, m
     bundle.tools.shutdown(timeout=1)
 
 
-def test_server_rejects_legacy_database_before_memorydb_init(
+def test_server_delegates_generation_gate_to_memorydb(
     tmp_path: Path, monkeypatch,
 ) -> None:
     import sqlite3
@@ -938,17 +938,8 @@ def test_server_rejects_legacy_database_before_memorydb_init(
         backup_jsonl=tmp_path / "backup.jsonl",
     )
     monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: settings))
-    constructed = False
-
-    def forbidden(*_args, **_kwargs):
-        nonlocal constructed
-        constructed = True
-        raise AssertionError("MemoryTools must not touch a legacy database")
-
-    monkeypatch.setattr(server, "MemoryTools", forbidden)
-    with pytest.raises(RuntimeError, match="mema upgrade"):
+    with pytest.raises(RuntimeError, match="mema doctor --json"):
         server.build_runtime()
-    assert constructed is False
     with sqlite3.connect(legacy) as conn:
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name='memory_evidence'"
@@ -967,6 +958,6 @@ def test_memorydb_library_entry_rejects_legacy_database(tmp_path: Path) -> None:
         backup_jsonl=tmp_path / "backup.jsonl",
     )
     before = legacy.read_bytes()
-    with pytest.raises(RuntimeError, match="mema upgrade"):
+    with pytest.raises(RuntimeError, match="mema doctor --json"):
         MemoryDB(settings)
     assert legacy.read_bytes() == before

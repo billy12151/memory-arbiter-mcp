@@ -40,6 +40,17 @@ class EvidencePipeline:
             return {"status": "skipped", "reason": "memory_not_found"}
         if embedder is None:
             return {"status": "skipped", "reason": "embedder_unavailable", "warnings": warnings}
+        vec_state = self.db.get_vec_index_state()
+        if vec_state.get("state") in {"mismatch", "failed"} and not (
+            vec_state.get("state") == "mismatch"
+            and vec_state.get("target_space_id") == embedder.embedding_space_id
+            and vec_state.get("space_rebuild_active") is True
+        ):
+            return {
+                "status": "skipped",
+                "reason": "embedding_space_rebuild_required",
+                "warnings": warnings,
+            }
         units = local_text_units(
             str(current.get("subject") or ""), str(current.get("content") or ""),
         )
@@ -79,9 +90,15 @@ class EvidencePipeline:
         content = str(record.get("content") or "")
         if hashlib.sha256(content.encode()).hexdigest() != snapshot.get("content_hash"):
             return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
-        embedder, _ = self._ensure_embedder()
+        embedder, _ = self._ensure_active_embedder()
         if embedder is None:
             return {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
+        if self.db.get_vec_index_state().get("state") in {"mismatch", "failed"}:
+            return {
+                "status": "incomplete",
+                "reason": "embedding_space_rebuild_required",
+                "notices_created": 0,
+            }
         # Spec §5/§15.3: while a conflict group is applying, versions produced
         # by its apply plan must not re-notify THE SAME conflict. Suppression is
         # therefore slot-scoped and applied only after the gate resolves the

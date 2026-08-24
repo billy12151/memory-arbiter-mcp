@@ -461,7 +461,7 @@ def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, m
     assert second["data"]["id"] in [row["id"] for row in searched["data"]["results"]]
 
 
-def test_previous_generation_old_space_is_rebuilt_into_runtime_space(
+def test_previous_generation_old_space_is_preserved_and_disabled(
     tmp_path: Path, monkeypatch,
 ) -> None:
     pytest.importorskip("sqlite_vec")
@@ -508,21 +508,19 @@ def test_previous_generation_old_space_is_rebuilt_into_runtime_space(
     plan = inspect(source_path, target, settings)
     result = build(source_path, target, settings, progress=False)
 
-    assert plan["upgrade_mode"] == "full_evidence_rebuild"
-    assert plan["evidence_reuse_reason"] == "embedding_space_mismatch"
+    assert plan["upgrade_mode"] == "conflict_only"
+    assert plan["schema_migration"]["vector_effect"] == "preserve"
     assert result["ok"] is True, result
-    assert result["upgrade_mode"] == "full_evidence_rebuild"
-    assert result["indexed"] == 1
-    assert result["target_space_ready"] is True
-    assert result["expected_space_id"] == FakeEmbedder.embedding_space_id
+    assert result["upgrade_mode"] == "conflict_only"
+    assert result["indexed"] == 0
     with sqlite3.connect(target) as conn:
         state = dict(conn.execute("SELECT key,value FROM _vec_index_meta"))
-    assert state["state"] == "ready"
-    assert state["active_space_id"] == FakeEmbedder.embedding_space_id
-    assert "target_space_id" not in state
+    assert state["state"] == "mismatch"
+    assert state["active_space_id"] == "old-pipeline-space"
+    assert state["target_space_id"] == plan["configured_space_id"]
 
 
-def test_full_rebuild_does_not_copy_deleted_old_space_evidence(
+def test_preserve_migration_keeps_derived_rows_for_later_health_repair(
     tmp_path: Path, monkeypatch,
 ) -> None:
     pytest.importorskip("sqlite_vec")
@@ -582,7 +580,7 @@ def test_full_rebuild_does_not_copy_deleted_old_space_evidence(
         workspace_vectors = int(
             conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0]
         )
-    assert evidence_memory_ids == {active}
+    assert evidence_memory_ids == {active, deleted}
     assert units == vectors
     assert workspace_vectors == 1
 
@@ -1055,6 +1053,58 @@ def test_space_rebuild_flips_mismatch_back_to_ready(tmp_path: Path) -> None:
         ).fetchone() is None
     result = tools.memory_search(query="接口超时")
     assert result["data"]["vector_lag"]["pending_evidence_index"] == 0
+
+
+def test_lazy_space_check_blocks_ordinary_publish_until_rebuild_starts(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    first = tools.memory_write(content="old space", subject="old", tags=[])["data"]["id"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    with tools.db.connection() as conn:
+        before = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
+
+    tools.db.init_vec_index_state("new-space", True)
+    tools._embedder = FakeEmbedder()
+    tools._embedder.embedding_space_id = "new-space"
+    blocked = tools._index_local_text_evidence(first, tools.db.get_memory(first))
+    assert blocked["status"] == "skipped"
+    assert blocked["reason"] == "embedding_space_rebuild_required"
+    with tools.db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0] == before
+
+    tools.db.mark_space_rebuild_started()
+    allowed = tools._index_local_text_evidence(first, tools.db.get_memory(first))
+    assert allowed["status"] == "indexed"
+
+
+def test_explicit_rebuild_recovers_missing_vector_tables(tmp_path: Path) -> None:
+    pytest.importorskip("sqlite_vec")
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="repair me", subject="repair", workspace="project")
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    with tools.db.write_transaction() as conn:
+        conn.execute("DROP TABLE memory_evidence_vec")
+        conn.execute("DROP TABLE workspace_canonicals_vec")
+    tools.db.state.sqlite_vec_available = False
+    tools.db._sqlite_vec_loadable = False
+
+    preview = tools.memory_repair("rebuild_evidence", {"dry_run": True, "batch_size": 10})
+    assert preview["ok"] is True
+    assert preview["data"]["vector_table_repair"] == {
+        "required": True,
+        "missing_tables": ["memory_evidence_vec", "workspace_canonicals_vec"],
+        "recreated": False,
+        "warnings": [],
+    }
+    assert preview["data"]["workspace_vectors"] == "rebuild_required"
+
+    result = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
+    assert result["ok"] is True, result
+    assert result["data"]["vector_table_repair"]["recreated"] is True
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.db.get_vec_index_state()["state"] == "ready"
+    with tools.db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0] > 0
+        assert conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0] == 1
 
 
 def test_space_rebuild_completion_purges_deleted_evidence_and_requires_vectors(
@@ -1848,8 +1898,12 @@ def test_migration_resume_recovers_from_failed_build(tmp_path: Path, monkeypatch
     assert resumed["ok"] is True, resumed
     assert resumed["switch_ready"] is True
     with sqlite3.connect(target) as conn:
-        phase = conn.execute("SELECT value FROM migration_state WHERE key='phase'").fetchone()[0]
-    assert phase == "ready"
+        phase = conn.execute("SELECT value FROM migration_state WHERE key='phase'").fetchone()
+        completed_at = conn.execute(
+            "SELECT value FROM migration_state WHERE key='migration_completed_at'"
+        ).fetchone()
+    assert phase is None
+    assert completed_at is not None
 
 
 def test_migration_resume_with_changed_space_restarts_derived_index(
@@ -1917,7 +1971,9 @@ def test_migration_resume_with_changed_space_restarts_derived_index(
         migration = dict(conn.execute("SELECT key,value FROM migration_state"))
     assert state["state"] == "ready"
     assert state["active_space_id"] == "space-new"
-    assert migration["evidence_rebuild_space_id"] == "space-new"
+    assert "evidence_rebuild_space_id" not in migration
+    assert "phase" not in migration
+    assert migration["migration_completed_at"]
 
 
 def test_migration_inspect_accepts_missing_parent_dir(tmp_path: Path) -> None:

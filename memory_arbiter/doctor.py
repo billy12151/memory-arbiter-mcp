@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -12,7 +13,7 @@ from typing import Any, Callable, Iterator, Optional
 
 from .config import Settings
 from .constants import is_default_workspace_term
-from .db_generation import detect_database_generation
+from .db_generation import detect_database_generation, detect_upgrade_source_generation
 from .degrade import DegradeState
 from .models import utc_now_iso
 
@@ -106,6 +107,25 @@ def _finding(check_id: str, ok: bool, detail: str, *, critical: bool = False, ev
     return Finding(check_id, check_id.split(".")[0], severity, "pass" if ok else "warn", check_id, detail, evidence or {})
 
 
+def _safe_count(conn: sqlite3.Connection, source: str, where: str | None = None) -> int | None:
+    """Count an optional vec0 source, preserving unavailable as unknown."""
+    try:
+        suffix = f" WHERE {where}" if where else ""
+        return int(conn.execute(f"SELECT COUNT(*) FROM {source}{suffix}").fetchone()[0])
+    except sqlite3.Error:
+        return None
+
+
+def _vec_table_dimension(conn: sqlite3.Connection, table: str) -> int | None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if row is None:
+        return None
+    match = re.search(r"embedding\s+float\[(\d+)]", str(row[0] or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
 def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: Optional[DegradeState] = None, embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None) -> OverviewReport:
     findings: list[Finding] = []
     from .db.evidence_store import indexable_coverage_counts
@@ -167,6 +187,106 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     if settings.config_warnings:
         findings.append(_finding("config.warnings", False, "; ".join(settings.config_warnings)))
     if deep:
+        quick_check = str(conn.execute("PRAGMA quick_check").fetchone()[0])
+        findings.append(_finding(
+            "database.quick_check", quick_check == "ok", quick_check,
+            critical=quick_check != "ok",
+        ))
+        migration = {
+            str(row[0]): str(row[1])
+            for row in conn.execute(
+                "SELECT key,value FROM migration_state "
+                "WHERE key IN ('schema_generation','phase','migration_completed_at')"
+            )
+        }
+        generation_ok = (
+            migration.get("schema_generation") == "workspace_state_v1"
+            and migration.get("phase") not in {"building", "backfill", "resuming", "failed"}
+        )
+        findings.append(_finding(
+            "database.schema_generation", generation_ok,
+            f"generation={migration.get('schema_generation') or 'missing'}, "
+            f"phase={migration.get('phase') or 'complete'}",
+            critical=not generation_ok,
+            evidence=migration,
+        ))
+        vec_meta = {
+            str(row[0]): str(row[1])
+            for row in conn.execute("SELECT key,value FROM _vec_index_meta")
+        }
+        active_space = vec_meta.get("active_space_id")
+        configured_space: str | None = None
+        try:
+            from .vnext_migration import _configured_embedding_space_id
+            configured_space = _configured_embedding_space_id(settings)
+        except (OSError, ValueError):
+            configured_space = None
+        space_ok = (
+            configured_space is None
+            or (vec_meta.get("state") == "ready" and active_space == configured_space)
+        )
+        findings.append(_finding(
+            "vector.space", space_ok,
+            f"state={vec_meta.get('state') or 'unmanaged'}, "
+            f"active={active_space or 'none'}, configured={configured_space or 'none'}",
+            evidence={
+                "state": vec_meta.get("state", "unmanaged"),
+                "active_space_id": active_space,
+                "configured_space_id": configured_space,
+            },
+        ))
+        evidence_dim = _vec_table_dimension(conn, "memory_evidence_vec")
+        workspace_dim = _vec_table_dimension(conn, "workspace_canonicals_vec")
+        dimensions_ok = (
+            not settings.enable_sqlite_vec
+            or (evidence_dim == int(settings.vec_dim) and workspace_dim == int(settings.vec_dim))
+        )
+        findings.append(_finding(
+            "vector.table_dimension", dimensions_ok,
+            f"evidence={evidence_dim}, workspace={workspace_dim}, configured={int(settings.vec_dim)}",
+            evidence={"evidence": evidence_dim, "workspace": workspace_dim,
+                      "configured": int(settings.vec_dim)},
+        ))
+        evidence_vectors = _safe_count(conn, "memory_evidence_vec")
+        orphan_vectors = _safe_count(
+            conn, "memory_evidence_vec v LEFT JOIN memory_evidence e ON e.id=v.id",
+            "e.id IS NULL",
+        )
+        missing_vectors = _safe_count(
+            conn, "memory_evidence e LEFT JOIN memory_evidence_vec v ON v.id=e.id",
+            "v.id IS NULL",
+        )
+        evidence_rows_ok = (
+            not settings.enable_sqlite_vec
+            or (
+                evidence_vectors is not None
+                and orphan_vectors == 0
+                and missing_vectors == 0
+            )
+        )
+        findings.append(_finding(
+            "vector.evidence_rows",
+            evidence_rows_ok,
+            f"{units} evidence rows, {evidence_vectors} vectors, "
+            f"{orphan_vectors} orphan vectors, {missing_vectors} missing vectors",
+            evidence={"evidence": units, "vectors": evidence_vectors,
+                      "orphan_vectors": orphan_vectors, "missing_vectors": missing_vectors},
+        ))
+        canonical_count = int(conn.execute(
+            "SELECT COUNT(*) FROM workspace_canonicals WHERE lower(trim(name)) "
+            "NOT IN ('','default','none','null','unknown') AND trim(name) NOT IN ('默认','未知')"
+        ).fetchone()[0])
+        canonical_vectors = _safe_count(conn, "workspace_canonicals_vec")
+        workspace_rows_ok = (
+            not settings.enable_sqlite_vec
+            or (canonical_vectors is not None and canonical_vectors == canonical_count)
+        )
+        findings.append(_finding(
+            "vector.workspace_rows",
+            workspace_rows_ok,
+            f"{canonical_count} non-default canonicals, {canonical_vectors} vectors",
+            evidence={"canonicals": canonical_count, "vectors": canonical_vectors},
+        ))
         # --deep / memory_review(deep=true): actually run the embedder and
         # compare the live dimension against vec.dim (seconds-level cost).
         embedding_configured = (
@@ -226,7 +346,7 @@ def open_ro_connection(path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def doctor_overview_cli(settings: Settings, deep: bool = False) -> OverviewReport:
-    generation = detect_database_generation(settings.db_path)
+    generation = detect_upgrade_source_generation(settings.db_path)
     if generation == "legacy":
         return OverviewReport(
             utc_now_iso(),
@@ -268,6 +388,15 @@ def doctor_overview_cli(settings: Settings, deep: bool = False) -> OverviewRepor
 
     try:
         with open_ro_connection(settings.db_path) as conn:
+            if settings.enable_sqlite_vec:
+                try:
+                    import sqlite_vec
+
+                    conn.enable_load_extension(True)
+                    sqlite_vec.load(conn)
+                    conn.enable_load_extension(False)
+                except (ImportError, sqlite3.Error):
+                    pass
             return run_all_checks(conn, settings, deep, embedder_probe=_cli_embedder_probe if deep else None)
     except Exception as exc:
         return OverviewReport(utc_now_iso(), Severity.CRITICAL, [Finding("database.open", "database", Severity.CRITICAL, "error", "database.open", str(exc))], {"mode": "unavailable", "total_memories": 0})

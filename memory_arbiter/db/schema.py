@@ -195,6 +195,11 @@ class SchemaStore:
             "updated_at=CURRENT_TIMESTAMP",
             (CURRENT_SCHEMA_GENERATION,),
         )
+        conn.execute(
+            """INSERT INTO migration_state(key,value,updated_at)
+               VALUES('migration_completed_at',strftime('%Y-%m-%dT%H:%M:%fZ','now'),CURRENT_TIMESTAMP)
+               ON CONFLICT(key) DO NOTHING"""
+        )
         conn.commit()
 
     @staticmethod
@@ -278,7 +283,7 @@ class SchemaStore:
         conn.execute("DROP INDEX IF EXISTS idx_ws_alias_events")
         conn.execute("DROP TABLE IF EXISTS workspace_alias_events")
 
-    def _probe_features(self, conn: sqlite3.Connection) -> None:
+    def _probe_features(self, conn: sqlite3.Connection, *, initialize: bool = True) -> None:
         if self.settings.enable_sqlite_vec:
             try:
                 import sqlite_vec
@@ -289,9 +294,17 @@ class SchemaStore:
                 self._sqlite_vec_loadable = True
                 self.state.sqlite_vec_available = True
                 self.state.mode = "sqlite_vec"
-                self._ensure_evidence_vec_table(conn)
-                self._ensure_workspace_vec_table(conn)
+                if initialize:
+                    self._ensure_evidence_vec_table(conn)
+                    self._ensure_workspace_vec_table(conn)
+                else:
+                    # Constant-size capability probe only. Missing/corrupt
+                    # vector tables are a doctor/repair concern, not startup DDL.
+                    conn.execute("SELECT id FROM memory_evidence_vec LIMIT 0")
+                    conn.execute("SELECT id FROM workspace_canonicals_vec LIMIT 0")
             except Exception as exc:  # pragma: no cover - environment dependent
+                self._sqlite_vec_loadable = False
+                self.state.sqlite_vec_available = False
                 self.state.warn(
                     f"sqlite-vec unavailable: {exc}. Semantic recall disabled; "
                     "falling back to FTS5 or keyword search."
@@ -306,8 +319,11 @@ class SchemaStore:
             self.state.warn(f"sqlite-vec disabled by configuration. {suffix}")
 
         try:
-            self._ensure_fts(conn)
-            self._rebuild_fts(conn)
+            if initialize:
+                self._ensure_fts(conn)
+                self._rebuild_fts(conn)
+            else:
+                conn.execute("SELECT rowid FROM memories_fts LIMIT 0")
             self.state.fts5_available = True
             if not self.state.sqlite_vec_available:
                 self.state.mode = "fts5"
@@ -316,19 +332,20 @@ class SchemaStore:
             if not self.state.sqlite_vec_available:
                 self.state.mode = "like"
 
-        try:
-            conn.execute("CREATE TABLE IF NOT EXISTS write_probe (id INTEGER)")
-            conn.execute("INSERT INTO write_probe(id) VALUES (1)")
-            conn.execute("DELETE FROM write_probe")
-            conn.commit()
-        except sqlite3.Error as exc:
-            self.state.sqlite_writable = False
-            self.state.mode = "jsonl_backup"
-            self.state.jsonl_backup_active = True
-            self.state.warn(
-                f"SQLite opened read-only or write probe failed: {exc}. "
-                "Writes will use JSONL backup when possible."
-            )
+        if initialize:
+            try:
+                conn.execute("CREATE TABLE IF NOT EXISTS write_probe (id INTEGER)")
+                conn.execute("INSERT INTO write_probe(id) VALUES (1)")
+                conn.execute("DELETE FROM write_probe")
+                conn.commit()
+            except sqlite3.Error as exc:
+                self.state.sqlite_writable = False
+                self.state.mode = "jsonl_backup"
+                self.state.jsonl_backup_active = True
+                self.state.warn(
+                    f"SQLite opened read-only or write probe failed: {exc}. "
+                    "Writes will use JSONL backup when possible."
+                )
 
     def _probe_sqlite_vec_loadable(self) -> Optional[bool]:
         try:
@@ -397,3 +414,48 @@ class SchemaStore:
                 f"workspace vector index unavailable: {exc}. "
                 "Workspace alias resolution will use exact matches."
             )
+
+    def ensure_vector_tables_for_repair(self) -> tuple[bool, list[str]]:
+        """Create missing derived vec0 tables only from an explicit repair."""
+        if not self.settings.enable_sqlite_vec:
+            return False, ["vec.enabled must be true to repair vector tables"]
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._db._new_connection()
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            before = {
+                str(row[0]) for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('memory_evidence_vec','workspace_canonicals_vec')"
+                )
+            }
+            self._ensure_evidence_vec_table(conn)
+            self._ensure_workspace_vec_table(conn)
+            self._db._sqlite_vec_loadable = True
+            self.state.sqlite_vec_available = True
+            self.state.mode = "sqlite_vec"
+            return before != {"memory_evidence_vec", "workspace_canonicals_vec"}, []
+        except (ImportError, sqlite3.Error) as exc:
+            return False, [f"vector table repair unavailable: {exc}"]
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def missing_vector_tables(self) -> list[str]:
+        """Read-only preview of derived vec0 tables requiring recreation."""
+        expected = {"memory_evidence_vec", "workspace_canonicals_vec"}
+        try:
+            with self._db.connection() as conn:
+                present = {
+                    str(row[0]) for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('memory_evidence_vec','workspace_canonicals_vec')"
+                    )
+                }
+        except sqlite3.Error:
+            return sorted(expected)
+        return sorted(expected - present)

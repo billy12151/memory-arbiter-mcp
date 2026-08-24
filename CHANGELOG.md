@@ -3,11 +3,25 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
-## Unreleased
+## [0.14.4] — 2026-08-24
 
 ### Changed
 
+- **Schema and vector compatibility are independent** — every migration declares `vector_effect=preserve|rebuild`. Preserve migrations no longer load a model, validate full vector coverage, or switch to a full rebuild merely because the configured embedding space differs; preserved incompatible vectors are marked `mismatch` and remain disabled until the existing rebuild workflow repairs them.
+- **Startup generation gate is constant-time** — current databases use one bounded `migration_state` lookup and skip schema DDL, table enumeration, vector scans, row counts, and integrity checks. Pre-generation table inspection remains available only to the low-frequency upgrade/doctor path.
+- **Migration receipts are compact and atomic** — successful migrations publish `schema_generation` and `migration_completed_at` in the final transaction and remove temporary `phase`, cursor, coverage, count, and verification receipts. Deep doctor owns `quick_check`, schema-state, vector-space/dimension, coverage, and bidirectional orphan checks.
 - **Restart-safe localhost HTTP default** — Streamable HTTP now defaults to stateless request handling because product state and semantic notices are SQLite-backed rather than MCP-session-backed. Explicit `mcp.http.stateless=false` remains available for clients that require server-side sessions or server-initiated SSE messages.
+
+### Fixed
+
+- **Vector-space mismatch is fail-closed across every normal path** — lazy model loading now validates the configured embedding space before query, evidence write, workspace-vector publication, placement hints, or conflict KNN. Ordinary calls cannot mix target-space vectors into an old index; only an explicit rebuild with a persisted rebuild epoch may republish them.
+- **Derived-table loss has an executable recovery path** — deep doctor reports missing/unqueryable vec0 tables without treating errors as zero healthy rows, `rebuild_evidence` dry-run previews the missing tables, and authorized execution recreates only the derived tables before a full evidence/workspace-vector rebuild.
+- **Migration publication and recovery stay crash-safe** — successful migrations atomically publish generation plus one completion timestamp, retain staging ownership, reject unknown phases, and leave failed/checkpoint-incomplete targets unopenable. Obsolete success receipts no longer accumulate.
+- **Three independent review rounds** — a normal review, a function-oriented review, and an adversarial review fixed startup maintenance work, doctor false health, staging ownership cleanup, lazy-space write contamination, and explicit vector-table recovery.
+
+### Verification
+
+- 777 tests pass in the vec-equipped development environment before release metadata updates; strict mypy, Ruff, compileall, dependency audit, migration failure-injection tests, real stateless HTTP smoke, deep production-index checks, sdist/wheel build, and Twine checks pass.
 
 ## [0.14.3] — 2026-08-24
 

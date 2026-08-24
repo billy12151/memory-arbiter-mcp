@@ -74,8 +74,6 @@ class MemoryTools:
         self._notice_claim_last_error_at: Optional[str] = None
         self._last_backup_notice_signature: Optional[tuple[int, int, int, bool]] = None
         self._last_backup_source_signature: Optional[tuple[int, int, int]] = None
-        # v0.6.0: initialise vec index state on startup
-        self._init_vec_state()
 
     def start_update_monitor(self, monitor: Optional[UpdateMonitor] = None) -> None:
         # Product notice delivery is owned by the four outer product wrappers,
@@ -274,20 +272,6 @@ class MemoryTools:
             "backend_unload": unload_result,
         }
 
-    def _init_vec_state(self) -> None:
-        """Initialise _vec_index_meta based on current embedder availability."""
-        space_id = None
-        has_managed = False
-        if self._embedding_configured() and self.settings.enable_sqlite_vec:
-            embedder, _ = self._ensure_embedder()
-            if embedder is not None:
-                space_id = embedder.embedding_space_id
-                has_managed = True
-        try:
-            self.db.init_vec_index_state(space_id, has_managed)
-        except Exception:
-            pass  # non-fatal: state init failure shouldn't block startup
-
     def _allowed(self, agent_id: Optional[str] = None, client: Optional[str] = None) -> Tuple[bool, list[str]]:
         actual_agent = agent_id or self.current_agent_id()
         actual_client = client or self.current_client()
@@ -394,7 +378,30 @@ class MemoryTools:
                 return None, warnings
             self._embedder = embedder
             self._embedder_loaded = True  # cache only on successful build
+            try:
+                self.db.init_vec_index_state(embedder.embedding_space_id, True)
+            except Exception as exc:
+                warning = f"vector space state initialization failed: {exc}"
+                self._embedder_warnings.append(warning)
+                warnings.append(warning)
             return self._embedder, warnings
+
+    def _ensure_active_embedder(self) -> Tuple[Optional[ManagedEmbedder], list[str]]:
+        """Load the configured embedder, but expose it only for a ready index."""
+        embedder, warnings = self._ensure_embedder()
+        if embedder is None:
+            return None, warnings
+        state = self.db.get_vec_index_state().get("state")
+        if state in {"mismatch", "failed"}:
+            reason = (
+                "embedding_space_mismatch" if state == "mismatch"
+                else "embedding_migration_failed"
+            )
+            warning = f"vec_disabled={reason}"
+            if warning not in warnings:
+                warnings.append(warning)
+            return None, warnings
+        return embedder, warnings
 
     def _caller_workspace(self, explicit_workspace: Optional[str] = None) -> CallerWorkspace:
         """Resolve the caller workspace for strict read ACLs.
@@ -418,7 +425,7 @@ class MemoryTools:
             # none an explicit filter scopes the query (canonicalize-then-
             # filter, spec §15.6); it is never an ACL boundary — an omitted
             # workspace still spans all workspaces.
-            embedder, ensure_warnings = self._ensure_embedder()
+            embedder, ensure_warnings = self._ensure_active_embedder()
             warnings.extend(ensure_warnings)
             try:
                 resolved = self.db.resolve_workspace_canonical(workspace, embedder, register_new=False)

@@ -11,6 +11,7 @@ from memory_arbiter.config import Settings
 from memory_arbiter.db_generation import (
     CURRENT_SCHEMA_GENERATION,
     detect_database_generation,
+    detect_upgrade_source_generation,
     legacy_database_message,
 )
 from memory_arbiter.upgrade_cli import run_upgrade
@@ -25,10 +26,8 @@ def test_startup_refusal_explains_safe_upgrade_requirements(tmp_path: Path) -> N
         "mema upgrade --dry-run",
         "side-by-side target",
         "old conflict, decision, and semantic-notice history is not copied",
-        "fast conflict-only path",
-        "sqlite-vec",
-        "local GGUF embedding model",
-        "llama-cpp-python",
+        "vectors are preserved or rebuilt",
+        "does not block the structural migration",
     ):
         assert phrase in message
 
@@ -42,7 +41,8 @@ def test_upgrade_help_warns_about_writers_loss_target_and_reindex(capsys) -> Non
         "stop every MCP server",
         "side-by-side target",
         "old conflict, decision, and semantic-notice records",
-        "fast conflict-only path",
+        "preserved or rebuilt",
+        "repaired separately",
         "sqlite-vec",
         "llama-cpp-python",
         "local GGUF embedding model",
@@ -51,12 +51,13 @@ def test_upgrade_help_warns_about_writers_loss_target_and_reindex(capsys) -> Non
         assert phrase in output
 
 
-def test_upgrade_plan_explains_evidence_reuse_decision() -> None:
+def test_upgrade_plan_explains_vector_effect_and_compatibility() -> None:
     from memory_arbiter.upgrade_cli import _render_plan
 
     output = _render_plan({
         "upgrade_mode": "full_evidence_rebuild",
-        "evidence_reuse_reason": "embedding_space_mismatch",
+        "schema_migration": {"vector_effect": "rebuild"},
+        "vector_compatibility": "mismatch",
         "counts": {"memories": 2},
         "estimated_evidence_units": 4,
         "estimated_vector_bytes": 128,
@@ -66,7 +67,8 @@ def test_upgrade_plan_explains_evidence_reuse_decision() -> None:
         "target": "/tmp/target.sqlite3",
     })
 
-    assert "Evidence reuse decision: embedding_space_mismatch" in output
+    assert "Vector effect: rebuild" in output
+    assert "Vector compatibility: mismatch" in output
 
 
 @pytest.fixture(autouse=True)
@@ -117,8 +119,49 @@ def test_generation_detection_prefers_legacy_owners(tmp_path: Path) -> None:
     current = tmp_path / "current.db"
     _current_db(current)
     assert detect_database_generation(tmp_path / "missing.db") == "missing"
-    assert detect_database_generation(legacy) == "legacy"
+    assert detect_database_generation(legacy) == "unknown"
+    assert detect_upgrade_source_generation(legacy) == "legacy"
     assert detect_database_generation(current) == "current"
+
+
+def test_current_startup_skips_schema_ddl(tmp_path: Path, monkeypatch) -> None:
+    from memory_arbiter.db import MemoryDB
+    from memory_arbiter.db.schema import SchemaStore
+    from memory_arbiter.tools import MemoryTools
+
+    path = tmp_path / "current.sqlite3"
+    settings = Settings(db_path=path, backup_jsonl=tmp_path / "backup.jsonl")
+    MemoryDB(settings)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("current startup must not run maintenance work")
+
+    monkeypatch.setattr(SchemaStore, "_init_schema", forbidden)
+    monkeypatch.setattr(SchemaStore, "_rebuild_fts", forbidden)
+    monkeypatch.setattr(SchemaStore, "_ensure_evidence_vec_table", forbidden)
+    monkeypatch.setattr(SchemaStore, "_ensure_workspace_vec_table", forbidden)
+    monkeypatch.setattr("memory_arbiter.embedder.build_embedder", forbidden)
+    reopened = MemoryDB(settings)
+    assert reopened.db_available is True
+    MemoryTools(settings, reopened)
+
+
+def test_current_generation_accepts_compact_receipt_without_phase(tmp_path: Path) -> None:
+    current = tmp_path / "current.db"
+    _current_db(current)
+    with sqlite3.connect(current) as conn:
+        conn.execute(
+            "INSERT INTO migration_state VALUES('migration_completed_at','2026-08-24T00:00:00Z')"
+        )
+    assert detect_database_generation(current) == "current"
+
+
+def test_current_generation_rejects_unknown_phase(tmp_path: Path) -> None:
+    current = tmp_path / "current.db"
+    _current_db(current)
+    with sqlite3.connect(current) as conn:
+        conn.execute("INSERT INTO migration_state VALUES('phase','unexpected')")
+    assert detect_database_generation(current) == "unknown"
 
 
 def test_upgrade_cancel_does_not_migrate_or_edit_config(

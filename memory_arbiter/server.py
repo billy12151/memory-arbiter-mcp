@@ -9,7 +9,6 @@ import sys
 from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple, Optional
 
 from .config import Settings
-from .db_generation import database_startup_lock, require_current_or_new_database
 from .request_identity import (
     AGENT_ID_HEADER,
     CLIENT_HEADER,
@@ -297,10 +296,6 @@ def build_runtime() -> ServerBundle:
             "Community Streamable HTTP MCP may bind only to localhost "
             "(127.0.0.1, ::1, or localhost); X-Mema-* headers are not authentication."
         )
-    # Same startup lock as MemoryDB.__init__: never race another first-start's
-    # in-flight schema creation with this pre-flight generation check.
-    with database_startup_lock(settings.db_path):
-        require_current_or_new_database(settings.db_path)
     try:
         from mcp.server.fastmcp import FastMCP
     except Exception as exc:

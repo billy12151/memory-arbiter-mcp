@@ -261,6 +261,7 @@ class MetaStore:
             "state": meta.get("state", "unmanaged"),
             "active_space_id": meta.get("active_space_id"),
             "target_space_id": meta.get("target_space_id"),
+            "space_rebuild_active": "space_rebuild_evidence_id" in meta,
             "migration_cursor": int(meta["migration_cursor"]) if "migration_cursor" in meta else None,
             "migration_epoch": meta.get("migration_epoch"),
             "last_error": meta.get("last_error"),
@@ -287,6 +288,20 @@ class MetaStore:
                     ).fetchone()[0]
                 )
                 self.set_meta(conn, "space_rebuild_evidence_id", str(epoch))
+
+    def require_space_rebuild(self, embedding_space_id: str, reason: str) -> None:
+        """Force an explicit full rebuild after derived-table loss/corruption."""
+        with self._db.write_transaction() as conn:
+            self.set_meta(conn, "state", "mismatch")
+            self.set_meta(conn, "target_space_id", embedding_space_id)
+            self.set_meta(conn, "migration_epoch", uuid.uuid4().hex)
+            self.set_meta(conn, "last_error", reason)
+            for key in (
+                "space_rebuild_evidence_id", "migration_cursor",
+                "migration_lease_owner", "migration_lease_expires_at",
+                "workspace_rebuild_space_id",
+            ):
+                self.delete_meta(conn, key)
 
     @staticmethod
     def _space_rebuild_pending_sql() -> str:

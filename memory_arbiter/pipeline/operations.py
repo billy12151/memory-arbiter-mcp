@@ -468,7 +468,7 @@ class OperationsPipeline:
         """
         from_ws = str(payload.get("from") or "")
         to_ws = str(payload.get("to") or "")
-        embedder, ensure_warnings = self._ensure_embedder()
+        embedder, ensure_warnings = self._ensure_active_embedder()
         updated, warnings = self.db.migrate_workspace(
             from_ws, to_ws, embedder=embedder,
         )
@@ -1182,6 +1182,34 @@ class OperationsPipeline:
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
+        missing_vector_tables = (
+            self.db.missing_vector_tables() if self.settings.enable_sqlite_vec else []
+        )
+        table_repair: dict[str, Any] = {
+            "required": bool(missing_vector_tables),
+            "missing_tables": missing_vector_tables,
+            "recreated": False,
+            "warnings": [],
+        }
+        if not dry_run and self.settings.enable_sqlite_vec:
+            recreated, repair_warnings = self.db.ensure_vector_tables_for_repair()
+            table_repair.update({"recreated": recreated, "warnings": repair_warnings})
+            if repair_warnings:
+                return self.db.state.response(
+                    {"error": "vector table repair failed", "vector_table_repair": table_repair},
+                    ok=False, extra_warnings=list(caller.warnings) + repair_warnings,
+                )
+            if recreated:
+                embedder, embedder_warnings = self._ensure_embedder()
+                if embedder is None:
+                    return self.db.state.response(
+                        {"error": "embedding runtime unavailable after vector table repair",
+                         "vector_table_repair": table_repair},
+                        ok=False, extra_warnings=list(caller.warnings) + embedder_warnings,
+                    )
+                self.db.require_space_rebuild(
+                    embedder.embedding_space_id, "derived vector tables were recreated",
+                )
         mismatch_rebuild = False
         workspace_rebuild: dict[str, Any] = {"ok": True, "rebuilt": 0}
         if memory_ids is None:
@@ -1197,8 +1225,13 @@ class OperationsPipeline:
             # the execute path so dry runs stay side-effect-free.
             vec_state = self.db.get_vec_index_state()
             mismatch_rebuild = (
-                vec_state.get("state") == "mismatch"
-                and vec_state.get("target_space_id") is not None
+                (
+                    bool(missing_vector_tables)
+                    or (
+                        vec_state.get("state") == "mismatch"
+                        and vec_state.get("target_space_id") is not None
+                    )
+                )
                 and caller.isolation != "strict"
             )
             if mismatch_rebuild:
@@ -1236,7 +1269,11 @@ class OperationsPipeline:
                             extra_warnings=list(caller.warnings),
                         )
                     self.db.mark_space_rebuild_started()
-                ids = self.db.space_rebuild_pending_ids(batch)
+                ids = (
+                    self.db.stale_index_ids(batch)
+                    if dry_run and missing_vector_tables
+                    else self.db.space_rebuild_pending_ids(batch)
+                )
                 if not dry_run and not ids:
                     # Nothing pending: settle the flip now instead of waiting
                     # for an unrelated write to trigger the completion check.
@@ -1264,6 +1301,7 @@ class OperationsPipeline:
                     "memory_ids": ids,
                     "count": len(ids),
                     "workspace_vectors": "rebuild_required" if mismatch_rebuild else "unchanged",
+                    "vector_table_repair": table_repair,
                     "vec_index_state": self.db.get_vec_index_state(),
                 },
                 extra_warnings=list(caller.warnings),
@@ -1282,6 +1320,7 @@ class OperationsPipeline:
                 "workspace_vector_rebuild": (
                     workspace_rebuild if mismatch_rebuild else {"ok": True, "rebuilt": 0}
                 ),
+                "vector_table_repair": table_repair,
                 # Surfaces a skipped flip (e.g. embedder unavailable with an
                 # empty pending set): without it, "queued=0" is
                 # indistinguishable from a settled mismatch->ready flip.

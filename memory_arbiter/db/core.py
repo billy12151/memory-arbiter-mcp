@@ -86,17 +86,6 @@ class MemoryDB:
     """
 
     def __init__(self, settings: Settings, *, allow_incomplete: bool = False):
-        # Startup lock: a concurrent first-start can otherwise observe this
-        # process's half-built schema and misclassify it as a legacy database.
-        # allow_incomplete is reserved for migrate-vnext --resume, which must
-        # reopen the crashed target it is repairing; legacy databases are
-        # still refused.
-        with database_startup_lock(settings.db_path):
-            if allow_incomplete:
-                if detect_database_generation(settings.db_path) == "legacy":
-                    raise LegacyDatabaseError(legacy_database_message(settings.db_path))
-            else:
-                require_current_or_new_database(settings.db_path)
         self.settings = settings
         self.state = DegradeState()
         self._db_available = False
@@ -110,8 +99,18 @@ class MemoryDB:
         self.memories = MemoriesStore(self)
         self.backup_replay = BackupReplayStore(self)
         self.evidence = EvidenceStore(self)
+        # Hold one lock across the generation gate and any first-start schema
+        # creation. Current databases skip DDL entirely at normal startup.
         with database_startup_lock(settings.db_path):
-            self._init_database()
+            if allow_incomplete:
+                generation = detect_database_generation(settings.db_path)
+                if generation == "legacy":
+                    raise LegacyDatabaseError(legacy_database_message(settings.db_path))
+            else:
+                generation = require_current_or_new_database(settings.db_path)
+            self._init_database(
+                initialize_schema=allow_incomplete or generation in {"missing", "empty"},
+            )
 
     # ------------------------------------------------------------------
     #  Connection factory + context managers
@@ -207,7 +206,7 @@ class MemoryDB:
     #  One-time init (runs before any tool call)
     # ------------------------------------------------------------------
 
-    def _init_database(self) -> None:
+    def _init_database(self, *, initialize_schema: bool = True) -> None:
         # Only brand-new databases are tightened: never touch permissions of
         # a file the operator may share deliberately.
         db_preexisted = self.settings.db_path.exists()
@@ -216,9 +215,10 @@ class MemoryDB:
         for attempt in range(_INIT_BUSY_RETRIES):
             conn: Optional[sqlite3.Connection] = None
             try:
-                conn = self._new_connection(init=True)
-                self._init_schema(conn)
-                self._probe_features(conn)
+                conn = self._new_connection(init=initialize_schema)
+                if initialize_schema:
+                    self._init_schema(conn)
+                self._probe_features(conn, initialize=initialize_schema)
                 if not db_preexisted:
                     try:
                         os.chmod(self.settings.db_path, 0o600)
@@ -253,8 +253,10 @@ class MemoryDB:
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         return self.schema._init_schema(conn)
 
-    def _probe_features(self, conn: sqlite3.Connection) -> None:
-        return self.schema._probe_features(conn)
+    def _probe_features(
+        self, conn: sqlite3.Connection, *, initialize: bool = True,
+    ) -> None:
+        return self.schema._probe_features(conn, initialize=initialize)
 
     def _probe_sqlite_vec_loadable(self) -> Optional[bool]:
         return self.schema._probe_sqlite_vec_loadable()
@@ -267,6 +269,12 @@ class MemoryDB:
 
     def _ensure_workspace_vec_table(self, conn: sqlite3.Connection) -> None:
         return self.schema._ensure_workspace_vec_table(conn)
+
+    def ensure_vector_tables_for_repair(self) -> tuple[bool, list[str]]:
+        return self.schema.ensure_vector_tables_for_repair()
+
+    def missing_vector_tables(self) -> list[str]:
+        return self.schema.missing_vector_tables()
 
     def resolve_workspace_canonical(
         self,
@@ -829,6 +837,9 @@ class MemoryDB:
 
     def maybe_complete_space_rebuild(self, embedding_space_id: str) -> bool:
         return self.meta.maybe_complete_space_rebuild(embedding_space_id)
+
+    def require_space_rebuild(self, embedding_space_id: str, reason: str) -> None:
+        return self.meta.require_space_rebuild(embedding_space_id, reason)
 
     def init_vec_index_state(
         self,

@@ -2,7 +2,7 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.14.2` contract.
+This guide describes the `0.14.4` contract.
 
 ## MCP Surface
 
@@ -20,7 +20,7 @@ With sqlite-vec and a local embedding model configured, writes asynchronously pu
 
 `memory(action="read", data={"memory_id":42})` returns the complete source. Add `"span":{"start":120,"end":640}` to return only `data.memory.content[120:640]` plus `data.span.{start,end,total_chars}`. Bounds must be strict JSON integers with `0 <= start < end`; an oversized end clips to content length, while a start beyond content fails. `scan_candidates.deep_read` may provide ready-to-use spans; semantic-notice read calls are full-memory reads by design, so omit the span parameter there whenever full context is needed.
 
-Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect missing/stale coverage, then queue bounded rebuild pages. Repeat execute/dry-run until no ids remain and status reports complete eligible coverage. A changed embedding space reports `state=mismatch` and disables the evidence channel until every eligible memory is republished. Evidence units and vectors are derived. Upgrade reuses an existing evidence/vector index only when it is `ready` in the exact configured model/pipeline space; otherwise it rebuilds the index in that space.
+Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect missing/stale coverage, then queue bounded rebuild pages. Repeat execute/dry-run until no ids remain and status reports complete eligible coverage. A changed embedding space reports `state=mismatch` and disables the evidence channel until every eligible memory is republished. Evidence units and vectors are derived. Schema migrations explicitly declare `vector_effect=preserve|rebuild`; a preserve migration copies vectors unchanged, then evaluates compatibility separately without blocking the structural upgrade.
 
 ## Conflict Detection Contract
 
@@ -132,7 +132,7 @@ There is no public in-place upgrade: both paths build and verify a side-by-side 
 4. Run `mema upgrade`; restart and verify with `mema doctor --json`.
 5. Complete the epoch-pinned full `scan_candidates` pass shown by status/doctor.
 
-The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, and audit. The obsolete workspace decision event ledger is intentionally omitted. A proven same-space source clones FTS/evidence/vector tables unchanged and replaces only the conflict domain; a missing, non-ready, or different space rebuilds and republishes evidence vectors. It intentionally starts with empty new conflict/notice state: old `conflicts`, `conflict_judgments`, and `semantic_notices` history are not migrated. Target publication requires fingerprint stability, empty destructive tables, and a successful target `wal_checkpoint(TRUNCATE)` before WAL/SHM removal and config switch; the full-rebuild path additionally requires complete eligible evidence coverage and `state=ready` in the expected space.
+The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, and audit. The obsolete workspace decision event ledger is intentionally omitted. Preserve migrations clone FTS/evidence/vector payloads unchanged and replace only the conflict domain; compatibility is evaluated independently, and an incompatible configured space is recorded as `mismatch` so vector reads stay disabled until repair. Rebuild migrations regenerate evidence vectors. The target intentionally starts with empty conflict/notice state: old `conflicts`, `conflict_judgments`, and `semantic_notices` history are not migrated. Target publication requires fingerprint stability, empty destructive tables, an atomic generation/completion marker, and a successful target `wal_checkpoint(TRUNCATE)` before WAL/SHM removal and config switch; rebuild migrations additionally require complete eligible evidence coverage and `state=ready` in the expected space.
 
 On success `conflict_scan_required=true` and a persistent epoch are recorded. Only a full scan covering the upgrade-time active set with the matching detector can CAS-clear it. A partial page, failed scan, or old detector cannot. `--yes` only skips the prompt acknowledging writer shutdown and permanent conflict/judgment/notice-history loss; it does not stop processes, checkpoint/back up the source, or relax verification. `--no-switch` leaves configuration untouched. Environment-overridden/mismatched config paths require the printed manual switch.
 

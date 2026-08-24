@@ -2,7 +2,7 @@
 
 **[English](INTEGRATION.md) | 中文**
 
-本指南描述 `0.14.2` 的正式契约。
+本指南描述 `0.14.4` 的正式契约。
 
 ## MCP 接口面
 
@@ -132,6 +132,6 @@ JSONL 回放无需授权即可预览。应用回放需要显式用户授权，�
 4. 运行 `mema upgrade`；重启并用 `mema doctor --json` 验证。
 5. 完成 status/doctor 显示的带 epoch 固定的完整 `scan_candidates` 全库扫描。
 
-side-by-side 拷贝保留记忆内容/历史、备份回放回执、workspace canonical 和当前 redirect/负决策状态及审计。已废弃的 workspace 决策事件账本被刻意省略。已证明同空间的源库原样克隆 FTS/证据/向量表，只替换冲突域；空间缺失、非 ready 或不一致时重建并重新发布证据向量。它刻意以空的冲突/notice 状态开始：旧 `conflicts`、`conflict_judgments` 和 `semantic_notices` 历史不迁移。目标发布要求指纹稳定、破坏性表为空、在移除 WAL/SHM 并切换配置前目标 `wal_checkpoint(TRUNCATE)` 成功；完整重建路径额外要求合格证据全覆盖，且目标向量状态在预期空间为 `ready`。
+side-by-side 拷贝保留记忆内容/历史、备份回放回执、workspace canonical 和当前 redirect/负决策状态及审计。已废弃的 workspace 决策事件账本被刻意省略。每个结构迁移显式声明 `vector_effect=preserve|rebuild`：preserve 原样复制 FTS/证据/向量 payload，只替换冲突域，再独立判断空间兼容性；不兼容时写入 `mismatch` 并禁用向量读取，等待后续重建，不阻断结构迁移。它刻意以空的冲突/notice 状态开始：旧 `conflicts`、`conflict_judgments` 和 `semantic_notices` 历史不迁移。目标发布要求指纹稳定、破坏性表为空、generation 与完成时间在同一事务提交，并在移除 WAL/SHM、切换配置前完成 `wal_checkpoint(TRUNCATE)`；rebuild 路径额外要求合格证据全覆盖且目标向量状态在预期空间为 `ready`。
 
 成功时记录 `conflict_scan_required=true` 和一个持久 epoch。只有覆盖升级时活跃集且 detector 匹配的完整扫描才能 CAS 清除它。部分页、失败扫描或旧 detector 都不能。`--yes` 只跳过"确认写入方已停止、冲突/裁决/notice 历史永久丢失"的提示；它不会停止进程、checkpoint/备份源库，也不放松验证。`--no-switch` 不动配置。被环境变量覆盖/不匹配的配置路径需要按打印的手动步骤切换。

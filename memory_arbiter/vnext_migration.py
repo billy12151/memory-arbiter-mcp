@@ -7,7 +7,6 @@ import gc
 import hashlib
 import json
 import os
-import re
 import shutil
 import sqlite3
 import sys
@@ -22,7 +21,7 @@ from .db import MemoryDB
 from .db_generation import (
     CONFLICT_DETECTOR_VERSION,
     CURRENT_SCHEMA_GENERATION,
-    PREVIOUS_SCHEMA_GENERATIONS,
+    SCHEMA_MIGRATIONS,
     detect_database_generation,
 )
 from .embedder import (
@@ -46,26 +45,17 @@ DESTRUCTIVELY_REBUILT_TABLES = (
     "conflicts", "conflict_judgments", "semantic_notices", "workspace_alias_events",
 )
 _BUILDING_SCHEMA_GENERATION = f"{CURRENT_SCHEMA_GENERATION}:building"
+_OBSOLETE_SUCCESS_RECEIPTS = (
+    "row_counts_match", "evidence_coverage", "failed_count", "source_stable",
+    "workspace_vector_failures", "destructive_tables_empty",
+    "target_space_ready", "cursor_memory_id", "evidence_rebuild_space_id",
+)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone() is not None
-
-
-def is_previous_evidence_generation(path: Path) -> bool:
-    """Return whether path uses the immediately previous evidence schema."""
-    try:
-        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
-            if not _table_exists(conn, "migration_state"):
-                return False
-            row = conn.execute(
-                "SELECT value FROM migration_state WHERE key='schema_generation'"
-            ).fetchone()
-            return bool(row and str(row[0]) in PREVIOUS_SCHEMA_GENERATIONS)
-    except sqlite3.Error:
-        return False
 
 
 def _configured_embedding_space_id(settings: Settings | None) -> str | None:
@@ -107,107 +97,6 @@ def _source_vec_state(path: Path) -> dict[str, str]:
             }
     except sqlite3.Error:
         return {}
-
-
-def _vec_table_dimension(conn: sqlite3.Connection, table: str) -> int | None:
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,),
-    ).fetchone()
-    if row is None:
-        return None
-    match = re.search(r"embedding\s+float\[(\d+)]", str(row[0] or ""), re.IGNORECASE)
-    return int(match.group(1)) if match else None
-
-
-def _source_evidence_complete(path: Path, expected_dim: int) -> tuple[bool, str]:
-    """Verify current logical evidence and one vector row for every unit."""
-    try:
-        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
-            conn.row_factory = sqlite3.Row
-            try:
-                import sqlite_vec
-
-                conn.enable_load_extension(True)
-                sqlite_vec.load(conn)
-                conn.enable_load_extension(False)
-            except (ImportError, sqlite3.Error):
-                return False, "source_vectors_unverifiable"
-            if not _table_exists(conn, "memory_evidence"):
-                return False, "source_evidence_missing"
-            if not _table_exists(conn, "memory_evidence_vec"):
-                return False, "source_vectors_missing"
-            if _vec_table_dimension(conn, "memory_evidence_vec") != int(expected_dim):
-                return False, "source_vector_dimension_mismatch"
-            if _vec_table_dimension(conn, "workspace_canonicals_vec") != int(expected_dim):
-                return False, "source_workspace_vector_dimension_mismatch"
-            expected_ids: set[int] = set()
-            for memory in conn.execute(
-                "SELECT id,version,content,subject FROM memories "
-                "WHERE status!='deleted' ORDER BY id"
-            ):
-                memory_id = int(memory["id"])
-                version = int(memory["version"] or 1)
-                content = str(memory["content"] or "")
-                units = local_text_units(str(memory["subject"] or ""), content)
-                rows = conn.execute(
-                    "SELECT id,memory_version,content_hash,unit_index,kind,text,"
-                    "start_offset,end_offset FROM memory_evidence "
-                    "WHERE memory_id=? ORDER BY unit_index",
-                    (memory_id,),
-                ).fetchall()
-                if len(rows) != len(units):
-                    return False, "source_evidence_incomplete"
-                content_hash = evidence_content_hash(content)
-                for row, unit in zip(rows, units):
-                    if (
-                        int(row["memory_version"]) != version
-                        or str(row["content_hash"]) != content_hash
-                        or int(row["unit_index"]) != int(unit.unit_index)
-                        or str(row["kind"]) != unit.kind
-                        or str(row["text"]) != unit.text
-                        or int(row["start_offset"]) != int(unit.start_offset)
-                        or int(row["end_offset"]) != int(unit.end_offset)
-                    ):
-                        return False, "source_evidence_stale"
-                    expected_ids.add(int(row["id"]))
-            all_evidence_ids = {
-                int(row[0]) for row in conn.execute("SELECT id FROM memory_evidence")
-            }
-            if all_evidence_ids != expected_ids:
-                return False, "source_evidence_orphaned"
-            vector_ids = {int(row[0]) for row in conn.execute("SELECT id FROM memory_evidence_vec")}
-            if vector_ids != expected_ids:
-                return False, "source_vectors_incomplete"
-            expected_workspace_ids = {
-                int(row["id"])
-                for row in conn.execute("SELECT id,name FROM workspace_canonicals")
-                if not is_default_workspace_term(str(row["name"] or ""))
-            }
-            workspace_vector_ids = {
-                int(row[0]) for row in conn.execute("SELECT id FROM workspace_canonicals_vec")
-            }
-            if workspace_vector_ids != expected_workspace_ids:
-                return False, "source_workspace_vectors_incomplete"
-    except (sqlite3.Error, TypeError, ValueError):
-        return False, "source_evidence_unverifiable"
-    return True, "source_evidence_complete"
-
-
-def _can_reuse_evidence_space(source: Path, settings: Settings | None) -> tuple[bool, str]:
-    """Require proof that cloned evidence/vectors match the running pipeline."""
-    state = _source_vec_state(source)
-    if state.get("state") != "ready":
-        return False, f"source_vec_state_{state.get('state') or 'missing'}"
-    expected = _configured_embedding_space_id(settings)
-    if expected is None:
-        return False, "configured_embedding_space_unavailable"
-    if state.get("active_space_id") != expected:
-        return False, "embedding_space_mismatch"
-    assert settings is not None
-    complete, reason = _source_evidence_complete(source, settings.vec_dim)
-    if not complete:
-        return False, reason
-    return True, "embedding_space_match"
 
 
 def _counts_on_connection(conn: sqlite3.Connection) -> dict[str, int]:
@@ -299,9 +188,19 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
         )
     finally:
         conn.close()
-    previous_evidence = is_previous_evidence_generation(source)
-    reusable, reuse_reason = _can_reuse_evidence_space(source, settings)
-    conflict_only = previous_evidence and reusable
+    source_generation = _source_schema_generation(source)
+    migration = SCHEMA_MIGRATIONS.get(source_generation or "")
+    vector_effect = migration.vector_effect if migration is not None else "rebuild"
+    conflict_only = migration is not None and vector_effect == "preserve"
+    vec_state = _source_vec_state(source)
+    configured_space = _configured_embedding_space_id(settings)
+    active_space = vec_state.get("active_space_id")
+    if vec_state.get("state") == "ready" and configured_space and active_space == configured_space:
+        vector_compatibility = "ready"
+    elif configured_space and active_space and active_space != configured_space:
+        vector_compatibility = "mismatch"
+    else:
+        vector_compatibility = vec_state.get("state", "unmanaged")
     vector_bytes = (
         0 if conflict_only
         else units * int((settings.vec_dim if settings is not None else Settings.vec_dim)) * 4
@@ -314,7 +213,18 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
     return {
         "source": str(source), "target": str(target),
         "upgrade_mode": "conflict_only" if conflict_only else "full_evidence_rebuild",
-        "evidence_reuse_reason": reuse_reason if previous_evidence else "source_generation_requires_rebuild",
+        "schema_migration": {
+            "source_generation": source_generation,
+            "target_generation": CURRENT_SCHEMA_GENERATION,
+            "vector_effect": vector_effect,
+        },
+        "vector_compatibility": vector_compatibility,
+        "active_space_id": active_space,
+        "configured_space_id": configured_space,
+        "evidence_reuse_reason": (
+            "schema_migration_preserves_vectors" if conflict_only
+            else "schema_migration_requires_rebuild"
+        ),
         "source_bytes": source.stat().st_size, "counts": _counts(source),
         "destructive_history_loss": list(DESTRUCTIVELY_REBUILT_TABLES),
         "destructive_history_counts": _destructive_counts(source),
@@ -322,6 +232,93 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
         "estimated_vector_bytes": vector_bytes,
         "free_bytes": free_bytes, "required_bytes": required,
         "disk_ok": free_bytes >= required, "target_exists": target.exists(),
+    }
+
+
+def _source_schema_generation(path: Path) -> str | None:
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+            row = conn.execute(
+                "SELECT value FROM migration_state WHERE key='schema_generation'"
+            ).fetchone()
+            return str(row[0]) if row is not None else None
+    except sqlite3.Error:
+        return None
+
+
+def _complete_migration_on_connection(
+    conn: sqlite3.Connection,
+    *,
+    extra_state: dict[str, str] | None = None,
+) -> None:
+    values = dict(extra_state or {})
+    values["schema_generation"] = CURRENT_SCHEMA_GENERATION
+    values["migration_completed_at"] = conn.execute(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+    ).fetchone()[0]
+    for key, value in values.items():
+        conn.execute(
+            "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+            (key, value),
+        )
+    conn.execute("DELETE FROM migration_state WHERE key='phase'")
+    placeholders = ",".join("?" for _ in _OBSOLETE_SUCCESS_RECEIPTS)
+    conn.execute(
+        f"DELETE FROM migration_state WHERE key IN ({placeholders})",
+        _OBSOLETE_SUCCESS_RECEIPTS,
+    )
+
+
+def _set_preserved_vector_compatibility(
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> dict[str, str | None]:
+    meta = {
+        str(row[0]): str(row[1])
+        for row in conn.execute("SELECT key,value FROM _vec_index_meta")
+    }
+    configured = _configured_embedding_space_id(settings)
+    active = meta.get("active_space_id")
+    vector_rows = 0
+    if configured and not active:
+        try:
+            vector_rows = int(
+                conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0]
+            ) + int(
+                conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0]
+            )
+        except sqlite3.Error:
+            vector_rows = 1
+    if configured and ((active and configured != active) or (not active and vector_rows)):
+        conn.execute(
+            "INSERT INTO _vec_index_meta(key,value) VALUES('state','mismatch') "
+            "ON CONFLICT(key) DO UPDATE SET value='mismatch'"
+        )
+        conn.execute(
+            "INSERT INTO _vec_index_meta(key,value) VALUES('target_space_id',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (configured,),
+        )
+        state = "mismatch"
+    elif configured and not active:
+        conn.execute(
+            "INSERT INTO _vec_index_meta(key,value) VALUES('state','ready') "
+            "ON CONFLICT(key) DO UPDATE SET value='ready'"
+        )
+        conn.execute(
+            "INSERT INTO _vec_index_meta(key,value) VALUES('active_space_id',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (configured,),
+        )
+        state = "ready"
+        active = configured
+    else:
+        state = meta.get("state", "unmanaged")
+    return {
+        "state": state,
+        "active_space_id": active,
+        "target_space_id": configured if state == "mismatch" else meta.get("target_space_id"),
     }
 
 
@@ -347,9 +344,15 @@ def _current_conflict_schema(settings: Settings) -> list[str]:
         conn.close()
 
 
-def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[str, Any]:
+def build_conflict_only(
+    source: Path,
+    target: Path,
+    settings: Settings,
+    *,
+    plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Clone a dev1 evidence DB and transactionally replace only conflict state."""
-    plan = inspect(source, target, settings)
+    plan = plan or inspect(source, target, settings)
     if plan.get("upgrade_mode") != "conflict_only":
         return {
             "ok": False,
@@ -385,8 +388,7 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
             conn.execute(statement)
         boundary = canonical_scan_boundary(active_scan_boundary_on_connection(conn))
         state = {
-            "schema_generation": CURRENT_SCHEMA_GENERATION,
-            "phase": "ready",
+            "phase": "building",
             "source_path": str(source),
             "conflict_scan_required": "true",
             "conflict_scan_epoch": epoch,
@@ -412,12 +414,20 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
     target_fp = _fingerprint(target)
     preserved = all(source_fp.get(key) == target_fp.get(key) for key in source_fp)
     destructive_empty = all(value == 0 for value in _destructive_counts(target).values())
-    checkpoint_ok = preserved and destructive_empty and _checkpoint(target)
-    target_space_reusable, target_space_reason = (
-        _can_reuse_evidence_space(target, settings)
-        if checkpoint_ok else (False, "target_checkpoint_or_validation_failed")
-    )
-    switch_ready = checkpoint_ok and target_space_reusable
+    switch_ready = preserved and destructive_empty
+    vector_state: dict[str, str | None] = {}
+    if switch_ready:
+        try:
+            with contextlib.closing(sqlite3.connect(target)) as final_conn:
+                final_conn.execute("BEGIN IMMEDIATE")
+                vector_state = _set_preserved_vector_compatibility(final_conn, settings)
+                _complete_migration_on_connection(final_conn, extra_state={
+                    key: value for key, value in state.items() if key != "phase"
+                })
+                final_conn.commit()
+            switch_ready = _checkpoint(target)
+        except (sqlite3.Error, OSError):
+            switch_ready = False
     if switch_ready:
         _remove_sidecars(target)
     else:
@@ -431,6 +441,9 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
                 failed_conn.execute(
                     "INSERT INTO migration_state(key,value,updated_at) VALUES('phase','failed',CURRENT_TIMESTAMP) "
                     "ON CONFLICT(key) DO UPDATE SET value='failed',updated_at=CURRENT_TIMESTAMP"
+                )
+                failed_conn.execute(
+                    "DELETE FROM migration_state WHERE key='migration_completed_at'"
                 )
                 failed_conn.commit()
             finally:
@@ -447,8 +460,8 @@ def build_conflict_only(source: Path, target: Path, settings: Settings) -> dict[
         "source_fingerprint": source_fp,
         "target_fingerprint": target_fp,
         "destructive_tables_empty": destructive_empty,
-        "target_space_reusable": target_space_reusable,
-        "target_space_reason": target_space_reason,
+        "vector_effect": "preserve",
+        "vec_index_state": vector_state,
         "conflict_scan": state,
         "switch_ready": switch_ready,
     }
@@ -508,15 +521,13 @@ def _mark_conflict_rebuild_ready(db: MemoryDB) -> dict[str, str]:
     epoch = uuid.uuid4().hex
     boundary = _active_scan_boundary(db)
     values = {
-        "schema_generation": CURRENT_SCHEMA_GENERATION,
         "conflict_scan_required": "true",
         "conflict_scan_epoch": epoch,
         "conflict_scan_detector_version": CONFLICT_DETECTOR_VERSION,
         "conflict_scan_boundary": boundary,
     }
-    _set_state(db, values)
-    # Drop any progress row from a superseded epoch so the fresh scan starts clean.
     with db.write_transaction() as conn:
+        _complete_migration_on_connection(conn, extra_state=values)
         conn.execute("DELETE FROM migration_state WHERE key='conflict_scan_progress'")
     return values
 
@@ -561,6 +572,9 @@ def _reset_phase_to_failed(target: Path) -> None:
                 "INSERT INTO migration_state(key, value) VALUES ('phase', 'failed') "
                 "ON CONFLICT(key) DO UPDATE SET value='failed'"
             )
+            conn.execute(
+                "DELETE FROM migration_state WHERE key='migration_completed_at'"
+            )
             conn.commit()
     except sqlite3.Error:
         pass
@@ -594,7 +608,7 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     if plan.get("upgrade_mode") == "conflict_only":
         if resume:
             return {"ok": False, "error": "conflict_only_upgrade_is_not_resumable"}
-        return build_conflict_only(source, target, settings)
+        return build_conflict_only(source, target, settings, plan=plan)
     if plan.get("ok") is False:
         return dict(plan)
     if not plan["disk_ok"]:
@@ -830,15 +844,8 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     scan_state: dict[str, str] = {}
     if complete:
         scan_state = _mark_conflict_rebuild_ready(db)
-    _set_state(db, {
-        "phase": "ready" if complete else "failed",
-        "row_counts_match": str(row_counts_match).lower(),
-        "evidence_coverage": f"{coverage['indexed_memories']}/{coverage['eligible_memories']}",
-        "failed_count": str(len(failed)), "source_stable": str(source_stable).lower(),
-        "workspace_vector_failures": str(len(workspace_vector_failures)),
-        "destructive_tables_empty": str(destructive_tables_empty).lower(),
-        "target_space_ready": str(target_space_ready).lower(),
-    })
+    if not complete:
+        _set_state(db, {"phase": "failed"})
     switch_ready = False
     if complete:
         del tools

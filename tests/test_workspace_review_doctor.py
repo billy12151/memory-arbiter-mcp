@@ -47,6 +47,59 @@ def _run_doctor(tools: MemoryTools):
         return run_all_checks(conn, tools.settings)
 
 
+def test_deep_doctor_owns_integrity_generation_and_vector_health(tmp_path):
+    pytest.importorskip("sqlite_vec")
+    settings = Settings(
+        db_path=tmp_path / "deep.sqlite3",
+        backup_jsonl=tmp_path / "deep.jsonl",
+        enable_sqlite_vec=True,
+        vec_dim=2,
+    )
+    db = MemoryDB(settings)
+    with db.write_transaction() as conn:
+        conn.execute(
+            """INSERT INTO memories(content,agent_id,workspace,tags,source_type,
+               event_time,ingest_time,status,subject,metadata,version,created_at)
+               VALUES('body','agent','default','[]','agent_generated',
+               '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','active','subject','{}',1,
+               '2026-01-01T00:00:00Z')"""
+        )
+        memory_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """INSERT INTO memory_evidence(memory_id,memory_version,content_hash,
+               unit_index,kind,text,start_offset,end_offset,created_at)
+               VALUES(?,1,'hash',0,'text','body',0,4,'2026-01-01T00:00:00Z')""",
+            (memory_id,),
+        )
+
+    with db.diagnostic_connection() as conn:
+        shallow = run_all_checks(conn, settings, deep=False)
+    assert not any(f.check_id == "database.quick_check" for f in shallow.findings)
+
+    with db.diagnostic_connection() as conn:
+        deep = run_all_checks(conn, settings, deep=True)
+    findings = {f.check_id: f for f in deep.findings}
+    assert findings["database.quick_check"].status == "pass"
+    assert findings["database.schema_generation"].status == "pass"
+    assert findings["vector.table_dimension"].status == "pass"
+    assert findings["vector.evidence_rows"].status == "warn"
+    assert findings["vector.evidence_rows"].evidence["missing_vectors"] == 1
+
+
+def test_deep_doctor_does_not_treat_unqueryable_vec_tables_as_empty(tmp_path):
+    tools = make_tools(tmp_path)
+    tools.settings.enable_sqlite_vec = True
+    with tools.db.diagnostic_connection() as conn:
+        conn.execute("DROP TABLE IF EXISTS memory_evidence_vec")
+        conn.execute("DROP TABLE IF EXISTS workspace_canonicals_vec")
+        report = run_all_checks(conn, tools.settings, deep=True)
+    findings = {f.check_id: f for f in report.findings}
+    assert findings["vector.evidence_rows"].status == "warn"
+    assert findings["vector.evidence_rows"].evidence["vectors"] is None
+    assert findings["vector.workspace_rows"].status == "warn"
+    assert findings["vector.workspace_rows"].evidence["vectors"] is None
+
+
 def _review(report):
     return next(f for f in report.findings if f.check_id == "workspace.review")
 

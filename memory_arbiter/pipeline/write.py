@@ -116,7 +116,7 @@ class WritePipeline:
         }
         isolation = self.settings.isolation
 
-        embedder, warnings = self._ensure_embedder()
+        embedder, warnings = self._ensure_active_embedder()
         result["warnings"].extend(warnings)
         # Resolution is read-only. Registration of only the final policy result
         # happens atomically in insert_memory.
@@ -233,7 +233,7 @@ class WritePipeline:
         subject = str(getattr(record, "subject", None) or "").strip()
         if not subject:
             return None
-        embedder, _ = self._ensure_embedder()
+        embedder, _ = self._ensure_active_embedder()
         if embedder is None or not self.db.state.sqlite_vec_available:
             return None
         try:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal
 
@@ -20,6 +21,25 @@ CURRENT_SCHEMA_GENERATION = "workspace_state_v1"
 PREVIOUS_SCHEMA_GENERATIONS = frozenset({
     "conflict_groups_v2", "local_text_evidence_v1",
 })
+
+
+@dataclass(frozen=True)
+class SchemaMigrationDefinition:
+    """Compatibility metadata for one explicit structural migration."""
+
+    source_generation: str
+    target_generation: str
+    vector_effect: Literal["preserve", "rebuild"] = "preserve"
+
+
+SCHEMA_MIGRATIONS = {
+    generation: SchemaMigrationDefinition(
+        source_generation=generation,
+        target_generation=CURRENT_SCHEMA_GENERATION,
+        vector_effect="preserve",
+    )
+    for generation in PREVIOUS_SCHEMA_GENERATIONS
+}
 # The single identity of the running conflict-detection pipeline (deterministic
 # rules + Qwen pair extraction). The scan-clearing gate compares the PERSISTED
 # requirement against this running constant, and scan candidate keys stamp it;
@@ -36,56 +56,63 @@ class LegacyDatabaseError(RuntimeError):
 
 
 def detect_database_generation(path: Path) -> DatabaseGeneration:
-    """Classify a database without creating or modifying it."""
+    """Classify a database with one constant-size migration-state query."""
     path = Path(path).expanduser()
     if not path.exists():
         return "missing"
     try:
+        if path.stat().st_size == 0:
+            return "empty"
+    except OSError:
+        return "unknown"
+    try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
-            tables = {
-                str(row[0])
+            state = {
+                str(row[0]): str(row[1])
                 for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
+                    "SELECT key,value FROM migration_state "
+                    "WHERE key IN ('schema_generation','phase')"
                 )
             }
         finally:
             conn.close()
     except sqlite3.Error:
         return "unknown"
-    if not tables:
-        return "empty"
-    if "memories" not in tables:
-        return "unknown"
-    # Old releases may have created partial vNext tables while continuing to
-    # use the legacy stores. Legacy ownership wins over mere table presence.
-    if tables & LEGACY_DERIVED_TABLES:
-        return "legacy"
-    if not {"memory_evidence", "migration_state"}.issubset(tables):
-        return "legacy"
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            state = {
-                str(row[0]): str(row[1])
-                for row in conn.execute("SELECT key,value FROM migration_state")
-            }
-        finally:
-            conn.close()
-    except sqlite3.Error:
+    phase = state.get("phase")
+    if phase is not None and phase != "ready":
         return "unknown"
     if state.get("schema_generation") in PREVIOUS_SCHEMA_GENERATIONS:
         return "legacy"
     if state.get("schema_generation") == CURRENT_SCHEMA_GENERATION:
-        # A side-by-side build whose backfill failed (or crashed mid-backfill)
-        # must never start as "current": the data is incomplete even though
-        # the schema is new. 'resuming' is the brief window in which
-        # migrate-vnext --resume has unblocked a failed target; a kill -9 in
-        # that window must not leave the incomplete DB openable.
-        if state.get("phase") in {"failed", "backfill", "resuming"}:
-            return "unknown"
+        # phase=ready is an accepted legacy success receipt. New migrations
+        # remove phase when they atomically publish the generation marker.
         return "current"
     return "unknown"
+
+
+def detect_upgrade_source_generation(path: Path) -> DatabaseGeneration:
+    """Classify old pre-generation databases for the low-frequency CLI path."""
+    generation = detect_database_generation(path)
+    if generation in {"missing", "empty", "legacy"}:
+        return generation
+    try:
+        with sqlite3.connect(f"file:{Path(path).expanduser()}?mode=ro", uri=True) as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('memories','migration_state','memory_claims',"
+                    "'memories_vec','memory_sections_vec')"
+                )
+            }
+    except sqlite3.Error:
+        return "unknown"
+    if tables & LEGACY_DERIVED_TABLES:
+        return "legacy"
+    if generation == "unknown" and "migration_state" not in tables and "memories" in tables:
+        return "legacy"
+    return generation
 
 
 def legacy_database_message(path: Path) -> str:
@@ -96,10 +123,9 @@ def legacy_database_message(path: Path) -> str:
         "Stop every process that can write to this database, then run `mema upgrade`. "
         "Use `mema upgrade --dry-run` first to inspect prerequisites and the side-by-side "
         "target. The old database is kept for rollback, but old conflict, decision, and "
-        "semantic-notice history is not copied. A previous evidence schema uses the fast "
-        "conflict-only path only when its ready vector index matches the configured "
-        "embedding space; otherwise reindexing requires sqlite-vec, a local GGUF embedding "
-        "model, and llama-cpp-python."
+        "semantic-notice history is not copied. Each schema migration declares whether "
+        "vectors are preserved or rebuilt. A preserved but incompatible vector space is "
+        "disabled and repaired separately; it does not block the structural migration."
     )
 
 
