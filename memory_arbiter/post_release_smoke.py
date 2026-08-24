@@ -15,6 +15,8 @@ from memory_arbiter import __version__
 from memory_arbiter.config import Settings
 from memory_arbiter.tools import MemoryTools
 
+PRODUCTION_SMOKE_WORKSPACE = "测试"
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -35,7 +37,7 @@ def main() -> int:
             tags=["release-smoke", __version__],
             source_type="agent_generated",
             source_ref="pypi-production-smoke",
-            workspace=settings.workspace,
+            workspace=PRODUCTION_SMOKE_WORKSPACE,
         )
         if not written.get("ok") or written.get("data", {}).get("backup_only"):
             raise RuntimeError(f"write failed or backup-only: {written}")

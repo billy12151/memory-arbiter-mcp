@@ -4,7 +4,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.14.4` (fast constant-size startup gates, independent schema/vector compatibility, restart-safe stateless HTTP, and explicit derived-index recovery).
+> Current release: `0.14.5` (visible new-workspace review notices, safer release smoke data, and local hidden-state packaging guards).
 
 ## Why trust it
 
@@ -84,7 +84,7 @@ Evidence/semantic queues are process-local, so a crash or forced shutdown can lo
 
 ## Upgrading from an older database
 
-**Upgrade warning for 0.14.4:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are refused without modification. Run the public side-by-side `mema upgrade`. Every schema migration declares `vector_effect=preserve|rebuild`; the migrations from the two previous evidence generations preserve vector payloads regardless of current model availability. Compatibility is evaluated separately: a different configured embedding space records `state=mismatch`, disables vector reads, and is repaired later with `memory_repair(rebuild_evidence)`. Both paths compact current workspace redirect/negative-decision state and discard the obsolete workspace decision event ledger.
+**Upgrade warning for 0.14.5:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are refused without modification. Run the public side-by-side `mema upgrade`. Every schema migration declares `vector_effect=preserve|rebuild`; the migrations from the two previous evidence generations preserve vector payloads regardless of current model availability. Compatibility is evaluated separately: a different configured embedding space records `state=mismatch`, disables vector reads, and is repaired later with `memory_repair(rebuild_evidence)`. Both paths compact current workspace redirect/negative-decision state and discard the obsolete workspace decision event ledger.
 
 The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, and audit. The obsolete workspace decision event ledger is not copied. Preserve migrations clone FTS/evidence/vector payloads unchanged and transactionally rebuild only the conflict domain; vector health or space mismatch never changes the structural migration result. Rebuild migrations regenerate evidence and vectors. Both paths intentionally start with empty new `conflicts`/notice state and do not copy old `conflicts`, append-only `conflict_judgments`, or `semantic_notices` history. Current contradictions must be rediscovered by a scheduled full-library scan.
 

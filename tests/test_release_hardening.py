@@ -160,6 +160,7 @@ def test_production_smoke_version_mismatch_has_no_runtime_side_effect(monkeypatc
 
 def test_production_smoke_always_cleans_up(monkeypatch):
     events: list[str] = []
+    writes: list[dict] = []
 
     class FakeSettings:
         workspace = "release-test"
@@ -170,6 +171,7 @@ def test_production_smoke_always_cleans_up(monkeypatch):
 
         def memory_write(self, **kwargs):
             events.append("write")
+            writes.append(kwargs)
             return {"ok": True, "data": {"id": 7}}
 
         def memory_get(self, **kwargs):
@@ -193,3 +195,5 @@ def test_production_smoke_always_cleans_up(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["mema-production-smoke", "--expected-version", production_smoke.__version__])
     assert production_smoke.main() == 1
     assert events == ["init", "write", "read", "retire", "expired", "shutdown"]
+    assert writes[0]["workspace"] == "测试"
+    assert writes[0]["workspace"] != FakeSettings.workspace
