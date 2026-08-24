@@ -3,6 +3,13 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## Unreleased
+
+### Fixed
+
+- **New workspace registration is visible outside strict mode** — the first successful `none`/`weak` write that registers a canonical now returns a non-blocking top-level `workspace_review` notice plus the existing write hint. The notice points to doctor review and requires fresh user authorization before `confirm_workspaces`; repeated writes and strict pending-workspace flows do not duplicate it.
+- **Local hidden state is excluded from source control and distributions** — repository ignore rules now cover local agent/editor directories and all non-example `.env.*` files, while the source manifest explicitly prunes those directories and OS metadata. Required project files such as `.github/workflows`, `.gitignore`, and the public `.env.example` remain tracked or packaged as appropriate.
+
 ## [0.14.4] — 2026-08-24
 
 ### Changed

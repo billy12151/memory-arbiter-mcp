@@ -7,3 +7,14 @@ recursive-include docs *.md *.py
 recursive-include docs/assets *
 recursive-include examples *.json
 recursive-include scripts *.py
+
+# Never ship local editor/agent state or operating-system metadata.
+prune .claude
+prune .codex
+prune .cursor
+prune .idea
+prune .vscode
+prune .windsurf
+prune .workbuddy
+prune .zcode
+global-exclude .DS_Store Thumbs.db

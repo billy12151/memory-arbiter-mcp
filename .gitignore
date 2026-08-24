@@ -22,8 +22,8 @@ env/
 
 # Environment files
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # IDE
 .idea/
@@ -44,4 +44,7 @@ htmlcov/
 # IDE session artifacts
 .workbuddy/
 .zcode/
-.claude/tmp/
+.claude/
+.codex/
+.cursor/
+.windsurf/

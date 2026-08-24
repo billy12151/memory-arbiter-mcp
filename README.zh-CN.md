@@ -195,6 +195,8 @@ mema doctor --json
 - **只监听 127.0.0.1**，迷码不会绑公网。这两个头只是"是谁在写"的来源标记，**不是密码**。要给远程机器用，自己在前面加带认证的反代，别让迷码直接暴露。
 - **launchd 跑的时候 PATH 和工作目录跟你终端不一样**：`ProgramArguments` 里直接写 `mema` 的**绝对路径**；GGUF 模型路径在 config.json 里也写绝对路径，别用 `~`。
 
+在 `none` / `weak` 模式下，首次成功注册一个 canonical workspace 时，写入响应会返回非阻断的顶层 `workspace_review` notice，并保留 `data.write_hints.new_workspace_detected`。先检查是否与已有 workspace 重复，再由用户授权执行 `confirm_workspaces`；重复写入已有 workspace 不会重复提醒。`strict` 模式继续使用阻断式 `action_required=confirm_new_workspace`，不会再叠加这条非阻断 notice。
+
 ### Claude Desktop / Claude Code 连接本机 HTTP
 
 Claude 的本地 MCP 配置入口启动的是 stdio 命令。要复用已经常驻的 mema HTTP 服务、避免再启动第二份 mema，可在 `~/.claude.json` 的 `mcpServers` 下保留这一条配置（当前 Claude Desktop/Cowork 与 Claude Code 可能共用这个用户级文件）：

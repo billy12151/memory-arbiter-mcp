@@ -518,6 +518,7 @@ def test_emitted_action_required_literals_have_help_paths(tmp_path: Path) -> Non
         emitted.update(pattern.findall(source.read_text(encoding="utf-8")))
     paths = set(tools.memory(action="help")["data"]["action_required_paths"])
     assert emitted <= paths, sorted(emitted - paths)
+    assert "authorized=true" in tools.memory(action="help")["data"]["action_required_paths"]["review_workspace_registry"]
 
 
 def test_product_help_exposes_fields_for_read_only_surface(tmp_path: Path) -> None:

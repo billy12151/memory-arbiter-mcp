@@ -100,6 +100,12 @@ class ProductSurfaces:
                 "Explain the proposed canonical workspace and ask the user to authorize confirmation. After "
                 "approval call memory_govern(action='confirm_pending_workspace') with authorized=true."
             ),
+            "review_workspace_registry": (
+                "Run the notice's memory_review(view='doctor') call, inspect the complete workspace "
+                "registry for duplicates, and rename or migrate any duplicates first. Then ask the user "
+                "to authorize memory_govern(action='confirm_workspaces'); only after approval add "
+                "authorized=true to the notice's confirm_call."
+            ),
             "ask_user_for_authorization": (
                 "Explain the returned impact and ask the user to authorize that specific governance action. "
                 "Authorization is mandatory; only after approval add authorized=true to the returned retry call."

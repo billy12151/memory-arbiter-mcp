@@ -260,14 +260,25 @@ def test_memory_status_echoes_isolation(tmp_path):
 
 # ── none: normalization without ACL; explicit filter still scopes ──────────
 
-def test_none_write_normalizes_without_hint_or_acl(tmp_path):
-    """none normalizes silently: no ACL, no hint/action, canonical falls back to raw."""
+def test_none_write_normalizes_with_nonblocking_new_workspace_notice(tmp_path):
+    """none stays ACL-free but makes first-time workspace registration visible."""
     tools = make_tools(tmp_path, "none")
     r = _write(tools, "alpha content", "projA")
-    # canonical column falls back to raw (insert_memory never NULLs it), but
-    # no alias resolution ran and no hint/action is attached.
+    # Canonical falls back to raw and does not block the write.
     assert r["data"].get("action_required") is None
-    assert (r["data"].get("write_hints") or {}).get("new_workspace_detected") is None
+    hint = (r["data"].get("write_hints") or {}).get("new_workspace_detected")
+    assert hint == {"canonical": "projA", "similar_workspaces": []}
+    notice = next(item for item in r["notices"] if item["type"] == "workspace_review")
+    assert notice["workspace"] == "projA"
+    assert notice["action_required"] == "review_workspace_registry"
+    assert notice["review_call"] == {
+        "tool": "memory_review", "view": "doctor", "data": {},
+    }
+    assert notice["authorization_required"] is True
+    assert "authorized" not in notice["confirm_call"]["data"]
+
+    repeated = _write(tools, "second content", "projA")
+    assert not any(item.get("type") == "workspace_review" for item in repeated.get("notices", []))
 
 
 def test_none_explicit_workspace_filter_scopes_results(tmp_path):
@@ -377,6 +388,7 @@ def test_strict_new_workspace_blocks_as_pending(tmp_path):
     assert d.get("action_required") == "confirm_new_workspace"
     assert d.get("verification_status") == "pending_user"
     assert (d.get("record") or {}).get("status") == MemoryStatus.PENDING.value
+    assert not any(item.get("type") == "workspace_review" for item in r.get("notices", []))
 
 
 def test_strict_pending_requires_workspace_confirmation(tmp_path):
@@ -601,6 +613,21 @@ def test_weak_new_workspace_emits_hint(tmp_path):
     hint = (r["data"].get("write_hints") or {}).get("new_workspace_detected")
     assert hint is not None
     assert hint["canonical"] == "projA"
+    notice = next(item for item in r["notices"] if item["type"] == "workspace_review")
+    assert notice["workspace"] == "projA"
+
+
+def test_product_remember_preserves_new_workspace_notice(tmp_path):
+    tools = make_tools(tmp_path, "none")
+    response = tools.memory("remember", {
+        "content": "new workspace through product wrapper",
+        "subject": "workspace notice",
+        "workspace": "projA",
+        "source_type": "agent_generated",
+    })
+    notice = next(item for item in response["notices"] if item["type"] == "workspace_review")
+    assert notice["workspace"] == "projA"
+    assert notice["action_required"] == "review_workspace_registry"
 
 
 # ── alias canonicalization degradation (no embedder) ────────────────────────

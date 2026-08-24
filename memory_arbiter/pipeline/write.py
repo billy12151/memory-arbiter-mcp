@@ -87,12 +87,35 @@ class WritePipeline:
                 data["evidence_index"], data["semantic_conflict_check"] = (
                     self._enqueue_content_postcommit(memory_id, data["record"])
                 )
-            return self._tools.db.state.response(
+            response = self._tools.db.state.response(
                 data,
                 extra_warnings=(
                     policy_warnings + validation.warnings + write_warnings + workspace["warnings"]
                 ),
             )
+            if workspace["is_new"] and not workspace["strict_block"]:
+                response.setdefault("notices", []).append({
+                    "type": "workspace_review",
+                    "severity": "info",
+                    "workspace": workspace["canonical"],
+                    "message": (
+                        f"New workspace {workspace['canonical']!r} was registered. "
+                        "Review the workspace registry for duplicates before confirming it."
+                    ),
+                    "action_required": "review_workspace_registry",
+                    "review_call": {
+                        "tool": "memory_review",
+                        "view": "doctor",
+                        "data": {},
+                    },
+                    "confirm_call": {
+                        "tool": "memory_govern",
+                        "action": "confirm_workspaces",
+                        "data": {},
+                    },
+                    "authorization_required": True,
+                })
+            return response
         except Exception as exc:
             return self._tools.db.state.response(
                 {"written": False, "error": str(exc)},
@@ -287,7 +310,7 @@ class WritePipeline:
                     "confirm it with memory_govern(action='confirm_pending_workspace')"
                 ),
             })
-        elif self.settings.isolation == "weak" and workspace["is_new"]:
+        elif workspace["is_new"]:
             data.setdefault("write_hints", {})["new_workspace_detected"] = {
                 "canonical": workspace["canonical"],
                 "similar_workspaces": workspace["similar"],

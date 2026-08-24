@@ -12,6 +12,11 @@ import memory_arbiter.post_release_smoke as production_smoke
 
 ROOT = Path(__file__).resolve().parent.parent
 
+LOCAL_HIDDEN_DIRS = (
+    ".claude", ".codex", ".cursor", ".idea", ".vscode", ".windsurf",
+    ".workbuddy", ".zcode",
+)
+
 
 def _load_script(name: str, relative_path: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / relative_path)
@@ -23,6 +28,19 @@ def _load_script(name: str, relative_path: str):
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_local_hidden_state_is_ignored_and_pruned_from_sdists():
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
+
+    assert ".env.*" in gitignore
+    assert "!.env.example" in gitignore
+    assert "include .env.example" in manifest
+    for directory in LOCAL_HIDDEN_DIRS:
+        assert f"{directory}/" in gitignore
+        assert f"prune {directory}" in manifest
+    assert "global-exclude .DS_Store Thumbs.db" in manifest
 
 
 def test_workflow_python_script_dependencies_are_tracked_when_in_git_repo():
