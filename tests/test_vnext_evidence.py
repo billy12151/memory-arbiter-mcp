@@ -368,7 +368,16 @@ def test_vnext_status_change_updates_evidence_parent_status(tmp_path: Path) -> N
                 (written["id"],),
             )
         }
+        versions = {
+            (int(row["memory_version"]), int(row["version"]))
+            for row in conn.execute(
+                "SELECT e.memory_version,m.version FROM memory_evidence e "
+                "JOIN memories m ON m.id=e.memory_id WHERE e.memory_id=?",
+                (written["id"],),
+            )
+        }
     assert statuses == {"superseded"}
+    assert versions == {(2, 2)}
 
 
 def test_vnext_weak_isolation_does_not_hard_filter_semantic_candidates(tmp_path: Path, monkeypatch) -> None:

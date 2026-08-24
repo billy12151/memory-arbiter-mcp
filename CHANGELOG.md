@@ -3,6 +3,16 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.6] — 2026-08-24
+
+### Fixed
+
+- **Status-only memory updates keep evidence versions current** — when governance changes source/trust/status/entity semantics and increments the authoritative memory version without changing evidence text, existing evidence rows now advance to that version in the same transaction. Supersede/retire no longer leaves false stale-evidence warnings; vec0 `parent_status` continues to update as before.
+
+### Verification
+
+- Full tests, strict mypy, Ruff, compileall, dependency audit, release build, isolated wheel smoke, production smoke, and deep production database checks pass.
+
 ## [0.14.5] — 2026-08-24
 
 ### Fixed

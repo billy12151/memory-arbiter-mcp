@@ -261,6 +261,15 @@ class MemoriesStore:
         ]
         values.append(int(memory_id))
         conn.execute(f"UPDATE memories SET {sql} WHERE id = ?", values)
+        if snapshot_semantics_changed:
+            # These updates do not change evidence text. Keep the derived rows
+            # pinned to the new authoritative memory version in the same
+            # transaction instead of making doctor report false staleness.
+            conn.execute(
+                "UPDATE memory_evidence SET memory_version=memory_version+1 "
+                "WHERE memory_id=?",
+                (int(memory_id),),
+            )
         if status_changed and self.state.sqlite_vec_available:
             try:
                 conn.execute(
