@@ -2,13 +2,15 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.14.6` contract.
+This guide describes the `0.14.7` contract.
 
 ## MCP Surface
 
 Configure the command as `mema` and use the four product tools. Call `memory(action="help")` or the corresponding tool help to discover current fields.
 
 stdio is the default transport. To share one Community process among local clients, set `mcp.transport="streamable-http"` and connect each client to `http://127.0.0.1:8000/mcp`. HTTP request handling is stateless by default (`mcp.http.stateless=true`): memory and semantic notices live in SQLite, and a later successful tool response claims any pending semantic notice regardless of the MCP connection that initiated the asynchronous work. This also prevents a server restart from stranding clients on an expired in-memory session. Set it to `false` only for a client that requires server-side MCP sessions or server-initiated SSE messages. A process restart can still interrupt a worker job that has not persisted its notice yet.
+
+The server requires an explicitly configured identity on every transport: set `client` and `agent_id` in config.json or `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` in the environment. There are no built-in defaults, and the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity — attribution and policy decisions use it, and `agent_id`/`client` fields in tool `data` are never accepted as provenance. streamable-http takes the caller identity from the per-request headers below.
 
 In each MCP server configuration, set fixed `X-Mema-Client` and `X-Mema-Agent-Id` request headers; the client then sends them automatically on initialize, tool discovery, and tool calls. Do not have the agent dynamically add identity to tool `data`. HTTP mode fails closed when either header is missing, empty, invalid, duplicated, or conflicts with tool data. It is restricted to loopback: the headers provide local provenance and policy input, not authentication, tenant isolation, or permission to expose the service publicly.
 

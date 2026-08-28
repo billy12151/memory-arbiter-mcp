@@ -2,13 +2,15 @@
 
 **[English](INTEGRATION.md) | 中文**
 
-本指南描述 `0.14.6` 的正式契约。
+本指南描述 `0.14.7` 的正式契约。
 
 ## MCP 接口面
 
 把命令配置为 `mema`，使用四个产品工具。用 `memory(action="help")` 或对应工具的 help 发现当前字段。
 
 stdio 是默认传输。要让多个本地客户端共享一个社区版进程，设置 `mcp.transport="streamable-http"`，把每个客户端连接到 `http://127.0.0.1:8000/mcp`。HTTP 默认按无状态请求处理（`mcp.http.stateless=true`）：记忆和 semantic notice 保存在 SQLite 中，异步任务产生的 pending notice 会由后续任一次成功工具调用领取，不依赖发起任务时的 MCP 连接；服务重启也不会让客户端卡在已失效的内存 session。只有客户端明确需要服务端 MCP session 或主动 SSE 消息时才设为 `false`。进程重启仍可能中断尚未把 notice 落库的 worker 任务。
+
+无论哪种传输，服务器都要求显式配置身份：在 config.json 里设置 `client` 和 `agent_id`，或使用环境变量 `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID`。没有内建默认值，任一为空都会拒绝启动。stdio 下该配置身份即进程级调用身份——归因和策略判定都用它，工具 `data` 里的 `agent_id`/`client` 字段不会被当作身份来源。streamable-http 则以下述逐请求头为调用身份。
 
 在每个 MCP server 配置中设置固定的 `X-Mema-Client` 和 `X-Mema-Agent-Id` 请求头；客户端随后会在 initialize、工具发现和工具调用时自动携带。**不要**让 agent 往工具 `data` 里动态附加身份。任一请求头缺失、为空、非法、重复或与工具数据冲突时，HTTP 模式都会 fail closed。它只绑定 loopback：请求头提供的是本地来源标记和策略输入，不是认证、租户隔离，也不是把服务暴露到公网的许可。
 

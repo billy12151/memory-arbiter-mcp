@@ -3,6 +3,29 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.7] — 2026-08-28
+
+### Added
+
+- **`memory_govern(action="move_memories_workspace")`** — moves selected memories by id to another workspace bucket, writing both the raw `workspace` column and `workspace_canonical` (complement to `migrate_workspace`, which merges whole canonicals by name). Per-id pre-validation plus a single atomic transaction under the same advisory flock as rename/migrate/normalize; illegal ids land in `failed_ids` with reasons. Divergent rows (canonical already pointing elsewhere, e.g. rows written through a confirmed alias) refuse unless authorized, then re-anchor with an explicit response note and reroute guidance. Strict callers may only move within their admitted workspace scope. The destination folds onto the registered spelling and follows exactly one confirmed-alias hop, matching what an ordinary write using the same name would do; a brand-new bucket registers its canonical, publishes its vector, and emits a `workspace_review` notice. Open/applying conflict scope keys are never rewritten; cross-scope members are reported for a scan.
+- **`memory_repair(task="normalize_workspaces")`** — idempotent, dry-run-by-default bulk fold of registered spelling-variant canonicals (first-seen winner) across the whole registry, repointing aliases, rewriting memories/conflicts scope keys, and installing redirects, serialized with rename/migrate via the startup flock.
+
+### Changed
+
+- **Request identity is required at startup** — `client`/`agent_id` have no silent defaults; `build_runtime` refuses to start without them (config values count). The stdio transport bridges the configured identity per process; HTTP headers remain per-request. Attribution always comes from the trusted identity: payload `agent_id`/`client` are ignored on write, the server no longer injects them, and backup replay preserves the original attribution. `memory_status` policy echo is reduced to whether the current caller is allowed.
+- **Workspace alias decisions share one primitive** — record/install paths go through `_apply_alias_decision_on_conn` with the union of both guard sets (default-term refused in both directions, status enum, non-empty, self-pair no-op). Rejected pairs match by mechanical key across spellings, so a rejected `A→B` also blocks variants; confirmed decisions register and store the canonical orthography. `final_sync` publish failures now return `target_ready`/`needs_config_switch`/`target` instead of a bare "config switch failed". The self-mapping `sqlitevec` alias dead entry is removed. Qwen semantic-conflict preload now defaults on (fail-open).
+
+### Fixed
+
+- **Full-width IME default synonyms no longer register a phantom default pool** — `is_default_workspace_term` NFKC-normalizes before the synonym comparison, so `ｄｅｆａｕｌｔ`/`ＮＵＬＬ` land in the global pool like every other reserved term.
+- **`write_transaction` no longer masks the original error when `BEGIN` itself fails** — the cleanup rolls back only when a transaction is active, so a busy-timeout failure reports `database is locked` instead of `cannot rollback`.
+- **Confirmed-alias lookups pick the same winner as the resolver** — `updated_at DESC, canonical ASC` ordering is now shared, so drift states with two confirmed rows cannot split move and write destinations.
+- **Id fields reject values above the SQLite integer range** with a structured `invalid_input` instead of an `OverflowError`, and `new_workspace` is bounded like every other workspace field.
+
+### Verification
+
+- Full tests (875), strict mypy, Ruff, compileall, release build, isolated wheel smoke, and adversarial PoC re-runs pass; remote main CI verified green on the release SHA.
+
 ## [0.14.6] — 2026-08-24
 
 ### Fixed

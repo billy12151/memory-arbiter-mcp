@@ -4,7 +4,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.14.6` (status-safe evidence versioning, visible workspace review notices, and safer production smoke data).
+> Current release: `0.14.7` (required request identity, unified workspace-alias orthography with a normalize repair task, and the move_memories_workspace governance action).
 
 ## Why trust it
 
@@ -18,6 +18,23 @@ Memory Arbiter is a trustworthy local fact layer for AI agents — not just shar
 
 ## Install & quickstart
 
+### Install with your AI Agent
+
+Paste this into Codex, Claude Code, Cursor, or another coding agent with terminal access:
+
+```text
+Read the latest README at https://github.com/billy12151/memory-arbiter-mcp.
+Install and configure the latest mema release for my operating system and current AI client.
+Preserve any existing config and database; do not overwrite or delete existing data.
+Ask me before choosing between materially different install modes, changing existing config,
+or performing any destructive or privileged action. When finished, run mema doctor and report
+the install method, config path, database path, client integration, and verification result.
+```
+
+The agent should treat this README as the source of truth, inspect the local environment before choosing `uvx`, core, `vec`, or `semantic-local`, and stop for user input when a safe choice cannot be inferred. A successful install is not complete until `mema doctor` has run and any warning has been reported.
+
+### Install manually
+
 ```bash
 pip install memory-arbiter-mcp
 pip install "memory-arbiter-mcp[vec]"            # sqlite-vec evidence recall
@@ -25,6 +42,8 @@ pip install "memory-arbiter-mcp[semantic-local]" # local GGUF runtime (embedding
 ```
 
 Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Its starter template includes DB/backup paths, stdio/localhost HTTP transport, core workspace controls (`isolation`, canonical matching, weak weighting, strict admission, cutoff/guard), vec, embedding, recall caps, and `update_check.enabled=true`. The reference `examples/memory-arbiter.config.example.json` additionally shows optional workspace-Qwen and semantic-conflict tuning. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+
+The server requires an explicitly configured identity: set `client` and `agent_id` in config.json or `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` in the environment (the stdio `examples/*.mcp.json` entries do this via `env`). There are no built-in defaults — the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; `memory(action="remember")` does not accept `agent_id`/`client` in `data`. streamable-http takes caller identity from the per-request headers described below.
 
 stdio remains the default. For one local server shared by several clients, set `mcp.transport` to `streamable-http` (or `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`) and connect to `http://127.0.0.1:8000/mcp`. Each client's MCP server entry must set fixed `X-Mema-Client` and `X-Mema-Agent-Id` headers; see [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json). The client sends them automatically on every HTTP MCP request—agents should not add identity to individual tool calls. Missing, empty, invalid, duplicated, or conflicting identity is rejected instead of falling back to defaults. Community HTTP mode binds only to localhost, and these headers are advisory provenance and policy input, **not authentication or multi-tenant isolation**.
 
@@ -69,7 +88,7 @@ The single `conflicts` table stores one one-to-many event and its immutable memb
 
 ## Workspaces
 
-Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` applies no workspace ACL: an omitted workspace spans the library, while an explicitly supplied workspace is canonicalized and scopes that read. `weak` adds a soft ranking/hint signal; `workspace_weak_vector_weight=true` makes that nudge decay continuously with guarded canonical-vector distance. Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it. Strict visibility is exact-canonical by default. When `workspace_recall_admission=true`, workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share one admitted set: the caller canonical plus every canonical at or below `workspace_recall_cutoff` (default `0.25`) after default-pool, short-name (`workspace_min_name_len`), and generic-substring guards. Process-global maintenance (for example semantic runtime control, backup replay, doctor, and settings) is not a workspace-scoped content view. Missing vectors or sqlite-vec degradation fall back to the exact caller canonical. The reserved `default` pool is insulated and is not visible from a strict project scope. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; supported workspace governance uses rename, migrate, pending confirmation, and full-registry confirmation. Internal redirect/negative-decision state prevents old names from re-splitting and suppressed candidates from reappearing, but is not a user-facing workflow.
+Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` applies no workspace ACL: an omitted workspace spans the library, while an explicitly supplied workspace is canonicalized and scopes that read. `weak` adds a soft ranking/hint signal; `workspace_weak_vector_weight=true` makes that nudge decay continuously with guarded canonical-vector distance. Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it. Strict visibility is exact-canonical by default. When `workspace_recall_admission=true`, workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share one admitted set: the caller canonical plus every canonical at or below `workspace_recall_cutoff` (default `0.25`) after default-pool, short-name (`workspace_min_name_len`), and generic-substring guards. Process-global maintenance (for example semantic runtime control, backup replay, doctor, and settings) is not a workspace-scoped content view. Missing vectors or sqlite-vec degradation fall back to the exact caller canonical. The reserved `default` pool is insulated and is not visible from a strict project scope. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; supported workspace governance uses rename, migrate, move-by-id (`move_memories_workspace`), pending confirmation, and full-registry confirmation. Internal redirect/negative-decision state prevents old names from re-splitting and suppressed candidates from reappearing, but is not a user-facing workflow.
 
 The first successful write that registers a canonical workspace returns a non-blocking top-level `workspace_review` notice in `none`/`weak`, plus `data.write_hints.new_workspace_detected`. Review possible duplicates before running authorized `confirm_workspaces`. `strict` instead returns the existing blocking `action_required=confirm_new_workspace` flow and does not emit the duplicate non-blocking notice.
 
@@ -84,7 +103,7 @@ Evidence/semantic queues are process-local, so a crash or forced shutdown can lo
 
 ## Upgrading from an older database
 
-**Upgrade warning for 0.14.6:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are refused without modification. Run the public side-by-side `mema upgrade`. Every schema migration declares `vector_effect=preserve|rebuild`; the migrations from the two previous evidence generations preserve vector payloads regardless of current model availability. Compatibility is evaluated separately: a different configured embedding space records `state=mismatch`, disables vector reads, and is repaired later with `memory_repair(rebuild_evidence)`. Both paths compact current workspace redirect/negative-decision state and discard the obsolete workspace decision event ledger.
+**Upgrade warning for 0.14.7:** current runtime startup accepts only schema generation `workspace_state_v1`. Both `conflict_groups_v2` and `local_text_evidence_v1`, plus older claim/memory-vector/section-vector databases, are refused without modification. Run the public side-by-side `mema upgrade`. Every schema migration declares `vector_effect=preserve|rebuild`; the migrations from the two previous evidence generations preserve vector payloads regardless of current model availability. Compatibility is evaluated separately: a different configured embedding space records `state=mismatch`, disables vector reads, and is repaired later with `memory_repair(rebuild_evidence)`. Both paths compact current workspace redirect/negative-decision state and discard the obsolete workspace decision event ledger.
 
 The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, and audit. The obsolete workspace decision event ledger is not copied. Preserve migrations clone FTS/evidence/vector payloads unchanged and transactionally rebuild only the conflict domain; vector health or space mismatch never changes the structural migration result. Rebuild migrations regenerate evidence and vectors. Both paths intentionally start with empty new `conflicts`/notice state and do not copy old `conflicts`, append-only `conflict_judgments`, or `semantic_notices` history. Current contradictions must be rediscovered by a scheduled full-library scan.
 

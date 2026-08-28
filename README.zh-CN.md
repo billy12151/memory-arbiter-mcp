@@ -3,7 +3,7 @@
 **[English](README.md) | 中文**
 
 > 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.14.6`。
+> 当前正式版本 `0.14.7`。
 
 ## 一句话说明白
 
@@ -39,7 +39,21 @@
 - **AI 只负责发现矛盾，没权力改。** 发现两条记忆打架时，AI（本地小模型 Qwen）只能"举手报告"，选哪个、改哪个，必须你点头。
 - **改任何东西都留痕。** 每次修改都有历史版本，可以查到谁、什么时候、把什么改成了什么。
 
-## 3 分钟上手
+## 交给 AI Agent 安装
+
+把下面这段话直接发给 Codex、Claude Code、Cursor，或其他能操作终端的编程 Agent：
+
+```text
+请阅读 https://github.com/billy12151/memory-arbiter-mcp 的最新 README，
+根据我的操作系统和当前 AI 客户端安装并配置最新版 mema。
+请保留已有配置和数据库，不要覆盖或删除现有数据；
+需要我选择不同安装模式、修改已有配置，或执行任何破坏性、提权操作时先询问我。
+完成后运行 mema doctor，并向我报告安装方式、配置路径、数据库路径、客户端接入方式和验收结果。
+```
+
+Agent 应以这份 README 为事实来源，先检查本机环境，再判断使用 `uvx`、核心版、`vec` 或 `semantic-local`。无法安全判断时必须询问用户；没有运行 `mema doctor` 并报告所有警告，就不算安装完成。
+
+## 手动安装（备用）
 
 前提：电脑上装了 Python 3.11+。
 
@@ -133,7 +147,7 @@ mema console         # 打开本地网页控制台（只读，看看库里都有
 
 ## 从旧版本升级（重要，先看再动）
 
-> ⚠️ **0.14.6 升级警告：** 当前 schema generation 仍为 `workspace_state_v1`；更早的数据库**直接启动会被拒绝**，必须走迁移命令。迁移会**丢弃旧的冲突/裁决/提醒历史**（记忆原文和历史都保留），升级完成后需要跑一遍全库扫描重新发现冲突。结构迁移与向量兼容现在独立判断：空间不一致会禁用向量并等待显式重建，不再阻断结构升级。
+> ⚠️ **0.14.7 升级警告：** 当前 schema generation 仍为 `workspace_state_v1`；更早的数据库**直接启动会被拒绝**，必须走迁移命令。迁移会**丢弃旧的冲突/裁决/提醒历史**（记忆原文和历史都保留），升级完成后需要跑一遍全库扫描重新发现冲突。结构迁移与向量兼容现在独立判断：空间不一致会禁用向量并等待显式重建，不再阻断结构升级。
 
 ```bash
 # 1. 先预览，看看会动什么（不动真格）
@@ -158,6 +172,7 @@ mema doctor --json
 
 | 配置项 | 白话说明 | 默认值 |
 | --- | --- | --- |
+| `client` / `agent_id` | 调用身份（"是谁在写"），必填：没有内建默认值，缺失或为空时服务拒绝启动。stdio 下这组配置身份即进程级调用身份（归因、策略判定都用它）；HTTP 模式以请求头为准 | 无（必填） |
 | `db_path` | 数据库文件放哪 | 安装时生成 |
 | `mcp.transport` | `stdio`（默认，一对一）或 `streamable-http`（多个客户端共享一个本地服务） | `stdio` |
 | `mcp.http.stateless` | HTTP 请求无状态处理；服务重启后客户端不会持有失效 session | `true` |
@@ -166,6 +181,8 @@ mema doctor --json
 | `vec.enabled` | 开启后支持"按意思搜" | 关闭 |
 | `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径 | 无 |
 | `semantic_conflict.model_path` | 本地 Qwen 小模型路径，用于写入时的冲突核对 | 无 |
+
+注意：`mema setup` 生成的模板**不含**身份项——在 config.json 里补上 `client`/`agent_id`，或在客户端接入配置里用环境变量 `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` 提供（`examples/` 下的 stdio 示例就是这么做的）。写入时不要在 `remember` 的 `data` 里传 `agent_id`/`client`，这些字段会被当未知字段剔除，归因只来自上述可信身份。
 
 完整的配置说明和示例：[`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json)、[`.env.example`](.env.example)。
 
