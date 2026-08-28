@@ -1,7 +1,9 @@
 """Memory write path for the local-text evidence architecture."""
 from __future__ import annotations
 
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional, Tuple, TYPE_CHECKING
+
+from ..embedder import ManagedEmbedder
 
 from .. import workspace_rules
 from ..constants import is_default_workspace_term
@@ -15,9 +17,25 @@ if TYPE_CHECKING:
 class WritePipeline:
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools: "MemoryTools" = tools
+        self.db = tools.db
+        self.settings = tools.settings
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._tools, name)
+    def _allowed(self, *args: Any, **kwargs: Any) -> "Tuple[bool, list[str]]":
+        return self._tools._allowed(*args, **kwargs)
+
+    def _post_commit(
+        self, *args: Any, **kwargs: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return self._tools._post_commit(*args, **kwargs)
+
+    def _ensure_active_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+        return self._tools._ensure_active_embedder()
+
+    def _suggest_workspace_candidate(self, *args: Any, **kwargs: Any) -> Any:
+        return self._tools._suggest_workspace_candidate(*args, **kwargs)
+
+    def current_agent_id(self) -> Optional[str]:
+        return self._tools.current_agent_id()
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         payload = dict(payload)

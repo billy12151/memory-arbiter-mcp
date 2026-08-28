@@ -4,13 +4,15 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..evidence import evidence_content_hash, local_text_units
 from ..models import TrustedApplyingContext
+from ..embedder import ManagedEmbedder
 from ..semantic_conflict import (
     PAIR_PROMPT_VERSION,
+    SemanticBackend,
     decide_evidence,
     evaluate_pair_extractions,
     notice_dedupe_key,
@@ -20,6 +22,7 @@ from ..text import canon_entity, canon_scope
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
+    from ..workers import SemanticConflictWorker
 
 # Technical failures degrade the check route and keep the job incomplete.
 _TECHNICAL_REASONS = {
@@ -31,9 +34,22 @@ _TECHNICAL_REASONS = {
 class EvidencePipeline:
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
+        self.db = tools.db
+        self.settings = tools.settings
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._tools, name)
+
+    @property
+    def _semantic_worker(self) -> "SemanticConflictWorker":
+        return self._tools._semantic_worker
+
+    def _ensure_active_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+        return self._tools._ensure_active_embedder()
+
+    def _ensure_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+        return self._tools._ensure_embedder()
+
+    def _ensure_semantic_backend(self) -> "Optional[SemanticBackend]":
+        return self._tools._ensure_semantic_backend()
 
     def index_memory(self, memory_id: int, record: dict[str, Any] | None = None) -> dict[str, Any]:
         current = record or self.db.get_memory(int(memory_id))
@@ -264,6 +280,10 @@ class EvidencePipeline:
             }
 
         def classify(left_env: dict[str, Any], right_env: dict[str, Any]) -> Any:
+            if backend is None:
+                # The per-pair guard below never lets a None reach the call;
+                # keep the narrowed local so the closure type-checks.
+                raise RuntimeError("semantic backend unavailable mid-pair")
             try:
                 # Once a pair starts, only the inference hard timeout may stop
                 # it. The job budget is a fairness gate between pairs.
@@ -279,6 +299,8 @@ class EvidencePipeline:
             peer = self.db.get_memory(peer_id)
             if not peer or peer.get("status") != "active":
                 continue
+            record_row: dict[str, Any] = record or {}
+            peer_row: dict[str, Any] = peer or {}
             left_version = int(record.get("version") or 1)
             right_version = int(peer.get("version") or 1)
             if self.db.is_semantic_pair_closed(memory_id, peer_id, left_version, right_version):
@@ -292,8 +314,8 @@ class EvidencePipeline:
                 record_degradation("qwen_budget_exhausted")
                 incomplete_reason = "qwen_budget_exhausted"
                 continue
-            left_env = envelope(record, unit.text)
-            right_env = envelope(peer, str(hit.get("text") or ""))
+            left_env = envelope(record_row, unit.text)
+            right_env = envelope(peer_row, str(hit.get("text") or ""))
             started = time.monotonic()
             forward_signal = classify(left_env, right_env)
             reverse_signal = classify(right_env, left_env)
@@ -339,8 +361,10 @@ class EvidencePipeline:
                 # examined and decided. The check stays complete and no
                 # degradation counter fires (spec §9/§15.5/§8).
                 continue
-            metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-            peer_metadata = peer.get("metadata") if isinstance(peer.get("metadata"), dict) else {}
+            raw_meta = record_row.get("metadata")
+            metadata = raw_meta if isinstance(raw_meta, dict) else {}
+            raw_peer_meta = peer_row.get("metadata")
+            peer_metadata = raw_peer_meta if isinstance(raw_peer_meta, dict) else {}
             entity = metadata.get("entity") if metadata.get("entity") == peer_metadata.get("entity") else None
             scope = metadata.get("scope") if metadata.get("scope") == peer_metadata.get("scope") else None
             if not entity or not scope:

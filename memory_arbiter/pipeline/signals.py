@@ -12,9 +12,11 @@ if TYPE_CHECKING:
 class ConflictSignalPipeline:
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
+        self.db = tools.db
+        self.settings = tools.settings
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._tools, name)
+    def _conflict_next_call(self, *args: Any, **kwargs: Any) -> Optional[dict[str, Any]]:
+        return self._tools._conflict_next_call(*args, **kwargs)
 
     @staticmethod
     def _confidence_rank(hint: Optional[str]) -> int:
