@@ -7,7 +7,6 @@ Versions follow semantic versioning.
 
 ### Added
 
-- **Stale `applying` conflict groups surface in the default conflict list** — groups stuck in `applying` for over 7 days now appear alongside open groups, flagged `stale_applying=true` with a `replan_conflict` next action, so slot suppression no longer depends on users remembering to replan. Read-only change; the conflict state machine is untouched.
 - **`final_sync` pre-build writer check** — the source database is probed with an EXCLUSIVE lock before the staging build starts; an active writer fails fast with `source_has_active_writer` instead of being discovered only at the post-build fingerprint gate (which remains in place).
 - **Backup replay drains the evidence worker before reporting completion** — receipts marked complete now mean the derived evidence index actually landed; a drain timeout appends a warning.
 
@@ -26,7 +25,7 @@ Versions follow semantic versioning.
 
 ### Verification
 
-- Full tests (909), strict mypy, and Ruff pass.
+- Full tests (908), strict mypy, and Ruff pass.
 
 ## [0.14.7] — 2026-08-28
 

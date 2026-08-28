@@ -248,18 +248,11 @@ class ConflictStore:
         source: Optional[str] = None,
         workspace: "WorkspaceScope" = None,
         offset: int = 0,
-        include_stale_applying_before: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         if not self._db_available:
             return []
-        if include_stale_applying_before is not None:
-            # B-C5: additionally carry applying groups whose refreshed_at is
-            # past the cutoff (wedged apply plans) into the listing.
-            sql = "SELECT * FROM conflicts WHERE (status=? OR (status='applying' AND refreshed_at<=?))"
-            params: list[Any] = [status, include_stale_applying_before]
-        else:
-            sql = "SELECT * FROM conflicts WHERE status=?"
-            params = [status]
+        sql = "SELECT * FROM conflicts WHERE status=?"
+        params: list[Any] = [status]
         if source is not None:
             sql += " AND source=?"
             params.append(source)

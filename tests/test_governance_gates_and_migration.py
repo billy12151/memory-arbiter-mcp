@@ -3,8 +3,9 @@
 B-C3: record_conflict requires authorized=true only for not_a_conflict
 dispositions (ordinary open intake stays ungated).
 B-E3: memory(action='judge') requires authorized=true when decided_by='user'.
-B-C5: the default open conflict listing also surfaces applying groups whose
-refreshed_at is older than 7 days, flagged stale_applying with replan guidance.
+B-C5 (superseded): the stale-applying list surfacing was removed by product
+decision; doctor now reports all unresolved groups (conflicts.backlog counts
+open+applying, conflicts.applying flags every mid-apply group).
 B-C4: conflict slot entity/scope are stored in canon form.
 B-D2: memory_replay_backup drains the evidence worker before responding.
 B-D4: final_sync fails fast when the source has an active writer.
@@ -12,7 +13,6 @@ B-D4: final_sync fails fast when the source has an active writer.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from memory_arbiter.config import Settings
@@ -156,30 +156,13 @@ def test_judge_decided_by_agent_needs_no_authorization(tmp_path: Path) -> None:
     assert judged["data"]["outcome"] == "applying"
 
 
-# ── B-C5: stale applying surfacing in the default open listing ──────────────
+# ── B-C5 (superseded): doctor reports unresolved groups; listing stays pure ──
 
-def test_fresh_applying_group_stays_out_of_default_open_listing(tmp_path: Path) -> None:
+def test_open_listing_excludes_applying_groups(tmp_path: Path) -> None:
     tools, db = _tools(tmp_path)
     conflict_id, _, _ = _applying_conflict(tools, db)
     listing = tools.memory_list_conflicts(status="open", limit=50)
     assert conflict_id not in [c["id"] for c in listing["data"]["conflicts"]]
-
-
-def test_stale_applying_group_surfaces_with_replan_guidance(tmp_path: Path) -> None:
-    tools, db = _tools(tmp_path)
-    conflict_id, _, _ = _applying_conflict(tools, db)
-    stale_at = (datetime.now(timezone.utc) - timedelta(days=8)).replace(microsecond=0).isoformat()
-    with db.write_transaction() as conn:
-        conn.execute("UPDATE conflicts SET refreshed_at=? WHERE id=?", (stale_at, conflict_id))
-
-    listing = tools.memory_list_conflicts(status="open", limit=50)
-    surfaced = next(c for c in listing["data"]["conflicts"] if c["id"] == conflict_id)
-    assert surfaced["stale_applying"] is True
-    assert surfaced["next_action"]["tool"] == "memory_govern"
-    assert surfaced["next_action"]["action"] == "replan_conflict"
-    assert surfaced["next_action"]["data"]["authorized"] is True
-    # Read-only surfacing: the conflict itself is unchanged.
-    assert db.get_conflict(conflict_id)["status"] == "applying"
 
 
 # ── B-C4: slot entity/scope stored in canon form ────────────────────────────

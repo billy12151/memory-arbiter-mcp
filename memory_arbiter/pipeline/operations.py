@@ -9,7 +9,6 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -119,15 +118,6 @@ class OperationsPipeline:
             return denied
         conflicts: list[dict[str, Any]] = []
         raw_limit = max(int(limit), 1)
-        # Stale-applying surfacing (B-C5): the default open listing also
-        # includes groups that entered applying more than 7 days ago without
-        # resolving — a wedged apply plan is otherwise invisible in the open
-        # view. Read-only: no state-machine change and no automatic reset.
-        stale_applying_before: Optional[str] = None
-        if status == "open":
-            stale_applying_before = (
-                datetime.now(timezone.utc) - timedelta(days=7)
-            ).replace(microsecond=0).isoformat()
         explicit_none_scope = caller.isolation == "none" and caller.source == "explicit"
         if caller.isolation != "strict":
             conflicts = [
@@ -135,7 +125,6 @@ class OperationsPipeline:
                 for c in self.db.conflicts.list_conflicts(
                     status=status, limit=raw_limit, source=source,
                     workspace=caller.canonical if explicit_none_scope else None,
-                    include_stale_applying_before=stale_applying_before,
                 )
             ]
         else:
@@ -150,7 +139,6 @@ class OperationsPipeline:
                 rows = self.db.conflicts.list_conflicts(
                     status=status, limit=page_size, source=source,
                     workspace=scope, offset=offset,
-                    include_stale_applying_before=stale_applying_before,
                 )
                 if not rows:
                     break
@@ -163,22 +151,6 @@ class OperationsPipeline:
                 offset += len(rows)
                 if len(rows) < page_size:
                     break
-        if stale_applying_before is not None:
-            for conflict in conflicts:
-                if str(conflict.get("status") or "") != "applying":
-                    continue
-                # Only reachable via the stale inclusion above: a group idle in
-                # applying past the cutoff is wedged, so steer to an authorized
-                # replan rather than per-step apply/resolve guidance.
-                conflict["stale_applying"] = True
-                conflict["next_action"] = {
-                    "tool": "memory_govern", "action": "replan_conflict",
-                    "data": {
-                        "conflict_id": conflict.get("id"),
-                        "expected_revision": conflict.get("revision"),
-                        "authorized": True,
-                    },
-                }
         data = {"conflicts": conflicts, "count": len(conflicts)}
         if caller.isolation == "strict":
             data.update(caller.response_fields())
