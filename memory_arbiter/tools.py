@@ -34,6 +34,15 @@ from .pipeline.operations import OperationsPipeline
 from .pipeline.evidence import EvidencePipeline
 
 
+# Backup-replay notice signatures compared in _consume_notices. EMPTY means
+# the replay inbox holds no pending work (and resets the dedup state).
+# DEGRADED is emitted when inspection itself raises: the -1 sentinels mark
+# the counts as unknown (real counts are always >= 0) with has_more forced
+# True so the degraded signature can never collide with the empty one.
+_BACKUP_NOTICE_EMPTY_SIGNATURE = (0, 0, 0, False)
+_BACKUP_NOTICE_DEGRADED_SIGNATURE = (-1, -1, -1, True)
+
+
 class MemoryTools:
     def __init__(self, settings: Optional[Settings] = None, db: Optional[MemoryDB] = None):
         self.settings = settings or Settings.from_env()
@@ -191,7 +200,7 @@ class MemoryTools:
                 int(inspection.get("conflicts") or 0),
                 bool(inspection.get("has_more")),
             )
-            if signature != (0, 0, 0, False) and signature != self._last_backup_notice_signature:
+            if signature != _BACKUP_NOTICE_EMPTY_SIGNATURE and signature != self._last_backup_notice_signature:
                 notices.append({
                     "type": "backup_replay_pending",
                     "severity": "warning",
@@ -206,11 +215,10 @@ class MemoryTools:
                     },
                 })
                 self._last_backup_notice_signature = signature
-            elif signature == (0, 0, 0, False):
+            elif signature == _BACKUP_NOTICE_EMPTY_SIGNATURE:
                 self._last_backup_notice_signature = None
         except Exception as exc:
-            degradation_signature = (-1, -1, -1, True)
-            if self._last_backup_notice_signature != degradation_signature:
+            if self._last_backup_notice_signature != _BACKUP_NOTICE_DEGRADED_SIGNATURE:
                 notices.append({
                     "type": "backup_replay_notice_degraded",
                     "severity": "warning",
@@ -221,7 +229,7 @@ class MemoryTools:
                         "data": {"dry_run": True, "limit": 200, "offset": 0},
                     },
                 })
-                self._last_backup_notice_signature = degradation_signature
+                self._last_backup_notice_signature = _BACKUP_NOTICE_DEGRADED_SIGNATURE
         return notices
 
     def wait_semantic_worker_drained(self, timeout: float = 30.0) -> bool:
@@ -821,7 +829,14 @@ class MemoryTools:
             entity = left_meta.get("entity") if left_meta.get("entity") == right_meta.get("entity") else None
             scope = left_meta.get("scope") if left_meta.get("scope") == right_meta.get("scope") else None
             if entity and scope:
-                slot_key = {"entity": entity, "attribute": gate.attribute, "scope": scope}
+                # B-C4: slot keys are built with canonicalised entity/scope
+                # (the comparison-side counterpart of the storage-side canon
+                # in db/conflicts.py _normalize_slot) so lexical variants like
+                # "MyProject"/"myproject" aggregate into one slot group.
+                slot_key = {
+                    "entity": _canon_entity(entity), "attribute": gate.attribute,
+                    "scope": _canon_scope(scope),
+                }
                 item["slot_key"] = slot_key
                 item["slot_provenance"] = {
                     "entity": "metadata", "scope": "metadata",
@@ -1115,28 +1130,6 @@ class MemoryTools:
 
     def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
         return self._operations.memory_list_conflicts(status, limit, source, **_)
-
-    def memory_record_conflict(
-        self, left_id: int, right_id: int, reason: str,
-        conflict_type: Optional[str] = None, conflict_point: Optional[str] = None,
-        suggested_winner: Optional[int] = None, confidence_hint: Optional[str] = None,
-        source: Optional[str] = None, refresh: bool = False,
-        left_version: Optional[int] = None, right_version: Optional[int] = None,
-        scan_prompt_version: Optional[str] = None, scan_model: Optional[str] = None,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Legacy pair-based recording was removed with the conflict_judgments table."""
-        return self.db.state.response(
-            {
-                "outcome": "removed",
-                "error": (
-                    "pair-based memory_record_conflict was removed; record triaged scan "
-                    "candidates via memory_repair(task='record_conflict') with slot_key, "
-                    "members, value_groups, and evidence"
-                ),
-            },
-            ok=False,
-        )
 
     def memory_resolve_conflict(
         self, conflict_id: int, reason: str = "", status: str = "resolved", **_: Any,

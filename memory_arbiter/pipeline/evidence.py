@@ -15,6 +15,7 @@ from ..semantic_conflict import (
     notice_dedupe_key,
     signal_extraction,
 )
+from ..text import canon_entity, canon_scope
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
@@ -83,6 +84,11 @@ class EvidencePipeline:
     def process_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Run the bounded notice gate and report completion to sync callers."""
         record = self.db.get_memory(int(memory_id))
+        if record and record.get("status") == "pending":
+            # A pending (workspace-activation) memory is not an incomplete
+            # check: the conflict job is simply skipped until activation,
+            # matching the "skipped" semantics used by index_memory above.
+            return {"status": "skipped", "reason": "pending_workspace_activation", "notices_created": 0}
         if not record or record.get("status") != "active":
             return {"status": "incomplete", "reason": "memory_not_active", "notices_created": 0}
         if int(record.get("version") or 1) != int(snapshot.get("version") or 1):
@@ -146,6 +152,21 @@ class EvidencePipeline:
                     group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 ))
         min_budget = self.settings.semantic_conflict_min_pair_budget_ms / 1000.0
+        # Behaviour change (v3 hardening): each degradation reason is counted
+        # at most once per task. The pair loop can hit the same technical
+        # failure for many pairs, and counting every hit made
+        # _check_degradation_count grow with pair count rather than with
+        # distinct failure modes. reasons_seen keeps the per-task list that
+        # _check_degradation_reason (last write wins) would otherwise lose.
+        degradation_reasons: set[str] = set()
+        reasons_seen: list[str] = []
+
+        def record_degradation(reason: str) -> None:
+            if reason in degradation_reasons:
+                return
+            degradation_reasons.add(reason)
+            reasons_seen.append(reason)
+            self._tools._record_check_degradation(reason)
 
         def backlog_deadline() -> float | None:
             value = self._semantic_worker.pending_job_deadline(
@@ -207,8 +228,11 @@ class EvidencePipeline:
                 if existing is None or priority > existing_priority or (priority == existing_priority and closer):
                     by_peer[peer_id] = (hit, unit, decision)
         if gathering_truncated:
-            self._tools._record_check_degradation("notice_budget_exhausted")
-            return {"status": "incomplete", "reason": "notice_budget_exhausted", "notices_created": 0}
+            record_degradation("notice_budget_exhausted")
+            return {
+                "status": "incomplete", "reason": "notice_budget_exhausted",
+                "notices_created": 0, "reasons_seen": reasons_seen,
+            }
 
         backend = self._ensure_semantic_backend()
         ordered = sorted(
@@ -259,12 +283,12 @@ class EvidencePipeline:
             if self.db.is_semantic_pair_closed(memory_id, peer_id, left_version, right_version):
                 continue
             if backend is None:
-                self._tools._record_check_degradation("qwen_unavailable")
+                record_degradation("qwen_unavailable")
                 incomplete_reason = "qwen_unavailable"
                 continue
             active_deadline = backlog_deadline()
             if active_deadline is not None and active_deadline - time.monotonic() < min_budget * 2:
-                self._tools._record_check_degradation("qwen_budget_exhausted")
+                record_degradation("qwen_budget_exhausted")
                 incomplete_reason = "qwen_budget_exhausted"
                 continue
             left_env = envelope(record, unit.text)
@@ -302,11 +326,11 @@ class EvidencePipeline:
                 if reason == "qwen_unverified":
                     # Grounding failed: uncertain — fail-closed for notices and
                     # the pair remains a scan review candidate.
-                    self._tools._record_check_degradation(reason)
+                    record_degradation(reason)
                     incomplete_reason = reason
                     continue
                 if reason in _TECHNICAL_REASONS:
-                    self._tools._record_check_degradation(reason)
+                    record_degradation(reason)
                     incomplete_reason = reason
                     continue
                 # Definitive strict-gate negatives (not_same_attribute_different_value,
@@ -321,10 +345,25 @@ class EvidencePipeline:
             if not entity or not scope:
                 incomplete_reason = "slot_provenance_insufficient"
                 continue
-            slot_key = {"entity": entity, "attribute": gate.attribute, "scope": scope}
-            if json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":")) in applying_slots:
-                # A third-party fact landing on a slot currently under
-                # application: scan review only (spec §15.3), no new notice.
+            # B-C4: slot keys are built with canonicalised entity/scope (the
+            # comparison-side counterpart of the storage-side canon in
+            # db/conflicts.py _normalize_slot) so lexical variants like
+            # "MyProject"/"myproject" address the same slot.
+            slot_key = {
+                "entity": canon_entity(entity), "attribute": gate.attribute,
+                "scope": canon_scope(scope),
+            }
+            slot_json = json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            raw_slot_json = json.dumps(
+                {"entity": entity, "attribute": gate.attribute, "scope": scope},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+            if slot_json in applying_slots or raw_slot_json in applying_slots:
+                # Suppression matches either form: conflict groups stored before
+                # storage-side canonicalisation may still carry the raw
+                # (unnormalised) slot_key. A third-party fact landing on a slot
+                # currently under application: scan review only (spec §15.3),
+                # no new notice.
                 continue
             member_versions = [
                 {"memory_id": memory_id, "version": left_version, "value": gate.value_a,
@@ -332,10 +371,14 @@ class EvidencePipeline:
                 {"memory_id": peer_id, "version": right_version, "value": gate.value_b,
                  "evidence": {"quote": hit.get("text"), "start": hit.get("start_offset"), "end": hit.get("end_offset")}},
             ]
+            # Model output may omit keys (or parsed may not be a dict at all):
+            # fall back to the gate's normalised value instead of raising
+            # KeyError (mirrors the scan-path defence in tools.py).
+            forward_parsed = forward_signal.parsed if isinstance(forward_signal.parsed, dict) else {}
             value_groups = [
-                {"normalized_value": gate.value_a, "display_value": forward_signal.parsed["value_a"],
+                {"normalized_value": gate.value_a, "display_value": forward_parsed.get("value_a") or gate.value_a,
                  "members": [f"{memory_id}@{left_version}"]},
-                {"normalized_value": gate.value_b, "display_value": forward_signal.parsed["value_b"],
+                {"normalized_value": gate.value_b, "display_value": forward_parsed.get("value_b") or gate.value_b,
                  "members": [f"{peer_id}@{right_version}"]},
             ]
             outcome = self.db.record_semantic_notice(
@@ -380,7 +423,15 @@ class EvidencePipeline:
             if outcome.get("outcome") == "created":
                 surfaced += 1
         if surfaced:
-            return {"status": "completed", "outcome": "notices_created", "notices_created": surfaced}
-        if incomplete_reason:
-            return {"status": "incomplete", "reason": incomplete_reason, "notices_created": 0}
-        return {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
+            result: dict[str, Any] = {
+                "status": "completed", "outcome": "notices_created", "notices_created": surfaced,
+            }
+        elif incomplete_reason:
+            result = {"status": "incomplete", "reason": incomplete_reason, "notices_created": 0}
+        else:
+            result = {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
+        if reasons_seen:
+            # Degradations may also occur on pairs before a later pair surfaces
+            # a notice, so the list is attached to completed outcomes too.
+            result["reasons_seen"] = reasons_seen
+        return result
