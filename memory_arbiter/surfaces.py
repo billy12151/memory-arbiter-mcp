@@ -1,11 +1,10 @@
 """Product-surface routing helpers for MemoryTools (Phase 4 extraction)."""
-# mypy: disable-error-code=no-any-return
 from __future__ import annotations
 
 from importlib import resources
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
-from .acl import WorkspaceScope, forbidden_payload, raw_workspace
+from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, raw_workspace
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .models import MemoryStatus, ProtectionLevel, SourceType
 from .validation import PRODUCT_FIELD_REGISTRY, _controlled_integer, validate_product_payload
@@ -163,9 +162,35 @@ class ProductSurfaces:
 
     def __init__(self, tools: "MemoryTools"):
         self._tools = tools
+        self.db = tools.db
+        self.settings = tools.settings
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._tools, name)
+    def _caller_workspace(self, *args: Any, **kwargs: Any) -> "CallerWorkspace":
+        return self._tools._caller_workspace(*args, **kwargs)
+
+    def _conflict_detail_for_workspace(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+        return self._tools._conflict_detail_for_workspace(*args, **kwargs)
+
+    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+        return self._tools._get_memory_visible(*args, **kwargs)
+
+    def _payload_dict(self, data: "Optional[dict[str, Any]]") -> dict[str, Any]:
+        return self._tools._payload_dict(data)
+
+    def _semantic_control_with_timeout(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._tools._semantic_control_with_timeout(*args, **kwargs)
+
+    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+        return self._tools._strict_acl_unavailable(*args, **kwargs)
+
+    def memory_audit_summary(self, **kwargs: Any) -> dict[str, Any]:
+        return self._tools.memory_audit_summary(**kwargs)
+
+    def memory_history(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._tools.memory_history(*args, **kwargs)
+
+    def memory_status(self, **kwargs: Any) -> dict[str, Any]:
+        return self._tools.memory_status(**kwargs)
 
     @staticmethod
     def _judge_constraints() -> dict[str, Any]:
@@ -272,11 +297,15 @@ class ProductSurfaces:
             help_doc.setdefault("semantic_control_actions", [
                 "status", "pause", "resume", "enable", "unload", "disable",
             ])
-        if topic and isinstance(help_doc, dict):
-            narrowed = dict(help_doc)
-            narrowed["requested_topic"] = topic
-            return narrowed
-        return help_doc
+        # helps.get returns Any-typed values from the module constant; narrow
+        # once so the return contract stays dict for strict mypy.
+        if isinstance(help_doc, dict):
+            if topic:
+                narrowed = dict(help_doc)
+                narrowed["requested_topic"] = topic
+                return narrowed
+            return help_doc
+        return {"description": str(help_doc)}
 
     def _invalid_product_call(self, surface: str, message: str, topic: Optional[str] = None) -> dict[str, Any]:
         return self.db.state.response(
@@ -543,21 +572,21 @@ class ProductSurfaces:
         if action == "help":
             return self.db.state.response(self._product_help("memory", self._help_topic(payload, "action")))
         if action == "remember":
-            return self._forward("memory", action, self.memory_write, **payload)
+            return self._forward("memory", action, self._tools.memory_write, **payload)
         if action == "find":
-            return self._forward("memory", action, self.memory_search, **payload)
+            return self._forward("memory", action, self._tools.memory_search, **payload)
         if action == "read":
             self._alias_id(payload, "memory_id")
             missing = self._require_id("memory", payload, "memory_id", action)
             if missing is not None:
                 return missing
-            return self._forward("memory", action, self.memory_get, **payload)
+            return self._forward("memory", action, self._tools.memory_get, **payload)
         if action == "update":
             self._alias_id(payload, "memory_id")
             missing = self._require_id("memory", payload, "memory_id", action)
             if missing is not None:
                 return missing
-            return self._forward("memory", action, self.memory_edit, **payload)
+            return self._forward("memory", action, self._tools.memory_edit, **payload)
         if action == "judge":
             required = self._judge_required_fields()
             if "conflict_id" not in payload and "id" in payload:
@@ -597,11 +626,11 @@ class ProductSurfaces:
                 "audit": self.memory_audit_summary(**payload).get("data"),
             })
         if view == "doctor":
-            return self._forward("memory_review", view, self.memory_doctor_overview, **payload)
+            return self._forward("memory_review", view, self._tools.memory_doctor_overview, **payload)
         if view == "audit":
             return self._forward("memory_review", view, self.memory_audit_summary, **payload)
         if view == "conflicts":
-            return self._forward("memory_review", view, self.memory_list_conflicts, **payload)
+            return self._forward("memory_review", view, self._tools.memory_list_conflicts, **payload)
         if view == "conflict_detail":
             conflict_id = payload.get("conflict_id") or payload.get("id")
             if conflict_id is None:
@@ -629,9 +658,9 @@ class ProductSurfaces:
                 return memory_id_int
             return self.memory_history(memory_id=memory_id_int, workspace=payload.get("workspace"))
         if view == "expired":
-            return self._forward("memory_review", view, self.memory_search_expired, **payload)
+            return self._forward("memory_review", view, self._tools.memory_search_expired, **payload)
         if view == "entities":
-            return self._forward("memory_review", view, self.memory_list_entities, **payload)
+            return self._forward("memory_review", view, self._tools.memory_list_entities, **payload)
         return self._invalid_product_call("memory_review", f"unknown view: {view}", view)
 
     def _memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
@@ -662,7 +691,7 @@ class ProductSurfaces:
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
-            return self._forward("memory_govern", action, self.memory_supersede, **payload)
+            return self._forward("memory_govern", action, self._tools.memory_supersede, **payload)
         if action in {"apply_conflict_action", "replan_conflict", "resolve_conflict"}:
             invalid_id = self._coerce_product_id("memory_govern", payload, "conflict_id", action)
             if invalid_id is not None:
@@ -700,7 +729,7 @@ class ProductSurfaces:
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
-            return self._forward("memory_govern", action, self.memory_confirm, **payload)
+            return self._forward("memory_govern", action, self._tools.memory_confirm, **payload)
         if action in {"accept_workspace_alias", "reject_workspace_alias"}:
             alias = payload.get("alias")
             canonical = payload.get("canonical")
@@ -762,7 +791,7 @@ class ProductSurfaces:
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
-            return self._forward("memory_govern", action, self.memory_rename_workspace_canonical, **payload)
+            return self._forward("memory_govern", action, self._tools.memory_rename_workspace_canonical, **payload)
         if action == "migrate_workspace":
             if not payload.get("from") or not payload.get("to"):
                 return self._invalid_product_call("memory_govern", "migrate_workspace requires from and to", action)
@@ -772,7 +801,7 @@ class ProductSurfaces:
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
-            return self._forward("memory_govern", action, self.memory_migrate_workspace, **payload)
+            return self._forward("memory_govern", action, self._tools.memory_migrate_workspace, **payload)
         if action == "move_memories_workspace":
             raw_ids = payload.get("memory_ids")
             if not isinstance(raw_ids, list) or not raw_ids:
@@ -791,7 +820,7 @@ class ProductSurfaces:
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
-            return self._forward("memory_govern", action, self.memory_move_memories_workspace, **payload)
+            return self._forward("memory_govern", action, self._tools.memory_move_memories_workspace, **payload)
         if action == "confirm_pending_workspace":
             invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
             if invalid_id is not None:
@@ -804,7 +833,7 @@ class ProductSurfaces:
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
-            return self._forward("memory_govern", action, self.memory_confirm_pending_workspace, **payload)
+            return self._forward("memory_govern", action, self._tools.memory_confirm_pending_workspace, **payload)
         if action == "confirm_workspaces":
             raw_list = payload.get("workspaces")
             if raw_list is not None and (
@@ -821,7 +850,7 @@ class ProductSurfaces:
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
-            return self._forward("memory_govern", action, self.memory_confirm_workspaces, **payload)
+            return self._forward("memory_govern", action, self._tools.memory_confirm_workspaces, **payload)
         return self._invalid_product_call("memory_govern", f"unknown action: {action}", action)
 
     def _memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
@@ -834,7 +863,7 @@ class ProductSurfaces:
         if task == "help":
             return self.db.state.response(self._product_help("memory_repair", self._help_topic(payload, "task")))
         if task == "rebuild_evidence":
-            return self._forward("memory_repair", task, self.memory_rebuild_evidence, **payload)
+            return self._forward("memory_repair", task, self._tools.memory_rebuild_evidence, **payload)
         if task == "scan_candidates":
             caller = self._caller_workspace(payload.get("workspace"))
             denied = self._strict_acl_unavailable(caller)
@@ -908,19 +937,19 @@ class ProductSurfaces:
                 invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
                 if invalid_id is not None:
                     return invalid_id
-            return self._forward("memory_repair", task, self.memory_cleanup_history, **payload)
+            return self._forward("memory_repair", task, self._tools.memory_cleanup_history, **payload)
         if task == "set_entity":
             invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
             if invalid_id is not None:
                 return invalid_id
-            return self._forward("memory_repair", task, self.memory_set_entity, **payload)
+            return self._forward("memory_repair", task, self._tools.memory_set_entity, **payload)
         if task == "activate_pending":
             invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
             if invalid_id is not None:
                 return invalid_id
-            return self._forward("memory_repair", task, self.memory_activate, **payload)
+            return self._forward("memory_repair", task, self._tools.memory_activate, **payload)
         if task == "replay_backup":
-            return self._forward("memory_repair", task, self.memory_replay_backup, **payload)
+            return self._forward("memory_repair", task, self._tools.memory_replay_backup, **payload)
         if task == "normalize_workspaces":
             # normalize is a GLOBAL registry operation (see the help note):
             # the payload carries no workspace filter, so the strict-ACL gate
@@ -930,7 +959,7 @@ class ProductSurfaces:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
                 return denied
-            return self._forward("memory_repair", task, self.memory_normalize_workspaces, **payload)
+            return self._forward("memory_repair", task, self._tools.memory_normalize_workspaces, **payload)
         if task == "record_conflict":
             caller = self._caller_workspace(payload.get("workspace"))
             denied = self._strict_acl_unavailable(caller)
