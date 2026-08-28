@@ -20,7 +20,7 @@ from ..db import MemoryDB, _normalize_alias_key
 from ..db_generation import database_startup_lock
 from ..db.workspaces import _coerce_ws, _mechanical_ws_key
 from ..validation import MAX_BATCH_IDS, _controlled_integer
-from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
+from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext
 from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
 
@@ -296,11 +296,11 @@ class OperationsPipeline:
             # a general suppression switch.
             result["evidence_index"], result["semantic_conflict_check"] = self._enqueue_content_postcommit(
                 target_id, self.db.get_memory(target_id),
-                trusted_applying_context={
-                    "conflict_id": conflict_id_int, "revision": revision + 1,
-                    "memory_id": target_id, "action": action,
-                    "chosen_value": conflict.get("chosen_value"),
-                },
+                trusted_applying_context=TrustedApplyingContext(
+                    conflict_id=conflict_id_int, revision=revision + 1,
+                    memory_id=target_id, action=action,
+                    chosen_value=str(conflict.get("chosen_value") or "") or None,
+                ),
             )
         elif not successful and step.get("error") == "chosen_value_not_grounded" and step.get("orphaned_edit"):
             # A grounding-failed edit committed without a post-commit re-index

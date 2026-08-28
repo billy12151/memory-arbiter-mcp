@@ -8,6 +8,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..evidence import evidence_content_hash, local_text_units
+from ..models import TrustedApplyingContext
 from ..semantic_conflict import (
     PAIR_PROMPT_VERSION,
     decide_evidence,
@@ -114,15 +115,15 @@ class EvidencePipeline:
         # names which row to revalidate.
         applying_slots: set[str] = set()
         applying_groups: list[dict[str, Any]] = []
-        trusted = snapshot.get("trusted_applying_context")
-        if isinstance(trusted, dict) and trusted.get("conflict_id") is not None:
-            live = self.db.get_conflict(int(trusted["conflict_id"]))
+        trusted = TrustedApplyingContext.from_dict(snapshot.get("trusted_applying_context"))
+        if trusted is not None:
+            live = self.db.get_conflict(trusted.conflict_id)
             if live is not None and live.get("status") == "applying":
                 plan = (live.get("apply_summary") or {}).get("plan") or []
                 plan_ids = {int(item.get("memory_id") or 0) for item in plan}
-                trusted_memory = int(trusted.get("memory_id") or 0)
-                trusted_revision = trusted.get("revision")
-                trusted_action = str(trusted.get("action") or "")
+                trusted_memory = trusted.memory_id
+                trusted_revision = trusted.revision
+                trusted_action = trusted.action
                 # Spec §15.3 preconditions: applying status, exact revision,
                 # target in the plan, and the exact action from that plan step.
                 revision_ok = (

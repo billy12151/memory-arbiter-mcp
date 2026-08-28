@@ -141,3 +141,45 @@ class MemoryRecord:
             subject=payload.get("subject"),
             metadata=dict(payload.get("metadata") or {}),
         )
+
+
+@dataclass(frozen=True)
+class TrustedApplyingContext:
+    """Typed §15.3 suppression context for a conflict apply-plan write.
+
+    Constructed only by the apply flow; carried inside worker snapshots as a
+    dict (to_dict) and rehydrated (from_dict) at the notice gate, which
+    revalidates every field against the live conflict row. A bare dict at
+    construction sites let typos fail silently (suppression never engaged),
+    which is what this type eliminates.
+    """
+
+    conflict_id: int
+    revision: int
+    memory_id: int
+    action: str
+    chosen_value: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "conflict_id": self.conflict_id,
+            "revision": self.revision,
+            "memory_id": self.memory_id,
+            "action": self.action,
+            "chosen_value": self.chosen_value,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> Optional["TrustedApplyingContext"]:
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return cls(
+                conflict_id=int(raw["conflict_id"]),
+                revision=int(raw["revision"]),
+                memory_id=int(raw["memory_id"]),
+                action=str(raw["action"]),
+                chosen_value=raw.get("chosen_value"),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None

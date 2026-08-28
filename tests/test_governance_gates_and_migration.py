@@ -336,3 +336,23 @@ def test_tags_only_edit_of_member_stays_silent(tmp_path: Path) -> None:
     response = tools.memory_edit(left, tags_only=True, add_tags=["legacy"])
     assert response["data"]["edited"] is True
     assert "attention_required" not in response["data"]
+
+
+# ── #3: TrustedApplyingContext typed boundary ───────────────────────────────
+
+def test_trusted_applying_context_roundtrip_and_malformed() -> None:
+    from memory_arbiter.models import TrustedApplyingContext
+
+    ctx = TrustedApplyingContext(
+        conflict_id=7, revision=3, memory_id=42, action="update_current_claim",
+        chosen_value="sqlite",
+    )
+    assert TrustedApplyingContext.from_dict(ctx.to_dict()) == ctx
+    # Malformed snapshots (typos / missing keys / wrong types) degrade to
+    # None instead of half-engaging the §15.3 suppression.
+    assert TrustedApplyingContext.from_dict(None) is None
+    assert TrustedApplyingContext.from_dict("not-a-dict") is None
+    assert TrustedApplyingContext.from_dict({"conflict_id": 7}) is None
+    assert TrustedApplyingContext.from_dict({
+        "conflict_id": "x", "revision": 3, "memory_id": 42, "action": "a",
+    }) is None

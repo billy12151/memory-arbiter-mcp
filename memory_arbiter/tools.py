@@ -15,7 +15,7 @@ from .constants import strict_ws
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
 from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
-from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
+from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext
 from .search import search_memories, _linked_open_items_for_search
 from .semantic_conflict import (
     IsolatedGGUFSemanticBackend,
@@ -129,15 +129,15 @@ class MemoryTools:
 
     def _enqueue_local_text_index(
         self, memory_id: int, record: Optional[dict[str, Any]] = None,
-        *, trusted_applying_context: Optional[dict[str, Any]] = None,
+        *, trusted_applying_context: Optional[TrustedApplyingContext] = None,
     ) -> dict[str, Any]:
         current = record or self.db.get_memory(int(memory_id)) or {}
         version = int(current.get("version") or 1)
         task_id = f"semantic:{int(memory_id)}@{version}"
         self._semantic_worker.reserve(task_id)
         snapshot: dict[str, Any] = {"version": version, "task_id": task_id}
-        if trusted_applying_context:
-            snapshot["trusted_applying_context"] = dict(trusted_applying_context)
+        if trusted_applying_context is not None:
+            snapshot["trusted_applying_context"] = trusted_applying_context.to_dict()
         result = self._evidence_worker.enqueue(int(memory_id), snapshot)
         if result.get("status") != "queued":
             self._semantic_worker.complete(
@@ -148,7 +148,7 @@ class MemoryTools:
 
     def _enqueue_content_postcommit(
         self, memory_id: int, record: Optional[dict[str, Any]] = None,
-        *, trusted_applying_context: Optional[dict[str, Any]] = None,
+        *, trusted_applying_context: Optional[TrustedApplyingContext] = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         index = self._enqueue_local_text_index(
             memory_id, record, trusted_applying_context=trusted_applying_context,
@@ -1039,7 +1039,7 @@ class MemoryTools:
 
     def _enqueue_semantic_conflict_check(
         self, memory_id: Optional[int], record: Any, *, after_evidence: bool = False,
-        trusted_applying_context: Optional[dict[str, Any]] = None,
+        trusted_applying_context: Optional[TrustedApplyingContext] = None,
     ) -> dict[str, Any]:
         if memory_id is None:
             return {"status": "skipped", "reason": "backup_only"}
@@ -1060,8 +1060,8 @@ class MemoryTools:
             "task_id": task_id,
             "dedupe_key": task_id,
         }
-        if trusted_applying_context:
-            snapshot["trusted_applying_context"] = dict(trusted_applying_context)
+        if trusted_applying_context is not None:
+            snapshot["trusted_applying_context"] = trusted_applying_context.to_dict()
         return self._semantic_worker.enqueue(int(memory_id), snapshot)
 
     def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
