@@ -220,6 +220,12 @@ _EVIDENCE_ALIASES = {
     "postgres": "postgresql",
     "sqlite_vec": "sqlite-vec",
 }
+# B-C1 evaluation (2026-08-28): same bare-substring shape as the old
+# coexistence_veto dimension markers, but deliberately left quote-based —
+# decide_evidence runs at the recall/triage stage before any extraction
+# exists, so there is no attribute to align against, and these are explicit
+# scope phrases (environment/region/platform pairs) rather than generic
+# dimension words that commonly appear in unrelated prose.
 _EXPLICIT_SCOPES = (
     ("测试环境", "生产环境"),
     ("移动端", "管理后台"),
@@ -554,10 +560,36 @@ def value_is_grounded(value: str, quote: str) -> bool:
     return any(normalize_value(piece) == target for piece in pieces)
 
 
-def coexistence_veto(left: dict[str, Any], right: dict[str, Any]) -> Optional[str]:
+def coexistence_veto(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    forward: Optional[AttributeValueExtraction] = None,
+    reverse: Optional[AttributeValueExtraction] = None,
+) -> Optional[str]:
     """Return a deterministic coexistence reason code, or None when unknown."""
     left_text = str(left.get("quote") or left.get("content") or "").casefold()
     right_text = str(right.get("quote") or right.get("content") or "").casefold()
+    # 2026-08-28 (B-C1): dimension markers used to be matched as bare
+    # substrings of the whole quote, so an unrelated "平均"/"峰值" (etc.)
+    # anywhere in the prose vetoed a genuine same-attribute conflict and the
+    # notice was silently dropped (false negative). When extractions are
+    # supplied (the notice gate always passes them) a marker pair only counts
+    # as a dimension difference when each marker appears in the corresponding
+    # side's extracted attribute text — markers that occur only in the quote
+    # body no longer veto, so more real conflicts surface as notices. Callers
+    # without extractions keep the legacy quote-substring behaviour.
+    if forward is not None or reverse is not None:
+        # forward was extracted left→right, reverse right→left.
+        left_dimension = " ".join(filter(None, (
+            forward.attribute_a if forward is not None else "",
+            reverse.attribute_b if reverse is not None else "",
+        ))).casefold()
+        right_dimension = " ".join(filter(None, (
+            forward.attribute_b if forward is not None else "",
+            reverse.attribute_a if reverse is not None else "",
+        ))).casefold()
+    else:
+        left_dimension, right_dimension = left_text, right_text
     dimension_markers = {
         "coexist_environment_mismatch": (("测试环境", "生产环境"), ("staging", "production"), ("dev", "prod")),
         "coexist_region_mismatch": (("中国区", "海外区"), ("us-east", "eu-west")),
@@ -568,7 +600,11 @@ def coexistence_veto(left: dict[str, Any], right: dict[str, Any]) -> Optional[st
         "coexist_metric_mismatch": (("平均", "峰值"), ("总计", "单项"), ("总数", "其中")),
     }
     for code, pairs in dimension_markers.items():
-        if any((a in left_text and b in right_text) or (b in left_text and a in right_text) for a, b in pairs):
+        if any(
+            (a in left_dimension and b in right_dimension)
+            or (b in left_dimension and a in right_dimension)
+            for a, b in pairs
+        ):
             return code
     evolution = (
         "替换为", "替换成", "升级为", "升级到", "迁移到", "迁移至", "不再采用",
@@ -628,7 +664,7 @@ def evaluate_pair_extractions(
     grounded = value_is_grounded(forward.value_a, quote_a) and value_is_grounded(forward.value_b, quote_b)
     if not grounded:
         return PairGateResult("review_candidate", "qwen_unverified")
-    veto = coexistence_veto(left, right)
+    veto = coexistence_veto(left, right, forward, reverse)
     if veto:
         return PairGateResult("review_candidate", veto, grounded=True)
     return PairGateResult(
