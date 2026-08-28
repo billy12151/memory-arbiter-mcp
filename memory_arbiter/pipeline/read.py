@@ -1,8 +1,10 @@
 """Internal read, search, comparison, and conflict-signal operations."""
-# mypy: disable-error-code=no-any-return
 from __future__ import annotations
 
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional, Tuple, TYPE_CHECKING
+
+from ..acl import CallerWorkspace
+from ..embedder import ManagedEmbedder
 
 from ..arbitration import compare_memories
 from ..constants import strict_ws
@@ -22,9 +24,27 @@ _STRONG_CONFLICT_SOURCES = ("open_table", "conflict_guidance", "conflict_group")
 class ReadPipeline:
     def __init__(self, tools: "MemoryTools"):
         self._tools = tools
+        self.db = tools.db
+        self.settings = tools.settings
+        self._evidence_worker = tools._evidence_worker
+        self._embedder_warnings = tools._embedder_warnings
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._tools, name)
+    def _attach_conflict_signals(
+        self, *args: Any, **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return self._tools._attach_conflict_signals(*args, **kwargs)
+
+    def _caller_workspace(self, *args: Any, **kwargs: Any) -> "CallerWorkspace":
+        return self._tools._caller_workspace(*args, **kwargs)
+
+    def _ensure_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+        return self._tools._ensure_embedder()
+
+    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+        return self._tools._get_memory_visible(*args, **kwargs)
+
+    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+        return self._tools._strict_acl_unavailable(*args, **kwargs)
 
     @staticmethod
     def _search_memories(*args: Any, **kwargs: Any) -> Any:

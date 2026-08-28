@@ -1,5 +1,4 @@
 """Governance, edit, status, and maintenance operations for MemoryTools (Phase 4 extraction)."""
-# mypy: disable-error-code=no-any-return
 from __future__ import annotations
 
 import hashlib
@@ -10,13 +9,14 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Mapping, Optional, Tuple, cast, TYPE_CHECKING
 
 from .. import __version__
-from ..acl import WorkspaceScope, scope_names, workspace_scope_sql, forbidden_payload, raw_workspace
+from ..acl import CallerWorkspace, WorkspaceScope, scope_names, workspace_scope_sql, forbidden_payload, raw_workspace
 from ..arbitration import compare_memories
 from ..constants import DEFAULT_WORKSPACE_NAME, is_default_workspace_term
 from ..db import MemoryDB, _normalize_alias_key
+from ..embedder import ManagedEmbedder
 from ..db_generation import database_startup_lock
 from ..db.workspaces import _coerce_ws, _mechanical_ws_key
 from ..validation import MAX_BATCH_IDS, _controlled_integer
@@ -25,15 +25,68 @@ from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
 
 if TYPE_CHECKING:
+    from ..update_monitor import UpdateMonitor
     from ..tools import MemoryTools
 
 
 class OperationsPipeline:
     def __init__(self, tools: "MemoryTools"):
         self._tools = tools
+        self.db = tools.db
+        self.settings = tools.settings
+        self._evidence_worker = tools._evidence_worker
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._tools, name)
+    @property
+    def _update_monitor(self) -> "Optional[UpdateMonitor]":
+        # Assigned on MemoryTools after pipeline construction: resolve lazily.
+        return self._tools._update_monitor
+
+    def _allowed(self, *args: Any, **kwargs: Any) -> "Tuple[bool, list[str]]":
+        return self._tools._allowed(*args, **kwargs)
+
+    def _caller_workspace(self, *args: Any, **kwargs: Any) -> "CallerWorkspace":
+        return self._tools._caller_workspace(*args, **kwargs)
+
+    def _conflict_detail_for_workspace(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+        return self._tools._conflict_detail_for_workspace(*args, **kwargs)
+
+    def _embedding_configured(self) -> bool:
+        return self._tools._embedding_configured()
+
+    def _post_commit(
+        self, *args: Any, **kwargs: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return self._tools._post_commit(*args, **kwargs)
+
+    def _ensure_active_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+        return self._tools._ensure_active_embedder()
+
+    def _ensure_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+        return self._tools._ensure_embedder()
+
+    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+        return self._tools._get_memory_visible(*args, **kwargs)
+
+    def _is_truthy(self, *args: Any, **kwargs: Any) -> bool:
+        return self._tools._is_truthy(*args, **kwargs)
+
+    def _semantic_notice_workspace_scope(self, *args: Any, **kwargs: Any) -> "WorkspaceScope":
+        return self._tools._semantic_notice_workspace_scope(*args, **kwargs)
+
+    def _semantic_status(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._tools._semantic_status(*args, **kwargs)
+
+    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+        return self._tools._strict_acl_unavailable(*args, **kwargs)
+
+    def current_agent_id(self) -> "Optional[str]":
+        return self._tools.current_agent_id()
+
+    def current_client(self) -> "Optional[str]":
+        return self._tools.current_client()
+
+    def wait_evidence_worker_drained(self, *args: Any, **kwargs: Any) -> bool:
+        return self._tools.wait_evidence_worker_drained(*args, **kwargs)
 
     @staticmethod
     def _compare_memories(*args: Any, **kwargs: Any) -> Any:
@@ -143,7 +196,7 @@ class OperationsPipeline:
                 if not rows:
                     break
                 for c in rows:
-                    detail = self._conflict_detail_for_workspace(int(c.get("id")), caller)
+                    detail = self._conflict_detail_for_workspace(int(c.get("id") or 0), caller)
                     if detail is not None:
                         conflicts.append(detail["conflict"])
                         if len(conflicts) >= raw_limit:
@@ -235,6 +288,8 @@ class OperationsPipeline:
                     if edited.get("outcome") != "edited":
                         raise ValueError(str(edited.get("outcome") or "edit_failed"))
                 updated = edited.get("record") or current
+                if not isinstance(updated, dict):
+                    updated = dict(cast(Mapping[str, Any], updated))
                 chosen = str(conflict.get("chosen_value") or "")
                 updated_content = str(updated.get("content") or "")
                 if edited.get("outcome") == "blocked":
@@ -314,7 +369,7 @@ class OperationsPipeline:
             )
         next_step = next((item for item in plan if item.get("status") == "pending"), None)
         if successful:
-            next_data = {
+            next_data: dict[str, Any] = {
                 "conflict_id": conflict_id_int,
                 "expected_revision": revision + 1,
                 "authorized": True,
