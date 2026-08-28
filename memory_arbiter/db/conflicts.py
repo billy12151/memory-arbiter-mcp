@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from typing import Any, Optional, TYPE_CHECKING
+from contextlib import contextmanager
+from typing import Any, Iterator, Optional, TYPE_CHECKING
+from ..degrade import DegradeState
 
 from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..models import ConflictMember, ConflictValueGroup, utc_now_iso
@@ -56,8 +58,23 @@ class ConflictStore:
     def __init__(self, db: "MemoryDB") -> None:
         self._db = db
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._db, name)
+    @property
+    def _db_available(self) -> bool:
+        return self._db._db_available
+
+    @property
+    def state(self) -> "DegradeState":
+        return self._db.state
+
+    @contextmanager
+    def connection(self) -> "Iterator[sqlite3.Connection]":
+        with self._db.connection() as conn:
+            yield conn
+
+    @contextmanager
+    def write_transaction(self) -> "Iterator[sqlite3.Connection]":
+        with self._db.write_transaction() as conn:
+            yield conn
 
     @staticmethod
     def _normalize_slot(slot_key: Optional[dict[str, Any]]) -> Optional[dict[str, str]]:
@@ -508,7 +525,7 @@ class ConflictStore:
                                 "revision": int(snapshot_row["revision"]),
                             }
                 raise
-            return {"outcome": "inserted", "conflict_id": int(cur.lastrowid), "revision": 1}
+            return {"outcome": "inserted", "conflict_id": int(cur.lastrowid or 0), "revision": 1}
 
     def escalate_structured_notice(
         self, notice_id: int, *, workspace_canonical: "WorkspaceScope", reason: str,

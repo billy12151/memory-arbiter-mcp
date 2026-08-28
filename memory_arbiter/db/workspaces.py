@@ -5,7 +5,10 @@ import json
 import re
 import sqlite3
 import uuid
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from contextlib import contextmanager
+from typing import Any, Iterator, Optional, Tuple, TYPE_CHECKING
+from ..config import Settings
+from ..degrade import DegradeState
 
 from ..constants import DEFAULT_WORKSPACE_NAME, DEFAULT_TERMS, is_default_workspace_term
 from ..db_generation import database_startup_lock
@@ -86,11 +89,27 @@ class WorkspaceStore:
     def __init__(self, db: "MemoryDB"):
         self._db = db
 
-    def __getattr__(self, name: str) -> Any:
-        # Proxy to MemoryDB for connection/write_transaction/state/settings and
-        # cross-store helpers used by the copied methods. This keeps the Phase 3
-        # extraction close to a pure move; later hardening can tighten the seam.
-        return getattr(self._db, name)
+    @property
+    def _db_available(self) -> bool:
+        return self._db._db_available
+
+    @property
+    def settings(self) -> "Settings":
+        return self._db.settings
+
+    @property
+    def state(self) -> "DegradeState":
+        return self._db.state
+
+    @contextmanager
+    def connection(self) -> "Iterator[sqlite3.Connection]":
+        with self._db.connection() as conn:
+            yield conn
+
+    @contextmanager
+    def write_transaction(self) -> "Iterator[sqlite3.Connection]":
+        with self._db.write_transaction() as conn:
+            yield conn
 
     def _publish_missing_workspace_canonical_vector(
         self,
