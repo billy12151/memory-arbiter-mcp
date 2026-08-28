@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from contextvars import ContextVar
-from typing import Any, Callable, cast, Optional, Tuple
+from typing import Any, Callable, cast
 
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, visible_memory
 from .arbitration import compare_memories

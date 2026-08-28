@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from ..acl import WorkspaceScope, workspace_scope_sql
 from ..constants import is_default_workspace_term

@@ -7,7 +7,6 @@ import sqlite3
 import sys
 import types
 from pathlib import Path
-from typing import Optional
 
 import pytest
 

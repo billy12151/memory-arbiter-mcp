@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from importlib import resources
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, raw_workspace
 from .db_generation import CONFLICT_DETECTOR_VERSION

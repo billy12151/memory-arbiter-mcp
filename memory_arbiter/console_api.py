@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from . import __version__
 from .acl import workspace_scope_sql

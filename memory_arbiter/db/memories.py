@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
-from typing import Any, Iterator, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Iterator, TYPE_CHECKING
 
 from ..config import Settings
 from ..degrade import DegradeState

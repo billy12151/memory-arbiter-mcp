@@ -6,7 +6,7 @@ import json
 import os
 import signal
 import sys
-from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple, Optional
+from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple
 
 from .config import Settings
 from .request_identity import (

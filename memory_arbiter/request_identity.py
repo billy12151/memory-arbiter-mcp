@@ -6,7 +6,7 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Any, Iterator, Mapping, Optional
+from typing import Any, Iterator, Mapping
 from urllib.parse import urlsplit
 
 CLIENT_HEADER = "X-Mema-Client"

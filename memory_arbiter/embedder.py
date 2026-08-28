@@ -5,7 +5,7 @@ import json
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable
 
 # Bump when embed_text input construction, truncation strategy, or pipeline
 # semantics change.  Part of embedding_space_id — changing it forces a rebuild.

@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from typing import Any, cast, Optional, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..models import utc_now_iso

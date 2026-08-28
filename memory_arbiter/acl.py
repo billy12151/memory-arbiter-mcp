@@ -7,7 +7,7 @@ semantics of general-purpose DB reads such as ``get_memory``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Sequence
 
 
 WORKSPACE_EXPR = "COALESCE(NULLIF(workspace_canonical, ''), workspace)"

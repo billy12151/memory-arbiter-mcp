@@ -7,7 +7,6 @@ locations keep re-export aliases so existing imports keep working.
 from __future__ import annotations
 
 import unicodedata
-from typing import Optional
 
 # Recent-fallback warning prefix. The legacy bm25 search path infers
 # retrieval_mode by SNIFFING this warning (it has no structured mode signal), so

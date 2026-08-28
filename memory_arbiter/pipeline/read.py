@@ -1,7 +1,7 @@
 """Internal read, search, comparison, and conflict-signal operations."""
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from ..acl import CallerWorkspace
 from ..embedder import ManagedEmbedder

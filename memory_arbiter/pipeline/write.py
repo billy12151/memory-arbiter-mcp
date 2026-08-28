@@ -1,7 +1,7 @@
 """Memory write path for the local-text evidence architecture."""
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from ..embedder import ManagedEmbedder
 

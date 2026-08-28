@@ -22,7 +22,6 @@ Covered contract points (PR-C1):
     registered canonicals sharing a rejected target's mechanical key.
 """
 from pathlib import Path
-from typing import Optional
 
 import pytest
 

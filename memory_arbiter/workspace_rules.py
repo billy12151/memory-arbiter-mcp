@@ -13,7 +13,7 @@ All functions here are pure (no IO) so they are cheap to unit-test.
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any
 
 from .constants import DEFAULT_TERMS, is_default_workspace_term  # re-exported below
 

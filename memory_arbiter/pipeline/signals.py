@@ -1,7 +1,7 @@
 """Attach member-linked open/applying conflict-group state to search results."""
 from __future__ import annotations
 
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from ..acl import raw_workspace
 

@@ -11,7 +11,7 @@ import argparse
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .config import Settings
 from .doctor import OverviewReport, Severity, doctor_overview_cli, report_to_dict

@@ -10,7 +10,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from typing import Any, Iterator, Optional, TYPE_CHECKING
+from typing import Any, Iterator, TYPE_CHECKING
 from ..degrade import DegradeState
 
 from ..acl import WorkspaceScope, scope_names, workspace_scope_sql

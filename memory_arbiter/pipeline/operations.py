@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple, cast, TYPE_CHECKING
+from typing import Any, Mapping, cast, TYPE_CHECKING
 
 from .. import __version__
 from ..acl import CallerWorkspace, WorkspaceScope, scope_names, workspace_scope_sql, forbidden_payload, raw_workspace

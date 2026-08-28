@@ -17,7 +17,7 @@ aliases so existing imports keep working.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 
 def utc_now_iso() -> str:

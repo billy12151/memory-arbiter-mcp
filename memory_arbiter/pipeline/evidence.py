@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..evidence import evidence_content_hash, local_text_units
