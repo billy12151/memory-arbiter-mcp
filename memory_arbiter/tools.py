@@ -44,14 +44,14 @@ _BACKUP_NOTICE_DEGRADED_SIGNATURE = (-1, -1, -1, True)
 
 
 class MemoryTools:
-    def __init__(self, settings: Optional[Settings] = None, db: Optional[MemoryDB] = None):
+    def __init__(self, settings: Settings | None = None, db: MemoryDB | None = None):
         self.settings = settings or Settings.from_env()
         self.db = db or MemoryDB(self.settings)
-        self._embedder: Optional[ManagedEmbedder] = None
+        self._embedder: ManagedEmbedder | None = None
         self._embedder_loaded = False
         self._embedder_lock = threading.Lock()
         self._embedder_warnings: list[str] = list(self.settings.config_warnings)
-        self._update_monitor: Optional[UpdateMonitor] = None
+        self._update_monitor: UpdateMonitor | None = None
         self._evidence_worker = LocalTextIndexWorker(self)
         self._surfaces = ProductSurfaces(self)
         self._signals = ConflictSignalPipeline(self)
@@ -59,7 +59,7 @@ class MemoryTools:
         self._read_pipeline = ReadPipeline(self)
         self._operations = OperationsPipeline(self)
         self._evidence = EvidencePipeline(self)
-        self._semantic_backend: Optional[SemanticBackend] = None
+        self._semantic_backend: SemanticBackend | None = None
         self._semantic_backend_lock = threading.Lock()
         self._semantic_runtime_disabled = False
         self._semantic_worker = SemanticConflictWorker(self)
@@ -69,22 +69,22 @@ class MemoryTools:
         # Per-product-call caller cache. ContextVar isolates concurrent MCP
         # tasks; the product wrapper clears it before dispatch and automatic
         # notice delivery reuses the scope computed by the operation.
-        self._product_caller: ContextVar[Optional[CallerWorkspace]] = ContextVar(
+        self._product_caller: ContextVar[CallerWorkspace | None] = ContextVar(
             "memory_arbiter_product_caller", default=None,
         )
-        self._last_pair_duration_ms: Optional[int] = None
+        self._last_pair_duration_ms: int | None = None
         # Spec §7: check-route fail-closed degradation must stay observable
         # (qwen unavailable / per-job budget exhausted), not silently skipped.
-        self._check_degradation_reason: Optional[str] = None
+        self._check_degradation_reason: str | None = None
         self._check_degradation_count = 0
-        self._check_degradation_at: Optional[str] = None
+        self._check_degradation_at: str | None = None
         self._notice_claim_error_count = 0
-        self._notice_claim_last_error: Optional[str] = None
-        self._notice_claim_last_error_at: Optional[str] = None
-        self._last_backup_notice_signature: Optional[tuple[int, int, int, bool]] = None
-        self._last_backup_source_signature: Optional[tuple[int, int, int]] = None
+        self._notice_claim_last_error: str | None = None
+        self._notice_claim_last_error_at: str | None = None
+        self._last_backup_notice_signature: tuple[int, int, int, bool] | None = None
+        self._last_backup_source_signature: tuple[int, int, int] | None = None
 
-    def start_update_monitor(self, monitor: Optional[UpdateMonitor] = None) -> None:
+    def start_update_monitor(self, monitor: UpdateMonitor | None = None) -> None:
         # Product notice delivery is owned by the four outer product wrappers,
         # not DegradeState.response(): nested responses must never consume it.
         self.db.state.notice_provider = None
@@ -128,8 +128,8 @@ class MemoryTools:
         }
 
     def _enqueue_local_text_index(
-        self, memory_id: int, record: Optional[dict[str, Any]] = None,
-        *, trusted_applying_context: Optional[TrustedApplyingContext] = None,
+        self, memory_id: int, record: dict[str, Any] | None = None,
+        *, trusted_applying_context: TrustedApplyingContext | None = None,
     ) -> dict[str, Any]:
         current = record or self.db.get_memory(int(memory_id)) or {}
         version = int(current.get("version") or 1)
@@ -147,8 +147,8 @@ class MemoryTools:
         return {**result, "semantic_task_id": task_id, "semantic_dedupe_key": task_id}
 
     def _enqueue_content_postcommit(
-        self, memory_id: int, record: Optional[dict[str, Any]] = None,
-        *, trusted_applying_context: Optional[TrustedApplyingContext] = None,
+        self, memory_id: int, record: dict[str, Any] | None = None,
+        *, trusted_applying_context: TrustedApplyingContext | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         index = self._enqueue_local_text_index(
             memory_id, record, trusted_applying_context=trusted_applying_context,
@@ -169,9 +169,9 @@ class MemoryTools:
         return index, check
 
     def _post_commit(
-        self, memory_id: int, record: Optional[dict[str, Any]] = None,
+        self, memory_id: int, record: dict[str, Any] | None = None,
         *, recheck_conflicts: bool,
-        trusted_applying_context: Optional[TrustedApplyingContext] = None,
+        trusted_applying_context: TrustedApplyingContext | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Single write-path post-commit entry: index always, recheck explicitly.
 
@@ -194,7 +194,7 @@ class MemoryTools:
     def start_semantic_worker(self) -> None:
         self._semantic_worker.start()
 
-    def current_client(self) -> Optional[str]:
+    def current_client(self) -> str | None:
         # Trusted identity comes only from the request scope (HTTP headers or
         # the stdio process identity established in server.build_runtime).
         # Never fall back to process-level settings here: a missing trusted
@@ -202,7 +202,7 @@ class MemoryTools:
         identity = get_request_identity()
         return identity.client if identity is not None else None
 
-    def current_agent_id(self) -> Optional[str]:
+    def current_agent_id(self) -> str | None:
         identity = get_request_identity()
         return identity.agent_id if identity is not None else None
 
@@ -258,7 +258,7 @@ class MemoryTools:
     def wait_semantic_worker_drained(self, timeout: float = 30.0) -> bool:
         return self._semantic_worker.wait_drained(timeout)
 
-    def _get_semantic_backend_ref(self) -> Optional[SemanticBackend]:
+    def _get_semantic_backend_ref(self) -> SemanticBackend | None:
         with self._semantic_backend_lock:
             return self._semantic_backend
 
@@ -307,7 +307,7 @@ class MemoryTools:
             "backend_unload": unload_result,
         }
 
-    def _allowed(self, agent_id: Optional[str] = None, client: Optional[str] = None) -> Tuple[bool, list[str]]:
+    def _allowed(self, agent_id: str | None = None, client: str | None = None) -> tuple[bool, list[str]]:
         actual_agent = agent_id or self.current_agent_id()
         actual_client = client or self.current_client()
         if self.settings.policy.enabled_for(actual_client, actual_agent):
@@ -315,24 +315,24 @@ class MemoryTools:
         return False, [f"Memory arbiter disabled by policy for client={actual_client}, agent_id={actual_agent}."]
 
     @staticmethod
-    def _payload_dict(data: Optional[dict[str, Any]]) -> dict[str, Any]:
+    def _payload_dict(data: dict[str, Any] | None) -> dict[str, Any]:
         return dict(data) if isinstance(data, dict) else {}
 
     def _judge_constraints(self) -> dict[str, Any]:
         return self._surfaces._judge_constraints()
 
-    def _product_help(self, surface: str, topic: Optional[str] = None) -> dict[str, Any]:
+    def _product_help(self, surface: str, topic: str | None = None) -> dict[str, Any]:
         return self._surfaces._product_help(surface, topic)
 
-    def _invalid_product_call(self, surface: str, message: str, topic: Optional[str] = None) -> dict[str, Any]:
+    def _invalid_product_call(self, surface: str, message: str, topic: str | None = None) -> dict[str, Any]:
         return self._surfaces._invalid_product_call(surface, message, topic)
 
     @staticmethod
-    def _help_topic(payload: dict[str, Any], fallback_key: str) -> Optional[str]:
+    def _help_topic(payload: dict[str, Any], fallback_key: str) -> str | None:
         return ProductSurfaces._help_topic(payload, fallback_key)
 
     def _forward(
-        self, surface: str, topic: Optional[str], fn: Callable[..., dict[str, Any]], **payload: Any,
+        self, surface: str, topic: str | None, fn: Callable[..., dict[str, Any]], **payload: Any,
     ) -> dict[str, Any]:
         return self._surfaces._forward(surface, topic, fn, **payload)
 
@@ -341,18 +341,18 @@ class MemoryTools:
         return ProductSurfaces._alias_id(payload, target)
 
     def _int_product_arg(
-        self, surface: str, value: Any, name: str, topic: Optional[str] = None,
-    ) -> Optional[int | dict[str, Any]]:
+        self, surface: str, value: Any, name: str, topic: str | None = None,
+    ) -> int | dict[str, Any] | None:
         return self._surfaces._int_product_arg(surface, value, name, topic)
 
     def _require_id(
-        self, surface: str, payload: dict[str, Any], name: str, topic: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        self, surface: str, payload: dict[str, Any], name: str, topic: str | None = None,
+    ) -> dict[str, Any] | None:
         return self._surfaces._require_id(surface, payload, name, topic)
 
     def _coerce_product_id(
-        self, surface: str, payload: dict[str, Any], name: str, topic: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        self, surface: str, payload: dict[str, Any], name: str, topic: str | None = None,
+    ) -> dict[str, Any] | None:
         return self._surfaces._coerce_product_id(surface, payload, name, topic)
 
     @staticmethod
@@ -360,29 +360,29 @@ class MemoryTools:
         return ProductSurfaces._is_truthy(value)
 
     def _require_ws_strings(
-        self, payload: dict[str, Any], names: tuple[str, ...], surface: str, topic: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        self, payload: dict[str, Any], names: tuple[str, ...], surface: str, topic: str | None = None,
+    ) -> dict[str, Any] | None:
         return self._surfaces._require_ws_strings(payload, names, surface, topic)
 
-    def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         return self._surfaces.memory(action, data, **_)
 
-    def memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory_review(self, view: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         return self._surfaces.memory_review(view, data, **_)
 
-    def memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory_govern(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         return self._surfaces.memory_govern(action, data, **_)
 
-    def memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory_repair(self, task: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         return self._surfaces.memory_repair(task, data, **_)
 
     def _embedding_configured(self) -> bool:
         return self.settings.embedding_provider == "gguf" and self.settings.embedding_model_path is not None
 
-    def _index_local_text_evidence(self, memory_id: int, record: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def _index_local_text_evidence(self, memory_id: int, record: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._evidence.index_memory(memory_id, record)
 
-    def _ensure_embedder(self) -> Tuple[Optional[ManagedEmbedder], list[str]]:
+    def _ensure_embedder(self) -> tuple[ManagedEmbedder | None, list[str]]:
         if self._embedder_loaded:
             return self._embedder, []
         with self._embedder_lock:
@@ -421,7 +421,7 @@ class MemoryTools:
                 warnings.append(warning)
             return self._embedder, warnings
 
-    def _ensure_active_embedder(self) -> Tuple[Optional[ManagedEmbedder], list[str]]:
+    def _ensure_active_embedder(self) -> tuple[ManagedEmbedder | None, list[str]]:
         """Load the configured embedder, but expose it only for a ready index."""
         embedder, warnings = self._ensure_embedder()
         if embedder is None:
@@ -438,7 +438,7 @@ class MemoryTools:
             return None, warnings
         return embedder, warnings
 
-    def _caller_workspace(self, explicit_workspace: Optional[str] = None) -> CallerWorkspace:
+    def _caller_workspace(self, explicit_workspace: str | None = None) -> CallerWorkspace:
         """Resolve the caller workspace for strict read ACLs.
 
         Explicit payload/query/console workspace wins. Without one, fall back to
@@ -453,7 +453,7 @@ class MemoryTools:
             source = "settings"
             workspace = str(getattr(self.settings, "workspace", "") or "").strip()
         warnings: list[str] = []
-        canonical: Optional[str] = None
+        canonical: str | None = None
         admitted: tuple[str, ...] = ()
         if workspace:
             # Explicit filters are canonicalized in every isolation mode. In
@@ -498,7 +498,7 @@ class MemoryTools:
         self._product_caller.set(caller)
         return caller
 
-    def _strict_acl_unavailable(self, caller: CallerWorkspace) -> Optional[dict[str, Any]]:
+    def _strict_acl_unavailable(self, caller: CallerWorkspace) -> dict[str, Any] | None:
         if caller.isolation == "strict" and not caller.canonical:
             return self.db.state.response(
                 forbidden_payload("workspace", workspace=caller, reason="missing_caller_workspace"),
@@ -507,7 +507,7 @@ class MemoryTools:
             )
         return None
 
-    def _get_memory_visible(self, memory_id: int, caller: Optional[CallerWorkspace] = None) -> Optional[dict[str, Any]]:
+    def _get_memory_visible(self, memory_id: int, caller: CallerWorkspace | None = None) -> dict[str, Any] | None:
         caller = caller or self._caller_workspace(None)
         if caller.isolation == "strict":
             if not caller.canonical:
@@ -528,8 +528,8 @@ class MemoryTools:
 
     @staticmethod
     def _conflict_next_call(
-        conflict: dict[str, Any], workspace: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        conflict: dict[str, Any], workspace: str | None = None,
+    ) -> dict[str, Any] | None:
         conflict_id = int(conflict["id"])
         revision = int(conflict["revision"])
         status = conflict.get("status")
@@ -570,7 +570,7 @@ class MemoryTools:
             }
         return None
 
-    def _conflict_detail_for_workspace(self, conflict_id: int, caller: Optional[CallerWorkspace] = None) -> Optional[dict[str, Any]]:
+    def _conflict_detail_for_workspace(self, conflict_id: int, caller: CallerWorkspace | None = None) -> dict[str, Any] | None:
         """Return group detail only when every member passes strict ACL."""
         caller = caller or self._caller_workspace(None)
         conflict = self.db.get_conflict(int(conflict_id))
@@ -633,7 +633,7 @@ class MemoryTools:
             detail.update(caller.response_fields())
         return detail
 
-    def _conflict_visible(self, conflict_id: int, caller: Optional[CallerWorkspace] = None) -> bool:
+    def _conflict_visible(self, conflict_id: int, caller: CallerWorkspace | None = None) -> bool:
         return self._conflict_detail_for_workspace(conflict_id, caller) is not None
 
     @staticmethod
@@ -649,7 +649,7 @@ class MemoryTools:
             and self.settings.semantic_conflict_model_path is not None
         )
 
-    def _ensure_semantic_backend(self) -> Optional[SemanticBackend]:
+    def _ensure_semantic_backend(self) -> SemanticBackend | None:
         if not self._semantic_configured():
             return None
         with self._semantic_backend_lock:
@@ -770,9 +770,9 @@ class MemoryTools:
         deadline = time.monotonic() + max(
             1.0, int(getattr(self.settings, "semantic_conflict_scan_budget_ms", 60000)) / 1000.0,
         )
-        memory_cache: dict[int, Optional[dict[str, Any]]] = {}
+        memory_cache: dict[int, dict[str, Any] | None] = {}
 
-        def memory(mid: int) -> Optional[dict[str, Any]]:
+        def memory(mid: int) -> dict[str, Any] | None:
             if mid not in memory_cache:
                 memory_cache[mid] = self.db.get_memory(int(mid))
             return memory_cache[mid]
@@ -897,7 +897,7 @@ class MemoryTools:
             except Exception:
                 return "error"
 
-        last_reason: Optional[str] = None
+        last_reason: str | None = None
         for item in candidates:
             if state["evaluated"] >= max_pairs or time.monotonic() >= deadline:
                 break
@@ -1061,8 +1061,8 @@ class MemoryTools:
         return {"outcome": "invalid_action", "valid_actions": ["status", "pause", "resume", "enable", "unload", "disable"]}
 
     def _enqueue_semantic_conflict_check(
-        self, memory_id: Optional[int], record: Any, *, after_evidence: bool = False,
-        trusted_applying_context: Optional[TrustedApplyingContext] = None,
+        self, memory_id: int | None, record: Any, *, after_evidence: bool = False,
+        trusted_applying_context: TrustedApplyingContext | None = None,
     ) -> dict[str, Any]:
         if memory_id is None:
             return {"status": "skipped", "reason": "backup_only"}
@@ -1093,7 +1093,7 @@ class MemoryTools:
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         return self._write_pipeline.memory_write(**payload)
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
         return self._read_pipeline.memory_search(
             query=query, workspace=workspace, tags=tags, limit=limit, offset=offset,
             debug_ranking=debug_ranking, query_embedding=query_embedding,
@@ -1105,15 +1105,15 @@ class MemoryTools:
     def memory_search_expired(
         self,
         query: str = "",
-        workspace: Optional[str] = None,
-        tags: Optional[list[str]] = None,
+        workspace: str | None = None,
+        tags: list[str] | None = None,
         limit: int = 20,
         debug_ranking: bool = False,
-        query_embedding: Optional[list[float]] = None,
-        tags_filter: Optional[list[str]] = None,
-        after_time: Optional[str] = None,
-        before_time: Optional[str] = None,
-        source_type: Optional[str] = None,
+        query_embedding: list[float] | None = None,
+        tags_filter: list[str] | None = None,
+        after_time: str | None = None,
+        before_time: str | None = None,
+        source_type: str | None = None,
         include_conflict_signal: bool = True,
         offset: int = 0,
         **_: Any,
@@ -1130,17 +1130,17 @@ class MemoryTools:
         self,
         memory_id: int,
         sections: str = "none",
-        section_ids: Optional[list[int]] = None,
+        section_ids: list[int] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         return self._read_pipeline.memory_get(
             memory_id=memory_id, sections=sections, section_ids=section_ids, **_,
         )
 
-    def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
+    def memory_recent(self, workspace: str | None = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         return self._read_pipeline.memory_recent(workspace, limit, **_)
 
-    def memory_compare(self, left_id: Optional[int] = None, right_id: Optional[int] = None, left: Optional[dict[str, Any]] = None, right: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory_compare(self, left_id: int | None = None, right_id: int | None = None, left: dict[str, Any] | None = None, right: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         return self._read_pipeline.memory_compare(left_id, right_id, left, right, **_)
 
     def memory_arbitrate(self, left_id: int, right_id: int, mark_conflict: bool = True, authorized: bool = False, **_: Any) -> dict[str, Any]:
@@ -1151,7 +1151,7 @@ class MemoryTools:
     def _with_resolution_guidance(self, conflict: dict[str, Any]) -> dict[str, Any]:
         return self._operations._with_resolution_guidance(conflict)
 
-    def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
+    def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: str | None = None, **_: Any) -> dict[str, Any]:
         return self._operations.memory_list_conflicts(status, limit, source, **_)
 
     def memory_resolve_conflict(
@@ -1160,26 +1160,26 @@ class MemoryTools:
         resolve_conflict = cast(Callable[..., dict[str, Any]], self._operations.memory_resolve_conflict)
         return resolve_conflict(conflict_id, reason, status, **_)
 
-    def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
+    def memory_confirm(self, memory_id: int, source_ref: str | None = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
         return self._operations.memory_confirm(
             memory_id, source_ref, confidence, self._is_truthy(authorized), **_,
         )
 
     def memory_rename_workspace_canonical(
-        self, old: str, new: str, reason: Optional[str] = None, **_: Any,
+        self, old: str, new: str, reason: str | None = None, **_: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_rename_workspace_canonical(old, new, reason, **_)
 
     def memory_migrate_workspace(
-        self, reason: Optional[str] = None, **payload: Any,
+        self, reason: str | None = None, **payload: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_migrate_workspace(reason, **payload)
 
     def memory_move_memories_workspace(
         self,
-        memory_ids: Optional[list[int]] = None,
+        memory_ids: list[int] | None = None,
         new_workspace: str = "",
-        reason: Optional[str] = None,
+        reason: str | None = None,
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -1188,7 +1188,7 @@ class MemoryTools:
         )
 
     def memory_confirm_pending_workspace(
-        self, memory_id: int, canonical: str, reason: Optional[str] = None,
+        self, memory_id: int, canonical: str, reason: str | None = None,
         authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_confirm_pending_workspace(
@@ -1197,8 +1197,8 @@ class MemoryTools:
 
     def memory_confirm_workspaces(
         self,
-        workspaces: Optional[list[str]] = None,
-        reason: Optional[str] = None,
+        workspaces: list[str] | None = None,
+        reason: str | None = None,
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -1215,7 +1215,7 @@ class MemoryTools:
         self,
         memory_id: int,
         reason: str,
-        superseded_by: Optional[int] = None,
+        superseded_by: int | None = None,
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -1233,7 +1233,7 @@ class MemoryTools:
         return self._operations.memory_doctor_overview(deep, **_)
 
     def memory_set_entity(
-        self, memory_id: int, entity: Optional[str] = None, scope: Optional[str] = None,
+        self, memory_id: int, entity: str | None = None, scope: str | None = None,
         clear: bool = False, authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_set_entity(
@@ -1246,7 +1246,7 @@ class MemoryTools:
         return self._operations.memory_list_entities(limit, include_unassigned, **_)
 
     def memory_rebuild_evidence(
-        self, memory_ids: Optional[list[int]] = None, dry_run: bool = True,
+        self, memory_ids: list[int] | None = None, dry_run: bool = True,
         batch_size: int = 50, **_: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_rebuild_evidence(memory_ids, dry_run, batch_size, **_)
@@ -1257,16 +1257,16 @@ class MemoryTools:
     def memory_edit(
         self,
         memory_id: int,
-        new_content: Optional[str] = None,
-        old_text: Optional[str] = None,
-        new_text: Optional[str] = None,
-        new_subject: Optional[str] = None,
-        new_tags: Optional[list[str]] = None,
+        new_content: str | None = None,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        new_subject: str | None = None,
+        new_tags: list[str] | None = None,
         reason: str = "",
         authorized: bool = False,
         tags_only: bool = False,
-        add_tags: Optional[list[str]] = None,
-        remove_tags: Optional[list[str]] = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_edit(
@@ -1279,8 +1279,8 @@ class MemoryTools:
 
     def memory_cleanup_history(
         self,
-        memory_id: Optional[int] = None,
-        older_than_days: Optional[int] = None,
+        memory_id: int | None = None,
+        older_than_days: int | None = None,
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -1319,7 +1319,7 @@ class MemoryTools:
         return self.db.workspaces.normalize_workspace_canonicals(dry_run=dry_run)
 
     @staticmethod
-    def _confidence_rank(hint: Optional[str]) -> int:
+    def _confidence_rank(hint: str | None) -> int:
         return ConflictSignalPipeline._confidence_rank(hint)
 
     def _attach_conflict_signals(
@@ -1335,5 +1335,5 @@ class MemoryTools:
         conflicts: list[dict[str, Any]],
         summaries: dict[int, dict[str, Any]],
         result_id_set: set[int],
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return self._signals._build_open_table_signal(memory_id, conflicts, summaries, result_id_set)

@@ -15,7 +15,7 @@ CLIENT_MAX_LENGTH = 64
 AGENT_ID_MAX_LENGTH = 128
 
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9._:@-]+$")
-_current_identity: ContextVar[Optional["RequestIdentity"]] = ContextVar(
+_current_identity: ContextVar["RequestIdentity" | None] = ContextVar(
     "memory_arbiter_request_identity", default=None,
 )
 
@@ -37,20 +37,20 @@ class IdentityHeaderError(ValueError):
         )
 
 
-def get_request_identity() -> Optional[RequestIdentity]:
+def get_request_identity() -> RequestIdentity | None:
     return _current_identity.get()
 
 
-def set_request_identity(identity: RequestIdentity) -> Token[Optional[RequestIdentity]]:
+def set_request_identity(identity: RequestIdentity) -> Token[RequestIdentity | None]:
     return _current_identity.set(identity)
 
 
-def reset_request_identity(token: Token[Optional[RequestIdentity]]) -> None:
+def reset_request_identity(token: Token[RequestIdentity | None]) -> None:
     _current_identity.reset(token)
 
 
 @contextmanager
-def request_identity_scope(identity: Optional[RequestIdentity]) -> Iterator[None]:
+def request_identity_scope(identity: RequestIdentity | None) -> Iterator[None]:
     if identity is None:
         yield
         return
@@ -61,7 +61,7 @@ def request_identity_scope(identity: Optional[RequestIdentity]) -> Iterator[None
         reset_request_identity(token)
 
 
-def _header_value(headers: Mapping[str, Any], name: str) -> Optional[str]:
+def _header_value(headers: Mapping[str, Any], name: str) -> str | None:
     getlist = getattr(headers, "getlist", None)
     if callable(getlist):
         values = list(getlist(name))
@@ -83,7 +83,7 @@ def _header_value(headers: Mapping[str, Any], name: str) -> Optional[str]:
 
 
 def _validate_identity_value(
-    value: Optional[str], *, header: str, max_length: int,
+    value: str | None, *, header: str, max_length: int,
 ) -> str:
     if value is None:
         raise IdentityHeaderError(header, "is required")
@@ -124,7 +124,7 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
-def host_header_name(host_header: Optional[str]) -> Optional[str]:
+def host_header_name(host_header: str | None) -> str | None:
     if host_header is None or not str(host_header).strip():
         return None
     try:

@@ -83,11 +83,11 @@ class AuditStore:
         except (OSError, ValueError, TypeError):
             pass
 
-    def scan_log_last_completed(self) -> Optional[dict[str, Any]]:
+    def scan_log_last_completed(self) -> dict[str, Any] | None:
         path = self.scan_log_path
         if not path.exists():
             return None
-        last_completed: Optional[dict[str, Any]] = None
+        last_completed: dict[str, Any] | None = None
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 for line in fh:

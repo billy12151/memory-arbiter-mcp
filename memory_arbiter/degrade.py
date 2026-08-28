@@ -12,7 +12,7 @@ class DegradeState:
     fts5_available: bool = False
     sqlite_writable: bool = True
     jsonl_backup_active: bool = False
-    notice_provider: Optional[Callable[[], list[dict[str, Any]]]] = None
+    notice_provider: Callable[[], list[dict[str, Any]]] | None = None
 
     @property
     def degraded(self) -> bool:
@@ -22,7 +22,7 @@ class DegradeState:
         if message not in self.warnings:
             self.warnings.append(message)
 
-    def response(self, data: Any, ok: bool = True, extra_warnings: Optional[list[str]] = None) -> dict[str, Any]:
+    def response(self, data: Any, ok: bool = True, extra_warnings: list[str] | None = None) -> dict[str, Any]:
         warnings = list(self.warnings)
         for warning in extra_warnings or []:
             if warning not in warnings:

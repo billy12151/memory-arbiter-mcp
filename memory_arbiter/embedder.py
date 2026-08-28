@@ -38,7 +38,7 @@ class ManagedEmbedder:
     n_ctx: int
     reserved_tokens: int = 64
     warnings: list[str] = field(default_factory=list)
-    last_encode_error: Optional[str] = None
+    last_encode_error: str | None = None
     # llama-cpp-python's GGUF inference (create_embedding AND tokenize) is not
     # thread-safe: concurrent calls on one Llama instance deadlock. The async
     # split worker runs embed on a background thread while the main thread may
@@ -52,7 +52,7 @@ class ManagedEmbedder:
         self,
         prefix: str,
         body: str,
-        max_body_chars: Optional[int] = None,
+        max_body_chars: int | None = None,
     ) -> EmbedResult:
         """Unified token-safe embedding (design doc §1.1b).
 
@@ -157,7 +157,7 @@ def build_embedder(
     n_ctx: int = 2048,
     reserved_tokens: int = 64,
     max_section_chars: int = 3600,
-) -> Tuple[Optional[ManagedEmbedder], list[str]]:
+) -> tuple[ManagedEmbedder | None, list[str]]:
     """Build a managed GGUF embedder with token-safe helpers.
 
     Returns (ManagedEmbedder, []) on success, (None, warnings) on failure.

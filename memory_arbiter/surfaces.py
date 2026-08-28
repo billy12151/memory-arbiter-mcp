@@ -168,19 +168,19 @@ class ProductSurfaces:
     def _caller_workspace(self, *args: Any, **kwargs: Any) -> "CallerWorkspace":
         return self._tools._caller_workspace(*args, **kwargs)
 
-    def _conflict_detail_for_workspace(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+    def _conflict_detail_for_workspace(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._conflict_detail_for_workspace(*args, **kwargs)
 
-    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._get_memory_visible(*args, **kwargs)
 
-    def _payload_dict(self, data: "Optional[dict[str, Any]]") -> dict[str, Any]:
+    def _payload_dict(self, data: "dict[str, Any] | None") -> dict[str, Any]:
         return self._tools._payload_dict(data)
 
     def _semantic_control_with_timeout(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return self._tools._semantic_control_with_timeout(*args, **kwargs)
 
-    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._strict_acl_unavailable(*args, **kwargs)
 
     def memory_audit_summary(self, **kwargs: Any) -> dict[str, Any]:
@@ -269,7 +269,7 @@ class ProductSurfaces:
             if registered_surface == surface and not operation.startswith("_")
         }
 
-    def _product_help(self, surface: str, topic: Optional[str] = None) -> dict[str, Any]:
+    def _product_help(self, surface: str, topic: str | None = None) -> dict[str, Any]:
         # The document bodies live in the module-level _PRODUCT_HELPS constant
         # (#9); every mutation path below copies via dict() first.
         helps = _PRODUCT_HELPS
@@ -307,18 +307,18 @@ class ProductSurfaces:
             return help_doc
         return {"description": str(help_doc)}
 
-    def _invalid_product_call(self, surface: str, message: str, topic: Optional[str] = None) -> dict[str, Any]:
+    def _invalid_product_call(self, surface: str, message: str, topic: str | None = None) -> dict[str, Any]:
         return self.db.state.response(
             {"error": message, "help": self._product_help(surface, topic)},
             ok=False,
         )
 
     @staticmethod
-    def _help_topic(payload: dict[str, Any], fallback_key: str) -> Optional[str]:
+    def _help_topic(payload: dict[str, Any], fallback_key: str) -> str | None:
         return payload.get("topic") or payload.get(fallback_key)
 
     def _forward(
-        self, surface: str, topic: Optional[str], fn: Callable[..., dict[str, Any]], **payload: Any,
+        self, surface: str, topic: str | None, fn: Callable[..., dict[str, Any]], **payload: Any,
     ) -> dict[str, Any]:
         """Forward ``**payload`` to a low-level method with a product-surface guard.
 
@@ -347,16 +347,16 @@ class ProductSurfaces:
             payload[target] = payload.pop("id")
 
     def _int_product_arg(
-        self, surface: str, value: Any, name: str, topic: Optional[str] = None,
-    ) -> Optional[int | dict[str, Any]]:
+        self, surface: str, value: Any, name: str, topic: str | None = None,
+    ) -> int | dict[str, Any] | None:
         parsed = _controlled_integer(value)
         if parsed is None:
             return self._invalid_product_call(surface, f"{name} must be an integer", topic)
         return parsed
 
     def _require_id(
-        self, surface: str, payload: dict[str, Any], name: str, topic: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        self, surface: str, payload: dict[str, Any], name: str, topic: str | None = None,
+    ) -> dict[str, Any] | None:
         """Guard a forward whose target has a required positional ``name``.
 
         Product tools forward ``**payload`` to low-level methods. When the agent
@@ -370,8 +370,8 @@ class ProductSurfaces:
         return None
 
     def _coerce_product_id(
-        self, surface: str, payload: dict[str, Any], name: str, topic: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        self, surface: str, payload: dict[str, Any], name: str, topic: str | None = None,
+    ) -> dict[str, Any] | None:
         self._alias_id(payload, name)
         missing = self._require_id(surface, payload, name, topic)
         if missing is not None:
@@ -401,8 +401,8 @@ class ProductSurfaces:
         return False
 
     def _require_ws_strings(
-        self, payload: dict[str, Any], names: tuple[str, ...], surface: str, topic: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        self, payload: dict[str, Any], names: tuple[str, ...], surface: str, topic: str | None = None,
+    ) -> dict[str, Any] | None:
         """Reject non-string workspace fields with a structured error.
 
         Loosely-typed MCP JSON can pass a list/dict/int; str()-coercing those
@@ -431,8 +431,8 @@ class ProductSurfaces:
         self,
         surface: str,
         operation: str,
-        data: Optional[dict[str, Any]],
-        dispatch: Callable[[str, Optional[dict[str, Any]]], dict[str, Any]],
+        data: dict[str, Any] | None,
+        dispatch: Callable[[str, dict[str, Any] | None], dict[str, Any]],
     ) -> dict[str, Any]:
         if data is not None and not isinstance(data, dict):
             return dispatch(operation, data)
@@ -452,7 +452,7 @@ class ProductSurfaces:
         return response
 
     def _notice_workspace_scope(
-        self, response: dict[str, Any], data: Optional[dict[str, Any]],
+        self, response: dict[str, Any], data: dict[str, Any] | None,
     ) -> "WorkspaceScope":
         """Scope automatic notice delivery like every other strict read.
 
@@ -469,7 +469,7 @@ class ProductSurfaces:
         return self._caller_workspace(raw).scope_canonicals()
 
     def _deliver_product_notices(
-        self, response: dict[str, Any], data: Optional[dict[str, Any]],
+        self, response: dict[str, Any], data: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Attach notices only after success, scoped to this product caller."""
         if not response.get("ok"):
@@ -501,25 +501,25 @@ class ProductSurfaces:
             response.setdefault("notices", []).extend(notices)
         return response
 
-    def memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         operation = str(action or "help").strip().lower()
         self._tools._product_caller.set(None)
         response = self._validated_product_call("memory", operation, data, self._memory)
         return self._deliver_product_notices(response, data)
 
-    def memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory_review(self, view: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         operation = str(view or "help").strip().lower()
         self._tools._product_caller.set(None)
         response = self._validated_product_call("memory_review", operation, data, self._memory_review)
         return self._deliver_product_notices(response, data)
 
-    def memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory_govern(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         operation = str(action or "help").strip().lower()
         self._tools._product_caller.set(None)
         response = self._validated_product_call("memory_govern", operation, data, self._memory_govern)
         return self._deliver_product_notices(response, data)
 
-    def memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory_repair(self, task: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         operation = str(task or "help").strip().lower()
         self._tools._product_caller.set(None)
         response = self._validated_product_call("memory_repair", operation, data, self._memory_repair)
@@ -547,12 +547,12 @@ class ProductSurfaces:
     def _governance_authorization_error(
         self, action: str, payload: dict[str, Any],
         *, tool: str = "memory_govern", retry_field: str = "action",
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         if not payload.get("authorized"):
             return self._governance_authorization_required(action, tool=tool, retry_field=retry_field)
         return None
 
-    def _memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def _memory(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         """Task-oriented daily memory tool: remember/find/read/update/judge/status.
 
         Use help when unsure about fields. For current source-of-truth updates,
@@ -608,7 +608,7 @@ class ProductSurfaces:
             return self.memory_status(workspace=payload.get("workspace"))
         return self._invalid_product_call("memory", f"unknown action: {action}", action)
 
-    def _memory_review(self, view: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def _memory_review(self, view: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         """Read-only memory inspection: health, conflicts, history, expired recall, audit, and entities."""
         payload = self._payload_dict(data)
         if data is not None and not isinstance(data, dict):
@@ -663,7 +663,7 @@ class ProductSurfaces:
             return self._forward("memory_review", view, self._tools.memory_list_entities, **payload)
         return self._invalid_product_call("memory_review", f"unknown view: {view}", view)
 
-    def _memory_govern(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def _memory_govern(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         """Explicit user-authorized governance: retire, apply/replan/resolve conflict plans, confirm, or manage workspaces.
 
         Do not use this for ordinary updates or current source-of-truth replacement;
@@ -853,7 +853,7 @@ class ProductSurfaces:
             return self._forward("memory_govern", action, self._tools.memory_confirm_workspaces, **payload)
         return self._invalid_product_call("memory_govern", f"unknown action: {action}", action)
 
-    def _memory_repair(self, task: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def _memory_repair(self, task: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         """Maintenance and repair for evidence, history, backup, notices, and runtime state."""
         payload = self._payload_dict(data)
         if data is not None and not isinstance(data, dict):

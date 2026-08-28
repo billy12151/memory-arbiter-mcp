@@ -19,7 +19,7 @@ SUPPORT_NEW_ISSUE_URL = f"{SUPPORT_REPO_URL}/issues/new"
 class ConsoleAPI:
     """Read-only data adapter for the local Console HTTP server."""
 
-    def __init__(self, tools: Optional[MemoryTools] = None, settings: Optional[Settings] = None):
+    def __init__(self, tools: MemoryTools | None = None, settings: Settings | None = None):
         self.tools = tools or MemoryTools(settings or Settings.from_env())
         self.settings = self.tools.settings
 
@@ -51,12 +51,12 @@ class ConsoleAPI:
     def health(self) -> dict[str, Any]:
         return {"ok": True, "version": __version__, "read_only": True, "brand": {"en": "mema", "zh": "迷码"}}
 
-    def _strict_workspace_required(self, workspace: Optional[str]) -> Optional[dict[str, Any]]:
+    def _strict_workspace_required(self, workspace: str | None) -> dict[str, Any] | None:
         if getattr(self.tools.settings, "isolation", "none") == "strict" and not str(workspace or "").strip():
             return {"error": "isolation=strict requires an explicit workspace query", "_http_status": 400}
         return None
 
-    def overview(self, workspace: Optional[str] = None) -> dict[str, Any]:
+    def overview(self, workspace: str | None = None) -> dict[str, Any]:
         missing_ws = self._strict_workspace_required(workspace)
         if missing_ws is not None:
             return missing_ws
@@ -99,7 +99,7 @@ class ConsoleAPI:
             "status": status,
         }
 
-    def _status_counts(self, workspace: Optional[str] = None) -> dict[str, int]:
+    def _status_counts(self, workspace: str | None = None) -> dict[str, int]:
         # Conflict counters follow the doctor "unresolved" definition: open + applying.
         counts = {"total": 0, "active": 0, "superseded": 0, "conflicted": 0, "pending": 0, "deleted": 0, "expired": 0, "open_conflicts": 0, "applying_conflicts": 0}
         if not self.tools.db.db_available:
@@ -162,7 +162,7 @@ class ConsoleAPI:
         counts["expired"] = counts.get("superseded", 0) + counts.get("conflicted", 0) + counts.get("pending", 0)
         return counts
 
-    def conflicts(self, status: str = "open", limit: Any = 50, workspace: Optional[str] = None) -> dict[str, Any]:
+    def conflicts(self, status: str = "open", limit: Any = 50, workspace: str | None = None) -> dict[str, Any]:
         missing_ws = self._strict_workspace_required(workspace)
         if missing_ws is not None:
             return missing_ws
@@ -174,7 +174,7 @@ class ConsoleAPI:
         items = data.get("conflicts") or []
         return {"items": items, "count": len(items), "status": status or "open"}
 
-    def conflict_detail(self, conflict_id: int, workspace: Optional[str] = None) -> dict[str, Any]:
+    def conflict_detail(self, conflict_id: int, workspace: str | None = None) -> dict[str, Any]:
         missing_ws = self._strict_workspace_required(workspace)
         if missing_ws is not None:
             return missing_ws
@@ -187,7 +187,7 @@ class ConsoleAPI:
             return {"error": f"conflict id {conflict_id} not found", "_http_status": 404}
         return detail
 
-    def _get_conflict_row(self, conflict_id: int) -> Optional[dict[str, Any]]:
+    def _get_conflict_row(self, conflict_id: int) -> dict[str, Any] | None:
         if not self.tools.db.db_available:
             return None
         try:
@@ -213,9 +213,9 @@ class ConsoleAPI:
         self,
         query: str = "",
         status: str = "active",
-        workspace: Optional[str] = None,
-        source_type: Optional[str] = None,
-        tags: Optional[str] = None,
+        workspace: str | None = None,
+        source_type: str | None = None,
+        tags: str | None = None,
         limit: Any = 30,
         offset: Any = 0,
     ) -> dict[str, Any]:
@@ -288,7 +288,7 @@ class ConsoleAPI:
             "warnings": response.get("warnings", []) if isinstance(response, dict) else [],
         }
 
-    def _recent_browse(self, limit: int, offset: int, workspace: Optional[str] = None) -> dict[str, Any]:
+    def _recent_browse(self, limit: int, offset: int, workspace: str | None = None) -> dict[str, Any]:
         """Browse active memories by recency (newest first), paginated.
 
         Bypasses memory_search so the memories page shows the actual newest
@@ -348,13 +348,13 @@ class ConsoleAPI:
             out.update(caller.response_fields())
         return out
 
-    def memory_detail(self, memory_id: int, workspace: Optional[str] = None) -> dict[str, Any]:
+    def memory_detail(self, memory_id: int, workspace: str | None = None) -> dict[str, Any]:
         missing_ws = self._strict_workspace_required(workspace)
         if missing_ws is not None:
             return missing_ws
         return self._memory_or_error(memory_id, workspace=workspace)
 
-    def _memory_or_error(self, memory_id: Any, workspace: Optional[str] = None) -> dict[str, Any]:
+    def _memory_or_error(self, memory_id: Any, workspace: str | None = None) -> dict[str, Any]:
         try:
             memory_id_int = int(memory_id)
         except (TypeError, ValueError):

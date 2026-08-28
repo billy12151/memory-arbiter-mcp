@@ -29,7 +29,7 @@ DEFAULT_WORKSPACE_NAME = "default"
 DEFAULT_TERMS = frozenset({"", DEFAULT_WORKSPACE_NAME, "默认", "none", "null", "unknown", "未知"})
 
 
-def is_default_workspace_term(name: Optional[str]) -> bool:
+def is_default_workspace_term(name: str | None) -> bool:
     """True when a workspace string is a reserved default-pool synonym."""
     if name is None:
         return False
@@ -74,7 +74,7 @@ def isolation_active(level: str) -> bool:
     return level != Isolation.NONE
 
 
-def strict_ws(level: str, ws_canonical: Optional[str]) -> Optional[str]:
+def strict_ws(level: str, ws_canonical: str | None) -> str | None:
     """Return ``ws_canonical`` only under strict isolation, else None.
 
     Folds the repeated ``ws_canonical if (isolation == "strict" and ws_canonical)

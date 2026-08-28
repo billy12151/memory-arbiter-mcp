@@ -183,7 +183,7 @@ class MemoryIdentityMiddleware:
             await self.app(scope, downstream_receive, send)
 
 
-def _identity_for_tool(app: Any) -> Optional[RequestIdentity]:
+def _identity_for_tool(app: Any) -> RequestIdentity | None:
     get_context = getattr(app, "get_context", None)
     if callable(get_context):
         try:
@@ -219,7 +219,7 @@ def _identity_mismatch(
     )
 
 
-def _policy_denied(tools: MemoryTools, identity: RequestIdentity) -> Optional[dict[str, Any]]:
+def _policy_denied(tools: MemoryTools, identity: RequestIdentity) -> dict[str, Any] | None:
     allowed, warnings = tools._allowed(identity.agent_id, identity.client)
     if allowed:
         return None
@@ -230,7 +230,7 @@ def _policy_denied(tools: MemoryTools, identity: RequestIdentity) -> Optional[di
     )
 
 
-def _repair_policy_check(task: str, data: Optional[dict[str, Any]]) -> bool:
+def _repair_policy_check(task: str, data: dict[str, Any] | None) -> bool:
     operation = task.strip().lower()
     payload = data if isinstance(data, dict) else {}
     if operation == "help":
@@ -253,7 +253,7 @@ def _repair_policy_check(task: str, data: Optional[dict[str, Any]]) -> bool:
 
 def _invoke_with_identity(
     tools: MemoryTools,
-    identity: Optional[RequestIdentity],
+    identity: RequestIdentity | None,
     fn: Callable[..., dict[str, Any]],
     *,
     policy_check: bool,
@@ -269,9 +269,9 @@ def _invoke_with_identity(
 
 def _data_with_request_identity(
     tools: MemoryTools,
-    data: Optional[dict[str, Any]],
-    identity: Optional[RequestIdentity],
-) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    data: dict[str, Any] | None,
+    identity: RequestIdentity | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     if identity is None or not isinstance(data, dict):
         return data, None
     payload = dict(data)
@@ -328,14 +328,14 @@ def build_runtime() -> ServerBundle:
     # process-level identity from config once and apply it per tool call via
     # request_identity_scope in _invoke_with_identity. Without this bridge the
     # trusted source (ContextVar) would be empty on every stdio call.
-    stdio_identity: Optional[RequestIdentity] = None
+    stdio_identity: RequestIdentity | None = None
     if settings.mcp_transport == "stdio":
         stdio_identity = RequestIdentity(
             client=configured_client, agent_id=configured_agent_id, transport="stdio",
         )
 
     @app.tool()
-    def memory(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def memory(action: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
         """Daily memory operations: remember, find, read, update, judge, status, help.
 
         Call memory(action="help") to discover accepted fields, judge requirements,
@@ -353,7 +353,7 @@ def build_runtime() -> ServerBundle:
         )
 
     @app.tool()
-    def memory_review(view: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def memory_review(view: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
         """Read-only inspection: overview, doctor, conflicts, conflict_detail, history, expired, audit, entities, help.
 
         Use memory_review(view="help") for accepted fields. Inspect conflict_detail
@@ -370,7 +370,7 @@ def build_runtime() -> ServerBundle:
         )
 
     @app.tool()
-    def memory_govern(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def memory_govern(action: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
         """Authorized governance: retire, apply/replan/resolve conflicts, confirm, and manage workspaces.
 
         Every state-changing action requires explicit user authorization for that
@@ -387,7 +387,7 @@ def build_runtime() -> ServerBundle:
         )
 
     @app.tool()
-    def memory_repair(task: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def memory_repair(task: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
         """Maintenance: evidence rebuild, history cleanup, entity assignment, pending activation, backup replay, notices, and semantic runtime control.
 
         Use memory_repair(task="help") for notice handling and semantic_control

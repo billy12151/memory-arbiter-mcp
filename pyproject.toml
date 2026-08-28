@@ -41,7 +41,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.ruff.lint]
-select = ["E9", "F63", "F7", "F82"]
+select = ["E9", "F63", "F7", "F82", "UP006", "UP007", "UP045"]
 
 [tool.mypy]
 strict = true

@@ -40,9 +40,9 @@ class ConflictMember:
     evidence_span: tuple[int, int]
     content_hash: str
     direction: str
-    prompt_version: Optional[str]
+    prompt_version: str | None
     detector_version: str
-    evidence_unit: Optional[int] = None
+    evidence_unit: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,7 +74,7 @@ def utc_now_iso() -> str:
     return utc_now_iso()
 
 
-def normalize_iso(value: Optional[str]) -> str:
+def normalize_iso(value: str | None) -> str:
     if not value:
         return utc_now_iso()
     try:
@@ -94,15 +94,15 @@ class MemoryRecord:
     workspace: str
     tags: list[str] = field(default_factory=list)
     source_type: str = SourceType.UNKNOWN.value
-    source_ref: Optional[str] = None
+    source_ref: str | None = None
     event_time: str = field(default_factory=utc_now_iso)
     ingest_time: str = field(default_factory=utc_now_iso)
     confidence: float = 0.5
     protection_level: str = ProtectionLevel.NORMAL.value
     status: str = MemoryStatus.ACTIVE.value
-    subject: Optional[str] = None
+    subject: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    id: Optional[int] = None
+    id: int | None = None
 
     @classmethod
     def from_input(
@@ -110,7 +110,7 @@ class MemoryRecord:
         payload: dict[str, Any],
         defaults: dict[str, str],
         *,
-        trusted_agent_id: Optional[str] = None,
+        trusted_agent_id: str | None = None,
     ) -> "MemoryRecord":
         # agent_id is provenance, not caller input: payload agent_id is ignored
         # by design. Trusted channels only: `trusted_agent_id` (e.g. backup
@@ -158,7 +158,7 @@ class TrustedApplyingContext:
     revision: int
     memory_id: int
     action: str
-    chosen_value: Optional[str] = None
+    chosen_value: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -170,7 +170,7 @@ class TrustedApplyingContext:
         }
 
     @classmethod
-    def from_dict(cls, raw: Any) -> Optional["TrustedApplyingContext"]:
+    def from_dict(cls, raw: Any) -> "TrustedApplyingContext" | None:
         if not isinstance(raw, dict):
             return None
         try:

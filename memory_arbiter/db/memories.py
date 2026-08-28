@@ -67,11 +67,11 @@ class MemoriesStore:
     def insert_memory(
         self,
         record: MemoryRecord,
-        workspace_canonical: Optional[str] = None,
-        workspace_embedding: Optional[list[float]] = None,
+        workspace_canonical: str | None = None,
+        workspace_embedding: list[float] | None = None,
         *,
         register_workspace_canonical: bool = True,
-    ) -> Tuple[Optional[int], list[str]]:
+    ) -> tuple[int | None, list[str]]:
         warnings: list[str] = []
         if not record.content:
             raise ValueError("content is required")
@@ -106,7 +106,7 @@ class MemoriesStore:
 
     def insert_memory_on_conn(
         self, conn: sqlite3.Connection, record: MemoryRecord,
-        workspace_canonical: Optional[str] = None,
+        workspace_canonical: str | None = None,
     ) -> int:
         canonical = (workspace_canonical or record.workspace or "").strip() or DEFAULT_WORKSPACE_NAME
         cur = conn.execute(
@@ -144,7 +144,7 @@ class MemoriesStore:
             )
         return memory_id
 
-    def _append_backup(self, record: MemoryRecord, workspace_canonical: Optional[str] = None) -> None:
+    def _append_backup(self, record: MemoryRecord, workspace_canonical: str | None = None) -> None:
         from datetime import datetime, timezone
         import os
 
@@ -181,15 +181,15 @@ class MemoriesStore:
         self.state.jsonl_backup_active = True
 
     @staticmethod
-    def _fetch_memory(conn: sqlite3.Connection, memory_id: int) -> Optional[dict[str, Any]]:
+    def _fetch_memory(conn: sqlite3.Connection, memory_id: int) -> dict[str, Any] | None:
         row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
         return _row_to_dict(row) if row else None
 
-    def get_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> Optional[dict[str, Any]]:
+    def get_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> dict[str, Any] | None:
         """Fetch a memory using the caller's transaction/connection."""
         return self._fetch_memory(conn, int(memory_id))
 
-    def get_memory(self, memory_id: int, *, conn: Optional[sqlite3.Connection] = None) -> Optional[dict[str, Any]]:
+    def get_memory(self, memory_id: int, *, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
         if conn is not None:
             return self.get_memory_on_conn(conn, memory_id)
         if not self._db_available:
@@ -200,7 +200,7 @@ class MemoriesStore:
     def get_memory_for_workspace(
         self, memory_id: int, ws_canonical: str,
         admitted: WorkspaceScope = None,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """ACL-specific read-by-id helper; does not change get_memory semantics.
 
         ``admitted`` (defaulting to just ``ws_canonical``) is the strict
@@ -313,7 +313,7 @@ class MemoriesStore:
         memory_id: int,
         updates: dict[str, Any],
         *,
-        conn: Optional[sqlite3.Connection] = None,
+        conn: sqlite3.Connection | None = None,
     ) -> bool:
         if conn is not None:
             return self.update_memory_on_conn(conn, memory_id, updates)
@@ -325,7 +325,7 @@ class MemoriesStore:
         except sqlite3.Error:
             return False
 
-    def list_memories(self, subject: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
+    def list_memories(self, subject: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         if not self._db_available:
             return []
         clauses = ["status != 'deleted'"]
@@ -344,11 +344,11 @@ class MemoriesStore:
     @staticmethod
     def _filter_clauses(
         like_status_clause: str,
-        tags_filter: Optional[list[str]],
-        after_dt: Optional[datetime],
-        before_dt: Optional[datetime],
-        source_type: Optional[str],
-    ) -> Tuple[list[str], list[Any]]:
+        tags_filter: list[str] | None,
+        after_dt: datetime | None,
+        before_dt: datetime | None,
+        source_type: str | None,
+    ) -> tuple[list[str], list[Any]]:
         """WHERE clause + params shared by count_filtered_memories and recall_by_filters.
 
         Mirrors search._passes_filters: like_status_clause + per-tag json_each exact
@@ -383,10 +383,10 @@ class MemoriesStore:
     def count_filtered_memories(
         self,
         like_status_clause: str,
-        tags_filter: Optional[list[str]],
-        after_dt: Optional[datetime],
-        before_dt: Optional[datetime],
-        source_type: Optional[str],
+        tags_filter: list[str] | None,
+        after_dt: datetime | None,
+        before_dt: datetime | None,
+        source_type: str | None,
         ws_canonical: WorkspaceScope = None,
     ) -> int:
         """v0.7.3: COUNT(*) under the same filters used by search's _passes_filters.
@@ -418,10 +418,10 @@ class MemoriesStore:
     def recall_by_filters(
         self,
         like_status_clause: str,
-        tags_filter: Optional[list[str]],
-        after_dt: Optional[datetime],
-        before_dt: Optional[datetime],
-        source_type: Optional[str],
+        tags_filter: list[str] | None,
+        after_dt: datetime | None,
+        before_dt: datetime | None,
+        source_type: str | None,
         limit: int,
         offset: int = 0,
         ws_canonical: WorkspaceScope = None,
@@ -463,11 +463,11 @@ class MemoriesStore:
     def update_tags_low_side_effect(
         self,
         memory_id: int,
-        add_tags: Optional[list[str]] = None,
-        remove_tags: Optional[list[str]] = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
         authorized: bool = False,
         *,
-        conn: Optional[sqlite3.Connection] = None,
+        conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         """v0.7.6: low-side-effect tag-only update.
 
@@ -508,8 +508,8 @@ class MemoriesStore:
         self,
         conn: sqlite3.Connection,
         memory_id: int,
-        add_tags: Optional[list[str]] = None,
-        remove_tags: Optional[list[str]] = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
         """Update tags using a caller-owned write transaction."""
@@ -574,8 +574,8 @@ class MemoriesStore:
     def update_metadata_fields_low_side_effect(
         self,
         memory_id: int,
-        set_fields: Optional[dict[str, Any]] = None,
-        clear_fields: Optional[list[str]] = None,
+        set_fields: dict[str, Any] | None = None,
+        clear_fields: list[str] | None = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
         if not self._db_available or not self.state.sqlite_writable:
@@ -590,8 +590,8 @@ class MemoriesStore:
         self,
         conn: sqlite3.Connection,
         memory_id: int,
-        set_fields: Optional[dict[str, Any]] = None,
-        clear_fields: Optional[list[str]] = None,
+        set_fields: dict[str, Any] | None = None,
+        clear_fields: list[str] | None = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
         """Update metadata using a caller-owned write transaction."""
@@ -653,7 +653,7 @@ class MemoriesStore:
 
     def find_metadata_overlap_candidates(
         self,
-        subject: Optional[str],
+        subject: str | None,
         tags: list[str],
         exclude_id: int,
         limit: int = 50,
@@ -714,11 +714,11 @@ class MemoriesStore:
 
     def find_semantic_overlap_candidates(
         self,
-        subject: Optional[str],
+        subject: str | None,
         tags: list[str],
         exclude_id: int,
         limit: int = 50,
-        canonical_workspace: Optional[str] = None,
+        canonical_workspace: str | None = None,
         isolation: str = "none",
     ) -> list[dict[str, Any]]:
         """Return a bounded, metadata-only shortlist for semantic classification.
@@ -888,17 +888,17 @@ class MemoriesStore:
         conn: sqlite3.Connection,
         memory_id: int,
         *,
-        new_content: Optional[str] = None,
-        old_text: Optional[str] = None,
-        new_text: Optional[str] = None,
-        new_subject: Optional[str] = None,
-        new_tags: Optional[list[str]] = None,
-        add_tags: Optional[list[str]] = None,
-        remove_tags: Optional[list[str]] = None,
-        reason: Optional[str] = None,
+        new_content: str | None = None,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        new_subject: str | None = None,
+        new_tags: list[str] | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        reason: str | None = None,
         authorized: bool = False,
-        expected_version: Optional[int] = None,
-        expected_content_hash: Optional[str] = None,
+        expected_version: int | None = None,
+        expected_content_hash: str | None = None,
         require_active: bool = True,
     ) -> dict[str, Any]:
         """Apply a full/partial edit intent inside caller-owned transaction.
@@ -1038,18 +1038,18 @@ class MemoriesStore:
         self,
         memory_id: int,
         *,
-        new_content: Optional[str] = None,
-        old_text: Optional[str] = None,
-        new_text: Optional[str] = None,
-        new_subject: Optional[str] = None,
-        new_tags: Optional[list[str]] = None,
-        add_tags: Optional[list[str]] = None,
-        remove_tags: Optional[list[str]] = None,
-        reason: Optional[str] = None,
+        new_content: str | None = None,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        new_subject: str | None = None,
+        new_tags: list[str] | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        reason: str | None = None,
         authorized: bool = False,
-        expected_version: Optional[int] = None,
-        expected_content_hash: Optional[str] = None,
-        conn: Optional[sqlite3.Connection] = None,
+        expected_version: int | None = None,
+        expected_content_hash: str | None = None,
+        conn: sqlite3.Connection | None = None,
         require_active: bool = True,
     ) -> dict[str, Any]:
         if conn is not None:
@@ -1096,13 +1096,13 @@ class MemoriesStore:
         self,
         memory_id: int,
         new_content: str,
-        new_subject: Optional[str] = None,
-        new_tags: Optional[list[str]] = None,
-        reason: Optional[str] = None,
+        new_subject: str | None = None,
+        new_tags: list[str] | None = None,
+        reason: str | None = None,
         *,
-        conn: Optional[sqlite3.Connection] = None,
+        conn: sqlite3.Connection | None = None,
         authorized: bool = True,
-    ) -> Optional[int]:
+    ) -> int | None:
         """In-place edit a memory's content, archiving the prior version."""
         result = self.edit_memory_intent(
             memory_id,
@@ -1131,8 +1131,8 @@ class MemoriesStore:
             return [_row_to_dict(row) for row in rows]
 
     def cleanup_history(
-        self, memory_id: Optional[int] = None, older_than_days: Optional[int] = None,
-        *, conn: Optional[sqlite3.Connection] = None,
+        self, memory_id: int | None = None, older_than_days: int | None = None,
+        *, conn: sqlite3.Connection | None = None,
     ) -> int:
         """Delete historical snapshots from memory_history.
 

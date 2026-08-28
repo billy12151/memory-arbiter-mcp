@@ -42,13 +42,13 @@ class EvidencePipeline:
     def _semantic_worker(self) -> "SemanticConflictWorker":
         return self._tools._semantic_worker
 
-    def _ensure_active_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+    def _ensure_active_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
         return self._tools._ensure_active_embedder()
 
-    def _ensure_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+    def _ensure_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
         return self._tools._ensure_embedder()
 
-    def _ensure_semantic_backend(self) -> "Optional[SemanticBackend]":
+    def _ensure_semantic_backend(self) -> "SemanticBackend | None":
         return self._tools._ensure_semantic_backend()
 
     def index_memory(self, memory_id: int, record: dict[str, Any] | None = None) -> dict[str, Any]:

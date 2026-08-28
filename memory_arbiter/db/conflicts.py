@@ -77,7 +77,7 @@ class ConflictStore:
             yield conn
 
     @staticmethod
-    def _normalize_slot(slot_key: Optional[dict[str, Any]]) -> Optional[dict[str, str]]:
+    def _normalize_slot(slot_key: dict[str, Any] | None) -> dict[str, str] | None:
         if slot_key is None:
             return None
         if set(slot_key) != {"entity", "attribute", "scope"}:
@@ -179,7 +179,7 @@ class ConflictStore:
 
     @staticmethod
     def _candidate_key(
-        detector_version: str, members: list[dict[str, Any]], candidate_key: Optional[dict[str, Any]]
+        detector_version: str, members: list[dict[str, Any]], candidate_key: dict[str, Any] | None
     ) -> dict[str, Any]:
         expected_evidence = [{
             "member": _member_ref(member),
@@ -251,7 +251,7 @@ class ConflictStore:
                 return False
         return True
 
-    def get_conflict(self, conflict_id: int) -> Optional[dict[str, Any]]:
+    def get_conflict(self, conflict_id: int) -> dict[str, Any] | None:
         if not self._db_available:
             return None
         with self.connection() as conn:
@@ -262,7 +262,7 @@ class ConflictStore:
         self,
         status: str = "open",
         limit: int = 50,
-        source: Optional[str] = None,
+        source: str | None = None,
         workspace: "WorkspaceScope" = None,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -283,13 +283,13 @@ class ConflictStore:
             return [_decode_row(row) for row in conn.execute(sql, params).fetchall()]
 
     def record_conflict_group(
-        self, *, workspace_canonical: str, slot_key: Optional[dict[str, Any]],
+        self, *, workspace_canonical: str, slot_key: dict[str, Any] | None,
         members: list[dict[str, Any] | ConflictMember],
         value_groups: list[dict[str, Any] | ConflictValueGroup],
         detection_reason: str, source: str, detector_version: str,
-        conflict_point: Optional[str] = None, prompt_version: Optional[str] = None,
-        candidate_key: Optional[dict[str, Any]] = None, status: str = "open",
-        expected_revision: Optional[int] = None,
+        conflict_point: str | None = None, prompt_version: str | None = None,
+        candidate_key: dict[str, Any] | None = None, status: str = "open",
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         if status not in {"open", "not_a_conflict"}:
             return {"outcome": "invalid_status"}
@@ -662,8 +662,8 @@ class ConflictStore:
 
     def judge_conflict(
         self, conflict_id: int, *, expected_revision: int, chosen_value: str,
-        decided_by: str, decided_ref: Optional[str], decision_reason: str,
-        apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int] = None,
+        decided_by: str, decided_ref: str | None, decision_reason: str,
+        apply_plan: list[dict[str, Any]], resolution_memory_id: int | None = None,
         strict_workspace: "WorkspaceScope" = None,
     ) -> dict[str, Any]:
         if decided_by not in {"user", "agent"} or not chosen_value:
@@ -754,7 +754,7 @@ class ConflictStore:
 
     def replan_conflict(
         self, conflict_id: int, *, expected_revision: int,
-        apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int] = None,
+        apply_plan: list[dict[str, Any]], resolution_memory_id: int | None = None,
         strict_workspace: "WorkspaceScope" = None,
     ) -> dict[str, Any]:
         """CAS-reset an applying plan while retaining every prior plan snapshot."""
@@ -833,7 +833,7 @@ class ConflictStore:
 
     def resolve_conflict(
         self, conflict_id: int, reason: str = "", status: str = "resolved", *,
-        expected_revision: Optional[int] = None, strict_workspace: "WorkspaceScope" = None,
+        expected_revision: int | None = None, strict_workspace: "WorkspaceScope" = None,
     ) -> dict[str, Any]:
         if status != "resolved":
             return {"outcome": "invalid_status", "conflict_id": int(conflict_id)}
@@ -898,10 +898,10 @@ class ConflictStore:
         # Generic memory mutation cannot complete a revisioned application plan.
         return 0
 
-    def resolve_conflicts_for(self, memory_id: int, *, conn: Optional[sqlite3.Connection] = None) -> int:
+    def resolve_conflicts_for(self, memory_id: int, *, conn: sqlite3.Connection | None = None) -> int:
         return 0
 
-    def get_memory_version(self, memory_id: int) -> Optional[int]:
+    def get_memory_version(self, memory_id: int) -> int | None:
         memory = self._db.get_memory(int(memory_id))
         return int(memory["version"]) if memory else None
 

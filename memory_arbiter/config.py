@@ -19,7 +19,7 @@ class AgentPolicy:
     allow_agents: list[str] = field(default_factory=list)
     deny_agents: list[str] = field(default_factory=list)
 
-    def enabled_for(self, client: Optional[str], agent_id: Optional[str]) -> bool:
+    def enabled_for(self, client: str | None, agent_id: str | None) -> bool:
         # Identity may be absent (no trusted request identity); an unknown
         # caller is neither denied nor allowed by name and lands on the
         # client/default policy.
@@ -37,7 +37,7 @@ class AgentPolicy:
 class Settings:
     db_path: Path
     backup_jsonl: Path
-    policy_path: Optional[Path] = None
+    policy_path: Path | None = None
     # No built-in identity: the MCP server refuses to start without an
     # explicitly configured client/agent_id (see server.build_runtime).
     client: str = ""
@@ -59,8 +59,8 @@ class Settings:
     content_like_cap: int = 30
     superseded_limit: int = 20
     policy: AgentPolicy = field(default_factory=AgentPolicy)
-    embedding_provider: Optional[str] = None
-    embedding_model_path: Optional[Path] = None
+    embedding_provider: str | None = None
+    embedding_model_path: Path | None = None
     embedding_auto_query: bool = True
     embedding_auto_write: bool = True
     # ── Embedding pipeline params (v0.6.0: part of embedding_space_id) ──
@@ -102,7 +102,7 @@ class Settings:
     tool_profile: str = "product"
     semantic_conflict_enabled: bool = False
     semantic_conflict_backend: str = "local_gguf"
-    semantic_conflict_model_path: Optional[Path] = None
+    semantic_conflict_model_path: Path | None = None
     semantic_conflict_on_write: str = "async"
     semantic_conflict_max_concurrency: int = 1
     semantic_conflict_queue_max_size: int = 100
@@ -494,7 +494,7 @@ class Settings:
         return {"agent_id": self.agent_id, "workspace": self.workspace}
 
 
-def load_policy(path: Optional[Path], warnings: Optional[list[str]] = None) -> AgentPolicy:
+def load_policy(path: Path | None, warnings: list[str] | None = None) -> AgentPolicy:
     if not path or not path.exists():
         return AgentPolicy()
     try:
@@ -528,7 +528,7 @@ def parse_bool(val: Any, default: bool = False) -> bool:
     return default
 
 
-def parse_bool_warn(val: Any, default: bool, name: str = "", warnings: Optional[list[str]] = None) -> bool:
+def parse_bool_warn(val: Any, default: bool, name: str = "", warnings: list[str] | None = None) -> bool:
     if isinstance(val, bool):
         return val
     if isinstance(val, (int, float)):
@@ -544,7 +544,7 @@ def parse_bool_warn(val: Any, default: bool, name: str = "", warnings: Optional[
     return default
 
 
-def parse_int(val: Any, default: int, name: str = "", warnings: Optional[list[str]] = None) -> int:
+def parse_int(val: Any, default: int, name: str = "", warnings: list[str] | None = None) -> int:
     try:
         return int(val)
     except (TypeError, ValueError):
@@ -553,7 +553,7 @@ def parse_int(val: Any, default: int, name: str = "", warnings: Optional[list[st
         return default
 
 
-def parse_float(val: Any, default: float, name: str = "", warnings: Optional[list[str]] = None) -> float:
+def parse_float(val: Any, default: float, name: str = "", warnings: list[str] | None = None) -> float:
     try:
         return float(val)
     except (TypeError, ValueError):
@@ -562,7 +562,7 @@ def parse_float(val: Any, default: float, name: str = "", warnings: Optional[lis
         return default
 
 
-def clamp_int(val: int, lo: int, hi: int, name: str = "", warnings: Optional[list[str]] = None) -> int:
+def clamp_int(val: int, lo: int, hi: int, name: str = "", warnings: list[str] | None = None) -> int:
     """Clamp an int to [lo, hi], emitting a warning when out of range."""
     if val < lo:
         if warnings is not None:
@@ -575,7 +575,7 @@ def clamp_int(val: int, lo: int, hi: int, name: str = "", warnings: Optional[lis
     return val
 
 
-def clamp_float(val: float, lo: float, hi: float, name: str = "", warnings: Optional[list[str]] = None) -> float:
+def clamp_float(val: float, lo: float, hi: float, name: str = "", warnings: list[str] | None = None) -> float:
     """Clamp a finite float to [lo, hi], warning and using lo for NaN/Inf."""
     if not math.isfinite(val):
         if warnings is not None:
@@ -592,7 +592,7 @@ def clamp_float(val: float, lo: float, hi: float, name: str = "", warnings: Opti
     return val
 
 
-def _find_config_file(warnings: list[str]) -> Optional[Path]:
+def _find_config_file(warnings: list[str]) -> Path | None:
     env_path = os.getenv("MEMORY_ARBITER_CONFIG")
     if env_path:
         path = Path(env_path).expanduser()
@@ -603,7 +603,7 @@ def _find_config_file(warnings: list[str]) -> Optional[Path]:
     return xdg if xdg.exists() else None
 
 
-def load_config_file(path: Optional[Path], warnings: list[str]) -> dict[str, Any]:
+def load_config_file(path: Path | None, warnings: list[str]) -> dict[str, Any]:
     if not path or not path.exists():
         return {}
     try:

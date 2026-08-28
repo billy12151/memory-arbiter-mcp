@@ -30,7 +30,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse_time(value: Any) -> Optional[datetime]:
+def _parse_time(value: Any) -> datetime | None:
     """Parse an ISO-8601 string to UTC; None on bad input.
 
     Implementation lives in timeutil.parse_iso8601_utc (Phase 1); thin re-export.
@@ -77,7 +77,7 @@ class UpdateMonitor:
     def __init__(
         self,
         enabled: bool = True,
-        state_path: Optional[Path] = None,
+        state_path: Path | None = None,
         current_version: str = __version__,
         fetcher: Fetcher = _default_fetcher,
         now_func: Callable[[], datetime] = _now,
@@ -88,7 +88,7 @@ class UpdateMonitor:
         self._fetcher = fetcher
         self._now = now_func
         self._lock = threading.RLock()
-        self._check_thread: Optional[threading.Thread] = None
+        self._check_thread: threading.Thread | None = None
         self._state = self._load_state()
         try:
             self._observe_installed_version()
@@ -138,7 +138,7 @@ class UpdateMonitor:
             return []
         return notices
 
-    def consume_agent_onboarding_notice(self, agent_id: Optional[str]) -> list[dict[str, Any]]:
+    def consume_agent_onboarding_notice(self, agent_id: str | None) -> list[dict[str, Any]]:
         # Absent identity (no trusted request identity) collapses to the
         # "default" onboarding bucket rather than erroring.
         normalized_agent_id = str(agent_id or "default").strip() or "default"
@@ -267,7 +267,7 @@ class UpdateMonitor:
             return True
         return now - checked >= CHECK_INTERVAL
 
-    def _update_available_notice_locked(self) -> Optional[dict[str, Any]]:
+    def _update_available_notice_locked(self) -> dict[str, Any] | None:
         latest = self._state.get("latest_version")
         if not isinstance(latest, str) or not latest:
             return None
@@ -289,7 +289,7 @@ class UpdateMonitor:
             "agent_instruction": "Tell the user once in plain language. Do not auto-upgrade.",
         }
 
-    def _post_upgrade_doctor_notice_locked(self) -> Optional[dict[str, Any]]:
+    def _post_upgrade_doctor_notice_locked(self) -> dict[str, Any] | None:
         previous = self._state.get("previous_installed_version")
         if not isinstance(previous, str) or not previous or previous == self.current_version:
             return None

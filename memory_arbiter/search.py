@@ -187,7 +187,7 @@ def _trust_bonus(record: dict[str, Any]) -> float:
     return _TRUST_BONUS_DEFAULT
 
 
-def _parse_ingest_time(record: dict[str, Any]) -> Optional[datetime]:
+def _parse_ingest_time(record: dict[str, Any]) -> datetime | None:
     """Parse ingest_time as a timezone-aware UTC datetime, if possible.
 
     Implementation lives in timeutil.parse_iso8601_utc (Phase 1); thin re-export.
@@ -204,7 +204,7 @@ def _ingest_sort_key(record: dict[str, Any]) -> float:
     return ts.timestamp()
 
 
-def _recency_bonus(record: dict[str, Any], now: Optional[datetime] = None) -> float:
+def _recency_bonus(record: dict[str, Any], now: datetime | None = None) -> float:
     """Tiered recency bonus based on ingest_time, never enough to override relevance.
 
     Uses ingest_time (when the memory entered the store) rather than event_time
@@ -239,9 +239,9 @@ _WS_PENALTY_CROSS = -0.15  # gentler penalty so cross-ws stays reachable
 
 def _workspace_bonus(
     record: dict[str, Any],
-    ws_canonical: Optional[str],
+    ws_canonical: str | None,
     isolation: str,
-    distance_map: Optional[dict[str, float]] = None,
+    distance_map: dict[str, float] | None = None,
     min_name_len: int = 3,
 ) -> float:
     """Soft workspace nudge for weak isolation. 0 outside weak mode.
@@ -417,9 +417,9 @@ def _score_tags_surface(
 def _soft_rerank(
     query: str,
     candidates: list[dict[str, Any]],
-    ws_canonical: Optional[str] = None,
+    ws_canonical: str | None = None,
     isolation: str = "none",
-    distance_map: Optional[dict[str, float]] = None,
+    distance_map: dict[str, float] | None = None,
     ws_min_name_len: int = 3,
 ) -> list[dict[str, Any]]:
     """Apply soft-rerank to a wide-recall candidate pool.
@@ -570,14 +570,14 @@ def _soft_rerank(
 def _wide_recall(
     db: MemoryDB,
     query: str,
-    workspace: Optional[str],
-    tags: Optional[list[str]],
+    workspace: str | None,
+    tags: list[str] | None,
     status_clause_m: str,
     like_status_clause: str,
     status_filter: str = "active",  # "active", "expired", "all"
     pool_cap: int = 50,
     content_like_fallback: bool = True,
-    query_embedding: Optional[list[float]] = None,
+    query_embedding: list[float] | None = None,
     content_like_cap: int = 30,
     ws_canonical: "WorkspaceScope" = None,
 ) -> list[dict[str, Any]]:
@@ -897,7 +897,7 @@ def _sanitize_fts_query_or(query: str) -> str:
     return " OR ".join(parts)
 
 
-def _parse_time(s: Any) -> Optional[datetime]:
+def _parse_time(s: Any) -> datetime | None:
     """v0.7.3: parse an ISO 8601 time string for after_time/before_time filtering.
 
     Implementation lives in timeutil.parse_iso8601 (Phase 1); thin re-export here.
@@ -907,7 +907,7 @@ def _parse_time(s: Any) -> Optional[datetime]:
     return parse_iso8601(s)
 
 
-def _sanitize_tags_filter(tags_filter: Optional[list[str]]) -> Optional[list[str]]:
+def _sanitize_tags_filter(tags_filter: list[str] | None) -> list[str] | None:
     """v0.7.3: normalize the tags_filter argument (design §3.2).
 
     Drops non-strings, empty strings, and duplicates (preserving first-seen
@@ -931,10 +931,10 @@ def _sanitize_tags_filter(tags_filter: Optional[list[str]]) -> Optional[list[str
 
 def _passes_filters(
     rec: dict[str, Any],
-    tags_filter: Optional[list[str]],
-    after_dt: Optional[datetime],
-    before_dt: Optional[datetime],
-    source_type: Optional[str],
+    tags_filter: list[str] | None,
+    after_dt: datetime | None,
+    before_dt: datetime | None,
+    source_type: str | None,
 ) -> bool:
     """v0.7.3: post-filter a candidate row against user-provided filters.
 
@@ -973,19 +973,19 @@ def _passes_filters(
 def search_memories(
     db: MemoryDB,
     query: str,
-    workspace: Optional[str] = None,
-    tags: Optional[list[str]] = None,
+    workspace: str | None = None,
+    tags: list[str] | None = None,
     limit: int = 10,
     status_filter: str = "active",  # "active", "expired", "all" ("superseded" → "expired")
     debug_ranking: bool = False,
-    query_embedding: Optional[list[float]] = None,
+    query_embedding: list[float] | None = None,
     # v0.7.3 additions (design §3.1) — all optional, omit == v0.7.2 behaviour
-    tags_filter: Optional[list[str]] = None,
-    after_time: Optional[str] = None,
-    before_time: Optional[str] = None,
-    source_type: Optional[str] = None,
+    tags_filter: list[str] | None = None,
+    after_time: str | None = None,
+    before_time: str | None = None,
+    source_type: str | None = None,
     offset: int = 0,
-    ws_canonical: Optional[str] = None,
+    ws_canonical: str | None = None,
     isolation: str = "none",
     hard_scope: bool = False,
     ws_scope: "WorkspaceScope" = None,
@@ -1196,7 +1196,7 @@ def search_memories(
     # distance without any scoring leaf touching the DB. Read-only; a default
     # query canonical never enters the vector system; degradation returns an
     # empty map (scoring falls back to the binary step per record).
-    weak_distance_map: Optional[dict[str, float]] = None
+    weak_distance_map: dict[str, float] | None = None
     if (
         isolation == "weak"
         and ws_canonical
@@ -1439,8 +1439,8 @@ def _linked_open_items_for_search(
 def _search_bm25(
     db: MemoryDB,
     query: str,
-    workspace: Optional[str],
-    tags: Optional[list[str]],
+    workspace: str | None,
+    tags: list[str] | None,
     limit: int,
     status_clause_m: str,
     like_status_clause: str,
@@ -1448,7 +1448,7 @@ def _search_bm25(
     debug_ranking: bool,
     offset: int = 0,
     ws_canonical: "WorkspaceScope" = None,
-) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
+) -> tuple[list[dict[str, Any]], list[str], bool, int]:
     """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback.
 
     scopes to the admitted canonical set like the hybrid path, so
@@ -1526,14 +1526,14 @@ def _search_bm25(
 
 def _recent_fallback(
     db: MemoryDB,
-    workspace: Optional[str],
-    tags: Optional[list[str]],
+    workspace: str | None,
+    tags: list[str] | None,
     limit: int,
     like_status_clause: str,
     warnings: list[str],
     offset: int = 0,
     ws_canonical: "WorkspaceScope" = None,
-) -> Tuple[list[dict[str, Any]], list[str], bool, int]:
+) -> tuple[list[dict[str, Any]], list[str], bool, int]:
     """Recent-memory fallback when no direct match found (r4 §4.2 safety net)."""
     clauses = [like_status_clause]
     params: list[Any] = []

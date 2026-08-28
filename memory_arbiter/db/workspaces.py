@@ -25,7 +25,7 @@ _DEFAULT_TERM_SQL_NOT_IN = (
 )
 
 
-def _normalize_alias_key(ws: Optional[str]) -> str:
+def _normalize_alias_key(ws: str | None) -> str:
     """Normalize a workspace string into a stable alias-governance key.
 
     Case-folded + whitespace-collapsed so "金营项目 " and "金营项目" map to the
@@ -41,7 +41,7 @@ def _normalize_alias_key(ws: Optional[str]) -> str:
     return " ".join(s.split()).casefold()
 
 
-def _mechanical_ws_key(ws: Optional[str]) -> str:
+def _mechanical_ws_key(ws: str | None) -> str:
     """Fold a workspace string to a deterministic case/separator-insensitive key.
 
     Unlike _normalize_alias_key (which only case-folds + collapses whitespace
@@ -56,7 +56,7 @@ def _mechanical_ws_key(ws: Optional[str]) -> str:
     return re.sub(r"[\s_\-]+", "", ws).casefold()
 
 
-def _normalize_ws_group_key(ws: Optional[str]) -> str:
+def _normalize_ws_group_key(ws: str | None) -> str:
     """Grouping key for ``normalize_workspace_canonicals`` — deliberately
     STRICTER than ``_mechanical_ws_key``.
 
@@ -181,7 +181,7 @@ class WorkspaceStore:
         self,
         canonical: str,
         embedder: Any = None,
-    ) -> Optional[list[float]]:
+    ) -> list[float] | None:
         """Embed canonical text only when its derived vector is missing.
 
         Both the existence probe and model call happen before the authoritative
@@ -218,7 +218,7 @@ class WorkspaceStore:
     def publish_workspace_canonical_vector(
         self,
         canonical: str,
-        embedding: Optional[list[float]],
+        embedding: list[float] | None,
     ) -> list[str]:
         """Publish a prepared canonical vector after the canonical write commits.
 
@@ -327,10 +327,10 @@ class WorkspaceStore:
 
     def resolve_workspace_canonical(
         self,
-        ws_raw: Optional[str],
+        ws_raw: str | None,
         embedder: Any = None,
         *,
-        match_distance: Optional[float] = None,
+        match_distance: float | None = None,
         register_new: bool = True,
     ) -> dict[str, Any]:
         """Resolve a raw workspace string to its canonical name (alias merge).
@@ -717,7 +717,7 @@ class WorkspaceStore:
         *,
         status: str = "confirmed",
         force: bool = False,
-    ) -> Tuple[bool, list[str]]:
+    ) -> tuple[bool, list[str]]:
         """Record one alias→canonical decision (confirmed redirect or rejection).
 
         Single primitive behind record_workspace_decision_on_conn and
@@ -829,7 +829,7 @@ class WorkspaceStore:
         *,
         status: str = "confirmed",
         force: bool = False,
-    ) -> Tuple[bool, list[str]]:
+    ) -> tuple[bool, list[str]]:
         return self._apply_alias_decision_on_conn(
             conn, workspace_name, canonical, status=status, force=force,
         )
@@ -841,8 +841,8 @@ class WorkspaceStore:
         *,
         status: str = "confirmed",
         force: bool = False,
-        conn: Optional[sqlite3.Connection] = None,
-    ) -> Tuple[bool, list[str]]:
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[bool, list[str]]:
         if conn is not None:
             return self.record_workspace_decision_on_conn(
                 conn, workspace_name, canonical, status=status, force=force,
@@ -857,7 +857,7 @@ class WorkspaceStore:
         except sqlite3.Error as exc:
             return False, [f"record_workspace_decision failed: {exc}"]
 
-    def get_workspace_decision(self, workspace_name: str) -> Optional[dict[str, Any]]:
+    def get_workspace_decision(self, workspace_name: str) -> dict[str, Any] | None:
         if not self._db_available:
             return None
         workspace_key = _normalize_alias_key(workspace_name)
@@ -906,7 +906,7 @@ class WorkspaceStore:
     @staticmethod
     def _mechanical_canonical_on_conn(
         conn: sqlite3.Connection, workspace_name: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         key = _mechanical_ws_key(workspace_name)
         if not key:
             return None
@@ -916,7 +916,7 @@ class WorkspaceStore:
                 return name
         return None
 
-    def registered_mechanical_canonical(self, workspace_name: str) -> Optional[str]:
+    def registered_mechanical_canonical(self, workspace_name: str) -> str | None:
         """Return the registered canonical with the same mechanical key, if any.
 
         Read-only twin of the destination-orthography fold migrate_workspace
@@ -933,7 +933,7 @@ class WorkspaceStore:
         except sqlite3.Error:
             return None
 
-    def confirmed_alias_canonical(self, workspace_name: str) -> Optional[str]:
+    def confirmed_alias_canonical(self, workspace_name: str) -> str | None:
         """Return the confirmed-redirect canonical for an alias spelling, if any.
 
         Mirrors the write path's confirmed-alias short-circuit: a move
@@ -959,7 +959,7 @@ class WorkspaceStore:
 
     def _competing_move_warning_on_conn(
         self, conn: sqlite3.Connection, source: str, destination: str,
-    ) -> Optional[list[str]]:
+    ) -> list[str] | None:
         source_exists = conn.execute(
             "SELECT 1 FROM workspace_canonicals WHERE name=? UNION ALL "
             "SELECT 1 FROM memories WHERE "
@@ -1004,7 +1004,7 @@ class WorkspaceStore:
 
     def rename_workspace_canonical(
         self, old: str, new: str,
-    ) -> Tuple[int, list[str]]:
+    ) -> tuple[int, list[str]]:
         """Rename or merge a canonical and keep old-name forwarding stable."""
         if not self._db_available or not self.state.sqlite_writable:
             return 0, ["SQLite write unavailable; rename skipped."]
@@ -1126,8 +1126,8 @@ class WorkspaceStore:
         from_ws: str,
         to_ws: str,
         *,
-        to_embedding: Optional[list[float]] = None,
-    ) -> Tuple[int, list[str]]:
+        to_embedding: list[float] | None = None,
+    ) -> tuple[int, list[str]]:
         """Merge canonical ``from_ws`` into ``to_ws`` on an open write connection.
 
         Full merge suite shared by ``migrate_workspace`` and
@@ -1201,7 +1201,7 @@ class WorkspaceStore:
 
     def migrate_workspace(
         self, from_ws: str, to_ws: str, *, embedder: Any = None,
-    ) -> Tuple[int, list[str]]:
+    ) -> tuple[int, list[str]]:
         """Merge one canonical into another and keep old-name forwarding stable."""
         if not self._db_available or not self.state.sqlite_writable:
             return 0, ["SQLite write unavailable; migrate skipped."]
@@ -1357,7 +1357,7 @@ class WorkspaceStore:
         rows = conn.execute(
             "SELECT id, name FROM workspace_canonicals ORDER BY id ASC"
         ).fetchall()
-        groups: dict[str, list[Tuple[int, str]]] = {}
+        groups: dict[str, list[tuple[int, str]]] = {}
         for row in rows:
             name = str(row["name"])
             key = _normalize_ws_group_key(name)
@@ -1407,7 +1407,7 @@ class WorkspaceStore:
             # spelling of the pair (the resolve-refusal flow's typical
             # product, e.g. 'agent_lane'→'AgentLane'); merging on top of it
             # would leave a confirmed redirect and the rejection side by side.
-            respected: Optional[dict[str, str]] = None
+            respected: dict[str, str] | None = None
             for row in rejected_rows:
                 alias_spelling = str(row["alias_workspace"])
                 rejected_canonical = str(row["canonical"])
@@ -1558,7 +1558,7 @@ class WorkspaceStore:
                 "action": "dropped_duplicate" if duplicate else "rewritten",
             })
 
-    def prepare_workspace_canonical_embedding(self, canonical: str, embedder: Any = None) -> Optional[list[float]]:
+    def prepare_workspace_canonical_embedding(self, canonical: str, embedder: Any = None) -> list[float] | None:
         """Compute canonical embedding before caller takes a SQLite write lock."""
         canonical = _coerce_ws(canonical)
         if (
@@ -1580,8 +1580,8 @@ class WorkspaceStore:
         memory_id: int,
         canonical: str,
         *,
-        precomputed_embedding: Optional[list[float]] = None,
-    ) -> Tuple[bool, list[str]]:
+        precomputed_embedding: list[float] | None = None,
+    ) -> tuple[bool, list[str]]:
         canonical = _coerce_ws(canonical)
         if not canonical:
             return False, ["canonical must be a non-empty workspace string."]
@@ -1617,8 +1617,8 @@ class WorkspaceStore:
         memory_id: int,
         workspace: str,
         *,
-        precomputed_embedding: Optional[list[float]] = None,
-    ) -> Tuple[bool, list[str]]:
+        precomputed_embedding: list[float] | None = None,
+    ) -> tuple[bool, list[str]]:
         """Reassign one memory's workspace bucket and canonical together.
 
         Companion to set_memory_workspace_canonical_on_conn for governance
@@ -1663,9 +1663,9 @@ class WorkspaceStore:
         canonical: str,
         embedder: Any = None,
         *,
-        conn: Optional[sqlite3.Connection] = None,
-        precomputed_embedding: Optional[list[float]] = None,
-    ) -> Tuple[bool, list[str]]:
+        conn: sqlite3.Connection | None = None,
+        precomputed_embedding: list[float] | None = None,
+    ) -> tuple[bool, list[str]]:
         """Directly set a memory's workspace_canonical column.
 
         update_memory() intentionally whitelists only trust/status/metadata

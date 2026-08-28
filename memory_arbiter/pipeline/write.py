@@ -20,7 +20,7 @@ class WritePipeline:
         self.db = tools.db
         self.settings = tools.settings
 
-    def _allowed(self, *args: Any, **kwargs: Any) -> "Tuple[bool, list[str]]":
+    def _allowed(self, *args: Any, **kwargs: Any) -> "tuple[bool, list[str]]":
         return self._tools._allowed(*args, **kwargs)
 
     def _post_commit(
@@ -28,13 +28,13 @@ class WritePipeline:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         return self._tools._post_commit(*args, **kwargs)
 
-    def _ensure_active_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+    def _ensure_active_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
         return self._tools._ensure_active_embedder()
 
     def _suggest_workspace_candidate(self, *args: Any, **kwargs: Any) -> Any:
         return self._tools._suggest_workspace_candidate(*args, **kwargs)
 
-    def current_agent_id(self) -> Optional[str]:
+    def current_agent_id(self) -> str | None:
         return self._tools.current_agent_id()
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
@@ -265,7 +265,7 @@ class WritePipeline:
         result["strict_block"] = isolation == "strict" and result["is_new"]
         return result
 
-    def _suggest_placement_for_default(self, record: MemoryRecord) -> Optional[dict[str, Any]]:
+    def _suggest_placement_for_default(self, record: MemoryRecord) -> dict[str, Any] | None:
         """Read-only subject-based placement hint for a default/empty workspace.
 
         Embeds the subject and finds the nearest existing memory that lives in a

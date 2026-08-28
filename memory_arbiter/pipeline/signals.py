@@ -15,11 +15,11 @@ class ConflictSignalPipeline:
         self.db = tools.db
         self.settings = tools.settings
 
-    def _conflict_next_call(self, *args: Any, **kwargs: Any) -> Optional[dict[str, Any]]:
+    def _conflict_next_call(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
         return self._tools._conflict_next_call(*args, **kwargs)
 
     @staticmethod
-    def _confidence_rank(hint: Optional[str]) -> int:
+    def _confidence_rank(hint: str | None) -> int:
         # Retained for callers of the old private helper; group signals do not
         # rank by legacy confidence judgments.
         return {"high": 3, "medium": 2, "low": 1}.get(hint or "", 0)
@@ -60,7 +60,7 @@ class ConflictSignalPipeline:
         conflicts: list[dict[str, Any]],
         summaries: dict[int, dict[str, Any]],
         result_id_set: set[int],
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         del result_id_set  # Membership, not pair orientation, determines linkage.
         primary = max(
             conflicts,

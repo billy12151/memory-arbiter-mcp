@@ -13,7 +13,7 @@ from typing import Any, Optional, Sequence, Union
 WORKSPACE_EXPR = "COALESCE(NULLIF(workspace_canonical, ''), workspace)"
 
 #: A workspace scope is either one canonical name or the admitted set.
-WorkspaceScope = Union[str, Sequence[str], None]
+WorkspaceScope = str | Sequence[str] | None
 
 
 def scope_names(scope: WorkspaceScope) -> list[str]:
@@ -54,8 +54,8 @@ def workspace_scope_sql(expr: str, scope: WorkspaceScope) -> tuple[str, list[str
 @dataclass(frozen=True)
 class CallerWorkspace:
     isolation: str
-    workspace: Optional[str]
-    canonical: Optional[str]
+    workspace: str | None
+    canonical: str | None
     source: str
     warnings: tuple[str, ...] = ()
     #: canonicals a strict caller may read/act on — its own plus any
@@ -88,15 +88,15 @@ class CallerWorkspace:
         return data
 
 
-def raw_workspace(record: Optional[dict[str, Any]]) -> str:
+def raw_workspace(record: dict[str, Any] | None) -> str:
     if not record:
         return ""
     return str((record.get("workspace_canonical") or record.get("workspace") or "")).strip()
 
 
 def visible_memory(
-    record: Optional[dict[str, Any]],
-    canonical: Optional[str],
+    record: dict[str, Any] | None,
+    canonical: str | None,
     admitted: WorkspaceScope = None,
 ) -> bool:
     """Strict read-ACL predicate.
@@ -126,7 +126,7 @@ def forbidden_payload(kind: str, *, workspace: CallerWorkspace, reason: str = "w
     return payload
 
 
-def memory_public_stub(memory_id: Any, *, visible: bool, memory: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def memory_public_stub(memory_id: Any, *, visible: bool, memory: dict[str, Any] | None = None) -> dict[str, Any]:
     if visible:
         return {
             "visible": True,

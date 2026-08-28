@@ -415,7 +415,7 @@ import datetime as _dt
 
 
 def _write_mem(tools: MemoryTools, *, content: str, subject: str, tags: list[str],
-               source_type: str = "agent_generated", ingest_time: Optional[str] = None,
+               source_type: str = "agent_generated", ingest_time: str | None = None,
                workspace: str = "ws") -> int:
     """Helper: write one memory via tools.memory_write, return its id."""
     payload = {
@@ -758,7 +758,7 @@ def test_passes_filters_unit() -> None:
     from memory_arbiter.search import _passes_filters
     from datetime import datetime, timezone
 
-    def mk(ingest_time: Optional[str] = "2026-06-15T00:00:00+00:00", tags: list = None, source_type: str = "agent_generated"):
+    def mk(ingest_time: str | None = "2026-06-15T00:00:00+00:00", tags: list = None, source_type: str = "agent_generated"):
         rec = {"tags": json.dumps(tags or []), "ingest_time": ingest_time, "source_type": source_type}
         return rec
 

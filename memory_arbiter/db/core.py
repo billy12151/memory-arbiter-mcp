@@ -218,9 +218,9 @@ class MemoryDB:
         # a file the operator may share deliberately.
         db_preexisted = self.settings.db_path.exists()
         self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-        last_error: Optional[sqlite3.Error] = None
+        last_error: sqlite3.Error | None = None
         for attempt in range(_INIT_BUSY_RETRIES):
-            conn: Optional[sqlite3.Connection] = None
+            conn: sqlite3.Connection | None = None
             try:
                 conn = self._new_connection(init=initialize_schema)
                 if initialize_schema:
@@ -265,7 +265,7 @@ class MemoryDB:
     ) -> None:
         return self.schema._probe_features(conn, initialize=initialize)
 
-    def _probe_sqlite_vec_loadable(self) -> Optional[bool]:
+    def _probe_sqlite_vec_loadable(self) -> bool | None:
         return self.schema._probe_sqlite_vec_loadable()
 
     def _rebuild_fts(self, conn: sqlite3.Connection) -> None:
@@ -285,10 +285,10 @@ class MemoryDB:
 
     def resolve_workspace_canonical(
         self,
-        ws_raw: Optional[str],
+        ws_raw: str | None,
         embedder: Any = None,
         *,
-        match_distance: Optional[float] = None,
+        match_distance: float | None = None,
         register_new: bool = True,
     ) -> dict[str, Any]:
         return self.workspaces.resolve_workspace_canonical(
@@ -302,7 +302,7 @@ class MemoryDB:
         *,
         status: str = "confirmed",
         force: bool = False,
-    ) -> Tuple[bool, list[str]]:
+    ) -> tuple[bool, list[str]]:
         return self.workspaces.record_workspace_decision(
             workspace_name, canonical, status=status, force=force,
         )
@@ -315,27 +315,27 @@ class MemoryDB:
         *,
         status: str = "confirmed",
         force: bool = False,
-    ) -> Tuple[bool, list[str]]:
+    ) -> tuple[bool, list[str]]:
         return self.workspaces.record_workspace_decision(
             workspace_name, canonical, status=status, force=force, conn=conn,
         )
 
-    def get_workspace_decision(self, workspace_name: str) -> Optional[dict[str, Any]]:
+    def get_workspace_decision(self, workspace_name: str) -> dict[str, Any] | None:
         return self.workspaces.get_workspace_decision(workspace_name)
 
     def rename_workspace_canonical(
         self, old: str, new: str,
-    ) -> Tuple[int, list[str]]:
+    ) -> tuple[int, list[str]]:
         return self.workspaces.rename_workspace_canonical(old, new)
 
     def migrate_workspace(
         self, from_ws: str, to_ws: str, *, embedder: Any = None,
-    ) -> Tuple[int, list[str]]:
+    ) -> tuple[int, list[str]]:
         return self.workspaces.migrate_workspace(from_ws, to_ws, embedder=embedder)
 
     def prepare_workspace_canonical_embedding(
         self, canonical: str, embedder: Any = None,
-    ) -> Optional[list[float]]:
+    ) -> list[float] | None:
         return self.workspaces.prepare_workspace_canonical_embedding(canonical, embedder)
 
     def rebuild_workspace_canonical_vectors(
@@ -350,7 +350,7 @@ class MemoryDB:
         memory_id: int,
         canonical: str,
         embedder: Any = None,
-    ) -> Tuple[bool, list[str]]:
+    ) -> tuple[bool, list[str]]:
         return self.workspaces.set_memory_workspace_canonical(memory_id, canonical, embedder)
 
     def set_memory_workspace_canonical_on_conn(
@@ -358,8 +358,8 @@ class MemoryDB:
         conn: sqlite3.Connection,
         memory_id: int,
         canonical: str,
-        precomputed_embedding: Optional[list[float]] = None,
-    ) -> Tuple[bool, list[str]]:
+        precomputed_embedding: list[float] | None = None,
+    ) -> tuple[bool, list[str]]:
         return self.workspaces.set_memory_workspace_canonical(
             memory_id,
             canonical,
@@ -370,13 +370,13 @@ class MemoryDB:
 
     def evidence_knn(
         self, query_embedding: list[float], *, k: int = 100, parent_status_filter: str = "active",
-        workspace: WorkspaceScope = None, exclude_memory_id: Optional[int] = None,
+        workspace: WorkspaceScope = None, exclude_memory_id: int | None = None,
     ) -> list[dict[str, Any]]:
         return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id)
 
     def scan_rule_candidates(
         self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
-        include_check: bool = False, max_distance: Optional[float] = None,
+        include_check: bool = False, max_distance: float | None = None,
         workspace: WorkspaceScope = None, similarity_pool_limit: int = 0,
     ) -> dict[str, Any]:
         return self.evidence.scan_rule_candidates(
@@ -389,11 +389,11 @@ class MemoryDB:
     def insert_memory(
         self,
         record: MemoryRecord,
-        workspace_canonical: Optional[str] = None,
-        workspace_embedding: Optional[list[float]] = None,
+        workspace_canonical: str | None = None,
+        workspace_embedding: list[float] | None = None,
         *,
         register_workspace_canonical: bool = True,
-    ) -> Tuple[Optional[int], list[str]]:
+    ) -> tuple[int | None, list[str]]:
         return self.memories.insert_memory(
             record, workspace_canonical, workspace_embedding,
             register_workspace_canonical=register_workspace_canonical,
@@ -401,7 +401,7 @@ class MemoryDB:
 
     def insert_memory_on_conn(
         self, conn: sqlite3.Connection, record: MemoryRecord,
-        workspace_canonical: Optional[str] = None,
+        workspace_canonical: str | None = None,
     ) -> int:
         return self.memories.insert_memory_on_conn(conn, record, workspace_canonical)
 
@@ -409,18 +409,18 @@ class MemoryDB:
         return self.memories._append_backup(record)
 
     @staticmethod
-    def _fetch_memory(conn: sqlite3.Connection, memory_id: int) -> Optional[dict[str, Any]]:
+    def _fetch_memory(conn: sqlite3.Connection, memory_id: int) -> dict[str, Any] | None:
         return MemoriesStore._fetch_memory(conn, memory_id)
 
-    def get_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> Optional[dict[str, Any]]:
+    def get_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> dict[str, Any] | None:
         return self.memories.get_memory_on_conn(conn, memory_id)
 
-    def get_memory(self, memory_id: int) -> Optional[dict[str, Any]]:
+    def get_memory(self, memory_id: int) -> dict[str, Any] | None:
         return self.memories.get_memory(memory_id)
 
     def get_memory_for_workspace(
         self, memory_id: int, ws_canonical: str, admitted: "WorkspaceScope" = None,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return self.memories.get_memory_for_workspace(memory_id, ws_canonical, admitted)
 
     def list_memories_for_workspace(
@@ -434,17 +434,17 @@ class MemoryDB:
     def update_memory_on_conn(self, conn: sqlite3.Connection, memory_id: int, updates: dict[str, Any]) -> bool:
         return self.memories.update_memory(memory_id, updates, conn=conn)
 
-    def list_memories(self, workspace: Optional[str] = None, subject: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
+    def list_memories(self, workspace: str | None = None, subject: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return self.memories.list_memories(subject=subject, limit=limit)
 
     def _filter_clauses(
         self,
         like_status_clause: str,
-        tags_filter: Optional[list[str]],
-        after_dt: Optional[datetime],
-        before_dt: Optional[datetime],
-        source_type: Optional[str],
-    ) -> Tuple[list[str], list[Any]]:
+        tags_filter: list[str] | None,
+        after_dt: datetime | None,
+        before_dt: datetime | None,
+        source_type: str | None,
+    ) -> tuple[list[str], list[Any]]:
         return MemoriesStore._filter_clauses(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
         )
@@ -452,10 +452,10 @@ class MemoryDB:
     def count_filtered_memories(
         self,
         like_status_clause: str,
-        tags_filter: Optional[list[str]],
-        after_dt: Optional[datetime],
-        before_dt: Optional[datetime],
-        source_type: Optional[str],
+        tags_filter: list[str] | None,
+        after_dt: datetime | None,
+        before_dt: datetime | None,
+        source_type: str | None,
         ws_canonical: WorkspaceScope = None,
     ) -> int:
         return self.memories.count_filtered_memories(
@@ -465,10 +465,10 @@ class MemoryDB:
     def recall_by_filters(
         self,
         like_status_clause: str,
-        tags_filter: Optional[list[str]],
-        after_dt: Optional[datetime],
-        before_dt: Optional[datetime],
-        source_type: Optional[str],
+        tags_filter: list[str] | None,
+        after_dt: datetime | None,
+        before_dt: datetime | None,
+        source_type: str | None,
         limit: int,
         offset: int = 0,
         ws_canonical: WorkspaceScope = None,
@@ -481,7 +481,7 @@ class MemoryDB:
     def record_conflict_group(self, **kwargs: Any) -> dict[str, Any]:
         return self.conflicts.record_conflict_group(**kwargs)
 
-    def get_conflict(self, conflict_id: int) -> Optional[dict[str, Any]]:
+    def get_conflict(self, conflict_id: int) -> dict[str, Any] | None:
         return self.conflicts.get_conflict(conflict_id)
 
     def escalate_structured_notice(self, notice_id: int, **kwargs: Any) -> dict[str, Any]:
@@ -500,7 +500,7 @@ class MemoryDB:
         self,
         status: str = "open",
         limit: int = 50,
-        source: Optional[str] = None,
+        source: str | None = None,
         workspace: WorkspaceScope = None,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -518,7 +518,7 @@ class MemoryDB:
 
     def resolve_conflict(
         self, conflict_id: int, reason: str = "", status: str = "resolved",
-        *, expected_revision: Optional[int] = None,
+        *, expected_revision: int | None = None,
     ) -> dict[str, Any]:
         return self.conflicts.resolve_conflict(
             conflict_id, reason=reason, status=status, expected_revision=expected_revision,
@@ -527,7 +527,7 @@ class MemoryDB:
     def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
         return self.conflicts.is_pair_dismissed(left_id, right_id)
 
-    def get_memory_version(self, memory_id: int) -> Optional[int]:
+    def get_memory_version(self, memory_id: int) -> int | None:
         return self.conflicts.get_memory_version(memory_id)
 
     def dismissed_pairs_for(self, memory_ids: list[int]) -> set[tuple[int, int]]:
@@ -541,16 +541,16 @@ class MemoryDB:
         self,
         *,
         memory_id: int,
-        peer_id: Optional[int],
+        peer_id: int | None,
         severity: str,
         notice_type: str,
         title: str,
         message: str,
         payload: dict[str, Any],
-        dedupe_key: Optional[str] = None,
-        conflict_id: Optional[int] = None,
-        left_version: Optional[int] = None,
-        right_version: Optional[int] = None,
+        dedupe_key: str | None = None,
+        conflict_id: int | None = None,
+        left_version: int | None = None,
+        right_version: int | None = None,
         source: str = "semantic_evidence",
     ) -> dict[str, Any]:
         return self.semantic_notices.record_semantic_notice(
@@ -568,12 +568,12 @@ class MemoryDB:
             source=source,
         )
 
-    def claim_next_semantic_notice(self, workspace_canonical: WorkspaceScope = None) -> Optional[dict[str, Any]]:
+    def claim_next_semantic_notice(self, workspace_canonical: WorkspaceScope = None) -> dict[str, Any] | None:
         return self.semantic_notices.claim_next_semantic_notice(workspace_canonical)
 
     def read_semantic_notice(
         self, notice_id: int, workspace_canonical: WorkspaceScope = None,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return self.semantic_notices.read_semantic_notice(notice_id, workspace_canonical)
 
     def list_semantic_notices(
@@ -592,8 +592,8 @@ class MemoryDB:
         self,
         left_id: int,
         right_id: int,
-        left_version: Optional[int] = None,
-        right_version: Optional[int] = None,
+        left_version: int | None = None,
+        right_version: int | None = None,
         notice_type: str = "semantic_evidence",
     ) -> bool:
         return self.semantic_notices.is_semantic_pair_closed(
@@ -606,7 +606,7 @@ class MemoryDB:
         status: str,
         reason: str = "",
         workspace_canonical: WorkspaceScope = None,
-        conflict_id: Optional[int] = None,
+        conflict_id: int | None = None,
     ) -> dict[str, Any]:
         return self.semantic_notices.update_semantic_notice_status(
             notice_id, status, reason, workspace_canonical, conflict_id,
@@ -623,7 +623,7 @@ class MemoryDB:
     def log_attention(self, *, trigger: str, source: str, memory_ids: list[int]) -> None:
         return self.audit.log_attention(trigger=trigger, source=source, memory_ids=memory_ids)
 
-    def _scan_log_last_completed(self) -> Optional[dict[str, Any]]:
+    def _scan_log_last_completed(self) -> dict[str, Any] | None:
         return self.audit.scan_log_last_completed()
 
     # ------------------------------------------------------------------
@@ -642,11 +642,11 @@ class MemoryDB:
     def update_tags_low_side_effect(
         self,
         memory_id: int,
-        add_tags: Optional[list[str]] = None,
-        remove_tags: Optional[list[str]] = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
         authorized: bool = False,
         *,
-        conn: Optional[sqlite3.Connection] = None,
+        conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         return self.memories.update_tags_low_side_effect(
             memory_id, add_tags, remove_tags, authorized, conn=conn,
@@ -655,8 +655,8 @@ class MemoryDB:
     def update_metadata_fields_low_side_effect(
         self,
         memory_id: int,
-        set_fields: Optional[dict[str, Any]] = None,
-        clear_fields: Optional[list[str]] = None,
+        set_fields: dict[str, Any] | None = None,
+        clear_fields: list[str] | None = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
         return self.memories.update_metadata_fields_low_side_effect(
@@ -667,8 +667,8 @@ class MemoryDB:
         self,
         conn: sqlite3.Connection,
         memory_id: int,
-        set_fields: Optional[dict[str, Any]] = None,
-        clear_fields: Optional[list[str]] = None,
+        set_fields: dict[str, Any] | None = None,
+        clear_fields: list[str] | None = None,
         authorized: bool = False,
     ) -> dict[str, Any]:
         return self.memories.update_metadata_fields_low_side_effect_on_conn(
@@ -685,7 +685,7 @@ class MemoryDB:
 
     def find_metadata_overlap_candidates(
         self,
-        subject: Optional[str],
+        subject: str | None,
         tags: list[str],
         exclude_id: int,
         limit: int = 50,
@@ -694,11 +694,11 @@ class MemoryDB:
 
     def find_semantic_overlap_candidates(
         self,
-        subject: Optional[str],
+        subject: str | None,
         tags: list[str],
         exclude_id: int,
         limit: int = 50,
-        canonical_workspace: Optional[str] = None,
+        canonical_workspace: str | None = None,
         isolation: str = "none",
     ) -> list[dict[str, Any]]:
         return self.memories.find_semantic_overlap_candidates(
@@ -711,10 +711,10 @@ class MemoryDB:
         self,
         memory_id: int,
         new_content: str,
-        new_subject: Optional[str] = None,
-        new_tags: Optional[list[str]] = None,
-        reason: Optional[str] = None,
-    ) -> Optional[int]:
+        new_subject: str | None = None,
+        new_tags: list[str] | None = None,
+        reason: str | None = None,
+    ) -> int | None:
         return self.memories.edit_memory(memory_id, new_content, new_subject, new_tags, reason)
 
     def edit_memory_on_conn(
@@ -722,12 +722,12 @@ class MemoryDB:
         conn: sqlite3.Connection,
         memory_id: int,
         new_content: str,
-        new_subject: Optional[str] = None,
-        new_tags: Optional[list[str]] = None,
-        reason: Optional[str] = None,
+        new_subject: str | None = None,
+        new_tags: list[str] | None = None,
+        reason: str | None = None,
         *,
         authorized: bool = True,
-    ) -> Optional[int]:
+    ) -> int | None:
         return self.memories.edit_memory(
             memory_id, new_content, new_subject, new_tags, reason,
             conn=conn, authorized=authorized,
@@ -737,18 +737,18 @@ class MemoryDB:
         self,
         memory_id: int,
         *,
-        new_content: Optional[str] = None,
-        old_text: Optional[str] = None,
-        new_text: Optional[str] = None,
-        new_subject: Optional[str] = None,
-        new_tags: Optional[list[str]] = None,
-        add_tags: Optional[list[str]] = None,
-        remove_tags: Optional[list[str]] = None,
-        reason: Optional[str] = None,
+        new_content: str | None = None,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        new_subject: str | None = None,
+        new_tags: list[str] | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        reason: str | None = None,
         authorized: bool = False,
-        expected_version: Optional[int] = None,
-        expected_content_hash: Optional[str] = None,
-        conn: Optional[sqlite3.Connection] = None,
+        expected_version: int | None = None,
+        expected_content_hash: str | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         return self.memories.edit_memory_intent(
             memory_id,
@@ -770,8 +770,8 @@ class MemoryDB:
         return self.memories.list_history(memory_id)
 
     def cleanup_history(
-        self, memory_id: Optional[int] = None, older_than_days: Optional[int] = None,
-        *, conn: Optional[sqlite3.Connection] = None,
+        self, memory_id: int | None = None, older_than_days: int | None = None,
+        *, conn: sqlite3.Connection | None = None,
     ) -> int:
         return self.memories.cleanup_history(memory_id, older_than_days, conn=conn)
 
@@ -785,7 +785,7 @@ class MemoryDB:
     # ---- _vec_index_meta CRUD ----
 
     @staticmethod
-    def _get_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    def _get_meta(conn: sqlite3.Connection, key: str) -> str | None:
         return MetaStore.get_meta(conn, key)
 
     @staticmethod
@@ -850,7 +850,7 @@ class MemoryDB:
 
     def init_vec_index_state(
         self,
-        embedding_space_id: Optional[str],
+        embedding_space_id: str | None,
         has_managed_embedder: bool,
     ) -> None:
         return self.meta.init_vec_index_state(embedding_space_id, has_managed_embedder)

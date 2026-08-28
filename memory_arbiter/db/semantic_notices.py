@@ -80,7 +80,7 @@ class SemanticNoticeStore:
         return (f" AND {scope_sql}", list(params))
 
     @staticmethod
-    def _snapshot(payload: dict[str, Any], memory_id: int, peer_id: int, left_version: int, right_version: int, detector_version: str, prompt_version: Optional[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _snapshot(payload: dict[str, Any], memory_id: int, peer_id: int, left_version: int, right_version: int, detector_version: str, prompt_version: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         raw_members_value = payload.get("member_versions")
         raw_members = raw_members_value if isinstance(raw_members_value, list) else []
         qwen_value = payload.get("qwen_signal")
@@ -122,7 +122,7 @@ class SemanticNoticeStore:
         groups = groups_value if isinstance(groups_value, list) else []
         return members, [dict(group) for group in groups]
 
-    def record_semantic_notice(self, *, memory_id: int, peer_id: Optional[int], severity: str, notice_type: str, title: str, message: str, payload: dict[str, Any], dedupe_key: Optional[str] = None, conflict_id: Optional[int] = None, left_version: Optional[int] = None, right_version: Optional[int] = None, source: str = "semantic_evidence") -> dict[str, Any]:
+    def record_semantic_notice(self, *, memory_id: int, peer_id: int | None, severity: str, notice_type: str, title: str, message: str, payload: dict[str, Any], dedupe_key: str | None = None, conflict_id: int | None = None, left_version: int | None = None, right_version: int | None = None, source: str = "semantic_evidence") -> dict[str, Any]:
         db = self._db
         if not db.db_available or not db.state.sqlite_writable:
             return {"outcome": "unavailable"}
@@ -275,7 +275,7 @@ class SemanticNoticeStore:
         return True
 
     @staticmethod
-    def _echo_workspace(workspace_canonical: "WorkspaceScope") -> Optional[str]:
+    def _echo_workspace(workspace_canonical: "WorkspaceScope") -> str | None:
         """The single workspace string to echo back in a suggested call.
 
         A scope may be the caller's admitted set ; the caller's own
@@ -296,7 +296,7 @@ class SemanticNoticeStore:
             calls.append({"tool": "memory", "action": "read", "data": data})
         return calls
 
-    def claim_next_semantic_notice(self, workspace_canonical: "WorkspaceScope" = None) -> Optional[dict[str, Any]]:
+    def claim_next_semantic_notice(self, workspace_canonical: "WorkspaceScope" = None) -> dict[str, Any] | None:
         workspace_sql, args = self._workspace_clause(workspace_canonical)
         with self._db.write_transaction() as conn:
             while True:
@@ -339,7 +339,7 @@ class SemanticNoticeStore:
                 if not transitioned:
                     return None
 
-    def read_semantic_notice(self, notice_id: int, workspace_canonical: "WorkspaceScope" = None) -> Optional[dict[str, Any]]:
+    def read_semantic_notice(self, notice_id: int, workspace_canonical: "WorkspaceScope" = None) -> dict[str, Any] | None:
         workspace_sql, args = self._workspace_clause(workspace_canonical)
         with self._db.write_transaction() as conn:
             row = conn.execute("SELECT * FROM conflicts WHERE id=? AND notice_type IS NOT NULL" + workspace_sql, (int(notice_id), *args)).fetchone()
@@ -443,7 +443,7 @@ class SemanticNoticeStore:
                 result[key] = result.get(key, 0) + 1
             return result
 
-    def is_semantic_pair_closed(self, left_id: int, right_id: int, left_version: Optional[int] = None, right_version: Optional[int] = None, notice_type: str = "semantic_evidence") -> bool:
+    def is_semantic_pair_closed(self, left_id: int, right_id: int, left_version: int | None = None, right_version: int | None = None, notice_type: str = "semantic_evidence") -> bool:
         for notice in self.list_semantic_notices("dismissed", 10000) + self.list_semantic_notices("resolved", 10000):
             if notice.get("notice_type") != notice_type:
                 continue
@@ -455,7 +455,7 @@ class SemanticNoticeStore:
                 return True
         return False
 
-    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "", workspace_canonical: "WorkspaceScope" = None, conflict_id: Optional[int] = None) -> dict[str, Any]:
+    def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "", workspace_canonical: "WorkspaceScope" = None, conflict_id: int | None = None) -> dict[str, Any]:
         status = str(status).lower()
         if status not in {"dismissed", "resolved"}:
             return {"outcome": "invalid_status"}

@@ -37,17 +37,17 @@ class OperationsPipeline:
         self._evidence_worker = tools._evidence_worker
 
     @property
-    def _update_monitor(self) -> "Optional[UpdateMonitor]":
+    def _update_monitor(self) -> "UpdateMonitor | None":
         # Assigned on MemoryTools after pipeline construction: resolve lazily.
         return self._tools._update_monitor
 
-    def _allowed(self, *args: Any, **kwargs: Any) -> "Tuple[bool, list[str]]":
+    def _allowed(self, *args: Any, **kwargs: Any) -> "tuple[bool, list[str]]":
         return self._tools._allowed(*args, **kwargs)
 
     def _caller_workspace(self, *args: Any, **kwargs: Any) -> "CallerWorkspace":
         return self._tools._caller_workspace(*args, **kwargs)
 
-    def _conflict_detail_for_workspace(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+    def _conflict_detail_for_workspace(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._conflict_detail_for_workspace(*args, **kwargs)
 
     def _embedding_configured(self) -> bool:
@@ -58,13 +58,13 @@ class OperationsPipeline:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         return self._tools._post_commit(*args, **kwargs)
 
-    def _ensure_active_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+    def _ensure_active_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
         return self._tools._ensure_active_embedder()
 
-    def _ensure_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+    def _ensure_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
         return self._tools._ensure_embedder()
 
-    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._get_memory_visible(*args, **kwargs)
 
     def _is_truthy(self, *args: Any, **kwargs: Any) -> bool:
@@ -76,13 +76,13 @@ class OperationsPipeline:
     def _semantic_status(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return self._tools._semantic_status(*args, **kwargs)
 
-    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._strict_acl_unavailable(*args, **kwargs)
 
-    def current_agent_id(self) -> "Optional[str]":
+    def current_agent_id(self) -> "str | None":
         return self._tools.current_agent_id()
 
-    def current_client(self) -> "Optional[str]":
+    def current_client(self) -> "str | None":
         return self._tools.current_client()
 
     def wait_evidence_worker_drained(self, *args: Any, **kwargs: Any) -> bool:
@@ -164,7 +164,7 @@ class OperationsPipeline:
                 }
         return enriched
 
-    def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: Optional[str] = None, **_: Any) -> dict[str, Any]:
+    def memory_list_conflicts(self, status: str = "open", limit: int = 50, source: str | None = None, **_: Any) -> dict[str, Any]:
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
@@ -232,8 +232,8 @@ class OperationsPipeline:
 
     def memory_apply_conflict_action(
         self, conflict_id: int, expected_revision: int, memory_id: int, action: str,
-        content: Optional[str] = None, old_text: Optional[str] = None,
-        new_text: Optional[str] = None, reason: str = "", authorized: bool = False,
+        content: str | None = None, old_text: str | None = None,
+        new_text: str | None = None, reason: str = "", authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
         """Apply one planned member action and update its result in one write transaction."""
@@ -403,7 +403,7 @@ class OperationsPipeline:
 
     def memory_replan_conflict(
         self, conflict_id: int, expected_revision: int, apply_plan: list[dict[str, Any]],
-        resolution_memory_id: Optional[int] = None, authorized: bool = False, **_: Any,
+        resolution_memory_id: int | None = None, authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         if not self._is_truthy(authorized):
             return self.db.state.response({"error": "authorized=True is required"}, ok=False)
@@ -427,7 +427,7 @@ class OperationsPipeline:
         )
         return self.db.state.response(result, ok=result.get("outcome") == "replanned", extra_warnings=list(caller.warnings))
 
-    def memory_confirm(self, memory_id: int, source_ref: Optional[str] = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
+    def memory_confirm(self, memory_id: int, source_ref: str | None = None, confidence: float = 1.0, authorized: bool = False, **_: Any) -> dict[str, Any]:
         authorized = self._is_truthy(authorized)
         if not authorized:
             return self.db.state.response(
@@ -455,8 +455,8 @@ class OperationsPipeline:
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
-        updated: Optional[dict[str, Any]] = None
-        error: Optional[str] = None
+        updated: dict[str, Any] | None = None
+        error: str | None = None
         try:
             with self.db.write_transaction() as conn:
                 memory = self.db.get_memory_on_conn(conn, int(memory_id))
@@ -504,7 +504,7 @@ class OperationsPipeline:
     #  Workspace rename/migration and strict pending confirmation.
     # ------------------------------------------------------------------
     def memory_rename_workspace_canonical(
-        self, old: str, new: str, reason: Optional[str] = None, **_: Any,
+        self, old: str, new: str, reason: str | None = None, **_: Any,
     ) -> dict[str, Any]:
         """Rename a canonical workspace and maintain internal forwarding."""
         updated, warnings = self.db.rename_workspace_canonical(old, new)
@@ -519,7 +519,7 @@ class OperationsPipeline:
         )
 
     def memory_migrate_workspace(
-        self, reason: Optional[str] = None, **payload: Any,
+        self, reason: str | None = None, **payload: Any,
     ) -> dict[str, Any]:
         """Merge one workspace into another and maintain internal forwarding.
 
@@ -561,7 +561,7 @@ class OperationsPipeline:
         self,
         memory_ids: list[int],
         new_workspace: str,
-        reason: Optional[str] = None,
+        reason: str | None = None,
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -633,7 +633,7 @@ class OperationsPipeline:
                 ok=False, extra_warnings=warnings,
             )
 
-        def destination_error(name: str) -> Optional[dict[str, Any]]:
+        def destination_error(name: str) -> dict[str, Any] | None:
             if is_default_workspace_term(name):
                 return {
                     "moved": False,
@@ -1009,7 +1009,7 @@ class OperationsPipeline:
         return response
 
     def memory_confirm_pending_workspace(
-        self, memory_id: int, canonical: str, reason: Optional[str] = None,
+        self, memory_id: int, canonical: str, reason: str | None = None,
         authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         """Assign a pending memory's canonical workspace and activate it.
@@ -1026,7 +1026,7 @@ class OperationsPipeline:
                 return denied
         warnings: list[str] = list(caller.warnings) if caller is not None else []
 
-        def visible_error_record() -> Optional[dict[str, Any]]:
+        def visible_error_record() -> dict[str, Any] | None:
             if caller is not None:
                 return self._get_memory_visible(int(memory_id), caller)
             return self.db.get_memory(int(memory_id))
@@ -1035,7 +1035,7 @@ class OperationsPipeline:
         # invoke embedding/model work; a later ordinary write can publish the
         # canonical vector through the normal retry path.
         activated = False
-        updated: Optional[dict[str, Any]] = None
+        updated: dict[str, Any] | None = None
         try:
             with self.db.write_transaction() as conn:
                 memory = self.db.get_memory_on_conn(conn, int(memory_id))
@@ -1152,8 +1152,8 @@ class OperationsPipeline:
 
     def memory_confirm_workspaces(
         self,
-        workspaces: Optional[list[str]] = None,
-        reason: Optional[str] = None,
+        workspaces: list[str] | None = None,
+        reason: str | None = None,
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -1276,8 +1276,8 @@ class OperationsPipeline:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
                 return denied
-        updated: Optional[dict[str, Any]] = None
-        error: Optional[str] = None
+        updated: dict[str, Any] | None = None
+        error: str | None = None
         action_required = False
         canonical = ""
         try:
@@ -1346,7 +1346,7 @@ class OperationsPipeline:
         self,
         memory_id: int,
         reason: str,
-        superseded_by: Optional[int] = None,
+        superseded_by: int | None = None,
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -1385,7 +1385,7 @@ class OperationsPipeline:
                 extra_warnings=list(caller.warnings),
             )
         resolved = 0
-        updated: Optional[dict[str, Any]] = None
+        updated: dict[str, Any] | None = None
         try:
             with self.db.write_transaction() as conn:
                 memory = self.db.get_memory_on_conn(conn, int(memory_id))
@@ -1547,8 +1547,8 @@ class OperationsPipeline:
     def memory_set_entity(
         self,
         memory_id: int,
-        entity: Optional[str] = None,
-        scope: Optional[str] = None,
+        entity: str | None = None,
+        scope: str | None = None,
         clear: bool = False,
         authorized: bool = False,
         **_: Any,
@@ -1683,7 +1683,7 @@ class OperationsPipeline:
 
     def memory_rebuild_evidence(
         self,
-        memory_ids: Optional[list[int]] = None,
+        memory_ids: list[int] | None = None,
         dry_run: bool = True,
         batch_size: int = 50,
         **_: Any,
@@ -1846,8 +1846,8 @@ class OperationsPipeline:
 
     def memory_judge_conflict(
         self, conflict_id: int, expected_revision: int, chosen_value: str,
-        decided_by: str, ref: Optional[str], reason: str,
-        apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int],
+        decided_by: str, ref: str | None, reason: str,
+        apply_plan: list[dict[str, Any]], resolution_memory_id: int | None,
         authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         try:
@@ -2010,16 +2010,16 @@ class OperationsPipeline:
     def memory_edit(
         self,
         memory_id: int,
-        new_content: Optional[str] = None,
-        old_text: Optional[str] = None,
-        new_text: Optional[str] = None,
-        new_subject: Optional[str] = None,
-        new_tags: Optional[list[str]] = None,
+        new_content: str | None = None,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        new_subject: str | None = None,
+        new_tags: list[str] | None = None,
         reason: str = "",
         authorized: bool = False,
         tags_only: bool = False,
-        add_tags: Optional[list[str]] = None,
-        remove_tags: Optional[list[str]] = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         """In-place edit a memory's content or tags.
@@ -2253,8 +2253,8 @@ class OperationsPipeline:
 
     def memory_cleanup_history(
         self,
-        memory_id: Optional[int] = None,
-        older_than_days: Optional[int] = None,
+        memory_id: int | None = None,
+        older_than_days: int | None = None,
         authorized: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -2337,7 +2337,7 @@ class OperationsPipeline:
         stages: dict[str, str],
         stage: str,
         outcome: str,
-        error_code: Optional[str] = None,
+        error_code: str | None = None,
     ) -> None:
         stages[stage] = outcome
         self.db.backup_replay.set_postprocess_state(
@@ -2348,8 +2348,8 @@ class OperationsPipeline:
         self,
         replay_key: str,
         memory_id: int,
-        prior_stages: Optional[dict[str, Any]] = None,
-    ) -> tuple[str, dict[str, str], Optional[str], list[str]]:
+        prior_stages: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, str], str | None, list[str]]:
         stages = {
             str(key): str(value)
             for key, value in (prior_stages or {}).items()

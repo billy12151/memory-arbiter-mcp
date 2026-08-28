@@ -43,7 +43,7 @@ KEEP_CUES = (
 )
 
 
-def classify_workspace_quality(ws_raw: Optional[str]) -> str:
+def classify_workspace_quality(ws_raw: str | None) -> str:
     """Return one of: empty | default | generic | specific | suspicious.
 
     - empty / default : no usable signal → ASK.
@@ -113,12 +113,12 @@ def _generic_only_proximity(query: str, record: str) -> bool:
 
 
 def workspace_vector_distance(
-    query_canonical: Optional[str],
-    record_canonical: Optional[str],
-    distance_map: Optional[dict[str, float]],
+    query_canonical: str | None,
+    record_canonical: str | None,
+    distance_map: dict[str, float] | None,
     *,
     min_name_len: int = DEFAULT_MIN_NAME_LEN,
-) -> Optional[float]:
+) -> float | None:
     """Guarded cosine distance between two workspace canonicals (Shared admission).
 
     Returns the usable distance from ``distance_map`` (keyed by record
@@ -153,9 +153,9 @@ def workspace_vector_distance(
 
 
 def workspace_admit(
-    query_canonical: Optional[str],
-    record_canonical: Optional[str],
-    distance_map: Optional[dict[str, float]],
+    query_canonical: str | None,
+    record_canonical: str | None,
+    distance_map: dict[str, float] | None,
     cutoff: float,
     *,
     min_name_len: int = DEFAULT_MIN_NAME_LEN,
@@ -222,9 +222,9 @@ def extract_evidence(record: Any, *, max_key_sentences: int = 3) -> dict[str, An
 # ── rule decision (636 §5) ───────────────────────────────────────────────────
 
 def rule_decision(
-    ws_raw: Optional[str],
+    ws_raw: str | None,
     resolved: dict[str, Any],
-    evidence: Optional[dict[str, Any]] = None,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Decide AUTO | KEEP | ASK | None over a resolver result.
 

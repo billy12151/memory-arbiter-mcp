@@ -45,7 +45,7 @@ class MetaStore:
         self._db = db
 
     @staticmethod
-    def get_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
         row = conn.execute("SELECT value FROM _vec_index_meta WHERE key = ?", (key,)).fetchone()
         return str(row["value"]) if row else None
 
@@ -493,7 +493,7 @@ class MetaStore:
 
     def init_vec_index_state(
         self,
-        embedding_space_id: Optional[str],
+        embedding_space_id: str | None,
         has_managed_embedder: bool,
     ) -> None:
         db = self._db

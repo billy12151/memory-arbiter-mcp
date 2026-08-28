@@ -43,7 +43,7 @@ def _color(text: str, code: str, use_color: bool) -> str:
     return f"{code}{text}{_RESET}" if use_color else text
 
 
-def _render_text(report: OverviewReport, use_color: bool, update_check: Optional[dict[str, Any]] = None) -> str:
+def _render_text(report: OverviewReport, use_color: bool, update_check: dict[str, Any] | None = None) -> str:
     """Plain-text rendering with optional ANSI color (§10.2)."""
     lines: list[str] = []
     sev = report.overall

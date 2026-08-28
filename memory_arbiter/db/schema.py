@@ -347,7 +347,7 @@ class SchemaStore:
                     "Writes will use JSONL backup when possible."
                 )
 
-    def _probe_sqlite_vec_loadable(self) -> Optional[bool]:
+    def _probe_sqlite_vec_loadable(self) -> bool | None:
         try:
             import sqlite_vec
 

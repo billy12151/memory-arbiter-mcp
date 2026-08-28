@@ -37,13 +37,13 @@ class ReadPipeline:
     def _caller_workspace(self, *args: Any, **kwargs: Any) -> "CallerWorkspace":
         return self._tools._caller_workspace(*args, **kwargs)
 
-    def _ensure_embedder(self) -> "Tuple[Optional[ManagedEmbedder], list[str]]":
+    def _ensure_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
         return self._tools._ensure_embedder()
 
-    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+    def _get_memory_visible(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._get_memory_visible(*args, **kwargs)
 
-    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "Optional[dict[str, Any]]":
+    def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._strict_acl_unavailable(*args, **kwargs)
 
     @staticmethod
@@ -77,7 +77,7 @@ class ReadPipeline:
         pending = int(worker.get("queue_depth") or 0) + len(worker.get("inflight") or [])
         return {"pending_evidence_index": pending}
 
-    def memory_search(self, query: str = "", workspace: Optional[str] = None, tags: Optional[list[str]] = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: Optional[list[float]] = None, tags_filter: Optional[list[str]] = None, after_time: Optional[str] = None, before_time: Optional[str] = None, source_type: Optional[str] = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
         if "include_superseded" in _:
             return self.db.state.response(
                 {
@@ -175,7 +175,7 @@ class ReadPipeline:
         # calling agent notices it on a quick scan instead of having to inspect
         # each result's nested conflict_signal.
         attention_required = False
-        attention_summary: Optional[str] = None
+        attention_summary: str | None = None
         if include_conflict_signal and retrieval_mode == "direct" and results:
             # Distinct conflict_signal sources on these hits (source -> first
             # result carrying it): each source is logged once, and the loud
@@ -270,15 +270,15 @@ class ReadPipeline:
     def memory_search_expired(
         self,
         query: str = "",
-        workspace: Optional[str] = None,
-        tags: Optional[list[str]] = None,
+        workspace: str | None = None,
+        tags: list[str] | None = None,
         limit: int = 20,
         debug_ranking: bool = False,
-        query_embedding: Optional[list[float]] = None,
-        tags_filter: Optional[list[str]] = None,
-        after_time: Optional[str] = None,
-        before_time: Optional[str] = None,
-        source_type: Optional[str] = None,
+        query_embedding: list[float] | None = None,
+        tags_filter: list[str] | None = None,
+        after_time: str | None = None,
+        before_time: str | None = None,
+        source_type: str | None = None,
         include_conflict_signal: bool = True,
         offset: int = 0,
         **_: Any,
@@ -392,7 +392,7 @@ class ReadPipeline:
             results = self._attach_conflict_signals(results, extra_warnings)
 
         attention_required = False
-        attention_summary: Optional[str] = None
+        attention_summary: str | None = None
         if include_conflict_signal and retrieval_mode == "direct" and results:
             seen_sources: dict[str, dict[str, Any]] = {}
             for r in results:
@@ -466,8 +466,8 @@ class ReadPipeline:
         self,
         memory_id: int,
         sections: str = "none",
-        section_ids: Optional[list[int]] = None,
-        span: Optional[dict[str, Any]] = None,
+        section_ids: list[int] | None = None,
+        span: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         """Return one full memory by id, or a character window of it.
@@ -486,8 +486,8 @@ class ReadPipeline:
                 {"error": "section reads were removed; read the full memory content"},
                 ok=False,
             )
-        span_start: Optional[int] = None
-        span_end: Optional[int] = None
+        span_start: int | None = None
+        span_end: int | None = None
         if span is not None:
             if not isinstance(span, dict):
                 return self.db.state.response({"error": "span must be an object with start/end"}, ok=False)
@@ -534,7 +534,7 @@ class ReadPipeline:
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
-    def memory_recent(self, workspace: Optional[str] = None, limit: int = 20, **_: Any) -> dict[str, Any]:
+    def memory_recent(self, workspace: str | None = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         limit = max(1, min(int(limit), 100))
         caller = self._caller_workspace(workspace)
         denied = self._strict_acl_unavailable(caller)
@@ -551,7 +551,7 @@ class ReadPipeline:
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
-    def memory_compare(self, left_id: Optional[int] = None, right_id: Optional[int] = None, left: Optional[dict[str, Any]] = None, right: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
+    def memory_compare(self, left_id: int | None = None, right_id: int | None = None, left: dict[str, Any] | None = None, right: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:

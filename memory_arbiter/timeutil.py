@@ -28,7 +28,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def parse_iso8601(value: Any) -> Optional[datetime]:
+def parse_iso8601(value: Any) -> datetime | None:
     """Parse an ISO-8601 string; None on falsy/unparseable. Naive → UTC.
 
     Mirrors the lenient ``search._parse_time`` / ``update_monitor._parse_time``
@@ -47,7 +47,7 @@ def parse_iso8601(value: Any) -> Optional[datetime]:
     return dt
 
 
-def parse_iso8601_utc(value: Any) -> Optional[datetime]:
+def parse_iso8601_utc(value: Any) -> datetime | None:
     """Parse an ISO-8601 string to an aware UTC datetime; None on bad input.
 
     Mirrors ``search._parse_ingest_time``: rewrites a trailing ``Z`` and rebases

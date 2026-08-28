@@ -126,7 +126,7 @@ def _vec_table_dimension(conn: sqlite3.Connection, table: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: Optional[DegradeState] = None, embedder_probe: Optional[Callable[[], tuple[Any, list[str]]]] = None) -> OverviewReport:
+def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: DegradeState | None = None, embedder_probe: Callable[[], tuple[Any, list[str]]] | None = None) -> OverviewReport:
     findings: list[Finding] = []
     from .db.evidence_store import indexable_coverage_counts
 
@@ -172,7 +172,7 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     applying_groups: list[dict[str, Any]] = []
     for row in applying_rows[:10]:
         refreshed = str(row[1] or "")
-        idle_days: Optional[int] = None
+        idle_days: int | None = None
         try:
             refreshed_at = datetime.fromisoformat(refreshed)
             if refreshed_at.tzinfo is None:

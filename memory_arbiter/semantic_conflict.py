@@ -101,12 +101,12 @@ _WORKSPACE_PROMPT = """你是 mema 的 workspace 归一候选建议器，只输�
 
 @dataclass
 class WorkspaceCandidateSignal:
-    candidate: Optional[str]
+    candidate: str | None
     relation: str
-    confidence: Optional[float]
+    confidence: float | None
     evidence: str
     raw: str = ""
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -129,10 +129,10 @@ class PairEvidence:
 class ModelSignal:
     candidate: bool
     candidate_type: str
-    confidence: Optional[float]
+    confidence: float | None
     raw: str
     parsed: dict[str, Any] | None
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -140,8 +140,8 @@ class EvidenceDecision:
     action: str
     reason: str
     anchors: list[str] = field(default_factory=list)
-    left_value: Optional[str] = None
-    right_value: Optional[str] = None
+    left_value: str | None = None
+    right_value: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,16 +156,16 @@ class AttributeValueExtraction:
 class PairGateResult:
     state: str
     reason: str
-    attribute: Optional[str] = None
-    value_a: Optional[str] = None
-    value_b: Optional[str] = None
+    attribute: str | None = None
+    value_a: str | None = None
+    value_b: str | None = None
     grounded: bool = False
 
 
 class SemanticBackend(Protocol):
     def classify_pair(
         self, left: dict[str, Any], right: dict[str, Any],
-        *, deadline_monotonic: Optional[float] = None,
+        *, deadline_monotonic: float | None = None,
     ) -> ModelSignal:
         ...
 
@@ -175,7 +175,7 @@ class SemanticBackend(Protocol):
         evidence: dict[str, Any],
         candidates: list[str],
         *,
-        deadline_monotonic: Optional[float] = None,
+        deadline_monotonic: float | None = None,
     ) -> WorkspaceCandidateSignal:
         ...
 
@@ -384,7 +384,7 @@ def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
     )
 
 
-def _extract_first_json_object(raw: str) -> Optional[str]:
+def _extract_first_json_object(raw: str) -> str | None:
     """Return the first balanced top-level ``{...}`` object in *raw*, or None.
 
     Small models frequently emit JSON with nested objects/arrays or trailing
@@ -452,7 +452,7 @@ _VALUE_ALIASES = {
 # normalize_value output is byte-identical to the pre-alias baseline.
 
 
-def extraction_from_text(raw: str) -> tuple[Optional[AttributeValueExtraction], Optional[str]]:
+def extraction_from_text(raw: str) -> tuple[AttributeValueExtraction | None, str | None]:
     """Strictly parse the bounded four-field conflict extraction protocol."""
     snippet = _extract_first_json_object(raw or "")
     if not snippet:
@@ -563,9 +563,9 @@ def value_is_grounded(value: str, quote: str) -> bool:
 def coexistence_veto(
     left: dict[str, Any],
     right: dict[str, Any],
-    forward: Optional[AttributeValueExtraction] = None,
-    reverse: Optional[AttributeValueExtraction] = None,
-) -> Optional[str]:
+    forward: AttributeValueExtraction | None = None,
+    reverse: AttributeValueExtraction | None = None,
+) -> str | None:
     """Return a deterministic coexistence reason code, or None when unknown."""
     left_text = str(left.get("quote") or left.get("content") or "").casefold()
     right_text = str(right.get("quote") or right.get("content") or "").casefold()
@@ -622,8 +622,8 @@ def coexistence_veto(
 
 
 def evaluate_pair_extractions(
-    forward: Optional[AttributeValueExtraction],
-    reverse: Optional[AttributeValueExtraction],
+    forward: AttributeValueExtraction | None,
+    reverse: AttributeValueExtraction | None,
     left: dict[str, Any],
     right: dict[str, Any],
     *,
@@ -674,7 +674,7 @@ def evaluate_pair_extractions(
     )
 
 
-def signal_extraction(signal: Any) -> Optional[AttributeValueExtraction]:
+def signal_extraction(signal: Any) -> AttributeValueExtraction | None:
     """Pull the validated four-field extraction out of a ModelSignal, if any."""
     parsed = getattr(signal, "parsed", None)
     if not isinstance(parsed, dict):
@@ -762,8 +762,8 @@ class LocalGGUFSemanticBackend:
         self._cond = threading.Condition(threading.Lock())
         self._load_lock = threading.Lock()
         self._infer_lock = threading.Lock()
-        self._last_error: Optional[str] = None
-        self._loaded_at: Optional[float] = None
+        self._last_error: str | None = None
+        self._loaded_at: float | None = None
         self._inflight = 0
         self._unloading = False
         self._loading = False
@@ -889,7 +889,7 @@ class LocalGGUFSemanticBackend:
 
     def classify_pair(
         self, left: dict[str, Any], right: dict[str, Any],
-        *, deadline_monotonic: Optional[float] = None,
+        *, deadline_monotonic: float | None = None,
     ) -> ModelSignal:
         llm: Any | None = None
         acquired = False
@@ -1104,7 +1104,7 @@ class IsolatedGGUFSemanticBackend:
         self._ctx = multiprocessing.get_context("spawn")
         self._request_lock = threading.Lock()
         self._schedule_cond = threading.Condition()
-        self._schedule_queues: dict[str, deque[tuple[object, Optional[float]]]] = {
+        self._schedule_queues: dict[str, deque[tuple[object, float | None]]] = {
             "notice": deque(), "workspace": deque(),
         }
         self._schedule_active = False
@@ -1117,9 +1117,9 @@ class IsolatedGGUFSemanticBackend:
         self._generation = 0
         self._restarts = 0
         self._timed_out = 0
-        self._last_error: Optional[str] = None
-        self._loaded_at: Optional[float] = None
-        self._inflight_started: Optional[float] = None
+        self._last_error: str | None = None
+        self._loaded_at: float | None = None
+        self._inflight_started: float | None = None
         self._child_loaded = False
 
     def _start_locked(self) -> None:
@@ -1182,7 +1182,7 @@ class IsolatedGGUFSemanticBackend:
             if count_restart:
                 self._restarts += 1
 
-    def _admit_request(self, request_class: str, deadline_monotonic: Optional[float]) -> Optional[object]:
+    def _admit_request(self, request_class: str, deadline_monotonic: float | None) -> object | None:
         now = time.monotonic()
         if deadline_monotonic is not None and deadline_monotonic <= now:
             return None
@@ -1215,7 +1215,7 @@ class IsolatedGGUFSemanticBackend:
                         continue
                     self._schedule_cond.wait(remaining)
 
-    def _select_next_request_locked(self) -> Optional[object]:
+    def _select_next_request_locked(self) -> object | None:
         now = time.monotonic()
         for queue in self._schedule_queues.values():
             while queue and queue[0][1] is not None and queue[0][1] <= now:
@@ -1238,7 +1238,7 @@ class IsolatedGGUFSemanticBackend:
 
     def _request(
         self, command: str, *, request_class: str = "notice",
-        deadline_monotonic: Optional[float] = None, **payload: Any,
+        deadline_monotonic: float | None = None, **payload: Any,
     ) -> Any:
         # Fast rejection matters for synchronous workspace suggestions while a
         # prior inference owns the single-flight lock. Re-check after acquiring
@@ -1291,7 +1291,7 @@ class IsolatedGGUFSemanticBackend:
             self._release_admission()
 
     @staticmethod
-    def _remaining_timeout_ms(deadline_monotonic: Optional[float], configured_ms: int) -> int:
+    def _remaining_timeout_ms(deadline_monotonic: float | None, configured_ms: int) -> int:
         if deadline_monotonic is None:
             return configured_ms
         remaining_ms = int((deadline_monotonic - time.monotonic()) * 1000)
@@ -1332,7 +1332,7 @@ class IsolatedGGUFSemanticBackend:
 
     def classify_pair(
         self, left: dict[str, Any], right: dict[str, Any],
-        *, deadline_monotonic: Optional[float] = None,
+        *, deadline_monotonic: float | None = None,
     ) -> ModelSignal:
         try:
             result = self._request(
@@ -1345,7 +1345,7 @@ class IsolatedGGUFSemanticBackend:
 
     def suggest_workspace_candidate(
         self, ws_raw: str, evidence: dict[str, Any], candidates: list[str],
-        *, deadline_monotonic: Optional[float] = None,
+        *, deadline_monotonic: float | None = None,
     ) -> WorkspaceCandidateSignal:
         try:
             result = self._request(

@@ -17,17 +17,17 @@ class LocalTextIndexWorker:
         self._pending: dict[int, dict[str, Any]] = {}
         self._inflight: set[int] = set()
         self._cond = threading.Condition()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self._shutdown = False
         self._processed = 0
-        self._last_error: Optional[str] = None
+        self._last_error: str | None = None
 
     def start(self) -> None:
         self._ensure_thread()
 
     def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
-        displaced: Optional[dict[str, Any]] = None
+        displaced: dict[str, Any] | None = None
         with self._cond:
             if self._shutdown:
                 return {"status": "shutdown"}
@@ -142,12 +142,12 @@ class SemanticConflictWorker:
         self._pending: dict[int, dict[str, Any]] = {}
         self._inflight: set[int] = set()
         self._cond = threading.Condition()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self._paused = False
         self._runtime_disabled = False
         self._shutdown = False
-        self._last_error: Optional[str] = None
+        self._last_error: str | None = None
         self._error_seq = 0
         self._processed = 0
         self._skipped = 0
@@ -202,7 +202,7 @@ class SemanticConflictWorker:
         with self._cond:
             if task_id in self._completed:
                 return {"status": "completed", "task_id": task_id, "dedupe_key": task_id}
-            rejected: Optional[str] = None
+            rejected: str | None = None
             if self._shutdown:
                 rejected = "shutdown"
             elif self._runtime_disabled:
@@ -235,7 +235,7 @@ class SemanticConflictWorker:
         self._ensure_thread()
         return {"status": "queued", "task_id": task_id, "dedupe_key": task_id}
 
-    def wait_task(self, task_id: str, timeout: float) -> Optional[dict[str, Any]]:
+    def wait_task(self, task_id: str, timeout: float) -> dict[str, Any] | None:
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self._cond:
             while task_id not in self._completed:
@@ -270,7 +270,7 @@ class SemanticConflictWorker:
                 "last_error": self._last_error,
             }
 
-    def pending_job_deadline(self, timeout_seconds: float) -> Optional[float]:
+    def pending_job_deadline(self, timeout_seconds: float) -> float | None:
         """Return the fairness deadline implied by the oldest queued job."""
         with self._cond:
             if not self._pending:
@@ -379,7 +379,7 @@ class SemanticConflictWorker:
                 memory_id = next(iter(self._pending))
                 snapshot = self._pending.pop(memory_id)
                 self._inflight.add(memory_id)
-            error_message: Optional[str] = None
+            error_message: str | None = None
             job_result: dict[str, Any] = {"status": "incomplete", "reason": "worker_error"}
             task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")
             with self._cond:

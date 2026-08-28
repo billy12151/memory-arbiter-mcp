@@ -80,7 +80,7 @@ def parse_time(value: Any) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def decision(left: dict[str, Any], right: dict[str, Any], winner: Optional[dict[str, Any]], side: str, reasons: list[str]) -> dict[str, Any]:
+def decision(left: dict[str, Any], right: dict[str, Any], winner: dict[str, Any] | None, side: str, reasons: list[str]) -> dict[str, Any]:
     loser = None
     if winner:
         loser = right if winner.get("id") == left.get("id") else left
