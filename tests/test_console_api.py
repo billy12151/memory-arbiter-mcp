@@ -387,3 +387,45 @@ def test_settings_view_is_read_only_and_bilingual(tmp_path: Path) -> None:
     assert items
     assert all(item["editable"] is False for item in items)
     assert all(item["label_en"] and item["label_zh"] for item in items)
+
+
+def test_overview_counts_and_doctor_agree_on_unresolved_conflicts(tmp_path: Path) -> None:
+    from memory_arbiter.doctor import run_all_checks
+
+    api = _api(tmp_path)
+
+    def _memory(content: str) -> int:
+        return api.tools.memory_write(
+            content=content, subject="console-conflicts", tags=["console"],
+            source_type="agent_generated", workspace="console-ws", agent_id="test",
+        )["data"]["id"]
+
+    open_left, open_right = _memory("cache backend is redis"), _memory("cache backend is memcached")
+    open_group = _record_group(api, open_left, open_right, point="cache backend")
+    assert open_group["conflict_id"]
+
+    apply_left, apply_right = _memory("console port is 8080"), _memory("console port is 9090")
+    applying_group = _record_group(api, apply_left, apply_right, point="console port")
+    judged = api.tools.db.judge_conflict(
+        applying_group["conflict_id"], expected_revision=1, chosen_value="new",
+        decided_by="agent", decided_ref=None, decision_reason="reviewed",
+        apply_plan=[
+            {"memory_id": apply_left, "action": "update_current_claim"},
+            {"memory_id": apply_right, "action": "use_as_resolution"},
+        ],
+        resolution_memory_id=apply_right,
+    )
+    assert judged["outcome"] == "applying", judged
+
+    # Console 口径 == doctor 口径: unresolved = open + applying.
+    counts = api._status_counts()
+    assert counts["open_conflicts"] == 2
+    assert counts["applying_conflicts"] == 1
+    overview = api.overview()
+    assert overview["counts"]["open_conflicts"] == 2
+    assert overview["counts"]["applying_conflicts"] == 1
+
+    with api.tools.db.connection() as conn:
+        report = run_all_checks(conn, api.tools.settings)
+    backlog = next(f for f in report.findings if f.check_id == "conflicts.backlog")
+    assert backlog.evidence == {"open": 1, "applying": 1}

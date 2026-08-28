@@ -1921,9 +1921,15 @@ class OperationsPipeline:
             conflicts = self.memory_list_conflicts(
                 status="open", limit=10000, workspace=caller.workspace,
             ).get("data", {}).get("conflicts", [])
+            conflicts += self.memory_list_conflicts(
+                status="applying", limit=10000, workspace=caller.workspace,
+            ).get("data", {}).get("conflicts", [])
         else:
             conflicts = self.db.list_conflicts(
                 status="open", limit=10000, workspace=workspace_scope,
+            )
+            conflicts += self.db.list_conflicts(
+                status="applying", limit=10000, workspace=workspace_scope,
             )
         for conflict in conflicts:
             ws_name = str(conflict.get("workspace_canonical") or "").strip()

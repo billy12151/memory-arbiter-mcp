@@ -125,7 +125,7 @@ class AuditStore:
 
             open_conflict_rows = conn.execute(
                 "SELECT workspace_canonical AS workspace, COUNT(*) AS open_conflicts "
-                "FROM conflicts WHERE status='open' GROUP BY workspace_canonical"
+                "FROM conflicts WHERE status IN ('open','applying') GROUP BY workspace_canonical"
             ).fetchall()
             open_conflicts_by_ws = {
                 str(row["workspace"]): int(row["open_conflicts"])

@@ -7,6 +7,8 @@ Versions follow semantic versioning.
 
 ### Added
 
+- **Doctor reports all unresolved conflict groups** — `conflicts.backlog` now counts `open` + `applying` (was `open` only) with a split in the detail, and a new `conflicts.applying` check flags every group still mid-apply with id/idle-days evidence, so wedged apply plans surface in health checks instead of being invisible to every counting path. Candidate notices keep their own `notices.backlog` check. The default conflict listing stays pure `status=open`.
+- **Console and audit counters match the doctor's unresolved definition** — `ConsoleAPI._status_counts`, `memory_audit_summary`, and the db-level audit now count `open` + `applying` instead of `open` only (previously a wedged apply plan was invisible to every counting path, and the console number could disagree with the conflict list); console counts gain an `applying_conflicts` split and the English sidebar label reads "Unresolved conflicts".
 - **`final_sync` pre-build writer check** — the source database is probed with an EXCLUSIVE lock before the staging build starts; an active writer fails fast with `source_has_active_writer` instead of being discovered only at the post-build fingerprint gate (which remains in place).
 - **Backup replay drains the evidence worker before reporting completion** — receipts marked complete now mean the derived evidence index actually landed; a drain timeout appends a warning.
 
@@ -25,7 +27,7 @@ Versions follow semantic versioning.
 
 ### Verification
 
-- Full tests (908), strict mypy, and Ruff pass.
+- Full tests (912), strict mypy, and Ruff pass.
 
 ## [0.14.7] — 2026-08-28
 

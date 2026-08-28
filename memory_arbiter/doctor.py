@@ -142,6 +142,9 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
         "AND notice_delivery_status IN ('pending','delivered')"
     ).fetchone()[0])
     open_conflicts = int(conn.execute("SELECT COUNT(*) FROM conflicts WHERE status='open'").fetchone()[0])
+    applying_rows = conn.execute(
+        "SELECT id,refreshed_at FROM conflicts WHERE status='applying' ORDER BY refreshed_at,id"
+    ).fetchall()
     scan_required_row = conn.execute(
         "SELECT value FROM migration_state WHERE key='conflict_scan_required'"
     ).fetchone()
@@ -150,11 +153,38 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     findings.append(_finding("evidence.coverage", indexed == eligible or not settings.embedding_auto_write, f"{indexed}/{eligible} memories indexed", evidence={"indexed": indexed, "eligible": eligible, "non_indexable": counts["non_indexable_memories"], "units": units}))
     findings.append(_finding("evidence.freshness", stale == 0, f"{stale} stale evidence rows", evidence={"stale": stale}))
     findings.append(_finding("evidence.orphans", orphan == 0, f"{orphan} orphan evidence rows", evidence={"orphan": orphan}))
-    findings.append(_finding("conflicts.backlog", open_conflicts < 100, f"{open_conflicts} open conflicts"))
+    unresolved_conflicts = open_conflicts + len(applying_rows)
+    findings.append(_finding(
+        "conflicts.backlog", unresolved_conflicts < 100,
+        f"{unresolved_conflicts} unresolved conflicts ({open_conflicts} open, {len(applying_rows)} applying)",
+        evidence={"open": open_conflicts, "applying": len(applying_rows)},
+    ))
     findings.append(_finding(
         "conflicts.scan_required", not conflict_scan_required,
         "complete a full matching-detector conflict scan" if conflict_scan_required
         else "conflict rebuild scan complete",
+    ))
+    # Applying is a transient execution state: a healthy apply completes in
+    # minutes, so any group still applying at doctor time is either mid-flight
+    # or wedged. Flag every one with id/idle-days evidence (replaces the
+    # removed stale-applying list surfacing); agent steers replan or resolve.
+    now = datetime.now(timezone.utc)
+    applying_groups: list[dict[str, Any]] = []
+    for row in applying_rows[:10]:
+        refreshed = str(row[1] or "")
+        idle_days: Optional[int] = None
+        try:
+            refreshed_at = datetime.fromisoformat(refreshed)
+            if refreshed_at.tzinfo is None:
+                refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+            idle_days = max(0, (now - refreshed_at).days)
+        except ValueError:
+            pass
+        applying_groups.append({"id": int(row[0]), "refreshed_at": refreshed, "idle_days": idle_days})
+    findings.append(_finding(
+        "conflicts.applying", not applying_rows,
+        f"{len(applying_rows)} applying conflict group(s) awaiting completion",
+        evidence={"groups": applying_groups},
     ))
     findings.append(_finding("notices.backlog", open_notices < 100, f"{open_notices} open notices"))
     # v0.8.8 observability (restored): searches that ring conflict signals

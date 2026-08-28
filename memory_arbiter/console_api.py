@@ -100,7 +100,8 @@ class ConsoleAPI:
         }
 
     def _status_counts(self, workspace: Optional[str] = None) -> dict[str, int]:
-        counts = {"total": 0, "active": 0, "superseded": 0, "conflicted": 0, "pending": 0, "deleted": 0, "expired": 0, "open_conflicts": 0}
+        # Conflict counters follow the doctor "unresolved" definition: open + applying.
+        counts = {"total": 0, "active": 0, "superseded": 0, "conflicted": 0, "pending": 0, "deleted": 0, "expired": 0, "open_conflicts": 0, "applying_conflicts": 0}
         if not self.tools.db.db_available:
             return counts
         try:
@@ -124,14 +125,21 @@ class ConsoleAPI:
                         counts[status] = count
                         counts["total"] += count
                 if caller.isolation == "strict":
-                    conflicts = self._payload(self.tools.memory_list_conflicts(
+                    open_rows = self._payload(self.tools.memory_list_conflicts(
                         status="open", limit=10000, workspace=caller.workspace,
                     )).get("conflicts") or []
+                    applying_rows = self._payload(self.tools.memory_list_conflicts(
+                        status="applying", limit=10000, workspace=caller.workspace,
+                    )).get("conflicts") or []
                 else:
-                    conflicts = self.tools.db.list_conflicts(
+                    open_rows = self.tools.db.list_conflicts(
                         status="open", limit=10000, workspace=caller.canonical,
                     )
-                counts["open_conflicts"] = len(conflicts)
+                    applying_rows = self.tools.db.list_conflicts(
+                        status="applying", limit=10000, workspace=caller.canonical,
+                    )
+                counts["applying_conflicts"] = len(applying_rows)
+                counts["open_conflicts"] = len(open_rows) + len(applying_rows)
             else:
                 with self.tools.db.connection() as conn:
                     rows = conn.execute("SELECT status, COUNT(*) AS count FROM memories GROUP BY status").fetchall()
@@ -140,8 +148,15 @@ class ConsoleAPI:
                         count = int(row["count"] or 0)
                         counts[status] = count
                         counts["total"] += count
-                    conflict_row = conn.execute("SELECT COUNT(*) AS count FROM conflicts WHERE status='open'").fetchone()
-                    counts["open_conflicts"] = int(conflict_row["count"] or 0) if conflict_row else 0
+                    conflict_rows = conn.execute(
+                        "SELECT status, COUNT(*) AS count FROM conflicts "
+                        "WHERE status IN ('open','applying') GROUP BY status"
+                    ).fetchall()
+                    for row in conflict_rows:
+                        count = int(row["count"] or 0)
+                        counts["open_conflicts"] += count
+                        if row["status"] == "applying":
+                            counts["applying_conflicts"] = count
         except sqlite3.Error:
             return counts
         counts["expired"] = counts.get("superseded", 0) + counts.get("conflicted", 0) + counts.get("pending", 0)

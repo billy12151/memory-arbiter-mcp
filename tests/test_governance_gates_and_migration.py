@@ -165,6 +165,68 @@ def test_open_listing_excludes_applying_groups(tmp_path: Path) -> None:
     assert conflict_id not in [c["id"] for c in listing["data"]["conflicts"]]
 
 
+def test_doctor_backlog_counts_open_and_applying(tmp_path: Path) -> None:
+    from memory_arbiter.doctor import run_all_checks
+
+    tools, db = _tools(tmp_path)
+    left, right = _memory(db, "cache backend is redis"), _memory(db, "cache backend is memcached")
+    # A different slot from _applying_conflict's default: recording a second
+    # group on an occupied slot returns stale_conflict, not a new open group.
+    tools.memory_repair("record_conflict", _record_payload(
+        left, right, slot={"entity": "project", "attribute": "cache", "scope": "global"},
+    ))
+    _applying_conflict(tools, db)
+
+    conn = sqlite3.connect(tools.settings.db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        report = run_all_checks(conn, tools.settings)
+    finally:
+        conn.close()
+    backlog = next(f for f in report.findings if f.check_id == "conflicts.backlog")
+    assert "2 unresolved conflicts (1 open, 1 applying)" in backlog.detail
+    assert backlog.evidence == {"open": 1, "applying": 1}
+
+
+def test_doctor_flags_every_applying_group_with_idle_age(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from memory_arbiter.doctor import run_all_checks
+
+    tools, db = _tools(tmp_path)
+    conflict_id, _, _ = _applying_conflict(tools, db)
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=23)).replace(microsecond=0).isoformat()
+    with db.write_transaction() as conn:
+        conn.execute("UPDATE conflicts SET refreshed_at=? WHERE id=?", (stale_at, conflict_id))
+
+    conn = sqlite3.connect(tools.settings.db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        report = run_all_checks(conn, tools.settings)
+    finally:
+        conn.close()
+    applying = next(f for f in report.findings if f.check_id == "conflicts.applying")
+    assert applying.status == "warn"
+    group = applying.evidence["groups"][0]
+    assert group["id"] == conflict_id
+    assert group["idle_days"] == 23
+
+
+def test_doctor_applying_check_ok_when_none(tmp_path: Path) -> None:
+    from memory_arbiter.doctor import run_all_checks
+
+    tools, _ = _tools(tmp_path)
+    conn = sqlite3.connect(tools.settings.db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        report = run_all_checks(conn, tools.settings)
+    finally:
+        conn.close()
+    applying = next(f for f in report.findings if f.check_id == "conflicts.applying")
+    assert applying.status == "pass"
+    assert applying.evidence == {"groups": []}
+
+
 # ── B-C4: slot entity/scope stored in canon form ────────────────────────────
 
 def test_normalize_slot_canonicalizes_entity_and_scope(tmp_path: Path) -> None:
