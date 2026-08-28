@@ -3,6 +3,31 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.8] — 2026-08-28
+
+### Added
+
+- **Stale `applying` conflict groups surface in the default conflict list** — groups stuck in `applying` for over 7 days now appear alongside open groups, flagged `stale_applying=true` with a `replan_conflict` next action, so slot suppression no longer depends on users remembering to replan. Read-only change; the conflict state machine is untouched.
+- **`final_sync` pre-build writer check** — the source database is probed with an EXCLUSIVE lock before the staging build starts; an active writer fails fast with `source_has_active_writer` instead of being discovered only at the post-build fingerprint gate (which remains in place).
+- **Backup replay drains the evidence worker before reporting completion** — receipts marked complete now mean the derived evidence index actually landed; a drain timeout appends a warning.
+
+### Changed
+
+- **Governance authorization gates on two high-risk sub-paths** — `memory_repair(task="record_conflict")` with `status="not_a_conflict"` now requires `authorized=true` (routine `open` recording stays ungated), closing the slot-occupancy suppression vector; `memory(action="judge")` with `decided_by="user"` now requires `authorized=true` (`decided_by="agent"` stays ungated).
+- **Coexistence veto aligns with extracted attributes** — dimension marker words (e.g. 平均/峰值, 移动端/管理后台) count as a coexisting-dimension difference only when they appear in the extracted attribute text of the corresponding side; markers found only in the quote body no longer veto. The stricter gate lets true conflicts reach the notice path that were previously misread as dimension differences. Direct `coexistence_veto` callers without extractions keep the legacy substring behavior.
+- **Check-degradation records dedupe per task and reason** — one task reports each distinct technical reason once and exposes `reasons_seen`; the counter grows more slowly, so alert thresholds based on absolute counts shift meaning.
+- **Pending memories skip the semantic check explicitly** — a pending memory's semantic-conflict check now returns `{status: skipped, reason: pending_workspace_activation}` instead of `incomplete/memory_not_active`; evidence indexing is unchanged.
+- **Conflict slot_keys store canonical entity/scope orthography** — comparison paths match both canon and raw forms so legacy stored groups stay suppressed.
+
+### Fixed
+
+- **Notice-path display values tolerate malformed model output** — non-dict or missing `parsed` keys fall back to the gate values instead of raising `KeyError` in the worker, matching the scan path's existing guard.
+- Removed the dead `memory_record_conflict` stub (unreachable on the four-tool MCP surface) and replaced magic backup-notice signature tuples with named constants; product help payloads build once as a module-level constant.
+
+### Verification
+
+- Full tests (909), strict mypy, and Ruff pass.
+
 ## [0.14.7] — 2026-08-28
 
 ### Added
