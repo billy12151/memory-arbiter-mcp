@@ -4,7 +4,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.14.8` (governance authorization gates, attribute-aligned coexistence veto, unresolved-conflict visibility in doctor/console plus a synchronous prompt when editing a conflicted memory, and migration/replay durability hardening).
+> Current release: `0.14.9` (architecture hardening: typed trusted-applying context, single _post_commit write-path entry, no __getattr__ forwarding with strict mypy unexempted, and enforced PEP 585/604 annotations).
 
 ## Why trust it
 

@@ -3,6 +3,21 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.9] — 2026-08-29
+
+Architecture-only release (plan id=775; behavior-preserving except where noted).
+
+### Changed
+
+- **Typed `TrustedApplyingContext` replaces the bare §15.3 suppression dict** — the apply flow constructs a frozen dataclass (`to_dict`/`from_dict` for the worker-snapshot transport), so a typo'd field is now a construction error instead of silently disengaging suppression. Malformed snapshots previously crashed the semantic job inside `int()` coercions; `from_dict` now degrades them to `None`, fail-open to the ordinary re-check (behavior improvement). `chosen_value` is carried for audit parity; the gate does not consume it.
+- **Single `_post_commit` entry for all write-path post-commit work** — ten call sites state `recheck_conflicts` explicitly instead of hand-picking between the two enqueue helpers, closing the pairing-mistake class that let a pending memory enter the semantic queue. Writers that opt out return `semantic_conflict_check: {status: skipped, reason: recheck_disabled}` where the field used to be absent (response field is now always present — **breaking for consumers asserting its absence**).
+- **No more `__getattr__` forwarding; strict mypy unexempted** — all nine forwarding shims (six pipelines, three db stores) are replaced by explicit attributes and typed delegates; the three file-level `no-any-return` exemptions are deleted and strict mypy passes across the package. Newly-reached latent typing gaps fixed: `lastrowid` null handling, a `sqlite3.Row` flowing where `dict` was assumed, closure narrowing of the semantic backend, and a next-step dict inferred as `dict[str, int]`.
+- **PEP 585/604 annotations enforced** — 624 annotations migrate to `X | None` / built-in generics; `UP006/UP007/UP045` join the selected Ruff rules so the mixed style cannot return (requires Python >= 3.11, both forms runtime-safe).
+
+### Verification
+
+- Full tests (918), strict mypy with zero exemptions, and Ruff (incl. UP) pass.
+
 ## [0.14.8] — 2026-08-28
 
 ### Added
