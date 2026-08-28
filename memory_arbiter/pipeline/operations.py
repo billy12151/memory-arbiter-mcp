@@ -2133,6 +2133,34 @@ class OperationsPipeline:
         data["evidence_index"], data["semantic_conflict_check"] = (
             self._enqueue_content_postcommit(memory_id_int, data["record"])
         )
+        unresolved = self.db.conflicts.list_open_conflicts_for_memory_ids(
+            [memory_id_int], include_applying=True,
+        )
+        if unresolved:
+            # Content edits bump the version, staling the group's pinned member
+            # snapshot (open) or the in-flight plan's expected_version
+            # (applying). Prompt synchronously — same contract the search path
+            # signals with — so the caller handles the group instead of
+            # leaving it wedged. tags-only edits keep the version and stay
+            # silent; the apply flow's own writes go through memory_govern.
+            ids = ", ".join(f"#{int(group.get('id') or 0)}" for group in unresolved)
+            data["attention_required"] = True
+            data["action_required"] = "review_unresolved_conflicts"
+            data["unresolved_conflicts"] = [
+                {
+                    "conflict_id": group.get("id"),
+                    "revision": group.get("revision"),
+                    "status": group.get("status"),
+                    "conflict_point": group.get("conflict_point"),
+                }
+                for group in unresolved
+            ]
+            data["attention_summary"] = (
+                f"edited memory is a member of unresolved conflict group(s) {ids}; "
+                "this edit may stale their pinned member versions — review via "
+                "memory_review(view='conflict_detail') and judge / replan / "
+                "resolve as appropriate"
+            )
         return self.db.state.response(data)
 
     def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:

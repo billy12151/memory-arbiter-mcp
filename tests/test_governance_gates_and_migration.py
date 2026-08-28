@@ -293,3 +293,46 @@ def test_final_sync_fails_fast_with_active_source_writer(tmp_path: Path) -> None
     assert "stop all writers" in result["next_step"]
     # Fail-fast: no staging rebuild was started.
     assert not target.with_name(target.name + ".finalizing").exists()
+
+
+# ── Write-time prompt: editing a member of an unresolved conflict group ─────
+
+def test_editing_open_group_member_prompts_unresolved_conflicts(tmp_path: Path) -> None:
+    tools, db = _tools(tmp_path)
+    left, right = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
+    tools.memory_repair("record_conflict", _record_payload(left, right))
+    response = tools.memory_edit(left, new_content="database is mysql, per legacy notes")
+    assert response["data"]["edited"] is True
+    assert response["data"]["attention_required"] is True
+    unresolved = response["data"]["unresolved_conflicts"]
+    assert len(unresolved) == 1
+    assert unresolved[0]["status"] == "open"
+    assert response["data"]["action_required"] == "review_unresolved_conflicts"
+
+
+def test_editing_applying_group_member_prompts_unresolved_conflicts(tmp_path: Path) -> None:
+    tools, db = _tools(tmp_path)
+    conflict_id, left, _ = _applying_conflict(tools, db)
+    response = tools.memory_edit(left, new_content="database is mysql, legacy")
+    assert response["data"]["edited"] is True
+    unresolved = response["data"]["unresolved_conflicts"]
+    assert [(g["conflict_id"], g["status"]) for g in unresolved] == [(conflict_id, "applying")]
+
+
+def test_editing_nonmember_memory_stays_silent(tmp_path: Path) -> None:
+    tools, db = _tools(tmp_path)
+    left, right = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
+    tools.memory_repair("record_conflict", _record_payload(left, right))
+    bystander = _memory(db, "unrelated fact about caching")
+    response = tools.memory_edit(bystander, new_content="unrelated fact about caching, updated")
+    assert response["data"]["edited"] is True
+    assert "attention_required" not in response["data"]
+
+
+def test_tags_only_edit_of_member_stays_silent(tmp_path: Path) -> None:
+    tools, db = _tools(tmp_path)
+    left, right = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
+    tools.memory_repair("record_conflict", _record_payload(left, right))
+    response = tools.memory_edit(left, tags_only=True, add_tags=["legacy"])
+    assert response["data"]["edited"] is True
+    assert "attention_required" not in response["data"]
