@@ -57,7 +57,7 @@ def test_product_record_judge_apply_and_resolve(tmp_path: Path) -> None:
 
     judged = tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [
             {"memory_id": mysql, "action": "update_current_claim"},
             {"memory_id": sqlite, "action": "use_as_resolution"},
@@ -118,7 +118,7 @@ def test_apply_rejects_ungrounded_value_then_authorized_replan_preserves_history
     conflict_id = tools.memory_repair("record_conflict", _record_payload(left, right))["data"]["conflict_id"]
     assert tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [{"memory_id": left, "action": "update_current_claim"}],
         "resolution_memory_id": right,
     })["ok"] is True
@@ -161,7 +161,7 @@ def test_cross_workspace_record_and_resolution_are_rejected_transactionally(tmp_
     conflict_id = tools.memory_repair("record_conflict", _record_payload(left, right))["data"]["conflict_id"]
     judged = tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [{"memory_id": left, "action": "update_current_claim"}],
         "resolution_memory_id": foreign_id,
     })
@@ -177,7 +177,7 @@ def test_judge_rejects_unrelated_chosen_value_without_mutation(tmp_path: Path) -
 
     judged = tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "postgres",
-        "decided_by": "user", "ref": "chat", "reason": "unrelated value",
+        "decided_by": "user", "ref": "chat", "reason": "unrelated value", "authorized": True,
         "apply_plan": [
             {"memory_id": left, "action": "preserve_historical_record"},
             {"memory_id": right, "action": "preserve_historical_record"},
@@ -209,7 +209,7 @@ def test_strict_closure_revalidates_all_member_workspaces_transactionally(tmp_pa
     before = db.get_conflict(conflict_id)
     judged = tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [{"memory_id": left, "action": "preserve_historical_record"}],
         "resolution_memory_id": left, "workspace": "default",
     })
@@ -223,7 +223,7 @@ def test_strict_closure_revalidates_all_member_workspaces_transactionally(tmp_pa
         )
     judged = tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [{"memory_id": left, "action": "preserve_historical_record"}],
         "resolution_memory_id": right, "workspace": "default",
     })
@@ -259,7 +259,7 @@ def test_resolution_version_must_still_be_active_and_pinned(tmp_path: Path) -> N
     conflict_id = tools.memory_repair("record_conflict", _record_payload(left, right))["data"]["conflict_id"]
     tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [{"memory_id": right, "action": "use_as_resolution"}],
         "resolution_memory_id": right,
     })

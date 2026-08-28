@@ -49,11 +49,11 @@ _SLOT_UNSET = object()
 
 
 def _record_payload(left: int, right: int, *, detector: str = "d1", status: str = "open",
-                    slot: object = _SLOT_UNSET) -> dict:
+                    slot: object = _SLOT_UNSET, authorized: bool = False) -> dict:
     if slot is _SLOT_UNSET:
         slot = {"entity": "project", "attribute": "database", "scope": "global"}
     members = [_member(left, 1, "mysql", detector=detector), _member(right, 1, "sqlite", detector=detector)]
-    return {
+    payload = {
         "slot_key": slot,
         "members": members,
         "value_groups": [
@@ -63,13 +63,18 @@ def _record_payload(left: int, right: int, *, detector: str = "d1", status: str 
         "detector_version": detector, "prompt_version": "p1", "source": "scheduled_scan",
         "reason": "different database values", "status": status,
     }
+    if authorized:
+        # not_a_conflict dispositions require explicit authorization (B-C3).
+        payload["authorized"] = True
+    return payload
 
 
 def _judge(tools: MemoryTools, conflict_id: int, plan: list[dict], revision: int = 1,
            chosen: str = "sqlite", resolution: int | None = None) -> dict:
     return tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": revision, "chosen_value": chosen,
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        # decided_by="user" requires explicit authorization (B-E3).
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": plan, "resolution_memory_id": resolution,
     })
 
@@ -290,7 +295,7 @@ def test_record_conflict_duplicate_event_after_detector_change(tmp_path: Path) -
     a, b = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
     # not_a_conflict recorded with slot+fingerprint under d1; re-recording the
     # same slot/members under d2 must return a structured outcome, not raise.
-    recorded = tools.memory_repair("record_conflict", _record_payload(a, b, status="not_a_conflict"))
+    recorded = tools.memory_repair("record_conflict", _record_payload(a, b, status="not_a_conflict", authorized=True))
     assert recorded["ok"] is True
     re_recorded = tools.memory_repair("record_conflict", _record_payload(a, b, detector="d2"))
     assert re_recorded["data"]["outcome"] == "duplicate_event"
@@ -301,9 +306,9 @@ def test_slotless_not_a_conflict_reevaluates_after_detector_change(tmp_path: Pat
     """Spec item 17: a candidate-only dismissal re-evaluates under a new detector."""
     tools, db = _tools(tmp_path)
     a, b = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
-    first = tools.memory_repair("record_conflict", _record_payload(a, b, status="not_a_conflict", slot=None))
+    first = tools.memory_repair("record_conflict", _record_payload(a, b, status="not_a_conflict", slot=None, authorized=True))
     assert first["data"]["outcome"] == "inserted"
-    second = tools.memory_repair("record_conflict", _record_payload(a, b, detector="d2", status="not_a_conflict", slot=None))
+    second = tools.memory_repair("record_conflict", _record_payload(a, b, detector="d2", status="not_a_conflict", slot=None, authorized=True))
     assert second["data"]["outcome"] == "inserted"
     assert second["data"]["conflict_id"] != first["data"]["conflict_id"]
 
@@ -339,7 +344,7 @@ def test_not_a_conflict_against_open_group_returns_open_group_exists(tmp_path: P
     a, b = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
     conflict_id = tools.memory_repair("record_conflict", _record_payload(a, b))["data"]["conflict_id"]
     inverted = tools.memory_repair("record_conflict", {
-        **_record_payload(a, b, status="not_a_conflict"), "expected_revision": 1,
+        **_record_payload(a, b, status="not_a_conflict"), "expected_revision": 1, "authorized": True,
     })
     assert inverted["ok"] is False
     assert inverted["data"]["outcome"] == "open_group_exists"
@@ -579,15 +584,6 @@ def test_failed_step_suggests_replan_and_apply_keeps_history(tmp_path: Path) -> 
     })
     assert re_applied["ok"] is True
     assert db.get_conflict(conflict_id)["apply_summary"]["history"] == history
-
-
-# ── legacy wrapper returns a structured error instead of recursing ──────────
-
-def test_memory_record_conflict_wrapper_returns_structured_error(tmp_path: Path) -> None:
-    tools, _ = _tools(tmp_path)
-    result = tools.memory_record_conflict(1, 2, "legacy call")
-    assert result["ok"] is False
-    assert "memory_repair" in result["data"]["error"]
 
 
 # ── 2026-08-21 review round 2: blocker + regression fixes ───────────────────

@@ -1734,6 +1734,7 @@ def test_judge_uses_group_revision_and_apply_plan(tmp_path: Path) -> None:
         "decided_by": "user",
         "ref": "test",
         "reason": "用户确认生产超时",
+        "authorized": True,
         "resolution_memory_id": right["id"],
         "apply_plan": [
             {"memory_id": left["id"], "action": "update_current_claim"},
@@ -1800,7 +1801,7 @@ def test_judge_group_schema_rejects_legacy_fields_and_bad_types(tmp_path: Path) 
     )["data"]["conflict_id"]
     base = {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "30秒",
-        "decided_by": "user", "ref": "test", "reason": "两说",
+        "decided_by": "user", "ref": "test", "reason": "两说", "authorized": True,
         "resolution_memory_id": b["id"],
         "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"}],
     }
@@ -2156,6 +2157,8 @@ def test_record_conflict_not_a_conflict_registration(tmp_path: Path) -> None:
         "detector_version": "attribute-value-v1",
         "source": "scheduled_scan",
         "reason": "同主题演进，无需治理",
+        # not_a_conflict dispositions require explicit authorization (B-C3).
+        "authorized": True,
     }
     marked = tools.memory_repair("record_conflict", payload)
     assert marked["ok"] is True
@@ -2264,6 +2267,8 @@ def test_not_a_conflict_candidate_version_change_can_be_reevaluated(tmp_path: Pa
         "slot_key": None, "members": clue["members"], "value_groups": [],
         "candidate_key": clue["candidate_key"], "status": "not_a_conflict",
         "detector_version": "attribute-value-v1", "source": "scheduled_scan", "reason": "演进",
+        # not_a_conflict dispositions require explicit authorization (B-C3).
+        "authorized": True,
     }
     first = tools.memory_repair("record_conflict", payload)
     second = tools.memory_repair("record_conflict", payload)
@@ -2611,7 +2616,12 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
 
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
 
-    assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1}
+    # reasons_seen is attached because the second pair hit the job budget
+    # (qwen_budget_exhausted) after the first pair's notice was created.
+    assert result == {
+        "status": "completed", "outcome": "notices_created", "notices_created": 1,
+        "reasons_seen": ["qwen_budget_exhausted"],
+    }
     assert deadlines == [None, None]
     assert len(tools.db.list_semantic_notices(status="open", limit=10)) == 1
 
@@ -2692,7 +2702,7 @@ def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkey
     conflict_id = recorded["data"]["conflict_id"]
     tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"},
                        {"memory_id": b["id"], "action": "use_as_resolution"}],
         "resolution_memory_id": b["id"],
@@ -2752,7 +2762,7 @@ def test_applying_reentry_does_not_suppress_different_slot(tmp_path: Path, monke
     conflict_id = recorded["data"]["conflict_id"]
     tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"},
                        {"memory_id": b["id"], "action": "use_as_resolution"}],
         "resolution_memory_id": b["id"],
@@ -2819,7 +2829,7 @@ def test_applying_reentry_context_requires_revision_and_action(
     conflict_id = recorded["data"]["conflict_id"]
     tools.memory("judge", {
         "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "sqlite",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
+        "decided_by": "user", "ref": "chat", "reason": "confirmed", "authorized": True,
         "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"},
                        {"memory_id": b["id"], "action": "use_as_resolution"}],
         "resolution_memory_id": b["id"],
