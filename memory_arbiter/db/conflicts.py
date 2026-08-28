@@ -14,6 +14,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..models import ConflictMember, ConflictValueGroup, utc_now_iso
 from ..semantic_conflict import normalize_value
+from ..text import canon_entity, canon_scope
 
 if TYPE_CHECKING:
     from .core import MemoryDB
@@ -65,6 +66,11 @@ class ConflictStore:
         if set(slot_key) != {"entity", "attribute", "scope"}:
             raise ValueError("slot_key must contain exactly entity, attribute, and scope")
         normalized = {key: str(slot_key[key]).strip() for key in ("entity", "attribute", "scope")}
+        # Storage-side canonicalisation (B-C4): entity/scope are stored in
+        # canon form so slot identity matches the comparison side's canonical
+        # matching; attribute keeps its raw-stripped form (detector-owned).
+        normalized["entity"] = canon_entity(normalized["entity"])
+        normalized["scope"] = canon_scope(normalized["scope"])
         if not all(normalized.values()) or any(
             value.casefold() in {"unknown", "__unknown__"} for value in normalized.values()
         ):
@@ -242,11 +248,18 @@ class ConflictStore:
         source: Optional[str] = None,
         workspace: "WorkspaceScope" = None,
         offset: int = 0,
+        include_stale_applying_before: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         if not self._db_available:
             return []
-        sql = "SELECT * FROM conflicts WHERE status=?"
-        params: list[Any] = [status]
+        if include_stale_applying_before is not None:
+            # B-C5: additionally carry applying groups whose refreshed_at is
+            # past the cutoff (wedged apply plans) into the listing.
+            sql = "SELECT * FROM conflicts WHERE (status=? OR (status='applying' AND refreshed_at<=?))"
+            params: list[Any] = [status, include_stale_applying_before]
+        else:
+            sql = "SELECT * FROM conflicts WHERE status=?"
+            params = [status]
         if source is not None:
             sql += " AND source=?"
             params.append(source)

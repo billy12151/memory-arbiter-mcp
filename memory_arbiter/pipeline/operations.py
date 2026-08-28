@@ -9,6 +9,7 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -118,13 +119,23 @@ class OperationsPipeline:
             return denied
         conflicts: list[dict[str, Any]] = []
         raw_limit = max(int(limit), 1)
+        # Stale-applying surfacing (B-C5): the default open listing also
+        # includes groups that entered applying more than 7 days ago without
+        # resolving — a wedged apply plan is otherwise invisible in the open
+        # view. Read-only: no state-machine change and no automatic reset.
+        stale_applying_before: Optional[str] = None
+        if status == "open":
+            stale_applying_before = (
+                datetime.now(timezone.utc) - timedelta(days=7)
+            ).replace(microsecond=0).isoformat()
         explicit_none_scope = caller.isolation == "none" and caller.source == "explicit"
         if caller.isolation != "strict":
             conflicts = [
                 self._with_resolution_guidance(c)
-                for c in self.db.list_conflicts(
+                for c in self.db.conflicts.list_conflicts(
                     status=status, limit=raw_limit, source=source,
                     workspace=caller.canonical if explicit_none_scope else None,
+                    include_stale_applying_before=stale_applying_before,
                 )
             ]
         else:
@@ -136,9 +147,10 @@ class OperationsPipeline:
             page_size = min(max(raw_limit, 50), 1000)
             offset = 0
             while len(conflicts) < raw_limit:
-                rows = self.db.list_conflicts(
+                rows = self.db.conflicts.list_conflicts(
                     status=status, limit=page_size, source=source,
                     workspace=scope, offset=offset,
+                    include_stale_applying_before=stale_applying_before,
                 )
                 if not rows:
                     break
@@ -151,6 +163,22 @@ class OperationsPipeline:
                 offset += len(rows)
                 if len(rows) < page_size:
                     break
+        if stale_applying_before is not None:
+            for conflict in conflicts:
+                if str(conflict.get("status") or "") != "applying":
+                    continue
+                # Only reachable via the stale inclusion above: a group idle in
+                # applying past the cutoff is wedged, so steer to an authorized
+                # replan rather than per-step apply/resolve guidance.
+                conflict["stale_applying"] = True
+                conflict["next_action"] = {
+                    "tool": "memory_govern", "action": "replan_conflict",
+                    "data": {
+                        "conflict_id": conflict.get("id"),
+                        "expected_revision": conflict.get("revision"),
+                        "authorized": True,
+                    },
+                }
         data = {"conflicts": conflicts, "count": len(conflicts)}
         if caller.isolation == "strict":
             data.update(caller.response_fields())
@@ -1784,7 +1812,8 @@ class OperationsPipeline:
     def memory_judge_conflict(
         self, conflict_id: int, expected_revision: int, chosen_value: str,
         decided_by: str, ref: Optional[str], reason: str,
-        apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int], **_: Any,
+        apply_plan: list[dict[str, Any]], resolution_memory_id: Optional[int],
+        authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         try:
             conflict_id_int = int(conflict_id)
@@ -1794,6 +1823,26 @@ class OperationsPipeline:
             return self.db.state.response({"error": "conflict_id, expected_revision, and resolution_memory_id must be integers"}, ok=False)
         if not isinstance(apply_plan, list):
             return self.db.state.response({"error": "apply_plan must be an array"}, ok=False)
+        # Authorization gate (B-E3): a decision attributed to a human
+        # (decided_by="user") must be explicitly confirmed by the caller,
+        # matching the memory_govern authorization contract. Agent-attributed
+        # decisions stay ungated — they are the detector's routine flow.
+        if str(decided_by).strip().lower() == "user" and not self._is_truthy(authorized):
+            return self.db.state.response(
+                {
+                    "error": "explicit user authorization required",
+                    "action_required": "ask_user_for_authorization",
+                    "governance_action": "judge",
+                    "impact": "Records a user-attributed conflict decision and starts applying its plan.",
+                    "authorized": False,
+                    "retry": {
+                        "tool": "memory",
+                        "action": "judge",
+                        "set_after_user_confirmation": {"authorized": True},
+                    },
+                },
+                ok=False,
+            )
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
@@ -2344,9 +2393,19 @@ class OperationsPipeline:
                 already_replayed.append({"replay_key": entry["replay_key"], "memory_id": replayed.get("memory_id"), "postprocess_status": "complete"})
             else:
                 conflicts.append({"replay_key": entry["replay_key"], "outcome": outcome})
+        # Drain the evidence worker before responding (B-D2): replay
+        # post-processing enqueues local-text indexing on the background
+        # worker, so without the drain a "complete" receipt could be observed
+        # before the evidence index is actually persisted.
+        drained = self.wait_evidence_worker_drained(timeout=30.0)
+        if not drained:
+            warnings.append(
+                "evidence worker did not drain within 30s; complete receipts may still have text indexing in flight"
+            )
         return self.db.state.response(
             {
                 "dry_run": False,
+                "evidence_worker_drained": drained,
                 "imported": imported,
                 "imported_count": len(imported),
                 "already_replayed": already_replayed,

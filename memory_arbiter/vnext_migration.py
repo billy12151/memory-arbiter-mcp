@@ -907,6 +907,29 @@ def final_sync(
             }
         staging.unlink()
     _remove_sidecars(staging)
+    # Fail fast on an active source writer (B-D4): without this probe a
+    # wedged old writer is only caught by the post-build fingerprint gate
+    # below, after a full staging rebuild. The short busy_timeout keeps the
+    # probe cheap; BEGIN EXCLUSIVE doubles as the write probe.
+    if source.exists():
+        probe = sqlite3.connect(source, timeout=1)
+        try:
+            probe.execute("PRAGMA busy_timeout=1000")
+            probe.execute("BEGIN EXCLUSIVE")
+            probe.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            return {
+                "ok": False,
+                "error": "source_has_active_writer",
+                "source": str(source),
+                "target": str(target),
+                "next_step": (
+                    "stop all writers on the source database and rerun the "
+                    "final sync; no staging rebuild has started"
+                ),
+            }
+        finally:
+            probe.close()
     result = build(source, staging, settings, progress=progress)
     if not result.get("ok"):
         result["staging"] = str(staging)

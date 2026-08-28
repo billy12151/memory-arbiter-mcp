@@ -60,7 +60,8 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     },
     ("memory", "judge"): {
         "id", "conflict_id", "expected_revision", "chosen_value", "decided_by",
-        "ref", "reason", "apply_plan", "resolution_memory_id", "workspace",
+        "ref", "reason", "apply_plan", "resolution_memory_id", "authorized",
+        "workspace",
     },
     ("memory_review", "overview"): _COMMON,
     ("memory_review", "doctor"): {"deep", "workspace"},
@@ -106,7 +107,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_repair", "record_conflict"): {
         "slot_key", "members", "value_groups", "candidate_key", "status",
         "detector_version", "prompt_version", "source", "reason", "conflict_point",
-        "expected_revision", "workspace",
+        "expected_revision", "authorized", "workspace",
     },
     ("memory_repair", "replay_backup"): {"dry_run", "authorized", "limit", "offset"},
     ("memory_repair", "normalize_workspaces"): {"dry_run", "authorized"},

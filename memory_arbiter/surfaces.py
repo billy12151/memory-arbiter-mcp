@@ -30,6 +30,122 @@ def _agent_onboarding_guide() -> str:
         )
 
 
+def _memory_value_reference() -> dict[str, Any]:
+    return {
+        "source_type": [item.value for item in SourceType],
+        "protection_level": [item.value for item in ProtectionLevel],
+        "memory_status_note": (
+            "Lifecycle values a record can carry (seen on reads). On remember, "
+            "status accepts only 'active' (the default - omit it) or 'pending'; "
+            "strict isolation sets pending internally until confirm_pending_workspace "
+            "activates the memory. superseded/conflicted/deleted are rejected as write inputs."
+        ),
+        "memory_status": [item.value for item in MemoryStatus],
+        "update_modes": {
+            "replace_content": "memory_id plus new_content, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
+            "replace_text": "memory_id plus old_text and new_text, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
+            "tags_only": "memory_id plus tags_only=true with add_tags and/or remove_tags; content is unchanged.",
+        },
+    }
+
+
+# One shared help-document instance (#9): the literal's only dynamic input is
+# the (now module-level) _memory_value_reference, so it is built once here
+# instead of on every _product_help call. Every mutation path in
+# _product_help copies via dict() before adding keys, so callers can never
+# mutate this shared instance.
+_PRODUCT_HELPS: dict[str, Any] = {
+    "memory": {
+        "description": "Daily memory operations: remember, find, read, update, judge, status.",
+        "actions": ["remember", "find", "read", "update", "judge", "status", "help"],
+        "examples": {
+            "remember": {"action": "remember", "data": {"content": "Fact to remember", "subject": "Short subject", "tags": ["project"]}},
+            "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
+            "read": {"action": "read", "data": {"memory_id": 123}},
+            "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
+            "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
+        },
+        "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
+        "value_reference": _memory_value_reference(),
+    },
+    "memory_review": {
+        "description": "Read-only inspection. Never changes memory state.",
+        "views": ["overview", "doctor", "conflicts", "conflict_detail", "history", "expired", "audit", "entities", "help"],
+        "examples": {
+            "conflicts": {"view": "conflicts", "data": {"status": "open", "limit": 20}},
+            "history": {"view": "history", "data": {"memory_id": 123}},
+            "expired": {"view": "expired", "data": {"query": "old decision", "limit": 10}},
+        },
+    },
+    "memory_govern": {
+        "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
+        "actions": ["retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "confirm_pending_workspace", "confirm_workspaces", "help"],
+        "examples": {
+            "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
+            "apply_conflict_action": {"action": "apply_conflict_action", "data": {"conflict_id": 1, "expected_revision": 2, "memory_id": 12, "action": "update_current_claim", "content": "The database is SQLite.", "reason": "Apply the confirmed conflict decision.", "authorized": True}},
+            "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "expected_revision": 4, "reason": "All planned member actions completed.", "authorized": True}},
+            "rename_workspace_canonical": {"action": "rename_workspace_canonical", "data": {"old": "旧项目名", "new": "新项目名", "reason": "User confirmed the rename.", "authorized": True}},
+            "migrate_workspace": {"action": "migrate_workspace", "data": {"from": "金营二期", "to": "金营项目", "reason": "User confirmed the merge.", "authorized": True}},
+            "move_memories_workspace": {"action": "move_memories_workspace", "data": {"memory_ids": [123, 124], "new_workspace": "金营项目", "reason": "User confirmed these memories belong to the project bucket.", "authorized": True}},
+            "confirm_pending_workspace": {"action": "confirm_pending_workspace", "data": {"memory_id": 123, "canonical": "金营项目", "authorized": True}},
+            "confirm_workspaces": {"action": "confirm_workspaces", "data": {"reason": "Reviewed the registry after renaming duplicates; snapshots the current registry.", "authorized": True}},
+        },
+        "safety_note": "Set authorized=true only after the user explicitly confirms the specific governance action. Retire only whole memories; for partial updates or current-document replacement, update the existing memory instead.",
+        "workspace_move_vs_migrate": (
+            "migrate_workspace merges one whole canonical workspace into another by "
+            "name and reroutes the old name through an alias; move_memories_workspace "
+            "moves selected memories by id to another workspace bucket (both workspace "
+            "columns) and leaves alias/normalization rules untouched. Moving does not "
+            "change memory status: pending memories stay pending until activated via "
+            "confirm_pending_workspace, and superseded/deleted rows keep their status "
+            "(reported via moved_non_active)."
+        ),
+        "authorization_rule": "All state-changing actions require authorized=true. Without it, the response returns action_required=ask_user_for_authorization and an impact description.",
+        "confirm_actions": {
+            "confirm": "Promote one memory to user_confirmed and lock it against ordinary changes.",
+            "confirm_pending_workspace": (
+                "Confirm a new canonical workspace under strict isolation and activate its pending memory."
+            ),
+            "confirm_workspaces": (
+                "Record the reviewed workspace snapshot after rename/merge cleanup. "
+                "Omit workspaces to snapshot the current registry and clear workspace.review; "
+                "an explicit subset confirms only those names, so other current names remain warnings."
+            ),
+        },
+    },
+    "memory_repair": {
+        "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
+        "tasks": ["rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
+        "examples": {
+            "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
+            "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
+            "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
+            "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
+            "normalize_workspaces": {"task": "normalize_workspaces", "data": {"dry_run": True}},
+            "normalize_workspaces_apply": {"task": "normalize_workspaces", "data": {"dry_run": False, "authorized": True}},
+            "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
+            "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
+            "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
+            "notice_read": {"task": "notice", "data": {"action": "read", "notice_id": 1}},
+            "notice_dismiss": {"task": "notice", "data": {"action": "dismiss", "notice_id": 1, "reason": "Reviewed; not actionable."}},
+            "notice_resolve": {"task": "notice", "data": {"action": "resolve", "notice_id": 1, "reason": "Reviewed and handled."}},
+            "notice_escalate": {"task": "notice", "data": {"action": "escalate", "notice_id": 1, "reason": "Verified against both memories: real contradiction needing governance."}},
+        },
+        "semantic_notice_delivery": "Notices progress pending -> delivered while open, then dismissed/resolved, or stale when any frozen member is no longer active at its pinned version. Read requires freshness.fresh=true and executing every read_calls entry for complete memories before triage; two-member notices also expose optional left/right aliases. Dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict.",
+        "checked_no_notice": "A completed semantic task with outcome=checked_no_notice examined its eligible candidates and emitted zero notices; it is not a claim that no conflict can exist outside that task snapshot or candidate budget.",
+        "normalize_workspaces_scope": (
+            "normalize_workspaces is a GLOBAL registry operation: it takes no workspace "
+            "filter and folds spelling-variant canonicals across the whole registry. "
+            "Under strict isolation it still requires a resolvable caller workspace "
+            "(settings.workspace), the same ACL gate as scan_candidates/record_conflict."
+        ),
+        "semantic_control_actions": [
+            "status", "pause", "resume", "enable", "unload", "disable",
+        ],
+    },
+}
+
+
 class ProductSurfaces:
     _GOVERNANCE_IMPACTS: dict[str, str] = {
         "retire": "Marks a whole memory superseded and removes it from active recall.",
@@ -42,6 +158,7 @@ class ProductSurfaces:
         "move_memories_workspace": "Moves the selected memories by id to another workspace bucket (both workspace columns); alias and normalization rules are not changed. Rows whose canonical already diverges from their bucket (e.g. rows written through a confirmed alias) are re-anchored to the destination when authorized.",
         "confirm_pending_workspace": "Assigns the canonical workspace and activates the pending memory for recall.",
         "confirm_workspaces": "Records the reviewed workspace registry snapshot that doctor's workspace.review diffs against; unconfirmed new workspaces keep the check warning.",
+        "record_conflict": "Records a not_a_conflict disposition that suppresses future detection of the same candidate; ordinary open conflict intake does not require authorization.",
     }
 
     def __init__(self, tools: "MemoryTools"):
@@ -127,116 +244,10 @@ class ProductSurfaces:
             if registered_surface == surface and not operation.startswith("_")
         }
 
-    @staticmethod
-    def _memory_value_reference() -> dict[str, Any]:
-        return {
-            "source_type": [item.value for item in SourceType],
-            "protection_level": [item.value for item in ProtectionLevel],
-            "memory_status_note": (
-                "Lifecycle values a record can carry (seen on reads). On remember, "
-                "status accepts only 'active' (the default - omit it) or 'pending'; "
-                "strict isolation sets pending internally until confirm_pending_workspace "
-                "activates the memory. superseded/conflicted/deleted are rejected as write inputs."
-            ),
-            "memory_status": [item.value for item in MemoryStatus],
-            "update_modes": {
-                "replace_content": "memory_id plus new_content, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
-                "replace_text": "memory_id plus old_text and new_text, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
-                "tags_only": "memory_id plus tags_only=true with add_tags and/or remove_tags; content is unchanged.",
-            },
-        }
-
     def _product_help(self, surface: str, topic: Optional[str] = None) -> dict[str, Any]:
-        helps: dict[str, Any] = {
-            "memory": {
-                "description": "Daily memory operations: remember, find, read, update, judge, status.",
-                "actions": ["remember", "find", "read", "update", "judge", "status", "help"],
-                "examples": {
-                    "remember": {"action": "remember", "data": {"content": "Fact to remember", "subject": "Short subject", "tags": ["project"]}},
-                    "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
-                    "read": {"action": "read", "data": {"memory_id": 123}},
-                    "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
-                    "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
-                },
-                "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
-                "value_reference": self._memory_value_reference(),
-            },
-            "memory_review": {
-                "description": "Read-only inspection. Never changes memory state.",
-                "views": ["overview", "doctor", "conflicts", "conflict_detail", "history", "expired", "audit", "entities", "help"],
-                "examples": {
-                    "conflicts": {"view": "conflicts", "data": {"status": "open", "limit": 20}},
-                    "history": {"view": "history", "data": {"memory_id": 123}},
-                    "expired": {"view": "expired", "data": {"query": "old decision", "limit": 10}},
-                },
-            },
-            "memory_govern": {
-                "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
-                "actions": ["retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "confirm_pending_workspace", "confirm_workspaces", "help"],
-                "examples": {
-                    "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
-                    "apply_conflict_action": {"action": "apply_conflict_action", "data": {"conflict_id": 1, "expected_revision": 2, "memory_id": 12, "action": "update_current_claim", "content": "The database is SQLite.", "reason": "Apply the confirmed conflict decision.", "authorized": True}},
-                    "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "expected_revision": 4, "reason": "All planned member actions completed.", "authorized": True}},
-                    "rename_workspace_canonical": {"action": "rename_workspace_canonical", "data": {"old": "旧项目名", "new": "新项目名", "reason": "User confirmed the rename.", "authorized": True}},
-                    "migrate_workspace": {"action": "migrate_workspace", "data": {"from": "金营二期", "to": "金营项目", "reason": "User confirmed the merge.", "authorized": True}},
-                    "move_memories_workspace": {"action": "move_memories_workspace", "data": {"memory_ids": [123, 124], "new_workspace": "金营项目", "reason": "User confirmed these memories belong to the project bucket.", "authorized": True}},
-                    "confirm_pending_workspace": {"action": "confirm_pending_workspace", "data": {"memory_id": 123, "canonical": "金营项目", "authorized": True}},
-                    "confirm_workspaces": {"action": "confirm_workspaces", "data": {"reason": "Reviewed the registry after renaming duplicates; snapshots the current registry.", "authorized": True}},
-                },
-                "safety_note": "Set authorized=true only after the user explicitly confirms the specific governance action. Retire only whole memories; for partial updates or current-document replacement, update the existing memory instead.",
-                "workspace_move_vs_migrate": (
-                    "migrate_workspace merges one whole canonical workspace into another by "
-                    "name and reroutes the old name through an alias; move_memories_workspace "
-                    "moves selected memories by id to another workspace bucket (both workspace "
-                    "columns) and leaves alias/normalization rules untouched. Moving does not "
-                    "change memory status: pending memories stay pending until activated via "
-                    "confirm_pending_workspace, and superseded/deleted rows keep their status "
-                    "(reported via moved_non_active)."
-                ),
-                "authorization_rule": "All state-changing actions require authorized=true. Without it, the response returns action_required=ask_user_for_authorization and an impact description.",
-                "confirm_actions": {
-                    "confirm": "Promote one memory to user_confirmed and lock it against ordinary changes.",
-                    "confirm_pending_workspace": (
-                        "Confirm a new canonical workspace under strict isolation and activate its pending memory."
-                    ),
-                    "confirm_workspaces": (
-                        "Record the reviewed workspace snapshot after rename/merge cleanup. "
-                        "Omit workspaces to snapshot the current registry and clear workspace.review; "
-                        "an explicit subset confirms only those names, so other current names remain warnings."
-                    ),
-                },
-            },
-            "memory_repair": {
-                "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-                "tasks": ["rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
-                "examples": {
-                    "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
-                    "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
-                    "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
-                    "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
-                    "normalize_workspaces": {"task": "normalize_workspaces", "data": {"dry_run": True}},
-                    "normalize_workspaces_apply": {"task": "normalize_workspaces", "data": {"dry_run": False, "authorized": True}},
-                    "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
-                    "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
-                    "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
-                    "notice_read": {"task": "notice", "data": {"action": "read", "notice_id": 1}},
-                    "notice_dismiss": {"task": "notice", "data": {"action": "dismiss", "notice_id": 1, "reason": "Reviewed; not actionable."}},
-                    "notice_resolve": {"task": "notice", "data": {"action": "resolve", "notice_id": 1, "reason": "Reviewed and handled."}},
-                    "notice_escalate": {"task": "notice", "data": {"action": "escalate", "notice_id": 1, "reason": "Verified against both memories: real contradiction needing governance."}},
-                },
-                "semantic_notice_delivery": "Notices progress pending -> delivered while open, then dismissed/resolved, or stale when any frozen member is no longer active at its pinned version. Read requires freshness.fresh=true and executing every read_calls entry for complete memories before triage; two-member notices also expose optional left/right aliases. Dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict.",
-                "checked_no_notice": "A completed semantic task with outcome=checked_no_notice examined its eligible candidates and emitted zero notices; it is not a claim that no conflict can exist outside that task snapshot or candidate budget.",
-                "normalize_workspaces_scope": (
-                    "normalize_workspaces is a GLOBAL registry operation: it takes no workspace "
-                    "filter and folds spelling-variant canonicals across the whole registry. "
-                    "Under strict isolation it still requires a resolvable caller workspace "
-                    "(settings.workspace), the same ACL gate as scan_candidates/record_conflict."
-                ),
-                "semantic_control_actions": [
-                    "status", "pause", "resume", "enable", "unload", "disable",
-                ],
-            },
-        }
+        # The document bodies live in the module-level _PRODUCT_HELPS constant
+        # (#9); every mutation path below copies via dict() first.
+        helps = _PRODUCT_HELPS
         if topic == AGENT_ONBOARDING_TOPIC:
             return {
                 "description": "Agent onboarding guide for using mema / Memory Arbiter correctly.",
@@ -485,7 +496,9 @@ class ProductSurfaces:
         response = self._validated_product_call("memory_repair", operation, data, self._memory_repair)
         return self._deliver_product_notices(response, data)
 
-    def _governance_authorization_required(self, action: str) -> dict[str, Any]:
+    def _governance_authorization_required(
+        self, action: str, *, tool: str = "memory_govern", retry_field: str = "action",
+    ) -> dict[str, Any]:
         return self.db.state.response(
             {
                 "error": "explicit user authorization required",
@@ -494,8 +507,8 @@ class ProductSurfaces:
                 "impact": self._GOVERNANCE_IMPACTS[action],
                 "authorized": False,
                 "retry": {
-                    "tool": "memory_govern",
-                    "action": action,
+                    "tool": tool,
+                    retry_field: action,
                     "set_after_user_confirmation": {"authorized": True},
                 },
             },
@@ -504,9 +517,10 @@ class ProductSurfaces:
 
     def _governance_authorization_error(
         self, action: str, payload: dict[str, Any],
+        *, tool: str = "memory_govern", retry_field: str = "action",
     ) -> Optional[dict[str, Any]]:
         if not payload.get("authorized"):
-            return self._governance_authorization_required(action)
+            return self._governance_authorization_required(action, tool=tool, retry_field=retry_field)
         return None
 
     def _memory(self, action: str = "help", data: Optional[dict[str, Any]] = None, **_: Any) -> dict[str, Any]:
@@ -930,6 +944,16 @@ class ProductSurfaces:
                 )
             if not isinstance(payload.get("members"), list) or not isinstance(payload.get("value_groups"), list):
                 return self._invalid_product_call("memory_repair", "members and value_groups must be arrays", task)
+            # Authorization gate (B-C3): a not_a_conflict disposition suppresses
+            # future detection of the same candidate, so it requires explicit
+            # user authorization; ordinary open intake stays ungated — it is
+            # the external reviewer's routine flow.
+            if str(payload.get("status") or "open").strip().lower() == "not_a_conflict":
+                auth_error = self._governance_authorization_error(
+                    "record_conflict", payload, tool="memory_repair", retry_field="task",
+                )
+                if auth_error is not None:
+                    return auth_error
             if caller.isolation == "strict":
                 try:
                     member_ids = [int(member["memory_id"]) for member in payload["members"]]
