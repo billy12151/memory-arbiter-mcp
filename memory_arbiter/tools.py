@@ -162,13 +162,17 @@ class MemoryTools:
     def start_semantic_worker(self) -> None:
         self._semantic_worker.start()
 
-    def current_client(self) -> str:
+    def current_client(self) -> Optional[str]:
+        # Trusted identity comes only from the request scope (HTTP headers or
+        # the stdio process identity established in server.build_runtime).
+        # Never fall back to process-level settings here: a missing trusted
+        # source must surface as None, not silently claim the env identity.
         identity = get_request_identity()
-        return identity.client if identity is not None else self.settings.client
+        return identity.client if identity is not None else None
 
-    def current_agent_id(self) -> str:
+    def current_agent_id(self) -> Optional[str]:
         identity = get_request_identity()
-        return identity.agent_id if identity is not None else self.settings.agent_id
+        return identity.agent_id if identity is not None else None
 
     def _consume_notices(self) -> list[dict[str, Any]]:
         notices: list[dict[str, Any]] = []
@@ -1155,6 +1159,18 @@ class MemoryTools:
     ) -> dict[str, Any]:
         return self._operations.memory_migrate_workspace(reason, **payload)
 
+    def memory_move_memories_workspace(
+        self,
+        memory_ids: Optional[list[int]] = None,
+        new_workspace: str = "",
+        reason: Optional[str] = None,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        return self._operations.memory_move_memories_workspace(
+            memory_ids or [], new_workspace, reason, self._is_truthy(authorized), **_,
+        )
+
     def memory_confirm_pending_workspace(
         self, memory_id: int, canonical: str, reason: Optional[str] = None,
         authorized: bool = False, **_: Any,
@@ -1263,6 +1279,28 @@ class MemoryTools:
         return self._operations.memory_replay_backup(
             dry_run, self._is_truthy(authorized), limit, offset, **_,
         )
+
+    def memory_normalize_workspaces(
+        self, dry_run: bool = True, authorized: bool = False, **_: Any,
+    ) -> dict[str, Any]:
+        """Fold registered workspace spelling variants into first-seen canonicals."""
+        dry_run = self._is_truthy(dry_run)
+        if not dry_run and not self._is_truthy(authorized):
+            # Same caller-confirmation gate as replay_backup: executing the
+            # merge re-points memories and drops canonical rows, so it needs
+            # explicit user authorization.
+            return {
+                "ok": False,
+                "dry_run": False,
+                "error": "authorized=True is required to execute workspace normalization",
+                "action_required": "ask_user_for_authorization",
+                "groups": [],
+                "merged": [],
+                "rejected_normalized": [],
+                "skipped": [],
+                "warnings": [],
+            }
+        return self.db.workspaces.normalize_workspace_canonicals(dry_run=dry_run)
 
     @staticmethod
     def _confidence_rank(hint: Optional[str]) -> int:

@@ -534,6 +534,158 @@ def test_final_sync_excludes_late_old_writer_through_publish(
         assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
 
 
+def _stub_final_sync_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_fingerprint = {"stable": True}
+
+    def built(_source, staging, _settings, **_kwargs):
+        staging.write_bytes(b"new")
+        # A real build opens MemoryDB on the staging path, whose startup leaves
+        # the <staging>.startup.lock sidecar behind (database_startup_lock).
+        staging.with_name(staging.name + ".startup.lock").write_bytes(b"")
+        return {
+            "ok": True,
+            "switch_ready": True,
+            "source_fingerprint": source_fingerprint,
+        }
+
+    monkeypatch.setattr("memory_arbiter.vnext_migration.build", built)
+    monkeypatch.setattr(
+        "memory_arbiter.vnext_migration._fingerprint_on_connection",
+        lambda _conn: source_fingerprint,
+    )
+    monkeypatch.setattr("memory_arbiter.vnext_migration._remove_sidecars", lambda _path: None)
+
+
+def _staging_startup_lock(target: Path) -> Path:
+    staging = target.with_name(target.name + ".finalizing")
+    return staging.with_name(staging.name + ".startup.lock")
+
+
+_CONFIG_SWITCH_FAILED_NEXT_STEP = (
+    "the target database is already live; only the config switch failed — "
+    "point db_path at the target manually (or fix the config and retry the "
+    "switch); no rebuild is needed"
+)
+
+
+def test_final_sync_publish_callback_raise_converges_to_switch_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memory_arbiter.vnext_migration import final_sync
+
+    source = tmp_path / "legacy.db"
+    target = tmp_path / "target.db"
+    _legacy_db(source)
+    settings = Settings(db_path=source, backup_jsonl=tmp_path / "backup.jsonl")
+    _stub_final_sync_build(monkeypatch)
+
+    def publish():
+        raise RuntimeError("boom")
+
+    result = final_sync(source, target, settings, progress=False, publish_callback=publish)
+    assert result["ok"] is False
+    assert result["error"] == "migration_complete_but_config_switch_failed"
+    assert result["target_ready"] is True
+    assert result["needs_config_switch"] is True
+    assert result["target"] == str(target)
+    # The stale build-phase next_step ("freeze writes and run --final-sync …")
+    # must be overridden: the target is already live, no rebuild is due.
+    assert result["next_step"] == _CONFIG_SWITCH_FAILED_NEXT_STEP
+    assert result["config"]["switched"] is False
+    assert result["config"]["error"].startswith("publish_callback_raised:")
+    assert "boom" in result["config"]["error"]
+    # The target database is already live; only the config switch failed.
+    assert target.read_bytes() == b"new"
+    # The staging startup-lock sidecar is cleaned on the failure branch too.
+    assert not _staging_startup_lock(target).exists()
+
+
+def test_final_sync_publish_callback_declined_switch_reports_target_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memory_arbiter.vnext_migration import final_sync
+
+    source = tmp_path / "legacy.db"
+    target = tmp_path / "target.db"
+    _legacy_db(source)
+    settings = Settings(db_path=source, backup_jsonl=tmp_path / "backup.jsonl")
+    _stub_final_sync_build(monkeypatch)
+
+    def publish():
+        return {"switched": False, "error": "config_switch_failed: operator declined"}
+
+    result = final_sync(source, target, settings, progress=False, publish_callback=publish)
+    assert result["ok"] is False
+    assert result["error"] == "migration_complete_but_config_switch_failed"
+    assert result["target_ready"] is True
+    assert result["needs_config_switch"] is True
+    assert result["target"] == str(target)
+    assert result["next_step"] == _CONFIG_SWITCH_FAILED_NEXT_STEP
+    assert result["config"] == {
+        "switched": False,
+        "error": "config_switch_failed: operator declined",
+    }
+    assert target.read_bytes() == b"new"
+    # The staging startup-lock sidecar is cleaned on the failure branch too.
+    assert not _staging_startup_lock(target).exists()
+
+
+def test_final_sync_publish_callback_non_dict_return_converges_to_switch_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memory_arbiter.vnext_migration import final_sync
+
+    source = tmp_path / "legacy.db"
+    target = tmp_path / "target.db"
+    _legacy_db(source)
+    settings = Settings(db_path=source, backup_jsonl=tmp_path / "backup.jsonl")
+    _stub_final_sync_build(monkeypatch)
+
+    def publish():
+        # Malformed return: must not escape as AttributeError on .get with
+        # the target already live.
+        return None
+
+    result = final_sync(source, target, settings, progress=False, publish_callback=publish)
+    assert result["ok"] is False
+    assert result["error"] == "migration_complete_but_config_switch_failed"
+    assert result["target_ready"] is True
+    assert result["needs_config_switch"] is True
+    assert result["target"] == str(target)
+    assert result["next_step"] == _CONFIG_SWITCH_FAILED_NEXT_STEP
+    assert result["config"] == {
+        "switched": False,
+        "error": "publish_callback_returned_invalid: NoneType",
+    }
+    assert target.read_bytes() == b"new"
+    assert not _staging_startup_lock(target).exists()
+
+
+def test_final_sync_publish_callback_truthy_string_switched_is_not_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memory_arbiter.vnext_migration import final_sync
+
+    source = tmp_path / "legacy.db"
+    target = tmp_path / "target.db"
+    _legacy_db(source)
+    settings = Settings(db_path=source, backup_jsonl=tmp_path / "backup.jsonl")
+    _stub_final_sync_build(monkeypatch)
+
+    def publish():
+        # A truthy string is not a confirmed switch; only a real `True` is.
+        return {"switched": "false"}
+
+    result = final_sync(source, target, settings, progress=False, publish_callback=publish)
+    assert result["ok"] is False
+    assert result["error"] == "migration_complete_but_config_switch_failed"
+    assert result["target_ready"] is True
+    assert result["needs_config_switch"] is True
+    assert result["config"] == {"switched": "false"}
+    assert target.read_bytes() == b"new"
+    assert not _staging_startup_lock(target).exists()
+
+
 def test_preflight_rejects_missing_vec_embedding_and_model(tmp_path) -> None:
     legacy = tmp_path / "legacy.db"
     _legacy_db(legacy)

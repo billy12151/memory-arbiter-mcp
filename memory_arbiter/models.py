@@ -105,7 +105,16 @@ class MemoryRecord:
     id: Optional[int] = None
 
     @classmethod
-    def from_input(cls, payload: dict[str, Any], defaults: dict[str, str]) -> "MemoryRecord":
+    def from_input(
+        cls,
+        payload: dict[str, Any],
+        defaults: dict[str, str],
+        *,
+        trusted_agent_id: Optional[str] = None,
+    ) -> "MemoryRecord":
+        # agent_id is provenance, not caller input: payload agent_id is ignored
+        # by design. Trusted channels only: `trusted_agent_id` (e.g. backup
+        # replay preserving the original attribution) or config/env defaults.
         source_type = payload.get("source_type") or SourceType.UNKNOWN.value
         protection = payload.get("protection_level") or ProtectionLevel.NORMAL.value
         status = payload.get("status") or MemoryStatus.ACTIVE.value
@@ -119,7 +128,7 @@ class MemoryRecord:
         tags = list(raw_tags) if isinstance(raw_tags, (list, tuple)) else []
         return cls(
             content=str(payload["content"]).strip(),
-            agent_id=str(payload.get("agent_id") or defaults.get("agent_id") or "default"),
+            agent_id=str(trusted_agent_id or defaults.get("agent_id") or "default"),
             workspace=str(payload.get("workspace") or defaults.get("workspace") or "default"),
             tags=tags,
             source_type=str(source_type),

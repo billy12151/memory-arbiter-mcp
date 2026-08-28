@@ -39,6 +39,7 @@ class ProductSurfaces:
         "confirm": "Promotes the memory to user_confirmed and locks it against ordinary changes.",
         "rename_workspace_canonical": "Renames a canonical workspace and reroutes all affected memories.",
         "migrate_workspace": "Bulk-moves memories to another canonical workspace and records the alias.",
+        "move_memories_workspace": "Moves the selected memories by id to another workspace bucket (both workspace columns); alias and normalization rules are not changed. Rows whose canonical already diverges from their bucket (e.g. rows written through a confirmed alias) are re-anchored to the destination when authorized.",
         "confirm_pending_workspace": "Assigns the canonical workspace and activates the pending memory for recall.",
         "confirm_workspaces": "Records the reviewed workspace registry snapshot that doctor's workspace.review diffs against; unconfirmed new workspaces keep the check warning.",
     }
@@ -171,17 +172,27 @@ class ProductSurfaces:
             },
             "memory_govern": {
                 "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
-                "actions": ["retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace", "confirm_workspaces", "help"],
+                "actions": ["retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "confirm_pending_workspace", "confirm_workspaces", "help"],
                 "examples": {
                     "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
                     "apply_conflict_action": {"action": "apply_conflict_action", "data": {"conflict_id": 1, "expected_revision": 2, "memory_id": 12, "action": "update_current_claim", "content": "The database is SQLite.", "reason": "Apply the confirmed conflict decision.", "authorized": True}},
                     "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "expected_revision": 4, "reason": "All planned member actions completed.", "authorized": True}},
                     "rename_workspace_canonical": {"action": "rename_workspace_canonical", "data": {"old": "旧项目名", "new": "新项目名", "reason": "User confirmed the rename.", "authorized": True}},
                     "migrate_workspace": {"action": "migrate_workspace", "data": {"from": "金营二期", "to": "金营项目", "reason": "User confirmed the merge.", "authorized": True}},
+                    "move_memories_workspace": {"action": "move_memories_workspace", "data": {"memory_ids": [123, 124], "new_workspace": "金营项目", "reason": "User confirmed these memories belong to the project bucket.", "authorized": True}},
                     "confirm_pending_workspace": {"action": "confirm_pending_workspace", "data": {"memory_id": 123, "canonical": "金营项目", "authorized": True}},
                     "confirm_workspaces": {"action": "confirm_workspaces", "data": {"reason": "Reviewed the registry after renaming duplicates; snapshots the current registry.", "authorized": True}},
                 },
                 "safety_note": "Set authorized=true only after the user explicitly confirms the specific governance action. Retire only whole memories; for partial updates or current-document replacement, update the existing memory instead.",
+                "workspace_move_vs_migrate": (
+                    "migrate_workspace merges one whole canonical workspace into another by "
+                    "name and reroutes the old name through an alias; move_memories_workspace "
+                    "moves selected memories by id to another workspace bucket (both workspace "
+                    "columns) and leaves alias/normalization rules untouched. Moving does not "
+                    "change memory status: pending memories stay pending until activated via "
+                    "confirm_pending_workspace, and superseded/deleted rows keep their status "
+                    "(reported via moved_non_active)."
+                ),
                 "authorization_rule": "All state-changing actions require authorized=true. Without it, the response returns action_required=ask_user_for_authorization and an impact description.",
                 "confirm_actions": {
                     "confirm": "Promote one memory to user_confirmed and lock it against ordinary changes.",
@@ -197,12 +208,14 @@ class ProductSurfaces:
             },
             "memory_repair": {
                 "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-                "tasks": ["rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "semantic_control", "notice", "record_conflict", "help"],
+                "tasks": ["rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
                 "examples": {
                     "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
                     "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
                     "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
                     "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
+                    "normalize_workspaces": {"task": "normalize_workspaces", "data": {"dry_run": True}},
+                    "normalize_workspaces_apply": {"task": "normalize_workspaces", "data": {"dry_run": False, "authorized": True}},
                     "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
                     "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
                     "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
@@ -213,6 +226,12 @@ class ProductSurfaces:
                 },
                 "semantic_notice_delivery": "Notices progress pending -> delivered while open, then dismissed/resolved, or stale when any frozen member is no longer active at its pinned version. Read requires freshness.fresh=true and executing every read_calls entry for complete memories before triage; two-member notices also expose optional left/right aliases. Dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict.",
                 "checked_no_notice": "A completed semantic task with outcome=checked_no_notice examined its eligible candidates and emitted zero notices; it is not a claim that no conflict can exist outside that task snapshot or candidate budget.",
+                "normalize_workspaces_scope": (
+                    "normalize_workspaces is a GLOBAL registry operation: it takes no workspace "
+                    "filter and folds spelling-variant canonicals across the whole registry. "
+                    "Under strict isolation it still requires a resolvable caller workspace "
+                    "(settings.workspace), the same ACL gate as scan_candidates/record_conflict."
+                ),
                 "semantic_control_actions": [
                     "status", "pause", "resume", "enable", "unload", "disable",
                 ],
@@ -740,6 +759,25 @@ class ProductSurfaces:
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self.memory_migrate_workspace, **payload)
+        if action == "move_memories_workspace":
+            raw_ids = payload.get("memory_ids")
+            if not isinstance(raw_ids, list) or not raw_ids:
+                return self._invalid_product_call(
+                    "memory_govern",
+                    "move_memories_workspace requires memory_ids as a non-empty list of memory ids",
+                    action,
+                )
+            if not payload.get("new_workspace"):
+                return self._invalid_product_call(
+                    "memory_govern", "move_memories_workspace requires new_workspace", action,
+                )
+            bad = self._require_ws_strings(payload, ("new_workspace",), "memory_govern", action)
+            if bad is not None:
+                return bad
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
+            return self._forward("memory_govern", action, self.memory_move_memories_workspace, **payload)
         if action == "confirm_pending_workspace":
             invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
             if invalid_id is not None:
@@ -869,6 +907,16 @@ class ProductSurfaces:
             return self._forward("memory_repair", task, self.memory_activate, **payload)
         if task == "replay_backup":
             return self._forward("memory_repair", task, self.memory_replay_backup, **payload)
+        if task == "normalize_workspaces":
+            # normalize is a GLOBAL registry operation (see the help note):
+            # the payload carries no workspace filter, so the strict-ACL gate
+            # resolves the caller from settings only — the same two-line gate
+            # as scan_candidates/record_conflict.
+            caller = self._caller_workspace(None)
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+            return self._forward("memory_repair", task, self.memory_normalize_workspaces, **payload)
         if task == "record_conflict":
             caller = self._caller_workspace(payload.get("workspace"))
             denied = self._strict_acl_unavailable(caller)

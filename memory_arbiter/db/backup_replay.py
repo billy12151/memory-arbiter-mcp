@@ -241,7 +241,12 @@ class BackupReplayStore:
     def replay_one(self, entry: dict[str, Any]) -> dict[str, Any]:
         if not self._db.db_available or not self._db.state.sqlite_writable:
             return {"outcome": "sqlite_unavailable", "replay_key": entry["replay_key"]}
-        record = MemoryRecord.from_input(entry["record"], self._db.settings.defaults())
+        # Replay preserves the backup's original attribution through the
+        # explicit trusted channel; from_input ignores payload agent_id.
+        record = MemoryRecord.from_input(
+            entry["record"], self._db.settings.defaults(),
+            trusted_agent_id=(entry.get("record") or {}).get("agent_id"),
+        )
         captured_workspace = str(entry.get("workspace_canonical") or record.workspace)
         resolved = self._db.resolve_workspace_canonical(
             captured_workspace, None, register_new=False,

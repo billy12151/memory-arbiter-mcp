@@ -14,7 +14,11 @@ from types import SimpleNamespace
 import pytest
 
 from memory_arbiter.config import Settings
-from memory_arbiter.constants import DEFAULT_TERMS, DEFAULT_WORKSPACE_NAME
+from memory_arbiter.constants import (
+    DEFAULT_TERMS,
+    DEFAULT_WORKSPACE_NAME,
+    is_default_workspace_term,
+)
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
 
@@ -254,3 +258,39 @@ def test_placement_hint_still_fires_for_default_synonym(tmp_path, monkeypatch):
     assert w["data"]["workspace_canonical"] == DEFAULT_WORKSPACE_NAME
     hints = w["data"].get("write_hints") or {}
     assert hints["placement_suggestion"]["suggested_workspace"] == "projA"
+
+
+# ── regression: full-width IME spellings fold into the global pool ──────────
+
+def test_full_width_default_spellings_are_default_terms():
+    # NFKC folds full-width IME spellings onto their ASCII twins before the
+    # synonym comparison; without it ｄｅｆａｕｌｔ registers a phantom second
+    # default pool instead of landing in the global one.
+    assert is_default_workspace_term("ｄｅｆａｕｌｔ")
+    assert is_default_workspace_term("ＮＵＬＬ")
+    assert is_default_workspace_term("　默认　")  # U+3000 spaces are stripped
+    # boundary: full-width PROJECT names are still real workspaces, and
+    # supersets of "default" are not synonyms
+    assert not is_default_workspace_term("ｐｒｏｊ")
+    assert not is_default_workspace_term("defaulted")
+
+
+def test_full_width_default_write_lands_in_global_pool(tmp_path):
+    tools = make_tools(tmp_path)
+    written = _write(tools, "full-width default write", "ｄｅｆａｕｌｔ", subject="nfkc")
+    assert written["ok"]
+    assert written["data"]["workspace_canonical"] == DEFAULT_WORKSPACE_NAME
+    with tools.db.connection() as conn:
+        names = [str(row["name"]) for row in conn.execute("SELECT name FROM workspace_canonicals")]
+    assert "ｄｅｆａｕｌｔ" not in names
+
+
+def test_move_refuses_full_width_default_destination(tmp_path):
+    tools = make_tools(tmp_path)
+    memory_id = int(_write(tools, "x", "proj-a", subject="s")["data"]["id"])
+    outcome = tools.memory_govern("move_memories_workspace", {
+        "memory_ids": [memory_id], "new_workspace": "ＮＵＬＬ", "authorized": True,
+    })
+    assert not outcome["ok"]
+    assert "reserved global pool" in outcome["data"]["error"]
+    assert tools.db.get_memory(memory_id)["workspace"] == "proj-a"

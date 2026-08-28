@@ -65,6 +65,8 @@ def test_stdio_server_sigterm_does_not_abort_during_finalization(tmp_path: Path)
             "MEMORY_ARBITER_UPDATE_CHECK_ENABLED": "false",
             "MEMORY_ARBITER_SEMANTIC_CONFLICT_ENABLED": "false",
             "MEMORY_ARBITER_ENABLE_SQLITE_VEC": "false",
+            "MEMORY_ARBITER_CLIENT": "test-client",
+            "MEMORY_ARBITER_AGENT_ID": "test-agent",
         }
     )
     proc = subprocess.Popen(

@@ -14,8 +14,11 @@
        `which mema` prints (e.g. /Users/you/.local/bin/mema). launchd does not
        inherit your shell PATH, so a bare `mema` won't be found.
     2. StandardOutPath / StandardErrorPath: optional, defaults below are fine.
-    3. Transport is set via EnvironmentVariables below. You may instead set
-       mcp.transport in ~/.config/memory-arbiter/config.json and remove the
+    3. Transport and the required startup identity are set via
+       EnvironmentVariables below. mema has no built-in identity defaults: the
+       server refuses to start without client/agent_id from config.json or
+       these env vars. You may instead set mcp.transport and client/agent_id
+       in ~/.config/memory-arbiter/config.json and remove the
        EnvironmentVariables dict — config.json wins over env for matching keys.
 
   INSTALL
@@ -47,6 +50,14 @@
   <dict>
     <key>MEMORY_ARBITER_MCP_TRANSPORT</key>
     <string>streamable-http</string>
+    <!-- Required startup identity (no built-in defaults). Under streamable-http
+         the per-request X-Mema-Client / X-Mema-Agent-Id headers still determine
+         caller attribution and policy; this configured identity only satisfies
+         the startup requirement. -->
+    <key>MEMORY_ARBITER_CLIENT</key>
+    <string>mema-server</string>
+    <key>MEMORY_ARBITER_AGENT_ID</key>
+    <string>mema-server</string>
     <!-- Stateless is the default. It avoids expired client sessions after a
          service restart; persisted semantic notices still arrive later. -->
     <!-- Optional; unset uses 127.0.0.1:8000/mcp

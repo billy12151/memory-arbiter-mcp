@@ -6,6 +6,7 @@ locations keep re-export aliases so existing imports keep working.
 """
 from __future__ import annotations
 
+import unicodedata
 from typing import Optional
 
 # Recent-fallback warning prefix. The legacy bm25 search path infers
@@ -32,7 +33,11 @@ def is_default_workspace_term(name: Optional[str]) -> bool:
     """True when a workspace string is a reserved default-pool synonym."""
     if name is None:
         return False
-    return name.strip().casefold() in DEFAULT_TERMS
+    # NFKC first: a full-width IME spelling (ｄｅｆａｕｌｔ, ＮＵＬＬ) must fold to
+    # its ASCII twin before the synonym comparison. Exact-codepoint matching
+    # would treat the visually identical word as a brand-new workspace and
+    # register a phantom second default pool instead of the global one.
+    return unicodedata.normalize("NFKC", name.strip()).casefold() in DEFAULT_TERMS
 
 
 # ---------------------------------------------------------------------------

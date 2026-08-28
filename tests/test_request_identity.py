@@ -318,7 +318,7 @@ def _runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: Any):
     return server.build_runtime()
 
 
-def test_http_identity_injects_write_provenance_and_rejects_mismatch(
+def test_http_identity_attributes_write_provenance_and_rejects_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle = _runtime(tmp_path, monkeypatch)
@@ -489,6 +489,8 @@ def test_settings_parse_http_transport_and_server_passes_options(
     cfg.write_text(json.dumps({
         "db_path": str(tmp_path / "db.sqlite3"),
         "backup_jsonl": str(tmp_path / "backup.jsonl"),
+        "client": "cfg-client",
+        "agent_id": "cfg-agent",
         "mcp": {
             "transport": "streamable-http",
             "http": {"host": "localhost", "port": 8123, "path": "/memory/"},
@@ -521,6 +523,8 @@ def test_http_stateful_mode_remains_an_explicit_compatibility_option(
     cfg.write_text(json.dumps({
         "db_path": str(tmp_path / "db.sqlite3"),
         "backup_jsonl": str(tmp_path / "backup.jsonl"),
+        "client": "cfg-client",
+        "agent_id": "cfg-agent",
         "mcp": {
             "transport": "streamable-http",
             "http": {"stateless": False},
@@ -548,6 +552,8 @@ def test_streamable_http_rejects_non_loopback_bind(
     settings = Settings(
         db_path=tmp_path / "db.sqlite3",
         backup_jsonl=tmp_path / "backup.jsonl",
+        client="cfg-client",
+        agent_id="cfg-agent",
         mcp_transport="streamable-http",
         mcp_http_host="0.0.0.0",
     )
@@ -555,3 +561,81 @@ def test_streamable_http_rejects_non_loopback_bind(
     with pytest.raises(RuntimeError, match="localhost"):
         server.build_runtime()
     assert not settings.db_path.exists()
+
+
+def test_build_runtime_requires_configured_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memory_arbiter import server
+
+    settings = Settings(
+        db_path=tmp_path / "db.sqlite3",
+        backup_jsonl=tmp_path / "backup.jsonl",
+    )
+    monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: settings))
+    with pytest.raises(RuntimeError, match="configured identity"):
+        server.build_runtime()
+    assert not settings.db_path.exists()
+
+
+def test_stdio_bridge_status_and_policy_use_process_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _runtime(tmp_path, monkeypatch)
+    # No request scope at all: the stdio process identity established in
+    # build_runtime is the trusted source for every tool call.
+    status = bundle.app.tools["memory"](action="status", data={})
+    assert status["data"]["client"] == "settings-client"
+    assert status["data"]["agent_id"] == "settings-agent"
+    assert status["data"]["policy"] == {"caller_allowed": True}
+    bundle.tools.shutdown(timeout=1)
+
+    denied_settings = Settings(
+        db_path=tmp_path / "denied.sqlite3",
+        backup_jsonl=tmp_path / "denied.jsonl",
+        update_check_enabled=False,
+        client="settings-client",
+        agent_id="blocked",
+        policy=AgentPolicy(default_enabled=True, deny_agents=["blocked"]),
+    )
+    from memory_arbiter import server
+    monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: denied_settings))
+    _install_fake_fastmcp(monkeypatch)
+    denied_bundle = server.build_runtime()
+    written = denied_bundle.app.tools["memory"](
+        action="remember", data={"content": "fact", "subject": "stdio-policy"},
+    )
+    assert written["ok"] is False
+    assert written["data"]["written"] is False
+    # A payload agent_id cannot launder policy: it conflicts with the trusted
+    # process identity and is rejected as a mismatch before any write happens.
+    laundered = denied_bundle.app.tools["memory"](
+        action="remember",
+        data={"content": "fact", "subject": "stdio-policy", "agent_id": "unblocked"},
+    )
+    assert laundered["ok"] is False
+    assert laundered["data"]["error"] == "identity_mismatch"
+    denied_bundle.tools.shutdown(timeout=1)
+
+
+def test_remember_payload_agent_id_is_ignored_without_request_identity(
+    tmp_path: Path,
+) -> None:
+    from memory_arbiter.tools import MemoryTools
+
+    tools = MemoryTools(Settings(
+        db_path=tmp_path / "direct.sqlite3",
+        backup_jsonl=tmp_path / "direct.jsonl",
+        agent_id="env-agent",
+        client="env-client",
+    ))
+    written = tools.memory_write(
+        content="fact", subject="direct", agent_id="smuggled-agent",
+        source_type="agent_generated",
+    )
+    assert written["ok"] is True
+    # Payload provenance is dropped (unknown-field warning) and never reaches
+    # the record; attribution falls back to the env/config identity.
+    assert any("unknown field ignored: agent_id" in w for w in written["warnings"])
+    assert written["data"]["record"]["agent_id"] == "env-agent"
+    tools.shutdown(timeout=1)

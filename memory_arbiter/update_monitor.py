@@ -138,7 +138,9 @@ class UpdateMonitor:
             return []
         return notices
 
-    def consume_agent_onboarding_notice(self, agent_id: str) -> list[dict[str, Any]]:
+    def consume_agent_onboarding_notice(self, agent_id: Optional[str]) -> list[dict[str, Any]]:
+        # Absent identity (no trusted request identity) collapses to the
+        # "default" onboarding bucket rather than erroring.
         normalized_agent_id = str(agent_id or "default").strip() or "default"
         notice_key = f"{normalized_agent_id}:{AGENT_ONBOARDING_NOTICE_ID}:{AGENT_ONBOARDING_NOTICE_VERSION}"
         try:

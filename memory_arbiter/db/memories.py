@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 from ..acl import WorkspaceScope, workspace_scope_sql
+from ..constants import DEFAULT_WORKSPACE_NAME
 from ..models import MemoryRecord, utc_now_iso
 from ..text import (
     canon_entity as _canon_entity,
@@ -59,8 +60,9 @@ class MemoriesStore:
             return None, warnings
         # Double-store: raw workspace stays in `workspace`; resolved canonical
         # (from tools-side alias resolution) lands in `workspace_canonical`.
-        # Fall back to the raw workspace so the column is never NULL on new rows.
-        canonical = (workspace_canonical or record.workspace or "").strip() or record.workspace
+        # Blank/empty input collapses to DEFAULT_WORKSPACE_NAME so the column
+        # is never empty on new rows.
+        canonical = (workspace_canonical or record.workspace or "").strip() or DEFAULT_WORKSPACE_NAME
         # Register only the final canonical, atomically with the memory row. The
         # resolver/model runs before this transaction and must never register the
         # raw near-miss workspace (which would leave a phantom canonical).
@@ -83,7 +85,7 @@ class MemoriesStore:
         self, conn: sqlite3.Connection, record: MemoryRecord,
         workspace_canonical: Optional[str] = None,
     ) -> int:
-        canonical = (workspace_canonical or record.workspace or "").strip() or record.workspace
+        canonical = (workspace_canonical or record.workspace or "").strip() or DEFAULT_WORKSPACE_NAME
         cur = conn.execute(
                 """
                 INSERT INTO memories

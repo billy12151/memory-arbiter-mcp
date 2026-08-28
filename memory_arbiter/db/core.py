@@ -170,7 +170,14 @@ class MemoryDB:
             yield conn
             conn.execute("COMMIT")
         except BaseException:
-            conn.execute("ROLLBACK")
+            # If BEGIN itself failed (e.g. busy timeout) there is no active
+            # transaction; a blind ROLLBACK would raise "cannot rollback - no
+            # transaction is active" and mask the original error.
+            try:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
             raise
         finally:
             conn.close()

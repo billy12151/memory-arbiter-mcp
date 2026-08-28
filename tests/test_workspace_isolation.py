@@ -833,3 +833,49 @@ def test_non_default_workspace_gets_no_placement_suggestion(tmp_path):
     )
     ws = t._write_pipeline._resolve_write_workspace(rec)
     assert "placement_suggestion" not in ws or ws.get("placement_suggestion") is None
+
+
+def test_blank_workspace_write_lands_in_default(tmp_path):
+    # from_input does not strip: a whitespace-only workspace is truthy and
+    # passes through the whole main path. Resolution must still collapse it to
+    # the default pool instead of storing an empty/blank canonical.
+    from memory_arbiter.models import MemoryRecord
+
+    t = make_tools(tmp_path)
+    rec = MemoryRecord.from_input(
+        {"content": "空白 workspace 正文", "subject": "空白边界", "workspace": "   "},
+        t.settings.defaults(),
+    )
+    assert rec.workspace == "   "  # truthy blank survives from_input
+    memory_id, warnings = t.db.insert_memory(rec, "")
+    assert memory_id is not None
+    with t.db.connection() as conn:
+        row = conn.execute(
+            "SELECT workspace, workspace_canonical FROM memories WHERE id=?",
+            (memory_id,),
+        ).fetchone()
+    assert row["workspace"] == "   "
+    assert row["workspace_canonical"] == "default"
+
+
+def test_insert_memory_empty_canonical_falls_back_to_default(tmp_path):
+    # canonical 空串兜底: an explicit empty canonical with a blank raw workspace
+    # must become DEFAULT_WORKSPACE_NAME, never an empty string.
+    from memory_arbiter.models import MemoryRecord
+
+    t = make_tools(tmp_path)
+    rec = MemoryRecord.from_input(
+        {"content": "空 canonical 正文", "subject": "空串兜底", "workspace": ""},
+        t.settings.defaults(),
+    )
+    memory_id, _warnings = t.db.insert_memory(rec, "  ")
+    assert memory_id is not None
+    with t.db.connection() as conn:
+        row = conn.execute(
+            "SELECT workspace_canonical FROM memories WHERE id=?", (memory_id,),
+        ).fetchone()
+        registered = conn.execute(
+            "SELECT name FROM workspace_canonicals"
+        ).fetchall()
+    assert row["workspace_canonical"] == "default"
+    assert all(str(r["name"]).strip() for r in registered)

@@ -17,7 +17,9 @@ from ..acl import WorkspaceScope, scope_names, workspace_scope_sql, forbidden_pa
 from ..arbitration import compare_memories
 from ..constants import DEFAULT_WORKSPACE_NAME, is_default_workspace_term
 from ..db import MemoryDB, _normalize_alias_key
-from ..db.workspaces import _mechanical_ws_key
+from ..db_generation import database_startup_lock
+from ..db.workspaces import _coerce_ws, _mechanical_ws_key
+from ..validation import MAX_BATCH_IDS, _controlled_integer
 from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType
 from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
@@ -497,6 +499,457 @@ class OperationsPipeline:
             ok=not operation_warnings,
             extra_warnings=list(ensure_warnings) + list(warnings),
         )
+
+    def memory_move_memories_workspace(
+        self,
+        memory_ids: list[int],
+        new_workspace: str,
+        reason: Optional[str] = None,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Move selected memories by id to a different workspace bucket.
+
+        Companion to migrate_workspace: migrate merges one canonical
+        workspace into another by name and reroutes the alias; move
+        reassigns individual memories — the raw bucket column and
+        workspace_canonical together — and leaves alias/normalization rules
+        untouched. Divergent rows (workspace_canonical already pointing
+        somewhere other than the raw bucket, e.g. rows written through a
+        confirmed alias) are refused unless the call is authorized, in which
+        case they are re-anchored to the destination with an explicit
+        response note. The source bucket may be default; default is never a
+        valid destination. Moving does not change memory status: pending
+        memories stay pending, and superseded/deleted rows keep their status
+        (reported via moved_non_active).
+        """
+        authorized = self._is_truthy(authorized)
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        warnings: list[str] = list(caller.warnings)
+        admitted: set[str] = set()
+        if caller.isolation == "strict":
+            admitted = {
+                str(name or "").strip()
+                for name in caller.scope_canonicals()
+                if str(name or "").strip()
+            }
+
+        ids: list[int] = []
+        for value in list(memory_ids or []):
+            # Same strict coercion as the product surface (_controlled_integer):
+            # a direct call must not let bool True / float 1.5 silently become
+            # memory id 1.
+            memory_id = _controlled_integer(value)
+            if memory_id is None or memory_id <= 0:
+                return self.db.state.response(
+                    {
+                        "moved": False,
+                        "error": "memory_ids must contain positive integer ids",
+                        "field": "memory_ids",
+                    },
+                    ok=False, extra_warnings=warnings,
+                )
+            if memory_id not in ids:
+                ids.append(memory_id)
+        if len(ids) > MAX_BATCH_IDS:
+            return self.db.state.response(
+                {
+                    "moved": False,
+                    "error": f"memory_ids must be a list with at most {MAX_BATCH_IDS} items",
+                    "field": "memory_ids",
+                },
+                ok=False, extra_warnings=warnings,
+            )
+
+        requested = str(new_workspace or "").strip()
+        target = _coerce_ws(new_workspace)
+        if not target:
+            return self.db.state.response(
+                {
+                    "moved": False,
+                    "error": "new_workspace must be a non-empty workspace string",
+                    "field": "new_workspace",
+                },
+                ok=False, extra_warnings=warnings,
+            )
+
+        def destination_error(name: str) -> Optional[dict[str, Any]]:
+            if is_default_workspace_term(name):
+                return {
+                    "moved": False,
+                    "error": (
+                        "default is a reserved global pool and cannot be a move "
+                        "destination; choose a non-default workspace"
+                    ),
+                    "field": "new_workspace",
+                }
+            if caller.isolation == "strict" and name not in admitted:
+                return {
+                    "moved": False,
+                    "error": (
+                        "forbidden_strict_workspace: new_workspace is outside "
+                        "the caller workspace scope"
+                    ),
+                    "field": "new_workspace",
+                    **caller.response_fields(),
+                }
+            return None
+
+        def destination_block_response(blocked: dict[str, Any]) -> dict[str, Any]:
+            # Reconciliation contract: ids are already parsed when a
+            # destination is rejected, so the response must account for them.
+            blocked.update({
+                "moved_ids": [],
+                "failed_ids": list(ids),
+                "errors": [
+                    {"memory_id": memory_id, "reason": "destination_rejected"}
+                    for memory_id in ids
+                ],
+            })
+            return self.db.state.response(blocked, ok=False, extra_warnings=warnings)
+
+        bad_destination = destination_error(target)
+        if bad_destination is not None:
+            return destination_block_response(bad_destination)
+
+        # Destination orthography, mirroring what a write using the same name
+        # would do: follow ONE confirmed alias hop to its decision canonical
+        # (checked first, matching the write path's alias short-circuit), else
+        # land on the registered spelling of a mechanical twin (migrate's
+        # destination fold). Never a second alias hop — a write using the
+        # same name would not take one either.
+        def fold_destination(name: str) -> str:
+            alias_target = self.db.workspaces.confirmed_alias_canonical(name)
+            if alias_target:
+                return alias_target
+            return self.db.workspaces.registered_mechanical_canonical(name) or name
+
+        target = fold_destination(target)
+        bad_destination = destination_error(target)
+        if bad_destination is not None:
+            return destination_block_response(bad_destination)
+
+        # Advisory pre-validation (fast-fail before any transaction): per-id
+        # visibility plus the divergence gate. The write transaction re-checks
+        # each row on its own connection snapshot, so a row that diverges,
+        # vanishes, or leaves the caller scope in the window between the two
+        # is failed per id instead of silently re-anchored.
+        failures: list[dict[str, Any]] = []
+        movable: list[int] = []
+        for memory_id in ids:
+            memory = self._get_memory_visible(memory_id, caller)
+            if not memory:
+                failures.append({
+                    "memory_id": memory_id,
+                    "reason": "not_found_or_forbidden",
+                })
+                continue
+            bucket = str(memory.get("workspace") or "").strip()
+            canonical = str(memory.get("workspace_canonical") or "").strip()
+            if canonical and bucket and canonical != bucket and not authorized:
+                failures.append({
+                    "memory_id": memory_id,
+                    "reason": "canonical_diverged",
+                    "workspace": bucket,
+                    "workspace_canonical": canonical,
+                })
+                continue
+            movable.append(memory_id)
+
+        if not movable:
+            return self.db.state.response(
+                {
+                    "moved": False,
+                    "moved_ids": [],
+                    "failed_ids": [failure["memory_id"] for failure in failures],
+                    "errors": failures,
+                    "new_workspace": target,
+                },
+                ok=False, extra_warnings=warnings,
+            )
+
+        # Canonical embedding is prepared outside the write transaction, like
+        # every other canonical registration path.
+        embedder, ensure_warnings = self._ensure_active_embedder()
+        warnings.extend(ensure_warnings)
+        target_embedding = self.db.workspaces.prepare_missing_workspace_canonical_embedding(
+            target, embedder,
+        )
+
+        moved: list[int] = []
+        forced: list[dict[str, Any]] = []
+        non_active: list[dict[str, Any]] = []
+        bucket_was_new = False
+
+        def aborted(exc: BaseException) -> dict[str, Any]:
+            # The transaction rolled back: nothing moved, so every candidate
+            # id is accounted for in failed_ids (reconciliation contract:
+            # moved_ids + failed_ids covers the request). The vector-publish
+            # warning is dropped — after rollback the canonical row it names
+            # was never committed, so the retry guidance would be misleading.
+            reason_text = f"aborted: {exc}"
+            abort_warnings = [
+                warning for warning in warnings
+                if "workspace canonical vector publish failed" not in warning
+            ]
+            return self.db.state.response(
+                {
+                    "moved": False,
+                    "moved_ids": [],
+                    "failed_ids": [
+                        failure["memory_id"] for failure in failures
+                    ] + list(movable),
+                    "errors": failures + [
+                        {"memory_id": memory_id, "reason": reason_text}
+                        for memory_id in movable
+                    ],
+                    "new_workspace": target,
+                },
+                ok=False, extra_warnings=abort_warnings,
+            )
+
+        try:
+            # Same advisory flock as rename/migrate/normalize, always taken
+            # before the write transaction so every registry-mutating path
+            # serializes in one order; a concurrent merge can no longer
+            # resurrect a spelling between the fold read and the commit.
+            with database_startup_lock(self.settings.db_path), self.db.write_transaction() as conn:
+                # Re-fold from the ORIGINAL request, single hop, on the
+                # transaction's own snapshot. Re-folding the already-folded
+                # target would follow a second alias hop that a write using
+                # the same name would never take.
+                locked = (
+                    self.db.workspaces._mechanical_canonical_on_conn(conn, requested)
+                    or requested
+                )
+                alias_row = conn.execute(
+                    "SELECT canonical FROM workspace_aliases "
+                    "WHERE alias_workspace=? AND status='confirmed' "
+                    "ORDER BY updated_at DESC, canonical ASC LIMIT 1",
+                    (_normalize_alias_key(requested),),
+                ).fetchone()
+                if alias_row is not None:
+                    locked = str(alias_row["canonical"])
+                if locked != target:
+                    blocked = destination_error(locked)
+                    if blocked is not None:
+                        # Reconciliation contract: after ids were resolved the
+                        # response must still account for every request id.
+                        blocked.update({
+                            "new_workspace": target,
+                            "moved_ids": [],
+                            "failed_ids": [
+                                failure["memory_id"] for failure in failures
+                            ] + list(movable),
+                            "errors": failures + [
+                                {
+                                    "memory_id": memory_id,
+                                    "reason": "destination_changed_after_recheck",
+                                }
+                                for memory_id in movable
+                            ],
+                        })
+                        if requested != target:
+                            blocked["requested_new_workspace"] = requested
+                        return self.db.state.response(
+                            blocked, ok=False, extra_warnings=warnings,
+                        )
+                    target = locked
+                    # The prepared embedding belongs to the stale spelling;
+                    # drop it rather than publish a mismatched vector under
+                    # the rechecked canonical (a later write republishes it).
+                    target_embedding = None
+                bucket_was_new = conn.execute(
+                    "SELECT 1 FROM workspace_canonicals WHERE name = ?", (target,),
+                ).fetchone() is None
+                for memory_id in list(movable):
+                    row = conn.execute(
+                        "SELECT workspace, workspace_canonical, status FROM memories "
+                        "WHERE id = ?",
+                        (memory_id,),
+                    ).fetchone()
+                    if row is None:
+                        failures.append({
+                            "memory_id": memory_id,
+                            "reason": "not_found_or_forbidden",
+                        })
+                        movable.remove(memory_id)
+                        continue
+                    bucket = str(row["workspace"] or "").strip()
+                    canonical = str(row["workspace_canonical"] or "").strip()
+                    if caller.isolation == "strict":
+                        effective = canonical or bucket
+                        if effective not in admitted:
+                            failures.append({
+                                "memory_id": memory_id,
+                                "reason": "not_found_or_forbidden",
+                            })
+                            movable.remove(memory_id)
+                            continue
+                    if canonical and bucket and canonical != bucket:
+                        if not authorized:
+                            failures.append({
+                                "memory_id": memory_id,
+                                "reason": "canonical_diverged",
+                                "workspace": bucket,
+                                "workspace_canonical": canonical,
+                            })
+                            movable.remove(memory_id)
+                            continue
+                        forced.append({
+                            "memory_id": memory_id,
+                            "workspace": bucket,
+                            "workspace_canonical": canonical,
+                        })
+                    ok_move, move_warnings = self.db.workspaces.move_memory_workspace_on_conn(
+                        conn, memory_id, target,
+                        precomputed_embedding=target_embedding,
+                    )
+                    if not ok_move:
+                        failures.append({
+                            "memory_id": memory_id,
+                            "reason": "not_found_or_forbidden",
+                        })
+                        movable.remove(memory_id)
+                        continue
+                    for warning in move_warnings:
+                        if warning not in warnings:
+                            warnings.append(warning)
+                    status = str(row["status"] or "")
+                    if status not in (MemoryStatus.ACTIVE.value, MemoryStatus.PENDING.value):
+                        non_active.append({"memory_id": memory_id, "status": status})
+                    moved.append(memory_id)
+        except OSError as exc:
+            abort_warnings = [
+                warning for warning in warnings
+                if "workspace canonical vector publish failed" not in warning
+            ]
+            return self.db.state.response(
+                {
+                    "moved": False,
+                    "error": f"workspace move lock unavailable: {exc}",
+                    "moved_ids": [],
+                    "failed_ids": [
+                        failure["memory_id"] for failure in failures
+                    ] + list(movable),
+                    "errors": failures + [
+                        {"memory_id": memory_id, "reason": f"aborted: {exc}"}
+                        for memory_id in movable
+                    ],
+                    "new_workspace": target,
+                },
+                ok=False, extra_warnings=abort_warnings,
+            )
+        except sqlite3.Error as exc:
+            return aborted(exc)
+
+        # Open/applying conflicts keep their NOT NULL scope key: a by-id move
+        # must not rewrite conflict scopes wholesale (only migrate, which owns
+        # a whole canonical, does). Moved members whose conflict is scoped
+        # elsewhere are reported for a scan instead.
+        conflict_scope_ids: list[int] = []
+        try:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, workspace_canonical, member_versions FROM conflicts "
+                    "WHERE status IN ('open','applying')"
+                ).fetchall()
+            moved_set = set(moved)
+            for row in rows:
+                if str(row["workspace_canonical"] or "") == target:
+                    continue
+                try:
+                    members = json.loads(str(row["member_versions"] or "[]"))
+                except (TypeError, ValueError):
+                    continue
+                member_ids: set[int] = set()
+                for member in members if isinstance(members, list) else []:
+                    if not isinstance(member, dict):
+                        continue
+                    raw_member_id = member.get("memory_id")
+                    if raw_member_id is None:
+                        continue
+                    try:
+                        member_ids.add(int(raw_member_id))
+                    except (TypeError, ValueError):
+                        continue
+                if member_ids & moved_set:
+                    conflict_scope_ids.append(int(row["id"]))
+        except sqlite3.Error:
+            conflict_scope_ids = []
+
+        data: dict[str, Any] = {
+            "moved": not failures,
+            "moved_ids": moved,
+            "failed_ids": [failure["memory_id"] for failure in failures],
+            "errors": failures,
+            "new_workspace": target,
+        }
+        if requested != target:
+            data["requested_new_workspace"] = requested
+        if forced:
+            data["forced_reanchored"] = {
+                "memory_ids": [entry["memory_id"] for entry in forced],
+                "details": forced,
+                "note": (
+                    "These rows had workspace_canonical pointing somewhere other than "
+                    "their workspace bucket; both columns were re-anchored to the "
+                    "destination. Normalization rules are unchanged: future writes "
+                    "using the old workspace name still resolve to the old registered "
+                    "canonical. To reroute that name, use migrate_workspace or "
+                    "rename_workspace_canonical."
+                ),
+                "suggested_call": {
+                    "tool": "memory_govern",
+                    "action": "migrate_workspace",
+                    "data": {"from": forced[0]["workspace_canonical"], "to": target},
+                },
+                "authorization_required": True,
+            }
+        if non_active:
+            data["moved_non_active"] = non_active
+        if conflict_scope_ids:
+            data["conflict_scope_note"] = {
+                "conflict_ids": conflict_scope_ids,
+                "note": (
+                    "These open/applying conflicts are scoped to a different "
+                    "workspace_canonical than the destination; their scope keys were "
+                    "left unchanged on purpose. Re-check them via "
+                    "memory_repair(task='scan_candidates')."
+                ),
+            }
+        if any("workspace canonical vector publish failed" in warning for warning in warnings):
+            data["workspace_vector_publish"] = {
+                "status": "pending_retry",
+                "canonical": target,
+                "retry": (
+                    "After sqlite-vec and embedding configuration recover, write "
+                    "another memory using this workspace to retry publication."
+                ),
+                "repair_task_available": False,
+            }
+        response = self.db.state.response(data, ok=not failures, extra_warnings=warnings)
+        if bucket_was_new and moved:
+            # Deliberately delivered even on partial failure: the bucket row
+            # IS committed in that case, and dropping the review notice would
+            # hide a registered-but-unreviewed workspace.
+            response.setdefault("notices", []).append({
+                "type": "workspace_review",
+                "severity": "info",
+                "workspace": target,
+                "message": (
+                    f"New workspace {target!r} was registered. "
+                    "Review the workspace registry for duplicates before confirming it."
+                ),
+                "action_required": "review_workspace_registry",
+                "review_call": {"tool": "memory_review", "view": "doctor", "data": {}},
+                "confirm_call": {"tool": "memory_govern", "action": "confirm_workspaces", "data": {}},
+                "authorization_required": True,
+            })
+        return response
 
     def memory_confirm_pending_workspace(
         self, memory_id: int, canonical: str, reason: Optional[str] = None,
@@ -999,12 +1452,10 @@ class OperationsPipeline:
                 "semantic_conflict": self._semantic_status(
                     self._semantic_notice_workspace_scope(_.get("workspace")),
                 ),
-                "policy": {
-                    "client_defaults": self.settings.policy.client_defaults,
-                    "default_enabled": self.settings.policy.default_enabled,
-                    "allow_agents": self.settings.policy.allow_agents,
-                    "deny_agents": self.settings.policy.deny_agents,
-                },
+                # Policy echo is reduced to "is the current caller allowed":
+                # the trusted request identity is evaluated, and the raw
+                # allow/deny lists no longer leak through the status surface.
+                "policy": {"caller_allowed": self._allowed()[0]},
             },
             extra_warnings=self.settings.config_warnings,
         )

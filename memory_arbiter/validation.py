@@ -11,6 +11,7 @@ from .models import MemoryStatus, ProtectionLevel, SourceType
 from .timeutil import parse_iso8601_utc
 
 MAX_CONTENT_BYTES = 2 * 1024 * 1024
+MAX_SQLITE_INTEGER = 2**63 - 1
 MAX_SUBJECT_CHARS = 2_000
 MAX_QUERY_CHARS = 32_000
 MAX_TAGS = 100
@@ -42,9 +43,9 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory", "help"): {"topic", "action"},
     ("memory", "status"): {"workspace"},
     ("memory", "remember"): {
-        "content", "agent_id", "workspace", "tags", "source_type", "source_ref",
+        "content", "workspace", "tags", "source_type", "source_ref",
         "event_time", "ingest_time", "confidence", "protection_level", "status",
-        "subject", "metadata", "client",
+        "subject", "metadata",
     },
     ("memory", "find"): {
         "query", "workspace", "tags", "limit", "offset", "debug_ranking",
@@ -89,6 +90,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_govern", "confirm"): {"id", "memory_id", "source_ref", "confidence", "authorized", "workspace"},
     ("memory_govern", "rename_workspace_canonical"): {"old", "new", "reason", "authorized"},
     ("memory_govern", "migrate_workspace"): {"from", "to", "reason", "authorized"},
+    ("memory_govern", "move_memories_workspace"): {"memory_ids", "new_workspace", "reason", "authorized", "workspace"},
     ("memory_govern", "confirm_pending_workspace"): {"id", "memory_id", "canonical", "reason", "authorized", "workspace"},
     ("memory_govern", "confirm_workspaces"): {"workspaces", "reason", "authorized"},
     ("memory_govern", "help"): {"topic", "action"},
@@ -107,6 +109,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "expected_revision", "workspace",
     },
     ("memory_repair", "replay_backup"): {"dry_run", "authorized", "limit", "offset"},
+    ("memory_repair", "normalize_workspaces"): {"dry_run", "authorized"},
     ("memory_repair", "help"): {"topic", "task"},
 }
 
@@ -196,7 +199,7 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             field_name = "memory_id" if key == "id" and operation in {"read", "update", "history", "set_entity", "activate_pending", "cleanup_history", "confirm_pending_workspace"} else key
             result.error = _error(field_name, "must be a positive integer")
             return result
-        if parsed_id <= 0:
+        if parsed_id <= 0 or parsed_id > MAX_SQLITE_INTEGER:
             field_name = "memory_id" if key == "id" and operation in {"read", "update", "history", "set_entity", "activate_pending", "cleanup_history", "confirm_pending_workspace"} else key
             result.error = _error(field_name, "must be a positive integer")
             return result
@@ -234,6 +237,7 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         "new": MAX_TEXT_FIELD_CHARS,
         "from": MAX_TEXT_FIELD_CHARS,
         "to": MAX_TEXT_FIELD_CHARS,
+        "new_workspace": MAX_TEXT_FIELD_CHARS,
         "entity": MAX_TEXT_FIELD_CHARS,
         "scope": MAX_TEXT_FIELD_CHARS,
         # Governance/scan metadata is echoed by review surfaces; unbounded
@@ -344,7 +348,7 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
         parsed_items: list[int] = []
         for item in value:
             parsed_item = _controlled_integer(item)
-            if parsed_item is None or parsed_item <= 0:
+            if parsed_item is None or parsed_item <= 0 or parsed_item > MAX_SQLITE_INTEGER:
                 result.error = _error(key, "must contain positive integer ids")
                 return result
             parsed_items.append(parsed_item)

@@ -271,8 +271,6 @@ def _data_with_request_identity(
     tools: MemoryTools,
     data: Optional[dict[str, Any]],
     identity: Optional[RequestIdentity],
-    *,
-    inject: bool,
 ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
     if identity is None or not isinstance(data, dict):
         return data, None
@@ -284,8 +282,9 @@ def _data_with_request_identity(
                 tools, field=field, expected=value, received=payload[field],
             )
         payload.pop(field, None)
-    if inject:
-        payload.update(expected)
+    # Identity is never injected into the payload: tool-data identity fields are
+    # caller input (rejected on mismatch, stripped otherwise); attribution is
+    # applied from the trusted identity inside the write pipeline.
     return payload, None
 
 
@@ -295,6 +294,17 @@ def build_runtime() -> ServerBundle:
         raise RuntimeError(
             "Community Streamable HTTP MCP may bind only to localhost "
             "(127.0.0.1, ::1, or localhost); X-Mema-* headers are not authentication."
+        )
+    # Normalize the configured identity once: an unstripped config value would
+    # otherwise be stored verbatim as attribution and silently miss exact-match
+    # policy rules (header identities are strip-validated on the HTTP path).
+    configured_client = settings.client.strip()
+    configured_agent_id = settings.agent_id.strip()
+    if not configured_client or not configured_agent_id:
+        raise RuntimeError(
+            "memory-arbiter requires a configured identity: set client and "
+            "agent_id in config.json (or MEMORY_ARBITER_CLIENT / "
+            "MEMORY_ARBITER_AGENT_ID) before starting the MCP server."
         )
     try:
         from mcp.server.fastmcp import FastMCP
@@ -314,6 +324,15 @@ def build_runtime() -> ServerBundle:
     tools.start_update_monitor()
     tools.start_evidence_worker()
     tools.start_semantic_worker()
+    # stdio identity bridge: stdio has no per-request headers, so establish the
+    # process-level identity from config once and apply it per tool call via
+    # request_identity_scope in _invoke_with_identity. Without this bridge the
+    # trusted source (ContextVar) would be empty on every stdio call.
+    stdio_identity: Optional[RequestIdentity] = None
+    if settings.mcp_transport == "stdio":
+        stdio_identity = RequestIdentity(
+            client=configured_client, agent_id=configured_agent_id, transport="stdio",
+        )
 
     @app.tool()
     def memory(action: str = "help", data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -323,10 +342,9 @@ def build_runtime() -> ServerBundle:
         value enums, update modes, and action_required paths before relying on a
         result that requests attention.
         """
-        identity = _identity_for_tool(app)
+        identity = _identity_for_tool(app) or stdio_identity
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
-            inject=action.strip().lower() == "remember",
         )
         return error or _invoke_with_identity(
             tools, identity, tools.memory,
@@ -342,9 +360,9 @@ def build_runtime() -> ServerBundle:
         before judging a conflict so its members, value groups, revision, and apply
         state are visible.
         """
-        identity = _identity_for_tool(app)
+        identity = _identity_for_tool(app) or stdio_identity
         payload, error = _data_with_request_identity(
-            tools, {} if data is None else data, identity, inject=False,
+            tools, {} if data is None else data, identity,
         )
         return error or _invoke_with_identity(
             tools, identity, tools.memory_review,
@@ -359,9 +377,9 @@ def build_runtime() -> ServerBundle:
         action, then authorized=true. Call memory_govern(action="help") for exact
         actions, accepted fields, impact notes, and confirmation semantics.
         """
-        identity = _identity_for_tool(app)
+        identity = _identity_for_tool(app) or stdio_identity
         payload, error = _data_with_request_identity(
-            tools, {} if data is None else data, identity, inject=False,
+            tools, {} if data is None else data, identity,
         )
         return error or _invoke_with_identity(
             tools, identity, tools.memory_govern,
@@ -376,9 +394,9 @@ def build_runtime() -> ServerBundle:
         actions. Semantic notices are advisory; read both memories before dismiss
         or resolve, and never pass a notice directly to judge or resolve_conflict.
         """
-        identity = _identity_for_tool(app)
+        identity = _identity_for_tool(app) or stdio_identity
         payload, error = _data_with_request_identity(
-            tools, {} if data is None else data, identity, inject=False,
+            tools, {} if data is None else data, identity,
         )
         return error or _invoke_with_identity(
             tools, identity, tools.memory_repair,

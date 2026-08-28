@@ -19,7 +19,10 @@ class AgentPolicy:
     allow_agents: list[str] = field(default_factory=list)
     deny_agents: list[str] = field(default_factory=list)
 
-    def enabled_for(self, client: str, agent_id: str) -> bool:
+    def enabled_for(self, client: Optional[str], agent_id: Optional[str]) -> bool:
+        # Identity may be absent (no trusted request identity); an unknown
+        # caller is neither denied nor allowed by name and lands on the
+        # client/default policy.
         if agent_id in self.deny_agents:
             return False
         if agent_id in self.allow_agents:
@@ -35,8 +38,10 @@ class Settings:
     db_path: Path
     backup_jsonl: Path
     policy_path: Optional[Path] = None
-    client: str = "codex"
-    agent_id: str = "default"
+    # No built-in identity: the MCP server refuses to start without an
+    # explicitly configured client/agent_id (see server.build_runtime).
+    client: str = ""
+    agent_id: str = ""
     workspace: str = "default"
     mcp_transport: str = "stdio"
     mcp_http_host: str = "127.0.0.1"
@@ -105,7 +110,7 @@ class Settings:
     semantic_conflict_n_threads: int = 4
     semantic_conflict_n_batch: int = 128
     semantic_conflict_resident: bool = True
-    semantic_conflict_preload: bool = False
+    semantic_conflict_preload: bool = True
     semantic_conflict_job_timeout_ms: int = 5000
     semantic_conflict_inference_timeout_ms: int = 30000
     semantic_conflict_load_timeout_ms: int = 120000
@@ -310,8 +315,8 @@ class Settings:
             db_path=pick_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),
             backup_jsonl=pick_path("backup_jsonl", "MEMORY_ARBITER_BACKUP_JSONL", cwd / "memory_arbiter.backup.jsonl"),
             policy_path=Path(str(cfg.get("policy_path"))).expanduser() if cfg.get("policy_path") else (Path(policy_raw).expanduser() if policy_raw else None),
-            client=pick_str("client", "MEMORY_ARBITER_CLIENT", "codex"),
-            agent_id=pick_str("agent_id", "MEMORY_ARBITER_AGENT_ID", "default"),
+            client=pick_str("client", "MEMORY_ARBITER_CLIENT", ""),
+            agent_id=pick_str("agent_id", "MEMORY_ARBITER_AGENT_ID", ""),
             workspace=pick_str("workspace", "MEMORY_ARBITER_WORKSPACE", "default"),
             mcp_transport=mcp_transport,
             mcp_http_host=str(

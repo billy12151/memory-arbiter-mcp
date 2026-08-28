@@ -434,8 +434,16 @@ _ATTRIBUTE_ALIASES = {
 _VALUE_ALIASES = {
     "pgsql": "postgresql",
     "postgres": "postgresql",
-    "sqlitevec": "sqlitevec",
 }
+# A former "sqlitevec" -> "sqlite-vec" entry was deleted as a dead item:
+# _mechanical_normalize strips hyphens/underscores/dots before this lookup,
+# so every spelling ("sqlite-vec", "sqlite_vec", "sqlite vec") already
+# converges to "sqlitevec" and the alias only re-labelled the output form.
+# Any non-identity re-labelling is unsafe at the persistence boundary:
+# db/conflicts.py merges conflict value groups keyed by the stored
+# normalized_value string, so a group persisted as "sqlitevec" would split
+# away from newly written "sqlite-vec" values. Without the entry,
+# normalize_value output is byte-identical to the pre-alias baseline.
 
 
 def extraction_from_text(raw: str) -> tuple[Optional[AttributeValueExtraction], Optional[str]]:

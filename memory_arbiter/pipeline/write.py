@@ -31,7 +31,9 @@ class WritePipeline:
             return self._tools.db.state.response(
                 {"written": False, **error}, ok=False,
             )
-        allowed, policy_warnings = self._allowed(payload.get("agent_id"), payload.get("client"))
+        # Policy is evaluated against the trusted request identity, never
+        # caller-supplied payload fields (agent_id/client are not write inputs).
+        allowed, policy_warnings = self._allowed()
         if not allowed:
             return self._tools.db.state.response(
                 {"written": False}, ok=False, extra_warnings=policy_warnings,
@@ -65,6 +67,11 @@ class WritePipeline:
 
         try:
             record = MemoryRecord.from_input(payload, self.settings.defaults())
+            # Attribution channel: the trusted request identity (HTTP headers or
+            # the stdio process identity) owns agent_id. Payload/agent input can
+            # no longer smuggle provenance; when no trusted identity exists
+            # (direct MemoryTools use), from_input's env/config fallback stands.
+            record.agent_id = self.current_agent_id() or record.agent_id
             workspace = self._resolve_write_workspace(record)
             if workspace["strict_block"]:
                 record.status = MemoryStatus.PENDING.value

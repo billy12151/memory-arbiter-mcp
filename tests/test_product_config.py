@@ -133,6 +133,7 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
     monkeypatch.setenv("MEMORY_ARBITER_WORKSPACE", "repo-a")
     monkeypatch.setenv("MEMORY_ARBITER_AGENT_ID", "agent-a")
+    monkeypatch.setenv("MEMORY_ARBITER_CLIENT", "client-a")
 
     from memory_arbiter.server import build_runtime
 
@@ -189,6 +190,8 @@ def test_server_always_exposes_only_product_tools(tmp_path: Path, monkeypatch) -
     monkeypatch.setenv("MEMORY_ARBITER_TOOL_PROFILE", "legacy_full")
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
+    monkeypatch.setenv("MEMORY_ARBITER_CLIENT", "test-client")
+    monkeypatch.setenv("MEMORY_ARBITER_AGENT_ID", "test-agent")
 
     from memory_arbiter.server import build_runtime
 
@@ -429,8 +432,8 @@ def test_product_judge_help_exposes_group_decision_constraints(tmp_path: Path) -
     assert gov_help["judge_constraints"] == constraints
     assert gov_help["actions"] == [
         "retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm",
-        "rename_workspace_canonical", "migrate_workspace", "confirm_pending_workspace",
-        "confirm_workspaces", "help",
+        "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace",
+        "confirm_pending_workspace", "confirm_workspaces", "help",
     ]
     assert "accept_workspace_alias" not in gov_help["examples"]
     assert "reject_workspace_alias" not in gov_help["accepted_fields"]
@@ -872,6 +875,8 @@ def test_server_build_runtime_exposes_tools_for_shutdown(tmp_path: Path, monkeyp
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
     monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_ARBITER_CLIENT", "test-client")
+    monkeypatch.setenv("MEMORY_ARBITER_AGENT_ID", "test-agent")
 
     from memory_arbiter.server import build_runtime
 
@@ -907,6 +912,8 @@ def test_real_server_product_wrappers_preserve_non_object_data(tmp_path: Path, m
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "wrapper.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "wrapper.jsonl"))
     monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_ARBITER_CLIENT", "test-client")
+    monkeypatch.setenv("MEMORY_ARBITER_AGENT_ID", "test-agent")
 
     from memory_arbiter.server import build_runtime
 
@@ -937,6 +944,8 @@ def test_server_delegates_generation_gate_to_memorydb(
     settings = Settings(
         db_path=legacy,
         backup_jsonl=tmp_path / "backup.jsonl",
+        client="test-client",
+        agent_id="test-agent",
     )
     monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: settings))
     with pytest.raises(RuntimeError, match="mema doctor --json"):

@@ -1,12 +1,15 @@
 {
   "_readme": [
     "Copy to ~/.config/memory-arbiter/config.json and edit local paths.",
+    "client and agent_id are REQUIRED with no built-in defaults: the MCP server refuses to start when either is missing or blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; streamable-http takes caller identity from the per-request X-Mema-Client / X-Mema-Agent-Id headers instead.",
     "The embedding model enables local-text evidence recall.",
     "The optional Qwen2.5-0.5B model extracts four attribute/value fields in both directions; scan is broad and write-time notice is strict.",
     "This example explicitly keeps semantic_conflict.enabled=false: editing model_path alone will not enable it; set enabled=true or remove enabled to use model-path auto-enable.",
     "All isolation modes normalize workspace_canonical; none disables ACL only.",
     "mema setup writes a smaller embedding-only template; it intentionally does not mirror every optional key in this reference example."
   ],
+  "client": "your-client",
+  "agent_id": "your-agent-id",
   "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
   "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
   "tool_profile": "product",

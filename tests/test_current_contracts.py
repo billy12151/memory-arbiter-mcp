@@ -380,3 +380,25 @@ def test_doctor_cli_reports_legacy_database_as_upgrade_required(tmp_path: Path) 
     assert payload["findings"][0]["evidence"]["generation"] == "legacy"
     assert "mema upgrade --dry-run" in payload["findings"][0]["fix_hint"]
     assert "notice_type" not in payload["findings"][0]["detail"]
+
+
+def test_backup_replay_preserves_original_agent_id(tmp_path: Path) -> None:
+    tool = tools(tmp_path)
+    envelope = {
+        "backup_schema": 1, "replay_key": "attr-one", "backup_written_at": utc_now_iso(),
+        "workspace_canonical": "w",
+        "record": {
+            "content": "restored", "subject": "restore", "workspace": "w",
+            "agent_id": "original-agent", "source_type": "agent_generated",
+            "event_time": utc_now_iso(),
+        },
+    }
+    tool.settings.backup_jsonl.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+    replayed = tool.memory_repair(task="replay_backup", data={"dry_run": False, "authorized": True})
+    assert replayed["data"]["imported_count"] == 1
+    memory_id = replayed["data"]["imported"][0]["memory_id"]
+    with tool.db.connection() as conn:
+        row = conn.execute(
+            "SELECT agent_id FROM memories WHERE id=?", (memory_id,),
+        ).fetchone()
+    assert row["agent_id"] == "original-agent"

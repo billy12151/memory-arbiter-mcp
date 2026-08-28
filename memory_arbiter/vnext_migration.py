@@ -945,14 +945,54 @@ def final_sync(
         _remove_sidecars(target)
         os.replace(staging, target)
         _remove_sidecars(staging)
+        # The staging build's startup-lock sidecar outlives the rename; the
+        # switched-in database does not need one. Remove it here — staging is
+        # already renamed away — so the config-switch failure branch below
+        # cannot leave the orphan lock file behind either.
+        staging_lock = staging.with_name(staging.name + ".startup.lock")
+        if staging_lock.exists():
+            staging_lock.unlink()
         if publish_callback is not None:
-            publish_result = publish_callback()
+            try:
+                publish_result = publish_callback()
+            except Exception as exc:
+                # A raising callback used to escape via the BaseException path
+                # with no structured result; converge it into the same failure
+                # branch as a declined switch so operators get the target path.
+                publish_result = {"switched": False, "error": f"publish_callback_raised: {exc}"}
+            if not isinstance(publish_result, dict):
+                # A non-dict return (e.g. None) must not escape as an
+                # AttributeError on .get below with the target already live;
+                # converge it into the same structured failure branch.
+                publish_result = {
+                    "switched": False,
+                    "error": f"publish_callback_returned_invalid: {type(publish_result).__name__}",
+                }
             result["config"] = publish_result
-            if not publish_result.get("switched"):
+            # Strict identity check: only a real boolean True confirms the
+            # switch. A truthy string like "false" must take the failure
+            # branch instead of committing a switch that never happened.
+            if publish_result.get("switched") is not True:
                 source_lock.execute("ROLLBACK")
                 result.update({
                     "ok": False,
                     "error": "migration_complete_but_config_switch_failed",
+                    # The target database is already live (os.replace above);
+                    # only the config switch failed. Tell operators exactly
+                    # where the new database is and that a switch is still due.
+                    "target_ready": True,
+                    "needs_config_switch": True,
+                    "target": str(target),
+                    # build() left "freeze writes and run --final-sync before
+                    # switching db_path" in the result, which would send the
+                    # operator through another hours-long rebuild even though
+                    # only the config switch remains. Override it.
+                    "next_step": (
+                        "the target database is already live; only the config "
+                        "switch failed — point db_path at the target manually "
+                        "(or fix the config and retry the switch); no rebuild "
+                        "is needed"
+                    ),
                 })
                 return result
         source_lock.execute("COMMIT")
@@ -962,11 +1002,6 @@ def final_sync(
         raise
     finally:
         source_lock.close()
-    # The staging build's startup-lock sidecar outlives the rename; the
-    # switched-in database does not need one.
-    staging_lock = staging.with_name(staging.name + ".startup.lock")
-    if staging_lock.exists():
-        staging_lock.unlink()
     result.update({
         "target": str(target),
         "final_sync": True,
