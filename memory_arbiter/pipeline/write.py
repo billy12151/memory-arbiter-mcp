@@ -92,7 +92,7 @@ class WritePipeline:
             self._apply_workspace_response(data, workspace)
             if memory_id is not None:
                 data["evidence_index"], data["semantic_conflict_check"] = (
-                    self._enqueue_content_postcommit(memory_id, data["record"])
+                    self._post_commit(memory_id, data["record"], recheck_conflicts=True)
                 )
             response = self._tools.db.state.response(
                 data,

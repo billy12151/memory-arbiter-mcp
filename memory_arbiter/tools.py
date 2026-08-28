@@ -168,6 +168,29 @@ class MemoryTools:
             check["reason"] = "waiting_for_evidence_index"
         return index, check
 
+    def _post_commit(
+        self, memory_id: int, record: Optional[dict[str, Any]] = None,
+        *, recheck_conflicts: bool,
+        trusted_applying_context: Optional[TrustedApplyingContext] = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Single write-path post-commit entry: index always, recheck explicitly.
+
+        Every writer states whether the semantic-conflict check re-enters for
+        this write (recheck_conflicts) instead of each call site hand-picking
+        between the two enqueue helpers; the trusted context is only valid on
+        the apply flow's own committed edits (§15.3). Returns
+        (evidence_index, semantic_conflict_check); the check slot is
+        skipped/recheck_disabled when the writer opted out.
+        """
+        if not recheck_conflicts:
+            return (
+                self._enqueue_local_text_index(memory_id, record),
+                {"status": "skipped", "reason": "recheck_disabled"},
+            )
+        return self._enqueue_content_postcommit(
+            memory_id, record, trusted_applying_context=trusted_applying_context,
+        )
+
     def start_semantic_worker(self) -> None:
         self._semantic_worker.start()
 

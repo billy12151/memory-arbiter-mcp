@@ -294,8 +294,8 @@ class OperationsPipeline:
             # semantic worker re-enter. Its task remains allowed to discover
             # unrelated facts; conflict-plan trust is not exposed to callers as
             # a general suppression switch.
-            result["evidence_index"], result["semantic_conflict_check"] = self._enqueue_content_postcommit(
-                target_id, self.db.get_memory(target_id),
+            result["evidence_index"], result["semantic_conflict_check"] = self._post_commit(
+                target_id, self.db.get_memory(target_id), recheck_conflicts=True,
                 trusted_applying_context=TrustedApplyingContext(
                     conflict_id=conflict_id_int, revision=revision + 1,
                     memory_id=target_id, action=action,
@@ -309,8 +309,8 @@ class OperationsPipeline:
             # and surface the flag so a replan knows the member content changed.
             # The no_change path (use_as_resolution) has no committed edit to re-index.
             result["orphaned_edit"] = True
-            result["evidence_index"], result["semantic_conflict_check"] = self._enqueue_content_postcommit(
-                target_id, self.db.get_memory(target_id),
+            result["evidence_index"], result["semantic_conflict_check"] = self._post_commit(
+                target_id, self.db.get_memory(target_id), recheck_conflicts=True,
             )
         next_step = next((item for item in plan if item.get("status") == "pending"), None)
         if successful:
@@ -438,7 +438,9 @@ class OperationsPipeline:
         ok = updated is not None
         data = {"confirmed": ok, "record": updated}
         if ok:
-            data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), updated)
+            data["evidence_index"], data["semantic_conflict_check"] = self._post_commit(
+                int(memory_id), updated, recheck_conflicts=False,
+            )
         if caller.isolation == "strict":
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
@@ -1088,7 +1090,9 @@ class OperationsPipeline:
             data.update(caller.response_fields())
         if activated:
             data["record"] = self.db.get_memory(int(memory_id))
-            data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), data["record"])
+            data["evidence_index"], data["semantic_conflict_check"] = self._post_commit(
+                int(memory_id), data["record"], recheck_conflicts=False,
+            )
         return self.db.state.response(data, ok=True, extra_warnings=warnings)
 
     def memory_confirm_workspaces(
@@ -1278,7 +1282,9 @@ class OperationsPipeline:
             data.update(caller.response_fields())
         if ok:
             data["record"] = self.db.get_memory(int(memory_id))
-            data["evidence_index"] = self._enqueue_local_text_index(int(memory_id), data["record"])
+            data["evidence_index"], data["semantic_conflict_check"] = self._post_commit(
+                int(memory_id), data["record"], recheck_conflicts=False,
+            )
         return self.db.state.response(data, extra_warnings=warnings)
 
     def memory_supersede(
@@ -1558,7 +1564,9 @@ class OperationsPipeline:
         }
         data["record"] = self.db.get_memory(memory_id_int)
         if outcome == "updated":
-            data["evidence_index"] = self._enqueue_local_text_index(memory_id_int, data["record"])
+            data["evidence_index"], data["semantic_conflict_check"] = self._post_commit(
+                memory_id_int, data["record"], recheck_conflicts=False,
+            )
         if caller.isolation == "strict":
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
@@ -1758,7 +1766,7 @@ class OperationsPipeline:
                 extra_warnings=list(caller.warnings),
             )
         results = [
-            {"memory_id": mid, **self._enqueue_local_text_index(mid, self.db.get_memory(mid))}
+            {"memory_id": mid, **self._post_commit(mid, self.db.get_memory(mid), recheck_conflicts=False)[0]}
             for mid in ids
         ]
         failed = sum(item.get("status") != "queued" for item in results)
@@ -2131,7 +2139,7 @@ class OperationsPipeline:
         }
         data["record"] = self.db.get_memory(memory_id_int)
         data["evidence_index"], data["semantic_conflict_check"] = (
-            self._enqueue_content_postcommit(memory_id_int, data["record"])
+            self._post_commit(memory_id_int, data["record"], recheck_conflicts=True)
         )
         unresolved = self.db.conflicts.list_open_conflicts_for_memory_ids(
             [memory_id_int], include_applying=True,
@@ -2293,7 +2301,7 @@ class OperationsPipeline:
             if isinstance(key, str)
         }
         record = self.db.get_memory(memory_id) or {}
-        result = self._enqueue_local_text_index(memory_id, record)
+        result, _check = self._post_commit(memory_id, record, recheck_conflicts=False)
         outcome = str(result.get("status") or "unknown")
         if outcome == "queued":
             stages["evidence"] = "queued"

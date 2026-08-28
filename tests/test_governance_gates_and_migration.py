@@ -356,3 +356,18 @@ def test_trusted_applying_context_roundtrip_and_malformed() -> None:
     assert TrustedApplyingContext.from_dict({
         "conflict_id": "x", "revision": 3, "memory_id": 42, "action": "a",
     }) is None
+
+
+# ── #2: _post_commit switch ─────────────────────────────────────────────────
+
+def test_post_commit_recheck_switch(tmp_path: Path) -> None:
+    tools, db = _tools(tmp_path)
+    memory_id = _memory(db, "database is mysql")
+
+    index, check = tools._post_commit(memory_id, db.get_memory(memory_id), recheck_conflicts=False)
+    assert index.get("semantic_task_id")
+    assert check == {"status": "skipped", "reason": "recheck_disabled"}
+
+    index, check = tools._post_commit(memory_id, db.get_memory(memory_id), recheck_conflicts=True)
+    assert index.get("semantic_task_id")
+    assert check.get("status") in {"completed", "incomplete", "skipped", "deferred"}
