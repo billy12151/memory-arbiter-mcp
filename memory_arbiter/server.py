@@ -8,6 +8,7 @@ import signal
 import sys
 from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple
 
+from . import __version__
 from .config import Settings
 from .request_identity import (
     AGENT_ID_HEADER,
@@ -320,6 +321,13 @@ def build_runtime() -> ServerBundle:
         json_response=settings.mcp_http_json_response,
         max_request_body_size=settings.mcp_http_max_request_body_size,
     )
+    # The SDK's FastMCP constructor has no version parameter, and the
+    # lowlevel Server reports the MCP SDK's own version (e.g. 1.29.0) in the
+    # initialize handshake unless its `version` is set explicitly. Guard so
+    # SDK refactors or test doubles without the attribute degrade to the old
+    # behavior instead of breaking boot.
+    if getattr(app, "_mcp_server", None) is not None:
+        app._mcp_server.version = __version__
     tools = MemoryTools(settings)
     tools.start_update_monitor()
     tools.start_evidence_worker()
