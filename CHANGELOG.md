@@ -3,6 +3,16 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.10] — 2026-08-29
+
+### Fixed
+
+- **MCP `initialize` reports the package version** — the handshake's `serverInfo.version` showed the MCP Python SDK's own version (e.g. 1.29.0) because FastMCP's constructor has no version parameter and the lowlevel Server falls back to `pkg_version("mcp")`. The Server's `version` is now set explicitly after construction (guarded, so SDK refactors or test doubles degrade to the old behavior instead of breaking boot); `serverInfo` reads `memory-arbiter-mcp / 0.14.10` on both stdio and HTTP transports.
+
+### Verification
+
+- Full tests (918), strict mypy with zero exemptions, and Ruff (incl. UP) pass.
+
 ## [0.14.9] — 2026-08-29
 
 Architecture-only release (plan id=775; behavior-preserving except where noted).
