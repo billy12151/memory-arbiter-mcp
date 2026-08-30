@@ -3,6 +3,21 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.14.11] — 2026-08-31
+
+### Added
+
+- **GPU offload for the local GGUF embedder (self-healing)** — `build_embedder` probes `llama_cpp.llama_supports_gpu_offload()` once per process and, when the wheel carries a GPU backend (Metal on Apple Silicon, CUDA builds), constructs the embedding model with `n_gpu_layers=-1` (≈4x embedding throughput measured on M3). Construction or startup-probe failure falls back to a plain CPU instance; a GPU instance that fails later at runtime degrades exactly once to a freshly built CPU instance and heals the failing call (llama.cpp cannot migrate a loaded context between devices, so a rebuild is the only recovery; restart re-probes the GPU). GPU-less hosts are untouched. Device selection is deliberately NOT part of `embedding_space_id`: CPU vs GPU vectors differ only at cosine ≥ 0.9997 noise level (workspace match thresholds sit at 0.25 scale), so a host changing devices never forces an evidence rebuild.
+- **doctor deep checks `vector.device` and `evidence.unit_budget`** — the deep pass now reports which device the embedder runs on (warning when a runtime GPU→CPU degrade happened, with distinct text when the fallback rebuild also failed), and counts evidence units whose tokenized length exceeds the embed budget (tails beyond the budget are not indexed; the splitter's 400-char cap keeps this at zero today, so any hit means an uncapped subject unit or a splitter change).
+
+### Fixed
+
+- **Honest token budget** — `embed_text`'s budget now clamps to `min(n_ctx − reserved_tokens, n_batch)`. llama-cpp-python's `embed()` silently truncates encode input to `n_batch` tokens (library default 512) while the budget claimed `n_ctx − reserved_tokens` (1984 with defaults), so inputs between the two were cut with no diagnostic trace and `used_tokens`/`truncated` under-reported. Bytes reaching the model are unchanged for realistic inputs (a byte-fallback character landing exactly on the cut boundary can shift the cut by one trailing token — the same truncation regime as before); `embedding_space_id` is untouched (pipeline version stays 2, effective_config unchanged — verified identical against the live production DB), so no rebuild is triggered. Read-path query embedding also gains a char-level pre-trim (`max(max_section_chars, 2048)`) for pathological pastes.
+
+### Verification
+
+- Full tests (940), strict mypy with zero exemptions, and Ruff (incl. UP) pass; two review rounds (round 2 adversarial) with every finding fixed or explicitly accepted; `embedding_space_id` re-verified byte-identical against the live production DB before release.
+
 ## [0.14.10] — 2026-08-29
 
 ### Fixed

@@ -350,6 +350,80 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
                             "vector.dimension_probe", dim == int(settings.vec_dim),
                             f"embedding dim {dim} vs config vec.dim {int(settings.vec_dim)}",
                         ))
+                    # Device visibility: a runtime GPU→CPU self-heal keeps the
+                    # embedder alive but should not go unnoticed — surface it
+                    # as a warning so an operator restarts to re-probe the GPU.
+                    degraded = bool(getattr(embedder, "device_degraded", False))
+                    gpu_backed = bool(getattr(embedder, "gpu_backed", False))
+                    degraded_at = getattr(embedder, "device_degraded_at", None)
+                    if degraded and degraded_at is None:
+                        # Latch closed but the CPU rebuild itself failed: the
+                        # embedder is still pointed at the broken GPU instance
+                        # and every embed returns the sentinel — that is DOWN,
+                        # not merely slow.
+                        device_detail = (
+                            "GPU failed and the CPU fallback rebuild also failed — "
+                            "embedding unavailable until restart"
+                        )
+                    elif degraded:
+                        device_detail = (
+                            f"GPU failed at {degraded_at}; degraded to CPU inference — "
+                            "restart to re-probe"
+                        )
+                    elif gpu_backed:
+                        device_detail = "embedding on GPU"
+                    else:
+                        device_detail = "embedding on CPU"
+                    findings.append(_finding("vector.device", not degraded, device_detail))
+                    # Budget tripwire: units beyond the token budget lose their
+                    # tail at embed time. The splitter caps text units at 400
+                    # chars (≈≤402 tokens, under the 512 default), so any hit
+                    # means an uncapped subject unit or a splitter change.
+                    # tokenize_locked serialises against embed_text on the
+                    # shared live instance; the whole scan is guarded because
+                    # run_all_checks must never raise.
+                    tokenize_locked = getattr(embedder, "tokenize_locked", None)
+                    budget = embedder.token_budget() if hasattr(embedder, "token_budget") else None
+                    if tokenize_locked is None or budget is None:
+                        findings.append(_finding(
+                            "evidence.unit_budget", True,
+                            "skipped: embedder does not expose tokenize_locked/token_budget",
+                        ))
+                    else:
+                        # Char prefilter scaled to the worst tokenizer density
+                        # (byte-fallback expansion ≈4 tokens/char): below
+                        # budget/4 characters an input cannot exceed budget.
+                        prefilter = max(1, int(budget) // 4)
+                        try:
+                            over_budget = 0
+                            checked_units = 0
+                            worst_tokens = 0
+                            for row in conn.execute(
+                                "SELECT text FROM memory_evidence WHERE length(text) > ?",
+                                (prefilter,),
+                            ).fetchall():
+                                checked_units += 1
+                                tokens = len(tokenize_locked(str(row[0])))
+                                worst_tokens = max(worst_tokens, tokens)
+                                if tokens > budget:
+                                    over_budget += 1
+                            findings.append(_finding(
+                                "evidence.unit_budget", over_budget == 0,
+                                f"{over_budget} of {checked_units} oversized units exceed "
+                                f"the {budget}-token embed budget (worst {worst_tokens} tokens); "
+                                "tails beyond the budget are not indexed",
+                                evidence={
+                                    "over_budget": over_budget,
+                                    "checked_units": checked_units,
+                                    "worst_tokens": worst_tokens,
+                                    "budget": budget,
+                                },
+                            ))
+                        except Exception as exc:
+                            findings.append(_finding(
+                                "evidence.unit_budget", True,
+                                f"skipped: unit budget scan failed: {exc}",
+                            ))
     overall = max((f.severity for f in findings), key=lambda s: {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}[s])
     return OverviewReport(utc_now_iso(), overall, findings, {"mode": runtime_state.mode if runtime_state else "sqlite", "total_memories": total, "evidence_indexed": indexed, "evidence_units": units})
 

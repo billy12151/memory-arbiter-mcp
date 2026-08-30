@@ -103,7 +103,15 @@ class ReadPipeline:
             extra_warnings.extend(ensure_warnings)
             if embedder is not None:
                 try:
-                    er = embedder.embed_text(prefix="", body=query)
+                    # Char-level pre-trim for pathological pastes; the token
+                    # budget inside embed_text still makes the final cut. The
+                    # 2048 floor keeps an unusually small max_section_chars
+                    # config from clamping queries below the token budget's
+                    # reach (query vectors would silently shrink).
+                    er = embedder.embed_text(
+                        prefix="", body=query,
+                        max_body_chars=max(self.settings.max_section_chars, 2048),
+                    )
                     if er.embedding:
                         refreshed_state = self.db.get_vec_index_state()
                         if refreshed_state.get("state") in {"mismatch", "failed"}:
@@ -317,7 +325,15 @@ class ReadPipeline:
             extra_warnings.extend(ensure_warnings)
             if embedder is not None:
                 try:
-                    er = embedder.embed_text(prefix="", body=query)
+                    # Char-level pre-trim for pathological pastes; the token
+                    # budget inside embed_text still makes the final cut. The
+                    # 2048 floor keeps an unusually small max_section_chars
+                    # config from clamping queries below the token budget's
+                    # reach (query vectors would silently shrink).
+                    er = embedder.embed_text(
+                        prefix="", body=query,
+                        max_body_chars=max(self.settings.max_section_chars, 2048),
+                    )
                     if er.embedding:
                         refreshed_state = self.db.get_vec_index_state()
                         if refreshed_state.get("state") in {"mismatch", "failed"}:
