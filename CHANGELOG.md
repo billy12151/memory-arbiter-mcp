@@ -3,6 +3,44 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.0] — 2026-08-31
+
+**Breaking release: the configuration surface shrinks from 54 keys to 18 and configuration is file-only.** Plan record mema 804; two pre-implementation adversarial review rounds plus two release review rounds (round 2 adversarial), every finding fixed.
+
+### Changed
+
+- **Configuration is file-only (breaking).** All 52 `MEMORY_ARBITER_*` tuning variables are no longer read, plus the dead `MEMORY_ARBITER_UPDATE_CHECK_ENABLED` (nothing ever read it). Six launch-context variables remain: `MEMORY_ARBITER_CONFIG`, `DB_PATH`, `BACKUP_JSONL`, `MCP_TRANSPORT`, `CLIENT`, `AGENT_ID`. A stale export produces a `no longer read` warning visible in doctor, the console settings page, and `memory status` — read/search responses no longer carry config-time warnings at all.
+- **User surface 54 → 18 keys (breaking).** `Settings` shrinks from 59 to 20 fields; engine params (n_ctx/n_threads/n_batch for both models), five timeouts, all size caps, the seven workspace recall/normalization thresholds, and the Qwen candidate guard are frozen constants in `memory_arbiter/constants.py` at their former defaults. Removed file keys warn `no longer configurable` and are ignored; the full key-by-key migration table is in `docs/INTEGRATION.md`.
+- **`vec.enabled` folds into `embedding.model_path` (breaking)** — pointing at a model IS the intent to embed; `embedding.provider` and the `MEMORY_ARBITER_GGUF` alias are gone. `vec.dim` is deleted: the dimension comes from the DB active-dim source (a `active_dim` meta key backfilled from the vec0 table DDL on first open), vec0 tables are created lazily at the first successful embedder build, and swapping to a model with a different dim drops and re-creates the tables atomically with the mismatch flip (a dim swap that is later reverted arms the standard full rebuild instead of flipping ready — both directions covered by regression tests).
+- **`semantic_conflict.preload`/`resident` frozen `true`** — a configured Qwen model loads at startup and stays resident in its isolated subprocess; `semantic_conflict.enabled` remains the explicit off-switch (explicit `false` wins over the existing model_path auto-enable).
+- **Search is hybrid-only (breaking).** `ranking_mode` is deleted: the legacy bm25 branch and its warning-sniffing are removed. `_recent_fallback` and `NO_DIRECT_MATCH_PREFIX` survive unchanged on the hybrid path.
+- **HTTP surface fixed**: path is always `/mcp`, transport is stateless, JSON responses off, request body capped at 4 MB (constants). API entry accepts shape-only `query_embedding`/`embedding` payloads — dimension enforcement moved to the indexing point, so a fresh library with a non-default model no longer rejects correct-dim payloads at the door. `memory status` drops the frozen semantic fields (backend/resident/preload/timeouts).
+- **`sync_version.py` also guards the doc release strings** (README/README.zh-CN/INTRO/INTEGRATION×2) — the 0.14.12 release had shipped with all five still claiming 0.14.11; `--check` now fails and write mode rewrites them.
+
+### Fixed
+
+- **Dim-swap revert could wedge the vector channel** (release review round 1): reverting a model swap after the forward flip had rebuilt the tables at the new dim flipped straight to `ready` on foreign-dim tables — every insert and knn query then failed with `Dimension mismatch`, with no self-heal. The revert branch now rebuilds at the model's dim first.
+- **Dim-swap revert bypassed the coverage gate** (release review round 2): even on rebuilt tables the ready flip stranded surviving evidence rows without vectors behind a passing gate, and the workspace vector pool was left empty with nothing to rebuild it. A revert that had to rebuild tables now arms the standard mismatch rebuild (full republish + workspace pool rebuild + `maybe_complete` coverage gate); the armed state is idempotent across restarts.
+- **Transaction atomicity of the dim flip**: vec0 DDL no longer commits mid-`write_transaction` — the mismatch flip, table drop/re-create, and `active_dim` recording commit (or roll back) as one unit.
+- **Deep doctor false warnings in the pre-first-embed window**: a fresh library with a model configured but no embed yet reported missing-table warnings for `vector.evidence_rows`/`workspace_rows`; absent tables now count against the index only once a dim is active.
+
+### Added
+
+- `tests/test_config.py` (consolidated): hermetic file-based config tests, deprecation-warning coverage for removed keys and env vars, active-dim/lazy-table/dim-swap regression tests, a dataclass-vs-`from_env` consistency guard, and a frozen-field guard (`Settings.__dataclass_fields__` pinned to exactly 20).
+- Test suite consolidated by domain (43 → 23 files) with the 957-test multiset verified identical before/after; `.env.example` rewritten to the six launch-context variables.
+
+### Migration notes (0.14 → 0.15)
+
+1. Move any tuned values from env vars into `~/.config/memory-arbiter/config.json` — the per-key disposition table is in `docs/INTEGRATION.md` (frozen at former default / merged / deleted).
+2. `vec.enabled`/`vec.dim`/`embedding.provider` are gone; setting `embedding.model_path` is sufficient and the dim follows the model.
+3. If you pinned engine params (embedding `n_ctx`/`reserved_tokens`/`max_unit_chars`) to non-default values, the frozen defaults apply and your `embedding_space_id` changes — expect a one-time full evidence rebuild.
+4. A configured `semantic_conflict.model_path` now loads Qwen at startup; set `enabled: false` to keep the model on disk unused.
+5. Clients that relied on bm25 ordering (nobody found in the wild) must move to hybrid.
+
+### Verification
+
+- Full tests (957), Ruff, and `sync_version --check` pass; two release review rounds (round 2 adversarial) with all findings fixed; `embedding_space_id` for the default 768 model verified byte-identical to the pre-change production anchor (no rebuild for default configs); live service verified after upgrade (doctor green, Qwen subprocess resident, anchor unchanged).
+
 ## [0.14.12] — 2026-08-31
 
 ### Changed

@@ -1,6 +1,6 @@
 # Memory Arbiter MCP
 
-Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.14.12` 正式版本。
+Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个本地 SQLite 事实库，并显式保存来源、事实时间、版本历史、workspace 边界和治理结果。当前文档对应 `0.15.0` 正式版本。
 
 ## 单一 Evidence 主线
 
