@@ -136,7 +136,8 @@ def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> 
     assert text.index("B metadata:") < text.index("B证据原文=数据库为 SQLite。")
     assert "entity=checkout" in text and "scope=global" in text
     assert "不应使用的全文" not in text
-    assert PAIR_PROMPT_VERSION == "pair-v3"
+    assert PAIR_PROMPT_VERSION == "pair-v4"
+    assert "以 { 开头" in _PAIR_PROMPT
     assert "必须输出全部四个字符串字段" in _PAIR_PROMPT
     assert '"__unknown__"' in _PAIR_PROMPT
     assert "设为 null" not in _PAIR_PROMPT
@@ -939,22 +940,29 @@ def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path,
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
 
+    truncated_raw = '{"attribute_a": "数据库选型", "value_a": "MySQL", "attribute_b":'
     cases = [
-        ("semantic inference hard timeout after 30ms", "backend_error", "qwen_timeout"),
-        ("child exited", "backend_error", "qwen_backend_error"),
-        (None, "backend_unavailable", "qwen_unavailable"),
-        ("missing_json", "invalid_json", "qwen_invalid_output"),
+        ("semantic inference hard timeout after 30ms", "backend_error", "qwen_timeout", ""),
+        ("child exited", "backend_error", "qwen_backend_error", ""),
+        (None, "backend_unavailable", "qwen_unavailable", ""),
+        ("missing_json", "invalid_json", "qwen_invalid_output", truncated_raw),
     ]
-    for error, candidate_type, expected in cases:
+    for error, candidate_type, expected, raw in cases:
         backend = type(
             "B", (),
-            {"classify_pair": staticmethod(lambda l, r, _e=error, _t=candidate_type: ModelSignal(False, _t, None, "", None, _e))},
+            {"classify_pair": staticmethod(lambda l, r, _e=error, _t=candidate_type, _r=raw: ModelSignal(False, _t, None, _r, None, _e))},
         )()
         monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
         tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
         degradation = tools._semantic_status()["check_degradation"]
         assert degradation["last_reason"] == expected
     assert tools.db.list_semantic_notices(status="open") == []
+    # The offending raw output is kept for debugging; failures without model
+    # output (timeout / unavailable) leave no sample.
+    samples = degradation["recent_samples"]
+    assert [s["sample"] for s in samples] == [truncated_raw]
+    assert samples[0]["reason"] == "qwen_invalid_output"
+    assert samples[0]["at"]
 
 
 def test_failed_migration_target_is_not_current_generation(tmp_path: Path, monkeypatch) -> None:

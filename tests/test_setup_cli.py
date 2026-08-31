@@ -69,7 +69,7 @@ def test_config_template_has_required_fields():
     assert cfg["workspace_match_distance"] == 0.25
     assert cfg["workspace_weak_vector_weight"] is False
     assert cfg["workspace_min_name_len"] == 3
-    assert cfg["workspace_recall_admission"] is False
+    assert cfg["workspace_recall_admission"] is True
     assert cfg["workspace_recall_cutoff"] == 0.25
     assert cfg["vec"] == {"enabled": True, "dim": 768}
     assert cfg["embedding"]["provider"] == "gguf"

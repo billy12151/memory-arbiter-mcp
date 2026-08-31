@@ -78,6 +78,12 @@ class MemoryTools:
         self._check_degradation_reason: str | None = None
         self._check_degradation_count = 0
         self._check_degradation_at: str | None = None
+        # Last few offending raw model outputs (whitespace-folded, truncated,
+        # each tagged with its reason/timestamp), so a degradation spike is
+        # debuggable from status instead of guesswork. Samples can embed quote
+        # fragments from the checked pair — process-global diagnostics, same
+        # single-trust-domain exposure as the rest of semantic status.
+        self._check_degradation_samples: list[dict[str, str]] = []
         self._notice_claim_error_count = 0
         self._notice_claim_last_error: str | None = None
         self._notice_claim_last_error_at: str | None = None
@@ -104,17 +110,27 @@ class MemoryTools:
     def wait_evidence_worker_drained(self, timeout: float = 30.0) -> bool:
         return self._evidence_worker.wait_drained(timeout)
 
-    def _record_check_degradation(self, reason: str) -> None:
+    def _record_check_degradation(self, reason: str, sample: str | None = None) -> None:
         from .models import utc_now_iso
         self._check_degradation_reason = str(reason)
         self._check_degradation_count += 1
         self._check_degradation_at = utc_now_iso()
+        if sample:
+            text = " ".join(str(sample).split())[:300]
+            if text:
+                # Reason/timestamp ride along so a stale sample is never
+                # misread as belonging to the current last_reason.
+                self._check_degradation_samples.append(
+                    {"reason": str(reason), "at": self._check_degradation_at, "sample": text}
+                )
+                del self._check_degradation_samples[:-3]
 
     def _check_degradation_status(self) -> dict[str, Any]:
         return {
             "last_reason": self._check_degradation_reason,
             "count": self._check_degradation_count,
             "last_at": self._check_degradation_at,
+            "recent_samples": [dict(item) for item in self._check_degradation_samples],
             "note": (
                 "check-route candidates are fail-closed (no notice) while Qwen "
                 "is unavailable (qwen_unavailable/qwen_backend_error), times out "
@@ -472,7 +488,7 @@ class MemoryTools:
             # admission). Off / degraded → (canonical,), i.e. the single-canonical
             # scope. Only strict consults it; none/weak never hard-scope by it.
             if isolation == "strict" and canonical:
-                if getattr(self.settings, "workspace_recall_admission", False):
+                if getattr(self.settings, "workspace_recall_admission", True):
                     try:
                         admitted = self.db.workspaces.admitted_canonicals(
                             canonical,

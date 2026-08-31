@@ -45,7 +45,7 @@ CONFIG_DESCRIPTORS = [
     _item("workspace_match_distance", "workspace", default=0.25),
     _item("workspace_weak_vector_weight", "workspace", default=False),
     _item("workspace_min_name_len", "workspace", default=3),
-    _item("workspace_recall_admission", "workspace", default=False),
+    _item("workspace_recall_admission", "workspace", default=True),
     _item("workspace_recall_cutoff", "workspace", default=0.25),
 ]
 

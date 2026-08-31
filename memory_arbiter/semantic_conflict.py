@@ -46,7 +46,7 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
-PAIR_PROMPT_VERSION = "pair-v3"
+PAIR_PROMPT_VERSION = "pair-v4"
 
 _PAIR_RESPONSE_FORMAT = {
     "type": "json_object",
@@ -63,7 +63,7 @@ _PAIR_RESPONSE_FORMAT = {
     },
 }
 
-_PAIR_PROMPT = """你只做条件抽槽，只输出一个 JSON 对象，不要解释或裁决。
+_PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
 attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中的数字、名称、状态或短策略。
 无论是否能可靠抽取，都必须输出全部四个字符串字段，不得省略字段。无法可靠抽取时将对应字段写成字符串 "__unknown__"；不要输出 null、conflict、coexistence、winner、confidence 或额外字段。
@@ -900,12 +900,18 @@ class LocalGGUFSemanticBackend:
             acquired = True
             text = self._pair_text(left, right)
             with self._infer_lock:
+                # max_tokens: 120 truncated the grammar-constrained JSON
+                # whenever extracted values ran long (protocol allows 80-char
+                # attributes / 64-char values) — the top source of
+                # qwen_invalid_output. 384 covers the protocol worst case
+                # (~330 tokens). "</s>" was a dead stop: Qwen2.5's EOS
+                # (<|im_end|>) comes from the chat template.
                 out = llm.create_chat_completion(
                     messages=[{"role": "system", "content": _PAIR_PROMPT}, {"role": "user", "content": f"输入: {text}\n输出:"}],
-                    max_tokens=120,
+                    max_tokens=384,
                     temperature=0.0,
                     top_p=0.9,
-                    stop=["\n\n", "</s>"],
+                    stop=["\n\n"],
                     response_format=_PAIR_RESPONSE_FORMAT,
                 )
             raw = out["choices"][0]["message"]["content"]
@@ -1007,15 +1013,18 @@ class LocalGGUFSemanticBackend:
                 f"workspace原文: {ws_raw}\n标题: {title}\n关键句: {keys}\n候选: {cand_str}"
             )
             with self._infer_lock:
+                # max_tokens headroom as in classify_pair (truncated JSON was
+                # the top qwen_invalid_output source); "</s>" dropped — Qwen2.5
+                # EOS (<|im_end|>) comes from the chat template.
                 out = llm.create_chat_completion(
                     messages=[
                         {"role": "system", "content": _WORKSPACE_PROMPT},
                         {"role": "user", "content": f"输入:\n{text}\n输出:"},
                     ],
-                    max_tokens=120,
+                    max_tokens=384,
                     temperature=0.0,
                     top_p=0.9,
-                    stop=["\n\n", "</s>"],
+                    stop=["\n\n"],
                     response_format=_WORKSPACE_RESPONSE_FORMAT,
                 )
             raw = out["choices"][0]["message"]["content"]

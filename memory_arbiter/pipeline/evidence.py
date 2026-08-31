@@ -178,12 +178,12 @@ class EvidencePipeline:
         degradation_reasons: set[str] = set()
         reasons_seen: list[str] = []
 
-        def record_degradation(reason: str) -> None:
+        def record_degradation(reason: str, sample: str | None = None) -> None:
             if reason in degradation_reasons:
                 return
             degradation_reasons.add(reason)
             reasons_seen.append(reason)
-            self._tools._record_check_degradation(reason)
+            self._tools._record_check_degradation(reason, sample)
 
         def backlog_deadline() -> float | None:
             value = self._semantic_worker.pending_job_deadline(
@@ -353,7 +353,18 @@ class EvidencePipeline:
                     incomplete_reason = reason
                     continue
                 if reason in _TECHNICAL_REASONS:
-                    record_degradation(reason)
+                    sample = None
+                    if reason == "qwen_invalid_output":
+                        # Preserve the offending raw output so the failure mode
+                        # (truncation / prose / malformed) is visible in status.
+                        sample = next(
+                            (
+                                str(signal.raw) for signal in signals
+                                if signal.candidate_type in {"invalid_json", "invalid_schema"} and signal.raw
+                            ),
+                            None,
+                        )
+                    record_degradation(reason, sample)
                     incomplete_reason = reason
                     continue
                 # Definitive strict-gate negatives (not_same_attribute_different_value,

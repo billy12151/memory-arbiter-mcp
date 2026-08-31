@@ -90,13 +90,14 @@ class Settings:
     # Shared admission short-name guard: canonicals shorter than this never
     # vector-admit (exact equality only).
     workspace_min_name_len: int = 3
-    # strict vector admission. Off (default) = strict isolation is an
-    # exact same-canonical filter (v0.12.5 behavior). On = a strict caller also
-    # sees canonicals within workspace_recall_cutoff of its own (same shared
-    # guards: default insulation, short-name, generic-only proximity). The
-    # admitted set always contains the caller's own canonical, so off collapses
-    # every IN (...) scope to the single-canonical equality filter.
-    workspace_recall_admission: bool = False
+    # strict vector admission. On (default) = a strict caller also sees
+    # canonicals within workspace_recall_cutoff of its own (same shared
+    # guards: default insulation, short-name, generic-only proximity).
+    # Off = strict isolation is an exact same-canonical filter (v0.12.5
+    # behavior). The admitted set always contains the caller's own canonical,
+    # so off collapses every IN (...) scope to the single-canonical equality
+    # filter.
+    workspace_recall_admission: bool = True
     workspace_recall_cutoff: float = 0.25
     update_check_enabled: bool = True
     tool_profile: str = "product"
@@ -403,7 +404,7 @@ class Settings:
             ),
             workspace_recall_admission=pick_bool_field(
                 cfg.get("workspace_recall_admission"), "MEMORY_ARBITER_WORKSPACE_RECALL_ADMISSION",
-                "false", name="workspace_recall_admission", default_bool=False,
+                "true", name="workspace_recall_admission", default_bool=True,
             ),
             workspace_recall_cutoff=clamp_float(
                 pick_float_field(cfg.get("workspace_recall_cutoff"), "MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF", 0.25, name="workspace_recall_cutoff"),

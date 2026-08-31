@@ -88,7 +88,7 @@ Canonical 归一在每种隔离模式下都会运行，与 ACL 相互独立：
 
 - `none`：精确/确认/向量/规则/Qwen 归一行为与 weak 相同，但不应用 workspace ACL。省略 workspace 过滤时返回所有 workspace。
 - `weak`：同样的归一，外加软性排序/提示；没有硬可见性过滤。
-- `strict`：精确/确认和安全的机械规则可以复用 canonical；Qwen 不能静默合并。新 workspace 保持 pending，直到授权的 `confirm_pending_workspace`。可见性默认是精确 canonical。`workspace_recall_admission=true` 时，workspace 敏感的 recall/read/repair 操作、冲突/notice 工作流和 console 内容/计数视图共享调用方 canonical 加上所有在 `workspace_recall_cutoff`（默认 0.25）之内、且通过 default 池、`workspace_min_name_len` 和泛化子串 guard 的 canonical。进程级维护（如语义运行时控制、备份回放、doctor、settings）不按此限定。向量缺失或 sqlite-vec 降级时回退到精确 canonical 作用域；绝缘的 `default` 池永远不会被准入 strict 项目作用域。
+- `strict`：精确/确认和安全的机械规则可以复用 canonical；Qwen 不能静默合并。新 workspace 保持 pending，直到授权的 `confirm_pending_workspace`。可见性默认开启向量准入（`workspace_recall_admission=true`）：workspace 敏感的 recall/read/repair 操作、冲突/notice 工作流和 console 内容/计数视图共享调用方 canonical 加上所有在 `workspace_recall_cutoff`（默认 0.25）之内、且通过 default 池、`workspace_min_name_len` 和泛化子串 guard 的 canonical。设为 `false` 回退到精确 canonical 过滤。进程级维护（如语义运行时控制、备份回放、doctor、settings）不按此限定。向量缺失或 sqlite-vec 降级时回退到精确 canonical 作用域；绝缘的 `default` 池永远不会被准入 strict 项目作用域。
 
 在 `none` 和 `weak` 中，首次写入并注册 canonical workspace 时，响应返回非阻断的顶层 notice：`type=workspace_review`、`action_required=review_workspace_registry`，并附带 doctor 复查调用和需要用户另行授权的 `confirm_workspaces` 调用。重复写入已有 canonical 不重复提醒。`strict` 使用原有 pending workspace 阻断流程。
 
