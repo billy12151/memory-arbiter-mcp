@@ -30,6 +30,10 @@
   NOTES
     - mema binds only to localhost; this plist does not expose it remotely.
       X-Mema-Client / X-Mema-Agent-Id headers are provenance, not auth.
+    - Since 0.15.0 configuration is file-only: apart from the three variables
+      below (plus MEMORY_ARBITER_CONFIG/DB_PATH/BACKUP_JSONL), no
+      MEMORY_ARBITER_* env var is read — tune everything else in
+      ~/.config/memory-arbiter/config.json.
     - KeepAlive restarts on crash and at login. Set it to false if you prefer
       to start/stop manually.
     - If you use a GGUF model, give its path as an absolute path in
@@ -58,16 +62,13 @@
     <string>mema-server</string>
     <key>MEMORY_ARBITER_AGENT_ID</key>
     <string>mema-server</string>
-    <!-- Stateless is the default. It avoids expired client sessions after a
-         service restart; persisted semantic notices still arrive later. -->
-    <!-- Optional; unset uses 127.0.0.1:8000/mcp
-    <key>MEMORY_ARBITER_MCP_HTTP_HOST</key>
-    <string>127.0.0.1</string>
-    <key>MEMORY_ARBITER_MCP_HTTP_PORT</key>
-    <string>8000</string>
-    <key>MEMORY_ARBITER_MCP_HTTP_PATH</key>
-    <string>/mcp</string>
-    -->
+    <!-- HTTP request handling is stateless — fixed behavior since 0.15.0,
+         no config knob. It avoids expired client sessions after a service
+         restart; persisted semantic notices still arrive later. -->
+    <!-- Listen address is configured in config.json, not here:
+         mcp.http.host / mcp.http.port (defaults 127.0.0.1:8000; the endpoint
+         path is fixed /mcp). The MEMORY_ARBITER_MCP_HTTP_HOST/PORT/PATH
+         variables are no longer read since 0.15.0. -->
   </dict>
 
   <key>RunAtLoad</key>

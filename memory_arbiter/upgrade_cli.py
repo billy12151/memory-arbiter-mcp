@@ -72,14 +72,12 @@ def _render_plan(plan: dict[str, Any]) -> str:
 
 def _preflight(settings: Settings, target: Path) -> list[str]:
     errors: list[str] = []
-    if not settings.enable_sqlite_vec:
-        errors.append("vec.enabled must be true")
     try:
         import sqlite_vec  # noqa: F401
     except ImportError:
         errors.append("sqlite-vec is not installed; install memory-arbiter-mcp[vec]")
-    if settings.embedding_provider != "gguf" or settings.embedding_model_path is None:
-        errors.append("a local GGUF embedding model must be configured")
+    if settings.embedding_model_path is None:
+        errors.append("a local GGUF embedding model must be configured (embedding.model_path)")
     elif not settings.embedding_model_path.expanduser().is_file():
         errors.append(f"embedding model not found: {settings.embedding_model_path}")
     try:

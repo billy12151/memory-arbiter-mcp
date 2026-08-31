@@ -2,8 +2,9 @@
 """Synchronize and validate release version metadata.
 
 ``memory_arbiter.__version__`` is authoritative. Normal mode updates the MCP
-registry manifest. ``--check`` is read-only and also validates the newest
-CHANGELOG release and the editable project record/extras in ``uv.lock``.
+registry manifest and the release strings in the user-facing docs. ``--check``
+is read-only and also validates the newest CHANGELOG release and the editable
+project record/extras in ``uv.lock``.
 """
 from __future__ import annotations
 
@@ -20,6 +21,17 @@ SERVER_JSON = ROOT / "server.json"
 CHANGELOG = ROOT / "CHANGELOG.md"
 PYPROJECT = ROOT / "pyproject.toml"
 UV_LOCK = ROOT / "uv.lock"
+
+# User-facing docs that claim the current release version. Each pattern must
+# match exactly the version-bearing phrase; a reworded doc fails the check
+# instead of silently losing coverage.
+DOC_RELEASE_PATTERNS: tuple[tuple[Path, str], ...] = (
+    (ROOT / "README.md", r"Current release: `(\d+\.\d+\.\d+)`"),
+    (ROOT / "README.zh-CN.md", r"当前正式版本 `(\d+\.\d+\.\d+)`"),
+    (ROOT / "INTRO.md", r"当前文档对应 `(\d+\.\d+\.\d+)` 正式版本"),
+    (ROOT / "docs" / "INTEGRATION.md", r"describes the `(\d+\.\d+\.\d+)` contract"),
+    (ROOT / "docs" / "INTEGRATION.zh-CN.md", r"本指南描述 `(\d+\.\d+\.\d+)` 的正式契约"),
+)
 
 
 def read_authoritative_version() -> str:
@@ -62,6 +74,34 @@ def check_changelog(version: str) -> bool:
     if not ok:
         found = first_release.group(1) if first_release else "missing"
         print(f"CHANGELOG newest release {found} != authoritative {version}", file=sys.stderr)
+    return ok
+
+
+def sync_doc_release_strings(version: str, *, check: bool) -> bool:
+    ok = True
+    for path, pattern in DOC_RELEASE_PATTERNS:
+        text = path.read_text(encoding="utf-8")
+        match = re.search(pattern, text)
+        try:
+            display = path.relative_to(ROOT)
+        except ValueError:
+            display = path
+        if match is None:
+            print(
+                f"release version string missing in {display} (expected pattern: {pattern})",
+                file=sys.stderr,
+            )
+            ok = False
+        elif match.group(1) != version:
+            if check:
+                print(
+                    f"{display} claims release {match.group(1)} != authoritative {version}",
+                    file=sys.stderr,
+                )
+                ok = False
+            else:
+                path.write_text(text[: match.start(1)] + version + text[match.end(1):], encoding="utf-8")
+                print(f"updated {display} -> {version}")
     return ok
 
 
@@ -111,11 +151,12 @@ def main() -> int:
             )
             return 0
         sync_server_json(version, check=False)
-        return 0
+        return 0 if sync_doc_release_strings(version, check=False) else 1
 
     checks = (
         True if development_version else sync_server_json(version, check=True),
         True if development_version else check_changelog(version),
+        True if development_version else sync_doc_release_strings(version, check=True),
         check_uv_lock(version),
     )
     if all(checks):

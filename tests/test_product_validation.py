@@ -149,7 +149,7 @@ def test_agent_policy_precedence_deny_allow_client_default() -> None:
 
 def test_controlled_numeric_string_coercion_matches_consumed_value() -> None:
     payload = {"limit": "5", "offset": "2"}
-    result = validate_product_payload("memory", "find", payload, vec_dim=2)
+    result = validate_product_payload("memory", "find", payload)
     assert result.error is None
     assert payload == {"limit": 5, "offset": 2}
 
@@ -164,22 +164,22 @@ def test_integer_id_and_cas_fields_reject_floats_and_non_finite_values() -> None
     for surface, operation, field in cases:
         for value in (1.0, 1.5, math.nan, math.inf, -math.inf):
             payload = {field: value}
-            result = validate_product_payload(surface, operation, payload, vec_dim=2)
+            result = validate_product_payload(surface, operation, payload)
             assert result.error is not None, (surface, operation, field, value)
             assert result.error["field"] == field
 
     payload = {"memory_id": " 12 ", "expected_version": "+3"}
-    result = validate_product_payload("memory", "update", payload, vec_dim=2)
+    result = validate_product_payload("memory", "update", payload)
     assert result.error is None
     assert payload == {"memory_id": 12, "expected_version": 3}
 
     payload = {"memory_ids": ["1", 2]}
-    result = validate_product_payload("memory_repair", "rebuild_evidence", payload, vec_dim=2)
+    result = validate_product_payload("memory_repair", "rebuild_evidence", payload)
     assert result.error is None
     assert payload["memory_ids"] == [1, 2]
     for value in (1.0, math.nan, math.inf):
         result = validate_product_payload(
-            "memory_repair", "rebuild_evidence", {"memory_ids": [value]}, vec_dim=2,
+            "memory_repair", "rebuild_evidence", {"memory_ids": [value]},
         )
         assert result.error is not None
 
@@ -224,7 +224,7 @@ def test_timestamp_fields_reject_non_strings_and_oversized_values() -> None:
     for value in (True, 123, "2" * 129):
         result = validate_product_payload(
             "memory", "remember",
-            {"content": "x", "subject": "s", "event_time": value}, vec_dim=2,
+            {"content": "x", "subject": "s", "event_time": value},
         )
         assert result.error is not None
         assert result.error["field"] == "event_time"
@@ -239,7 +239,7 @@ def test_conflict_structured_payload_limits_reject_oversized_arrays() -> None:
     ]
     for surface, operation, field, value in cases:
         payload = {field: value}
-        result = validate_product_payload(surface, operation, payload, vec_dim=2)
+        result = validate_product_payload(surface, operation, payload)
         assert result.error is not None
         assert result.error["field"] == field
 
@@ -252,7 +252,7 @@ def test_conflict_structured_payload_limits_require_json_values() -> None:
         ("memory_repair", "record_conflict", "candidate_key", {"bad": object()}),
     ):
         result = validate_product_payload(
-            surface, operation, {field: value}, vec_dim=2,
+            surface, operation, {field: value},
         )
         assert result.error is not None
         assert result.error["field"] == field
@@ -261,7 +261,7 @@ def test_conflict_structured_payload_limits_require_json_values() -> None:
 def test_conflict_slot_key_limit_matches_database_schema() -> None:
     oversized = {"entity": "x" * MAX_CONFLICT_SLOT_KEY_BYTES, "attribute": "a", "scope": "s"}
     result = validate_product_payload(
-        "memory_repair", "record_conflict", {"slot_key": oversized}, vec_dim=2,
+        "memory_repair", "record_conflict", {"slot_key": oversized},
     )
     assert result.error is not None
     assert result.error["field"] == "slot_key"
@@ -273,7 +273,7 @@ def test_conflict_slot_key_limit_matches_database_schema() -> None:
         ("memory_repair", "record_conflict", "value_groups"),
     ):
         result = validate_product_payload(
-            surface, operation, {field: ["not-an-object"]}, vec_dim=2,
+            surface, operation, {field: ["not-an-object"]},
         )
         assert result.error is not None
         assert result.error["field"] == field
@@ -308,9 +308,10 @@ def test_workspace_vector_publish_failure_does_not_fail_memory_write(tmp_path: P
 
     class Embedder:
         embedding_space_id = "test"
+        dim = 2
 
         def embed_text(self, **_kwargs):
-            return type("Result", (), {"embedding": [0.1] * tools.settings.vec_dim})()
+            return type("Result", (), {"embedding": [0.1] * self.dim})()
 
     monkeypatch.setattr(tools, "_ensure_embedder", lambda: (Embedder(), []))
     monkeypatch.setattr(tools, "_embedding_configured", lambda: True)

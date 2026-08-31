@@ -284,7 +284,7 @@ class SchemaStore:
         conn.execute("DROP TABLE IF EXISTS workspace_alias_events")
 
     def _probe_features(self, conn: sqlite3.Connection, *, initialize: bool = True) -> None:
-        if self.settings.enable_sqlite_vec:
+        if self.settings.embedding_model_path is not None:
             try:
                 import sqlite_vec
 
@@ -294,14 +294,21 @@ class SchemaStore:
                 self._sqlite_vec_loadable = True
                 self.state.sqlite_vec_available = True
                 self.state.mode = "sqlite_vec"
-                if initialize:
-                    self._ensure_evidence_vec_table(conn)
-                    self._ensure_workspace_vec_table(conn)
-                else:
-                    # Constant-size capability probe only. Missing/corrupt
-                    # vector tables are a doctor/repair concern, not startup DDL.
-                    conn.execute("SELECT id FROM memory_evidence_vec LIMIT 0")
-                    conn.execute("SELECT id FROM workspace_canonicals_vec LIMIT 0")
+                # Table creation is lazy since 0.15.0: the derived vec0 tables
+                # are built at the first successful embedder load (see
+                # SchemaStore.ensure_vec_tables) with the dim the model itself
+                # reports, so initialization only proves the extension loads.
+                if not initialize:
+                    # Capability probe only, and only for tables that actually
+                    # exist — a current library that predates its first embed
+                    # has no vec tables yet, which is healthy, not a failure.
+                    for table in ("memory_evidence_vec", "workspace_canonicals_vec"):
+                        exists = conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                            (table,),
+                        ).fetchone()
+                        if exists is not None:
+                            conn.execute(f"SELECT id FROM {table} LIMIT 0")
             except Exception as exc:  # pragma: no cover - environment dependent
                 self._sqlite_vec_loadable = False
                 self.state.sqlite_vec_available = False
@@ -312,11 +319,12 @@ class SchemaStore:
         else:
             probe = self._probe_sqlite_vec_loadable()
             suffix = (
-                "Set MEMORY_ARBITER_ENABLE_SQLITE_VEC=true to enable semantic recall."
+                "Install with `pip install '.[vec]'` and set embedding.model_path "
+                "in config.json to enable semantic recall."
                 if probe is True
-                else "Install with `pip install '.[vec]'` and enable vec.enabled."
+                else "Set embedding.model_path in config.json to enable semantic recall."
             )
-            self.state.warn(f"sqlite-vec disabled by configuration. {suffix}")
+            self.state.warn(f"sqlite-vec disabled: no embedding model configured. {suffix}")
 
         try:
             if initialize:
@@ -393,32 +401,77 @@ class SchemaStore:
                 "content, tags, subject, content='memories', content_rowid='id')"
             )
 
-    def _ensure_evidence_vec_table(self, conn: sqlite3.Connection) -> None:
-        dim = int(self.settings.vec_dim or 768)
+    def ensure_evidence_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
+        # No commit here: callers either own a write_transaction (meta's
+        # mismatch flip needs this DDL inside its transaction) or commit
+        # explicitly once both tables exist.
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS memory_evidence_vec "
-            f"USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[{dim}])"
+            f"USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[{int(dim)}])"
         )
-        conn.commit()
 
-    def _ensure_workspace_vec_table(self, conn: sqlite3.Connection) -> None:
-        dim = int(self.settings.vec_dim or 768)
+    def ensure_workspace_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         try:
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS workspace_canonicals_vec "
-                f"USING vec0(id INTEGER PRIMARY KEY, embedding float[{dim}])"
+                f"USING vec0(id INTEGER PRIMARY KEY, embedding float[{int(dim)}])"
             )
-            conn.commit()
         except sqlite3.Error as exc:
             self.state.warn(
                 f"workspace vector index unavailable: {exc}. "
                 "Workspace alias resolution will use exact matches."
             )
 
+    def rebuild_vec_tables(self, conn: sqlite3.Connection, dim: int) -> None:
+        """Drop both vec0 tables (and vec0 shadow leftovers) and re-create
+        them empty at ``dim``. Must run inside the caller's transaction —
+        the flip to mismatch commits atomically with it."""
+        for table in ("memory_evidence_vec", "workspace_canonicals_vec"):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        shadows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND ("
+            "name LIKE 'memory_evidence_vec_%' OR "
+            "name LIKE 'workspace_canonicals_vec_%')"
+        ).fetchall()
+        for row in shadows:
+            conn.execute(f'DROP TABLE IF EXISTS "{str(row[0])}"')
+        self.ensure_evidence_vec_table(conn, dim)
+        self.ensure_workspace_vec_table(conn, dim)
+
+    def ensure_vec_tables(self, dim: int) -> list[str]:
+        """Lazily create the derived vec0 tables at the model-reported dim.
+
+        Called at the first successful embedder build (tools._ensure_embedder).
+        Existing tables are left untouched — IF NOT EXISTS never re-creates
+        them, so a dim change goes through init_vec_index_state's explicit
+        drop/recreate instead.
+        """
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._db._new_connection()
+            self.ensure_evidence_vec_table(conn, dim)
+            self.ensure_workspace_vec_table(conn, dim)
+            conn.commit()
+            self._db._sqlite_vec_loadable = True
+            self.state.sqlite_vec_available = True
+            self.state.mode = "sqlite_vec"
+            return []
+        except (ImportError, sqlite3.Error) as exc:
+            return [f"vector table creation failed (dim={int(dim)}): {exc}"]
+        finally:
+            if conn is not None:
+                conn.close()
+
     def ensure_vector_tables_for_repair(self) -> tuple[bool, list[str]]:
         """Create missing derived vec0 tables only from an explicit repair."""
-        if not self.settings.enable_sqlite_vec:
-            return False, ["vec.enabled must be true to repair vector tables"]
+        if self.settings.embedding_model_path is None:
+            return False, ["embedding.model_path must be configured to repair vector tables"]
+        dim = self._db.meta.get_active_dim()
+        if dim is None:
+            return False, [
+                "active embedding dimension unknown; load the configured model once "
+                "(any write or search) before repairing vector tables"
+            ]
         conn: sqlite3.Connection | None = None
         try:
             conn = self._db._new_connection()
@@ -433,8 +486,9 @@ class SchemaStore:
                     "AND name IN ('memory_evidence_vec','workspace_canonicals_vec')"
                 )
             }
-            self._ensure_evidence_vec_table(conn)
-            self._ensure_workspace_vec_table(conn)
+            self.ensure_evidence_vec_table(conn, dim)
+            self.ensure_workspace_vec_table(conn, dim)
+            conn.commit()
             self._db._sqlite_vec_loadable = True
             self.state.sqlite_vec_available = True
             self.state.mode = "sqlite_vec"

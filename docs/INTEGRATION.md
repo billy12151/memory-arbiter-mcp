@@ -2,19 +2,68 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.14.11` contract.
+This guide describes the `0.14.12` contract.
 
 ## MCP Surface
 
 Configure the command as `mema` and use the four product tools. Call `memory(action="help")` or the corresponding tool help to discover current fields.
 
-stdio is the default transport. To share one Community process among local clients, set `mcp.transport="streamable-http"` and connect each client to `http://127.0.0.1:8000/mcp`. HTTP request handling is stateless by default (`mcp.http.stateless=true`): memory and semantic notices live in SQLite, and a later successful tool response claims any pending semantic notice regardless of the MCP connection that initiated the asynchronous work. This also prevents a server restart from stranding clients on an expired in-memory session. Set it to `false` only for a client that requires server-side MCP sessions or server-initiated SSE messages. A process restart can still interrupt a worker job that has not persisted its notice yet.
+stdio is the default transport. To share one Community process among local clients, set `mcp.transport="streamable-http"` and connect each client to `http://127.0.0.1:8000/mcp` (host/port via `mcp.http.host`/`mcp.http.port`; the endpoint path is fixed at `/mcp`). HTTP request handling is stateless: memory and semantic notices live in SQLite, and a later successful tool response claims any pending semantic notice regardless of the MCP connection that initiated the asynchronous work. This also prevents a server restart from stranding clients on an expired in-memory session. A process restart can still interrupt a worker job that has not persisted its notice yet.
 
-The server requires an explicitly configured identity on every transport: set `client` and `agent_id` in config.json or `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` in the environment. There are no built-in defaults, and the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity — attribution and policy decisions use it, and `agent_id`/`client` fields in tool `data` are never accepted as provenance. streamable-http takes the caller identity from the per-request headers below.
+The server requires an explicitly configured identity on every transport: set `client` and `agent_id` in config.json or `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` in the environment (two of the six retained launch-context variables; see Configuration Surface). There are no built-in defaults, and the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity — attribution and policy decisions use it, and `agent_id`/`client` fields in tool `data` are never accepted as provenance. streamable-http takes the caller identity from the per-request headers below.
 
 In each MCP server configuration, set fixed `X-Mema-Client` and `X-Mema-Agent-Id` request headers; the client then sends them automatically on initialize, tool discovery, and tool calls. Do not have the agent dynamically add identity to tool `data`. HTTP mode fails closed when either header is missing, empty, invalid, duplicated, or conflicts with tool data. It is restricted to loopback: the headers provide local provenance and policy input, not authentication, tenant isolation, or permission to expose the service publicly.
 
 Writes require a non-empty `subject`; include `source_type`, `event_time`, `source_ref`, and useful tags when known. Pass the real project `workspace` for project facts. Use explicit `workspace="default"` only for facts intentionally stored in the global pool; do not rely on omission because client settings may supply a workspace. Strict isolation requires a workspace. Use `user_confirmed` only for facts explicitly verified by the user. When a new source replaces an existing current source, find/read the existing memory and update it instead of creating a second active copy.
+
+## Configuration Surface
+
+Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 18 keys:
+
+```json
+{
+  "db_path": "…", "backup_jsonl": "…",
+  "client": "…", "agent_id": "…", "workspace": "default",
+  "isolation": "none", "policy_path": null,
+  "update_check": {"enabled": true},
+  "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
+  "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "max_notice_pairs": 2},
+  "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
+}
+```
+
+Intent semantics:
+
+- Pointing `embedding.model_path` at a local GGUF model is the sole intent to enable sqlite-vec evidence recall — there is no `vec.enabled`/`embedding.provider`/`vec.dim` any more. The vector dimension comes from the model itself; the database records the active dimension as its fact source, and switching to a model with a different output dimension drops and recreates the vector tables at the new dimension at startup, flipping the index to `state=mismatch` until the full rebuild republishes into the fresh tables.
+- Pointing `semantic_conflict.model_path` at a local Qwen2.5-0.5B GGUF enables the semantic-conflict runtime, loads it at startup, and keeps it resident (frozen `preload`/`resident=true`). `semantic_conflict.enabled=false` is the explicit off-switch; unset + `model_path` means enabled.
+- Ranking is fixed hybrid (lexical + evidence fusion with reciprocal-rank fusion); there is no ranking-mode choice.
+- The HTTP endpoint path is fixed `/mcp` and request bodies are capped at 4 MB.
+
+Six environment variables remain as launch context: `MEMORY_ARBITER_CONFIG`, `MEMORY_ARBITER_DB_PATH`, `MEMORY_ARBITER_BACKUP_JSONL`, `MEMORY_ARBITER_MCP_TRANSPORT`, `MEMORY_ARBITER_CLIENT`, `MEMORY_ARBITER_AGENT_ID`. They select process context (which config file, which DB, which transport, which identity); a config-file value wins over the matching variable. Every other `MEMORY_ARBITER_*` variable is no longer read — a stale export surfaces a "no longer read" warning in `mema doctor`, the console settings page, and `memory(action="status")`, while read/retrieval responses carry no config warnings. A removed file key present in config.json similarly warns "no longer configurable" and is ignored.
+
+### 0.14 → 0.15 key migration
+
+| Old key (0.14.x) | Disposition |
+| --- | --- |
+| `vec.enabled`, `embedding.provider`, `embedding.model_path` env aliases (`MEMORY_ARBITER_GGUF`) | Merged — `embedding.model_path` is the single intent |
+| `vec.dim` | Removed — dimension comes from the model / DB `active_dim` fact source |
+| `ranking_mode` (env) | Removed — ranking fixed hybrid |
+| `tool_profile` | Removed — the four product tools are the only surface |
+| `semantic_conflict.backend`, `semantic_conflict.max_concurrency` | Removed — dead knobs (single local backend, serial worker) |
+| `semantic_conflict.preload`, `semantic_conflict.resident` | Frozen `true` — configured model loads at startup and stays resident |
+| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | Frozen constants (1024 / 4 / 128) |
+| `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | Frozen constants (5000 / 30000 / 120000 / 1000 ms) |
+| `semantic_conflict.queue_max_size`, `semantic_conflict.max_evidence_units` | Frozen constants (100 / 24) |
+| `semantic_conflict.scan_enhance`, `semantic_conflict.scan_max_pairs`, `semantic_conflict.scan_budget_ms` | Frozen constants (true / 8 / 60000) |
+| `semantic_conflict.notice_sync_wait_ms`, `semantic_conflict.workspace_qwen_budget_ms` | Frozen constants (5000 / 750 ms) |
+| `embedding.n_ctx`, `embedding.reserved_tokens`, `embedding.max_unit_chars` | Frozen constants (2048 / 64 / 3600) |
+| `workspace_match_distance`, `workspace_qwen_candidate_distance`, `workspace_qwen_candidate_top_k` | Frozen constants (0.25 / 0.25 / 3) |
+| `workspace_weak_vector_weight`, `workspace_min_name_len`, `workspace_recall_admission`, `workspace_recall_cutoff` | Frozen constants (false / 3 / true / 0.25) |
+| `recall_pool_cap`, `content_like_cap`, `superseded_limit` | Frozen constants (50 / 30 / 20) |
+| `mcp.http.path`, `mcp.http.stateless`, `mcp.http.json_response`, `mcp.http.max_request_body_size` | Frozen constants (`/mcp` / stateless / 4 MB) |
+| every other `MEMORY_ARBITER_*` environment variable | No longer read (warning in doctor/console/status) |
+
+Frozen constants live in `memory_arbiter/constants.py` at their former defaults; users who had customized one of them should expect the former-default behavior after upgrading, and an embedding-model change that alters the engine space triggers a one-time mismatch/rebuild as before.
 
 ## Evidence Recall
 
@@ -47,7 +96,7 @@ Fuzzy attribute similarity cannot create a formal slot. Qwen failure or absence 
 
 ### Scheduled scan: broad gate
 
-`memory_repair(task="scan_candidates")` enumerates bounded KNN/rule candidates without loading the whole library into the agent session. The scan keeps the deterministic baseline and, when `semantic_conflict.scan_enhance=true` (default) and the local Qwen backend is available, runs a bounded enhancement over the page: rule candidates are enriched with extracted `attribute/value` member fields and `value_groups`, and similarity-only pairs (normally opt-in via `include_check`) that extract a legal same-attribute/different-value in either direction are unioned into `candidates`. `semantic_conflict.scan_max_pairs` (default 8, 0 disables) caps Qwen pair evaluations per page and `semantic_conflict.scan_budget_ms` (default 60000) bounds the page deadline; verified candidates whose memories agree on metadata `entity/scope` are aggregated into `slot_groups`. Single-direction output, weak grounding, or missing entity/scope remains `review_candidate` for agent deep reading; Qwen absent/invalid/timeout/budget failure never reduces the baseline set and never removes a rule candidate.
+`memory_repair(task="scan_candidates")` enumerates bounded KNN/rule candidates without loading the whole library into the agent session. The scan keeps the deterministic baseline and, when the local Qwen runtime is available (scan enhancement is always on, a frozen constant), runs a bounded enhancement over the page: rule candidates are enriched with extracted `attribute/value` member fields and `value_groups`, and similarity-only pairs (normally opt-in via `include_check`) that extract a legal same-attribute/different-value in either direction are unioned into `candidates`. Qwen pair evaluations per page are capped at 8 and the page deadline is bounded at 60 s (frozen constants); verified candidates whose memories agree on metadata `entity/scope` are aggregated into `slot_groups`. Single-direction output, weak grounding, or missing entity/scope remains `review_candidate` for agent deep reading; Qwen absent/invalid/timeout/budget failure never reduces the baseline set and never removes a rule candidate.
 
 Candidates carry member versions, evidence spans, candidate identity, and deep-read calls. `scan_candidates` does not itself persist triage. For every reviewed candidate, call `memory_repair(task="record_conflict")` with `status="open"` or `status="not_a_conflict"`; otherwise it may appear on a later scan. Pass `slot_key` only for `status="open"` — a `not_a_conflict` triage records through `candidate_key` alone and returns `open_group_exists` if an open group already owns the slot. Candidate-only `not_a_conflict` rows use `candidate_key` and do not invent `scope="unknown"`.
 
@@ -55,9 +104,9 @@ Candidates carry member versions, evidence spans, candidate identity, and deep-r
 
 A user-visible notice requires both valid directions, consistent side mapping, strict quote grounding, distinct normalized values, complete slot provenance, and no coexistence veto. Any failure closes the notice path and leaves the case for scheduled scan review. Notice snapshots freeze member versions, value groups, slot provenance, detector/prompt version, task id, and dedupe key.
 
-After a successful write, the server waits at most `semantic_conflict.notice_sync_wait_ms` (default 5000, range 0–5000 ms) for the bounded notice task. `0` is fully asynchronous. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the strict gate; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
+After a successful write, the server waits at most 5000 ms (a frozen delivery-only constant) for the bounded notice task. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the strict gate; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
 
-`semantic_conflict.job_timeout_ms` (default 5000) is a queue-fairness budget, not an inference timeout. It activates only when another semantic job is waiting and is checked between candidate pairs. An already-started Qwen request runs under `semantic_conflict.inference_timeout_ms` (default 30000) even if the job budget expires; after that pair finishes, the worker yields before starting another pair. With no backlog, the job budget is inactive.
+The job budget (5000 ms, frozen) is a queue-fairness budget, not an inference timeout. It activates only when another semantic job is waiting and is checked between candidate pairs. An already-started Qwen request runs under the inference timeout (30000 ms, frozen) even if the job budget expires; after that pair finishes, the worker yields before starting another pair. With no backlog, the job budget is inactive.
 
 ## One Conflicts Table
 
@@ -88,13 +137,13 @@ Canonical normalization runs under every isolation mode and is independent from 
 
 - `none`: exact/confirmed/vector/rule/Qwen normalization behaves like weak mode, but no workspace ACL is applied. An omitted workspace filter returns all workspaces.
 - `weak`: same normalization plus soft ranking/hints; no hard visibility filter.
-- `strict`: exact/confirmed and safe mechanical rules may reuse a canonical; Qwen cannot silently merge. A new workspace remains pending until authorized `confirm_pending_workspace`. Visibility defaults to vector admission (`workspace_recall_admission=true`): workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share the caller canonical plus every canonical within `workspace_recall_cutoff` (default 0.25) that passes default-pool, `workspace_min_name_len`, and generic-substring guards. Set it to `false` for the legacy exact-canonical filter. Process-global maintenance such as semantic runtime control, backup replay, doctor, and settings is not scoped this way. Missing vectors or sqlite-vec degradation falls back to exact-canonical scope; the insulated `default` pool is never admitted into a strict project scope.
+- `strict`: exact/confirmed and safe mechanical rules may reuse a canonical; Qwen cannot silently merge. A new workspace remains pending until authorized `confirm_pending_workspace`. Visibility uses guarded vector admission (always on since 0.15.0, a frozen constant): workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share the caller canonical plus every canonical within the guarded cosine cutoff (0.25, frozen) that passes default-pool, short-name, and generic-substring guards. Process-global maintenance such as semantic runtime control, backup replay, doctor, and settings is not scoped this way. Missing vectors or sqlite-vec degradation falls back to exact-canonical scope; the insulated `default` pool is never admitted into a strict project scope.
 
 In `none` and `weak`, the first write that registers a canonical returns a non-blocking top-level notice with `type=workspace_review`, `action_required=review_workspace_registry`, a doctor review call, and the authorized `confirm_workspaces` call to use only after review. Repeated writes to an existing canonical do not repeat it. `strict` uses its blocking pending-workspace response instead.
 
 Resolution order is internal confirmed/negative workspace decisions, exact canonical, bounded vector candidates, deterministic `AUTO|KEEP|ASK`, then Qwen only for an undecided near-match. Qwen must choose from the supplied candidates and may suggest an `alias`/`typo`/`same_project` relationship, but automatic normalization writes only the memory's `workspace_canonical`; it does not create a persistent redirect. Negative decisions suppress repeated proposals. Product governance uses rename, migrate, pending confirmation, and full-registry review; internal decision rows are not a product workflow.
 
-Workspace and conflict inference share a serial local worker. `semantic_conflict.workspace_qwen_budget_ms` (default 750, range 50–5000 ms) is an independent short budget: timeout/busy preserves the raw canonical and returns a review hint rather than blocking the write-time notice gate.
+Workspace and conflict inference share a serial local worker. The near-match Qwen budget (750 ms, frozen) is an independent short budget: timeout/busy preserves the raw canonical and returns a review hint rather than blocking the write-time notice gate.
 
 ## Response Envelope
 

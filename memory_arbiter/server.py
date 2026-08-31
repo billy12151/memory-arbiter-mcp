@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple
 
 from . import __version__
 from .config import Settings
+from .constants import MCP_HTTP_BODY_LIMIT, MCP_HTTP_PATH
 from .request_identity import (
     AGENT_ID_HEADER,
     CLIENT_HEADER,
@@ -316,10 +317,11 @@ def build_runtime() -> ServerBundle:
         "memory-arbiter-mcp",
         host=settings.mcp_http_host,
         port=settings.mcp_http_port,
-        streamable_http_path=settings.mcp_http_path,
-        stateless_http=settings.mcp_http_stateless,
-        json_response=settings.mcp_http_json_response,
-        max_request_body_size=settings.mcp_http_max_request_body_size,
+        # Fixed HTTP transport surface (frozen constants since 0.15.0).
+        streamable_http_path=MCP_HTTP_PATH,
+        stateless_http=True,
+        json_response=False,
+        max_request_body_size=MCP_HTTP_BODY_LIMIT,
     )
     # The SDK's FastMCP constructor has no version parameter, and the
     # lowlevel Server reports the MCP SDK's own version (e.g. 1.29.0) in the
@@ -423,8 +425,8 @@ def build_http_app(bundle: ServerBundle) -> ASGIApp:
         )
     return MemoryIdentityMiddleware(
         bundle.app.streamable_http_app(),
-        path=settings.mcp_http_path,
-        max_request_body_size=settings.mcp_http_max_request_body_size,
+        path=MCP_HTTP_PATH,
+        max_request_body_size=MCP_HTTP_BODY_LIMIT,
     )
 
 

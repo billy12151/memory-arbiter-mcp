@@ -39,9 +39,7 @@ class WritePipeline:
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         payload = dict(payload)
-        validation = validate_product_payload(
-            "memory", "remember", payload, vec_dim=int(self.settings.vec_dim),
-        )
+        validation = validate_product_payload("memory", "remember", payload)
         if validation.error is not None:
             error = dict(validation.error)
             if error.get("field") in {"content", "subject"} and str(error.get("reason") or "").startswith("is required"):

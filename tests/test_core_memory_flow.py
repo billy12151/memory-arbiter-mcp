@@ -20,32 +20,6 @@ from memory_arbiter.models import ConflictMember, ConflictValueGroup, SourceType
 from memory_arbiter.tools import MemoryTools
 
 
-class _MockManagedEmbedder:
-    """Minimal mock for ManagedEmbedder — wraps a plain encode function.
-
-    Mirrors the production Never-raises contract: if _encode raises, the
-    exception is caught, last_encode_error is set, and an empty EmbedResult
-    is returned so callers must check er.embedding.
-    """
-
-    def __init__(self, encode_fn):
-        self._encode = encode_fn
-        self.embedding_space_id = "mock_space_id"
-        self.last_encode_error = None
-
-    def embed_text(self, prefix="", body="", max_body_chars=None):
-        # Mirror the production separator so the prefix's trailing token and the
-        # body's leading token are not merged (e.g. "alpha"+"alpha x" → "alphaalpha").
-        sep = "\n" if prefix and body else ""
-        text = (prefix + sep + body).strip()
-        try:
-            emb = self._encode(text)
-        except Exception as exc:
-            self.last_encode_error = str(exc)
-            return EmbedResult(embedding=[], truncated=True, original_tokens=0, used_tokens=0)
-        return EmbedResult(embedding=emb, truncated=False, original_tokens=0, used_tokens=0)
-
-
 def make_tools(tmp_path: Path) -> MemoryTools:
     settings = Settings(
         db_path=tmp_path / "memory.sqlite3",
@@ -53,22 +27,6 @@ def make_tools(tmp_path: Path) -> MemoryTools:
         client="codex",
         agent_id="agent-a",
         workspace="repo-a",
-        enable_sqlite_vec=False,
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
-
-
-def make_vec_tools(tmp_path: Path) -> MemoryTools:
-    pytest.importorskip("sqlite_vec")
-    settings = Settings(
-        db_path=tmp_path / "memory-vec.sqlite3",
-        backup_jsonl=tmp_path / "backup-vec.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="repo-a",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        split_threshold=1,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
@@ -125,7 +83,6 @@ def test_concurrent_first_start_does_not_false_degrade_on_column_migration(tmp_p
     settings = Settings(
         db_path=tmp_path / "concurrent-init.sqlite3",
         backup_jsonl=tmp_path / "concurrent-init.jsonl",
-        enable_sqlite_vec=False,
     )
     barrier = threading.Barrier(8)
     results: list[MemoryDB | Exception] = []
@@ -596,22 +553,24 @@ def test_degraded_status_mentions_missing_vec(tmp_path: Path) -> None:
 
 
 def test_vec_disabled_but_installed_warns_with_enable_hint(tmp_path: Path) -> None:
-    """When the package is loadable but the env switch is off, the warning
-    should point at the exact env var to flip — not just say "disabled".
+    """When the package is loadable but no model is configured, the warning
+    should point at the exact file key to set — not just say "disabled".
 
     This is the diagnostic gap that made the last reinstall-overwrite incident
     hard to spot: the user saw a generic "disabled by configuration" and had
-    no way to tell the package was actually fine, only the switch was missing.
-    Skipped on machines where sqlite-vec isn't installed (the hint would be
-    misleading there — the install line covers that path instead).
+    no way to tell the package was actually fine, only the model path was
+    missing. Since 0.15.0 the intent knob is embedding.model_path in the
+    config file (there is no env switch any more). Skipped on machines where
+    sqlite-vec isn't installed (the hint would be misleading there — the
+    install line covers that path instead).
     """
     pytest.importorskip("sqlite_vec")
-    tools = make_tools(tmp_path)  # enable_sqlite_vec=False in this fixture
+    tools = make_tools(tmp_path)  # no embedding model configured in this fixture
     status = tools.memory_status()
 
     assert status["data"]["sqlite_vec_available"] is False
     joined = " ".join(status["warnings"])
-    assert "MEMORY_ARBITER_ENABLE_SQLITE_VEC=true" in joined
+    assert "embedding.model_path" in joined
 
 
 def test_compare_manual_review_when_both_protected() -> None:

@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Any, TYPE_CHECKING
 
+from .constants import SEMANTIC_PRELOAD, SEMANTIC_QUEUE_MAX_SIZE
+
 if TYPE_CHECKING:
     from .tools import MemoryTools
 
@@ -161,7 +163,7 @@ class SemanticConflictWorker:
         if self._tools.settings.semantic_conflict_on_write == "off":
             return
         self._ensure_thread()
-        if self._tools.settings.semantic_conflict_preload:
+        if SEMANTIC_PRELOAD:
             threading.Thread(
                 target=self._preload_backend,
                 name="memory-arbiter-semantic-preload",
@@ -209,7 +211,7 @@ class SemanticConflictWorker:
                 rejected = "runtime_disabled"
             elif self._paused:
                 rejected = "paused"
-            max_size = int(getattr(self._tools.settings, "semantic_conflict_queue_max_size", 100))
+            max_size = SEMANTIC_QUEUE_MAX_SIZE
             if rejected is None and len(self._pending) >= max_size and int(memory_id) not in self._pending:
                 self._dropped_queue_full += 1
                 rejected = "queue_full"

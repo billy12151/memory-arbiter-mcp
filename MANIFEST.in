@@ -6,6 +6,7 @@ include memory_arbiter/AGENT_ONBOARDING.md
 recursive-include docs *.md *.py
 recursive-include docs/assets *
 recursive-include examples *.json
+include examples/*.plist
 recursive-include scripts *.py
 
 # Never ship local editor/agent state or operating-system metadata.

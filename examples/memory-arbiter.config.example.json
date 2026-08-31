@@ -1,10 +1,12 @@
 {
   "_readme": [
     "Copy to ~/.config/memory-arbiter/config.json and edit local paths.",
+    "Since 0.15.0 configuration is file-only and this is the complete 18-key user surface. Engine params, timeouts, thresholds, and caps are frozen constants (memory_arbiter/constants.py); 0.14.x keys that no longer exist are ignored with a 'no longer configurable' warning. Only six launch-context env vars remain (MEMORY_ARBITER_CONFIG/DB_PATH/BACKUP_JSONL/MCP_TRANSPORT/CLIENT/AGENT_ID); every other MEMORY_ARBITER_* variable is no longer read.",
     "client and agent_id are REQUIRED with no built-in defaults: the MCP server refuses to start when either is missing or blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; streamable-http takes caller identity from the per-request X-Mema-Client / X-Mema-Agent-Id headers instead.",
-    "The embedding model enables local-text evidence recall.",
-    "The optional Qwen2.5-0.5B model extracts four attribute/value fields in both directions; scan is broad and write-time notice is strict.",
+    "embedding.model_path IS the intent to enable sqlite-vec evidence recall — there is no vec.enabled/provider/dim knob any more. The vector dimension comes from the model itself; switching to a model with a different dimension drops and rebuilds the vector tables at the new dimension at startup.",
+    "semantic_conflict.model_path enables the local Qwen2.5-0.5B runtime: it loads at startup and stays resident (preload/resident are frozen true); scan is broad and write-time notice is strict.",
     "This example explicitly keeps semantic_conflict.enabled=false: editing model_path alone will not enable it; set enabled=true or remove enabled to use model-path auto-enable.",
+    "The HTTP endpoint path is fixed /mcp and request bodies are capped at 4 MB; ranking is fixed hybrid.",
     "All isolation modes normalize workspace_canonical; none disables ACL only.",
     "mema setup writes a smaller embedding-only template; it intentionally does not mirror every optional key in this reference example."
   ],
@@ -12,63 +14,28 @@
   "agent_id": "your-agent-id",
   "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
   "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
-  "tool_profile": "product",
+  "workspace": "default",
+  "isolation": "none",
+  "policy_path": null,
   "mcp": {
     "transport": "stdio",
     "http": {
       "host": "127.0.0.1",
-      "port": 8000,
-      "path": "/mcp",
-      "stateless": true
+      "port": 8000
     }
   },
-  "isolation": "none",
-  "workspace_match_distance": 0.25,
-  "workspace_qwen_candidate_distance": 0.25,
-  "workspace_qwen_candidate_top_k": 3,
-  "workspace_weak_vector_weight": false,
-  "workspace_min_name_len": 3,
-  "workspace_recall_admission": true,
-  "workspace_recall_cutoff": 0.25,
-  "vec": {
-    "enabled": true,
-    "dim": 768
-  },
-  "embedding": {
-    "provider": "gguf",
-    "model_path": "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
-    "auto_query": true,
-    "auto_write": true,
-    "n_ctx": 2048,
-    "reserved_tokens": 64,
-    "max_unit_chars": 3600
-  },
-  "recall_pool_cap": 50,
-  "content_like_cap": 30,
   "update_check": {
     "enabled": true
   },
+  "embedding": {
+    "model_path": "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
+    "auto_query": true,
+    "auto_write": true
+  },
   "semantic_conflict": {
     "enabled": false,
-    "backend": "local_gguf",
     "model_path": "~/.local/share/memory-arbiter/models/semantic-conflict/Qwen2.5-0.5B-Instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf",
     "on_write": "async",
-    "queue_max_size": 100,
-    "n_ctx": 1024,
-    "n_threads": 4,
-    "n_batch": 128,
-    "resident": true,
-    "preload": false,
-    "job_timeout_ms": 5000,
-    "inference_timeout_ms": 30000,
-    "load_timeout_ms": 120000,
-    "min_pair_budget_ms": 1000,
-    "max_evidence_units": 24,
-    "max_notice_pairs": 2,
-    "scan_enhance": true,
-    "scan_max_pairs": 8,
-    "scan_budget_ms": 60000,
-    "notice_sync_wait_ms": 5000,
-    "workspace_qwen_budget_ms": 750
+    "max_notice_pairs": 2
   }
 }

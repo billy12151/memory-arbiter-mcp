@@ -26,7 +26,7 @@ def make_tools(
         db_path=tmp_path / "move.sqlite3",
         backup_jsonl=tmp_path / "move.jsonl",
         client="codex", agent_id="agent-a", workspace=workspace,
-        enable_sqlite_vec=False, vec_dim=2, isolation=isolation,
+        isolation=isolation,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
@@ -373,13 +373,11 @@ def test_memory_ids_batch_limit_validation() -> None:
     within = validate_product_payload(
         "memory_govern", "move_memories_workspace",
         {"memory_ids": list(range(1, 1001)), "new_workspace": "x", "authorized": True},
-        vec_dim=2,
     )
     assert within.error is None
     beyond = validate_product_payload(
         "memory_govern", "move_memories_workspace",
         {"memory_ids": list(range(1, 1002)), "new_workspace": "x", "authorized": True},
-        vec_dim=2,
     )
     assert beyond.error is not None
     assert beyond.error["field"] == "memory_ids"

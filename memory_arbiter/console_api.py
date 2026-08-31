@@ -415,16 +415,18 @@ class ConsoleAPI:
         return values
 
     def _nested_setting(self, path: str) -> Any:
+        # Nested file keys of the 0.15.0 slim config face; every top-level
+        # Settings attribute resolves through _settings_values' getattr path.
         mapping = {
-            "vec.enabled": self.settings.enable_sqlite_vec,
-            "vec.dim": self.settings.vec_dim,
-            "embedding.provider": self.settings.embedding_provider,
             "embedding.model_path": self.settings.embedding_model_path,
             "embedding.auto_query": self.settings.embedding_auto_query,
             "embedding.auto_write": self.settings.embedding_auto_write,
-            "embedding.n_ctx": self.settings.embedding_n_ctx,
-            "embedding.reserved_tokens": self.settings.embedding_reserved_tokens,
-            "embedding.max_unit_chars": self.settings.max_section_chars,
+            "semantic_conflict.enabled": self.settings.semantic_conflict_enabled,
+            "semantic_conflict.model_path": self.settings.semantic_conflict_model_path,
+            "semantic_conflict.on_write": self.settings.semantic_conflict_on_write,
+            "semantic_conflict.max_notice_pairs": self.settings.semantic_conflict_max_notice_pairs,
+            "mcp.http.host": self.settings.mcp_http_host,
+            "mcp.http.port": self.settings.mcp_http_port,
             "update_check.enabled": self.settings.update_check_enabled,
         }
         value = mapping.get(path)

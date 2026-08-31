@@ -493,7 +493,7 @@ def test_settings_parse_http_transport_and_server_passes_options(
         "agent_id": "cfg-agent",
         "mcp": {
             "transport": "streamable-http",
-            "http": {"host": "localhost", "port": 8123, "path": "/memory/"},
+            "http": {"host": "localhost", "port": 8123},
         },
         "update_check": {"enabled": False},
     }), encoding="utf-8")
@@ -502,8 +502,6 @@ def test_settings_parse_http_transport_and_server_passes_options(
     assert settings.mcp_transport == "streamable-http"
     assert settings.mcp_http_host == "localhost"
     assert settings.mcp_http_port == 8123
-    assert settings.mcp_http_path == "/memory"
-    assert settings.mcp_http_stateless is True
 
     from memory_arbiter import server
     monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: settings))
@@ -511,14 +509,19 @@ def test_settings_parse_http_transport_and_server_passes_options(
     bundle = server.build_runtime()
     assert fake.last_kwargs["host"] == "localhost"
     assert fake.last_kwargs["port"] == 8123
-    assert fake.last_kwargs["streamable_http_path"] == "/memory"
+    # mcp.http.path is a frozen constant since 0.15.0 — always "/mcp".
+    from memory_arbiter.constants import MCP_HTTP_PATH
+    assert fake.last_kwargs["streamable_http_path"] == MCP_HTTP_PATH == "/mcp"
     assert fake.last_kwargs["stateless_http"] is True
     bundle.tools.shutdown(timeout=1)
 
 
-def test_http_stateful_mode_remains_an_explicit_compatibility_option(
+def test_http_stateless_is_frozen_despite_removed_stateful_option(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # 0.15.0: mcp.http.stateless was removed (frozen at True). A config file
+    # still carrying the former stateful compat option must warn and be
+    # ignored — the server stays stateless.
     cfg = tmp_path / "config.json"
     cfg.write_text(json.dumps({
         "db_path": str(tmp_path / "db.sqlite3"),
@@ -534,13 +537,16 @@ def test_http_stateful_mode_remains_an_explicit_compatibility_option(
     monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg))
 
     settings = Settings.from_env()
-    assert settings.mcp_http_stateless is False
+    assert any(
+        "mcp.http.stateless" in w and "no longer configurable" in w
+        for w in settings.config_warnings
+    )
 
     from memory_arbiter import server
     monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: settings))
     fake = _install_fake_fastmcp(monkeypatch)
     bundle = server.build_runtime()
-    assert fake.last_kwargs["stateless_http"] is False
+    assert fake.last_kwargs["stateless_http"] is True
     bundle.tools.shutdown(timeout=1)
 
 

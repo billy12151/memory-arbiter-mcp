@@ -1,3 +1,5 @@
+# ── from test_console_api.py ──
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -429,3 +431,284 @@ def test_overview_counts_and_doctor_agree_on_unresolved_conflicts(tmp_path: Path
         report = run_all_checks(conn, api.tools.settings)
     backlog = next(f for f in report.findings if f.check_id == "conflicts.backlog")
     assert backlog.evidence == {"open": 1, "applying": 1}
+
+
+# ── from test_console_server.py ──
+
+
+import json
+import threading
+import urllib.error
+import urllib.request
+
+from memory_arbiter.console_server import build_http_server
+
+
+class DummyAPI:
+    def health(self):
+        return {"ok": True}
+
+    def conflict_detail(self, conflict_id: int):
+        return {"error": f"conflict id {conflict_id} not found", "_http_status": 404}
+
+    def memory_detail(self, memory_id: int, sections: str = "catalog"):
+        return {"memory": {"id": memory_id}, "sections": sections}
+
+    def memories(self, **kwargs):
+        return {"error": "strict isolation requires workspace", "_http_status": 400}
+
+
+class ExplodingAPI(DummyAPI):
+    def health(self):
+        raise RuntimeError("secret /Users/example/private.sqlite3")
+
+
+def test_console_server_rejects_non_localhost() -> None:
+    try:
+        build_http_server("0.0.0.0", 8766)
+    except ValueError as exc:
+        assert "local-only" in str(exc)
+    else:
+        raise AssertionError("expected local-only host rejection")
+
+
+def test_console_server_rejects_ipv6_until_supported() -> None:
+    try:
+        build_http_server("::1", 8766)
+    except ValueError as exc:
+        assert "local-only" in str(exc)
+    else:
+        raise AssertionError("expected unsupported IPv6 host rejection")
+
+
+def test_console_server_builds_on_localhost(tmp_path) -> None:
+    server = build_http_server("127.0.0.1", 0, api=DummyAPI())
+    try:
+        host, port = server.server_address
+        assert host == "127.0.0.1"
+        assert isinstance(port, int)
+    finally:
+        server.server_close()
+
+
+def test_console_server_rejects_untrusted_host_header() -> None:
+    server = build_http_server("127.0.0.1", 0, api=DummyAPI())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/health",
+            headers={"Host": f"evil.example:{port}"},
+        )
+        try:
+            urllib.request.urlopen(request, timeout=2)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["error"] == "forbidden host"
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_console_server_maps_list_endpoint_errors_to_400() -> None:
+    server = build_http_server("127.0.0.1", 0, api=DummyAPI())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/memories", timeout=2)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["error"] == "strict isolation requires workspace"
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_console_server_returns_400_for_bad_path_id() -> None:
+    server = build_http_server("127.0.0.1", 0, api=DummyAPI())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/conflicts/not-an-id", timeout=2)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["error"] == "conflict id must be an integer"
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_console_server_returns_404_for_missing_conflict() -> None:
+    server = build_http_server("127.0.0.1", 0, api=DummyAPI())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/conflicts/123", timeout=2)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["error"] == "conflict id 123 not found"
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_console_server_handles_head_and_options() -> None:
+    server = build_http_server("127.0.0.1", 0, api=DummyAPI())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address
+        head = urllib.request.Request(f"http://127.0.0.1:{port}/api/health", method="HEAD")
+        with urllib.request.urlopen(head, timeout=2) as resp:
+            assert resp.code == 200
+            assert int(resp.headers.get("Content-Length", "0")) > 0
+            assert resp.read() == b""
+            assert resp.headers["X-Content-Type-Options"] == "nosniff"
+            assert resp.headers["X-Frame-Options"] == "DENY"
+            assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
+        options = urllib.request.Request(f"http://127.0.0.1:{port}/api/health", method="OPTIONS")
+        with urllib.request.urlopen(options, timeout=2) as resp:
+            assert resp.code == 204
+            assert "GET" in (resp.headers.get("Allow") or "")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_console_server_does_not_echo_internal_exception_details() -> None:
+    server = build_http_server("127.0.0.1", 0, api=ExplodingAPI())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 500
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload == {"error": "internal server error"}
+            assert "private.sqlite3" not in json.dumps(payload)
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# ── from test_console_static.py ──
+
+
+import shutil
+import subprocess
+
+from memory_arbiter.console_static import INDEX_HTML
+
+
+def test_console_static_has_sidebar_language_and_branding() -> None:
+    assert "sidebarNav" in INDEX_HTML
+    assert "langZh" in INDEX_HTML
+    assert "langEn" in INDEX_HTML
+    assert "mema Console" in INDEX_HTML
+    assert "迷码" in INDEX_HTML
+    assert "#/settings" in INDEX_HTML
+    assert "loadMemories().catch" in INDEX_HTML
+    assert "catch(e)" in INDEX_HTML
+
+
+def test_console_static_conflict_detail_uses_one_to_many_contract() -> None:
+    for field in ("d.members", "d.member_versions", "d.value_groups", "d.revision", "d.apply_summary"):
+        assert field in INDEX_HTML
+    assert "conflictDecision(c)" in INDEX_HTML
+    assert "conflictMemberCards(d)" in INDEX_HTML
+    assert "d.left" not in INDEX_HTML
+    assert "d.right" not in INDEX_HTML
+    assert "winner_side" not in INDEX_HTML
+
+
+def test_console_static_shows_resolution_guidance_without_retired_fields() -> None:
+    assert "resolutionActionText" in INDEX_HTML
+    assert "user authorization is still required" in INDEX_HTML
+    assert "resolution_kind" not in INDEX_HTML
+    assert "judgment_" not in INDEX_HTML
+
+
+def test_console_static_shows_support_panel_without_github_api() -> None:
+    assert "Support mema" in INDEX_HTML
+    assert "支持迷码" in INDEX_HTML
+    assert "Star on GitHub" in INDEX_HTML
+    assert "Request feature" in INDEX_HTML
+    assert "Report bug" in INDEX_HTML
+    assert "UX feedback" in INDEX_HTML
+    assert "体验反馈" in INDEX_HTML
+    assert "openFeedback('ux_feedback')" in INDEX_HTML
+    assert "['bug','feature','ux_feedback'].includes(type)" in INDEX_HTML
+    assert "buildIssueUrl" in INDEX_HTML
+    assert "encodeURIComponent" in INDEX_HTML or "URLSearchParams" in INDEX_HTML
+    assert "/issues/new" in INDEX_HTML
+    assert "Console does not upload your memory automatically" in INDEX_HTML
+    forbidden = ["github_token", "oauth", "device flow", "api.github.com", "fetch(supportUrls"]
+    lower = INDEX_HTML.lower()
+    for word in forbidden:
+        assert word.lower() not in lower
+    assert "fetch(supporturls" not in lower
+    assert "fetch(buildissueurl" not in lower
+
+
+def test_console_static_javascript_parses(tmp_path) -> None:
+    node = shutil.which("node")
+    if not node:
+        return
+    start = INDEX_HTML.index("<script>") + len("<script>")
+    end = INDEX_HTML.index("</script>")
+    script = INDEX_HTML[start:end]
+    script_path = tmp_path / "console.js"
+    script_path.write_text(script, encoding="utf-8")
+    subprocess.run([node, "--check", str(script_path)], check=True)
+
+
+def test_console_static_does_not_offer_write_actions() -> None:
+    forbidden = ["memory_write", "memory_supersede", "memory_confirm", "memory_resolve_conflict"]
+    lower = INDEX_HTML.lower()
+    for word in forbidden:
+        assert word not in lower
+
+
+def test_pagination_functions_exist_and_bind_correctly() -> None:
+    """T3: pagination JS functions and event bindings must exist in the served
+    HTML. This locks the wiring that a node --check syntax parse cannot catch —
+    e.g. a misspelled handler name or a broken onkeydown attribute would parse
+    fine as a string but silently break the UI."""
+    # functions defined at top level
+    for fn in ("function memPrev(", "function memNext(", "function memJump(",
+               "function commitFilters("):
+        assert fn in INDEX_HTML, f"missing: {fn}"
+    # memJump Enter binding
+    assert 'onkeydown="if(event.key===' in INDEX_HTML
+    assert "memJump(parseInt(this.value,10)||1)" in INDEX_HTML
+    # jump input disabled when totalPages<=1 (jumpDisabled flag drives it)
+    assert "jumpDisabled" in INDEX_HTML
+    assert "totalPages<=1" in INDEX_HTML
+    # pagination state initialized with the default page size constant
+    assert "DEFAULT_PAGE_SIZE" in INDEX_HTML
+    assert "memPage: {" in INDEX_HTML
+    # request sequence guard against stale responses (M3 race fix)
+    assert "memReqSeq" in INDEX_HTML

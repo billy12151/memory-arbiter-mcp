@@ -5,6 +5,7 @@ from importlib import resources
 from typing import Any, Callable, TYPE_CHECKING
 
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, raw_workspace
+from .constants import SEMANTIC_SCAN_ENHANCE, SEMANTIC_SCAN_MAX_PAIRS
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .models import MemoryStatus, ProtectionLevel, SourceType
 from .validation import PRODUCT_FIELD_REGISTRY, _controlled_integer, validate_product_payload
@@ -437,9 +438,7 @@ class ProductSurfaces:
         if data is not None and not isinstance(data, dict):
             return dispatch(operation, data)
         payload = dict(data or {})
-        validation = validate_product_payload(
-            surface, operation, payload, vec_dim=int(self.settings.vec_dim),
-        )
+        validation = validate_product_payload(surface, operation, payload)
         if validation.error is not None:
             return self.db.state.response(validation.error, ok=False)
         response = dispatch(operation, payload)
@@ -884,7 +883,7 @@ class ProductSurfaces:
             if not (1 <= batch_value <= 200) or not (1 <= k_value <= 20) or anchor_value < 0:
                 return self._invalid_product_call("memory_repair", "scan_candidates requires 1<=batch<=200, 1<=k<=20, anchor_memory_id>=0", task)
             scan_workspace = caller.scope_canonicals() if caller.isolation == "strict" else None
-            scan_enhance = bool(getattr(self.settings, "semantic_conflict_scan_enhance", True))
+            scan_enhance = SEMANTIC_SCAN_ENHANCE
             result = self.db.scan_rule_candidates(
                 after_memory_id=anchor_value,
                 anchor_batch=batch_value,
@@ -892,10 +891,7 @@ class ProductSurfaces:
                 include_check=self._is_truthy(payload.get("include_check")),
                 max_distance=distance_value,
                 workspace=scan_workspace,
-                similarity_pool_limit=(
-                    max(0, int(getattr(self.settings, "semantic_conflict_scan_max_pairs", 8)))
-                    if scan_enhance else 0
-                ),
+                similarity_pool_limit=(max(0, SEMANTIC_SCAN_MAX_PAIRS) if scan_enhance else 0),
             )
             if "error" not in result:
                 # Spec §7.1 wide gate: bounded Qwen enhancement over the page.

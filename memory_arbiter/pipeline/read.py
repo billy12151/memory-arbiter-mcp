@@ -7,7 +7,7 @@ from ..acl import CallerWorkspace
 from ..embedder import ManagedEmbedder
 
 from ..arbitration import compare_memories
-from ..constants import strict_ws
+from ..constants import EMBEDDING_MAX_SECTION_CHARS, SUPERSEDED_LIMIT, strict_ws
 from ..models import MemoryStatus
 from ..search import search_memories
 
@@ -104,13 +104,10 @@ class ReadPipeline:
             if embedder is not None:
                 try:
                     # Char-level pre-trim for pathological pastes; the token
-                    # budget inside embed_text still makes the final cut. The
-                    # 2048 floor keeps an unusually small max_section_chars
-                    # config from clamping queries below the token budget's
-                    # reach (query vectors would silently shrink).
+                    # budget inside embed_text still makes the final cut.
                     er = embedder.embed_text(
                         prefix="", body=query,
-                        max_body_chars=max(self.settings.max_section_chars, 2048),
+                        max_body_chars=max(EMBEDDING_MAX_SECTION_CHARS, 2048),
                     )
                     if er.embedding:
                         refreshed_state = self.db.get_vec_index_state()
@@ -300,8 +297,8 @@ class ReadPipeline:
         - FTS channel: ``search_memories(status_filter="expired")`` with
           ``status_clause = "m.status NOT IN ('active','deleted')"``
 
-        ``limit`` controls the per-page cap (default 20, hard cap 50,
-        configurable via ``MEMORY_ARBITER_SUPERSEDED_LIMIT``). ``offset``
+        ``limit`` controls the per-page cap (default 20, hard cap 50; the
+        page cap is the frozen constant SUPERSEDED_LIMIT). ``offset``
         enables cursor pagination — exact on the empty-query+filters path
         (SQL OFFSET backed by a precise count), best-effort on the
         query-recall path (pool windowed to offset+limit).
@@ -326,13 +323,10 @@ class ReadPipeline:
             if embedder is not None:
                 try:
                     # Char-level pre-trim for pathological pastes; the token
-                    # budget inside embed_text still makes the final cut. The
-                    # 2048 floor keeps an unusually small max_section_chars
-                    # config from clamping queries below the token budget's
-                    # reach (query vectors would silently shrink).
+                    # budget inside embed_text still makes the final cut.
                     er = embedder.embed_text(
                         prefix="", body=query,
-                        max_body_chars=max(self.settings.max_section_chars, 2048),
+                        max_body_chars=max(EMBEDDING_MAX_SECTION_CHARS, 2048),
                     )
                     if er.embedding:
                         refreshed_state = self.db.get_vec_index_state()
@@ -355,9 +349,7 @@ class ReadPipeline:
         limit_requested = int(limit)
         offset_requested = int(offset)
         effective_offset = max(0, min(offset_requested, 10000))
-        # Apply superseded_limit cap
-        superseded_limit_cap = self.settings.superseded_limit
-        effective_limit = min(max(1, limit_requested), max(1, int(superseded_limit_cap)), 50)
+        effective_limit = min(max(1, limit_requested), max(1, SUPERSEDED_LIMIT), 50)
 
         # v0.12.5: expired recall uses the shared caller-workspace resolver.
         isolation = self.settings.isolation

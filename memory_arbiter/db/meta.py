@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from typing import Any, TYPE_CHECKING
@@ -9,6 +10,46 @@ from typing import Any, TYPE_CHECKING
 from ..acl import WorkspaceScope, workspace_scope_sql
 from ..constants import is_default_workspace_term
 from ..evidence import INDEXABLE_PREFILTER_SQL, has_indexable_text
+
+# _vec_index_meta key holding the library's active embedding dimension. The
+# model that produced it is the fact source (there is no configured vec.dim
+# since 0.15.0); the key is written when a managed embedder loads and
+# back-filled from an existing vec0 table's CREATE SQL for legacy libraries.
+ACTIVE_DIM_META_KEY = "active_dim"
+
+
+def vec_table_dimension(conn: sqlite3.Connection, table: str) -> int | None:
+    """Parse a vec0 table's float[N] dimension from its CREATE SQL."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if row is None:
+        return None
+    match = re.search(r"embedding\s+float\[(\d+)]", str(row[0] or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def active_dim_on_connection(conn: sqlite3.Connection) -> int | None:
+    """Read-only active dim: _vec_index_meta key, else vec0 table SQL parse.
+
+    No backfill — safe on read-only/diagnostic connections. Callers that own
+    a writable database use MetaStore.get_active_dim, which persists the
+    parsed value so it survives a later table drop.
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM _vec_index_meta WHERE key = ?", (ACTIVE_DIM_META_KEY,)
+        ).fetchone()
+        if row is not None:
+            # Positional access: diagnostic/read-only connections may not use
+            # the sqlite3.Row factory.
+            try:
+                return int(row[0])
+            except (TypeError, ValueError):
+                pass
+    except sqlite3.Error:
+        pass
+    return vec_table_dimension(conn, "memory_evidence_vec")
 
 
 def active_scan_boundary_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -265,8 +306,35 @@ class MetaStore:
             "migration_cursor": int(meta["migration_cursor"]) if "migration_cursor" in meta else None,
             "migration_epoch": meta.get("migration_epoch"),
             "last_error": meta.get("last_error"),
+            "active_dim": int(meta[ACTIVE_DIM_META_KEY]) if ACTIVE_DIM_META_KEY in meta else None,
         }
         return result
+
+    def get_active_dim(self) -> int | None:
+        """The library's active embedding dimension (fact source since 0.15.0).
+
+        Reads the persisted meta key; a legacy library without one is
+        back-filled from the existing vec0 table's CREATE SQL and persisted.
+        Returns None when neither exists (fresh library, no embedder yet).
+        """
+        db = self._db
+        if not db._db_available:
+            return None
+        with db.connection() as conn:
+            dim = active_dim_on_connection(conn)
+        if dim is None:
+            return None
+        with db.write_transaction() as conn:
+            if self.get_meta(conn, ACTIVE_DIM_META_KEY) is None:
+                self.set_meta(conn, ACTIVE_DIM_META_KEY, str(dim))
+        return dim
+
+    def set_active_dim(self, dim: int) -> None:
+        """Record the dimension of the currently active managed embedder."""
+        if not self._db._db_available:
+            return
+        with self._db.write_transaction() as conn:
+            self.set_meta(conn, ACTIVE_DIM_META_KEY, str(int(dim)))
 
     def mark_space_rebuild_started(self) -> None:
         """Record the evidence-id epoch of an embedding-space rebuild (idempotent).
@@ -495,6 +563,7 @@ class MetaStore:
         self,
         embedding_space_id: str | None,
         has_managed_embedder: bool,
+        active_dim: int | None = None,
     ) -> None:
         db = self._db
         if not db._db_available:
@@ -504,13 +573,39 @@ class MetaStore:
                 self.set_meta(conn, "state", "unmanaged")
                 return
 
+            # The dimension of the embedder being activated is a library fact;
+            # record it in the same transaction as the state flip.
+            if active_dim is not None:
+                self.set_meta(conn, ACTIVE_DIM_META_KEY, str(int(active_dim)))
+
             rows = conn.execute("SELECT key, value FROM _vec_index_meta").fetchall()
             meta = {str(r["key"]): str(r["value"]) for r in rows}
             state = meta.get("state")
             active_space_id = meta.get("active_space_id")
             target_space_id = meta.get("target_space_id")
 
+            # A rebuild already armed toward this space (e.g. the dim-swap
+            # revert below) must stay armed: repeated init calls are
+            # idempotent no-ops until the rebuild flow completes. Checked
+            # before the revert branch so the same-id flip cannot bypass it.
+            if state in {"mismatch", "failed"} and target_space_id == embedding_space_id:
+                return
+
             if active_space_id == embedding_space_id:
+                # Same space id can still sit on foreign-dim tables: swapping
+                # the model to dim B and back to A keeps the A id active in
+                # meta while the forward flip already rebuilt the tables at B.
+                # The tables are rebuilt at the model's dim either way, but a
+                # rebuild that happened (existing dim differed) wiped every
+                # vector — going ready would strand surviving evidence rows
+                # without vectors behind a passing coverage gate. That case
+                # arms the standard mismatch rebuild instead.
+                dim_rebuilt = False
+                if active_dim is not None:
+                    existing_dim = vec_table_dimension(conn, "memory_evidence_vec")
+                    if existing_dim is not None and existing_dim != int(active_dim):
+                        self._db.schema.rebuild_vec_tables(conn, int(active_dim))
+                        dim_rebuilt = True
                 epoch = meta.get("space_rebuild_evidence_id")
                 try:
                     epoch_int = int(epoch) if epoch is not None else None
@@ -546,6 +641,23 @@ class MetaStore:
                     conn.execute(
                         "DELETE FROM memory_evidence WHERE id > ?", (epoch_int,)
                     )
+                if dim_rebuilt:
+                    # The table rebuild above wiped all vectors (both spaces');
+                    # the ready flip's coverage gate (maybe_complete_space_
+                    # rebuild) never runs on this path, so surviving evidence
+                    # rows and the workspace vector pool would lose coverage
+                    # silently. Arm the standard full rebuild toward this
+                    # space instead of flipping ready.
+                    self.set_meta(conn, "state", "mismatch")
+                    self.set_meta(conn, "target_space_id", embedding_space_id)
+                    self.set_meta(conn, "migration_epoch", uuid.uuid4().hex)
+                    for key in (
+                        "space_rebuild_evidence_id", "migration_cursor",
+                        "migration_lease_owner", "migration_lease_expires_at",
+                        "workspace_rebuild_space_id",
+                    ):
+                        self.delete_meta(conn, key)
+                    return
                 self.set_meta(conn, "state", "ready")
                 for key in (
                     "target_space_id", "space_rebuild_evidence_id",
@@ -556,8 +668,16 @@ class MetaStore:
                     self.delete_meta(conn, key)
                 return
 
-            if state in {"mismatch", "failed"} and target_space_id == embedding_space_id:
-                return
+            # Model swap to a different output dim: the existing vec0 tables
+            # are unusable, and IF-NOT-EXISTS creation can never re-create
+            # them at the new dim — drop them (plus any vec0 shadow leftovers,
+            # which normally die with the main table) and re-create empty at
+            # the new dim, atomically with the mismatch flip, so the rebuild
+            # flow can republish into fresh tables.
+            if active_dim is not None:
+                existing_dim = vec_table_dimension(conn, "memory_evidence_vec")
+                if existing_dim is not None and existing_dim != int(active_dim):
+                    self._db.schema.rebuild_vec_tables(conn, int(active_dim))
 
             try:
                 mem_vec_count = conn.execute(

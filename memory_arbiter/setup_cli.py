@@ -55,43 +55,35 @@ def _color(text: str, code: str, use_color: bool) -> str:
 
 
 def _default_config_dict(model_path: Path, db_path: Path, backup_jsonl: Path) -> dict[str, Any]:
-    """Return a self-contained starter config using current documented defaults.
+    """Return the 0.15.0 slim starter config (18 user keys, file-only).
 
-    This is intentionally a practical baseline, not a copy of every annotated
-    example option. It includes current top-level behavior controls and absolute
-    local paths; optional semantic-conflict tuning remains
-    available through the example config and environment variables.
+    Everything else the 0.14.x config carried is a frozen constant now.
+    Identity (client/agent_id) is intentionally left empty: the MCP server
+    refuses to start until it is filled in.
     """
     return {
         "db_path": str(db_path),
         "backup_jsonl": str(backup_jsonl),
-        "tool_profile": "product",
-        "mcp": {
-            "transport": "stdio",
-            "http": {
-                "host": "127.0.0.1", "port": 8000, "path": "/mcp",
-                "stateless": True,
-            },
-        },
+        "client": "",
+        "agent_id": "",
+        "workspace": "default",
         "isolation": "none",
-        "workspace_match_distance": 0.25,
-        "workspace_weak_vector_weight": False,
-        "workspace_min_name_len": 3,
-        "workspace_recall_admission": True,
-        "workspace_recall_cutoff": 0.25,
-        "vec": {"enabled": True, "dim": 768},
+        "policy_path": None,
+        "update_check": {"enabled": True},
         "embedding": {
-            "provider": "gguf",
             "model_path": str(model_path),
             "auto_query": True,
             "auto_write": True,
-            "n_ctx": 2048,
-            "reserved_tokens": 64,
-            "max_unit_chars": 3600,
         },
-        "recall_pool_cap": 50,
-        "content_like_cap": 30,
-        "update_check": {"enabled": True},
+        "semantic_conflict": {
+            "model_path": None,
+            "on_write": "async",
+            "max_notice_pairs": 2,
+        },
+        "mcp": {
+            "transport": "stdio",
+            "http": {"host": "127.0.0.1", "port": 8000},
+        },
     }
 
 
@@ -278,7 +270,7 @@ def _render_check_step(
         size_label = f"存在 ({size_mb:.0f} MB)"
         # If present but wrong size, flag warning but keep all_ok true (user may have a different quant).
         if not size_ok:
-            size_label += _color("  ⚠ 大小异常，可能是不同量化版本——若维度非 768 需改 vec.dim", _YELLOW, use_color)
+            size_label += _color("  ⚠ 大小异常，可能是不同量化版本（维度会自动从模型探测，无需配置）", _YELLOW, use_color)
             lines.append(f"{_color('✓', _GREEN, use_color)} GGUF 模型: {size_label}")
             lines.append(_color(f"     路径: {model_path}", _DIM, use_color))
         else:
@@ -430,9 +422,9 @@ def run_cli(argv: list[str]) -> int:
             # additionally confirm the file parses as JSON we recognise.
             if config_path.exists():
                 parsed = json.loads(config_path.read_text(encoding="utf-8"))
-                if not isinstance(parsed, dict) or "vec" not in parsed:
+                if not isinstance(parsed, dict) or "embedding" not in parsed:
                     config_load_ok = False
-                    config_load_error_str = "config.json 解析成功但缺少必要字段（vec 段）"
+                    config_load_error_str = "config.json 解析成功但缺少必要字段（embedding 段）"
         except Exception as exc:
             config_load_ok = False
             config_load_error_str = f"{type(exc).__name__}: {exc}"

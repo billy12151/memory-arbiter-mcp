@@ -25,7 +25,7 @@ from memory_arbiter.vnext_migration import final_sync
 def _tools(tmp_path: Path) -> tuple[MemoryTools, MemoryDB]:
     settings = Settings(
         db_path=tmp_path / "gates.db", backup_jsonl=tmp_path / "backup.jsonl",
-        enable_sqlite_vec=False, isolation="none", workspace="default",
+        isolation="none", workspace="default",
     )
     db = MemoryDB(settings)
     return MemoryTools(settings, db), db

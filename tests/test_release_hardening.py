@@ -71,7 +71,10 @@ def test_workflow_python_script_dependencies_are_tracked_when_in_git_repo():
 
 
 def test_release_metadata_is_consistent_and_check_is_read_only():
-    tracked = [ROOT / "server.json", ROOT / "CHANGELOG.md", ROOT / "uv.lock"]
+    doc_files = [path for path, _pattern in _load_script(
+        "sync_version_read_only", "scripts/sync_version.py"
+    ).DOC_RELEASE_PATTERNS]
+    tracked = [ROOT / "server.json", ROOT / "CHANGELOG.md", ROOT / "uv.lock", *doc_files]
     before = {path: _digest(path) for path in tracked}
     proc = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "sync_version.py"), "--check"],
@@ -81,6 +84,22 @@ def test_release_metadata_is_consistent_and_check_is_read_only():
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert {path: _digest(path) for path in tracked} == before
+
+
+def test_sync_version_detects_doc_release_string_drift(monkeypatch, tmp_path):
+    sync = _load_script("sync_version_doc_strings", "scripts/sync_version.py")
+    doc = tmp_path / "README.md"
+    doc.write_text("# Memory Arbiter MCP\n\n> Current release: `0.14.11` (...\n", encoding="utf-8")
+    monkeypatch.setattr(sync, "DOC_RELEASE_PATTERNS", ((doc, r"Current release: `(\d+\.\d+\.\d+)`"),))
+
+    assert not sync.sync_doc_release_strings("0.14.12", check=True)
+    assert sync.sync_doc_release_strings("0.14.12", check=False)
+    assert "> Current release: `0.14.12`" in doc.read_text(encoding="utf-8")
+    assert sync.sync_doc_release_strings("0.14.12", check=True)
+
+    doc.write_text("# reworded intro without a release line\n", encoding="utf-8")
+    assert not sync.sync_doc_release_strings("0.14.12", check=True)
+    assert not sync.sync_doc_release_strings("0.14.12", check=False)
 
 
 def test_sync_version_detects_manifest_changelog_and_lock_drift(monkeypatch, tmp_path):
@@ -119,10 +138,20 @@ def test_release_version_check_remains_strict(monkeypatch):
     monkeypatch.setattr(sync, "read_authoritative_version", lambda: "0.14.0")
     monkeypatch.setattr(sync, "sync_server_json", lambda version, check: calls.append(f"manifest:{version}:{check}") or False)
     monkeypatch.setattr(sync, "check_changelog", lambda version: calls.append(f"changelog:{version}") or False)
+    monkeypatch.setattr(
+        sync,
+        "sync_doc_release_strings",
+        lambda version, check: calls.append(f"docs:{version}:{check}") or False,
+    )
     monkeypatch.setattr(sync, "check_uv_lock", lambda version: calls.append(f"lock:{version}") or True)
     monkeypatch.setattr(sys, "argv", ["sync_version.py", "--check"])
     assert sync.main() == 1
-    assert calls == ["manifest:0.14.0:True", "changelog:0.14.0", "lock:0.14.0"]
+    assert calls == [
+        "manifest:0.14.0:True",
+        "changelog:0.14.0",
+        "docs:0.14.0:True",
+        "lock:0.14.0",
+    ]
 
 
 def test_uv_lock_dynamic_version_record_is_valid(monkeypatch, tmp_path):

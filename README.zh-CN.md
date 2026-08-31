@@ -3,7 +3,7 @@
 **[English](README.md) | 中文**
 
 > 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.14.11`。
+> 当前正式版本 `0.14.12`。
 
 ## 一句话说明白
 
@@ -168,23 +168,33 @@ mema doctor --json
 
 ## 配置（进阶）
 
-配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。常用的几项：
+配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 18 个键，引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
 
 | 配置项 | 白话说明 | 默认值 |
 | --- | --- | --- |
 | `client` / `agent_id` | 调用身份（"是谁在写"），必填：没有内建默认值，缺失或为空时服务拒绝启动。stdio 下这组配置身份即进程级调用身份（归因、策略判定都用它）；HTTP 模式以请求头为准 | 无（必填） |
 | `db_path` | 数据库文件放哪 | 安装时生成 |
-| `mcp.transport` | `stdio`（默认，一对一）或 `streamable-http`（多个客户端共享一个本地服务） | `stdio` |
-| `mcp.http.stateless` | HTTP 请求无状态处理；服务重启后客户端不会持有失效 session | `true` |
+| `backup_jsonl` | 数据库写不进去时的兜底备份文件（只追加） | 安装时生成 |
+| `workspace` | 写入时不带 workspace 用的默认工作区 | `default` |
 | `isolation` | workspace 隔离档：`none` / `weak` / `strict` | `none` |
+| `policy_path` | 可选：按客户端/agent 控制工具开关的策略文件 | 无 |
+| `mcp.transport` | `stdio`（默认，一对一）或 `streamable-http`（多个客户端共享一个本地服务） | `stdio` |
+| `mcp.http.host` / `mcp.http.port` | HTTP 模式的监听地址（只允许本机）和端口；地址路径固定是 `/mcp`，不用配 | `127.0.0.1:8000` |
 | `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
-| `vec.enabled` | 开启后支持"按意思搜" | 关闭 |
-| `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径 | 无 |
-| `semantic_conflict.model_path` | 本地 Qwen 小模型路径，用于写入时的冲突核对 | 无 |
+| `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径——**填了就是"我要用按意思搜"**，不用再开别的开关；向量维度自动跟着模型走，换不同维度的模型会在启动时自动按新维度重建向量表 | 无 |
+| `embedding.auto_query` / `embedding.auto_write` | 查询/写入时自动算向量 | `true` |
+| `semantic_conflict.model_path` | 本地 Qwen 小模型路径，用于写入时的冲突核对——填了就自动启用，并且启动时加载、常驻内存 | 无 |
+| `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
+| `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
+| `semantic_conflict.max_notice_pairs` | 一次写入最多提醒几对（1–3） | `2` |
 
-注意：`mema setup` 生成的模板**不含**身份项——在 config.json 里补上 `client`/`agent_id`，或在客户端接入配置里用环境变量 `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` 提供（`examples/` 下的 stdio 示例就是这么做的）。写入时不要在 `remember` 的 `data` 里传 `agent_id`/`client`，这些字段会被当未知字段剔除，归因只来自上述可信身份。
+关于"指向模型就是意图"再说两句：以前要 `vec.enabled`、`embedding.provider`、`vec.dim` 三个开关凑齐才算开了向量，现在**只看 `embedding.model_path` 填没填**；Qwen 那边同理，以前 `preload`/`resident` 默认不加载，现在配了模型就启动即加载、常驻不卸载。
 
-完整的配置说明和示例：[`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json)、[`.env.example`](.env.example)。
+环境变量只留 6 个"启动上下文"：`MEMORY_ARBITER_CONFIG` / `DB_PATH` / `BACKUP_JSONL` / `MCP_TRANSPORT` / `CLIENT` / `AGENT_ID`，用来告诉进程用哪个配置文件、哪个库、哪种传输、什么身份（launchd 等场景需要），同名时以配置文件为准。**其余旧环境变量全部失效**，设置了会在 `mema doctor`、控制台设置页和 `memory(action="status")` 里收到 "no longer read" 警告；被删的旧文件键会被忽略并提示 "no longer configurable"。旧键怎么迁移见[集成指南](docs/INTEGRATION.zh-CN.md)。
+
+注意：`mema setup` 生成的模板里 `client`/`agent_id` **留空待填**——在 config.json 里填上，或在客户端接入配置里用环境变量 `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` 提供（`examples/` 下的 stdio 示例就是这么做的）。写入时不要在 `remember` 的 `data` 里传 `agent_id`/`client`，这些字段会被当未知字段剔除，归因只来自上述可信身份。
+
+完整的配置示例：[`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json)。
 
 多客户端共享一个本地服务（HTTP 模式）时，每个客户端要在配置里写死两个请求头 `X-Mema-Client` 和 `X-Mema-Agent-Id`，客户端会自动带上。注意：这只用于区分"是谁在写"，**不是密码**——服务只监听本机，请勿暴露到网络。示例：[`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json)。
 
@@ -207,7 +217,7 @@ mema doctor --json
 
 几个关键提醒：
 
-- **HTTP 默认无状态**：迷码的记忆和 semantic notice 状态在 SQLite，不在 MCP session。服务重启后，客户端不会因为旧 session ID 卡住；异步生成并已落库的 notice 仍会附在后续成功的工具响应里。只有尚未落库、仍停留在进程内 worker 队列中的任务可能被进程重启中断。只有客户端明确依赖服务端 MCP session 或主动 SSE 消息时，才设置 `mcp.http.stateless=false`。
+- **HTTP 固定无状态**：迷码的记忆和 semantic notice 状态在 SQLite，不在 MCP session，所以请求按无状态处理（0.15.0 起固定如此，不再可配）。服务重启后，客户端不会因为旧 session ID 卡住；异步生成并已落库的 notice 仍会附在后续成功的工具响应里。只有尚未落库、仍停留在进程内 worker 队列中的任务可能被进程重启中断。
 - **请求头客户端写死一次**，每次请求自动带，别让 agent 在单次工具调用里动态加身份，那样会被拒。任一头缺失/为空/重复/冲突 → 直接 400 拒绝，不回退默认身份。
 - **只监听 127.0.0.1**，迷码不会绑公网。这两个头只是"是谁在写"的来源标记，**不是密码**。要给远程机器用，自己在前面加带认证的反代，别让迷码直接暴露。
 - **launchd 跑的时候 PATH 和工作目录跟你终端不一样**：`ProgramArguments` 里直接写 `mema` 的**绝对路径**；GGUF 模型路径在 config.json 里也写绝对路径，别用 `~`。

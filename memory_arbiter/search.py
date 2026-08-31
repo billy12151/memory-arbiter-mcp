@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,13 +26,20 @@ RetrievalMode = Literal[
     "unavailable",       # SQLite not available
 ]
 
-# v0.7.4.1: single source of truth for the recent-fallback warning. The legacy
-# bm25 path infers retrieval_mode by sniffing this warning (it has no structured
-# mode signal), so the literal must live in ONE place — never inline it.
-# Tests match on the prefix substring, so keep the prefix stable.
-# Single source: constants.NO_DIRECT_MATCH_PREFIX (Phase 1); re-exported here.
+# v0.7.4.1: single source of truth for the recent-fallback warning. Tests
+# match on the prefix substring, so the literal must live in ONE place —
+# never inline it. Single source: constants.NO_DIRECT_MATCH_PREFIX (Phase 1);
+# re-exported here.
 from .constants import NO_DIRECT_MATCH_PREFIX as _NO_DIRECT_MATCH_PREFIX
-from .constants import Isolation, is_default_workspace_term, strict_ws
+from .constants import (
+    CONTENT_LIKE_CAP,
+    Isolation,
+    RECALL_POOL_CAP,
+    WORKSPACE_MIN_NAME_LEN,
+    WORKSPACE_WEAK_VECTOR_WEIGHT,
+    is_default_workspace_term,
+    strict_ws,
+)
 
 
 @dataclass
@@ -103,22 +109,6 @@ def _sanitize_fts_query(query: str) -> str:
         else:
             groups.append(_quote_phrase(tok))
     return " AND ".join(groups)
-
-
-def _get_ranking_mode() -> str:
-    """v0.3.0: read ranking mode from env.
-
-    - bm25   : legacy v0.2.6 ordering (single FTS, bm25 sort)
-    - hybrid : wide-recall candidate pool + soft rerank (the new default)
-
-    Unknown values fall back to hybrid. (A third "shadow" mode exists only on
-    the dev/shadow-mode branch for local A/B evaluation; it is not part of the
-    published package.)
-    """
-    mode = (os.environ.get("MEMORY_ARBITER_RANKING_MODE") or "hybrid").lower()
-    if mode not in ("bm25", "hybrid"):
-        mode = "hybrid"
-    return mode
 
 
 # ---- Soft-rerank scoring constants (r4 §7, §8) --------------------------
@@ -697,7 +687,7 @@ def _wide_recall(
                 if scope_plain_sql:
                     clauses.append(scope_plain_sql)
                     params.extend(workspace_params)
-                params.append(content_like_cap)  # cap content-LIKE gap-fill (configurable via MEMORY_ARBITER_CONTENT_LIKE_CAP)
+                params.append(content_like_cap)  # cap content-LIKE gap-fill (frozen constant CONTENT_LIKE_CAP)
                 sql = f"""SELECT *, 0 AS score FROM memories
                           WHERE {' AND '.join(clauses)}
                           ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
@@ -1024,7 +1014,6 @@ def search_memories(
         scope_ws = ws_scope if ws_scope else ws_canonical
     else:
         scope_ws = None
-    mode = _get_ranking_mode()
     # v0.3.1: when a query_embedding is supplied but sqlite-vec is not active,
     # warn so the caller knows the semantic channel was silently skipped.
     if query_embedding and not db.state.sqlite_vec_available:
@@ -1066,34 +1055,6 @@ def search_memories(
         before_time = None
     tags_filter = _sanitize_tags_filter(tags_filter)
     has_filters = bool(tags_filter or after_time or before_time or source_type)
-
-    # === bm25 mode: legacy v0.2.6 single-FTS ordering ===
-    if mode == "bm25" and has_filters:
-        warnings.append(
-            "bm25 mode falls back to hybrid ranking when tags_filter/after_time/before_time/source_type are set."
-        )
-    if mode == "bm25" and not has_filters:
-        result, bm_warnings, bm_has_more, bm_total = _search_bm25(
-            db, query, workspace, tags, limit, status_clause, like_status_clause, warnings, debug_ranking,
-            offset=offset,
-            ws_canonical=scope_ws,
-        )
-        # Infer retrieval_mode for the legacy bm25 path: _search_bm25 internally
-        # falls back to _recent_fallback when query has no hit (appending its
-        # distinctive warning), so sniff the warnings to tell the two apart.
-        # Coupling note: the literal lives in _NO_DIRECT_MATCH_PREFIX; matching
-        # on the prefix constant (not an inline string) keeps this robust to
-        # wording tweaks of the warning's tail.
-        bm_mode: RetrievalMode
-        if not query:
-            bm_mode = "recent_browse"
-        elif not result:
-            bm_mode = "empty"
-        elif any(w.startswith(_NO_DIRECT_MATCH_PREFIX) for w in bm_warnings):
-            bm_mode = "recent_fallback"
-        else:
-            bm_mode = "direct"
-        return SearchOutcome(result, bm_warnings, bm_has_more, bm_total, bm_mode)
 
     # === v0.7.3 F1/C1: search.py empty-query shortcut ===
     # 现状是 `if not query: return _recent_fallback(...)`，会让 query 为空时
@@ -1139,12 +1100,12 @@ def search_memories(
     # pool_cap is preserved (keeps the pool-saturation / Channel-6 skip
     # semantics intact). Query-recall still has no exact total; the empty-query
     # SQL paths above are the precise pagination paths.
-    base_pool_cap = db.settings.recall_pool_cap
+    base_pool_cap = RECALL_POOL_CAP
     pool_cap = max(base_pool_cap, offset + limit + 1) if offset > 0 else base_pool_cap
     pool = _wide_recall(db, query, workspace, tags, status_clause, like_status_clause,
                         status_filter=status_filter, query_embedding=query_embedding,
                         pool_cap=pool_cap,
-                        content_like_cap=db.settings.content_like_cap,
+                        content_like_cap=CONTENT_LIKE_CAP,
                         ws_canonical=scope_ws)
 
     # v0.9.7: strict isolation — hard-filter the candidate pool to the query's
@@ -1201,7 +1162,7 @@ def search_memories(
         isolation == "weak"
         and ws_canonical
         and not is_default_workspace_term(ws_canonical)
-        and getattr(db.settings, "workspace_weak_vector_weight", False)
+        and WORKSPACE_WEAK_VECTOR_WEIGHT
         and pool
     ):
         pool_canonicals = {
@@ -1218,7 +1179,7 @@ def search_memories(
         query, pool,
         ws_canonical=ws_canonical, isolation=isolation,
         distance_map=weak_distance_map,
-        ws_min_name_len=int(getattr(db.settings, "workspace_min_name_len", 3)),
+        ws_min_name_len=WORKSPACE_MIN_NAME_LEN,
     )
     # Slice to the requested page window.
     page = reranked[offset:offset + limit]
@@ -1434,94 +1395,6 @@ def _linked_open_items_for_search(
     except Exception as exc:  # pragma: no cover - defensive
         warnings.append(f"linked_open_items lookup failed: {exc}; returned [].")
         return []
-
-
-def _search_bm25(
-    db: MemoryDB,
-    query: str,
-    workspace: str | None,
-    tags: list[str] | None,
-    limit: int,
-    status_clause_m: str,
-    like_status_clause: str,
-    warnings: list[str],
-    debug_ranking: bool,
-    offset: int = 0,
-    ws_canonical: "WorkspaceScope" = None,
-) -> tuple[list[dict[str, Any]], list[str], bool, int]:
-    """Legacy v0.2.6 bm25 ordering. Kept for RANKING_MODE=bm25 fallback.
-
-    scopes to the admitted canonical set like the hybrid path, so
-    RANKING_MODE=bm25 does not silently ignore vector admission.
-    """
-    rows = []
-    scope_m_sql, scope_params = workspace_scope_sql("COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", ws_canonical)
-    scope_plain_sql, _ = workspace_scope_sql("COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical)
-    workspace_clause_m = f" AND {scope_m_sql}" if scope_m_sql else ""
-    workspace_clause = scope_plain_sql
-    workspace_params: list[Any] = list(scope_params)
-    conn = db._new_connection()
-    if db.state.fts5_available and query:
-        sql = f"""
-            SELECT m.*, bm25(memories_fts) AS score
-            FROM memories_fts
-            JOIN memories m ON memories_fts.rowid = m.id
-            WHERE memories_fts MATCH ? AND {status_clause_m}{workspace_clause_m}
-        """
-        params: list[Any] = [_sanitize_fts_query(query), *workspace_params]
-        sql += " ORDER BY CASE m.status WHEN 'superseded' THEN 1 ELSE 0 END, score LIMIT ? OFFSET ?"
-        params.extend([limit + 1, offset])
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        except Exception as exc:
-            warnings.append(f"FTS5 query failed: {exc}. Falling back to LIKE search.")
-            rows = []
-    if not rows:
-        like = f"%{query}%"
-        clauses = [like_status_clause]
-        params = []
-        if query:
-            clauses.append("(content LIKE ? OR subject LIKE ? OR tags LIKE ?)")
-            params.extend([like, like, like])
-        for tag in tags or []:
-            clauses.append("tags LIKE ?")
-            params.append(f"%{tag}%")
-        if workspace_clause:
-            clauses.append(workspace_clause)
-            params.extend(workspace_params)
-        params.extend([limit + 1, offset])
-        try:
-            rows = conn.execute(
-                f"""SELECT *, 0 AS score FROM memories
-                    WHERE {' AND '.join(clauses)}
-                    ORDER BY CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
-                             event_time DESC, ingest_time DESC
-                    LIMIT ? OFFSET ?""",
-                params,
-            ).fetchall()
-        except Exception as exc:
-            warnings.append(f"LIKE fallback query failed: {exc}.")
-            rows = []
-        if query and not db.state.fts5_available:
-            warnings.append("Using LIKE/keyword search because sqlite-vec and FTS5 are unavailable.")
-    conn.close()
-    if query and not rows:
-        # v0.9.7: strict 下 query 未命中不应回退到最近记忆（会返回本 ws
-        # 的无关记忆，误导用户以为 query 命中）。none/weak 保留最近兜底。
-        if ws_canonical:
-            return [], warnings, False, 0
-        fb_rows, fb_warnings, fb_has_more, fb_total = _recent_fallback(
-            db, workspace, tags, limit, like_status_clause, warnings, offset=offset, ws_canonical=ws_canonical,
-        )
-        return fb_rows, fb_warnings, fb_has_more, fb_total
-    has_more = len(rows) > limit
-    page_rows = rows[:limit]
-    total_estimate = offset + len(page_rows) + (1 if has_more else 0)
-    out = [row_to_dict(row) for row in page_rows]
-    if not debug_ranking:
-        for r in out:
-            r.pop("score", None)
-    return out, warnings, has_more, total_estimate
 
 
 def _recent_fallback(

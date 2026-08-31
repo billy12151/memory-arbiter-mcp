@@ -274,8 +274,15 @@ class MemoryDB:
     def _ensure_fts(self, conn: sqlite3.Connection) -> None:
         return self.schema._ensure_fts(conn)
 
-    def _ensure_workspace_vec_table(self, conn: sqlite3.Connection) -> None:
-        return self.schema._ensure_workspace_vec_table(conn)
+    def ensure_evidence_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
+        return self.schema.ensure_evidence_vec_table(conn, dim)
+
+    def ensure_workspace_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
+        return self.schema.ensure_workspace_vec_table(conn, dim)
+
+    def ensure_vec_tables(self, dim: int) -> list[str]:
+        """Lazily create the derived vec0 tables at the model-reported dim."""
+        return self.schema.ensure_vec_tables(dim)
 
     def ensure_vector_tables_for_repair(self) -> tuple[bool, list[str]]:
         return self.schema.ensure_vector_tables_for_repair()
@@ -833,6 +840,12 @@ class MemoryDB:
     def get_vec_index_state(self) -> dict[str, Any]:
         return self.meta.get_vec_index_state()
 
+    def get_active_dim(self) -> int | None:
+        return self.meta.get_active_dim()
+
+    def set_active_dim(self, dim: int) -> None:
+        return self.meta.set_active_dim(dim)
+
     def mark_space_rebuild_started(self) -> None:
         return self.meta.mark_space_rebuild_started()
 
@@ -852,8 +865,11 @@ class MemoryDB:
         self,
         embedding_space_id: str | None,
         has_managed_embedder: bool,
+        active_dim: int | None = None,
     ) -> None:
-        return self.meta.init_vec_index_state(embedding_space_id, has_managed_embedder)
+        return self.meta.init_vec_index_state(
+            embedding_space_id, has_managed_embedder, active_dim=active_dim,
+        )
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)

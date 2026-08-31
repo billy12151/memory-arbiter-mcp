@@ -11,7 +11,27 @@ from typing import Any, Callable, cast
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, visible_memory
 from .arbitration import compare_memories
 from .config import Settings
-from .constants import strict_ws
+from .constants import (
+    EMBEDDING_MAX_SECTION_CHARS,
+    EMBEDDING_N_CTX,
+    EMBEDDING_RESERVED_TOKENS,
+    NOTICE_SYNC_WAIT_MS,
+    QWEN_BUDGET_MS,
+    QWEN_CANDIDATE_DISTANCE,
+    QWEN_CANDIDATE_TOP_K,
+    SEMANTIC_INFERENCE_TIMEOUT_MS,
+    SEMANTIC_LOAD_TIMEOUT_MS,
+    SEMANTIC_N_BATCH,
+    SEMANTIC_N_CTX,
+    SEMANTIC_N_THREADS,
+    SEMANTIC_SCAN_BUDGET_MS,
+    SEMANTIC_SCAN_ENHANCE,
+    SEMANTIC_SCAN_MAX_PAIRS,
+    WORKSPACE_MIN_NAME_LEN,
+    WORKSPACE_RECALL_ADMISSION,
+    WORKSPACE_RECALL_CUTOFF,
+    strict_ws,
+)
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
 from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
@@ -50,7 +70,10 @@ class MemoryTools:
         self._embedder: ManagedEmbedder | None = None
         self._embedder_loaded = False
         self._embedder_lock = threading.Lock()
-        self._embedder_warnings: list[str] = list(self.settings.config_warnings)
+        # Config-time warnings (removed env vars, deprecated file keys) are NOT
+        # seeded into read/search responses — they are surfaced by doctor,
+        # console settings, and memory status instead (0.15.0 behavior change).
+        self._embedder_warnings: list[str] = []
         self._update_monitor: UpdateMonitor | None = None
         self._evidence_worker = LocalTextIndexWorker(self)
         self._surfaces = ProductSurfaces(self)
@@ -170,7 +193,7 @@ class MemoryTools:
             memory_id, record, trusted_applying_context=trusted_applying_context,
         )
         task_id = index.get("semantic_task_id")
-        wait_ms = max(0, min(5000, int(getattr(self.settings, "notice_sync_wait_ms", 5000))))
+        wait_ms = max(0, NOTICE_SYNC_WAIT_MS)
         can_check = bool(self._embedding_configured()) and self.settings.semantic_conflict_on_write != "off"
         completed = (
             self._semantic_worker.wait_task(str(task_id), wait_ms / 1000.0)
@@ -393,7 +416,9 @@ class MemoryTools:
         return self._surfaces.memory_repair(task, data, **_)
 
     def _embedding_configured(self) -> bool:
-        return self.settings.embedding_provider == "gguf" and self.settings.embedding_model_path is not None
+        # Pointing at a GGUF model IS the intent to embed (no provider or
+        # vec.enabled knob since 0.15.0).
+        return self.settings.embedding_model_path is not None
 
     def _index_local_text_evidence(self, memory_id: int, record: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._evidence.index_memory(memory_id, record)
@@ -407,30 +432,33 @@ class MemoryTools:
             if not self._embedding_configured():
                 self._embedder_loaded = True  # deterministic config state; safe to cache
                 return None, []
-            if not self.settings.enable_sqlite_vec:
-                warning = "embedding configured but vec.enabled=false; auto-embedding disabled. Set vec.enabled=true to enable."
-                self._embedder_warnings.append(warning)
-                self._embedder_loaded = True  # deterministic config state
-                return None, [warning]
             from .embedder import build_embedder
 
             assert self.settings.embedding_model_path is not None
             embedder, warnings = build_embedder(
                 str(self.settings.embedding_model_path),
-                self.settings.vec_dim,
-                n_ctx=self.settings.embedding_n_ctx,
-                reserved_tokens=self.settings.embedding_reserved_tokens,
-                max_section_chars=self.settings.max_section_chars,
+                n_ctx=EMBEDDING_N_CTX,
+                reserved_tokens=EMBEDDING_RESERVED_TOKENS,
+                max_section_chars=EMBEDDING_MAX_SECTION_CHARS,
             )
             self._embedder_warnings.extend(warnings)
             if embedder is None:
-                # Build failed (missing model / dim mismatch / load error). Do NOT cache —
+                # Build failed (missing model / load error). Do NOT cache —
                 # a later retry (e.g. model installed) should still be able to succeed.
                 return None, warnings
             self._embedder = embedder
             self._embedder_loaded = True  # cache only on successful build
             try:
-                self.db.init_vec_index_state(embedder.embedding_space_id, True)
+                # Lazy vec-table creation: the derived vec0 tables are built
+                # here (first successful embedder load), not at schema init,
+                # with the dim the model itself reported. The same dim is
+                # recorded in _vec_index_meta as the library's active dim.
+                table_warnings = self.db.ensure_vec_tables(embedder.dim)
+                self._embedder_warnings.extend(table_warnings)
+                warnings.extend(table_warnings)
+                self.db.init_vec_index_state(
+                    embedder.embedding_space_id, True, active_dim=embedder.dim,
+                )
             except Exception as exc:
                 warning = f"vector space state initialization failed: {exc}"
                 self._embedder_warnings.append(warning)
@@ -488,12 +516,12 @@ class MemoryTools:
             # admission). Off / degraded → (canonical,), i.e. the single-canonical
             # scope. Only strict consults it; none/weak never hard-scope by it.
             if isolation == "strict" and canonical:
-                if getattr(self.settings, "workspace_recall_admission", True):
+                if WORKSPACE_RECALL_ADMISSION:
                     try:
                         admitted = self.db.workspaces.admitted_canonicals(
                             canonical,
-                            cutoff=float(getattr(self.settings, "workspace_recall_cutoff", 0.25)),
-                            min_name_len=int(getattr(self.settings, "workspace_min_name_len", 3)),
+                            cutoff=WORKSPACE_RECALL_CUTOFF,
+                            min_name_len=WORKSPACE_MIN_NAME_LEN,
                         )
                     except Exception:
                         admitted = (canonical,)
@@ -659,9 +687,10 @@ class MemoryTools:
         return f"{subject}\n{content}".strip()
 
     def _semantic_configured(self) -> bool:
+        # The backend is always the local GGUF engine now — the former
+        # semantic_conflict.backend knob was dead configuration.
         return (
             bool(self.settings.semantic_conflict_enabled)
-            and self.settings.semantic_conflict_backend == "local_gguf"
             and self.settings.semantic_conflict_model_path is not None
         )
 
@@ -676,11 +705,11 @@ class MemoryTools:
             assert self.settings.semantic_conflict_model_path is not None
             self._semantic_backend = IsolatedGGUFSemanticBackend(
                 self.settings.semantic_conflict_model_path,
-                n_ctx=self.settings.semantic_conflict_n_ctx,
-                n_threads=self.settings.semantic_conflict_n_threads,
-                n_batch=self.settings.semantic_conflict_n_batch,
-                hard_timeout_ms=self.settings.semantic_conflict_inference_timeout_ms,
-                load_timeout_ms=self.settings.semantic_conflict_load_timeout_ms,
+                n_ctx=SEMANTIC_N_CTX,
+                n_threads=SEMANTIC_N_THREADS,
+                n_batch=SEMANTIC_N_BATCH,
+                hard_timeout_ms=SEMANTIC_INFERENCE_TIMEOUT_MS,
+                load_timeout_ms=SEMANTIC_LOAD_TIMEOUT_MS,
             )
             return self._semantic_backend
 
@@ -701,15 +730,13 @@ class MemoryTools:
         # from resurrecting an over-distance name (a real-library dry-run had
         # Qwen "same_project@0.95" merge openclaw into proto-test at cosine
         # 0.357, far past the 0.25 threshold). Cap at top-K (A/B: 3 beats 5).
-        max_distance = float(getattr(self.settings, "workspace_qwen_candidate_distance", 0.25))
-        top_k = max(1, int(getattr(self.settings, "workspace_qwen_candidate_top_k", 3)))
         candidates = [
             s["name"] for s in (similar or [])
-            if s.get("name") and float(s.get("distance", 9.0)) <= max_distance
-        ][:top_k]
+            if s.get("name") and float(s.get("distance", 9.0)) <= QWEN_CANDIDATE_DISTANCE
+        ][:QWEN_CANDIDATE_TOP_K]
         if not candidates:
             return None
-        budget_ms = max(0, min(5000, int(getattr(self.settings, "workspace_qwen_budget_ms", 750))))
+        budget_ms = max(0, QWEN_BUDGET_MS)
         if budget_ms <= 0:
             return None
         try:
@@ -723,12 +750,8 @@ class MemoryTools:
             suggestion = backend.suggest_workspace_candidate(ws_raw, evidence, candidates)
         except Exception:
             suggestion = None
-        finally:
-            if not self.settings.semantic_conflict_resident and hasattr(backend, "maybe_unload_if_idle"):
-                try:
-                    backend.maybe_unload_if_idle()
-                except Exception:
-                    pass
+        # Frozen resident=true: the model stays loaded, so there is no idle
+        # unload path any more.
         return suggestion
 
     def _semantic_notice_workspace_scope(self, workspace: Any = None) -> "WorkspaceScope":
@@ -771,8 +794,8 @@ class MemoryTools:
         from .semantic_conflict import evaluate_pair_extractions, normalize_value as _normalize_value, signal_extraction, PAIR_PROMPT_VERSION
 
         pool = result.pop("similarity_pool", None) or []
-        max_pairs = max(0, int(getattr(self.settings, "semantic_conflict_scan_max_pairs", 8)))
-        if not getattr(self.settings, "semantic_conflict_scan_enhance", True) or max_pairs <= 0:
+        max_pairs = max(0, SEMANTIC_SCAN_MAX_PAIRS)
+        if not SEMANTIC_SCAN_ENHANCE or max_pairs <= 0:
             result["qwen_enhancement"] = {"status": "disabled", "similarity_pool_size": len(pool)}
             return result
         candidates = result.get("candidates") or []
@@ -783,9 +806,7 @@ class MemoryTools:
         if backend is None:
             result["qwen_enhancement"] = {"status": "skipped_unavailable", "similarity_pool_size": len(pool)}
             return result
-        deadline = time.monotonic() + max(
-            1.0, int(getattr(self.settings, "semantic_conflict_scan_budget_ms", 60000)) / 1000.0,
-        )
+        deadline = time.monotonic() + max(1.0, SEMANTIC_SCAN_BUDGET_MS / 1000.0)
         memory_cache: dict[int, dict[str, Any] | None] = {}
 
         def memory(mid: int) -> dict[str, Any] | None:
@@ -966,7 +987,6 @@ class MemoryTools:
             backend.status()
             if backend is not None else
             {
-                "backend": self.settings.semantic_conflict_backend,
                 "model_path": str(self.settings.semantic_conflict_model_path or ""),
                 "model_exists": bool(
                     self.settings.semantic_conflict_model_path
@@ -980,21 +1000,16 @@ class MemoryTools:
             "enabled": bool(self.settings.semantic_conflict_enabled),
             "configured": self._semantic_configured(),
             "on_write": self.settings.semantic_conflict_on_write,
-            "resident": bool(self.settings.semantic_conflict_resident),
             "max_concurrency": 1,
-            "max_concurrency_note": "reserved; MVP semantic worker is single-threaded (configured values are clamped to 1)",
-            "job_timeout_ms": int(self.settings.semantic_conflict_job_timeout_ms),
-            "inference_timeout_ms": int(self.settings.semantic_conflict_inference_timeout_ms),
-            "load_timeout_ms": int(self.settings.semantic_conflict_load_timeout_ms),
-            "min_pair_budget_ms": int(self.settings.semantic_conflict_min_pair_budget_ms),
-            "notice_sync_wait_ms": int(self.settings.notice_sync_wait_ms),
+            "max_concurrency_note": "reserved; the semantic worker is single-threaded",
             "last_pair_duration_ms": self._last_pair_duration_ms,
             "check_degradation": self._check_degradation_status(),
             "job_deadline_behavior": (
                 "The job budget activates only while another semantic job is queued and "
                 "gates between pairs. An inference already in flight is governed only by "
-                "inference_timeout_ms; a timed-out child is terminated and the next request "
-                "starts a new generation."
+                "the inference timeout; a timed-out child is terminated and the next request "
+                "starts a new generation. Timeouts are frozen constants since 0.15.0 "
+                "(memory_arbiter.constants)."
             ),
             "worker": self._semantic_worker.status(),
             "backend": backend_status,

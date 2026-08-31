@@ -146,7 +146,7 @@ def _controlled_integer(value: Any) -> int | None:
     return None
 
 
-def validate_product_payload(surface: str, operation: str, payload: dict[str, Any], *, vec_dim: int) -> ValidationResult:
+def validate_product_payload(surface: str, operation: str, payload: dict[str, Any]) -> ValidationResult:
     result = ValidationResult()
     allowed = PRODUCT_FIELD_REGISTRY.get((surface, operation))
     if allowed is not None:
@@ -407,8 +407,13 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
     if embedding is None:
         embedding = payload.get("embedding")
     if embedding is not None:
-        if not isinstance(embedding, list) or len(embedding) != int(vec_dim):
-            result.error = _error("embedding", f"must contain exactly {int(vec_dim)} numbers")
+        # Shape-only since 0.15.0: there is no configured vec.dim to compare
+        # against at the API boundary (the active dim is a per-library fact,
+        # discovered from the model). A wrong-length embedding is rejected
+        # where it is used — the vec index — rather than here, so a fresh
+        # library plus a non-default-dim model is never wrongly refused.
+        if not isinstance(embedding, list) or not embedding:
+            result.error = _error("embedding", "must be a non-empty list of numbers")
             return result
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in embedding):
             result.error = _error("embedding", "all values must be finite numbers")

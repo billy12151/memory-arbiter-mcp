@@ -48,6 +48,9 @@ class ManagedEmbedder:
     model_digest: str
     embedding_space_id: str
     n_ctx: int
+    # Output dimension, discovered from the model's own startup probe sample
+    # (there is no configured vec.dim any more — the model IS the fact source).
+    dim: int
     reserved_tokens: int = 64
     # llama-cpp-python's embed() silently truncates encode input to n_batch
     # tokens; embed_text's budget must clamp to the same ceiling (see
@@ -253,7 +256,6 @@ def compute_embedding_space_id(
 
 def build_embedder(
     model_path: str,
-    expected_dim: int,
     n_ctx: int = 2048,
     reserved_tokens: int = 64,
     max_section_chars: int = 3600,
@@ -267,6 +269,10 @@ def build_embedder(
     fails later at runtime degrades once via ManagedEmbedder's self-heal.
     llm-level GPU offload roughly quadruples embedding throughput on Apple
     Silicon; on GPU-less hosts the probe returns False and nothing changes.
+
+    The output dimension is read from the model's own startup probe sample
+    and carried on ManagedEmbedder.dim — there is no configured expected_dim
+    to enforce any more.
 
     Returns (ManagedEmbedder, []) on success, (None, warnings) on failure.
     Never raises.
@@ -345,25 +351,14 @@ def build_embedder(
             used_gpu = False
             encode, tokenize = make_closures(llm)
             sample = encode("dimension probe")
-        if len(sample) != expected_dim and used_gpu:
-            # A GPU-side fault can also masquerade as a dimension mismatch;
-            # retry once on CPU before declaring a config error.
-            warnings.append(
-                f"GPU dimension probe returned {len(sample)} dims (expected {expected_dim}); retrying on CPU"
-            )
-            llm = construct(False)
-            used_gpu = False
-            encode, tokenize = make_closures(llm)
-            sample = encode("dimension probe")
-        if len(sample) != expected_dim:
-            warnings.append(f"GGUF dim {len(sample)} != config vec.dim {expected_dim}; auto-embedding disabled.")
-            return None, warnings
+        dim = len(sample)
 
         model_digest = compute_model_digest(model_path)
         # All output-affecting config must be captured here so that changing any
         # of them yields a different embedding_space_id and forces a rebuild.
-        # These values must come from the caller's real Settings, NOT literals,
-        # otherwise the space-id invariant silently breaks (design doc §1.1b).
+        # Since 0.15.0 these are frozen constants (memory_arbiter.constants)
+        # passed in by the caller — they remain part of the space identity, so
+        # any future value change rotates the space id exactly as before.
         #
         # Deliberately NOT captured (decision 2026-08-31, user-approved):
         # - n_gpu_layers (device selection): CPU vs GPU vectors differ only at
@@ -380,7 +375,7 @@ def build_embedder(
             "max_section_chars": max_section_chars,
         }
         space_id = compute_embedding_space_id(
-            model_digest, expected_dim, EMBEDDING_PIPELINE_VERSION, effective_config
+            model_digest, dim, EMBEDDING_PIPELINE_VERSION, effective_config
         )
 
         return ManagedEmbedder(
@@ -389,6 +384,7 @@ def build_embedder(
             model_digest=model_digest,
             embedding_space_id=space_id,
             n_ctx=n_ctx,
+            dim=dim,
             reserved_tokens=reserved_tokens,
             n_batch=int(getattr(llm, "n_batch", 512) or 512),
             warnings=warnings,

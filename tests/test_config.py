@@ -1,3 +1,5 @@
+# ── from test_product_config.py ──
+
 from __future__ import annotations
 
 import hashlib
@@ -13,35 +15,8 @@ import pytest
 from memory_arbiter.arbitration import compare_memories
 from memory_arbiter.config import Settings, parse_bool
 from memory_arbiter.db import MemoryDB
-from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
-
-
-class _MockManagedEmbedder:
-    """Minimal mock for ManagedEmbedder — wraps a plain encode function.
-
-    Mirrors the production Never-raises contract: if _encode raises, the
-    exception is caught, last_encode_error is set, and an empty EmbedResult
-    is returned so callers must check er.embedding.
-    """
-
-    def __init__(self, encode_fn):
-        self._encode = encode_fn
-        self.embedding_space_id = "mock_space_id"
-        self.last_encode_error = None
-
-    def embed_text(self, prefix="", body="", max_body_chars=None):
-        # Mirror the production separator so the prefix's trailing token and the
-        # body's leading token are not merged (e.g. "alpha"+"alpha x" → "alphaalpha").
-        sep = "\n" if prefix and body else ""
-        text = (prefix + sep + body).strip()
-        try:
-            emb = self._encode(text)
-        except Exception as exc:
-            self.last_encode_error = str(exc)
-            return EmbedResult(embedding=[], truncated=True, original_tokens=0, used_tokens=0)
-        return EmbedResult(embedding=emb, truncated=False, original_tokens=0, used_tokens=0)
 
 
 def make_tools(tmp_path: Path) -> MemoryTools:
@@ -51,22 +26,6 @@ def make_tools(tmp_path: Path) -> MemoryTools:
         client="codex",
         agent_id="agent-a",
         workspace="repo-a",
-        enable_sqlite_vec=False,
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
-
-
-def make_vec_tools(tmp_path: Path) -> MemoryTools:
-    pytest.importorskip("sqlite_vec")
-    settings = Settings(
-        db_path=tmp_path / "memory-vec.sqlite3",
-        backup_jsonl=tmp_path / "backup-vec.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="repo-a",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        split_threshold=1,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
@@ -667,17 +626,17 @@ def test_product_memory_write_rejects_non_list_tags(tmp_path: Path) -> None:
 
 
 
-def test_tool_profile_env_and_validation(tmp_path: Path, monkeypatch) -> None:
+def test_tool_profile_env_is_no_longer_read(tmp_path: Path, monkeypatch) -> None:
+    # 0.15.0: tool_profile was dead configuration (the product surface is the
+    # only surface); a stale env export must warn instead of silently nothing.
     clear_config_env(monkeypatch)
     monkeypatch.setenv("MEMORY_ARBITER_TOOL_PROFILE", "legacy_full")
     settings = Settings.from_env()
-    assert settings.tool_profile == "product"
-    assert any("tool_profile" in warning for warning in settings.config_warnings)
-
-    monkeypatch.setenv("MEMORY_ARBITER_TOOL_PROFILE", "invalid")
-    settings = Settings.from_env()
-    assert settings.tool_profile == "product"
-    assert any("tool_profile" in warning for warning in settings.config_warnings)
+    assert not hasattr(settings, "tool_profile")
+    assert any(
+        "MEMORY_ARBITER_TOOL_PROFILE" in warning and "no longer read" in warning
+        for warning in settings.config_warnings
+    )
 
 
 
@@ -686,6 +645,9 @@ def test_config_file_overrides_env(tmp_path: Path, monkeypatch) -> None:
     cfg_path = tmp_path / "config.json"
     cfg_db = tmp_path / "from-config.sqlite3"
     env_db = tmp_path / "from-env.sqlite3"
+    # vec.enabled / vec.dim / embedding.provider were removed in 0.15.0 —
+    # present in the file they must warn and be ignored; model_path IS the
+    # embedding intent now.
     cfg_path.write_text(
         json.dumps(
             {
@@ -711,12 +673,16 @@ def test_config_file_overrides_env(tmp_path: Path, monkeypatch) -> None:
 
     assert settings.db_path == cfg_db
     assert settings.client == "from-config"
-    assert settings.enable_sqlite_vec is True
-    assert settings.vec_dim == 512
-    assert settings.embedding_provider == "gguf"
+    assert not hasattr(settings, "vec_dim")
+    assert not hasattr(settings, "embedding_provider")
     assert settings.embedding_model_path == tmp_path / "model.gguf"
     assert settings.embedding_auto_query is False
     assert settings.update_check_enabled is True
+    joined = "\n".join(settings.config_warnings)
+    assert "vec.enabled" in joined and "no longer configurable" in joined
+    assert "vec.dim" in joined
+    assert "embedding.provider" in joined
+    assert "MEMORY_ARBITER_VEC_DIM" in joined and "no longer read" in joined
 
 
 def test_update_check_config_switch(tmp_path: Path, monkeypatch) -> None:
@@ -746,6 +712,8 @@ def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch) -> None:
     clear_config_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "env.sqlite3"))
+    # 0.15.0: only launch-context env remains. The former vec/GGUF env knobs
+    # are no longer read — each stale export warns and is ignored.
     monkeypatch.setenv("MEMORY_ARBITER_ENABLE_SQLITE_VEC", "true")
     monkeypatch.setenv("MEMORY_ARBITER_VEC_DIM", "1024")
     monkeypatch.setenv("MEMORY_ARBITER_GGUF", str(tmp_path / "legacy.gguf"))
@@ -753,28 +721,30 @@ def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch) -> None:
     settings = Settings.from_env()
 
     assert settings.db_path == tmp_path / "env.sqlite3"
-    assert settings.enable_sqlite_vec is True
-    assert settings.vec_dim == 1024
-    assert settings.embedding_provider == "gguf"
-    assert settings.embedding_model_path == tmp_path / "legacy.gguf"
+    assert settings.embedding_model_path is None
+    warnings_text = "\n".join(settings.config_warnings)
+    for name in (
+        "MEMORY_ARBITER_ENABLE_SQLITE_VEC",
+        "MEMORY_ARBITER_VEC_DIM",
+        "MEMORY_ARBITER_GGUF",
+    ):
+        assert f"{name} is no longer read" in warnings_text
 
 
-def test_non_finite_workspace_recall_cutoff_falls_back_with_warning(
+def test_workspace_recall_cutoff_env_is_no_longer_read(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    import math
-
-    for raw in ("nan", "inf", "-inf"):
-        clear_config_env(monkeypatch)
-        monkeypatch.setenv("HOME", str(tmp_path / raw.replace("-", "neg")))
-        monkeypatch.setenv("MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF", raw)
-        settings = Settings.from_env()
-        assert settings.workspace_recall_cutoff == 0.0
-        assert math.isfinite(settings.workspace_recall_cutoff)
-        assert any(
-            "workspace_recall_cutoff" in warning and "not finite" in warning
-            for warning in settings.config_warnings
-        )
+    # 0.15.0 froze workspace_recall_cutoff at its former default; the env knob
+    # is scanned and warned about instead of parsed.
+    clear_config_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF", "nan")
+    settings = Settings.from_env()
+    assert not hasattr(settings, "workspace_recall_cutoff")
+    assert any(
+        "MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF" in warning and "no longer read" in warning
+        for warning in settings.config_warnings
+    )
 
 
 def test_config_file_parse_error_graceful(tmp_path: Path, monkeypatch) -> None:
@@ -816,11 +786,18 @@ def test_bad_field_value_degrades_with_warning(tmp_path: Path, monkeypatch) -> N
 
     settings = Settings.from_env()
 
-    assert settings.enable_sqlite_vec is False
-    assert settings.vec_dim == 768
     assert settings.embedding_auto_write is True
-    assert any("vec.enabled" in warning for warning in settings.config_warnings)
-    assert any("vec.dim" in warning for warning in settings.config_warnings)
+    # vec.* keys were removed in 0.15.0: they warn as no-longer-configurable
+    # instead of being parsed and degrading.
+    assert any(
+        "vec.enabled" in warning and "no longer configurable" in warning
+        for warning in settings.config_warnings
+    )
+    assert any(
+        "vec.dim" in warning and "no longer configurable" in warning
+        for warning in settings.config_warnings
+    )
+    # A still-live key with a bad value keeps the degrade-with-warning path.
     assert any("embedding.auto_write" in warning for warning in settings.config_warnings)
 
 
@@ -830,19 +807,30 @@ def test_parse_bool_false_string_is_false() -> None:
     assert parse_bool("no", default=True) is False
 
 
-def test_embedding_model_path_without_provider_defaults_to_gguf(tmp_path: Path, monkeypatch) -> None:
+def test_embedding_model_path_without_provider_enables_embedding(
+    tmp_path: Path, monkeypatch,
+) -> None:
     clear_config_env(monkeypatch)
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
-        json.dumps({"embedding": {"model_path": str(tmp_path / "model.gguf")}}),
+        json.dumps({
+            "embedding": {
+                "provider": "gguf",  # removed key: ignored with a warning
+                "model_path": str(tmp_path / "model.gguf"),
+            },
+        }),
         encoding="utf-8",
     )
     monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
 
     settings = Settings.from_env()
 
-    assert settings.embedding_provider == "gguf"
+    assert not hasattr(settings, "embedding_provider")
     assert settings.embedding_model_path == tmp_path / "model.gguf"
+    assert any(
+        "embedding.provider" in warning and "no longer configurable" in warning
+        for warning in settings.config_warnings
+    )
 
 
 
@@ -874,7 +862,9 @@ def test_server_build_runtime_exposes_tools_for_shutdown(tmp_path: Path, monkeyp
     monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(server_config))
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "server.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "server.backup.jsonl"))
-    monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")
+    server_config.write_text(
+        json.dumps({"update_check": {"enabled": False}}), encoding="utf-8",
+    )
     monkeypatch.setenv("MEMORY_ARBITER_CLIENT", "test-client")
     monkeypatch.setenv("MEMORY_ARBITER_AGENT_ID", "test-agent")
 
@@ -911,7 +901,9 @@ def test_real_server_product_wrappers_preserve_non_object_data(tmp_path: Path, m
     monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(wrapper_config))
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "wrapper.sqlite3"))
     monkeypatch.setenv("MEMORY_ARBITER_BACKUP_JSONL", str(tmp_path / "wrapper.jsonl"))
-    monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")
+    wrapper_config.write_text(
+        json.dumps({"update_check": {"enabled": False}}), encoding="utf-8",
+    )
     monkeypatch.setenv("MEMORY_ARBITER_CLIENT", "test-client")
     monkeypatch.setenv("MEMORY_ARBITER_AGENT_ID", "test-agent")
 
@@ -971,3 +963,599 @@ def test_memorydb_library_entry_rejects_legacy_database(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="mema doctor --json"):
         MemoryDB(settings)
     assert legacy.read_bytes() == before
+
+
+# ── from test_config_slim.py ──
+
+"""0.15.0 config-slimming regression guards (plan §7).
+
+Pins the new configuration contract:
+  a) dataclass defaults == empty-env from_env() field by field (one source of
+     truth — the dataclass IS the default surface now);
+  b) auto-enable: embedding.model_path alone turns embedding on (no vec
+     section); semantic_conflict.model_path alone turns semantic conflict on;
+  c) deprecation: removed file keys warn "no longer configurable"; removed env
+     exports warn "no longer read";
+  d) active_dim fact source: a dim-4 fake embedder lazily creates the vec0
+     tables at dim 4 and records meta active_dim=4; the default-model space id
+     computed from the frozen constants equals the literal former-default
+     combination (2048/64/3600/768) — no space drift for default users;
+  e) the Settings field set is frozen at exactly the 20 slim fields;
+  f) bm25 is gone: search source has no _search_bm25/_get_ranking_mode and
+     ranking is hybrid-only (no ranking-mode concept in responses);
+  g) lazy schema: a model-configured library with no vec tables starts without
+     an "sqlite-vec unavailable" warning (the probe must not judge a healthy
+     pre-first-embed library as broken).
+"""
+
+
+import dataclasses
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from memory_arbiter.config import Settings
+from memory_arbiter.constants import (
+    EMBEDDING_DEFAULT_DIM,
+    EMBEDDING_MAX_SECTION_CHARS,
+    EMBEDDING_N_CTX,
+    EMBEDDING_RESERVED_TOKENS,
+    REMOVED_ENV_NAMES,
+    SEMANTIC_PRELOAD,
+    SEMANTIC_RESIDENT,
+)
+from memory_arbiter.db import MemoryDB
+from memory_arbiter.db.meta import vec_table_dimension
+from memory_arbiter.embedder import (
+    EMBEDDING_PIPELINE_VERSION,
+    ManagedEmbedder,
+    build_embedder,
+    compute_embedding_space_id,
+    compute_model_digest,
+)
+from memory_arbiter.tools import MemoryTools
+
+try:
+    import sqlite_vec  # type: ignore  # noqa: F401
+
+    _VEC_AVAILABLE = True
+except Exception:  # pragma: no cover - environment dependent
+    _VEC_AVAILABLE = False
+
+requires_vec = pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not installed")
+
+# Launch-context env (retained) that must be cleared so from_env() sees a
+# truly empty launch context.
+_LAUNCH_ENV = (
+    "MEMORY_ARBITER_CONFIG",
+    "MEMORY_ARBITER_DB_PATH",
+    "MEMORY_ARBITER_BACKUP_JSONL",
+    "MEMORY_ARBITER_MCP_TRANSPORT",
+    "MEMORY_ARBITER_CLIENT",
+    "MEMORY_ARBITER_AGENT_ID",
+)
+
+
+def _hermetic_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config: dict
+) -> Path:
+    """Empty launch context + an explicit (possibly empty) config file."""
+    for key in _LAUNCH_ENV:
+        monkeypatch.delenv(key, raising=False)
+    for key in REMOVED_ENV_NAMES:
+        monkeypatch.delenv(key, raising=False)
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg))
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# (e) frozen field set — the slim dataclass is the contract
+# ---------------------------------------------------------------------------
+
+SLIM_SETTINGS_FIELDS = frozenset(
+    {
+        "db_path",
+        "backup_jsonl",
+        "policy_path",
+        "client",
+        "agent_id",
+        "workspace",
+        "mcp_transport",
+        "mcp_http_host",
+        "mcp_http_port",
+        "policy",
+        "embedding_model_path",
+        "embedding_auto_query",
+        "embedding_auto_write",
+        "isolation",
+        "update_check_enabled",
+        "semantic_conflict_enabled",
+        "semantic_conflict_model_path",
+        "semantic_conflict_on_write",
+        "semantic_conflict_max_notice_pairs",
+        "config_warnings",
+    }
+)
+
+
+def test_settings_field_set_is_frozen_at_twenty() -> None:
+    assert len(SLIM_SETTINGS_FIELDS) == 20
+    assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
+
+
+def test_settings_rejects_removed_kwargs() -> None:
+    # Every former knob must fail loudly at construction, not silently no-op.
+    for removed in (
+        "enable_sqlite_vec",
+        "vec_dim",
+        "embedding_provider",
+        "semantic_conflict_backend",
+        "semantic_conflict_preload",
+        "notice_sync_wait_ms",
+        "workspace_recall_cutoff",
+        "recall_pool_cap",
+        "tool_profile",
+        "mcp_http_path",
+    ):
+        with pytest.raises(TypeError):
+            Settings(
+                db_path=Path("x.sqlite3"),
+                backup_jsonl=Path("x.jsonl"),
+                **{removed: True},
+            )
+
+
+# ---------------------------------------------------------------------------
+# (a) dataclass defaults vs empty-env from_env()
+# ---------------------------------------------------------------------------
+
+
+def test_from_env_empty_config_matches_dataclass_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _hermetic_env(monkeypatch, tmp_path, {})
+    from_env_settings = Settings.from_env()
+
+    defaults = Settings(db_path=Path("d.sqlite3"), backup_jsonl=Path("b.jsonl"))
+    # Environment-dependent fields are excluded by design: db/backup paths are
+    # cwd-based, client/agent_id/mcp_transport read launch env, config_warnings
+    # collects parse-time diagnostics.
+    excluded = {
+        "db_path",
+        "backup_jsonl",
+        "client",
+        "agent_id",
+        "mcp_transport",
+        "config_warnings",
+    }
+    for field in dataclasses.fields(Settings):
+        if field.name in excluded:
+            continue
+        assert getattr(from_env_settings, field.name) == getattr(
+            defaults, field.name
+        ), f"from_env default drifted from dataclass default on {field.name}"
+
+
+# ---------------------------------------------------------------------------
+# (b) auto-enable (one intent, one knob)
+# ---------------------------------------------------------------------------
+
+
+def test_embedding_model_path_alone_enables_vec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"fake")
+    _hermetic_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "db_path": str(tmp_path / "b.sqlite3"),
+            "backup_jsonl": str(tmp_path / "b.jsonl"),
+            "embedding": {"model_path": str(model)},
+        },
+    )
+
+    settings = Settings.from_env()
+    # No vec section, no provider — pointing at the model IS the intent.
+    assert settings.embedding_model_path == model
+    tools = MemoryTools(settings)
+    assert tools._embedding_configured() is True
+
+
+def test_no_embedding_model_path_means_embedding_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _hermetic_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "db_path": str(tmp_path / "b.sqlite3"),
+            "backup_jsonl": str(tmp_path / "b.jsonl"),
+        },
+    )
+    settings = Settings.from_env()
+    assert settings.embedding_model_path is None
+    assert MemoryTools(settings)._embedding_configured() is False
+
+
+def test_semantic_model_path_alone_auto_enables_and_preloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = tmp_path / "qwen.gguf"
+    model.write_bytes(b"fake")
+    _hermetic_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "db_path": str(tmp_path / "b.sqlite3"),
+            "backup_jsonl": str(tmp_path / "b.jsonl"),
+            "semantic_conflict": {"model_path": str(model)},
+        },
+    )
+
+    settings = Settings.from_env()
+    assert settings.semantic_conflict_enabled is True
+    assert settings.semantic_conflict_model_path == model
+    assert any("auto-enabled" in warning for warning in settings.config_warnings)
+
+    tools = MemoryTools(settings)
+    status = tools._semantic_status()
+    assert status["enabled"] is True
+    assert status["configured"] is True
+    # preload/resident froze to true: a configured model loads at startup and
+    # stays resident (former from_env default false — approved behavior change).
+    assert SEMANTIC_PRELOAD is True
+    assert SEMANTIC_RESIDENT is True
+
+
+def test_semantic_explicit_false_wins_over_model_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = tmp_path / "qwen.gguf"
+    model.write_bytes(b"fake")
+    _hermetic_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "db_path": str(tmp_path / "b.sqlite3"),
+            "backup_jsonl": str(tmp_path / "b.jsonl"),
+            "semantic_conflict": {"enabled": False, "model_path": str(model)},
+        },
+    )
+    settings = Settings.from_env()
+    assert settings.semantic_conflict_enabled is False
+    assert MemoryTools(settings)._semantic_configured() is False
+
+
+# ---------------------------------------------------------------------------
+# (c) deprecation warnings
+# ---------------------------------------------------------------------------
+
+
+def test_removed_file_keys_warn_and_are_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _hermetic_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "semantic_conflict": {
+                "preload": False,
+                "resident": False,
+                "backend": "local",
+                "job_timeout_ms": 1,
+                "notice_sync_wait_ms": 1,
+            },
+            "embedding": {"provider": "gguf", "n_ctx": 128},
+            "vec": {"enabled": False, "dim": 8},
+            "tool_profile": "legacy_full",
+            "workspace_recall_cutoff": 0.9,
+        },
+    )
+    settings = Settings.from_env()
+    joined = "\n".join(settings.config_warnings)
+    for key in (
+        "semantic_conflict.preload",
+        "semantic_conflict.resident",
+        "semantic_conflict.backend",
+        "semantic_conflict.job_timeout_ms",
+        "semantic_conflict.notice_sync_wait_ms",
+        "embedding.provider",
+        "embedding.n_ctx",
+        "vec.enabled",
+        "vec.dim",
+        "tool_profile",
+        "workspace_recall_cutoff",
+    ):
+        assert f"{key} is no longer configurable" in joined, key
+    # Ignored, not applied: the removed vec.enabled=false must not disable
+    # an embedding model that IS configured.
+    assert settings.semantic_conflict_enabled is False
+
+
+def test_removed_env_exports_warn_no_longer_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _hermetic_env(monkeypatch, tmp_path, {})
+    monkeypatch.setenv("MEMORY_ARBITER_SEMANTIC_CONFLICT_PRELOAD", "false")
+    monkeypatch.setenv("MEMORY_ARBITER_ENABLE_SQLITE_VEC", "true")
+    monkeypatch.setenv("MEMORY_ARBITER_RANKING_MODE", "bm25")
+    monkeypatch.setenv("MEMORY_ARBITER_UPDATE_CHECK_ENABLED", "false")
+    monkeypatch.setenv("MEMORY_ARBITER_GGUF", "/tmp/legacy.gguf")
+
+    settings = Settings.from_env()
+    joined = "\n".join(settings.config_warnings)
+    for name in (
+        "MEMORY_ARBITER_SEMANTIC_CONFLICT_PRELOAD",
+        "MEMORY_ARBITER_ENABLE_SQLITE_VEC",
+        "MEMORY_ARBITER_RANKING_MODE",
+        "MEMORY_ARBITER_UPDATE_CHECK_ENABLED",
+        "MEMORY_ARBITER_GGUF",
+    ):
+        assert f"{name} is no longer read" in joined, name
+    # A stale ranking-mode export cannot resurrect bm25, and the dead update
+    # switch must not flip the file default.
+    assert settings.update_check_enabled is True
+    assert cfg.exists()
+
+
+# ---------------------------------------------------------------------------
+# (d) active_dim fact source
+# ---------------------------------------------------------------------------
+
+
+class _DimProbeEmbedder:
+    """Fake ManagedEmbedder reporting a fixed dim (no GGUF runtime needed)."""
+
+    def __init__(self, dim: int) -> None:
+        self.embedding_space_id = f"fake-dim-{dim}-space"
+        self.dim = dim
+
+    def embed_text(self, prefix: str = "", body: str = "", max_body_chars=None):
+        from memory_arbiter.embedder import EmbedResult
+
+        return EmbedResult([0.5] * self.dim, False, 0, 0)
+
+
+@requires_vec
+def test_fake_embedder_dim_creates_lazy_tables_and_records_active_dim(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=tmp_path / "dim.sqlite3",
+        backup_jsonl=tmp_path / "dim.jsonl",
+        embedding_model_path=model,
+    )
+    db = MemoryDB(settings)
+    tools = MemoryTools(settings=settings, db=db)
+    # Fresh library: no vec0 tables yet (lazy creation — schema init must not
+    # have built them without knowing the dim).
+    with db.connection() as conn:
+        assert (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_evidence_vec'"
+            ).fetchone()
+            is None
+        )
+
+    # First successful embedder build at dim 4: tables + space state together.
+    fake = _DimProbeEmbedder(4)
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(
+            "memory_arbiter.embedder.build_embedder",
+            lambda *_a, **_k: (fake, []),
+        )
+        tools._embedder_loaded = False
+        embedder, warnings = tools._ensure_embedder()
+        assert embedder is fake and warnings == []
+    finally:
+        monkeypatch.undo()
+
+    with db.connection() as conn:
+        assert (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_evidence_vec'"
+            ).fetchone()
+            is not None
+        )
+        assert vec_table_dimension(conn, "memory_evidence_vec") == 4
+        assert vec_table_dimension(conn, "workspace_canonicals_vec") == 4
+    assert db.meta.get_active_dim() == 4
+    assert db.get_vec_index_state()["state"] == "ready"
+
+
+@requires_vec
+def test_dim_change_drops_and_recreates_vec_tables(tmp_path: Path) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=tmp_path / "swap.sqlite3",
+        backup_jsonl=tmp_path / "swap.jsonl",
+        embedding_model_path=model,
+    )
+    db = MemoryDB(settings)
+    assert db.ensure_vec_tables(4) == []
+    db.init_vec_index_state("old-space", True, active_dim=4)
+
+    # A model swap to dim 2: init_vec_index_state must drop the dim-4 tables
+    # and re-create them at the new dim atomically with the mismatch flip.
+    db.init_vec_index_state("new-space", True, active_dim=2)
+    with db.connection() as conn:
+        assert vec_table_dimension(conn, "memory_evidence_vec") == 2
+        assert vec_table_dimension(conn, "workspace_canonicals_vec") == 2
+    assert db.meta.get_active_dim() == 2
+    state = db.get_vec_index_state()
+    assert state["state"] == "mismatch"
+    assert state["target_space_id"] == "new-space"
+
+
+def test_dim_swap_back_arms_rebuild_on_native_dim_tables(tmp_path: Path) -> None:
+    # Swapping the model to dim B and back to A keeps the A space id active
+    # in meta while the forward flip already rebuilt the tables at B. The
+    # revert branch rebuilds them at A — but because that rebuild wiped all
+    # vectors, it must NOT flip ready (surviving evidence rows would lose
+    # coverage behind a passing gate); it arms the standard mismatch
+    # rebuild toward A instead, and repeated inits stay armed (round-2
+    # adversarial review finding).
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=tmp_path / "back.sqlite3",
+        backup_jsonl=tmp_path / "back.jsonl",
+        embedding_model_path=model,
+    )
+    db = MemoryDB(settings)
+    assert db.ensure_vec_tables(4) == []
+    db.init_vec_index_state("space-a", True, active_dim=4)
+    db.init_vec_index_state("space-b", True, active_dim=2)  # forward swap
+    db.init_vec_index_state("space-a", True, active_dim=4)  # swap back
+
+    with db.connection() as conn:
+        assert vec_table_dimension(conn, "memory_evidence_vec") == 4
+        assert vec_table_dimension(conn, "workspace_canonicals_vec") == 4
+        # A native-dim vector must be insertable — the wedged state failed here.
+        conn.execute(
+            "INSERT INTO memory_evidence_vec(id, parent_status, embedding) VALUES(1,'active',?)",
+            ("[" + ", ".join("0.1" for _ in range(4)) + "]",),
+        )
+    state = db.get_vec_index_state()
+    assert state["state"] == "mismatch"
+    assert state["target_space_id"] == "space-a"
+    assert state["active_dim"] == 4
+    # Idempotency: the armed rebuild must survive repeated inits (the
+    # same-id revert flip must not bypass it back to ready).
+    db.init_vec_index_state("space-a", True, active_dim=4)
+    state = db.get_vec_index_state()
+    assert state["state"] == "mismatch"
+    assert state["target_space_id"] == "space-a"
+
+
+def test_default_model_space_id_unchanged_vs_literal_former_defaults(
+    tmp_path: Path,
+) -> None:
+    # The frozen constants must reproduce the exact former-default space id
+    # (2048/64/3600 engine params, 768-dim default model): any drift would
+    # force a pointless full evidence rebuild for default users.
+    model = tmp_path / "default.gguf"
+    model.write_bytes(b"default-model-bytes")
+    digest = compute_model_digest(str(model))
+
+    from_constants = compute_embedding_space_id(
+        digest,
+        EMBEDDING_DEFAULT_DIM,
+        EMBEDDING_PIPELINE_VERSION,
+        {
+            "n_ctx": EMBEDDING_N_CTX,
+            "reserved_tokens": EMBEDDING_RESERVED_TOKENS,
+            "max_section_chars": EMBEDDING_MAX_SECTION_CHARS,
+        },
+    )
+    from_literals = compute_embedding_space_id(
+        digest,
+        768,
+        2,
+        {"n_ctx": 2048, "reserved_tokens": 64, "max_section_chars": 3600},
+    )
+    assert from_constants == from_literals
+
+    from memory_arbiter.vnext_migration import _configured_embedding_space_id
+
+    settings = Settings(
+        db_path=tmp_path / "space.sqlite3",
+        backup_jsonl=tmp_path / "space.jsonl",
+        embedding_model_path=model,
+    )
+    assert _configured_embedding_space_id(settings, 768) == from_constants
+    # Without a dim there is nothing trustworthy to derive an identity from.
+    assert _configured_embedding_space_id(settings, None) is None
+    assert _configured_embedding_space_id(None, 768) is None
+
+
+# ---------------------------------------------------------------------------
+# (f) hybrid-only search
+# ---------------------------------------------------------------------------
+
+
+def test_search_source_has_no_bm25_path() -> None:
+    source = Path(__file__).parents[1] / "memory_arbiter" / "search.py"
+    text = source.read_text(encoding="utf-8")
+    assert "_search_bm25" not in text
+    assert "_get_ranking_mode" not in text
+    # The surviving helpers the hybrid path still uses.
+    assert "_recent_fallback" in text
+    from memory_arbiter.search import _recent_fallback  # noqa: F401
+    from memory_arbiter.constants import NO_DIRECT_MATCH_PREFIX
+
+    assert NO_DIRECT_MATCH_PREFIX == "No direct memory match"
+
+
+def test_search_responses_have_no_ranking_mode_concept(tmp_path: Path) -> None:
+    tools = MemoryTools(
+        Settings(
+            db_path=tmp_path / "hy.sqlite3",
+            backup_jsonl=tmp_path / "hy.jsonl",
+            client="codex",
+            agent_id="agent-a",
+        )
+    )
+    tools.memory_write(content="hybrid body", subject="hybrid", tags=[])
+    hit = tools.memory_search(query="hybrid")
+    assert hit["ok"] is True
+    assert hit["data"]["results"]
+    assert hit["data"]["retrieval_mode"] in {"direct", "recent_fallback", "empty"}
+    miss = tools.memory_search(query="完全无关的查询词")
+    assert miss["data"]["retrieval_mode"] in {"direct", "recent_fallback", "empty"}
+
+
+# ---------------------------------------------------------------------------
+# (g) lazy schema probe
+# ---------------------------------------------------------------------------
+
+
+@requires_vec
+def test_model_configured_library_without_vec_tables_is_healthy(tmp_path: Path) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=tmp_path / "probe.sqlite3",
+        backup_jsonl=tmp_path / "probe.jsonl",
+        embedding_model_path=model,
+    )
+    db = MemoryDB(settings)
+    # The extension is loadable and the library is pre-first-embed: the probe
+    # must pass (no "sqlite-vec unavailable" degradation) even though the
+    # derived vec0 tables do not exist yet.
+    assert db.state.sqlite_vec_available is True
+    assert db.db_available is True
+    assert not any("sqlite-vec unavailable" in w for w in db.state.warnings)
+    with db.connection() as conn:
+        for table in ("memory_evidence_vec", "workspace_canonicals_vec"):
+            assert (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                is None
+            )
+    # The repair surface only counts missing tables once the vec state says
+    # the index should be live (ready + model configured): a pre-first-embed
+    # library is healthy, not broken.
+    tools = MemoryTools(settings=settings, db=db)
+    preview = tools.memory_repair("rebuild_evidence", {"dry_run": True})
+    assert preview["ok"] is True
+    assert preview["data"]["vector_table_repair"]["required"] is False

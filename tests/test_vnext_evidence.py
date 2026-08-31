@@ -26,6 +26,9 @@ from memory_arbiter.vnext_migration import build, inspect
 
 class FakeEmbedder:
     embedding_space_id = "fake-vnext-space"
+    # ManagedEmbedder.dim since 0.15.0: the model's own output dimension is
+    # the library fact source (there is no configured vec.dim any more).
+    dim = 2
     last_encode_error = None
 
     @staticmethod
@@ -56,9 +59,6 @@ def make_tools(tmp_path: Path, *, semantic_enabled: bool = False) -> MemoryTools
     settings = Settings(
         db_path=tmp_path / "vnext.sqlite3",
         backup_jsonl=tmp_path / "backup.jsonl",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        embedding_provider="gguf",
         embedding_model_path=model,
         embedding_auto_write=True,
         embedding_auto_query=True,
@@ -69,7 +69,11 @@ def make_tools(tmp_path: Path, *, semantic_enabled: bool = False) -> MemoryTools
     tools = MemoryTools(settings=settings, db=db)
     tools._embedder = FakeEmbedder()
     tools._embedder_loaded = True
-    tools.db.init_vec_index_state("fake-vnext-space", True)
+    # Mirrors what the first successful embedder build does in production
+    # (tools._ensure_embedder): lazy vec0-table creation at the model's dim,
+    # then the space state flips with the same dim recorded as active_dim.
+    assert db.ensure_vec_tables(FakeEmbedder.dim) == []
+    tools.db.init_vec_index_state("fake-vnext-space", True, active_dim=FakeEmbedder.dim)
     return tools
 
 
@@ -204,13 +208,18 @@ def test_vnext_search_uses_evidence_knn_not_legacy_vectors(tmp_path: Path) -> No
 
 def test_evidence_candidate_enters_when_lexical_pool_is_full(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
-    tools.settings.recall_pool_cap = 4
+    # RECALL_POOL_CAP is a frozen constant since 0.15.0: fill the lexical pool
+    # exactly to the cap with content-only "needle" matches, so the semantic
+    # target's only path into the pool is the independent evidence channel
+    # (which must run even when FTS/LIKE already filled the pool).
+    from memory_arbiter.constants import RECALL_POOL_CAP
+
     lexical_ids = [
         tools.memory_write(
             content=f"needle lexical distractor {index}",
-            subject=f"needle {index}",
+            subject=f"distractor {index}",
         )["data"]["id"]
-        for index in range(4)
+        for index in range(RECALL_POOL_CAP)
     ]
     target_id = tools.memory_write(
         content="semantically relevant target without the query term",
@@ -244,7 +253,6 @@ def test_evidence_candidate_enters_when_lexical_pool_is_full(tmp_path: Path, mon
 
 def test_exact_subject_match_survives_evidence_fusion(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
-    tools.settings.recall_pool_cap = 4
     exact_id = tools.memory_write(
         content="exact command reference",
         subject="needle",
@@ -424,9 +432,6 @@ def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, m
     migration_settings = Settings(
         db_path=source_settings.db_path,
         backup_jsonl=tmp_path / "migration.jsonl",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        embedding_provider="gguf",
         embedding_model_path=model,
     )
 
@@ -436,7 +441,8 @@ def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, m
         original_init(self, settings=settings, db=db)
         self._embedder = FakeEmbedder()
         self._embedder_loaded = True
-        self.db.init_vec_index_state("fake-vnext-space", True)
+        self.db.ensure_vec_tables(FakeEmbedder.dim)
+        self.db.init_vec_index_state("fake-vnext-space", True, active_dim=FakeEmbedder.dim)
 
     monkeypatch.setattr(MemoryTools, "__init__", patched_init)
     result = build(source_settings.db_path, target, migration_settings, progress=False)
@@ -458,15 +464,13 @@ def test_side_by_side_migration_builds_verified_vnext_database(tmp_path: Path, m
     target_settings = Settings(
         db_path=target,
         backup_jsonl=tmp_path / "target.jsonl",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        embedding_provider="gguf",
         embedding_model_path=model,
     )
     target_tools = MemoryTools(target_settings, MemoryDB(target_settings))
     target_tools._embedder = FakeEmbedder()
     target_tools._embedder_loaded = True
-    target_tools.db.init_vec_index_state("fake-vnext-space", True)
+    target_tools.db.ensure_vec_tables(FakeEmbedder.dim)
+    target_tools.db.init_vec_index_state("fake-vnext-space", True, active_dim=FakeEmbedder.dim)
     searched = target_tools.memory_search(query="pgsql database", limit=5)
     assert second["data"]["id"] in [row["id"] for row in searched["data"]["results"]]
 
@@ -481,9 +485,6 @@ def test_previous_generation_old_space_is_preserved_and_disabled(
     settings = Settings(
         db_path=source_path,
         backup_jsonl=tmp_path / "backup.jsonl",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        embedding_provider="gguf",
         embedding_model_path=model,
     )
     source_db = MemoryDB(settings)
@@ -492,7 +493,10 @@ def test_previous_generation_old_space_is_preserved_and_disabled(
     old_embedder.embedding_space_id = "old-pipeline-space"
     source_tools._embedder = old_embedder
     source_tools._embedder_loaded = True
-    source_db.init_vec_index_state(old_embedder.embedding_space_id, True)
+    source_db.ensure_vec_tables(FakeEmbedder.dim)
+    source_db.init_vec_index_state(
+        old_embedder.embedding_space_id, True, active_dim=FakeEmbedder.dim,
+    )
     written = source_tools.memory_write(
         content="旧空间中的内容。", subject="旧空间", tags=[],
     )
@@ -510,7 +514,10 @@ def test_previous_generation_old_space_is_preserved_and_disabled(
         original_init(self, settings=settings, db=db)
         self._embedder = FakeEmbedder()
         self._embedder_loaded = True
-        self.db.init_vec_index_state(self._embedder.embedding_space_id, True)
+        self.db.ensure_vec_tables(FakeEmbedder.dim)
+        self.db.init_vec_index_state(
+            self._embedder.embedding_space_id, True, active_dim=FakeEmbedder.dim,
+        )
 
     monkeypatch.setattr(MemoryTools, "__init__", init_with_current_embedder)
     target = tmp_path / "current.sqlite3"
@@ -539,7 +546,6 @@ def test_preserve_migration_keeps_derived_rows_for_later_health_repair(
     model.write_bytes(b"fake")
     settings = Settings(
         db_path=source_path, backup_jsonl=tmp_path / "backup.jsonl",
-        enable_sqlite_vec=True, vec_dim=2, embedding_provider="gguf",
         embedding_model_path=model,
     )
     source_db = MemoryDB(settings)
@@ -548,7 +554,10 @@ def test_preserve_migration_keeps_derived_rows_for_later_health_repair(
     old_embedder.embedding_space_id = "old-pipeline-space"
     source_tools._embedder = old_embedder
     source_tools._embedder_loaded = True
-    source_db.init_vec_index_state(old_embedder.embedding_space_id, True)
+    source_db.ensure_vec_tables(FakeEmbedder.dim)
+    source_db.init_vec_index_state(
+        old_embedder.embedding_space_id, True, active_dim=FakeEmbedder.dim,
+    )
     active = source_tools.memory_write(
         content="active", subject="active", workspace="project-alpha",
     )["data"]["id"]
@@ -569,7 +578,10 @@ def test_preserve_migration_keeps_derived_rows_for_later_health_repair(
         original_init(self, settings=settings, db=db)
         self._embedder = FakeEmbedder()
         self._embedder_loaded = True
-        self.db.init_vec_index_state(self._embedder.embedding_space_id, True)
+        self.db.ensure_vec_tables(FakeEmbedder.dim)
+        self.db.init_vec_index_state(
+            self._embedder.embedding_space_id, True, active_dim=FakeEmbedder.dim,
+        )
 
     monkeypatch.setattr(MemoryTools, "__init__", init_with_current_embedder)
     target = tmp_path / "current.sqlite3"
@@ -577,9 +589,12 @@ def test_preserve_migration_keeps_derived_rows_for_later_health_repair(
     result = build(source_path, target, settings, progress=False)
 
     assert result["ok"] is True, result
+    # Keep the embedding model configured so the extension actually loads —
+    # without a model path the runtime no longer loads sqlite-vec and the
+    # preserved vec0 tables below would be unreadable ("no such module: vec0").
     target_db = MemoryDB(Settings(
         db_path=target, backup_jsonl=tmp_path / "target-backup.jsonl",
-        enable_sqlite_vec=True, vec_dim=2,
+        embedding_model_path=model,
     ))
     with target_db.connection() as conn:
         evidence_memory_ids = {
@@ -608,9 +623,6 @@ def test_final_sync_next_step_does_not_request_another_final_sync(tmp_path: Path
     settings = Settings(
         db_path=source_settings.db_path,
         backup_jsonl=tmp_path / "migration.jsonl",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        embedding_provider="gguf",
         embedding_model_path=model,
     )
     original_init = MemoryTools.__init__
@@ -619,7 +631,8 @@ def test_final_sync_next_step_does_not_request_another_final_sync(tmp_path: Path
         original_init(self, settings=settings, db=db)
         self._embedder = FakeEmbedder()
         self._embedder_loaded = True
-        self.db.init_vec_index_state("fake-vnext-space", True)
+        self.db.ensure_vec_tables(FakeEmbedder.dim)
+        self.db.init_vec_index_state("fake-vnext-space", True, active_dim=FakeEmbedder.dim)
 
     monkeypatch.setattr(MemoryTools, "__init__", patched_init)
     monkeypatch.setattr(Settings, "from_env", classmethod(lambda cls: settings))
@@ -873,7 +886,6 @@ def test_semantic_worker_coalescing_completes_displaced_task() -> None:
 
 def test_evidence_index_error_completes_exact_reserved_task(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
-    tools.settings.notice_sync_wait_ms = 1000
     monkeypatch.setattr(
         tools, "_index_local_text_evidence",
         lambda memory_id, record: {"status": "failed", "reason": "synthetic_failure"},
@@ -888,9 +900,13 @@ def test_evidence_index_error_completes_exact_reserved_task(tmp_path: Path, monk
     assert "timeout_continuing_async" not in str(result)
 
 
-def test_queue_full_drop_completes_exact_reserved_task_end_to_end(tmp_path: Path) -> None:
+def test_queue_full_drop_completes_exact_reserved_task_end_to_end(
+    tmp_path: Path, monkeypatch,
+) -> None:
     tools = make_tools(tmp_path)
-    tools.settings.semantic_conflict_queue_max_size = 1
+    # queue_max_size froze into a constant (0.15.0); shrink it through the
+    # module attribute the worker reads at enqueue time.
+    monkeypatch.setattr("memory_arbiter.workers.SEMANTIC_QUEUE_MAX_SIZE", 1)
     tools._semantic_worker._ensure_thread = lambda: None
     tools._semantic_worker.enqueue(111, {"version": 1, "task_id": "semantic:111@1"})
     task_id = "semantic:222@1"
@@ -1002,7 +1018,6 @@ def test_final_sync_rejects_source_writes_landing_before_replace(tmp_path: Path,
     legacy = tmp_path / "legacy.sqlite3"
     settings = Settings(
         db_path=legacy, backup_jsonl=tmp_path / "unused.jsonl",
-        enable_sqlite_vec=True, vec_dim=2, embedding_provider="gguf",
         embedding_model_path=tools.settings.embedding_model_path,
     )
     original_init = MemoryTools.__init__
@@ -1011,7 +1026,8 @@ def test_final_sync_rejects_source_writes_landing_before_replace(tmp_path: Path,
         original_init(self, settings=settings, db=db)
         self._embedder = FakeEmbedder()
         self._embedder_loaded = True
-        self.db.init_vec_index_state("fake-vnext-space", True)
+        self.db.ensure_vec_tables(FakeEmbedder.dim)
+        self.db.init_vec_index_state("fake-vnext-space", True, active_dim=FakeEmbedder.dim)
 
     monkeypatch.setattr(MemoryTools, "__init__", patched_init)
     src = MemoryDB(settings)
@@ -1888,7 +1904,6 @@ def test_migration_resume_recovers_from_failed_build(tmp_path: Path, monkeypatch
 
     settings = Settings(
         db_path=source, backup_jsonl=tmp_path / "b.jsonl",
-        enable_sqlite_vec=True, vec_dim=2, embedding_provider="gguf",
         embedding_model_path=tmp_path / "fake.gguf",
     )
     (tmp_path / "fake.gguf").write_bytes(b"fake")
@@ -1900,7 +1915,10 @@ def test_migration_resume_recovers_from_failed_build(tmp_path: Path, monkeypatch
         real_init(self, settings=settings, db=db)
         self._embedder = FakeEmbedder()
         self._embedder_loaded = True
-        self.db.init_vec_index_state(self._embedder.embedding_space_id, True)
+        self.db.ensure_vec_tables(FakeEmbedder.dim)
+        self.db.init_vec_index_state(
+            self._embedder.embedding_space_id, True, active_dim=FakeEmbedder.dim,
+        )
 
     monkeypatch.setattr(MemoryTools, "__init__", init_with_fake_embedder)
     monkeypatch.setattr(MemoryTools, "_index_local_text_evidence", flaky)
@@ -1942,7 +1960,6 @@ def test_migration_resume_with_changed_space_restarts_derived_index(
     model.write_bytes(b"fake")
     settings = Settings(
         db_path=source, backup_jsonl=tmp_path / "b.jsonl",
-        enable_sqlite_vec=True, vec_dim=2, embedding_provider="gguf",
         embedding_model_path=model,
     )
     target = tmp_path / "target.sqlite3"
@@ -1955,7 +1972,8 @@ def test_migration_resume_with_changed_space_restarts_derived_index(
         embedder.embedding_space_id = "space-old"
         self._embedder = embedder
         self._embedder_loaded = True
-        self.db.init_vec_index_state(embedder.embedding_space_id, True)
+        self.db.ensure_vec_tables(FakeEmbedder.dim)
+        self.db.init_vec_index_state(embedder.embedding_space_id, True, active_dim=FakeEmbedder.dim)
 
     real_index = MemoryTools._index_local_text_evidence
 
@@ -1976,7 +1994,8 @@ def test_migration_resume_with_changed_space_restarts_derived_index(
         embedder.embedding_space_id = "space-new"
         self._embedder = embedder
         self._embedder_loaded = True
-        self.db.init_vec_index_state(embedder.embedding_space_id, True)
+        self.db.ensure_vec_tables(FakeEmbedder.dim)
+        self.db.init_vec_index_state(embedder.embedding_space_id, True, active_dim=FakeEmbedder.dim)
 
     monkeypatch.setattr(MemoryTools, "__init__", init_new)
     monkeypatch.setattr(MemoryTools, "_index_local_text_evidence", real_index)
@@ -2007,7 +2026,6 @@ def test_migration_inspect_accepts_missing_parent_dir(tmp_path: Path) -> None:
         )
     settings = Settings(
         db_path=source, backup_jsonl=tmp_path / "b.jsonl",
-        vec_dim=2,
     )
     plan = inspect(source, tmp_path / "nested" / "dir" / "new.vnext.sqlite3", settings)
     assert plan.get("ok") is not False
@@ -2031,7 +2049,7 @@ def test_wave9_resuming_phase_refused_and_foreign_targets_clean(tmp_path: Path) 
         )
     target = tmp_path / "t.vnext.sqlite3"
     settings = Settings(
-        db_path=source, backup_jsonl=tmp_path / "b.jsonl", vec_dim=2,
+        db_path=source, backup_jsonl=tmp_path / "b.jsonl",
     )
     built = build(source, target, settings, resume=False, progress=False)
     assert built["ok"] is False or built["ok"] is True  # indexing may skip without embedder
@@ -2553,8 +2571,10 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
 
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    tools.settings.semantic_conflict_job_timeout_ms = 10
-    tools.settings.semantic_conflict_min_pair_budget_ms = 5
+    # Job/min-pair budgets froze into constants (0.15.0); shrink them through
+    # the module attributes the evidence pipeline reads.
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_JOB_TIMEOUT_MS", 10)
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MIN_PAIR_BUDGET_MS", 5)
     metadata = {"entity": "svc", "scope": "production"}
     peer = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=metadata)["data"]
     new = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=metadata)["data"]
@@ -2586,8 +2606,8 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     """A queued job enables fairness, but the current pair gets its full hard timeout."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    tools.settings.semantic_conflict_job_timeout_ms = 40
-    tools.settings.semantic_conflict_min_pair_budget_ms = 5
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_JOB_TIMEOUT_MS", 40)
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MIN_PAIR_BUDGET_MS", 5)
     tools.settings.semantic_conflict_max_notice_pairs = 3
     metadata = {"entity": "svc", "scope": "production"}
     peer_values = ("mysql", "postgres")

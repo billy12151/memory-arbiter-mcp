@@ -18,26 +18,31 @@ def write(tool: MemoryTools, content: str) -> int:
 
 def test_config_registry_only_describes_current_architecture() -> None:
     paths = {item["path"] for item in CONFIG_DESCRIPTORS}
-    assert "embedding.max_unit_chars" in paths
-    assert {
-        "workspace_weak_vector_weight", "workspace_min_name_len",
-        "workspace_recall_admission", "workspace_recall_cutoff",
-    } <= paths
+    # 0.15.0 slim surface: exactly the 18 configurable file keys. Everything
+    # else froze into memory_arbiter.constants and must NOT reappear here.
+    assert paths == {
+        "db_path", "backup_jsonl", "policy_path", "client", "agent_id",
+        "mcp.transport", "mcp.http.host", "mcp.http.port", "workspace", "isolation",
+        "embedding.model_path", "embedding.auto_query", "embedding.auto_write",
+        "semantic_conflict.enabled", "semantic_conflict.model_path",
+        "semantic_conflict.on_write", "semantic_conflict.max_notice_pairs",
+        "update_check.enabled",
+    }
+    assert not any(
+        "max_unit_chars" in path or "workspace_" in path or "notice_sync_wait" in path
+        or path.startswith("vec.") or "provider" in path or "n_ctx" in path
+        for path in paths
+    )
     assert not any("claim" in path or "split" in path or "pair_text_gate" in path for path in paths)
     assert sum(len(group["items"]) for group in grouped_descriptors()) == len(CONFIG_DESCRIPTORS)
     assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
-    notice_wait = next(
-        item for item in CONFIG_DESCRIPTORS
-        if item["path"] == "semantic_conflict.notice_sync_wait_ms"
-    )
-    assert notice_wait["default"] == 5000
 
 
-def test_notice_sync_wait_default_is_five_seconds() -> None:
-    settings = Settings(
-        db_path=Path("memory.sqlite3"), backup_jsonl=Path("memory.backup.jsonl"),
-    )
-    assert settings.notice_sync_wait_ms == 5000
+def test_notice_sync_wait_frozen_at_five_seconds() -> None:
+    # 0.15.0: notice_sync_wait_ms froze into a constant (former default 5000).
+    from memory_arbiter.constants import NOTICE_SYNC_WAIT_MS
+
+    assert NOTICE_SYNC_WAIT_MS == 5000
 
 
 def _record_current_group(tool: MemoryTools, left: int, right: int) -> dict:
@@ -289,11 +294,21 @@ def test_doctor_deep_probe_reports_dimension_mismatch(tmp_path: Path) -> None:
     from memory_arbiter.doctor import run_all_checks
     from memory_arbiter.config import Settings as Cfg
 
-    settings = Cfg(db_path=tmp_path / "d.sqlite3", backup_jsonl=tmp_path / "b.jsonl", vec_dim=2)
+    settings = Cfg(db_path=tmp_path / "d.sqlite3", backup_jsonl=tmp_path / "b.jsonl")
     conn = _sqlite3.connect(settings.db_path)
-    SchemaStore(
+    store = SchemaStore(
         type("PseudoDB", (), {"settings": settings, "state": None, "_sqlite_vec_loadable": False})()
-    )._init_schema(conn)
+    )
+    store._init_schema(conn)
+    # Lazy vec0 tables (0.15.0): create them at dim 2 the way the first
+    # successful embedder build does — the tables' own CREATE SQL is the
+    # active-dim fact source the deep probe compares against.
+    import sqlite_vec  # noqa: F401
+
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    store.ensure_evidence_vec_table(conn, 2)
     conn.close()
 
     class ProbeEmbedder:
@@ -331,8 +346,7 @@ def test_doctor_cli_deep_probe_uses_settings_embedder(monkeypatch, tmp_path) -> 
     # dimension finding instead of the "no resolver" false warning.
     settings = Settings(
         db_path=tmp_path / "d.sqlite3", backup_jsonl=tmp_path / "b.jsonl",
-        vec_dim=2, enable_sqlite_vec=True,
-        embedding_provider="gguf", embedding_model_path=tmp_path / "m.gguf",
+        embedding_model_path=tmp_path / "m.gguf",
     )
     (tmp_path / "m.gguf").write_bytes(b"x")
     import sqlite3 as _sql

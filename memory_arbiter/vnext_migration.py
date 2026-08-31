@@ -16,7 +16,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Settings
-from .constants import is_default_workspace_term
+from .constants import (
+    EMBEDDING_DEFAULT_DIM,
+    EMBEDDING_MAX_SECTION_CHARS,
+    EMBEDDING_N_CTX,
+    EMBEDDING_RESERVED_TOKENS,
+    is_default_workspace_term,
+)
 from .db import MemoryDB
 from .db_generation import (
     CONFLICT_DETECTOR_VERSION,
@@ -24,6 +30,7 @@ from .db_generation import (
     SCHEMA_MIGRATIONS,
     detect_database_generation,
 )
+from .db.meta import ACTIVE_DIM_META_KEY, active_dim_on_connection
 from .embedder import (
     EMBEDDING_PIPELINE_VERSION,
     compute_embedding_space_id,
@@ -58,14 +65,15 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     ).fetchone() is not None
 
 
-def _configured_embedding_space_id(settings: Settings | None) -> str | None:
-    """Compute the configured space identity without loading the GGUF runtime."""
-    if (
-        settings is None
-        or not settings.enable_sqlite_vec
-        or settings.embedding_provider != "gguf"
-        or settings.embedding_model_path is None
-    ):
+def _configured_embedding_space_id(settings: Settings | None, active_dim: int | None) -> str | None:
+    """Compute the configured space identity without loading the GGUF runtime.
+
+    The embedding dimension is a per-library fact (``active_dim`` from the
+    source database). Without it there is nothing trustworthy to derive an
+    identity from — return None rather than guessing with a default, so a
+    missing dim can never write a wrong space_id into the target.
+    """
+    if settings is None or active_dim is None or settings.embedding_model_path is None:
         return None
     model_path = settings.embedding_model_path.expanduser()
     if not model_path.is_file():
@@ -76,12 +84,12 @@ def _configured_embedding_space_id(settings: Settings | None) -> str | None:
         return None
     return compute_embedding_space_id(
         digest,
-        settings.vec_dim,
+        active_dim,
         EMBEDDING_PIPELINE_VERSION,
         {
-            "n_ctx": settings.embedding_n_ctx,
-            "reserved_tokens": settings.embedding_reserved_tokens,
-            "max_section_chars": settings.max_section_chars,
+            "n_ctx": EMBEDDING_N_CTX,
+            "reserved_tokens": EMBEDDING_RESERVED_TOKENS,
+            "max_section_chars": EMBEDDING_MAX_SECTION_CHARS,
         },
     )
 
@@ -97,6 +105,15 @@ def _source_vec_state(path: Path) -> dict[str, str]:
             }
     except sqlite3.Error:
         return {}
+
+
+def _source_active_dim(path: Path) -> int | None:
+    """Read-only active dim of the source library (meta key, else vec0 SQL)."""
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+            return active_dim_on_connection(conn)
+    except sqlite3.Error:
+        return None
 
 
 def _counts_on_connection(conn: sqlite3.Connection) -> dict[str, int]:
@@ -193,7 +210,8 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
     vector_effect = migration.vector_effect if migration is not None else "rebuild"
     conflict_only = migration is not None and vector_effect == "preserve"
     vec_state = _source_vec_state(source)
-    configured_space = _configured_embedding_space_id(settings)
+    active_dim = _source_active_dim(source)
+    configured_space = _configured_embedding_space_id(settings, active_dim)
     active_space = vec_state.get("active_space_id")
     if vec_state.get("state") == "ready" and configured_space and active_space == configured_space:
         vector_compatibility = "ready"
@@ -201,10 +219,10 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
         vector_compatibility = "mismatch"
     else:
         vector_compatibility = vec_state.get("state", "unmanaged")
-    vector_bytes = (
-        0 if conflict_only
-        else units * int((settings.vec_dim if settings is not None else Settings.vec_dim)) * 4
-    )
+    # Disk estimation is the one sanctioned EMBEDDING_DEFAULT_DIM fallback:
+    # before any model loads, only a rough per-vector byte figure is needed.
+    estimate_dim = active_dim if active_dim is not None else EMBEDDING_DEFAULT_DIM
+    vector_bytes = 0 if conflict_only else units * estimate_dim * 4
     # build()/final_sync() create the parent directory themselves; inspect
     # may run first (dry run) against a not-yet-existing path.
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -221,6 +239,9 @@ def inspect(source: Path, target: Path, settings: Settings | None = None) -> dic
         "vector_compatibility": vector_compatibility,
         "active_space_id": active_space,
         "configured_space_id": configured_space,
+        "active_dim": active_dim,
+        "estimated_vector_dim": estimate_dim,
+        "estimated_dim_is_default_fallback": active_dim is None,
         "evidence_reuse_reason": (
             "schema_migration_preserves_vectors" if conflict_only
             else "schema_migration_requires_rebuild"
@@ -278,7 +299,9 @@ def _set_preserved_vector_compatibility(
         str(row[0]): str(row[1])
         for row in conn.execute("SELECT key,value FROM _vec_index_meta")
     }
-    configured = _configured_embedding_space_id(settings)
+    configured = _configured_embedding_space_id(
+        settings, active_dim_on_connection(conn),
+    )
     active = meta.get("active_space_id")
     vector_rows = 0
     if configured and not active:
@@ -330,7 +353,7 @@ def _current_conflict_schema(settings: Settings) -> list[str]:
         from .db.schema import SchemaStore
 
         fake_db = type("SchemaTemplateDB", (), {
-            "settings": replace(settings, enable_sqlite_vec=False),
+            "settings": settings,
             "state": type("State", (), {"warn": lambda *_args: None})(),
             "_sqlite_vec_loadable": False,
         })()
@@ -717,7 +740,11 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
                     conn.execute("DELETE FROM _vec_index_meta")
                     conn.executemany(
                         "INSERT INTO _vec_index_meta(key,value) VALUES(?,?)",
-                        (("state", "ready"), ("active_space_id", expected_space_id)),
+                        (
+                            ("state", "ready"),
+                            ("active_space_id", expected_space_id),
+                            (ACTIVE_DIM_META_KEY, str(rebuild_embedder.dim)),
+                        ),
                     )
                 conn.execute(
                     "INSERT INTO migration_state(key,value,updated_at) "

@@ -2,7 +2,6 @@
 from __future__ import annotations
 import json
 import os
-import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -12,7 +11,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .config import Settings
-from .constants import is_default_workspace_term
+from .constants import (
+    EMBEDDING_MAX_SECTION_CHARS,
+    EMBEDDING_N_CTX,
+    EMBEDDING_RESERVED_TOKENS,
+    is_default_workspace_term,
+)
+from .db.meta import active_dim_on_connection, vec_table_dimension
 from .db_generation import detect_database_generation, detect_upgrade_source_generation
 from .degrade import DegradeState
 from .models import utc_now_iso
@@ -114,16 +119,6 @@ def _safe_count(conn: sqlite3.Connection, source: str, where: str | None = None)
         return int(conn.execute(f"SELECT COUNT(*) FROM {source}{suffix}").fetchone()[0])
     except sqlite3.Error:
         return None
-
-
-def _vec_table_dimension(conn: sqlite3.Connection, table: str) -> int | None:
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
-    ).fetchone()
-    if row is None:
-        return None
-    match = re.search(r"embedding\s+float\[(\d+)]", str(row[0] or ""), re.IGNORECASE)
-    return int(match.group(1)) if match else None
 
 
 def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: DegradeState | None = None, embedder_probe: Callable[[], tuple[Any, list[str]]] | None = None) -> OverviewReport:
@@ -245,10 +240,13 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
             for row in conn.execute("SELECT key,value FROM _vec_index_meta")
         }
         active_space = vec_meta.get("active_space_id")
+        # The embedding dimension is a per-library fact (meta key, else the
+        # vec0 tables' own CREATE SQL) — there is no configured vec.dim.
+        active_dim = active_dim_on_connection(conn)
         configured_space: str | None = None
         try:
             from .vnext_migration import _configured_embedding_space_id
-            configured_space = _configured_embedding_space_id(settings)
+            configured_space = _configured_embedding_space_id(settings, active_dim)
         except (OSError, ValueError):
             configured_space = None
         space_ok = (
@@ -265,17 +263,20 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
                 "configured_space_id": configured_space,
             },
         ))
-        evidence_dim = _vec_table_dimension(conn, "memory_evidence_vec")
-        workspace_dim = _vec_table_dimension(conn, "workspace_canonicals_vec")
+        evidence_dim = vec_table_dimension(conn, "memory_evidence_vec")
+        workspace_dim = vec_table_dimension(conn, "workspace_canonicals_vec")
+        # Lazy table creation means absent tables are only a problem once the
+        # index should be live; existing tables must agree with the active dim.
         dimensions_ok = (
-            not settings.enable_sqlite_vec
-            or (evidence_dim == int(settings.vec_dim) and workspace_dim == int(settings.vec_dim))
+            settings.embedding_model_path is None
+            or (evidence_dim is None and workspace_dim is None)
+            or (evidence_dim is not None and evidence_dim == workspace_dim == active_dim)
         )
         findings.append(_finding(
             "vector.table_dimension", dimensions_ok,
-            f"evidence={evidence_dim}, workspace={workspace_dim}, configured={int(settings.vec_dim)}",
+            f"evidence={evidence_dim}, workspace={workspace_dim}, active={active_dim}",
             evidence={"evidence": evidence_dim, "workspace": workspace_dim,
-                      "configured": int(settings.vec_dim)},
+                      "active": active_dim},
         ))
         evidence_vectors = _safe_count(conn, "memory_evidence_vec")
         orphan_vectors = _safe_count(
@@ -286,8 +287,11 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
             conn, "memory_evidence e LEFT JOIN memory_evidence_vec v ON v.id=e.id",
             "v.id IS NULL",
         )
+        # Absent tables are expected before the first embedder build (lazy
+        # creation); they count against the index only once a dim is active.
         evidence_rows_ok = (
-            not settings.enable_sqlite_vec
+            settings.embedding_model_path is None
+            or (evidence_vectors is None and active_dim is None)
             or (
                 evidence_vectors is not None
                 and orphan_vectors == 0
@@ -308,7 +312,8 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
         ).fetchone()[0])
         canonical_vectors = _safe_count(conn, "workspace_canonicals_vec")
         workspace_rows_ok = (
-            not settings.enable_sqlite_vec
+            settings.embedding_model_path is None
+            or (canonical_vectors is None and active_dim is None)
             or (canonical_vectors is not None and canonical_vectors == canonical_count)
         )
         findings.append(_finding(
@@ -318,12 +323,9 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
             evidence={"canonicals": canonical_count, "vectors": canonical_vectors},
         ))
         # --deep / memory_review(deep=true): actually run the embedder and
-        # compare the live dimension against vec.dim (seconds-level cost).
-        embedding_configured = (
-            settings.embedding_provider == "gguf"
-            and settings.embedding_model_path is not None
-            and settings.enable_sqlite_vec
-        )
+        # compare the live dimension against the library's active dim
+        # (seconds-level cost).
+        embedding_configured = settings.embedding_model_path is not None
         if embedder_probe is None:
             findings.append(_finding("vector.dimension_probe", False, "deep probe requested but no embedder resolver was provided"))
         else:
@@ -346,10 +348,19 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
                     except Exception as exc:
                         findings.append(_finding("vector.dimension_probe", False, f"embedding failed: {exc}"))
                     else:
-                        findings.append(_finding(
-                            "vector.dimension_probe", dim == int(settings.vec_dim),
-                            f"embedding dim {dim} vs config vec.dim {int(settings.vec_dim)}",
-                        ))
+                        if active_dim is None:
+                            # No stored dim yet (fresh library before its first
+                            # embed): nothing to compare against, report the
+                            # model's own dim.
+                            findings.append(_finding(
+                                "vector.dimension_probe", True,
+                                f"embedding dim {dim} (no stored active dim yet)",
+                            ))
+                        else:
+                            findings.append(_finding(
+                                "vector.dimension_probe", dim == active_dim,
+                                f"embedding dim {dim} vs active dim {active_dim}",
+                            ))
                     # Device visibility: a runtime GPU→CPU self-heal keeps the
                     # embedder alive but should not go unnoticed — surface it
                     # as a warning so an operator restarts to re-probe the GPU.
@@ -472,27 +483,22 @@ def doctor_overview_cli(settings: Settings, deep: bool = False) -> OverviewRepor
         # The CLI ambulance path has no MemoryTools; build the embedder
         # directly from settings so --deep actually probes the model its
         # help text promises (read-only; no DB access needed).
-        if (
-            settings.embedding_provider != "gguf"
-            or settings.embedding_model_path is None
-            or not settings.enable_sqlite_vec
-        ):
+        if settings.embedding_model_path is None:
             return None, []
         try:
             from .embedder import build_embedder
             return build_embedder(
                 str(settings.embedding_model_path),
-                settings.vec_dim,
-                n_ctx=settings.embedding_n_ctx,
-                reserved_tokens=settings.embedding_reserved_tokens,
-                max_section_chars=settings.max_section_chars,
+                n_ctx=EMBEDDING_N_CTX,
+                reserved_tokens=EMBEDDING_RESERVED_TOKENS,
+                max_section_chars=EMBEDDING_MAX_SECTION_CHARS,
             )
         except Exception:
             return None, []
 
     try:
         with open_ro_connection(settings.db_path) as conn:
-            if settings.enable_sqlite_vec:
+            if settings.embedding_model_path is not None:
                 try:
                     import sqlite_vec
 

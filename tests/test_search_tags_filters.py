@@ -28,32 +28,6 @@ from memory_arbiter.search import (
 )
 
 
-class _MockManagedEmbedder:
-    """Minimal mock for ManagedEmbedder — wraps a plain encode function.
-
-    Mirrors the production Never-raises contract: if _encode raises, the
-    exception is caught, last_encode_error is set, and an empty EmbedResult
-    is returned so callers must check er.embedding.
-    """
-
-    def __init__(self, encode_fn):
-        self._encode = encode_fn
-        self.embedding_space_id = "mock_space_id"
-        self.last_encode_error = None
-
-    def embed_text(self, prefix="", body="", max_body_chars=None):
-        # Mirror the production separator so the prefix's trailing token and the
-        # body's leading token are not merged (e.g. "alpha"+"alpha x" → "alphaalpha").
-        sep = "\n" if prefix and body else ""
-        text = (prefix + sep + body).strip()
-        try:
-            emb = self._encode(text)
-        except Exception as exc:
-            self.last_encode_error = str(exc)
-            return EmbedResult(embedding=[], truncated=True, original_tokens=0, used_tokens=0)
-        return EmbedResult(embedding=emb, truncated=False, original_tokens=0, used_tokens=0)
-
-
 def make_tools(tmp_path: Path) -> MemoryTools:
     settings = Settings(
         db_path=tmp_path / "memory.sqlite3",
@@ -61,22 +35,6 @@ def make_tools(tmp_path: Path) -> MemoryTools:
         client="codex",
         agent_id="agent-a",
         workspace="repo-a",
-        enable_sqlite_vec=False,
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
-
-
-def make_vec_tools(tmp_path: Path) -> MemoryTools:
-    pytest.importorskip("sqlite_vec")
-    settings = Settings(
-        db_path=tmp_path / "memory-vec.sqlite3",
-        backup_jsonl=tmp_path / "backup-vec.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="repo-a",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        split_threshold=1,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
@@ -712,44 +670,37 @@ def test_empty_query_no_filters_goes_fallback(tmp_path: Path) -> None:
     assert any("No direct memory match" in w for w in res["warnings"]) or len(res["data"]["results"]) > 0
 
 
-def test_bm25_mode_applies_filter_params(tmp_path: Path, monkeypatch) -> None:
+def test_hybrid_only_mode_applies_filter_params(tmp_path: Path) -> None:
+    # 0.15.0: ranking is hybrid-only (no ranking-mode knob). Filter params
+    # still scope the recall pool the way the former bm25 mode required.
     tools = make_tools(tmp_path)
     keep = _write_mem(tools, content="hello keep", subject="hello", tags=["keep"])
     _write_mem(tools, content="hello drop", subject="hello", tags=["drop"])
-    monkeypatch.setenv("MEMORY_ARBITER_RANKING_MODE", "bm25")
-    try:
-        res = tools.memory_search(query="hello", tags_filter=["keep"])
-        ids = {r["id"] for r in res["data"]["results"]}
-        assert ids == {keep}
-        assert any("bm25 mode falls back to hybrid" in w for w in res["warnings"]), res["warnings"]
-        assert res["data"]["has_more"] is False
-        assert res["data"]["total_estimate"] == 1
-    finally:
-        monkeypatch.delenv("MEMORY_ARBITER_RANKING_MODE", raising=False)
+    res = tools.memory_search(query="hello", tags_filter=["keep"])
+    ids = {r["id"] for r in res["data"]["results"]}
+    assert ids == {keep}
+    assert res["data"]["has_more"] is False
+    assert res["data"]["total_estimate"] == 1
 
 
-def test_bm25_mode_expired_search_honors_offset(tmp_path: Path, monkeypatch) -> None:
+def test_expired_search_honors_offset(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     ids = []
     for i in range(5):
         mid = _write_mem(tools, content=f"release expired {i}", subject="release", tags=[])
         ids.append(mid)
         assert tools.db.update_memory(mid, {"status": "superseded"}) is True
-    monkeypatch.setenv("MEMORY_ARBITER_RANKING_MODE", "bm25")
-    try:
-        page1 = tools.memory_search_expired(query="release", limit=2, offset=0)
-        page2 = tools.memory_search_expired(query="release", limit=2, offset=2)
-        p1_ids = [r["id"] for r in page1["data"]["results"]]
-        p2_ids = [r["id"] for r in page2["data"]["results"]]
-        assert len(p1_ids) == 2
-        assert len(p2_ids) == 2
-        assert set(p1_ids).isdisjoint(p2_ids)
-        assert page1["data"]["has_more"] is True
-        assert page2["data"]["offset"] == 2
-        assert page2["data"]["next_offset"] == 4
-        assert set(p1_ids + p2_ids).issubset(set(ids))
-    finally:
-        monkeypatch.delenv("MEMORY_ARBITER_RANKING_MODE", raising=False)
+    page1 = tools.memory_search_expired(query="release", limit=2, offset=0)
+    page2 = tools.memory_search_expired(query="release", limit=2, offset=2)
+    p1_ids = [r["id"] for r in page1["data"]["results"]]
+    p2_ids = [r["id"] for r in page2["data"]["results"]]
+    assert len(p1_ids) == 2
+    assert len(p2_ids) == 2
+    assert set(p1_ids).isdisjoint(p2_ids)
+    assert page1["data"]["has_more"] is True
+    assert page2["data"]["offset"] == 2
+    assert page2["data"]["next_offset"] == 4
+    assert set(p1_ids + p2_ids).issubset(set(ids))
 
 
 def test_passes_filters_unit() -> None:
@@ -810,3 +761,91 @@ def test_count_matches_post_filter(tmp_path: Path) -> None:
     assert res["data"]["has_more"] is False
 
 
+# ── from test_cjk_characterization.py ──
+
+"""Characterization tests: lock the CURRENT (pre-refactor) CJK regex behavior.
+
+These tests prove "what the two CJK regexes match today" so Phase 1 cannot
+silently change recall/subject behavior by merging them (R11).
+
+Authoritative measurement (2026-08-09, importing the real compiled patterns
+from the package — NOT re-typed literals):
+
+  * ``search._CJK_RE`` (shared by anchors.py) matches 38960 codepoints.
+  * ``db._CJK_CHAR_RE`` matches 39024 codepoints.
+  * ``db._CJK_CHAR_RE`` is a strict SUPERSET; the ONLY difference is the range
+    **U+4DC0–U+4DFF** (64 Yijing hexagram / legacy symbols), which db matches
+    and search does not.
+
+Because the match sets differ, the two regexes MUST be kept as two named
+constants. A naive "use the broadest" merge would flip ``search``'s behavior
+for those 64 codepoints (and ``db``'s if merged the other way), changing FTS
+sanitize / subject tokenization for any query containing them.
+
+These tests assert the CURRENT difference. A future deliberate unification must
+update them intentionally, not as a drive-by in a move commit.
+"""
+
+import pytest
+
+from memory_arbiter.db import _CJK_CHAR_RE, _subject_tokens
+from memory_arbiter.search import _CJK_RE
+
+
+@pytest.mark.parametrize("cp", [
+    0x3400,  # 㐀 Ext-A first
+    0x4DBF,  # 䶿 Ext-A last
+    0x4E00,  # 一 CJK Unified first
+    0x9FFF,  # 鿿 CJK Unified last
+    0xF900,  # 豈 Compat first
+    0x3042,  # あ Hiragana
+    0x30A2,  # ア Katakana
+    0xAC00,  # 가 Hangul first
+])
+def test_shared_core_codepoints_match_both(cp: int) -> None:
+    """Codepoints both regexes agree on (the CJK core)."""
+    ch = chr(cp)
+    assert _CJK_RE.search(ch), f"search._CJK_RE should match U+{cp:04X}"
+    assert _CJK_CHAR_RE.search(ch), f"db._CJK_CHAR_RE should match U+{cp:04X}"
+
+
+@pytest.mark.parametrize("cp", [0x4DC0, 0x4DFF])
+def test_only_difference_is_yijing_range(cp: int) -> None:
+    """Lock the CURRENT sole divergence: U+4DC0-U+4DFF matches db, not search.
+
+    (Probing the endpoints; the full-range subset proof below covers the rest.)"""
+    ch = chr(cp)
+    assert _CJK_CHAR_RE.search(ch), f"db._CJK_CHAR_RE should match U+{cp:04X}"
+    assert not _CJK_RE.search(ch), (
+        f"search._CJK_RE currently does NOT match U+{cp:04X}; if it now does, "
+        "the regexes were unified and this characterization test must be updated "
+        "deliberately (not as a drive-by)"
+    )
+
+
+def test_db_is_strict_superset_of_search() -> None:
+    """Whole-range proof: search ⊂ db and the delta is exactly U+4DC0-4DFF."""
+    search_hits = {cp for cp in range(0x2000, 0xDB00) if _CJK_RE.search(chr(cp))}
+    db_hits = {cp for cp in range(0x2000, 0xDB00) if _CJK_CHAR_RE.search(chr(cp))}
+    assert search_hits < db_hits, "search set must be a strict subset of db set"
+    assert (db_hits - search_hits) == set(range(0x4DC0, 0x4E00))
+    assert not (search_hits - db_hits), "search must not match anything db misses"
+
+
+def test_ascii_and_digits_match_neither() -> None:
+    for ch in "aZ019_":
+        assert not _CJK_RE.search(ch)
+        assert not _CJK_CHAR_RE.search(ch)
+
+
+def test_subject_tokens_uses_two_char_sliding_windows() -> None:
+    """db._subject_tokens splits a CJK run into 2-char sliding windows."""
+    assert _subject_tokens("金营项目") == ["金营", "营项", "项目"]
+    assert _subject_tokens("金营") == ["金营"]
+    assert _subject_tokens("金") == []  # a lone CJK char forms no 2-char window
+
+
+def test_subject_tokens_keeps_ascii_tokens_whole() -> None:
+    tokens = _subject_tokens("release 金营项目 v0.12")
+    assert "release" in tokens
+    assert "金营" in tokens and "项目" in tokens

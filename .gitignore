@@ -48,3 +48,4 @@ htmlcov/
 .codex/
 .cursor/
 .windsurf/
+*.sqlite3.startup.lock

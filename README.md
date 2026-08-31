@@ -4,7 +4,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.14.11` (MCP initialize handshake now reports the package version instead of the SDK's).
+> Current release: `0.14.12` (MCP initialize handshake now reports the package version instead of the SDK's).
 
 ## Why trust it
 
@@ -41,11 +41,11 @@ pip install "memory-arbiter-mcp[vec]"            # sqlite-vec evidence recall
 pip install "memory-arbiter-mcp[semantic-local]" # local GGUF runtime (embeddings + Qwen)
 ```
 
-Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Its starter template includes DB/backup paths, stdio/localhost HTTP transport, core workspace controls (`isolation`, canonical matching, weak weighting, strict admission, cutoff/guard), vec, embedding, recall caps, and `update_check.enabled=true`. The reference `examples/memory-arbiter.config.example.json` additionally shows optional workspace-Qwen and semantic-conflict tuning. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Since 0.15.0 configuration is file-only and the whole user surface is 18 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
 
-The server requires an explicitly configured identity: set `client` and `agent_id` in config.json or `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` in the environment (the stdio `examples/*.mcp.json` entries do this via `env`). There are no built-in defaults — the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; `memory(action="remember")` does not accept `agent_id`/`client` in `data`. streamable-http takes caller identity from the per-request headers described below.
+The server requires an explicitly configured identity: set `client` and `agent_id` in config.json or the `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` launch-context environment variables (the stdio `examples/*.mcp.json` entries do this via `env`). There are no built-in defaults — the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; `memory(action="remember")` does not accept `agent_id`/`client` in `data`. streamable-http takes caller identity from the per-request headers described below.
 
-stdio remains the default. For one local server shared by several clients, set `mcp.transport` to `streamable-http` (or `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`) and connect to `http://127.0.0.1:8000/mcp`. Each client's MCP server entry must set fixed `X-Mema-Client` and `X-Mema-Agent-Id` headers; see [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json). The client sends them automatically on every HTTP MCP request—agents should not add identity to individual tool calls. Missing, empty, invalid, duplicated, or conflicting identity is rejected instead of falling back to defaults. Community HTTP mode binds only to localhost, and these headers are advisory provenance and policy input, **not authentication or multi-tenant isolation**.
+stdio remains the default. For one local server shared by several clients, set `mcp.transport` to `streamable-http` (or `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`, one of the six retained launch-context variables) and connect to `http://127.0.0.1:8000/mcp`. Each client's MCP server entry must set fixed `X-Mema-Client` and `X-Mema-Agent-Id` headers; see [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json). The client sends them automatically on every HTTP MCP request—agents should not add identity to individual tool calls. Missing, empty, invalid, duplicated, or conflicting identity is rejected instead of falling back to defaults. Community HTTP mode binds only to localhost, and these headers are advisory provenance and policy input, **not authentication or multi-tenant isolation**.
 
 The daily loop is four calls — `remember` a reusable fact, `find` to recall, `read` for exact lookup, `update` when a newer source replaces an existing current memory (never create a second active copy of one source of truth). Point any agent at the packaged rule:
 
@@ -81,14 +81,14 @@ Code then validates the JSON, side mapping, mechanical attribute/value normaliza
 
 There are deliberately two gates:
 
-- **Scheduled scan is broad.** `memory_repair(task="scan_candidates")` retains deterministic KNN/rule candidates and — when `semantic_conflict.scan_enhance=true` (default) and the local Qwen backend is up — runs a bounded per-page Qwen enhancement: rule candidates gain extracted attribute/value fields and `value_groups`, similarity-only pairs (normally opt-in via `include_check`) that extract a valid same-attribute/different-value in either direction are unioned in, and verified candidates with matching entity/scope are aggregated into `slot_groups`. `scan_max_pairs`/`scan_budget_ms` bound the cost. Single-direction, weak-grounding, and incomplete entity/scope cases remain `review_candidate`; a model failure never shrinks the baseline candidate set. The external reviewer records every triaged candidate with `record_conflict(status="open"|"not_a_conflict")` to obtain snapshot dedupe.
-- **Write-time notice is strict.** A user-visible notice requires two valid, mutually consistent four-field extractions, grounded differing values, a complete canonical `workspace + entity + attribute + scope`, and no deterministic coexistence veto. Anything less fails closed into later scan review. `notice_sync_wait_ms` only controls synchronous delivery; it does not change detection.
+- **Scheduled scan is broad.** `memory_repair(task="scan_candidates")` retains deterministic KNN/rule candidates and — when the local Qwen runtime is up (scan enhancement is always on, a frozen constant) — runs a bounded per-page Qwen enhancement: rule candidates gain extracted attribute/value fields and `value_groups`, similarity-only pairs (normally opt-in via `include_check`) that extract a valid same-attribute/different-value in either direction are unioned in, and verified candidates with matching entity/scope are aggregated into `slot_groups`. Fixed bounds cap the cost (8 Qwen pair evaluations per page, 60 s page deadline). Single-direction, weak-grounding, and incomplete entity/scope cases remain `review_candidate`; a model failure never shrinks the baseline candidate set. The external reviewer records every triaged candidate with `record_conflict(status="open"|"not_a_conflict")` to obtain snapshot dedupe.
+- **Write-time notice is strict.** A user-visible notice requires two valid, mutually consistent four-field extractions, grounded differing values, a complete canonical `workspace + entity + attribute + scope`, and no deterministic coexistence veto. Anything less fails closed into later scan review. The fixed 5 s synchronous-delivery wait only gates when a notice is attached; it does not change detection.
 
 The single `conflicts` table stores one one-to-many event and its immutable member/value snapshot. Its public lifecycle is `open → applying → resolved`, with `not_a_conflict` as a terminal triage result. `memory(action="judge")` CAS-pins the conflict revision, records the chosen value and plan, and moves it to `applying`; execute each returned `memory_govern(action="apply_conflict_action")` sequentially with explicit authorization and the latest revision, then call authorized `resolve_conflict` only after every planned member action completes. Partial failures remain `applying`: when `data.action_required="replan_conflict"`, re-read the group/members and call authorized `memory_govern(action="replan_conflict")` with the current revision and replacement plan. Replanning preserves prior plan history; never retry stale precomputed steps.
 
 ## Workspaces
 
-Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` applies no workspace ACL: an omitted workspace spans the library, while an explicitly supplied workspace is canonicalized and scopes that read. `weak` adds a soft ranking/hint signal; `workspace_weak_vector_weight=true` makes that nudge decay continuously with guarded canonical-vector distance. Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it. Strict visibility defaults to vector admission (`workspace_recall_admission=true`): workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share one admitted set: the caller canonical plus every canonical at or below `workspace_recall_cutoff` (default `0.25`) after default-pool, short-name (`workspace_min_name_len`), and generic-substring guards. Set `workspace_recall_admission=false` for the legacy exact-canonical filter. Process-global maintenance (for example semantic runtime control, backup replay, doctor, and settings) is not a workspace-scoped content view. Missing vectors or sqlite-vec degradation fall back to the exact caller canonical. The reserved `default` pool is insulated and is not visible from a strict project scope. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; supported workspace governance uses rename, migrate, move-by-id (`move_memories_workspace`), pending confirmation, and full-registry confirmation. Internal redirect/negative-decision state prevents old names from re-splitting and suppressed candidates from reappearing, but is not a user-facing workflow.
+Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` applies no workspace ACL: an omitted workspace spans the library, while an explicitly supplied workspace is canonicalized and scopes that read. `weak` adds a soft ranking/hint signal (a fixed binary nudge — the continuous vector-distance weighting is no longer a knob). Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it. Strict visibility uses guarded vector admission (always on since 0.15.0, a frozen constant): workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share one admitted set: the caller canonical plus every canonical at or below a 0.25 cosine cutoff after default-pool, short-name, and generic-substring guards. Process-global maintenance (for example semantic runtime control, backup replay, doctor, and settings) is not a workspace-scoped content view. Missing vectors or sqlite-vec degradation fall back to the exact caller canonical. The reserved `default` pool is insulated and is not visible from a strict project scope. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; supported workspace governance uses rename, migrate, move-by-id (`move_memories_workspace`), pending confirmation, and full-registry confirmation. Internal redirect/negative-decision state prevents old names from re-splitting and suppressed candidates from reappearing, but is not a user-facing workflow.
 
 The first successful write that registers a canonical workspace returns a non-blocking top-level `workspace_review` notice in `none`/`weak`, plus `data.write_hints.new_workspace_detected`. Review possible duplicates before running authorized `confirm_workspaces`. `strict` instead returns the existing blocking `action_required=confirm_new_workspace` flow and does not emit the duplicate non-blocking notice.
 
@@ -132,33 +132,60 @@ The old database is never deleted. Standard JSON configuration is backed up and 
 
 ## Configuration
 
-Configuration discovery order:
+Configuration is file-only since 0.15.0. Everything tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at; `mema setup` writes the starter template). Engine parameters, timeouts, thresholds, and caps are frozen constants (`memory_arbiter/constants.py`).
 
-1. `MEMORY_ARBITER_CONFIG` (points at a config file)
-2. `~/.config/memory-arbiter/config.json`
-3. environment variables and defaults
+The complete user surface is 18 keys:
 
-Within one scope, a value set in the config file wins over the corresponding environment variable (e.g. `db_path` in `config.json` overrides `MEMORY_ARBITER_DB_PATH`); environment variables apply when no config file sets the key.
-
-See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json) and [`.env.example`](.env.example).
+```json
+{
+  "db_path": "~/.local/share/memory-arbiter/memory.sqlite3",
+  "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
+  "client": "your-client",
+  "agent_id": "your-agent-id",
+  "workspace": "default",
+  "isolation": "none",
+  "policy_path": null,
+  "update_check": { "enabled": true },
+  "embedding": {
+    "model_path": "~/.local/share/memory-arbiter/models/embedding.gguf",
+    "auto_query": true,
+    "auto_write": true
+  },
+  "semantic_conflict": {
+    "enabled": true,
+    "model_path": "~/.local/share/memory-arbiter/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "on_write": "async",
+    "max_notice_pairs": 2
+  },
+  "mcp": {
+    "transport": "stdio",
+    "http": { "host": "127.0.0.1", "port": 8000 }
+  }
+}
+```
 
 | Setting | Purpose |
 | --- | --- |
 | `db_path` | Current SQLite database |
 | `backup_jsonl` | Append-only fallback when SQLite cannot write |
-| `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
-| `mcp.http.host` / `port` / `path` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000/mcp` |
-| `mcp.http.stateless` | Stateless Streamable HTTP (default `true`); set `false` only for clients that require server-side MCP sessions |
+| `client` / `agent_id` | Required caller identity; no built-in defaults — the server refuses to start when either is blank |
+| `workspace` / `isolation` | Default workspace and `none`/`weak`/`strict` workspace behavior |
+| `policy_path` | Optional client/agent tool-routing policy file |
 | `update_check.enabled` | Optional one-shot background PyPI discovery (default `true`); the only network call, with cached/suppressed notices and no auto-upgrade |
-| `vec.enabled` | Enables sqlite-vec evidence recall |
-| `embedding.model_path` | Local GGUF embedding model |
-| `embedding.max_unit_chars` | Safety bound for one evidence embedding call |
-| `isolation` | `none`, `weak`, or `strict` workspace behavior |
-| `semantic_conflict.model_path` | Optional local Qwen2.5-0.5B GGUF for bidirectional four-field extraction |
-| `semantic_conflict.notice_sync_wait_ms` | Write-time notice delivery wait (`0..5000`, default `5000` ms); timeout continues the same task asynchronously |
-| `semantic_conflict.workspace_qwen_budget_ms` | Independent workspace near-match Qwen budget (`50..5000`, default `750` ms) |
-| `semantic_conflict.job_timeout_ms` | Between-pair asynchronous job budget |
-| `semantic_conflict.inference_timeout_ms` | Hard timeout for one Qwen call |
+| `embedding.model_path` | Local GGUF embedding model — pointing at it is the sole intent to enable sqlite-vec evidence recall |
+| `embedding.auto_query` / `auto_write` | Auto-embed at query/write time (default `true`) |
+| `semantic_conflict.model_path` | Optional local Qwen2.5-0.5B GGUF for bidirectional four-field extraction; configured → auto-enabled, loaded at startup, and kept resident |
+| `semantic_conflict.enabled` | Explicit off-switch; unset + `model_path` means enabled, explicit `false` wins |
+| `semantic_conflict.on_write` | Write-time detection: `async` (default) or `off` |
+| `semantic_conflict.max_notice_pairs` | Per-write notice cap (1–3, default `2`) |
+| `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
+| `mcp.http.host` / `port` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000`; the endpoint path is fixed at `/mcp` |
+
+See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json).
+
+Semantics worth knowing: the embedding dimension comes from the model itself — the database records the active dimension, and switching to a model with a different dimension automatically drops and rebuilds the vector tables at the new dimension at startup (a one-time full evidence rebuild). Ranking is fixed hybrid (lexical + evidence fusion); there is no ranking-mode knob. HTTP request handling is stateless with a 4 MB request-body cap.
+
+Six environment variables remain as launch context: `MEMORY_ARBITER_CONFIG`, `MEMORY_ARBITER_DB_PATH`, `MEMORY_ARBITER_BACKUP_JSONL`, `MEMORY_ARBITER_MCP_TRANSPORT`, `MEMORY_ARBITER_CLIENT`, `MEMORY_ARBITER_AGENT_ID`. They select process context (which config file, which DB, which transport, which identity), and a config-file value wins over the matching variable. Every other `MEMORY_ARBITER_*` variable is no longer read — a stale export surfaces a "no longer read" warning in `mema doctor`, the console settings page, and `memory(action="status")`. Removed file keys similarly warn "no longer configurable" and are ignored; [docs/INTEGRATION.md](docs/INTEGRATION.md) carries the 0.14 → 0.15 key-migration table.
 
 ## HTTP mode: sharing one local server
 
@@ -177,7 +204,7 @@ Setting it up:
 2. **Keep it running**: mema has **no built-in daemon** — use a process manager. On macOS, the launchd template at [`examples/com.memory-arbiter.mema.plist`](examples/com.memory-arbiter.mema.plist) runs it at load, restarts on crash, and logs to `/tmp/mema.{out,err}.log` (replace `__MEMA_BIN__` with the absolute path `which mema` prints; put it in `~/Library/LaunchAgents/` then `launchctl load`). For a quick try, `tmux new -d -s mema 'mema'` works.
 3. **Client**: copy [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json), filling in `X-Mema-Client` and `X-Mema-Agent-Id`.
 
-Notes: HTTP defaults to stateless request handling because mema keeps memory and semantic-notice state in SQLite, not in an MCP session. A service restart therefore does not leave clients holding an expired server session. Semantic notices created asynchronously are claimed from SQLite and attached to a later successful tool response as before; only a worker job that has not yet persisted its notice can be interrupted by a process restart. Set `mcp.http.stateless=false` only when a client specifically requires server-side MCP sessions or server-initiated SSE messages.
+Notes: HTTP request handling is stateless (a frozen constant since 0.15.0) because mema keeps memory and semantic-notice state in SQLite, not in an MCP session. A service restart therefore does not leave clients holding an expired server session. Semantic notices created asynchronously are claimed from SQLite and attached to a later successful tool response as before; only a worker job that has not yet persisted its notice can be interrupted by a process restart.
 
 The client sends the fixed headers automatically on every HTTP MCP request — agents must not add identity to individual tool `data`, or it is rejected. Missing/empty/duplicate/conflicting identity fails closed (400), never falling back to defaults. The service binds to loopback only; these headers are provenance, **not authentication**. Because launchd does not inherit your shell PATH or expand `~`, put absolute paths in `ProgramArguments` and for any GGUF `model_path` in config.json.
 
@@ -228,4 +255,4 @@ During development, package/docs may describe an unreleased dev version while `s
 
 ## 中文摘要
 
-Memory Arbiter（迷码）是面向 AI Agent 的本地可信事实层：每条事实只存一份完整原文，向量与检索均为可重建的派生索引。冲突 scan 走宽门召回，write-time notice 走双向四字段 Qwen 抽槽与严格 grounding；单一 `conflicts` 表保存一对多事件，生命周期为 `open → applying → resolved` 或 `not_a_conflict`。裁决后按 `judge → apply_conflict_action → resolve_conflict` 顺序治理。`none/weak/strict` 都做 workspace 归一；strict 可选 guarded vector admission，default 池不进入项目 scope。`workspace_state_v1` 升级会清除旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并要求完成带 epoch 的全库 scan。**完整中文文档见 [README.zh-CN.md](README.zh-CN.md)**；另见 [INTRO.md](INTRO.md) 与 [docs/INTEGRATION.zh-CN.md](docs/INTEGRATION.zh-CN.md)。
+Memory Arbiter（迷码）是面向 AI Agent 的本地可信事实层：每条事实只存一份完整原文，向量与检索均为可重建的派生索引。冲突 scan 走宽门召回，write-time notice 走双向四字段 Qwen 抽槽与严格 grounding；单一 `conflicts` 表保存一对多事件，生命周期为 `open → applying → resolved` 或 `not_a_conflict`。裁决后按 `judge → apply_conflict_action → resolve_conflict` 顺序治理。`none/weak/strict` 都做 workspace 归一；strict 使用 guarded vector admission，default 池不进入项目 scope。`workspace_state_v1` 升级会清除旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并要求完成带 epoch 的全库 scan。**完整中文文档见 [README.zh-CN.md](README.zh-CN.md)**；另见 [INTRO.md](INTRO.md) 与 [docs/INTEGRATION.zh-CN.md](docs/INTEGRATION.zh-CN.md)。

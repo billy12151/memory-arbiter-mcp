@@ -14,7 +14,14 @@ from typing import Any, Mapping, cast, TYPE_CHECKING
 from .. import __version__
 from ..acl import CallerWorkspace, WorkspaceScope, scope_names, workspace_scope_sql, forbidden_payload, raw_workspace
 from ..arbitration import compare_memories
-from ..constants import DEFAULT_WORKSPACE_NAME, is_default_workspace_term
+from ..constants import (
+    DEFAULT_WORKSPACE_NAME,
+    WORKSPACE_MIN_NAME_LEN,
+    WORKSPACE_RECALL_ADMISSION,
+    WORKSPACE_RECALL_CUTOFF,
+    WORKSPACE_WEAK_VECTOR_WEIGHT,
+    is_default_workspace_term,
+)
 from ..db import MemoryDB, _normalize_alias_key
 from ..embedder import ManagedEmbedder
 from ..db_generation import database_startup_lock
@@ -1493,18 +1500,18 @@ class OperationsPipeline:
                 "local_text_index_worker": self._evidence_worker.status(),
                 "isolation": self.settings.isolation,
                 "workspace_recall": {
-                    "admission_enabled": self.settings.workspace_recall_admission,
-                    "cutoff": self.settings.workspace_recall_cutoff,
-                    "min_name_len": self.settings.workspace_min_name_len,
-                    "weak_vector_weight": self.settings.workspace_weak_vector_weight,
+                    "admission_enabled": WORKSPACE_RECALL_ADMISSION,
+                    "cutoff": WORKSPACE_RECALL_CUTOFF,
+                    "min_name_len": WORKSPACE_MIN_NAME_LEN,
+                    "weak_vector_weight": WORKSPACE_WEAK_VECTOR_WEIGHT,
                     "strict_scope_behavior": (
                         "guarded_vector_neighbors"
-                        if self.settings.workspace_recall_admission
+                        if WORKSPACE_RECALL_ADMISSION
                         else "exact_canonical"
                     ),
                 },
                 "tool_surface": {
-                    "profile": self.settings.tool_profile,
+                    "profile": "product",
                     "default_profile": "product",
                     "product_tools": ["memory", "memory_review", "memory_govern", "memory_repair"],
                 },
@@ -1696,8 +1703,17 @@ class OperationsPipeline:
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
             return denied
+        # Vec tables are created lazily at the first embedder load, so their
+        # absence only counts as "missing" once the vec state says the index
+        # should be live (state=ready with embedding configured) — a fresh
+        # library in its pre-first-embed window is healthy, not broken.
         missing_vector_tables = (
-            self.db.missing_vector_tables() if self.settings.enable_sqlite_vec else []
+            self.db.missing_vector_tables()
+            if (
+                self.settings.embedding_model_path is not None
+                and self.db.get_vec_index_state().get("state") == "ready"
+            )
+            else []
         )
         table_repair: dict[str, Any] = {
             "required": bool(missing_vector_tables),
@@ -1705,7 +1721,7 @@ class OperationsPipeline:
             "recreated": False,
             "warnings": [],
         }
-        if not dry_run and self.settings.enable_sqlite_vec:
+        if not dry_run and self.settings.embedding_model_path is not None:
             recreated, repair_warnings = self.db.ensure_vector_tables_for_repair()
             table_repair.update({"recreated": recreated, "warnings": repair_warnings})
             if repair_warnings:

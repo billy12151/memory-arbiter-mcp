@@ -10,7 +10,12 @@ from typing import Any, Iterator, TYPE_CHECKING
 from ..config import Settings
 from ..degrade import DegradeState
 
-from ..constants import DEFAULT_WORKSPACE_NAME, DEFAULT_TERMS, is_default_workspace_term
+from ..constants import (
+    DEFAULT_WORKSPACE_NAME,
+    DEFAULT_TERMS,
+    WORKSPACE_MATCH_DISTANCE,
+    is_default_workspace_term,
+)
 from ..db_generation import database_startup_lock
 from ..models import utc_now_iso
 
@@ -376,10 +381,7 @@ class WorkspaceStore:
         if not self._db_available:
             return result
         if match_distance is None:
-            # Explicit None check (not truthy fallback): 0.0 is a legitimate
-            # "exact-vector-only" setting and must not be swallowed to 0.25.
-            configured = self.settings.workspace_match_distance
-            match_distance = float(0.25 if configured is None else configured)
+            match_distance = WORKSPACE_MATCH_DISTANCE
 
         try:
             with self.connection() as conn:

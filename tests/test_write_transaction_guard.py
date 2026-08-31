@@ -20,7 +20,7 @@ def make_db(tmp_path: Path) -> MemoryDB:
         db_path=tmp_path / "txn.sqlite3",
         backup_jsonl=tmp_path / "txn.jsonl",
         client="codex", agent_id="agent-a", workspace="default",
-        enable_sqlite_vec=False, vec_dim=2, isolation="none",
+        isolation="none",
     )
     return MemoryDB(settings)
 

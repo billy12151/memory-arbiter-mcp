@@ -18,32 +18,6 @@ from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
 
 
-class _MockManagedEmbedder:
-    """Minimal mock for ManagedEmbedder — wraps a plain encode function.
-
-    Mirrors the production Never-raises contract: if _encode raises, the
-    exception is caught, last_encode_error is set, and an empty EmbedResult
-    is returned so callers must check er.embedding.
-    """
-
-    def __init__(self, encode_fn):
-        self._encode = encode_fn
-        self.embedding_space_id = "mock_space_id"
-        self.last_encode_error = None
-
-    def embed_text(self, prefix="", body="", max_body_chars=None):
-        # Mirror the production separator so the prefix's trailing token and the
-        # body's leading token are not merged (e.g. "alpha"+"alpha x" → "alphaalpha").
-        sep = "\n" if prefix and body else ""
-        text = (prefix + sep + body).strip()
-        try:
-            emb = self._encode(text)
-        except Exception as exc:
-            self.last_encode_error = str(exc)
-            return EmbedResult(embedding=[], truncated=True, original_tokens=0, used_tokens=0)
-        return EmbedResult(embedding=emb, truncated=False, original_tokens=0, used_tokens=0)
-
-
 def make_tools(tmp_path: Path) -> MemoryTools:
     settings = Settings(
         db_path=tmp_path / "memory.sqlite3",
@@ -51,22 +25,6 @@ def make_tools(tmp_path: Path) -> MemoryTools:
         client="codex",
         agent_id="agent-a",
         workspace="repo-a",
-        enable_sqlite_vec=False,
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
-
-
-def make_vec_tools(tmp_path: Path) -> MemoryTools:
-    pytest.importorskip("sqlite_vec")
-    settings = Settings(
-        db_path=tmp_path / "memory-vec.sqlite3",
-        backup_jsonl=tmp_path / "backup-vec.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="repo-a",
-        enable_sqlite_vec=True,
-        vec_dim=2,
-        split_threshold=1,
     )
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 

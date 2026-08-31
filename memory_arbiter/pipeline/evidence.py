@@ -7,6 +7,11 @@ import time
 from typing import Any, TYPE_CHECKING
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
+from ..constants import (
+    SEMANTIC_JOB_TIMEOUT_MS,
+    SEMANTIC_MAX_EVIDENCE_UNITS,
+    SEMANTIC_MIN_PAIR_BUDGET_MS,
+)
 from ..evidence import evidence_content_hash, local_text_units
 from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
@@ -168,7 +173,7 @@ class EvidencePipeline:
                 applying_slots.add(json.dumps(
                     group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 ))
-        min_budget = self.settings.semantic_conflict_min_pair_budget_ms / 1000.0
+        min_budget = SEMANTIC_MIN_PAIR_BUDGET_MS / 1000.0
         # Behaviour change (v3 hardening): each degradation reason is counted
         # at most once per task. The pair loop can hit the same technical
         # failure for many pairs, and counting every hit made
@@ -187,13 +192,11 @@ class EvidencePipeline:
 
         def backlog_deadline() -> float | None:
             value = self._semantic_worker.pending_job_deadline(
-                self.settings.semantic_conflict_job_timeout_ms / 1000.0,
+                SEMANTIC_JOB_TIMEOUT_MS / 1000.0,
             )
             return float(value) if value is not None else None
 
-        max_units = max(1, int(getattr(
-            self.settings, "semantic_conflict_max_evidence_units", 24,
-        )))
+        max_units = max(1, SEMANTIC_MAX_EVIDENCE_UNITS)
         workspace = (
             record.get("workspace_canonical") or record.get("workspace")
             if self.settings.isolation == "strict" else None

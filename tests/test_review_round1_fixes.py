@@ -20,7 +20,7 @@ from memory_arbiter.tools import MemoryTools
 def _tools(tmp_path: Path, *, isolation: str = "none") -> tuple[MemoryTools, MemoryDB]:
     settings = Settings(
         db_path=tmp_path / "review.db", backup_jsonl=tmp_path / "backup.jsonl",
-        enable_sqlite_vec=False, isolation=isolation, workspace="default",
+        isolation=isolation, workspace="default",
     )
     db = MemoryDB(settings)
     return MemoryTools(settings, db), db

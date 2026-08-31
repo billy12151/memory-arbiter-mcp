@@ -5,7 +5,7 @@ text helpers that were previously duplicated across ``db.py``, ``search.py``,
 ``anchors.py`` and persistence/search modules. Original locations keep re-export aliases so
 existing imports (and tests that import private names) keep working.
 
-CJK: TWO constants are kept deliberately (R11 / test_cjk_characterization.py):
+CJK: TWO constants are kept deliberately (R11 / the CJK characterization tests in test_search_tags_filters.py):
   * ``CJK_RE_SEARCH`` — the FTS-trigram/token path regex (matches U+3400-4DBF,
     4E00-9FFF, F900-FAFF, 3040-309F, 30A0-30FF, AC00-D7AF).
   * ``CJK_RE_SUBJECT`` — the subject-tokenisation regex; a strict SUPERSET that

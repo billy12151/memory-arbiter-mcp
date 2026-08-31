@@ -41,6 +41,7 @@ def _embedder(encode, tokenize, **kwargs) -> ManagedEmbedder:
         embedding_space_id="space",
         n_ctx=2048,
         reserved_tokens=64,
+        dim=4,
     )
     fields.update(kwargs)
     return ManagedEmbedder(**fields)
@@ -277,7 +278,7 @@ class TestBuildEmbedderDevicePolicy:
         return str(path)
 
     def test_gpu_backend_offloads_and_exposes_cpu_rebuild(self, fake_llama_cpp, tmp_path):
-        embedder, warnings = build_embedder(self._model(tmp_path), expected_dim=4)
+        embedder, warnings = build_embedder(self._model(tmp_path))
         assert embedder is not None and warnings == []
         assert embedder.gpu_backed is True
         assert _FakeLlama.instances[0].kwargs["n_gpu_layers"] == -1
@@ -288,22 +289,26 @@ class TestBuildEmbedderDevicePolicy:
 
     def test_gpu_construction_failure_falls_back_to_cpu(self, fake_llama_cpp, tmp_path):
         _FakeLlama.gpu_construction_error = "no metal device available"
-        embedder, warnings = build_embedder(self._model(tmp_path), expected_dim=4)
+        embedder, warnings = build_embedder(self._model(tmp_path))
         assert embedder is not None
         assert embedder.gpu_backed is False
         assert embedder._cpu_rebuild is None
         assert any("GPU offload construction failed" in w for w in warnings)
 
-    def test_gpu_dim_mismatch_retries_on_cpu(self, fake_llama_cpp, tmp_path):
-        _FakeLlama.gpu_dim = 7  # wrong dimension only on the GPU instance
-        embedder, warnings = build_embedder(self._model(tmp_path), expected_dim=4)
+    def test_dimension_is_read_from_the_model_probe(self, fake_llama_cpp, tmp_path):
+        # 0.15.0: there is no configured expected_dim to enforce — the model's
+        # own startup probe sample IS the dimension fact source, whatever the
+        # backend reports.
+        _FakeLlama.gpu_dim = 7
+        embedder, warnings = build_embedder(self._model(tmp_path))
         assert embedder is not None
-        assert embedder.gpu_backed is False
-        assert any("GPU dimension probe" in w for w in warnings)
+        assert warnings == []
+        assert embedder.dim == 7
+        assert embedder.gpu_backed is True
 
     def test_gpu_probe_exception_retries_on_cpu(self, fake_llama_cpp, tmp_path):
         _FakeLlama.gpu_encode_error = "metal device removed"
-        embedder, warnings = build_embedder(self._model(tmp_path), expected_dim=4)
+        embedder, warnings = build_embedder(self._model(tmp_path))
         assert embedder is not None
         assert embedder.gpu_backed is False
         assert any("GPU dimension probe failed" in w for w in warnings)
@@ -311,13 +316,13 @@ class TestBuildEmbedderDevicePolicy:
     def test_cpu_probe_exception_disables_embedder(self, fake_llama_cpp, tmp_path):
         fake_llama_cpp.llama_supports_gpu_offload = lambda: False
         _FakeLlama.cpu_encode_error = "boom"
-        embedder, warnings = build_embedder(self._model(tmp_path), expected_dim=4)
+        embedder, warnings = build_embedder(self._model(tmp_path))
         assert embedder is None
         assert any("GGUF embedder load failed" in w for w in warnings)
 
     def test_cpu_only_wheel_never_passes_gpu_kwarg(self, fake_llama_cpp, tmp_path):
         fake_llama_cpp.llama_supports_gpu_offload = lambda: False
-        embedder, warnings = build_embedder(self._model(tmp_path), expected_dim=4)
+        embedder, warnings = build_embedder(self._model(tmp_path))
         assert embedder is not None and warnings == []
         assert embedder.gpu_backed is False
         assert all("n_gpu_layers" not in i.kwargs for i in _FakeLlama.instances)
@@ -354,8 +359,6 @@ class TestDoctorDeepDeviceAndBudget:
         settings = Settings(
             db_path=tmp_path / "budget.sqlite3",
             backup_jsonl=tmp_path / "budget.jsonl",
-            enable_sqlite_vec=False,
-            vec_dim=2,
         )
         db = MemoryDB(settings)
         with db.write_transaction() as conn:

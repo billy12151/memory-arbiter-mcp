@@ -126,7 +126,6 @@ class BackupReplayStore:
                         raise ValueError("record must be an object")
                     validation = validate_product_payload(
                         "memory", "remember", dict(record),
-                        vec_dim=int(self._db.settings.vec_dim),
                     )
                     if validation.error is not None:
                         raise ValueError(f"invalid record: {validation.error.get('field')}: {validation.error.get('reason')}")
