@@ -718,7 +718,7 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     expected_space_id = (
         rebuild_embedder.embedding_space_id if rebuild_embedder is not None else None
     )
-    if expected_space_id is not None:
+    if rebuild_embedder is not None:
         try:
             with db.write_transaction() as conn:
                 row = conn.execute(
