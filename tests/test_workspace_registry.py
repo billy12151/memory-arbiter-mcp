@@ -174,6 +174,7 @@ def test_grouping_first_seen_winner_regardless_of_order(tmp_path: Path) -> None:
 
 
 def test_merge_repoints_everything_and_installs_redirect(tmp_path: Path) -> None:
+    pytest.importorskip("sqlite_vec")
     tools = make_tools(tmp_path, vec=True)
     register(tools, "AgentLane", "agent-lane")
     loser_memory = write(tools, "agent-lane", "loser fact")
@@ -1410,6 +1411,7 @@ def test_concurrent_confirmed_decisions_leave_one_redirect(tmp_path: Path) -> No
 
 
 def test_negative_decision_filters_real_vector_candidate(tmp_path: Path) -> None:
+    pytest.importorskip("sqlite_vec")
     tools = alias_governance_make_tools(tmp_path, vec=True)
     if not tools.db.state.sqlite_vec_available:
         pytest.skip("sqlite-vec unavailable")

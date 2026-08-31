@@ -1404,6 +1404,7 @@ def test_dim_change_drops_and_recreates_vec_tables(tmp_path: Path) -> None:
     assert state["target_space_id"] == "new-space"
 
 
+@requires_vec
 def test_dim_swap_back_arms_rebuild_on_native_dim_tables(tmp_path: Path) -> None:
     # Swapping the model to dim B and back to A keeps the A space id active
     # in meta while the forward flip already rebuilt the tables at B. The

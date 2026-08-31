@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from memory_arbiter.config import Settings
 from memory_arbiter.config_registry import CONFIG_DESCRIPTORS, grouped_descriptors
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, utc_now_iso
@@ -289,6 +291,7 @@ def test_doctor_text_renderer_shows_every_dimension_and_current_summary() -> Non
 
 
 def test_doctor_deep_probe_reports_dimension_mismatch(tmp_path: Path) -> None:
+    pytest.importorskip("sqlite_vec")
     import sqlite3 as _sqlite3
     from memory_arbiter.db.schema import SchemaStore
     from memory_arbiter.doctor import run_all_checks
