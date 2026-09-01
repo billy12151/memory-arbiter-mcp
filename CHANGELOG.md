@@ -3,6 +3,14 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.1] — 2026-09-01
+
+**Packaging fix: restore the MCP Registry ownership token.** The evidence-pipeline refactor (`34b0939`, 0.14 line) rewrote README.md and dropped the `mcp-name: io.github.billy12151/memory-arbiter-mcp` identifier originally added for registry validation (`ec366b3`). Every PyPI artifact built since then failed the MCP Registry's package ownership check, so the registry listing stayed frozen at 0.2.0. No runtime changes.
+
+### Fixed
+
+- README.md again carries the registry identifier (hidden HTML comment at the top of the file; renders invisibly). PyPI artifacts from this release pass the registry's `mcp-name` ownership validation.
+
 ## [0.15.0] — 2026-08-31
 
 **Breaking release: the configuration surface shrinks from 54 keys to 18 and configuration is file-only.** Plan record mema 804; two pre-implementation adversarial review rounds plus two release review rounds (round 2 adversarial), every finding fixed.
