@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.billy12151/memory-arbiter-mcp -->
 # Memory Arbiter MCP
 
 **English | [中文](README.zh-CN.md)**
