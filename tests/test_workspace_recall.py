@@ -546,8 +546,7 @@ def test_strict_attention_summary_names_confirm_pending_workspace(tmp_path):
     assert "confirm_pending_workspace" in summary, f"attention_summary points at wrong tool: {summary!r}"
 
 
-def test_strict_bm25_direct_hits_are_workspace_scoped(tmp_path, monkeypatch):
-    monkeypatch.setenv("MEMORY_ARBITER_RANKING_MODE", "bm25")
+def test_strict_direct_hits_are_workspace_scoped(tmp_path):
     tools = make_tools(tmp_path, "strict")
     for ws, content in [("projA", "apple alpha"), ("projB", "apple beta")]:
         mid = _write(tools, content, ws)["data"]["id"]
