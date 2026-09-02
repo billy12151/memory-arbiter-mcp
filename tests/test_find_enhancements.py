@@ -67,6 +67,15 @@ def test_find_size_counts_beyond_limit(tmp_path: Path) -> None:
     assert str(size["matched_beyond_limit_count"]) in size["display_hint"]
 
 
+def test_find_size_empty_result_has_no_display_hint(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    result = tools.memory_search(query="does-not-exist", limit=10)
+    assert result["ok"] is True
+    size = result["data"]["size"]
+    assert size["returned_count"] == 0
+    assert size.get("display_hint") is None
+
+
 def test_find_unresolved_conflict_count_admitted_scope(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     left = tools.memory_write(content="database is mysql", subject="s", tags=[])["data"]["id"]

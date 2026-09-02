@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import difflib
 import re
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
 from ..embedder import ManagedEmbedder
 
@@ -19,6 +19,13 @@ from ..validation import validate_product_payload
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
+
+
+class _SubjectTagRecord(Protocol):
+    """Structural requirement for ``_similar_active_notice``: subject + tags."""
+
+    subject: str | None
+    tags: list[str]
 
 
 class WritePipeline:
@@ -72,7 +79,7 @@ class WritePipeline:
         return len(left_set & right_set) / len(left_set | right_set)
 
     def _similar_active_notice(
-        self, memory_id: int, record: MemoryRecord, workspace_canonical: str | None,
+        self, memory_id: int, record: _SubjectTagRecord, workspace_canonical: str | None,
     ) -> dict[str, Any] | None:
         """Write-time duplicate hint over subject/tags similarity (owner spec).
 

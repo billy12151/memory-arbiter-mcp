@@ -68,6 +68,23 @@ def test_scan_log_written_on_success_with_identity_fields(tmp_path: Path) -> Non
     assert len(after) == len(lines)
 
 
+def test_scan_log_empty_scan_does_not_write_completed_record(tmp_path: Path) -> None:
+    import tests.test_vnext_evidence as tv
+
+    tools = tv.make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    # No memories have been written, so the scan page completes with zero work.
+    result = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    assert result["ok"] is True, result
+    assert int(result["data"].get("anchors_scanned") or 0) == 0
+    assert result["data"].get("candidates") == []
+
+    path = tools.db.scan_log_path
+    if path.exists():
+        lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        assert not any(line.get("status") == "completed" for line in lines)
+
+
 def test_notice_fires_never_run_then_self_closes_on_scan(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     tools.memory_write(content="some memory", subject="s", tags=[], workspace="w")

@@ -265,16 +265,9 @@ class ReadPipeline:
             matched_total = int(total_estimate) if total_estimate is not None else len(results)
             beyond_count = max(0, matched_total - offset - len(results))
             avg_chars = returned_chars // max(1, len(contents)) if contents else 0
-            response_data["size"] = {
-                "returned_chars": returned_chars,
-                "returned_count": len(contents),
-                "tokens_estimate": returned_tokens,
-                "matched_beyond_limit_chars": beyond_count * avg_chars,
-                "matched_beyond_limit_count": beyond_count,
-                # The metering only pays off if the user actually sees it;
-                # tell the calling agent to surface the cost inline instead
-                # of leaving the numbers buried in the JSON payload.
-                "display_hint": (
+            display_hint = None
+            if contents:
+                display_hint = (
                     f"Surface the result-page cost to the user when presenting "
                     f"these results: ~{returned_tokens} tokens returned "
                     f"({len(contents)} item{'s' if len(contents) != 1 else ''})"
@@ -284,7 +277,17 @@ class ReadPipeline:
                         if beyond_count
                         else "."
                     )
-                ),
+                )
+            response_data["size"] = {
+                "returned_chars": returned_chars,
+                "returned_count": len(contents),
+                "tokens_estimate": returned_tokens,
+                "matched_beyond_limit_chars": beyond_count * avg_chars,
+                "matched_beyond_limit_count": beyond_count,
+                # The metering only pays off if the user actually sees results;
+                # silence the hint on empty pages to avoid instructing the agent
+                # about a cost that does not exist.
+                "display_hint": display_hint,
             }
         try:
             response_data["unresolved_conflict_count"] = self.db.conflicts.count_open_conflicts(

@@ -3,6 +3,20 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **`merge_memories` existence probe leak.** Under strict isolation, `not_found` and `workspace_acl` returned different error codes, allowing a caller to enumerate ids in other workspaces. Survivor and loser errors are now unified into `not_found_or_forbidden` (strict) / `not_found_or_forbidden` (loser) so the two cases are indistinguishable.
+- **`find` display_hint on empty results.** When a search returns zero items, `size.display_hint` is now `None` instead of instructing the agent to surface a non-existent cost.
+- **`scan_candidates` empty scans no longer write `scan_log.jsonl`.** A scan that processed zero anchors, candidates, and KNN pairs no longer appends a completed line, preventing the scheduled-task guidance notice from closing before the task is actually doing work.
+- **Duplicate hint now runs on strict pending→active activation.** `confirm_pending_workspace` and `memory_activate` re-check the newly active memory against existing active memories in the same workspace, surfacing `similar_active_memory` notices that were previously skipped for pending writes.
+- **`count_open_conflicts` no longer silently returns 0 when the conflicts DB is unavailable.** It now raises, and the read path surfaces the failure as a warning.
+
+### Changed
+
+- **`scheduled_tasks` help note** no longer incorrectly links `queue_full` to `rebuild_evidence`; it now distinguishes evidence-worker restart recovery from semantic-worker saturation.
+
 ## [0.15.2] — 2026-09-02
 
 **Tier-1 feature set (plan record mema 810 v3, owner-approved 2026-09-02) plus the Tier-3 quick-win bug fixes (mema 812).** Three independent PRs land together for one release: governed near-duplicate merge, scheduled-task guidance with scan activity logging, and find size metering.

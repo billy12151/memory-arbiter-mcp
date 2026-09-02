@@ -905,7 +905,7 @@ class ConflictStore:
         groups).
         """
         if not self._db_available:
-            return 0
+            raise RuntimeError("conflicts DB unavailable")
         sql = "SELECT COUNT(*) FROM conflicts WHERE status IN ('open','applying')"
         params: tuple[Any, ...] = ()
         # conflicts has no raw `workspace` column (workspace_canonical is NOT

@@ -264,6 +264,74 @@ def test_merge_survivor_must_be_active(tmp_path: Path) -> None:
     assert "not active" in str(result["data"]["error"])
 
 
+def _make_strict_tools(tmp_path: Path, db_name: str = "shared.sqlite3") -> MemoryTools:
+    settings = Settings(
+        db_path=tmp_path / db_name,
+        backup_jsonl=tmp_path / "shared.jsonl",
+        workspace="projA",
+        isolation="strict",
+    )
+    return MemoryTools(settings, MemoryDB(settings))
+
+
+def _confirm_pending(tools: MemoryTools, memory_id: int) -> None:
+    record = tools.db.get_memory(memory_id)
+    if record["status"] != "pending":
+        return
+    confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id,
+        "canonical": record["workspace_canonical"] or record["workspace"],
+        "authorized": True,
+    })
+    assert confirmed["ok"] is True, confirmed
+
+
+def test_merge_strict_hides_survivor_existence_and_loser_scope(tmp_path: Path) -> None:
+    """Strict isolation must not let a caller distinguish 'does not exist' from
+    'exists but is outside my scope' when probing survivor or loser ids."""
+    # Non-strict tenant writes an active memory in a workspace outside the
+    # strict caller's admitted scope, using the same underlying DB.
+    shared_settings = Settings(
+        db_path=tmp_path / "shared.sqlite3",
+        backup_jsonl=tmp_path / "shared.jsonl",
+    )
+    open_tools = MemoryTools(shared_settings, MemoryDB(shared_settings))
+    out_of_scope = _memory(open_tools, "secret fact", workspace="other")
+
+    strict_tools = _make_strict_tools(tmp_path)
+    survivor = _memory(strict_tools, "canonical statement", workspace="projA")
+    in_scope_loser = _memory(strict_tools, "canonical statement", workspace="projA")
+    _confirm_pending(strict_tools, survivor)
+    _confirm_pending(strict_tools, in_scope_loser)
+
+    # Survivor id that exists but is out of scope must look identical to a
+    # genuinely missing id.
+    missing_id = 99999
+    for survivor_probe in (out_of_scope, missing_id):
+        result = strict_tools.memory_govern("merge_memories", {
+            "survivor_id": survivor_probe,
+            "loser_ids": [in_scope_loser],
+            "reason": "probe",
+            "authorized": True,
+        })
+        assert result["ok"] is False
+        assert "not found or not accessible" in str(result["data"]["error"])
+
+    # A loser id that exists but is out of scope, and a loser id that does not
+    # exist, must both report the same per-id failure.
+    result = strict_tools.memory_govern("merge_memories", {
+        "survivor_id": survivor,
+        "loser_ids": [out_of_scope, missing_id, in_scope_loser],
+        "reason": "probe",
+        "authorized": True,
+    })
+    assert result["ok"] is True, result
+    failures = {f["memory_id"]: f["error"] for f in result["data"]["failed_ids"]}
+    assert failures[out_of_scope] == "not_found_or_forbidden"
+    assert failures[missing_id] == "not_found_or_forbidden"
+    assert result["data"]["merged_ids"] == [in_scope_loser]
+
+
 @pytest.fixture()
 def vec_tools(tmp_path: Path):
     import tests.test_vnext_evidence as tv

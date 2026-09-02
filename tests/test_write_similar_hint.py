@@ -118,3 +118,85 @@ def test_tag_jaccard_folds_internal_whitespace(tmp_path: Path) -> None:
     match = hints[0]["matches"][0]
     assert match["memory_id"] == first["data"]["id"]
     assert match["tag_jaccard"] == 1.0
+
+
+def _make_strict_tools(tmp_path: Path) -> MemoryTools:
+    settings = Settings(
+        db_path=tmp_path / "strict.sqlite3",
+        backup_jsonl=tmp_path / "strict.jsonl",
+        workspace="projA",
+        isolation="strict",
+    )
+    return MemoryTools(settings, MemoryDB(settings))
+
+
+def _confirm_pending(tools: MemoryTools, memory_id: int) -> None:
+    record = tools.db.get_memory(memory_id)
+    if record["status"] != "pending":
+        return
+    confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id,
+        "canonical": record["workspace_canonical"] or record["workspace"],
+        "authorized": True,
+    })
+    assert confirmed["ok"] is True, confirmed
+
+
+def test_strict_confirm_pending_workspace_adds_similar_active_notice(tmp_path: Path) -> None:
+    """Strict-mode pending memories are activated by confirm/activate; the
+    write-time duplicate hint must still fire once a second active duplicate
+    exists in the same workspace."""
+    tools = _make_strict_tools(tmp_path)
+    # Both writes target the same *unconfirmed* workspace, so both are pending.
+    first = tools.memory_write(
+        content="body one", subject="proj onboarding checklist", tags=["ops"],
+        workspace="projA",
+    )
+    second = tools.memory_write(
+        content="body two", subject="proj onboarding checklist", tags=["ops"],
+        workspace="projA",
+    )
+    assert first["data"]["record"]["status"] == "pending"
+    assert second["data"]["record"]["status"] == "pending"
+
+    first_confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": first["data"]["id"],
+        "canonical": "projA",
+        "authorized": True,
+    })
+    assert first_confirmed["ok"] is True
+    assert _similar_notices(first_confirmed) == [], "first active memory has no peers"
+
+    second_confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": second["data"]["id"],
+        "canonical": "projA",
+        "authorized": True,
+    })
+    assert second_confirmed["ok"] is True
+    hints = _similar_notices(second_confirmed)
+    assert len(hints) == 1
+    assert hints[0]["matches"][0]["memory_id"] == first["data"]["id"]
+
+
+def test_strict_memory_activate_adds_similar_active_notice(tmp_path: Path) -> None:
+    tools = _make_strict_tools(tmp_path)
+    first = tools.memory_write(
+        content="body one", subject="release checklist", tags=["release"],
+        workspace="projA",
+    )
+    assert first["data"]["record"]["status"] == "pending"
+    _confirm_pending(tools, first["data"]["id"])
+
+    # Workspace is now confirmed; an explicit pending write can be activated
+    # via memory_activate, and must still receive the duplicate hint.
+    second = tools.memory_write(
+        content="body two", subject="release checklist", tags=["release"],
+        workspace="projA", status="pending",
+    )
+    assert second["data"]["record"]["status"] == "pending"
+
+    activated_second = tools.memory_activate(second["data"]["id"], authorized=True)
+    assert activated_second["ok"] is True, activated_second
+    hints = _similar_notices(activated_second)
+    assert len(hints) == 1
+    assert hints[0]["matches"][0]["memory_id"] == first["data"]["id"]

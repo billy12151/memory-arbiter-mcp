@@ -36,8 +36,10 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                 {
                     "note": (
                         "Start at anchor_memory_id=0; use each page's next_anchor_memory_id as the "
-                        "next anchor_memory_id until it returns null. After a queue_full signal or a "
-                        "restart, run memory_repair(task='rebuild_evidence') before resuming."
+                        "next anchor_memory_id until it returns null. After a process restart, run "
+                        "memory_repair(task='rebuild_evidence') before resuming to catch up on "
+                        "evidence indexing. If you receive a queue_full response, the semantic worker "
+                        "is saturated — back off and retry the scan page later."
                     ),
                 },
             ],

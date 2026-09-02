@@ -36,6 +36,21 @@ if TYPE_CHECKING:
     from ..tools import MemoryTools
 
 
+class _SubjectTagView:
+    """Minimal read-only view for write-time duplicate-hint checks.
+
+    ``_similar_active_notice`` only reads ``.subject`` and ``.tags``; this
+    lightweight view lets status-change paths (confirm/activate) reuse the
+    same check without building a full ``MemoryRecord``.
+    """
+
+    __slots__ = ("subject", "tags")
+
+    def __init__(self, subject: str | None, tags: list[str] | None) -> None:
+        self.subject = subject
+        self.tags = tags or []
+
+
 class OperationsPipeline:
     def __init__(self, tools: "MemoryTools"):
         self._tools = tools
@@ -1150,12 +1165,23 @@ class OperationsPipeline:
             }
         if caller is not None and caller.isolation == "strict":
             data.update(caller.response_fields())
+        response = self.db.state.response(data, ok=True, extra_warnings=warnings)
         if activated:
-            data["record"] = self.db.get_memory(int(memory_id))
+            record = self.db.get_memory(int(memory_id))
+            if record is None:
+                raise RuntimeError("activated record disappeared")
+            data["record"] = record
             data["evidence_index"], data["semantic_conflict_check"] = self._post_commit(
-                int(memory_id), data["record"], recheck_conflicts=False,
+                int(memory_id), record, recheck_conflicts=False,
             )
-        return self.db.state.response(data, ok=True, extra_warnings=warnings)
+            similar_notice = self._tools._write_pipeline._similar_active_notice(
+                int(memory_id),
+                _SubjectTagView(record.get("subject"), record.get("tags")),
+                raw_workspace(record),
+            )
+            if similar_notice is not None:
+                response.setdefault("notices", []).append(similar_notice)
+        return response
 
     def memory_confirm_workspaces(
         self,
@@ -1342,12 +1368,23 @@ class OperationsPipeline:
         warnings: list[str] = list(caller.warnings) if caller is not None else []
         if caller is not None and caller.isolation == "strict":
             data.update(caller.response_fields())
+        response = self.db.state.response(data, extra_warnings=warnings)
         if ok:
-            data["record"] = self.db.get_memory(int(memory_id))
+            record = self.db.get_memory(int(memory_id))
+            if record is None:
+                raise RuntimeError("activated record disappeared")
+            data["record"] = record
             data["evidence_index"], data["semantic_conflict_check"] = self._post_commit(
-                int(memory_id), data["record"], recheck_conflicts=False,
+                int(memory_id), record, recheck_conflicts=False,
             )
-        return self.db.state.response(data, extra_warnings=warnings)
+            similar_notice = self._tools._write_pipeline._similar_active_notice(
+                int(memory_id),
+                _SubjectTagView(record.get("subject"), record.get("tags")),
+                raw_workspace(record),
+            )
+            if similar_notice is not None:
+                response.setdefault("notices", []).append(similar_notice)
+        return response
 
     def memory_supersede(
         self,
@@ -1655,10 +1692,13 @@ class OperationsPipeline:
         try:
             with self.db.write_transaction() as conn:
                 survivor = self.db.get_memory_on_conn(conn, survivor_id_int)
-                if not survivor:
+                if caller.isolation == "strict":
+                    if not survivor or raw_workspace(survivor) not in set(caller.scope_canonicals()):
+                        raise ValueError(
+                            f"survivor memory id {survivor_id_int} not found or not accessible"
+                        )
+                elif not survivor:
                     raise ValueError(f"survivor memory id {survivor_id_int} not found")
-                if caller.isolation == "strict" and raw_workspace(survivor) not in set(caller.scope_canonicals()):
-                    raise PermissionError("survivor_workspace_acl")
                 if survivor.get("status") != "active":
                     raise ValueError(
                         f"survivor is not active (status={survivor.get('status')}); pick a live memory to keep"
@@ -1674,11 +1714,14 @@ class OperationsPipeline:
                     attention_groups = conflict_membership.get(survivor_id_int, [])
                 for loser_id in loser_ints:
                     loser = self.db.get_memory_on_conn(conn, loser_id)
-                    if not loser:
+                    if caller.isolation == "strict":
+                        if not loser or raw_workspace(loser) not in set(caller.scope_canonicals()):
+                            failed_ids.append({
+                                "memory_id": loser_id, "error": "not_found_or_forbidden",
+                            })
+                            continue
+                    elif not loser:
                         failed_ids.append({"memory_id": loser_id, "error": "not_found"})
-                        continue
-                    if caller.isolation == "strict" and raw_workspace(loser) not in set(caller.scope_canonicals()):
-                        failed_ids.append({"memory_id": loser_id, "error": "workspace_acl"})
                         continue
                     status = str(loser.get("status") or "")
                     if status in {"superseded", "deleted"}:
