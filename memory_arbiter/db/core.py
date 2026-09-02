@@ -385,12 +385,14 @@ class MemoryDB:
         self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
         include_check: bool = False, max_distance: float | None = None,
         workspace: WorkspaceScope = None, similarity_pool_limit: int = 0,
+        include_duplicates: bool = False,
     ) -> dict[str, Any]:
         return self.evidence.scan_rule_candidates(
             after_memory_id=after_memory_id, anchor_batch=anchor_batch,
             neighbor_k=neighbor_k, include_check=include_check,
             max_distance=max_distance, workspace=workspace,
             similarity_pool_limit=similarity_pool_limit,
+            include_duplicates=include_duplicates,
         )
 
     def insert_memory(
@@ -629,6 +631,26 @@ class MemoryDB:
 
     def log_attention(self, *, trigger: str, source: str, memory_ids: list[int]) -> None:
         return self.audit.log_attention(trigger=trigger, source=source, memory_ids=memory_ids)
+
+    def log_scan(
+        self,
+        *,
+        duration_sec: float,
+        anchors_scanned: int,
+        candidates: int,
+        knn_pairs: int,
+        rule_pass: int,
+        next_anchor_memory_id: int | None,
+        truncated: bool,
+        client: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
+        return self.audit.log_scan(
+            duration_sec=duration_sec, anchors_scanned=anchors_scanned,
+            candidates=candidates, knn_pairs=knn_pairs, rule_pass=rule_pass,
+            next_anchor_memory_id=next_anchor_memory_id, truncated=truncated,
+            client=client, agent_id=agent_id,
+        )
 
     def _scan_log_last_completed(self) -> dict[str, Any] | None:
         return self.audit.scan_log_last_completed()

@@ -390,9 +390,9 @@ def test_product_judge_help_exposes_group_decision_constraints(tmp_path: Path) -
     gov_help = tools.memory_govern(action="help")["data"]
     assert gov_help["judge_constraints"] == constraints
     assert gov_help["actions"] == [
-        "retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm",
+        "retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm",
         "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace",
-        "confirm_pending_workspace", "confirm_workspaces", "help",
+        "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help",
     ]
     assert "accept_workspace_alias" not in gov_help["examples"]
     assert "reject_workspace_alias" not in gov_help["accepted_fields"]

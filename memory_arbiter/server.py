@@ -381,7 +381,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_govern(action: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Authorized governance: retire, apply/replan/resolve conflicts, confirm, and manage workspaces.
+        """Authorized governance: retire, merge near-duplicates, apply/replan/resolve conflicts, confirm, and manage workspaces.
 
         Every state-changing action requires explicit user authorization for that
         action, then authorized=true. Call memory_govern(action="help") for exact
@@ -398,7 +398,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_repair(task: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Maintenance: evidence rebuild, history cleanup, entity assignment, pending activation, backup replay, notices, and semantic runtime control.
+        """Maintenance: evidence rebuild, conflict scans (scheduled-task spec under help topic scheduled_tasks), history cleanup, entity assignment, pending activation, backup replay, notices, and semantic runtime control.
 
         Use memory_repair(task="help") for notice handling and semantic_control
         actions. Semantic notices are advisory; read both memories before dismiss

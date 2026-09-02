@@ -226,6 +226,28 @@ class UpdateMonitor:
         except Exception:
             return
 
+    def read_state_key(self, key: str) -> Any:
+        """Read one key from the shared notice-state file (lock-guarded)."""
+        with self._lock:
+            self._reload_state_locked()
+            return self._state.get(key)
+
+    def write_state_key(self, key: str, value: Any) -> bool:
+        """Persist one key to the shared notice-state file (lock-guarded).
+
+        Persists even when update checks are disabled: the state file backs
+        notice suppression in general, and an unsuppressible notice would be
+        worse than a no-op write.
+        """
+        try:
+            with self._lock:
+                self._reload_state_locked()
+                self._state[key] = value
+                self._write_state_locked(allow_when_disabled=True)
+                return True
+        except Exception:
+            return False
+
     def _run_one_check(self) -> None:
         try:
             raw = self._fetcher(PYPI_JSON_URL, float(BACKGROUND_TIMEOUT_SECONDS))

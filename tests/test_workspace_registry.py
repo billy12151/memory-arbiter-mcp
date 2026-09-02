@@ -424,6 +424,41 @@ def test_migrate_onto_own_mechanical_twin_is_noop(tmp_path: Path) -> None:
     assert alias_rows(tools) == []
 
 
+def test_migrate_into_target_with_existing_vector_keeps_it(tmp_path: Path) -> None:
+    """mema #794: vec0 ignores OR IGNORE — merging into a target that already
+    owns a vector used to raise UNIQUE and warn misleadingly about sqlite-vec
+    recovery. The probe keeps the existing vector and stays silent."""
+    pytest.importorskip("sqlite_vec")
+    tools = make_tools(tmp_path, vec=True)
+
+    class Embedder:
+        def embed_text(self, *, prefix: str = "", body: str = "", max_body_chars: int = 0):
+            return type("ER", (), {"embedding": [0.25, 0.75], "last_encode_error": None})()
+
+    register(tools, "target-ws")
+    write(tools, "target-ws", "winner fact")
+    tools.db.workspaces.publish_workspace_canonical_vector("target-ws", [0.25, 0.75])
+    with tools.db.connection() as conn:
+        target_row = conn.execute(
+            "SELECT c.id, v.id AS vector_id FROM workspace_canonicals c "
+            "LEFT JOIN workspace_canonicals_vec v ON v.id=c.id WHERE c.name='target-ws'"
+        ).fetchone()
+    assert target_row is not None and target_row["vector_id"] is not None
+
+    write(tools, "source-ws", "old fact")
+    updated, warnings = tools.db.workspaces.migrate_workspace(
+        "source-ws", "target-ws", embedder=Embedder(),
+    )
+    assert updated == 1
+    assert warnings == [], "existing target vector must be kept without a UNIQUE warning"
+    with tools.db.connection() as conn:
+        kept = conn.execute(
+            "SELECT v.id FROM workspace_canonicals c "
+            "JOIN workspace_canonicals_vec v ON v.id=c.id WHERE c.name='target-ws'"
+        ).fetchone()
+    assert kept is not None and int(kept["id"]) == int(target_row["id"])
+
+
 def test_rename_folds_destination_onto_registered_mechanical_twin(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     register(tools, "AgentLane")

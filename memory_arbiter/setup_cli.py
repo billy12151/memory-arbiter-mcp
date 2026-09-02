@@ -461,6 +461,14 @@ def run_cli(argv: list[str]) -> int:
     suppress_warning = args.print_config or args.no_config
     out_lines.extend(_render_summary(all_ok, use_color, written, suppress_warning=suppress_warning))
 
+    # ── Step 4: scheduled tasks guidance ──
+    from .scan_tasks import SCHEDULED_TASKS_SPEC
+
+    out_lines.append("")
+    out_lines.append("Recommended scheduled tasks (see the `scheduled_tasks` help topic for the full spec):")
+    for task in SCHEDULED_TASKS_SPEC["tasks"]:
+        out_lines.append(f"  - {task['name']} ({task['cadence']}): {task['purpose']}")
+
     print("\n".join(out_lines))
 
     # Exit codes: 0 all ok (or dry-run), 1 missing items, 2 config write failed.

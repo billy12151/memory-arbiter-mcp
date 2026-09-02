@@ -83,6 +83,61 @@ class AuditStore:
         except (OSError, ValueError, TypeError):
             pass
 
+    def log_scan(
+        self,
+        *,
+        duration_sec: float,
+        anchors_scanned: int,
+        candidates: int,
+        knn_pairs: int,
+        rule_pass: int,
+        next_anchor_memory_id: int | None,
+        truncated: bool,
+        client: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
+        """Append one completed scan_candidates run to scan_log.jsonl.
+
+        Unconditional activity record for the scheduled-task guidance notice:
+        the file's newest completed entry is the machine-checkable evidence
+        that a conflict scan task is running (fresh installs and long-stale
+        libraries both trigger the notice until this line appears). Fail-open
+        like log_attention: a broken log path must never fail the scan call.
+        Identity fields are advisory provenance from the request headers
+        (None under stdio).
+        """
+        try:
+            entry = {
+                "scan_time": utc_now_iso(),
+                "duration_sec": round(float(duration_sec), 4),
+                "status": "completed",
+                # Opt-in duplicates-pool overflow flag only — NOT a generic
+                # "page hit a bound" marker (the activity log's purpose is
+                # freshness evidence; the candidates path has its own bounds).
+                "duplicates_truncated": bool(truncated),
+                "anchors_scanned": int(anchors_scanned),
+                "candidates": int(candidates),
+                "knn_pairs": int(knn_pairs),
+                "rule_pass": int(rule_pass),
+                "next_anchor_memory_id": (
+                    int(next_anchor_memory_id) if next_anchor_memory_id is not None else None
+                ),
+                "client": str(client) if client else None,
+                "agent_id": str(agent_id) if agent_id else None,
+            }
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            path = self.scan_log_path
+            fresh = not path.exists()
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+            if fresh:
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
+        except (OSError, ValueError, TypeError):
+            pass
+
     def scan_log_last_completed(self) -> dict[str, Any] | None:
         path = self.scan_log_path
         if not path.exists():

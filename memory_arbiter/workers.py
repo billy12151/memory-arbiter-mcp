@@ -6,6 +6,7 @@ import time
 from typing import Any, TYPE_CHECKING
 
 from .constants import SEMANTIC_PRELOAD, SEMANTIC_QUEUE_MAX_SIZE
+from .models import TrustedApplyingContext
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
@@ -99,6 +100,13 @@ class LocalTextIndexWorker:
                     result = self._tools._index_local_text_evidence(memory_id, current)
                     if result.get("status") == "indexed":
                         context = snapshot.get("trusted_applying_context")
+                        if context is not None and not isinstance(context, TrustedApplyingContext):
+                            # Snapshots cross a thread boundary as plain dicts
+                            # (to_dict on enqueue); the enqueue path expects the
+                            # frozen dataclass and calls .to_dict() itself.
+                            # from_dict returns None on malformed input, which
+                            # degrades to the context-free check (fail-open).
+                            context = TrustedApplyingContext.from_dict(context)
                         if context is None:
                             self._tools._enqueue_semantic_conflict_check(
                                 memory_id, current, after_evidence=True,

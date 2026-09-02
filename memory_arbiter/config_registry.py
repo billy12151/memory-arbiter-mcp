@@ -1,6 +1,6 @@
 """Read-only descriptors for current configuration fields.
 
-Since 0.15.0 the user-facing config surface is the 17-file-key slim face;
+Since 0.15.0 the user-facing config surface is the 18-file-key slim face;
 everything else is a frozen constant (memory_arbiter.constants) and no longer
 appears here.
 """

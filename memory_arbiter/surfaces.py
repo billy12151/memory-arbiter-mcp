@@ -1,6 +1,7 @@
 """Product-surface routing helpers for MemoryTools (Phase 4 extraction)."""
 from __future__ import annotations
 
+import time
 from importlib import resources
 from typing import Any, Callable, TYPE_CHECKING
 
@@ -8,6 +9,8 @@ from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, raw_workspa
 from .constants import SEMANTIC_SCAN_ENHANCE, SEMANTIC_SCAN_MAX_PAIRS
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .models import MemoryStatus, ProtectionLevel, SourceType
+from .request_identity import get_request_identity
+from .scan_tasks import SCHEDULED_TASKS_TOPIC, scheduled_tasks_help
 from .validation import PRODUCT_FIELD_REGISTRY, _controlled_integer, validate_product_payload
 
 if TYPE_CHECKING:
@@ -66,6 +69,13 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
         },
         "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
+        "find_size_metering": (
+            "find responses carry a size block (returned_chars/returned_count, tokens_estimate, "
+            "matched_beyond_limit_*) plus the caller-scope unresolved_conflict_count; disable with "
+            "include_size=false. tokens_estimate uses a deterministic bucket estimator "
+            "(heuristic_v1, Qwen2.5-calibrated): pure Chinese prose runs ~30% high and pure English "
+            "~17% high — the estimate and the estimated share one yardstick, so savings comparisons stay valid."
+        ),
         "value_reference": _memory_value_reference(),
     },
     "memory_review": {
@@ -79,9 +89,12 @@ _PRODUCT_HELPS: dict[str, Any] = {
     },
     "memory_govern": {
         "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
-        "actions": ["retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "confirm_pending_workspace", "confirm_workspaces", "help"],
+        "actions": ["retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help"],
         "examples": {
             "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
+            "merge_memories": {"action": "merge_memories", "data": {"survivor_id": 456, "loser_ids": [123, 124], "reason": "Same fact recorded twice; keeping the newer record.", "authorized": True}},
+            "merge_memories_with_content": {"action": "merge_memories", "data": {"survivor_id": 456, "loser_ids": [123], "merged_content": "Combined statement retaining every unique detail from both records.", "reason": "User confirmed the combined wording.", "authorized": True}},
+            "separate_workspace_alias": {"action": "separate_workspace_alias", "data": {"alias": "旧项目名", "canonical": "新项目名", "reason": "User confirmed the two workspaces must stay separate.", "authorized": True}},
             "apply_conflict_action": {"action": "apply_conflict_action", "data": {"conflict_id": 1, "expected_revision": 2, "memory_id": 12, "action": "update_current_claim", "content": "The database is SQLite.", "reason": "Apply the confirmed conflict decision.", "authorized": True}},
             "resolve_conflict": {"action": "resolve_conflict", "data": {"conflict_id": 1, "expected_revision": 4, "reason": "All planned member actions completed.", "authorized": True}},
             "rename_workspace_canonical": {"action": "rename_workspace_canonical", "data": {"old": "旧项目名", "new": "新项目名", "reason": "User confirmed the rename.", "authorized": True}},
@@ -125,6 +138,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "normalize_workspaces_apply": {"task": "normalize_workspaces", "data": {"dry_run": False, "authorized": True}},
             "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
             "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
+            "scan_candidates_duplicates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True}},
             "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
             "notice_read": {"task": "notice", "data": {"action": "read", "notice_id": 1}},
             "notice_dismiss": {"task": "notice", "data": {"action": "dismiss", "notice_id": 1, "reason": "Reviewed; not actionable."}},
@@ -159,6 +173,8 @@ class ProductSurfaces:
         "confirm_pending_workspace": "Assigns the canonical workspace and activates the pending memory for recall.",
         "confirm_workspaces": "Records the reviewed workspace registry snapshot that doctor's workspace.review diffs against; unconfirmed new workspaces keep the check warning.",
         "record_conflict": "Records a not_a_conflict disposition that suppresses future detection of the same candidate; ordinary open conflict intake does not require authorization.",
+        "merge_memories": "Merges near-duplicate memories: keeps the survivor (optionally replacing its content with merged_content), supersedes the losers with a persistent merged_into pointer, and leaves conflict groups untouched (losers that are members of open/applying groups are rejected per-id).",
+        "separate_workspace_alias": "Undoes an installed alias redirect or records a keep-separate decision for two workspaces; reversing it later requires the confirm side to pass force=true.",
     }
 
     def __init__(self, tools: "MemoryTools"):
@@ -282,6 +298,8 @@ class ProductSurfaces:
                 "guide_file": "memory_arbiter/AGENT_ONBOARDING.md",
                 "content": _agent_onboarding_guide(),
             }
+        if topic == SCHEDULED_TASKS_TOPIC:
+            return scheduled_tasks_help()
         help_doc = helps.get(surface, {"description": "Unknown product surface."})
         if surface in {"memory", "memory_govern"} and isinstance(help_doc, dict):
             help_doc = dict(help_doc)
@@ -566,6 +584,7 @@ class ProductSurfaces:
         self._normalize_boolean_fields(
             payload, "authorized", "tags_only", "debug_ranking",
             "include_linked_open_items", "include_conflict_signal",
+            "include_size",
             "affects_current_output",
         )
         if action == "help":
@@ -663,11 +682,13 @@ class ProductSurfaces:
         return self._invalid_product_call("memory_review", f"unknown view: {view}", view)
 
     def _memory_govern(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
-        """Explicit user-authorized governance: retire, apply/replan/resolve conflict plans, confirm, or manage workspaces.
+        """Explicit user-authorized governance: retire, merge near-duplicates, apply/replan/resolve conflict plans, confirm, or manage workspaces.
 
         Do not use this for ordinary updates or current source-of-truth replacement;
         use memory(action="update") for those. Retire is only for whole-memory
-        retirement after explicit user authorization.
+        retirement after explicit user authorization; merge_memories is for
+        near-duplicate whole memories, with losers rejected per-id when they sit
+        in an open/applying conflict group.
         """
         payload = self._payload_dict(data)
         if data is not None and not isinstance(data, dict):
@@ -729,6 +750,55 @@ class ProductSurfaces:
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self._tools.memory_confirm, **payload)
+        if action == "merge_memories":
+            invalid_id = self._coerce_product_id("memory_govern", payload, "survivor_id", action)
+            if invalid_id is not None:
+                return invalid_id
+            raw_losers = payload.get("loser_ids")
+            if not isinstance(raw_losers, list) or not raw_losers:
+                return self._invalid_product_call(
+                    "memory_govern", "merge_memories requires loser_ids: a non-empty list of memory ids", action,
+                )
+            coerced_losers: list[int] = []
+            for item in raw_losers:
+                coerced = self._int_product_arg("memory_govern", item, "loser_ids", action)
+                if isinstance(coerced, dict):
+                    return coerced
+                if coerced is None:
+                    return self._invalid_product_call(
+                        "memory_govern", "loser_ids must contain integers only", action,
+                    )
+                coerced_losers.append(coerced)
+            # Bound the DEDUPED set, mirroring the pipeline's own accounting:
+            # 60 ids that collapse to 40 unique losers are one legal call.
+            payload["loser_ids"] = sorted(set(coerced_losers))
+            if len(payload["loser_ids"]) > 50:
+                return self._invalid_product_call(
+                    "memory_govern", "merge_memories accepts at most 50 unique loser_ids per call", action,
+                )
+            if not str(payload.get("reason") or "").strip():
+                return self._invalid_product_call(
+                    "memory_govern", "merge_memories requires reason and authorized=true", action,
+                )
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
+            return self._forward(
+                "memory_govern", action,
+                self._tools._operations.memory_merge_memories, **payload,
+            )
+        if action == "separate_workspace_alias":
+            if not str(payload.get("alias") or "").strip() or not str(payload.get("canonical") or "").strip():
+                return self._invalid_product_call(
+                    "memory_govern", "separate_workspace_alias requires alias and canonical", action,
+                )
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
+            return self._forward(
+                "memory_govern", action,
+                self._tools._operations.memory_separate_workspace_alias, **payload,
+            )
         if action in {"accept_workspace_alias", "reject_workspace_alias"}:
             alias = payload.get("alias")
             canonical = payload.get("canonical")
@@ -884,6 +954,7 @@ class ProductSurfaces:
                 return self._invalid_product_call("memory_repair", "scan_candidates requires 1<=batch<=200, 1<=k<=20, anchor_memory_id>=0", task)
             scan_workspace = caller.scope_canonicals() if caller.isolation == "strict" else None
             scan_enhance = SEMANTIC_SCAN_ENHANCE
+            scan_started = time.perf_counter()
             result = self.db.scan_rule_candidates(
                 after_memory_id=anchor_value,
                 anchor_batch=batch_value,
@@ -892,11 +963,30 @@ class ProductSurfaces:
                 max_distance=distance_value,
                 workspace=scan_workspace,
                 similarity_pool_limit=(max(0, SEMANTIC_SCAN_MAX_PAIRS) if scan_enhance else 0),
+                include_duplicates=self._is_truthy(payload.get("include_duplicates")),
             )
             if "error" not in result:
                 # Spec §7.1 wide gate: bounded Qwen enhancement over the page.
                 result = self._tools._enhance_scan_candidates(result)
             ok = "error" not in result
+            if ok:
+                # Unconditional activity record: the newest completed line in
+                # scan_log.jsonl is the evidence that a scheduled scan task
+                # exists (the guidance notice clears on it). Success-only by
+                # design — a failing scan is not proof a task is running.
+                identity = get_request_identity()
+                scan_counts = result.get("counts") or {}
+                self.db.log_scan(
+                    duration_sec=time.perf_counter() - scan_started,
+                    anchors_scanned=int(result.get("anchors_scanned") or 0),
+                    candidates=len(result.get("candidates") or []),
+                    knn_pairs=int(scan_counts.get("knn_pairs") or 0),
+                    rule_pass=int(scan_counts.get("rule_pass") or 0),
+                    next_anchor_memory_id=result.get("next_anchor_memory_id"),
+                    truncated=bool(result.get("duplicates_truncated")),
+                    client=(identity.client if identity else None),
+                    agent_id=(identity.agent_id if identity else None),
+                )
             scan_state = self.db.conflict_scan_state()
             if ok and scan_state.get("required"):
                 # Compare the PERSISTED requirement against the RUNNING

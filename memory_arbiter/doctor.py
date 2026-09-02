@@ -15,12 +15,14 @@ from .constants import (
     EMBEDDING_MAX_SECTION_CHARS,
     EMBEDDING_N_CTX,
     EMBEDDING_RESERVED_TOKENS,
+    SCAN_TASK_STALE_DAYS,
     is_default_workspace_term,
 )
 from .db.meta import active_dim_on_connection, vec_table_dimension
 from .db_generation import detect_database_generation, detect_upgrade_source_generation
 from .degrade import DegradeState
 from .models import utc_now_iso
+from .timeutil import parse_iso8601_utc
 
 
 class Severity(str, Enum):
@@ -121,6 +123,33 @@ def _safe_count(conn: sqlite3.Connection, source: str, where: str | None = None)
         return None
 
 
+def _last_completed_scan(settings: Settings) -> dict[str, Any] | None:
+    """Newest completed entry of scan_log.jsonl (file-level, doctor-local).
+
+    Mirrors AuditStore.scan_log_last_completed's selection so the notice
+    trigger and the doctor finding agree on what counts as scan activity.
+    """
+    path = Path(settings.db_path).parent / "scan_log.jsonl"
+    if not path.exists():
+        return None
+    last_completed: dict[str, Any] | None = None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(record, dict) and record.get("status") == "completed":
+                    last_completed = record
+    except OSError:
+        return None
+    return last_completed
+
+
 def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: DegradeState | None = None, embedder_probe: Callable[[], tuple[Any, list[str]]] | None = None) -> OverviewReport:
     findings: list[Finding] = []
     from .db.evidence_store import indexable_coverage_counts
@@ -144,6 +173,10 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
         "SELECT value FROM migration_state WHERE key='conflict_scan_required'"
     ).fetchone()
     conflict_scan_required = bool(scan_required_row and str(scan_required_row[0]) == "true")
+    last_scan = _last_completed_scan(settings)
+    has_scan_progress = conn.execute(
+        "SELECT 1 FROM migration_state WHERE key='conflict_scan_progress' AND value != ''"
+    ).fetchone() is not None
     findings.append(_finding("config.writable", runtime_state is None or runtime_state.sqlite_writable, "SQLite writable", critical=True))
     findings.append(_finding("evidence.coverage", indexed == eligible or not settings.embedding_auto_write, f"{indexed}/{eligible} memories indexed", evidence={"indexed": indexed, "eligible": eligible, "non_indexable": counts["non_indexable_memories"], "units": units}))
     findings.append(_finding("evidence.freshness", stale == 0, f"{stale} stale evidence rows", evidence={"stale": stale}))
@@ -157,8 +190,27 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     findings.append(_finding(
         "conflicts.scan_required", not conflict_scan_required,
         "complete a full matching-detector conflict scan" if conflict_scan_required
-        else "conflict rebuild scan complete",
+        else (
+            "conflict rebuild scan complete"
+            if (last_scan is not None or has_scan_progress)
+            else "no completed conflict scan on record — scheduled scan tasks are not set up; see memory_repair help (topic: scheduled_tasks)"
+        ),
     ))
+    if last_scan is not None:
+        scanned_at = parse_iso8601_utc(last_scan.get("scan_time"))
+        if scanned_at is not None:
+            # Same comparison basis as the guidance notice (exact seconds vs
+            # the 14-day threshold, not floored .days), so tier and finding
+            # cannot disagree inside day 14.
+            age = datetime.now(timezone.utc) - scanned_at
+            stale = age > timedelta(days=SCAN_TASK_STALE_DAYS)
+            age_days = max(0, age.days)
+            findings.append(_finding(
+                "conflicts.scan_stale", not stale,
+                f"last completed conflict scan {age_days} day(s) ago; "
+                f"activity beyond {SCAN_TASK_STALE_DAYS} days means the scheduled task is not running",
+                evidence={"last_scan_time": last_scan.get("scan_time"), "age_days": age_days},
+            ))
     # Applying is a transient execution state: a healthy apply completes in
     # minutes, so any group still applying at doctor time is either mid-flight
     # or wedged. Flag every one with id/idle-days evidence (replaces the

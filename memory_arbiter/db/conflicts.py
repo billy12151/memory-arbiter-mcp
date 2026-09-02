@@ -894,6 +894,29 @@ class ConflictStore:
             ).fetchall()
         return [_decode_row(row) for row in rows]
 
+    def count_open_conflicts(
+        self, workspace: "WorkspaceScope" = None,
+    ) -> int:
+        """Count open+applying groups in the caller's admitted scope.
+
+        The find response reports this as unresolved_conflict_count — an
+        admitted-scope figure, deliberately not doctor's global
+        conflicts.backlog (a strict caller must not learn about out-of-scope
+        groups).
+        """
+        if not self._db_available:
+            return 0
+        sql = "SELECT COUNT(*) FROM conflicts WHERE status IN ('open','applying')"
+        params: tuple[Any, ...] = ()
+        scope_sql, scope_params = workspace_scope_sql(
+            "COALESCE(NULLIF(workspace_canonical, ''), workspace)", workspace,
+        )
+        if scope_sql:
+            sql += f" AND {scope_sql}"
+            params = tuple(scope_params)
+        with self.connection() as conn:
+            return int(conn.execute(sql, params).fetchone()[0])
+
     def resolve_conflicts_for_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> int:
         # Generic memory mutation cannot complete a revisioned application plan.
         return 0

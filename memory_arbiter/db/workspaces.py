@@ -1160,10 +1160,25 @@ class WorkspaceStore:
             (to_ws, utc_now_iso()),
         )
         if to_embedding is not None:
-            row = conn.execute(
-                "SELECT id FROM workspace_canonicals WHERE name = ?", (to_ws,)
-            ).fetchone()
-            if row is not None:
+            # vec0 ignores OR IGNORE (mema #794): merging into a target that
+            # already owns a vector raised UNIQUE and produced a misleading
+            # "retry after sqlite-vec recovers" warning. Probe first — the
+            # merge never renames the target, so an existing vector stays
+            # authoritative and is kept as-is (post-commit probe pattern).
+            try:
+                row = conn.execute(
+                    "SELECT c.id, v.id AS vector_id "
+                    "FROM workspace_canonicals c "
+                    "LEFT JOIN workspace_canonicals_vec v ON v.id = c.id "
+                    "WHERE c.name = ?",
+                    (to_ws,),
+                ).fetchone()
+            except sqlite3.Error as exc:
+                row = None
+                warnings.append(
+                    f"workspace canonical vector probe failed for {to_ws!r}: {exc}"
+                )
+            if row is not None and row["vector_id"] is None:
                 try:
                     conn.execute(
                         "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",

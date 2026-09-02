@@ -263,6 +263,46 @@ class EvidenceStore:
         except sqlite3.Error:
             return []
 
+    @staticmethod
+    def _unit_pair_identity(
+        anchor_id: int, unit: Any, peer_id: int, hit: dict[str, Any],
+    ) -> tuple[frozenset[str], dict[str, Any], str]:
+        """Build the record_conflict-compatible identity for one unit pair.
+
+        Single source of truth for the candidate_key hash: the real-candidate
+        path and the duplicates_pool path must derive suppression lookups from
+        byte-identical keys or already-recorded pairs would re-surface.
+        """
+        anchor_ref = f"{anchor_id}@{int(unit['memory_version'] or 1)}"
+        peer_ref = f"{peer_id}@{int(hit.get('memory_version') or hit.get('memory_row_version') or 1)}"
+        member_refs = frozenset([anchor_ref, peer_ref])
+        evidence_by_ref = {
+            anchor_ref: {
+                "member": anchor_ref,
+                "unit": int(unit["eid"]),
+                "span": [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)],
+                "hash": str(unit["content_hash"] or ""),
+            },
+            peer_ref: {
+                "member": peer_ref,
+                "unit": int(hit.get("id") or 0),
+                "span": [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)],
+                "hash": str(hit.get("content_hash") or ""),
+            },
+        }
+        sorted_refs = sorted(member_refs, key=lambda ref: tuple(int(value) for value in ref.split("@", 1)))
+        candidate_key = {
+            "detector_version": CONFLICT_DETECTOR_VERSION,
+            "members": sorted_refs,
+            "evidence": [evidence_by_ref[ref] for ref in sorted_refs],
+        }
+        candidate_hash = hashlib.sha256(
+            json.dumps(
+                candidate_key, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        return member_refs, candidate_key, candidate_hash
+
     def scan_rule_candidates(
         self,
         *,
@@ -273,6 +313,7 @@ class EvidenceStore:
         max_distance: float | None = None,
         workspace: "WorkspaceScope" = None,
         similarity_pool_limit: int = 0,
+        include_duplicates: bool = False,
     ) -> dict[str, Any]:
         """Enumerate conflict-candidate pairs for an external scan loop.
 
@@ -287,6 +328,11 @@ class EvidenceStore:
         triggering unit snippets so the agent can triage without reading
         full memories. Pairs with an open conflict, or a version-pinned
         not_a_conflict dismissal, are filtered out.
+
+        include_duplicates additionally exposes same-value near-duplicate
+        pairs (ignore/equivalent_value|compatible_evidence) as a bounded
+        duplicates_pool for governance merge; recorded pairs are suppressed
+        with the same candidate-hash contract.
 
         Calibrated on a real 474-memory production copy: absolute vector
         distance has no discrimination there (random same-workspace pairs
@@ -324,7 +370,9 @@ class EvidenceStore:
                 return {
                     "anchors_scanned": 0, "next_anchor_memory_id": None,
                     "candidates": [], "counts": {"knn_pairs": 0, "rule_pass": 0,
-                                                 "filtered_open": 0, "filtered_dismissed": 0},
+                                                 "filtered_open": 0, "filtered_dismissed": 0,
+                                                 "duplicates": 0},
+                    "duplicates_pool": [], "duplicates_truncated": False,
                 }
             # The group schema has no left/right columns. Suppression is tied
             # to the exact candidate snapshot successfully persisted by
@@ -356,6 +404,15 @@ class EvidenceStore:
             # default candidate set stay available as a bounded pool for the
             # caller's Qwen union instead of vanishing outright.
             similarity_pool: dict[tuple[int, int], dict[str, Any]] = {}
+            # Near-duplicate (ignore/equivalent_value|compatible_evidence)
+            # pairs, exposed for governance merge only when include_duplicates
+            # is set. Same suppression contract as real candidates: pairs
+            # already recorded (not_a_conflict/open/applying) are not
+            # re-enumerated — the candidate_hash lookup runs inside the ignore
+            # branch, ahead of the historical silent drop.
+            duplicates_pool: dict[tuple[int, int], dict[str, Any]] = {}
+            duplicates_truncated = False
+            duplicates_cap = 2 * max(1, int(anchor_batch))
             pool_limit = max(0, int(similarity_pool_limit))
             knn_pair_count = 0
             stale_anchors = 0
@@ -440,6 +497,65 @@ class EvidenceStore:
                         # same pair would be lost.
                         decision = decide_evidence(text, str(hit.get("text") or ""))
                         if decision.action == "ignore":
+                            if include_duplicates and decision.reason in {"equivalent_value", "compatible_evidence"}:
+                                pair_key = (min(anchor_id, peer_id), max(anchor_id, peer_id))
+                                member_refs, _key, candidate_hash = self._unit_pair_identity(
+                                    anchor_id, unit, peer_id, hit,
+                                )
+                                recorded = recorded_candidate_statuses.get(candidate_hash)
+                                if recorded is None and not any(
+                                    member_refs <= group_members for group_members in active_group_members
+                                ):
+                                    hit_text_ignored = str(hit.get("text") or "")
+                                    if len(duplicates_pool) < duplicates_cap:
+                                        # Members mirror the record_conflict
+                                        # contract so an agent can dismiss a
+                                        # false positive without re-deriving
+                                        # the evidence identity.
+                                        duplicates_pool[pair_key] = {
+                                            "left_id": pair_key[0], "right_id": pair_key[1],
+                                            "reason": decision.reason,
+                                            "distance": float(hit.get("distance") or 0),
+                                            "candidate_key_hash": candidate_hash,
+                                            "left_snippet": text[:200] if pair_key[0] == anchor_id else hit_text_ignored[:200],
+                                            "right_snippet": hit_text_ignored[:200] if pair_key[1] == peer_id else text[:200],
+                                            "members": [
+                                                {
+                                                    "memory_id": pair_key[0],
+                                                    "version": int(unit["memory_version"] or 1) if pair_key[0] == anchor_id else int(hit.get("memory_version") or hit.get("memory_row_version") or 1),
+                                                    "attribute_raw": None, "value_raw": None,
+                                                    "normalized_attribute": None, "normalized_value": None,
+                                                    "evidence_quote": text if pair_key[0] == anchor_id else hit_text_ignored,
+                                                    "evidence_span": (
+                                                        [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)]
+                                                        if pair_key[0] == anchor_id else
+                                                        [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
+                                                    ),
+                                                    "content_hash": str(unit["content_hash"] or "") if pair_key[0] == anchor_id else str(hit.get("content_hash") or ""),
+                                                    "evidence_unit": int(unit["eid"]) if pair_key[0] == anchor_id else int(hit.get("id") or 0),
+                                                    "direction": "deterministic", "prompt_version": None,
+                                                    "detector_version": CONFLICT_DETECTOR_VERSION,
+                                                },
+                                                {
+                                                    "memory_id": pair_key[1],
+                                                    "version": int(hit.get("memory_version") or hit.get("memory_row_version") or 1) if pair_key[1] == peer_id else int(unit["memory_version"] or 1),
+                                                    "attribute_raw": None, "value_raw": None,
+                                                    "normalized_attribute": None, "normalized_value": None,
+                                                    "evidence_quote": hit_text_ignored if pair_key[1] == peer_id else text,
+                                                    "evidence_span": (
+                                                        [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
+                                                        if pair_key[1] == peer_id else
+                                                        [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)]
+                                                    ),
+                                                    "content_hash": str(hit.get("content_hash") or "") if pair_key[1] == peer_id else str(unit["content_hash"] or ""),
+                                                    "evidence_unit": int(hit.get("id") or 0) if pair_key[1] == peer_id else int(unit["eid"]),
+                                                    "direction": "deterministic", "prompt_version": None,
+                                                    "detector_version": CONFLICT_DETECTOR_VERSION,
+                                                },
+                                            ],
+                                        }
+                                    else:
+                                        duplicates_truncated = True
                             continue
                         # Numeric deltas remain a deterministic scan baseline
                         # candidate even though they can no longer directly
@@ -466,35 +582,9 @@ class EvidenceStore:
                             peer_content(peer_id), hit_text,
                             int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0),
                         )
-                        member_refs = frozenset([
-                            f"{anchor_id}@{int(unit['memory_version'] or 1)}",
-                            f"{peer_id}@{int(hit.get('memory_version') or hit.get('memory_row_version') or 1)}",
-                        ])
-                        evidence_by_ref = {
-                            f"{anchor_id}@{int(unit['memory_version'] or 1)}": {
-                                "member": f"{anchor_id}@{int(unit['memory_version'] or 1)}",
-                                "unit": int(unit["eid"]),
-                                "span": [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)],
-                                "hash": str(unit["content_hash"] or ""),
-                            },
-                            f"{peer_id}@{int(hit.get('memory_version') or hit.get('memory_row_version') or 1)}": {
-                                "member": f"{peer_id}@{int(hit.get('memory_version') or hit.get('memory_row_version') or 1)}",
-                                "unit": int(hit.get("id") or 0),
-                                "span": [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)],
-                                "hash": str(hit.get("content_hash") or ""),
-                            },
-                        }
-                        sorted_refs = sorted(member_refs, key=lambda ref: tuple(int(value) for value in ref.split("@", 1)))
-                        candidate_key = {
-                            "detector_version": CONFLICT_DETECTOR_VERSION,
-                            "members": sorted_refs,
-                            "evidence": [evidence_by_ref[ref] for ref in sorted_refs],
-                        }
-                        candidate_hash = hashlib.sha256(
-                            json.dumps(
-                                candidate_key, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                            ).encode("utf-8")
-                        ).hexdigest()
+                        member_refs, candidate_key, candidate_hash = self._unit_pair_identity(
+                            anchor_id, unit, peer_id, hit,
+                        )
                         recorded_status = recorded_candidate_statuses.get(candidate_hash)
                         if recorded_status is None and any(
                             member_refs <= group_members for group_members in active_group_members
@@ -517,7 +607,7 @@ class EvidenceStore:
                                 "members": [
                                     {
                                         "memory_id": pair[0],
-                                        "version": int(hit.get("memory_row_version") or 1) if pair[0] == peer_id else int(unit["memory_version"] or 1),
+                                        "version": int(hit.get("memory_version") or hit.get("memory_row_version") or 1) if pair[0] == peer_id else int(unit["memory_version"] or 1),
                                         "attribute_raw": None, "value_raw": None,
                                         "normalized_attribute": None, "normalized_value": None,
                                         "evidence_quote": text if pair[0] == anchor_id else hit_text,
@@ -533,7 +623,7 @@ class EvidenceStore:
                                     },
                                     {
                                         "memory_id": pair[1],
-                                        "version": int(hit.get("memory_row_version") or 1) if pair[1] == peer_id else int(unit["memory_version"] or 1),
+                                        "version": int(hit.get("memory_version") or hit.get("memory_row_version") or 1) if pair[1] == peer_id else int(unit["memory_version"] or 1),
                                         "attribute_raw": None, "value_raw": None,
                                         "normalized_attribute": None, "normalized_value": None,
                                         "evidence_quote": hit_text if pair[1] == peer_id else text,
@@ -607,15 +697,21 @@ class EvidenceStore:
                     + "LIMIT 1",
                     (next_anchor, *anchor_params),
                 ).fetchone()
+            duplicates_ordered = [
+                duplicates_pool[pair] for pair in sorted(duplicates_pool)
+            ]
             return {
                 "anchors_scanned": len(anchors),
                 "next_anchor_memory_id": int(next_anchor) if more else None,
                 "candidates": ordered,
                 "similarity_pool": similarity_ordered,
+                "duplicates_pool": duplicates_ordered,
+                "duplicates_truncated": duplicates_truncated,
                 "counts": {
                     "knn_pairs": knn_pair_count,
                     "rule_pass": len(ordered),
                     "similarity_pool": len(similarity_ordered),
+                    "duplicates": len(duplicates_ordered),
                     "filtered_open": filtered_open,
                     "filtered_dismissed": filtered_dismissed,
                     "stale_anchors": stale_anchors,

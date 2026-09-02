@@ -120,6 +120,14 @@ SEMANTIC_MAX_EVIDENCE_UNITS = 24
 SEMANTIC_PRELOAD = True
 SEMANTIC_RESIDENT = True
 
+# scheduled-task guidance notice (scan_log.jsonl freshness): a library whose
+# newest completed scan is older than this, or that has never completed one,
+# prompts the agent to offer setting up the two scheduled tasks.
+SCAN_TASK_STALE_DAYS = 14
+# Negative-cache TTL for the notice check: without it every product response
+# would re-read scan_log.jsonl end to end.
+SCAN_TASK_RECHECK_SECONDS = 3600
+
 # workspace normalization Qwen guard (A/B: top-3 beats top-5; over-distance
 # candidates must never reach the model — see tools._suggest_workspace_candidate)
 QWEN_CANDIDATE_DISTANCE = 0.25

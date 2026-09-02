@@ -3,6 +3,34 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+**Tier-1 feature set (plan record mema 810 v3, owner-approved 2026-09-02) plus the Tier-3 quick-win bug fixes (mema 812).** Three independent PRs land together for one release: governed near-duplicate merge, scheduled-task guidance with scan activity logging, and find size metering.
+
+### Added
+
+- **`memory_govern(action="merge_memories")` — governed near-duplicate merge.** Keeps a survivor (optionally replacing its content via `merged_content`), supersedes losers with a persistent `metadata.merged_into` + `merge_reason` pointer (the library's first persisted successor pointer; retire's `superseded_by` remains validate-only). One write transaction; `post_commit` rechecks conflicts only when the survivor was edited (`skipped/no_survivor_change` otherwise). Idempotent re-merge returns `deduped_ids`; losers already merged elsewhere fail per-id (`already_merged`) without blocking the rest. Losers sitting in an open/applying conflict group are rejected per-id with `attention_required` (members are id@version pinned; a hard merge would wedge the group). v1 refuses cross-workspace-canonical merges.
+- **`duplicates_pool` discovery outlet on `scan_candidates`.** `include_duplicates=true` surfaces same-value near-duplicate pairs (ignore/equivalent_value|compatible_evidence) that the rule gate historically dropped silently — a bounded pool (cap 2×batch, `duplicates_truncated` flag) carrying record_conflict-compatible members so a false positive can be dismissed as `not_a_conflict`. Recorded pairs (not_a_conflict/open/applying) are suppressed with the same candidate-hash contract: the hash lookup runs inside the ignore branch, ahead of the historical drop.
+- **Scheduled-task guidance (agent-first).** mema ships no internal timer by design — the scan's value loop ends in agent-side triage, so an external scheduler is what wakes the agent. Three notice tiers: `scan_never_run` (info; no completed scan on record — fresh installs and long-idle libraries alike), `scan_required` (warning; a rebuild is owed), `scan_stale` (info; newest scan older than 14 days). The notice carries a platform-agnostic `setup.tasks` spec (hourly `scan_candidates` paging loop + daily `doctor` reminder) and self-closes once tasks run; suppression rides the shared notice-state window. Full spec self-serve via `memory(action="help", data={"topic": "scheduled_tasks"})`. `mema setup` / `mema upgrade` endings print the task guidance.
+- **`scan_log.jsonl` write-back.** Every successful `scan_candidates` call appends one completed line (duration, page counters, `next_anchor_memory_id`, advisory caller identity `client`/`agent_id`; no workspace field, owner decision). The newest completed line is the machine-checkable evidence behind the notice tiers and the doctor findings; failures append nothing. This revives the v0.7.5 activity-log design (mema 243) on the current scan path — the original writer was removed with the legacy vector scanner in v0.12.0.
+- **`size` metering block on find.** Default-on (`include_size=false` opts out): `returned_chars`/`returned_count`, a `tokens_estimate` from a deterministic bucket-table estimator calibrated against a Qwen2.5 tokenizer on real records (±7% on five samples; documented skew: pure Chinese prose ~+30%, pure English ~+17%), and matched-beyond-limit counts. One call, no feedback loop; limit/offset semantics unchanged.
+- **`unresolved_conflict_count` on find** — caller admitted-scope open+applying groups (not doctor's global `conflicts.backlog`).
+- **`memory_govern(action="separate_workspace_alias")`** (mema 795, owner-named): undoes an installed alias redirect or records keep-separate for two workspaces. Reversing a recorded separation later requires `force=true` on the confirm side. The removed `accept/reject_workspace_alias` pair stays tombstoned.
+
+### Fixed
+
+- **Apply-path semantic recheck crash (mema 813).** `workers.py` forwarded the thread-boundary snapshot's `trusted_applying_context` as a plain dict into an enqueue expecting the frozen dataclass; `.to_dict()` inside raised AttributeError, which the fail-open wrapper mislabeled `evidence_index_error`. The forwarding point now rehydrates via `TrustedApplyingContext.from_dict` (malformed input degrades to the context-free check), with real-worker roundtrip regression tests.
+- **`migrate_workspace` vec0 UNIQUE (mema 794).** `INSERT OR IGNORE` into the vec0 virtual table does not honor OR IGNORE, so merging into a target that already owned a vector raised UNIQUE and emitted a misleading "retry after sqlite-vec recovers" warning. A LEFT JOIN probe now keeps the existing target vector (the merge never renames the target) and stays silent.
+- **doctor fresh-install false green.** `conflicts.scan_required` used to report "conflict rebuild scan complete" on libraries that had never completed any scan. It now reports "no completed conflict scan on record" until real activity exists, and a new `conflicts.scan_stale` finding flags scans idle beyond 14 days.
+- **Scheduled-task notice suppression is per-library and only opens on delivery** (round-2 review): the state key is namespaced by db_path so a healthy library cannot silence another library sharing the user-home notice state file, and a clean check refreshes only the 1-hour negative cache — a library that goes stale is re-detected within the hour instead of after the whole suppression window.
+- **Real-candidate `members[].version` now matches the candidate hash basis** (round-2 review, pre-existing): it uses the evidence-pinned `memory_version` with row fallback, the same expression `_unit_pair_identity` hashes with, so record_conflict round-trips keep suppression intact when a peer's evidence briefly lags its row version.
+
+### Changed
+
+- **memory_supersede docstring now matches the implementation** (mema 812 hygiene): it no longer claims open conflicts are auto-resolved and an audit row appended (both are stubs); it documents the version-pinned group caveat and points at merge_memories for durable survivor pointers.
+- `config_registry.py` docstring corrected from "17-file-key" to the actual 18-file-key slim surface (mema 812 hygiene).
+- `mema upgrade` `next_step` output mentions the two scheduled tasks.
+
 ## [0.15.1] — 2026-09-01
 
 **Packaging fix: restore the MCP Registry ownership token.** The evidence-pipeline refactor (`34b0939`, 0.14 line) rewrote README.md and dropped the `mcp-name: io.github.billy12151/memory-arbiter-mcp` identifier originally added for registry validation (`ec366b3`). Every PyPI artifact built since then failed the MCP Registry's package ownership check, so the registry listing stayed frozen at 0.2.0. No runtime changes.

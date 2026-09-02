@@ -77,7 +77,7 @@ class ReadPipeline:
         pending = int(worker.get("queue_depth") or 0) + len(worker.get("inflight") or [])
         return {"pending_evidence_index": pending}
 
-    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool = True, **_: Any) -> dict[str, Any]:
         if "include_superseded" in _:
             return self.db.state.response(
                 {
@@ -251,6 +251,34 @@ class ReadPipeline:
             # vNext §13.1: async evidence index lag, never pretend strong consistency.
             "vector_lag": self._vector_lag(),
         }
+        if include_size:
+            # v0.15.2: one-shot size metering so callers can see what a
+            # results page costs against pasting full texts; no feedback loop,
+            # limit/offset semantics untouched.
+            from ..tokens import TOKEN_ESTIMATE_BASIS, estimate_tokens
+
+            contents = [
+                str(r.get("content") or "") for r in results if r.get("content") is not None
+            ]
+            returned_chars = sum(len(c) for c in contents)
+            returned_tokens = sum(estimate_tokens(c) for c in contents)
+            matched_total = int(total_estimate) if total_estimate is not None else len(results)
+            beyond_count = max(0, matched_total - offset - len(results))
+            avg_chars = returned_chars // max(1, len(contents)) if contents else 0
+            response_data["size"] = {
+                "returned_chars": returned_chars,
+                "returned_count": len(contents),
+                "tokens_estimate": returned_tokens,
+                "estimate_basis": TOKEN_ESTIMATE_BASIS,
+                "matched_beyond_limit_chars": beyond_count * avg_chars,
+                "matched_beyond_limit_count": beyond_count,
+            }
+        try:
+            response_data["unresolved_conflict_count"] = self.db.conflicts.count_open_conflicts(
+                ws_scope,
+            )
+        except Exception:
+            pass
         if attention_required:
             response_data["attention_required"] = True
             response_data["attention_summary"] = attention_summary

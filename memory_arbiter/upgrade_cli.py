@@ -333,7 +333,11 @@ def run_upgrade(
         result["ok"] = False
         result["error"] = "migration_complete_but_config_switch_failed"
     if result.get("ok"):
-        result["next_step"] = "Restart the MCP client and run `mema doctor --json`."
+        result["next_step"] = (
+            "Restart the MCP client and run `mema doctor --json`. "
+            "Also schedule the two maintenance tasks (hourly conflict scan + daily governance "
+            "reminder); the full platform-agnostic spec is the `scheduled_tasks` help topic."
+        )
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok") else 2

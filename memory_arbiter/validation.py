@@ -51,6 +51,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "query", "workspace", "tags", "limit", "offset", "debug_ranking",
         "query_embedding", "tags_filter", "after_time", "before_time",
         "source_type", "include_linked_open_items", "include_conflict_signal",
+        "include_size",
     },
     ("memory", "read"): {"id", "memory_id", "span", "workspace"},
     ("memory", "update"): {
@@ -77,6 +78,9 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_review", "entities"): {"limit", "include_unassigned", "workspace"},
     ("memory_review", "help"): {"topic", "view"},
     ("memory_govern", "retire"): {"id", "memory_id", "reason", "superseded_by", "authorized", "workspace"},
+    ("memory_govern", "merge_memories"): {
+        "survivor_id", "loser_ids", "merged_content", "reason", "authorized", "workspace",
+    },
     ("memory_govern", "resolve_conflict"): {
         "id", "conflict_id", "expected_revision", "reason", "authorized", "workspace",
     },
@@ -94,6 +98,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_govern", "move_memories_workspace"): {"memory_ids", "new_workspace", "reason", "authorized", "workspace"},
     ("memory_govern", "confirm_pending_workspace"): {"id", "memory_id", "canonical", "reason", "authorized", "workspace"},
     ("memory_govern", "confirm_workspaces"): {"workspaces", "reason", "authorized"},
+    ("memory_govern", "separate_workspace_alias"): {"alias", "canonical", "reason", "authorized", "workspace"},
     ("memory_govern", "help"): {"topic", "action"},
     ("memory_repair", "rebuild_evidence"): {"memory_ids", "dry_run", "batch_size", "workspace"},
     ("memory_repair", "cleanup_history"): {"id", "memory_id", "older_than_days", "authorized", "workspace"},
@@ -102,7 +107,8 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_repair", "semantic_control"): {"action", "timeout", "workspace"},
     ("memory_repair", "notice"): {"action", "status", "limit", "id", "notice_id", "reason", "workspace"},
     ("memory_repair", "scan_candidates"): {
-        "anchor_memory_id", "batch", "k", "include_check", "max_distance", "workspace",
+        "anchor_memory_id", "batch", "k", "include_check", "max_distance",
+        "include_duplicates", "workspace",
     },
     ("memory_repair", "record_conflict"): {
         "slot_key", "members", "value_groups", "candidate_key", "status",

@@ -291,7 +291,7 @@ def test_product_field_registry_covers_all_declared_surface_operations() -> None
     expected = {
         "memory": {"help", "status", "remember", "find", "read", "update", "judge"},
         "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "history", "expired", "entities", "help"},
-        "memory_govern": {"retire", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "confirm_pending_workspace", "confirm_workspaces", "help"},
+        "memory_govern": {"retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help"},
         "memory_repair": {"rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "semantic_control", "notice", "record_conflict", "replay_backup", "normalize_workspaces", "help"},
     }
     actual = {

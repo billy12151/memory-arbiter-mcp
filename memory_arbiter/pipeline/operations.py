@@ -1360,9 +1360,17 @@ class OperationsPipeline:
         """Explicitly supersede a memory, bypassing the user-confirmed/locked
         protection that blocks ``memory_arbitrate``. Requires ``authorized=True``.
 
-        Side effects: status -> superseded, protection_level -> normal, all open
-        conflicts involving this memory are resolved, and an audit row is appended
-        to the conflicts table (reason prefixed with ``USER-AUTHORIZED SUPERSEDE``).
+        Side effects: status -> superseded, protection_level -> normal, and the
+        derived evidence rows follow the new version (vec0 parent_status
+        propagates, so the memory leaves active recall immediately). Open
+        conflict groups are NOT auto-resolved — members are version-pinned and
+        generic mutation cannot complete a revisioned plan; the response
+        reports ``linked_conflicts_resolved`` as 0 for that reason and groups
+        must be handled through the judge/apply lifecycle. There is no
+        separate audit row: the status change itself plus this call's
+        ``reason`` are the record. ``superseded_by`` is validated but not
+        persisted — use merge_memories when a durable survivor pointer is
+        needed.
         """
         authorized = self._is_truthy(authorized)
         if not authorized:
@@ -1458,6 +1466,375 @@ class OperationsPipeline:
         if caller.isolation == "strict":
             resp.update(caller.response_fields())
         return self.db.state.response(resp, extra_warnings=list(caller.warnings))
+
+    def memory_separate_workspace_alias(
+        self,
+        alias: str,
+        canonical: str,
+        reason: str = "",
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Undo an installed alias redirect or record a keep-separate decision.
+
+        Deliberately named "separate", not "reject" (owner decision
+        2026-09-02): reject reads like refusing a memory write, while this
+        action states that two workspaces must stay independent. Reversing a
+        recorded separation later requires the confirm side to pass force=true
+        (the keep-separate guard in _apply_alias_decision_on_conn).
+        """
+        authorized = self._is_truthy(authorized)
+        if not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required to separate workspace aliases", "separated": False},
+                ok=False,
+            )
+        alias_str = str(alias or "").strip()
+        canonical_str = str(canonical or "").strip()
+        if not alias_str or not canonical_str:
+            return self.db.state.response(
+                {"error": "separate_workspace_alias requires alias and canonical", "separated": False},
+                ok=False,
+            )
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        errors: list[str] = []
+        try:
+            with self.db.write_transaction() as conn:
+                ok, errors = self.db.workspaces.record_workspace_decision_on_conn(
+                    conn, alias_str, canonical_str, status="rejected",
+                )
+        except sqlite3.Error as exc:
+            return self.db.state.response(
+                {"error": f"separate_workspace_alias failed; transaction rolled back: {exc}", "separated": False},
+                ok=False, extra_warnings=list(caller.warnings),
+            )
+        if not ok:
+            return self.db.state.response(
+                {"error": "; ".join(errors), "separated": False},
+                ok=False, extra_warnings=list(caller.warnings),
+            )
+        data: dict[str, Any] = {
+            "separated": True,
+            "alias": alias_str,
+            "canonical": canonical_str,
+            "decision": "rejected",
+            "note": (
+                "the alias no longer redirects; a later merge/confirm targeting the same "
+                "pair requires force=true to reverse this decision"
+            ),
+        }
+        if reason:
+            data["reason"] = str(reason)
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
+
+    @staticmethod
+    def _merge_conflict_membership_on_conn(
+        conn: sqlite3.Connection, memory_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Group open/applying conflicts whose pinned members include any id.
+
+        Uses the caller-owned transaction connection: reading through a second
+        connection inside write_transaction would observe the pre-transaction
+        snapshot. Mirrors the SQL of list_open_conflicts_for_memory_ids.
+        """
+        membership: dict[int, list[dict[str, Any]]] = {}
+        wanted = sorted({int(value) for value in memory_ids})
+        if not wanted:
+            return membership
+        rows = conn.execute(
+            "SELECT DISTINCT c.* FROM conflicts AS c "
+            "JOIN json_each(c.member_versions) AS member "
+            "JOIN json_each(?) AS wanted "
+            "ON CAST(json_extract(member.value,'$.memory_id') AS INTEGER)=CAST(wanted.value AS INTEGER) "
+            "WHERE c.status IN ('open','applying') ORDER BY c.created_at DESC,c.id DESC",
+            (json.dumps(wanted, ensure_ascii=False, sort_keys=True, separators=(",", ":")),),
+        ).fetchall()
+        for row in rows:
+            group = dict(row)
+            try:
+                member_ids = {
+                    int(member["memory_id"])
+                    for member in json.loads(str(group.get("member_versions") or "[]"))
+                }
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+            for memory_id in member_ids & set(wanted):
+                membership.setdefault(memory_id, []).append(group)
+        return membership
+
+    def memory_merge_memories(
+        self,
+        survivor_id: int,
+        loser_ids: list[int],
+        reason: str,
+        merged_content: str | None = None,
+        authorized: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Merge near-duplicate memories: keep the survivor, supersede losers.
+
+        Deliberately NOT the conflict state machine: near-duplicates are not
+        conflicts, so losers are superseded through update_memory_on_conn
+        (version bump, evidence pinning, and vec0 parent_status propagation all
+        follow automatically) and a persistent ``merged_into`` pointer is
+        written into each loser's metadata (read-modify-write: the update
+        primitive replaces metadata wholesale). This is the library's first
+        persisted successor pointer — retire's ``superseded_by`` is validated
+        but never stored.
+
+        Losers that are members of an open/applying conflict group are
+        rejected per-id: members are pinned at id@version and superseding one
+        cannot close the group, so a hard merge would wedge it. The survivor
+        may sit in a group — without merged_content nothing changes for the
+        group; with merged_content the edit may stale pinned members and the
+        edit-path attention_required contract applies.
+        """
+        authorized = self._is_truthy(authorized)
+        if not authorized:
+            return self.db.state.response(
+                {"error": "authorized=True is required to merge memories", "merged": False},
+                ok=False,
+            )
+        try:
+            survivor_id_int = int(survivor_id)
+        except (TypeError, ValueError):
+            return self.db.state.response(
+                {"error": "survivor_id must be an integer", "merged": False}, ok=False,
+            )
+        raw_losers = loser_ids if isinstance(loser_ids, list) else []
+        loser_ints: list[int] = []
+        for value in raw_losers:
+            try:
+                loser_ints.append(int(value))
+            except (TypeError, ValueError):
+                return self.db.state.response(
+                    {"error": "loser_ids must contain integers only", "merged": False}, ok=False,
+                )
+        loser_ints = sorted(set(loser_ints))
+        if not loser_ints:
+            return self.db.state.response(
+                {"error": "loser_ids requires 1-50 positive integer ids", "merged": False}, ok=False,
+            )
+        if len(loser_ints) > 50:
+            return self.db.state.response(
+                {"error": "loser_ids requires 1-50 positive integer ids", "merged": False}, ok=False,
+            )
+        if survivor_id_int in loser_ints:
+            return self.db.state.response(
+                {"error": "survivor_id must not appear in loser_ids", "merged": False}, ok=False,
+            )
+        if not str(reason or "").strip():
+            return self.db.state.response(
+                {"error": "merge requires reason and authorized=true", "merged": False}, ok=False,
+            )
+        if merged_content is not None and not str(merged_content).strip():
+            # A provided-but-blank value is a caller mistake; the edit
+            # primitive would refuse to wipe content, so fail loudly here
+            # instead of silently treating it as "no edit requested".
+            return self.db.state.response(
+                {"error": "merged_content must be non-empty when provided", "merged": False}, ok=False,
+            )
+
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+
+        merged_ids: list[int] = []
+        deduped_ids: list[int] = []
+        failed_ids: list[dict[str, Any]] = []
+        survivor_edited = False
+        attention_groups: list[dict[str, Any]] = []
+        survivor_record: dict[str, Any] | None = None
+        survivor_history_id: int | None = None
+        try:
+            with self.db.write_transaction() as conn:
+                survivor = self.db.get_memory_on_conn(conn, survivor_id_int)
+                if not survivor:
+                    raise ValueError(f"survivor memory id {survivor_id_int} not found")
+                if caller.isolation == "strict" and raw_workspace(survivor) not in set(caller.scope_canonicals()):
+                    raise PermissionError("survivor_workspace_acl")
+                if survivor.get("status") != "active":
+                    raise ValueError(
+                        f"survivor is not active (status={survivor.get('status')}); pick a live memory to keep"
+                    )
+                survivor_canonical = raw_workspace(survivor)
+                conflict_membership = self._merge_conflict_membership_on_conn(
+                    conn, loser_ints + [survivor_id_int],
+                )
+                # Survivor-side group check only matters when the survivor is
+                # about to be edited (merged_content is validated non-blank
+                # above); a no-op merge does not stale any pin.
+                if merged_content is not None:
+                    attention_groups = conflict_membership.get(survivor_id_int, [])
+                for loser_id in loser_ints:
+                    loser = self.db.get_memory_on_conn(conn, loser_id)
+                    if not loser:
+                        failed_ids.append({"memory_id": loser_id, "error": "not_found"})
+                        continue
+                    if caller.isolation == "strict" and raw_workspace(loser) not in set(caller.scope_canonicals()):
+                        failed_ids.append({"memory_id": loser_id, "error": "workspace_acl"})
+                        continue
+                    status = str(loser.get("status") or "")
+                    if status in {"superseded", "deleted"}:
+                        raw_metadata = loser.get("metadata")
+                        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+                        pointer = metadata.get("merged_into")
+                        try:
+                            same_target = pointer is not None and int(pointer) == survivor_id_int
+                        except (TypeError, ValueError):
+                            same_target = False
+                        if status == "superseded" and same_target:
+                            deduped_ids.append(loser_id)
+                        elif status == "superseded":
+                            failed_ids.append({
+                                "memory_id": loser_id, "error": "already_merged",
+                                "merged_into": pointer,
+                            })
+                        else:
+                            failed_ids.append({
+                                "memory_id": loser_id, "error": "not_active", "status": status,
+                            })
+                        continue
+                    if raw_workspace(loser) != survivor_canonical:
+                        failed_ids.append({
+                            "memory_id": loser_id, "error": "workspace_mismatch",
+                            "survivor_workspace": survivor_canonical,
+                            "loser_workspace": raw_workspace(loser),
+                        })
+                        continue
+                    groups = conflict_membership.get(loser_id, [])
+                    if groups:
+                        # Members are pinned at id@version; superseding one
+                        # leaves the group open forever. Reject and steer the
+                        # caller to the conflict flow instead.
+                        failed_ids.append({
+                            "memory_id": loser_id, "error": "conflict_member",
+                            "attention_required": True,
+                            "conflicts": [
+                                {
+                                    "conflict_id": group.get("id"),
+                                    "revision": group.get("revision"),
+                                    "status": group.get("status"),
+                                    "conflict_point": group.get("conflict_point"),
+                                }
+                                for group in groups
+                            ],
+                            "hint": (
+                                "resolve the group first via judge/replan/resolve_conflict "
+                                "or record_conflict(status='not_a_conflict'), then merge"
+                            ),
+                        })
+                        continue
+                    # metadata is replaced wholesale by update_memory_on_conn,
+                    # so merge the pointer into the existing dict first.
+                    raw_metadata = loser.get("metadata")
+                    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+                    merged_metadata = dict(metadata)
+                    merged_metadata["merged_into"] = survivor_id_int
+                    merged_metadata["merge_reason"] = str(reason).strip()
+                    status_updated = self.db.update_memory_on_conn(
+                        conn,
+                        loser_id,
+                        {
+                            "status": "superseded",
+                            "protection_level": ProtectionLevel.NORMAL.value,
+                            "metadata": merged_metadata,
+                        },
+                    )
+                    if not status_updated:
+                        failed_ids.append({"memory_id": loser_id, "error": "update_failed"})
+                        continue
+                    merged_ids.append(loser_id)
+                if not merged_ids and not deduped_ids:
+                    raise ValueError("no loser could be merged; see failed_ids")
+                if merged_content is not None:
+                    edit_result = self.db.edit_memory_intent(
+                        survivor_id_int,
+                        new_content=str(merged_content),
+                        reason=f"merge survivors: {str(reason).strip()}",
+                        authorized=True,
+                        conn=conn,
+                    )
+                    if edit_result.get("outcome") != "edited":
+                        raise ValueError(
+                            f"survivor content merge failed: {edit_result.get('error') or edit_result.get('outcome')}"
+                        )
+                    survivor_edited = True
+                    survivor_history_id = int(edit_result.get("history_id") or 0) or None
+                survivor_record = self.db.get_memory_on_conn(conn, survivor_id_int)
+        except PermissionError:
+            return self.db.state.response(
+                forbidden_payload("memory", workspace=caller, reason="workspace_acl"),
+                ok=False, extra_warnings=list(caller.warnings),
+            )
+        except ValueError as exc:
+            return self.db.state.response(
+                {"error": str(exc), "merged": False, "failed_ids": failed_ids}, ok=False,
+                extra_warnings=list(caller.warnings),
+            )
+        except sqlite3.Error as exc:
+            return self.db.state.response(
+                {
+                    "error": f"merge failed; transaction rolled back: {exc}",
+                    "merged": False, "survivor_id": survivor_id_int,
+                },
+                ok=False, extra_warnings=list(caller.warnings),
+            )
+        except Exception as exc:
+            return self.db.state.response(
+                {
+                    "error": f"merge failed; transaction rolled back: {exc}",
+                    "merged": False, "survivor_id": survivor_id_int,
+                },
+                ok=False, extra_warnings=list(caller.warnings),
+            )
+        data: dict[str, Any] = {
+            "merged": True,
+            "survivor_id": survivor_id_int,
+            "merged_ids": merged_ids,
+            "deduped_ids": deduped_ids,
+            "failed_ids": failed_ids,
+            "survivor_edited": survivor_edited,
+            "history_id": survivor_history_id,
+            "record": survivor_record,
+        }
+        if survivor_edited:
+            data["evidence_index"], data["semantic_conflict_check"] = (
+                self._post_commit(survivor_id_int, survivor_record, recheck_conflicts=True)
+            )
+            data["post_commit"] = {"status": "recheck_conflicts"}
+        else:
+            # Superseding losers does not change the survivor's content, so no
+            # conflict recheck is owed; flag it explicitly for API stability.
+            data["post_commit"] = {"status": "skipped", "reason": "no_survivor_change"}
+        if attention_groups:
+            ids = ", ".join(f"#{int(group.get('id') or 0)}" for group in attention_groups)
+            data["attention_required"] = True
+            data["action_required"] = "review_unresolved_conflicts"
+            data["unresolved_conflicts"] = [
+                {
+                    "conflict_id": group.get("id"),
+                    "revision": group.get("revision"),
+                    "status": group.get("status"),
+                    "conflict_point": group.get("conflict_point"),
+                }
+                for group in attention_groups
+            ]
+            data["attention_summary"] = (
+                f"edited survivor is a member of unresolved conflict group(s) {ids}; "
+                "this edit may stale their pinned member versions — review via "
+                "memory_review(view='conflict_detail') and judge / replan / "
+                "resolve as appropriate"
+            )
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
 
     def _update_check_status(self) -> dict[str, Any]:
