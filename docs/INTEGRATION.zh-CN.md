@@ -102,7 +102,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 `scan_candidates(include_duplicates=true)` 是单页抽查：只返回该页的有界 `duplicates_pool`（上限 2×batch），携带完整的 record_conflict 兼容成员。要做全库近重复清扫，用独立的 `memory_repair(task="scan_duplicates")`（0.15.3）：服务端把所有页聚合到一个 200 对的全局上限下，一次有界响应替代整个分页循环。默认条目是轻量的（`left_id`/`right_id`、双方主题、workspace、`reason`、`distance`、`candidate_key_hash`）；`include_quotes=true` 才附上触发证据引文。抑制沿用同一 candidate-hash 契约——已记录 `not_a_conflict` 或已被 open/applying 组持有的 pair 不会重新出现。该任务不推进 conflict-scan 进度、不写 `scan_log.jsonl`；分诊路径：真重复走 `merge_memories`，误报走 `record_conflict` 压制。
 
-每次成功的 `scan_candidates` 调用会向 `scan_log.jsonl` 追加一行完成记录（耗时、分页计数、调用方身份）。这个文件就是「定时任务存在」的机器可查证据：没有完成记录且无冲突扫描进度时，agent 会收到 `scan_never_run` 引导提示（info）；重建要求未满足升级为 `scan_required`（warning）；最新记录超过 14 天触发 `scan_stale`（info）。提示载荷带平台无关的 `setup.tasks` 规格（每小时冲突扫描 + 每日治理提醒），任务跑起来后自动消失；同一份证据也驱动 doctor 的 `conflicts.scan_required` / `conflicts.scan_stale` 体检项。完整规格随时可取：`memory(action="help", data={"topic": "scheduled_tasks"})`。
+只有完整的扫描边界——某页 `scan_candidates` 返回 `next_anchor_memory_id=null` 且确实扫过 anchor——才向 `scan_log.jsonl` 追加一行轻量审计记录（`scan_time`、`duration_sec`、`status=completed`、调用方身份、所配置的模型名）。中间页保持静默，逐页计数已移除：这个文件是审计证据，不是扫描结果日志。这个文件就是「定时任务存在」的机器可查证据：没有完成记录且无冲突扫描进度时，agent 会收到 `scan_never_run` 引导提示（info）；重建要求未满足升级为 `scan_required`（warning）；最新记录超过 14 天触发 `scan_stale`（info）。提示载荷带平台无关的 `setup.tasks` 规格（每小时冲突扫描 + 每日治理提醒），任务跑起来后自动消失；同一份证据也驱动 doctor 的 `conflicts.scan_required` / `conflicts.scan_stale` 体检项。完整规格随时可取：`memory(action="help", data={"topic": "scheduled_tasks"})`。
 
 ### 写入时 notice：严门
 

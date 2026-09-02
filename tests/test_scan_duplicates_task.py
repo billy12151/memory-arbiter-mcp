@@ -153,3 +153,47 @@ def test_scan_duplicates_rejects_unknown_fields(vec_tools: MemoryTools) -> None:
     result = vec_tools.memory_repair("scan_duplicates", {"include_quotes": False, "bogus": 1})
     assert result["ok"] is True
     assert any("unknown field" in warning for warning in result.get("warnings") or [])
+
+
+def test_scan_duplicates_writes_no_scan_log_and_advances_no_progress(
+    vec_tools: MemoryTools, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = vec_tools
+    _write_for_scan(tools, "alpha duplicate fact statement")
+    _write_for_scan(tools, "alpha duplicate fact statement")
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    def _no_progress(**kwargs):
+        raise AssertionError("scan_duplicates must not advance conflict-scan progress")
+
+    monkeypatch.setattr(tools.db, "record_conflict_scan_page", _no_progress)
+    monkeypatch.setattr(tools.db, "complete_conflict_scan", _no_progress)
+    data = _sweep(tools)
+    assert data["total_pairs"] == 1
+    scan_log = tools.settings.db_path.parent / "scan_log.jsonl"
+    assert not scan_log.exists(), "scan_duplicates must not write scan_log.jsonl"
+
+
+def test_scan_candidates_zero_anchors_write_no_scan_log(vec_tools: MemoryTools) -> None:
+    result = vec_tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50})
+    assert result["ok"] is True
+    assert result["data"]["anchors_scanned"] == 0
+    assert result["data"]["next_anchor_memory_id"] is None
+    scan_log = vec_tools.settings.db_path.parent / "scan_log.jsonl"
+    assert not scan_log.exists(), (
+        "a zero-anchor boundary on an empty library is no evidence a task exists"
+    )
+
+
+def test_scan_duplicates_page_truncation_propagates(
+    vec_tools: MemoryTools, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = vec_tools
+    for _ in range(4):
+        _write_for_scan(tools, "shared identical duplicate fact statement")
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    monkeypatch.setattr("memory_arbiter.surfaces.SCAN_DUPLICATES_BATCH", 1)
+    data = _sweep(tools)
+    # First anchor alone pairs with 3 peers but its page pool caps at 2*1.
+    assert data["truncated"] is True

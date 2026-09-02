@@ -145,7 +145,9 @@ def _last_completed_scan(settings: Settings) -> dict[str, Any] | None:
             try:
                 record = json.loads(line)
             except (TypeError, ValueError):
-                return None
+                # A torn trailing line (crash mid-append) must not hide
+                # the valid completed record before it.
+                continue
             if isinstance(record, dict) and record.get("status") == "completed":
                 return record
     except OSError:

@@ -125,6 +125,11 @@ class WritePipeline:
                     )
                     if rows:
                         return rows
+                    # Empty KNN with a loaded embedder usually means the
+                    # workspace simply has no other active rows — but it can
+                    # also mean a vector publish failed or another process
+                    # wrote rows before a backfill. The scan is a cheap
+                    # indexed query and doubles as that cross-process net.
             except Exception:
                 pass
         return self.db.active_subject_tag_rows(

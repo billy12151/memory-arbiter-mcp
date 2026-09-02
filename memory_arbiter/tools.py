@@ -311,10 +311,12 @@ class MemoryTools:
     def _scheduled_task_notices(self) -> list[dict[str, Any]]:
         """Scheduled-task guidance notice, self-closing on scan evidence.
 
-        Any completed scan_candidates run appends to scan_log.jsonl and a
-        required rebuild records conflict_scan pages — either is the
-        machine-checkable proof that a task exists, and once it appears the
-        trigger condition (and this notice) goes away. Suppression rides the
+        A completed full-scan boundary (a scan_candidates page returning
+        next_anchor_memory_id=null with anchors scanned) appends one audit
+        line to scan_log.jsonl, and a required rebuild records conflict_scan
+        pages — either is the machine-checkable proof that a task exists,
+        and once it appears the trigger condition (and this notice) goes
+        away. Suppression rides the
         shared notice-state file; a negative-cache timestamp keeps the
         scan_log.jsonl re-read off every product response. Only an actual
         delivery advances the suppression window (last_at); a clean check
@@ -583,14 +585,16 @@ class MemoryTools:
         """Embed subject+tags for every active memory missing a hint vector.
 
         Covers libraries created before 0.15.3 and any vector whose publish
-        was skipped by a failed embed. Chunked in its own transactions so a
-        large library never holds one long write lock; rows whose embedding
-        fails (empty sentinel) are left missing and retried on the next
-        process start.
+        was skipped by a failed embed or a vec-table rebuild. Chunked in its
+        own transactions so a large library never holds one long write lock;
+        rows whose embedding fails (empty sentinel) are left missing and
+        retried on the next process start. Returns the number of vectors
+        actually written (not the number of candidates).
         """
         from .pipeline.write import WritePipeline
 
         rows = self.db.missing_subject_tags_rows()
+        written = 0
         for start in range(0, len(rows), 64):
             chunk = rows[start:start + 64]
             with self.db.write_transaction() as conn:
@@ -618,9 +622,10 @@ class MemoryTools:
                                 json.dumps([float(x) for x in er.embedding]),
                             ),
                         )
+                        written += 1
                     except Exception:
                         continue
-        return len(rows)
+        return written
 
     def _ensure_active_embedder(self) -> tuple[ManagedEmbedder | None, list[str]]:
         """Load the configured embedder, but expose it only for a ready index."""

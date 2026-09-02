@@ -1820,11 +1820,6 @@ class OperationsPipeline:
                     survivor_edited = True
                     survivor_history_id = int(edit_result.get("history_id") or 0) or None
                 survivor_record = self.db.get_memory_on_conn(conn, survivor_id_int)
-        except PermissionError:
-            return self.db.state.response(
-                forbidden_payload("memory", workspace=caller, reason="workspace_acl"),
-                ok=False, extra_warnings=list(caller.warnings),
-            )
         except ValueError as exc:
             return self.db.state.response(
                 {"error": str(exc), "merged": False, "failed_ids": failed_ids}, ok=False,
@@ -2270,6 +2265,16 @@ class OperationsPipeline:
             for mid in ids
         ]
         failed = sum(item.get("status") != "queued" for item in results)
+        # A table repair / dim swap recreates subject_tags_vec empty; the
+        # idempotent backfill restores hint vectors now instead of waiting
+        # for a process restart (fail-open, no-rows-missing is one cheap
+        # scan).
+        try:
+            embedder, _w = self._ensure_embedder()
+            if embedder is not None:
+                self._tools._backfill_subject_tags_vectors(embedder)
+        except Exception:
+            pass
         return self.db.state.response(
             {
                 "dry_run": False,
@@ -2808,6 +2813,10 @@ class OperationsPipeline:
         }
         record = self.db.get_memory(memory_id) or {}
         result, _check = self._post_commit(memory_id, record, recheck_conflicts=False)
+        # Replayed active rows carry no subject_tags_vec vector (replay
+        # restores base rows, not derived indexes); publish one so the
+        # write-time duplicate hint can recall them before the next restart.
+        self._tools._write_pipeline.refresh_subject_tags_vector(memory_id)
         outcome = str(result.get("status") or "unknown")
         if outcome == "queued":
             stages["evidence"] = "queued"

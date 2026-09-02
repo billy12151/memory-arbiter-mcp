@@ -150,7 +150,9 @@ class AuditStore:
                 try:
                     rec = json.loads(line)
                 except (ValueError, TypeError):
-                    return None
+                    # A torn trailing line (crash mid-append) must not hide
+                    # the valid completed record before it.
+                    continue
                 if isinstance(rec, dict) and rec.get("status") == "completed":
                     return rec
         except OSError:

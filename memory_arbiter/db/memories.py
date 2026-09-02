@@ -427,13 +427,16 @@ class MemoriesStore:
         ]
         try:
             with self.connection() as conn:
+                # The k=? window vec0 picks is GLOBAL over the table: rows from
+                # other workspaces crowd it until fetch_k grows past them.
+                # Like evidence knn, the growth ceiling must therefore be the
+                # unscoped active-domain count — a scoped count would cap the
+                # window below the foreign rows and silently starve recall.
                 candidate_count = int(
                     conn.execute(
                         "SELECT COUNT(*) FROM subject_tags_vec v "
                         "JOIN memories m ON m.id=v.id "
-                        "WHERE m.status='active' AND v.id != ? AND "
-                        + self._SUBJECT_TAGS_WS_CLAUSE,
-                        filter_params,
+                        "WHERE m.status='active'"
                     ).fetchone()[0]
                 )
                 max_fetch = max(1, candidate_count)

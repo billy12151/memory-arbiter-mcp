@@ -207,8 +207,6 @@ def test_fallback_scan_limit_binds_row_count(tmp_path: Path) -> None:
 
 
 def test_subject_tags_embed_text_sorts_tags(tmp_path: Path) -> None:
-    from memory_arbiter.pipeline.write import WritePipeline
-
     left = WritePipeline._subject_tags_embed_text(" 主题 ", ["b", "a", " c "])
     right = WritePipeline._subject_tags_embed_text("主题", ["c", "a", "b"])
     assert left == right == "主题\na b c"
@@ -232,3 +230,41 @@ def test_vec_knn_filters_inactive_and_excludes_self(tmp_path: Path) -> None:
         workspace_canonical="w",
     )
     assert [row["id"] for row in rows] == [], "superseded rows must not be recalled"
+
+
+def test_vec_knn_window_grows_past_foreign_workspaces(tmp_path: Path) -> None:
+    """vec0's k-window is global: 30 closer rows from OTHER workspaces must
+    not starve the scoped recall (the growth ceiling is the unscoped active
+    count, evidence-knn style)."""
+    tools = make_vec_tools(tmp_path)
+    # Foreign rows share most characters with the query text, so their
+    # histograms sit closer than the target's own workspace peers.
+    for index in range(30):
+        _write(tools, f"金营项目发版流程说明补充材料之{index}", ["release"], workspace="crowd-ws")
+    target = _write(tools, "金营项目发版流程说明", ["release"], workspace="w")
+    excluded = _write(tools, "完全无关的第二条", ["other"], workspace="w")
+    query = CharHistogramEmbedder.embed_text(
+        "", WritePipeline._subject_tags_embed_text("金营项目发版流程说明", ["release"]),
+    ).embedding
+    rows = tools.db.subject_tags_knn(
+        query, k=5, exclude_memory_id=int(excluded["id"]), workspace_canonical="w",
+    )
+    assert [row["id"] for row in rows] == [int(target["id"])]
+
+
+def test_knn_failure_falls_back_to_scan_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = make_vec_tools(tmp_path)
+    first = _write(tools, "回退扫描验证", ["fb"])
+
+    def _raise(**kwargs):
+        raise RuntimeError("vec exploded")
+
+    monkeypatch.setattr(tools.db, "subject_tags_knn", _raise)
+    result = tools.memory_write(
+        content="fallback body", subject="回退扫描验证", tags=["fb"], workspace="w",
+    )
+    hints = _similar_notices(result)
+    assert len(hints) == 1
+    assert hints[0]["matches"][0]["memory_id"] == first["id"]

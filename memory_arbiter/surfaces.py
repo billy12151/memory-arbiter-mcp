@@ -1034,9 +1034,12 @@ class ProductSurfaces:
                         result["conflict_scan_rearmed"] = True
                         result["conflict_scan_state"] = self.db.conflict_scan_state()
                     result["conflict_scan_progress_rejected"] = True
-            if ok and result.get("next_anchor_memory_id") is None:
+            if ok and result.get("next_anchor_memory_id") is None and int(
+                result.get("anchors_scanned") or 0
+            ) > 0:
                 # Audit evidence: only completed full-scan boundaries write a
-                # line; intermediate pages stay silent.
+                # line; intermediate pages stay silent, and a zero-anchor page
+                # (empty library) is no evidence a scheduled task exists.
                 identity = get_request_identity()
                 self.db.log_scan(
                     duration_sec=time.perf_counter() - scan_started,
