@@ -32,33 +32,39 @@ def _notice_types(tools: MemoryTools) -> list[str]:
     return [notice.get("type") for notice in result.get("notices") or []]
 
 
-def test_scan_log_written_on_success_with_identity_fields(tmp_path: Path) -> None:
+def test_scan_log_written_on_full_boundary_with_audit_fields(tmp_path: Path) -> None:
     import tests.test_vnext_evidence as tv
 
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
+    # Ensure both model fields are present so the audit entry records them.
+    tools.settings.semantic_conflict_model_path = tools.settings.embedding_model_path
     tools.start_update_monitor(UpdateMonitor(
         enabled=False, state_path=tmp_path / "notice_state.json",
     ))
-    tools.memory_write(content="alpha deployment note", subject="s", tags=[], workspace="w")
-    tools.memory_write(content="beta deployment note", subject="s", tags=[], workspace="w")
+    tools.memory_write(content="alpha deployment note", subject="alpha note", tags=[], workspace="w")
+    tools.memory_write(content="beta deployment note", subject="beta note", tags=[], workspace="w")
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     result = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
     assert result["ok"] is True, result
+    assert result["data"].get("next_anchor_memory_id") is None, "two memories fit in batch 50"
 
     path = tools.db.scan_log_path
     assert path.exists()
     lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    assert lines, "successful scan must append to scan_log.jsonl"
+    assert lines, "successful full-scan boundary must append to scan_log.jsonl"
     entry = lines[-1]
     assert entry["status"] == "completed"
-    assert entry["anchors_scanned"] >= 1
-    assert isinstance(entry["duration_sec"], float)
-    assert "workspace" not in entry, "workspace field is dropped by owner decision"
+    assert isinstance(entry["duration_sec"], float) and entry["duration_sec"] >= 0
     assert entry["client"] is None and entry["agent_id"] is None  # stdio has no identity
-    assert "candidates" in entry and "knn_pairs" in entry and "rule_pass" in entry
-    assert "duplicates_truncated" in entry and "next_anchor_memory_id" in entry
+    assert entry["embedding_model"] == str(tools.settings.embedding_model_path)
+    assert entry["semantic_model"] == str(tools.settings.semantic_conflict_model_path)
+    for dropped in (
+        "anchors_scanned", "candidates", "knn_pairs", "rule_pass",
+        "duplicates_truncated", "next_anchor_memory_id", "workspace",
+    ):
+        assert dropped not in entry, f"{dropped!r} is a per-page metric and must be dropped"
 
     # Failing scans (vec unavailable) must not append activity evidence.
     tools.db.state.sqlite_vec_available = False
@@ -68,21 +74,43 @@ def test_scan_log_written_on_success_with_identity_fields(tmp_path: Path) -> Non
     assert len(after) == len(lines)
 
 
-def test_scan_log_empty_scan_does_not_write_completed_record(tmp_path: Path) -> None:
+def test_scan_log_full_boundary_writes_and_partial_page_does_not(tmp_path: Path) -> None:
     import tests.test_vnext_evidence as tv
+    from memory_arbiter.doctor import _last_completed_scan
 
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    # No memories have been written, so the scan page completes with zero work.
-    result = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
-    assert result["ok"] is True, result
-    assert int(result["data"].get("anchors_scanned") or 0) == 0
-    assert result["data"].get("candidates") == []
+    tools.settings.semantic_conflict_model_path = tools.settings.embedding_model_path
+    tools.memory_write(content="first deployment note", subject="first note", tags=[], workspace="w")
+    tools.memory_write(content="second deployment note", subject="second note", tags=[], workspace="w")
+    assert tools.wait_evidence_worker_drained(timeout=5)
 
     path = tools.db.scan_log_path
-    if path.exists():
-        lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-        assert not any(line.get("status") == "completed" for line in lines)
+
+    # First page with batch=1 stops in the middle of the library.
+    first = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 1, "k": 10})
+    assert first["ok"] is True, first
+    next_anchor = first["data"].get("next_anchor_memory_id")
+    assert next_anchor is not None, "two memories require a second page"
+    assert not path.exists() or not path.read_text().strip(), "partial page must not write scan_log"
+
+    # Second page reaches the full boundary.
+    final = tools.memory_repair("scan_candidates", {"anchor_memory_id": int(next_anchor), "batch": 1, "k": 10})
+    assert final["ok"] is True, final
+    assert final["data"].get("next_anchor_memory_id") is None
+
+    lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert len(lines) == 1, "only the completed full boundary is logged"
+    entry = lines[-1]
+    assert entry["status"] == "completed"
+    assert set(entry.keys()) == {
+        "scan_time", "duration_sec", "status", "client", "agent_id",
+        "embedding_model", "semantic_model",
+    }
+
+    # Both read paths return the newest completed line.
+    assert tools.db.audit.scan_log_last_completed()["scan_time"] == entry["scan_time"]
+    assert _last_completed_scan(tools.settings)["scan_time"] == entry["scan_time"]
 
 
 def test_notice_fires_never_run_then_self_closes_on_scan(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections import deque
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -87,43 +88,38 @@ class AuditStore:
         self,
         *,
         duration_sec: float,
-        anchors_scanned: int,
-        candidates: int,
-        knn_pairs: int,
-        rule_pass: int,
-        next_anchor_memory_id: int | None,
-        truncated: bool,
         client: str | None = None,
         agent_id: str | None = None,
     ) -> None:
-        """Append one completed scan_candidates run to scan_log.jsonl.
+        """Append one completed full-scan boundary to scan_log.jsonl.
 
-        Unconditional activity record for the scheduled-task guidance notice:
-        the file's newest completed entry is the machine-checkable evidence
-        that a conflict scan task is running (fresh installs and long-stale
-        libraries both trigger the notice until this line appears). Fail-open
-        like log_attention: a broken log path must never fail the scan call.
-        Identity fields are advisory provenance from the request headers
-        (None under stdio).
+        Only a scan_candidates page whose ``next_anchor_memory_id`` is null
+        produces this line; intermediate pages are intentionally silent.  The
+        newest completed entry is the machine-checkable evidence that a full
+        conflict-scan boundary finished (fresh installs and long-stale libraries
+        trigger the guidance notice until this line appears).  Fail-open like
+        log_attention: a broken log path must never fail the scan call.
+        Identity and model fields are advisory provenance from the request
+        headers (None under stdio) and the current settings.
         """
         try:
+            settings = self._db.settings
             entry = {
                 "scan_time": utc_now_iso(),
                 "duration_sec": round(float(duration_sec), 4),
                 "status": "completed",
-                # Opt-in duplicates-pool overflow flag only — NOT a generic
-                # "page hit a bound" marker (the activity log's purpose is
-                # freshness evidence; the candidates path has its own bounds).
-                "duplicates_truncated": bool(truncated),
-                "anchors_scanned": int(anchors_scanned),
-                "candidates": int(candidates),
-                "knn_pairs": int(knn_pairs),
-                "rule_pass": int(rule_pass),
-                "next_anchor_memory_id": (
-                    int(next_anchor_memory_id) if next_anchor_memory_id is not None else None
-                ),
                 "client": str(client) if client else None,
                 "agent_id": str(agent_id) if agent_id else None,
+                "embedding_model": (
+                    str(settings.embedding_model_path)
+                    if settings.embedding_model_path is not None
+                    else None
+                ),
+                "semantic_model": (
+                    str(settings.semantic_conflict_model_path)
+                    if settings.semantic_conflict_model_path is not None
+                    else None
+                ),
             }
             line = json.dumps(entry, ensure_ascii=False) + "\n"
             path = self.scan_log_path
@@ -142,22 +138,24 @@ class AuditStore:
         path = self.scan_log_path
         if not path.exists():
             return None
-        last_completed: dict[str, Any] | None = None
         try:
             with open(path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except (ValueError, TypeError):
-                        continue
-                    if isinstance(rec, dict) and rec.get("status") == "completed":
-                        last_completed = rec
+                # Tail-read the last one or two lines so a trailing newline does
+                # not hide the final record.
+                last_lines = deque(fh, maxlen=2)
+            for line in reversed(last_lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (ValueError, TypeError):
+                    return None
+                if isinstance(rec, dict) and rec.get("status") == "completed":
+                    return rec
         except OSError:
             return None
-        return last_completed
+        return None
 
     def audit_summary(self) -> dict[str, Any]:
         db = self._db

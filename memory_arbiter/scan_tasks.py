@@ -65,8 +65,9 @@ def scheduled_tasks_help() -> dict[str, Any]:
         "topic": SCHEDULED_TASKS_TOPIC,
         "setup": SCHEDULED_TASKS_SPEC,
         "self_closing": (
-            "Every completed scan_candidates run appends to scan_log.jsonl; once a task runs, "
-            "the scan_never_run/scan_stale guidance notice stops appearing and doctor's "
+            "A completed full-scan boundary (a scan_candidates page whose next_anchor_memory_id "
+            "returns null) appends one line to scan_log.jsonl; once that line appears, the "
+            "scan_never_run/scan_stale guidance notice stops appearing and doctor's "
             "conflicts.scan_required / conflicts.scan_stale findings turn green."
         ),
     }

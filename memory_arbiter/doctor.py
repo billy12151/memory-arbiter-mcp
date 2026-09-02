@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -126,28 +127,30 @@ def _safe_count(conn: sqlite3.Connection, source: str, where: str | None = None)
 def _last_completed_scan(settings: Settings) -> dict[str, Any] | None:
     """Newest completed entry of scan_log.jsonl (file-level, doctor-local).
 
-    Mirrors AuditStore.scan_log_last_completed's selection so the notice
-    trigger and the doctor finding agree on what counts as scan activity.
+    Mirrors AuditStore.scan_log_last_completed's tail-read selection so the
+    notice trigger and the doctor finding agree on what counts as scan activity.
     """
     path = Path(settings.db_path).parent / "scan_log.jsonl"
     if not path.exists():
         return None
-    last_completed: dict[str, Any] | None = None
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(record, dict) and record.get("status") == "completed":
-                    last_completed = record
+            # Tail-read the last one or two lines so a trailing newline does
+            # not hide the final record.
+            last_lines = deque(fh, maxlen=2)
+        for line in reversed(last_lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except (TypeError, ValueError):
+                return None
+            if isinstance(record, dict) and record.get("status") == "completed":
+                return record
     except OSError:
         return None
-    return last_completed
+    return None
 
 
 def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = False, runtime_state: DegradeState | None = None, embedder_probe: Callable[[], tuple[Any, list[str]]] | None = None) -> OverviewReport:

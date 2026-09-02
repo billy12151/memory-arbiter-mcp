@@ -982,28 +982,6 @@ class ProductSurfaces:
                 # Spec §7.1 wide gate: bounded Qwen enhancement over the page.
                 result = self._tools._enhance_scan_candidates(result)
             ok = "error" not in result
-            if ok:
-                identity = get_request_identity()
-                scan_counts = result.get("counts") or {}
-                anchors_scanned = int(result.get("anchors_scanned") or 0)
-                candidates_count = len(result.get("candidates") or [])
-                knn_pairs = int(scan_counts.get("knn_pairs") or 0)
-                # Only record a completed scan when the page actually did work.
-                # A success with zero anchors, candidates, and knn pairs is not
-                # evidence that the scheduled task is healthy — it would falsely
-                # clear the "scan_never_run" guidance notice on an empty library.
-                if anchors_scanned > 0 or candidates_count > 0 or knn_pairs > 0:
-                    self.db.log_scan(
-                        duration_sec=time.perf_counter() - scan_started,
-                        anchors_scanned=anchors_scanned,
-                        candidates=candidates_count,
-                        knn_pairs=knn_pairs,
-                        rule_pass=int(scan_counts.get("rule_pass") or 0),
-                        next_anchor_memory_id=result.get("next_anchor_memory_id"),
-                        truncated=bool(result.get("duplicates_truncated")),
-                        client=(identity.client if identity else None),
-                        agent_id=(identity.agent_id if identity else None),
-                    )
             scan_state = self.db.conflict_scan_state()
             if ok and scan_state.get("required"):
                 # Compare the PERSISTED requirement against the RUNNING
@@ -1034,6 +1012,15 @@ class ProductSurfaces:
                         result["conflict_scan_rearmed"] = True
                         result["conflict_scan_state"] = self.db.conflict_scan_state()
                     result["conflict_scan_progress_rejected"] = True
+            if ok and result.get("next_anchor_memory_id") is None:
+                # Audit evidence: only completed full-scan boundaries write a
+                # line; intermediate pages stay silent.
+                identity = get_request_identity()
+                self.db.log_scan(
+                    duration_sec=time.perf_counter() - scan_started,
+                    client=(identity.client if identity else None),
+                    agent_id=(identity.agent_id if identity else None),
+                )
             return self.db.state.response(result, ok=ok, extra_warnings=list(caller.warnings))
         if task == "cleanup_history":
             if "id" in payload or "memory_id" in payload:

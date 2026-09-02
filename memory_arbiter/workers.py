@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, TYPE_CHECKING
 
-from .constants import SEMANTIC_PRELOAD, SEMANTIC_QUEUE_MAX_SIZE
+from .constants import EVIDENCE_QUEUE_MAX_SIZE, SEMANTIC_PRELOAD, SEMANTIC_QUEUE_MAX_SIZE
 from .models import TrustedApplyingContext
 
 if TYPE_CHECKING:
@@ -34,6 +34,12 @@ class LocalTextIndexWorker:
         with self._cond:
             if self._shutdown:
                 return {"status": "shutdown"}
+            if len(self._pending) + len(self._inflight) >= EVIDENCE_QUEUE_MAX_SIZE:
+                return {
+                    "status": "busy",
+                    "reason": "evidence_worker_queue_full",
+                    "queue_depth": len(self._pending),
+                }
             displaced = self._pending.get(int(memory_id))
             self._pending[int(memory_id)] = dict(snapshot)
             self._cond.notify_all()

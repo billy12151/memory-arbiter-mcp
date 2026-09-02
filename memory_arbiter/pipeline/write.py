@@ -232,6 +232,12 @@ class WritePipeline:
                     policy_warnings + validation.warnings + write_warnings + workspace["warnings"]
                 ),
             )
+            if data.get("evidence_index", {}).get("status") == "busy":
+                depth = int(data["evidence_index"].get("queue_depth") or 0)
+                response.setdefault("warnings", []).append(
+                    f"evidence indexer is busy (queue depth {depth}); memory written but "
+                    "evidence indexing is delayed — slow down writes or retry later."
+                )
             if workspace["is_new"] and not workspace["strict_block"]:
                 response.setdefault("notices", []).append({
                     "type": "workspace_review",

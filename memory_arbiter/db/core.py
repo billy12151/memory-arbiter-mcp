@@ -641,20 +641,11 @@ class MemoryDB:
         self,
         *,
         duration_sec: float,
-        anchors_scanned: int,
-        candidates: int,
-        knn_pairs: int,
-        rule_pass: int,
-        next_anchor_memory_id: int | None,
-        truncated: bool,
         client: str | None = None,
         agent_id: str | None = None,
     ) -> None:
         return self.audit.log_scan(
-            duration_sec=duration_sec, anchors_scanned=anchors_scanned,
-            candidates=candidates, knn_pairs=knn_pairs, rule_pass=rule_pass,
-            next_anchor_memory_id=next_anchor_memory_id, truncated=truncated,
-            client=client, agent_id=agent_id,
+            duration_sec=duration_sec, client=client, agent_id=agent_id,
         )
 
     def _scan_log_last_completed(self) -> dict[str, Any] | None:
