@@ -353,11 +353,15 @@ class MemoriesStore:
         if not self._db_available:
             return []
         with self.connection() as conn:
+            # Sargable form of COALESCE(NULLIF(workspace_canonical,''),workspace) = ?:
+            # the OR lets SQLite serve the canonical branch from
+            # idx_memories_canonical instead of scanning the whole table.
             rows = conn.execute(
                 "SELECT id, subject, tags, event_time, ingest_time FROM memories "
                 "WHERE status = 'active' AND id != ? "
-                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
-                (int(exclude_memory_id), workspace_canonical),
+                "AND (workspace_canonical = ? "
+                "OR ((workspace_canonical IS NULL OR workspace_canonical = '') AND workspace = ?))",
+                (int(exclude_memory_id), workspace_canonical, workspace_canonical),
             ).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:

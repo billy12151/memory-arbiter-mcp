@@ -908,8 +908,11 @@ class ConflictStore:
             return 0
         sql = "SELECT COUNT(*) FROM conflicts WHERE status IN ('open','applying')"
         params: tuple[Any, ...] = ()
+        # conflicts has no raw `workspace` column (workspace_canonical is NOT
+        # NULL) — the memories-table COALESCE idiom raised OperationalError
+        # here whenever a non-empty scope was passed.
         scope_sql, scope_params = workspace_scope_sql(
-            "COALESCE(NULLIF(workspace_canonical, ''), workspace)", workspace,
+            "workspace_canonical", workspace,
         )
         if scope_sql:
             sql += f" AND {scope_sql}"

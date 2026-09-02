@@ -255,7 +255,7 @@ class ReadPipeline:
             # v0.15.2: one-shot size metering so callers can see what a
             # results page costs against pasting full texts; no feedback loop,
             # limit/offset semantics untouched.
-            from ..tokens import TOKEN_ESTIMATE_BASIS, estimate_tokens
+            from ..tokens import estimate_tokens
 
             contents = [
                 str(r.get("content") or "") for r in results if r.get("content") is not None
@@ -269,16 +269,31 @@ class ReadPipeline:
                 "returned_chars": returned_chars,
                 "returned_count": len(contents),
                 "tokens_estimate": returned_tokens,
-                "estimate_basis": TOKEN_ESTIMATE_BASIS,
                 "matched_beyond_limit_chars": beyond_count * avg_chars,
                 "matched_beyond_limit_count": beyond_count,
+                # The metering only pays off if the user actually sees it;
+                # tell the calling agent to surface the cost inline instead
+                # of leaving the numbers buried in the JSON payload.
+                "display_hint": (
+                    f"Surface the result-page cost to the user when presenting "
+                    f"these results: ~{returned_tokens} tokens returned "
+                    f"({len(contents)} item{'s' if len(contents) != 1 else ''})"
+                    + (
+                        f"; {beyond_count} more matched "
+                        f"(~{beyond_count * avg_chars} chars) not returned."
+                        if beyond_count
+                        else "."
+                    )
+                ),
             }
         try:
             response_data["unresolved_conflict_count"] = self.db.conflicts.count_open_conflicts(
                 ws_scope,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Never drop the field silently: a strict caller cannot tell "no
+            # open conflicts" from "count query failed" without a trace.
+            extra_warnings.append(f"unresolved_conflict_count failed: {exc}")
         if attention_required:
             response_data["attention_required"] = True
             response_data["attention_summary"] = attention_summary

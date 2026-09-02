@@ -45,15 +45,24 @@ class WritePipeline:
         return self._tools.current_agent_id()
 
     _SIMILARITY_SPACE = re.compile(r"\s+")
+    _DIGIT_RUN = re.compile(r"\d+")
 
     @classmethod
     def _normalized_subject(cls, subject: str) -> str:
         return cls._SIMILARITY_SPACE.sub(" ", str(subject or "").casefold().strip())
 
-    @staticmethod
-    def _tag_jaccard(left: list[str], right: list[str]) -> float:
-        left_set = {str(tag).casefold().strip() for tag in left if str(tag).strip()}
-        right_set = {str(tag).casefold().strip() for tag in right if str(tag).strip()}
+    @classmethod
+    def _tag_jaccard(cls, left: list[str], right: list[str]) -> float:
+        # Tags normalize with the same whitespace folding as subjects, so
+        # "金营 项目" and "金营  项目" are the same tag.
+        left_set = {
+            cls._SIMILARITY_SPACE.sub(" ", str(tag).casefold().strip())
+            for tag in left if str(tag).strip()
+        }
+        right_set = {
+            cls._SIMILARITY_SPACE.sub(" ", str(tag).casefold().strip())
+            for tag in right if str(tag).strip()
+        }
         if not left_set and not right_set:
             # Neither side carries tags: the subject bar alone decides (a
             # shared empty vocabulary is trivially full overlap).
@@ -69,10 +78,12 @@ class WritePipeline:
 
         Deterministic and model-free by design: long documents rarely compare
         equal on content, but a forgotten near-duplicate keeps a near-identical
-        subject and tag set. Fires only when BOTH bars clear, so deliberate
-        series entries (tier-1 vs tier-2 plans sharing most tags) stay quiet
-        unless the subjects are near-identical. Same-workspace active rows
-        only (no cross-workspace leakage); fail-open on any error.
+        subject and tag set. Fires only when BOTH bars clear. Subjects
+        identical modulo digit runs (release/checklist series such as
+        "0.15.1 发版清单" vs "0.15.2 发版清单") are suppressed outright; other
+        deliberate series entries (tier-1 vs tier-2 plans sharing most tags)
+        stay quiet unless the subjects are near-identical. Same-workspace
+        active rows only (no cross-workspace leakage); fail-open on any error.
         """
         if not workspace_canonical:
             return None
@@ -84,10 +95,21 @@ class WritePipeline:
             if not subject:
                 return None
             record_tags = list(record.tags or [])
+            subject_series = self._DIGIT_RUN.sub("#", subject)
             scored: list[tuple[float, float, dict[str, Any]]] = []
             for row in rows:
                 row_subject = self._normalized_subject(str(row["subject"] or ""))
                 if not row_subject:
+                    continue
+                # Length gate: ratio() = 2*M/(len_a+len_b) with M bounded by
+                # the shorter subject, so when even a full subsequence match
+                # cannot clear the bar the SequenceMatcher run is skipped.
+                shorter = min(len(subject), len(row_subject))
+                if 2.0 * shorter < WRITE_SIMILAR_SUBJECT_RATIO * (len(subject) + len(row_subject)):
+                    continue
+                if row_subject != subject and self._DIGIT_RUN.sub("#", row_subject) == subject_series:
+                    # Series entries: identical modulo digit runs but not
+                    # exact duplicates — stay quiet.
                     continue
                 ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
                 if ratio < WRITE_SIMILAR_SUBJECT_RATIO:

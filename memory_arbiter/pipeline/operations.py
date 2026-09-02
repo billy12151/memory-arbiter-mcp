@@ -1692,10 +1692,19 @@ class OperationsPipeline:
                         if status == "superseded" and same_target:
                             deduped_ids.append(loser_id)
                         elif status == "superseded":
-                            failed_ids.append({
-                                "memory_id": loser_id, "error": "already_merged",
-                                "merged_into": pointer,
-                            })
+                            if pointer is None:
+                                # Superseded/retired outside merge carries no
+                                # merged_into pointer — name the actual state
+                                # instead of claiming a merge that never ran.
+                                failed_ids.append({
+                                    "memory_id": loser_id, "error": "already_superseded",
+                                    "merged_into": None, "status": status,
+                                })
+                            else:
+                                failed_ids.append({
+                                    "memory_id": loser_id, "error": "already_merged",
+                                    "merged_into": pointer,
+                                })
                         else:
                             failed_ids.append({
                                 "memory_id": loser_id, "error": "not_active", "status": status,

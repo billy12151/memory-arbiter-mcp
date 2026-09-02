@@ -507,7 +507,11 @@ class EvidenceStore:
                                     member_refs <= group_members for group_members in active_group_members
                                 ):
                                     hit_text_ignored = str(hit.get("text") or "")
-                                    if len(duplicates_pool) < duplicates_cap:
+                                    # Re-hitting an already-pooled pair is a
+                                    # free dict replace, not pool growth — it
+                                    # must not count against the cap or flag
+                                    # truncation that never happened.
+                                    if pair_key in duplicates_pool or len(duplicates_pool) < duplicates_cap:
                                         # Members mirror the record_conflict
                                         # contract so an agent can dismiss a
                                         # false positive without re-deriving

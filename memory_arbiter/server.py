@@ -351,6 +351,10 @@ def build_runtime() -> ServerBundle:
         Call memory(action="help") to discover accepted fields, judge requirements,
         value enums, update modes, and action_required paths before relying on a
         result that requests attention.
+
+        find responses carry a size block (tokens_estimate, matched-beyond-limit
+        counts) with a display_hint; surface those numbers to the user when
+        presenting the results.
         """
         identity = _identity_for_tool(app) or stdio_identity
         payload, error = _data_with_request_identity(

@@ -44,8 +44,11 @@ def test_find_size_block_default_on_and_opt_out(tmp_path: Path) -> None:
     assert size["returned_count"] == 1
     assert size["returned_chars"] == len("alpha deployment note with details")
     assert size["tokens_estimate"] == estimate_tokens("alpha deployment note with details")
-    assert size["estimate_basis"] == TOKEN_ESTIMATE_BASIS
+    assert "estimate_basis" not in size
     assert size["matched_beyond_limit_count"] == 0
+    assert "display_hint" in size
+    assert str(size["tokens_estimate"]) in size["display_hint"]
+    assert "(1 item)" in size["display_hint"]
     assert result["data"]["unresolved_conflict_count"] == 0
 
     off = tools.memory_search(query="deployment", limit=10, include_size=False)
@@ -61,6 +64,7 @@ def test_find_size_counts_beyond_limit(tmp_path: Path) -> None:
     size = result["data"]["size"]
     assert size["returned_count"] == 1
     assert size["matched_beyond_limit_count"] >= 1
+    assert str(size["matched_beyond_limit_count"]) in size["display_hint"]
 
 
 def test_find_unresolved_conflict_count_admitted_scope(tmp_path: Path) -> None:
@@ -95,3 +99,75 @@ def test_find_unresolved_conflict_count_admitted_scope(tmp_path: Path) -> None:
     signals = [r.get("conflict_signal") for r in result["data"]["results"] if r.get("conflict_signal")]
     assert signals, "conflict signal must still attach"
     assert all(sig.get("next_executable_call") for sig in signals)
+
+
+def make_strict_tools(tmp_path: Path) -> MemoryTools:
+    settings = Settings(
+        db_path=tmp_path / "strict.sqlite3",
+        backup_jsonl=tmp_path / "strict.jsonl",
+        workspace="projA",
+        isolation="strict",
+    )
+    return MemoryTools(settings, MemoryDB(settings))
+
+
+def _confirm_pending(tools: MemoryTools, memory_id: int) -> None:
+    record = tools.db.get_memory(memory_id)
+    if record["status"] != "pending":
+        return
+    confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "memory_id": memory_id,
+        "canonical": record["workspace_canonical"] or record["workspace"],
+        "authorized": True,
+    })
+    assert confirmed["ok"] is True, confirmed
+
+
+def test_find_unresolved_conflict_count_strict_scope(tmp_path: Path) -> None:
+    """Regression: the admitted-scope count must reach strict callers.
+
+    count_open_conflicts used to scope by
+    COALESCE(NULLIF(workspace_canonical,''),workspace), but the conflicts
+    table has no `workspace` column — any non-empty scope raised
+    OperationalError, which the search path swallowed, so strict responses
+    silently lost the field.
+    """
+    tools = make_strict_tools(tmp_path)
+    left = tools.memory_write(
+        content="database is mysql", subject="s", tags=[], workspace="projA",
+    )["data"]["id"]
+    right = tools.memory_write(
+        content="database is sqlite", subject="s2", tags=[], workspace="projA",
+    )["data"]["id"]
+    _confirm_pending(tools, left)
+    _confirm_pending(tools, right)
+    left_version = int(tools.db.get_memory(left)["version"])
+    right_version = int(tools.db.get_memory(right)["version"])
+
+    def member(memory_id: int, version: int, value: str):
+        quote = f"database is {value}"
+        return {
+            "memory_id": memory_id, "version": version, "attribute_raw": "database",
+            "value_raw": value, "normalized_attribute": "database",
+            "normalized_value": value.casefold(), "evidence_quote": quote,
+            "evidence_span": [0, len(quote)], "content_hash": (str(memory_id) * 64)[:64],
+            "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1",
+        }
+
+    created = tools.memory_repair("record_conflict", {
+        "slot_key": {"entity": "p", "attribute": "db", "scope": "g"},
+        "members": [member(left, left_version, "mysql"), member(right, right_version, "sqlite")],
+        "value_groups": [
+            {"normalized_value": "mysql", "display_value": "mysql", "members": [f"{left}@{left_version}"]},
+            {"normalized_value": "sqlite", "display_value": "sqlite", "members": [f"{right}@{right_version}"]},
+        ],
+        "status": "open", "detector_version": "d1", "prompt_version": "p1",
+        "source": "scan", "reason": "diff", "workspace": "projA", "authorized": True,
+    })
+    assert created["ok"] is True, created["data"]
+    result = tools.memory_search(query="database", workspace="projA", limit=10)
+    assert result["ok"] is True, result
+    assert result["data"]["unresolved_conflict_count"] == 1
+    assert not any(
+        "unresolved_conflict_count" in str(warning) for warning in result["warnings"]
+    )

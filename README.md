@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.15.1` (MCP initialize handshake now reports the package version instead of the SDK's).
+> Current release: `0.15.2` (MCP initialize handshake now reports the package version instead of the SDK's).
 
 ## Why trust it
 
@@ -62,6 +62,8 @@ The daily loop is four calls — `remember` a reusable fact, `find` to recall, `
 - `memory_repair`: evidence rebuild, broad conflict scanning/recording, history cleanup, entity assignment, pending activation, backup replay, semantic runtime control, and notice lifecycle
 
 Every product call returns the envelope `{ok, mode, warnings, degraded, data}`. Operation-specific `action_required`, `next_action`, `replan`, and records live under `data`; successful calls may additionally carry a top-level `notices` array. Each notice has its own `action_required` and machine-readable call under the notice object. Do not look for a generic top-level `action_required`.
+
+`find` responses include a `size` block: `returned_chars`/`returned_count`, a `tokens_estimate`, and matched-beyond-limit counts. `tokens_estimate` comes from a deterministic bucket-table estimator (`heuristic_v1`) calibrated against a Qwen2.5 tokenizer on real records; it runs ~30% high on pure Chinese prose and ~17% high on pure English — the estimate and the estimated share one yardstick, so savings comparisons stay valid. Follow the block's `display_hint` and surface the numbers to the user when presenting results.
 
 ## How recall works
 

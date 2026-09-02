@@ -84,3 +84,37 @@ def test_cross_workspace_and_superseded_stay_quiet(tmp_path: Path) -> None:
     tools.memory_supersede(memory_id=first["data"]["id"], reason="gone", authorized=True)
     after = _write(tools, "同名部署方案", ["ops"])
     assert _similar_notices(after) == []
+
+
+def test_digit_run_series_entries_stay_quiet(tmp_path: Path) -> None:
+    """Version-number series (subjects identical modulo digit runs) are not
+    duplicates: "项目 0.15.1 发版清单" vs "项目 0.15.2 发版清单" must not fire
+    even with identical tags (raw ratio measured 0.9524 >= 0.95)."""
+    tools = make_tools(tmp_path)
+    _write(tools, "项目 0.15.1 发版清单", ["mema-core", "release"])
+    series = _write(tools, "项目 0.15.2 发版清单", ["mema-core", "release"])
+    assert _similar_notices(series) == [], "digit-run series entries must not trigger the hint"
+
+
+def test_exact_digit_subject_duplicate_still_fires(tmp_path: Path) -> None:
+    """The series suppression only applies when the subjects differ: writing
+    the exact same version-numbered subject twice is a true duplicate."""
+    tools = make_tools(tmp_path)
+    first = _write(tools, "项目 0.15.1 发版清单", ["mema-core", "release"])
+    dup = _write(tools, "项目 0.15.1 发版清单", ["mema-core", "release"], content="same checklist again")
+    hints = _similar_notices(dup)
+    assert len(hints) == 1
+    assert hints[0]["matches"][0]["memory_id"] == first["data"]["id"]
+
+
+def test_tag_jaccard_folds_internal_whitespace(tmp_path: Path) -> None:
+    """Tag normalization folds internal whitespace like subjects do:
+    "金营 项目" and "金营  项目" are the same tag (Jaccard 1.0)."""
+    tools = make_tools(tmp_path)
+    first = _write(tools, "上线检查清单", ["金营 项目"])
+    dup = _write(tools, "上线检查清单", ["金营  项目"])
+    hints = _similar_notices(dup)
+    assert len(hints) == 1
+    match = hints[0]["matches"][0]
+    assert match["memory_id"] == first["data"]["id"]
+    assert match["tag_jaccard"] == 1.0

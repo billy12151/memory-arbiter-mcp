@@ -362,3 +362,37 @@ def test_scan_duplicates_pool_cap_and_truncation(vec_tools: MemoryTools) -> None
     })
     assert result["ok"] is True, result
     assert len(result["data"]["duplicates_pool"]) <= 2 * 1
+
+
+def test_merge_superseded_loser_without_pointer_reports_already_superseded(tmp_path: Path) -> None:
+    """A loser superseded outside merge (memory_supersede/retire leaves no
+    metadata.merged_into pointer) must not be mislabeled already_merged."""
+    tools = make_tools(tmp_path)
+    survivor, loser = _memory(tools, "s"), _memory(tools, "d")
+    tools.memory_supersede(memory_id=loser, reason="gone", authorized=True)
+    result = _merge(tools, survivor, [loser])
+    assert result["ok"] is False
+    failure = result["data"]["failed_ids"][0]
+    assert failure["error"] == "already_superseded"
+    assert failure["status"] == "superseded"
+    assert failure["merged_into"] is None
+
+
+def test_scan_duplicates_pool_full_rehit_does_not_flag_truncation(vec_tools: MemoryTools) -> None:
+    """Re-hitting an already-pooled pair is a free dict replace, not pool
+    growth: with the pool at cap, a second unit-level hit on the same memory
+    pair must not set duplicates_truncated."""
+    tools = vec_tools
+    # Anchor (written first → id 1) carries two identical body units, so each
+    # peer pair is hit twice; the two peers fill the pool to cap (2*batch)
+    # before the anchor's second unit re-hits both pairs.
+    _write_for_scan(tools, "shared statement alpha\n\nshared statement alpha")
+    _write_for_scan(tools, "shared statement alpha")
+    _write_for_scan(tools, "shared statement alpha")
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    result = tools.memory_repair("scan_candidates", {
+        "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True,
+    })
+    assert result["ok"] is True, result
+    assert len(result["data"]["duplicates_pool"]) == 2
+    assert result["data"]["duplicates_truncated"] is False

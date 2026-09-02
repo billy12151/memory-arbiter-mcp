@@ -71,16 +71,23 @@ _PRODUCT_HELPS: dict[str, Any] = {
         "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
         "write_duplicate_hint": (
             "remember responses may carry a similar_active_memory notice when the new subject/tags "
-            "closely match an existing active memory (subject ratio >=0.95 AND tag Jaccard >=0.8). "
+            "closely match an existing active memory (subject ratio >=0.95 AND tag Jaccard >=0.8; "
+            "empty tag sets on both sides count as Jaccard 1.0, so the subject alone decides; "
+            "subjects differing only in digit runs are treated as series entries and stay quiet). "
             "Triage it silently: ignore deliberate series entries, prefer updating the original on "
-            "true duplicates, and ask the user only when retiring/merging (governance) is needed."
+            "true duplicates, and ask the user only when retiring/merging (governance) is needed. "
+            "Known blind spot: pending->active transitions (confirm/activate) are not re-checked."
         ),
         "find_size_metering": (
             "find responses carry a size block (returned_chars/returned_count, tokens_estimate, "
             "matched_beyond_limit_*) plus the caller-scope unresolved_conflict_count; disable with "
             "include_size=false. tokens_estimate uses a deterministic bucket estimator "
             "(heuristic_v1, Qwen2.5-calibrated): pure Chinese prose runs ~30% high and pure English "
-            "~17% high — the estimate and the estimated share one yardstick, so savings comparisons stay valid."
+            "~17% high, and emoji/ZWJ sequences run systematically low (byte-level BPE means a "
+            "single emoji is >=1 token) — the estimate and the estimated share one yardstick, so "
+            "savings comparisons stay valid. "
+            "The block's display_hint instructs you to surface the token estimate and beyond-limit "
+            "count to the user when presenting the results."
         ),
         "value_reference": _memory_value_reference(),
     },
