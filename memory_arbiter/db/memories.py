@@ -478,12 +478,22 @@ class MemoriesStore:
 
         sqlite-vec 0.1.x vec0 rejects every conflict clause (even OR IGNORE
         raises on a PK conflict), so an upsert is DELETE+INSERT inside one
-        transaction.
+        transaction. The memory's active status is re-checked under the same
+        write lock: a retire that commits between the caller's check and this
+        publish must not leave a stale vector behind.
         """
         if not self._db_available or not self.state.sqlite_writable or not embedding:
             return False
         try:
             with self.write_transaction() as conn:
+                status_row = conn.execute(
+                    "SELECT status FROM memories WHERE id = ?", (int(memory_id),)
+                ).fetchone()
+                if status_row is None or str(status_row["status"]) != "active":
+                    conn.execute(
+                        "DELETE FROM subject_tags_vec WHERE id = ?", (int(memory_id),)
+                    )
+                    return False
                 conn.execute(
                     "DELETE FROM subject_tags_vec WHERE id = ?", (int(memory_id),)
                 )

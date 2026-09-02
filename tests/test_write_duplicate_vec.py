@@ -189,6 +189,51 @@ def test_backfill_restores_missing_actives_only(tmp_path: Path) -> None:
     assert _vec_ids(tools) == {int(keep["id"])}
 
 
+def test_backfill_purges_stale_non_active_rows(tmp_path: Path) -> None:
+    """A stale vector for a memory that left active (retire raced a publish)
+    has no other cleanup path — the backfill must purge it."""
+    tools = make_vec_tools(tmp_path)
+    gone = _write(tools, "过期残留行", ["stale"])
+    assert tools.memory_supersede(memory_id=int(gone["id"]), reason="gone", authorized=True)[
+        "ok"
+    ]
+    # The status change normally deletes the row; re-insert one by hand to
+    # simulate the raced-residue state.
+    blob = CharHistogramEmbedder.embed_text(
+        "", WritePipeline._subject_tags_embed_text("过期残留行", ["stale"]),
+    ).embedding
+    assert tools.db.upsert_subject_tags_vector(int(gone["id"]), blob) is False
+    with tools.db.connection() as conn:
+        stale = conn.execute(
+            "SELECT COUNT(*) FROM subject_tags_vec WHERE id=?", (int(gone["id"]),)
+        ).fetchone()[0]
+    assert stale == 0, "upsert must refuse a memory that is no longer active"
+
+    # Raw residue (e.g. a raced publish that predates the re-check): the
+    # backfill's purge is the cleanup path even with nothing missing.
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO subject_tags_vec(id, embedding) VALUES (?, ?)",
+            (int(gone["id"]), json.dumps([float(x) for x in blob])),
+        )
+    assert int(gone["id"]) in _vec_ids(tools)
+    assert tools._backfill_subject_tags_vectors(tools._embedder) == 0
+    assert int(gone["id"]) not in _vec_ids(tools), "backfill must purge stale rows"
+
+
+def test_space_change_clears_subject_tags_vec(tmp_path: Path) -> None:
+    """A same-dim model swap (space id changes, dim does not) must clear the
+    hint vectors: they live in the old embedding space and the missing-rows
+    backfill would otherwise never replace them."""
+    tools = make_vec_tools(tmp_path)
+    row = _write(tools, "空间一致性验证", ["space"])
+    assert int(row["id"]) in _vec_ids(tools)
+
+    tools.db.init_vec_index_state("another-space-same-dim", True, active_dim=32)
+    assert _vec_ids(tools) == set(), "space change must drop old-space hint vectors"
+    assert tools.db.get_vec_index_state().get("state") == "mismatch"
+
+
 def test_fallback_scan_limit_binds_row_count(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "fallback.sqlite3",

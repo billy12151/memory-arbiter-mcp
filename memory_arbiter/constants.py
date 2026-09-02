@@ -147,9 +147,12 @@ WRITE_SIMILAR_FALLBACK_SCAN_LIMIT = 500
 # One-shot response bounded by a global pair cap (default lightweight fields;
 # include_quotes adds evidence quotes), so an agent session never has to
 # ingest the unbounded duplicates enumeration that per-page scan_candidates
-# would require.
+# would require. The sweep loop itself is bounded by a hard page ceiling
+# (pages × batch anchors): a clean library walks every page, but no call can
+# run unbounded work; hitting the ceiling reports truncated=true.
 SCAN_DUPLICATES_MAX_RESULTS = 200
 SCAN_DUPLICATES_BATCH = 100
+SCAN_DUPLICATES_MAX_PAGES = 200
 
 # workspace normalization Qwen guard (A/B: top-3 beats top-5; over-distance
 # candidates must never reach the model — see tools._suggest_workspace_candidate)

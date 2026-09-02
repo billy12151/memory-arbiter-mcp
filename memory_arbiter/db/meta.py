@@ -668,6 +668,17 @@ class MetaStore:
                     self.delete_meta(conn, key)
                 return
 
+            # Space change (or first activation over unknown history): the
+            # duplicate-hint vectors live in the OLD embedding space. A dim
+            # swap below rebuilds the tables anyway, but a SAME-dim model
+            # swap would otherwise keep stale-space rows that the
+            # missing-rows backfill never replaces — clear them here so the
+            # startup backfill republishes in the current space.
+            try:
+                conn.execute("DELETE FROM subject_tags_vec")
+            except sqlite3.Error:
+                pass
+
             # Model swap to a different output dim: the existing vec0 tables
             # are unusable, and IF-NOT-EXISTS creation can never re-create
             # them at the new dim — drop them (plus any vec0 shadow leftovers,

@@ -736,6 +736,13 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
                     conn.execute("DELETE FROM memory_evidence_vec")
                     conn.execute("DELETE FROM memory_evidence")
                     conn.execute("DELETE FROM workspace_canonicals_vec")
+                    # Hint vectors from an aborted rebuild live in a foreign
+                    # embedding space; the table may not exist on a fresh
+                    # clone yet (created lazily at the first embedder load).
+                    try:
+                        conn.execute("DELETE FROM subject_tags_vec")
+                    except sqlite3.Error:
+                        pass
                     conn.execute("DELETE FROM migration_state WHERE key='cursor_memory_id'")
                     conn.execute("DELETE FROM _vec_index_meta")
                     conn.executemany(

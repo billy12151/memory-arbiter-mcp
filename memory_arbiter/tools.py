@@ -585,46 +585,70 @@ class MemoryTools:
         """Embed subject+tags for every active memory missing a hint vector.
 
         Covers libraries created before 0.15.3 and any vector whose publish
-        was skipped by a failed embed or a vec-table rebuild. Chunked in its
-        own transactions so a large library never holds one long write lock;
-        rows whose embedding fails (empty sentinel) are left missing and
-        retried on the next process start. Returns the number of vectors
-        actually written (not the number of candidates).
+        was skipped by a failed embed or a vec-table rebuild. Embedding
+        happens OUTSIDE the write transactions: an embed under BEGIN
+        IMMEDIATE would hold the write lock for the whole chunk's model time
+        and starve concurrent writers past the busy timeout, so each chunk
+        is prepared first and committed in one short transaction. Rows whose
+        embedding fails (empty sentinel) are left missing and retried on the
+        next process start. Returns the number of vectors actually written
+        (not the number of candidates).
         """
         from .pipeline.write import WritePipeline
 
         rows = self.db.missing_subject_tags_rows()
         written = 0
+        # Stale rows for memories that left active (a retire committed
+        # between a snapshot and its publish) waste KNN window slots and
+        # have no other cleanup path — purge them while we are here.
+        try:
+            with self.db.write_transaction() as conn:
+                conn.execute(
+                    "DELETE FROM subject_tags_vec WHERE id NOT IN "
+                    "(SELECT id FROM memories WHERE status='active')"
+                )
+        except Exception:
+            pass
         for start in range(0, len(rows), 64):
             chunk = rows[start:start + 64]
+            prepared: list[tuple[int, str]] = []
+            for row in chunk:
+                try:
+                    er = embedder.embed_text(
+                        prefix="",
+                        body=WritePipeline._subject_tags_embed_text(
+                            row.get("subject"), row.get("tags"),
+                        ),
+                    )
+                    if er and er.embedding:
+                        prepared.append((
+                            int(row["id"]),
+                            json.dumps([float(x) for x in er.embedding]),
+                        ))
+                except Exception:
+                    continue
             with self.db.write_transaction() as conn:
-                for row in chunk:
-                    try:
-                        er = embedder.embed_text(
-                            prefix="",
-                            body=WritePipeline._subject_tags_embed_text(
-                                row.get("subject"), row.get("tags"),
-                            ),
-                        )
-                        if not er or not er.embedding:
-                            continue
-                        # vec0 rejects conflict clauses; the backfill only
-                        # covers ids with no row, but the delete keeps the
-                        # statement safe against a concurrent publish.
+                for memory_id, blob in prepared:
+                    # Re-check under the write lock: a retire that committed
+                    # after the snapshot must not leave a stale vector.
+                    status_row = conn.execute(
+                        "SELECT status FROM memories WHERE id = ?", (memory_id,)
+                    ).fetchone()
+                    if status_row is None or str(status_row["status"]) != "active":
                         conn.execute(
-                            "DELETE FROM subject_tags_vec WHERE id = ?",
-                            (int(row["id"]),),
+                            "DELETE FROM subject_tags_vec WHERE id = ?", (memory_id,),
                         )
-                        conn.execute(
-                            "INSERT INTO subject_tags_vec(id, embedding) VALUES (?, ?)",
-                            (
-                                int(row["id"]),
-                                json.dumps([float(x) for x in er.embedding]),
-                            ),
-                        )
-                        written += 1
-                    except Exception:
                         continue
+                    # vec0 rejects conflict clauses; the delete keeps the
+                    # statement safe against a concurrent publish.
+                    conn.execute(
+                        "DELETE FROM subject_tags_vec WHERE id = ?", (memory_id,),
+                    )
+                    conn.execute(
+                        "INSERT INTO subject_tags_vec(id, embedding) VALUES (?, ?)",
+                        (memory_id, blob),
+                    )
+                    written += 1
         return written
 
     def _ensure_active_embedder(self) -> tuple[ManagedEmbedder | None, list[str]]:

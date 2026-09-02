@@ -8,6 +8,7 @@ from typing import Any, Callable, TYPE_CHECKING
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, raw_workspace
 from .constants import (
     SCAN_DUPLICATES_BATCH,
+    SCAN_DUPLICATES_MAX_PAGES,
     SCAN_DUPLICATES_MAX_RESULTS,
     SEMANTIC_SCAN_ENHANCE,
     SEMANTIC_SCAN_MAX_PAIRS,
@@ -1264,6 +1265,7 @@ class ProductSurfaces:
         collected: dict[tuple[int, int], dict[str, Any]] = {}
         truncated = False
         anchors_scanned = 0
+        pages_scanned = 0
         anchor = 0
         while True:
             page = self.db.scan_rule_candidates(
@@ -1277,6 +1279,7 @@ class ProductSurfaces:
                     {"task": task, "error": page["error"]}, ok=False,
                     extra_warnings=list(caller.warnings),
                 )
+            pages_scanned += 1
             anchors_scanned += int(page.get("anchors_scanned") or 0)
             for entry in page.get("duplicates_pool") or []:
                 pair_key = (int(entry["left_id"]), int(entry["right_id"]))
@@ -1295,6 +1298,11 @@ class ProductSurfaces:
             if len(collected) >= SCAN_DUPLICATES_MAX_RESULTS:
                 # Bounded by design: stop at the cap instead of shipping an
                 # unbounded enumeration into one agent session.
+                truncated = True
+                break
+            if pages_scanned >= SCAN_DUPLICATES_MAX_PAGES:
+                # Hard work ceiling (pages × batch anchors): no call can run
+                # unbounded sweep work even on an unexpectedly huge library.
                 truncated = True
                 break
             anchor = int(next_anchor)
@@ -1337,6 +1345,7 @@ class ProductSurfaces:
             "total_pairs": len(duplicates),
             "truncated": truncated,
             "anchors_scanned": anchors_scanned,
+            "pages_scanned": pages_scanned,
             "max_results": SCAN_DUPLICATES_MAX_RESULTS,
             "next_steps": (
                 "Triage silently: merge true duplicates via memory_govern(action="

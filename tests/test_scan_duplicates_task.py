@@ -197,3 +197,18 @@ def test_scan_duplicates_page_truncation_propagates(
     data = _sweep(tools)
     # First anchor alone pairs with 3 peers but its page pool caps at 2*1.
     assert data["truncated"] is True
+
+
+def test_scan_duplicates_page_ceiling_bounds_work(
+    vec_tools: MemoryTools, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = vec_tools
+    for index in range(6):
+        _write_for_scan(tools, f"clean library row {index}")
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    monkeypatch.setattr("memory_arbiter.surfaces.SCAN_DUPLICATES_BATCH", 2)
+    monkeypatch.setattr("memory_arbiter.surfaces.SCAN_DUPLICATES_MAX_PAGES", 2)
+    data = _sweep(tools)
+    assert data["pages_scanned"] == 2
+    assert data["truncated"] is True, "hitting the page ceiling must report truncation"
