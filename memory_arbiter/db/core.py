@@ -446,6 +446,11 @@ class MemoryDB:
     def list_memories(self, workspace: str | None = None, subject: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return self.memories.list_memories(subject=subject, limit=limit)
 
+    def active_subject_tag_rows(
+        self, exclude_memory_id: int, workspace_canonical: str | None,
+    ) -> list[dict[str, Any]]:
+        return self.memories.active_subject_tag_rows(exclude_memory_id, workspace_canonical)
+
     def _filter_clauses(
         self,
         like_status_clause: str,

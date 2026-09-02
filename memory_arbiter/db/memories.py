@@ -341,6 +341,38 @@ class MemoriesStore:
             ).fetchall()
             return [_row_to_dict(row) for row in rows]
 
+    def active_subject_tag_rows(
+        self, exclude_memory_id: int, workspace_canonical: str | None,
+    ) -> list[dict[str, Any]]:
+        """Lightweight id/subject/tags rows for the write-time duplicate hint.
+
+        Same-workspace active memories only: the hint must never leak a
+        subject the caller could not read, and cross-workspace near-duplicates
+        are not this check's business.
+        """
+        if not self._db_available:
+            return []
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, subject, tags, event_time, ingest_time FROM memories "
+                "WHERE status = 'active' AND id != ? "
+                "AND COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
+                (int(exclude_memory_id), workspace_canonical),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                tags = json.loads(row["tags"]) if row["tags"] else []
+            except (TypeError, ValueError):
+                tags = []
+            out.append({
+                "id": int(row["id"]),
+                "subject": str(row["subject"] or ""),
+                "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
+                "event_time": row["event_time"],
+            })
+        return out
+
     @staticmethod
     def _filter_clauses(
         like_status_clause: str,

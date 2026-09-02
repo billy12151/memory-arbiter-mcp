@@ -69,6 +69,12 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
         },
         "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
+        "write_duplicate_hint": (
+            "remember responses may carry a similar_active_memory notice when the new subject/tags "
+            "closely match an existing active memory (subject ratio >=0.95 AND tag Jaccard >=0.8). "
+            "Triage it silently: ignore deliberate series entries, prefer updating the original on "
+            "true duplicates, and ask the user only when retiring/merging (governance) is needed."
+        ),
         "find_size_metering": (
             "find responses carry a size block (returned_chars/returned_count, tokens_estimate, "
             "matched_beyond_limit_*) plus the caller-scope unresolved_conflict_count; disable with "

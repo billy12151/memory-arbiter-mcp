@@ -1,12 +1,19 @@
 """Memory write path for the local-text evidence architecture."""
 from __future__ import annotations
 
+import difflib
+import re
 from typing import Any, TYPE_CHECKING
 
 from ..embedder import ManagedEmbedder
 
 from .. import workspace_rules
-from ..constants import is_default_workspace_term
+from ..constants import (
+    WRITE_SIMILAR_MAX_HINTS,
+    WRITE_SIMILAR_SUBJECT_RATIO,
+    WRITE_SIMILAR_TAG_JACCARD,
+    is_default_workspace_term,
+)
 from ..models import MemoryRecord, MemoryStatus
 from ..validation import validate_product_payload
 
@@ -25,7 +32,7 @@ class WritePipeline:
 
     def _post_commit(
         self, *args: Any, **kwargs: Any,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> "tuple[dict[str, Any], dict[str, Any]]":
         return self._tools._post_commit(*args, **kwargs)
 
     def _ensure_active_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
@@ -36,6 +43,86 @@ class WritePipeline:
 
     def current_agent_id(self) -> str | None:
         return self._tools.current_agent_id()
+
+    _SIMILARITY_SPACE = re.compile(r"\s+")
+
+    @classmethod
+    def _normalized_subject(cls, subject: str) -> str:
+        return cls._SIMILARITY_SPACE.sub(" ", str(subject or "").casefold().strip())
+
+    @staticmethod
+    def _tag_jaccard(left: list[str], right: list[str]) -> float:
+        left_set = {str(tag).casefold().strip() for tag in left if str(tag).strip()}
+        right_set = {str(tag).casefold().strip() for tag in right if str(tag).strip()}
+        if not left_set and not right_set:
+            # Neither side carries tags: the subject bar alone decides (a
+            # shared empty vocabulary is trivially full overlap).
+            return 1.0
+        if not left_set or not right_set:
+            return 0.0
+        return len(left_set & right_set) / len(left_set | right_set)
+
+    def _similar_active_notice(
+        self, memory_id: int, record: MemoryRecord, workspace_canonical: str | None,
+    ) -> dict[str, Any] | None:
+        """Write-time duplicate hint over subject/tags similarity (owner spec).
+
+        Deterministic and model-free by design: long documents rarely compare
+        equal on content, but a forgotten near-duplicate keeps a near-identical
+        subject and tag set. Fires only when BOTH bars clear, so deliberate
+        series entries (tier-1 vs tier-2 plans sharing most tags) stay quiet
+        unless the subjects are near-identical. Same-workspace active rows
+        only (no cross-workspace leakage); fail-open on any error.
+        """
+        if not workspace_canonical:
+            return None
+        try:
+            rows = self.db.active_subject_tag_rows(int(memory_id), workspace_canonical)
+            if not rows:
+                return None
+            subject = self._normalized_subject(str(record.subject or ""))
+            if not subject:
+                return None
+            record_tags = list(record.tags or [])
+            scored: list[tuple[float, float, dict[str, Any]]] = []
+            for row in rows:
+                row_subject = self._normalized_subject(str(row["subject"] or ""))
+                if not row_subject:
+                    continue
+                ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
+                if ratio < WRITE_SIMILAR_SUBJECT_RATIO:
+                    continue
+                jaccard = self._tag_jaccard(record_tags, row["tags"])
+                if jaccard < WRITE_SIMILAR_TAG_JACCARD:
+                    continue
+                scored.append((ratio, jaccard, row))
+            if not scored:
+                return None
+            scored.sort(key=lambda item: (-item[0], -item[1]))
+            matches = [
+                {
+                    "memory_id": row["id"],
+                    "subject": row["subject"],
+                    "event_time": row.get("event_time"),
+                    "subject_similarity": round(ratio, 4),
+                    "tag_jaccard": round(jaccard, 4),
+                }
+                for ratio, jaccard, row in scored[:WRITE_SIMILAR_MAX_HINTS]
+            ]
+            return {
+                "type": "similar_active_memory",
+                "severity": "info",
+                "matches": matches,
+                "agent_instruction": (
+                    "This write closely matches existing active memories. Triage silently: "
+                    "ignore it if this is a deliberate series entry or cross-reference. If it "
+                    "duplicates an existing memory, prefer updating that memory instead of "
+                    "keeping two active copies. If the fix needs retiring or merging (governance) "
+                    "or you are unsure, ask the user."
+                ),
+            }
+        except Exception:
+            return None
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         payload = dict(payload)
@@ -138,6 +225,12 @@ class WritePipeline:
                     },
                     "authorization_required": True,
                 })
+            if memory_id is not None and record.status == MemoryStatus.ACTIVE.value:
+                similar_notice = self._similar_active_notice(
+                    int(memory_id), record, workspace["canonical"],
+                )
+                if similar_notice is not None:
+                    response.setdefault("notices", []).append(similar_notice)
             return response
         except Exception as exc:
             return self._tools.db.state.response(

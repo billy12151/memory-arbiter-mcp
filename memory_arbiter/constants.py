@@ -128,6 +128,15 @@ SCAN_TASK_STALE_DAYS = 14
 # would re-read scan_log.jsonl end to end.
 SCAN_TASK_RECHECK_SECONDS = 3600
 
+# Write-time duplicate hint (subject/tags similarity over active memories):
+# fires only when BOTH the normalized-subject ratio and the tag Jaccard clear
+# their bars, so deliberate series entries (tier-1 vs tier-2 plans sharing
+# most tags) stay quiet unless the subjects are near-identical. Conservative
+# start; loosen by editing constants after real-library feedback.
+WRITE_SIMILAR_SUBJECT_RATIO = 0.95
+WRITE_SIMILAR_TAG_JACCARD = 0.8
+WRITE_SIMILAR_MAX_HINTS = 2
+
 # workspace normalization Qwen guard (A/B: top-3 beats top-5; over-distance
 # candidates must never reach the model — see tools._suggest_workspace_candidate)
 QWEN_CANDIDATE_DISTANCE = 0.25
