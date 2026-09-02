@@ -448,8 +448,33 @@ class MemoryDB:
 
     def active_subject_tag_rows(
         self, exclude_memory_id: int, workspace_canonical: str | None,
+        *, limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        return self.memories.active_subject_tag_rows(exclude_memory_id, workspace_canonical)
+        return self.memories.active_subject_tag_rows(
+            exclude_memory_id, workspace_canonical, limit=limit,
+        )
+
+    def subject_tags_knn(
+        self,
+        query_embedding: list[float],
+        *,
+        k: int,
+        exclude_memory_id: int,
+        workspace_canonical: str | None,
+    ) -> list[dict[str, Any]]:
+        return self.memories.subject_tags_knn(
+            query_embedding, k=k, exclude_memory_id=exclude_memory_id,
+            workspace_canonical=workspace_canonical,
+        )
+
+    def upsert_subject_tags_vector(self, memory_id: int, embedding: list[float]) -> bool:
+        return self.memories.upsert_subject_tags_vector(memory_id, embedding)
+
+    def delete_subject_tags_vector(self, memory_id: int) -> bool:
+        return self.memories.delete_subject_tags_vector(memory_id)
+
+    def missing_subject_tags_rows(self) -> list[dict[str, Any]]:
+        return self.memories.missing_subject_tags_rows()
 
     def _filter_clauses(
         self,

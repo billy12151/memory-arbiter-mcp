@@ -302,6 +302,14 @@ class MemoriesStore:
                     "(SELECT id FROM memory_evidence WHERE memory_id=?)",
                     (str(new_status or "deleted"), int(memory_id)),
                 )
+                if str(new_status or "deleted") != "active":
+                    # The duplicate-hint recall index tracks the ACTIVE set;
+                    # leaving a stale row would only waste KNN window slots
+                    # (the join filters it anyway, but the domain should not
+                    # drift). Re-activation paths re-publish on activation.
+                    conn.execute(
+                        "DELETE FROM subject_tags_vec WHERE id = ?", (int(memory_id),)
+                    )
             except sqlite3.Error:
                 # Governance must remain available while the derived index is
                 # temporarily unavailable; rebuild_evidence repairs it later.
@@ -343,15 +351,23 @@ class MemoriesStore:
 
     def active_subject_tag_rows(
         self, exclude_memory_id: int, workspace_canonical: str | None,
+        *, limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Lightweight id/subject/tags rows for the write-time duplicate hint.
 
         Same-workspace active memories only: the hint must never leak a
         subject the caller could not read, and cross-workspace near-duplicates
-        are not this check's business.
+        are not this check's business. ``limit`` caps the scan fallback used
+        when no embedder/index is available (ORDER BY id keeps the cap
+        deterministic); the primary recall path is subject_tags_knn.
         """
         if not self._db_available:
             return []
+        cap_sql = ""
+        cap_params: list[Any] = []
+        if limit is not None:
+            cap_sql = " ORDER BY id LIMIT ?"
+            cap_params.append(max(1, int(limit)))
         with self.connection() as conn:
             # Sargable form of COALESCE(NULLIF(workspace_canonical,''),workspace) = ?:
             # the OR lets SQLite serve the canonical branch from
@@ -360,8 +376,9 @@ class MemoriesStore:
                 "SELECT id, subject, tags, event_time, ingest_time FROM memories "
                 "WHERE status = 'active' AND id != ? "
                 "AND (workspace_canonical = ? "
-                "OR ((workspace_canonical IS NULL OR workspace_canonical = '') AND workspace = ?))",
-                (int(exclude_memory_id), workspace_canonical, workspace_canonical),
+                "OR ((workspace_canonical IS NULL OR workspace_canonical = '') AND workspace = ?))"
+                + cap_sql,
+                (int(exclude_memory_id), workspace_canonical, workspace_canonical, *cap_params),
             ).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -374,6 +391,152 @@ class MemoriesStore:
                 "subject": str(row["subject"] or ""),
                 "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
                 "event_time": row["event_time"],
+            })
+        return out
+
+    _SUBJECT_TAGS_WS_CLAUSE = (
+        "(m.workspace_canonical = ? "
+        "OR ((m.workspace_canonical IS NULL OR m.workspace_canonical = '') AND m.workspace = ?))"
+    )
+
+    def subject_tags_knn(
+        self,
+        query_embedding: list[float],
+        *,
+        k: int,
+        exclude_memory_id: int,
+        workspace_canonical: str | None,
+    ) -> list[dict[str, Any]]:
+        """KNN recall of same-workspace active rows over subject_tags_vec.
+
+        Same row shape as active_subject_tag_rows so the duplicate-hint
+        fine-ranking is shared. sqlite-vec applies the workspace/exclusion
+        predicates after it picks its global KNN window, so the window grows
+        (evidence-knn pattern) until enough scoped rows are found or the whole
+        eligible domain was considered. Returns [] whenever the index or the
+        extension is unavailable — callers fall back to the capped scan.
+        """
+        if (
+            not self._db_available or not self.state.sqlite_vec_available
+            or not query_embedding or not str(workspace_canonical or "").strip()
+        ):
+            return []
+        requested_k = max(1, int(k))
+        filter_params: list[Any] = [
+            int(exclude_memory_id), workspace_canonical, workspace_canonical,
+        ]
+        try:
+            with self.connection() as conn:
+                candidate_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM subject_tags_vec v "
+                        "JOIN memories m ON m.id=v.id "
+                        "WHERE m.status='active' AND v.id != ? AND "
+                        + self._SUBJECT_TAGS_WS_CLAUSE,
+                        filter_params,
+                    ).fetchone()[0]
+                )
+                max_fetch = max(1, candidate_count)
+                fetch_k = min(max_fetch, requested_k * 4)
+                rows: list[Any] = []
+                while fetch_k > 0:
+                    rows = conn.execute(
+                        f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
+                                   m.event_time AS event_time
+                            FROM subject_tags_vec v
+                            JOIN memories m ON m.id=v.id
+                            WHERE v.embedding MATCH ? AND k=?
+                              AND m.status='active' AND v.id != ?
+                              AND {self._SUBJECT_TAGS_WS_CLAUSE}
+                            ORDER BY v.distance""",
+                        [json.dumps(query_embedding), fetch_k, *filter_params],
+                    ).fetchall()
+                    if len(rows) >= requested_k or fetch_k >= max_fetch:
+                        break
+                    fetch_k = min(max_fetch, fetch_k * 2)
+        except sqlite3.Error:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows[:requested_k]:
+            try:
+                tags = json.loads(row["tags"]) if row["tags"] else []
+            except (TypeError, ValueError):
+                tags = []
+            out.append({
+                "id": int(row["id"]),
+                "subject": str(row["subject"] or ""),
+                "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
+                "event_time": row["event_time"],
+            })
+        return out
+
+    def upsert_subject_tags_vector(self, memory_id: int, embedding: list[float]) -> bool:
+        """Publish/refresh one memory's subject+tags vector (write-time hint index).
+
+        sqlite-vec 0.1.x vec0 rejects every conflict clause (even OR IGNORE
+        raises on a PK conflict), so an upsert is DELETE+INSERT inside one
+        transaction.
+        """
+        if not self._db_available or not self.state.sqlite_writable or not embedding:
+            return False
+        try:
+            with self.write_transaction() as conn:
+                conn.execute(
+                    "DELETE FROM subject_tags_vec WHERE id = ?", (int(memory_id),)
+                )
+                conn.execute(
+                    "INSERT INTO subject_tags_vec(id, embedding) VALUES (?, ?)",
+                    (int(memory_id), json.dumps([float(x) for x in embedding])),
+                )
+            return True
+        except sqlite3.Error:
+            return False
+
+    def delete_subject_tags_vector(self, memory_id: int) -> bool:
+        """Drop one memory's hint vector (status left active / hard delete)."""
+        if not self._db_available or not self.state.sqlite_writable:
+            return False
+        try:
+            with self.write_transaction() as conn:
+                conn.execute(
+                    "DELETE FROM subject_tags_vec WHERE id = ?", (int(memory_id),)
+                )
+            return True
+        except sqlite3.Error:
+            return False
+
+    def missing_subject_tags_rows(self) -> list[dict[str, Any]]:
+        """Active memories whose hint vector is absent (startup backfill set).
+
+        Vec-id membership is computed in Python from one full scan per side:
+        backfill runs once per process, and plain id scans avoid any reliance
+        on vec0 point-lookup planning inside a correlated subquery.
+        """
+        if not self._db_available:
+            return []
+        try:
+            with self.connection() as conn:
+                vector_ids = {
+                    int(row["id"]) for row in conn.execute("SELECT id FROM subject_tags_vec")
+                }
+                rows = conn.execute(
+                    "SELECT id, subject, tags FROM memories WHERE status='active' "
+                    "ORDER BY id"
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if int(row["id"]) in vector_ids:
+                continue
+            try:
+                tags = json.loads(row["tags"]) if row["tags"] else []
+            except (TypeError, ValueError):
+                tags = []
+            out.append({
+                "id": int(row["id"]),
+                "subject": str(row["subject"] or ""),
+                "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
             })
         return out
 

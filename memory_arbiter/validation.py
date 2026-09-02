@@ -110,6 +110,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "anchor_memory_id", "batch", "k", "include_check", "max_distance",
         "include_duplicates", "workspace",
     },
+    ("memory_repair", "scan_duplicates"): {"include_quotes", "workspace"},
     ("memory_repair", "record_conflict"): {
         "slot_key", "members", "value_groups", "candidate_key", "status",
         "detector_version", "prompt_version", "source", "reason", "conflict_point",

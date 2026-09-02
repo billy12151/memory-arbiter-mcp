@@ -137,6 +137,19 @@ SCAN_TASK_RECHECK_SECONDS = 3600
 WRITE_SIMILAR_SUBJECT_RATIO = 0.95
 WRITE_SIMILAR_TAG_JACCARD = 0.8
 WRITE_SIMILAR_MAX_HINTS = 2
+# Recall channel (0.15.3): with a loaded embedder the hint recalls candidates
+# by subject+tags KNN over subject_tags_vec instead of scanning every
+# same-workspace active row; without one the legacy scan keeps a hard row cap.
+WRITE_DUPLICATE_VEC_TOP_K = 20
+WRITE_SIMILAR_FALLBACK_SCAN_LIMIT = 500
+
+# memory_repair(task="scan_duplicates") — full-library near-duplicate sweep.
+# One-shot response bounded by a global pair cap (default lightweight fields;
+# include_quotes adds evidence quotes), so an agent session never has to
+# ingest the unbounded duplicates enumeration that per-page scan_candidates
+# would require.
+SCAN_DUPLICATES_MAX_RESULTS = 200
+SCAN_DUPLICATES_BATCH = 100
 
 # workspace normalization Qwen guard (A/B: top-3 beats top-5; over-distance
 # candidates must never reach the model — see tools._suggest_workspace_candidate)

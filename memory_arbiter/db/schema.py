@@ -302,7 +302,9 @@ class SchemaStore:
                     # Capability probe only, and only for tables that actually
                     # exist — a current library that predates its first embed
                     # has no vec tables yet, which is healthy, not a failure.
-                    for table in ("memory_evidence_vec", "workspace_canonicals_vec"):
+                    for table in (
+                        "memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec",
+                    ):
                         exists = conn.execute(
                             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                             (table,),
@@ -422,21 +424,40 @@ class SchemaStore:
                 "Workspace alias resolution will use exact matches."
             )
 
+    def ensure_subject_tags_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
+        # Write-time duplicate-hint recall index (0.15.3): one vector per
+        # ACTIVE memory, embedding "subject + sorted tags". Rows are added on
+        # write/activation and removed when a memory leaves active, so the
+        # table's id domain tracks the active set; a startup backfill
+        # (tools._backfill_subject_tags_vectors) covers pre-existing rows.
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS subject_tags_vec "
+                f"USING vec0(id INTEGER PRIMARY KEY, embedding float[{int(dim)}])"
+            )
+        except sqlite3.Error as exc:
+            self.state.warn(
+                f"subject-tags vector index unavailable: {exc}. "
+                "Write-time duplicate hints will use the capped scan fallback."
+            )
+
     def rebuild_vec_tables(self, conn: sqlite3.Connection, dim: int) -> None:
-        """Drop both vec0 tables (and vec0 shadow leftovers) and re-create
+        """Drop the vec0 tables (and vec0 shadow leftovers) and re-create
         them empty at ``dim``. Must run inside the caller's transaction —
         the flip to mismatch commits atomically with it."""
-        for table in ("memory_evidence_vec", "workspace_canonicals_vec"):
+        for table in ("memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec"):
             conn.execute(f"DROP TABLE IF EXISTS {table}")
         shadows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND ("
             "name LIKE 'memory_evidence_vec_%' OR "
-            "name LIKE 'workspace_canonicals_vec_%')"
+            "name LIKE 'workspace_canonicals_vec_%' OR "
+            "name LIKE 'subject_tags_vec_%')"
         ).fetchall()
         for row in shadows:
             conn.execute(f'DROP TABLE IF EXISTS "{str(row[0])}"')
         self.ensure_evidence_vec_table(conn, dim)
         self.ensure_workspace_vec_table(conn, dim)
+        self.ensure_subject_tags_vec_table(conn, dim)
 
     def ensure_vec_tables(self, dim: int) -> list[str]:
         """Lazily create the derived vec0 tables at the model-reported dim.
@@ -451,6 +472,7 @@ class SchemaStore:
             conn = self._db._new_connection()
             self.ensure_evidence_vec_table(conn, dim)
             self.ensure_workspace_vec_table(conn, dim)
+            self.ensure_subject_tags_vec_table(conn, dim)
             conn.commit()
             self._db._sqlite_vec_loadable = True
             self.state.sqlite_vec_available = True
@@ -480,19 +502,24 @@ class SchemaStore:
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
+            expected = {
+                "memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec",
+            }
             before = {
                 str(row[0]) for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name IN ('memory_evidence_vec','workspace_canonicals_vec')"
+                    "AND name IN ('memory_evidence_vec','workspace_canonicals_vec',"
+                    "'subject_tags_vec')"
                 )
             }
             self.ensure_evidence_vec_table(conn, dim)
             self.ensure_workspace_vec_table(conn, dim)
+            self.ensure_subject_tags_vec_table(conn, dim)
             conn.commit()
             self._db._sqlite_vec_loadable = True
             self.state.sqlite_vec_available = True
             self.state.mode = "sqlite_vec"
-            return before != {"memory_evidence_vec", "workspace_canonicals_vec"}, []
+            return before != expected, []
         except (ImportError, sqlite3.Error) as exc:
             return False, [f"vector table repair unavailable: {exc}"]
         finally:
@@ -501,13 +528,14 @@ class SchemaStore:
 
     def missing_vector_tables(self) -> list[str]:
         """Read-only preview of derived vec0 tables requiring recreation."""
-        expected = {"memory_evidence_vec", "workspace_canonicals_vec"}
+        expected = {"memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec"}
         try:
             with self._db.connection() as conn:
                 present = {
                     str(row[0]) for row in conn.execute(
                         "SELECT name FROM sqlite_master WHERE type='table' "
-                        "AND name IN ('memory_evidence_vec','workspace_canonicals_vec')"
+                        "AND name IN ('memory_evidence_vec','workspace_canonicals_vec',"
+                        "'subject_tags_vec')"
                     )
                 }
         except sqlite3.Error:

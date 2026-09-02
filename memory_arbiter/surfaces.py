@@ -6,7 +6,12 @@ from importlib import resources
 from typing import Any, Callable, TYPE_CHECKING
 
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, raw_workspace
-from .constants import SEMANTIC_SCAN_ENHANCE, SEMANTIC_SCAN_MAX_PAIRS
+from .constants import (
+    SCAN_DUPLICATES_BATCH,
+    SCAN_DUPLICATES_MAX_RESULTS,
+    SEMANTIC_SCAN_ENHANCE,
+    SEMANTIC_SCAN_MAX_PAIRS,
+)
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .models import MemoryStatus, ProtectionLevel, SourceType
 from .request_identity import get_request_identity
@@ -70,13 +75,17 @@ _PRODUCT_HELPS: dict[str, Any] = {
         },
         "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
         "write_duplicate_hint": (
-            "remember responses may carry a similar_active_memory notice when the new subject/tags "
-            "closely match an existing active memory (subject ratio >=0.95 AND tag Jaccard >=0.8; "
-            "empty tag sets on both sides count as Jaccard 1.0, so the subject alone decides; "
-            "subjects differing only in digit runs are treated as series entries and stay quiet). "
-            "Triage it silently: ignore deliberate series entries, prefer updating the original on "
-            "true duplicates, and ask the user only when retiring/merging (governance) is needed. "
-            "Known blind spot: pending->active transitions (confirm/activate) are not re-checked."
+            "remember/activation responses may carry a similar_active_memory notice when the "
+            "new subject/tags closely match an existing active memory (subject ratio >=0.95 "
+            "AND tag Jaccard >=0.8; empty tag sets on both sides count as Jaccard 1.0, so the "
+            "subject alone decides; subjects differing only in digit runs are treated as "
+            "series entries and stay quiet). Candidates are recalled by subject+tags vector "
+            "KNN (top-k per workspace) when an embedding model is configured, with a capped "
+            "same-workspace scan as fallback; ranking itself stays deterministic. "
+            "Triage it silently: ignore deliberate series entries, prefer updating the "
+            "original on true duplicates, and ask the user only when retiring/merging "
+            "(governance) is needed. Pending->active transitions (confirm/activate) are "
+            "re-checked with the same notice."
         ),
         "find_size_metering": (
             "find responses carry a size block (returned_chars/returned_count, tokens_estimate, "
@@ -141,7 +150,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
     },
     "memory_repair": {
         "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-        "tasks": ["rebuild_evidence", "scan_candidates", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
+        "tasks": ["rebuild_evidence", "scan_candidates", "scan_duplicates", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
         "examples": {
             "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
             "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
@@ -152,6 +161,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
             "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
             "scan_candidates_duplicates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True}},
+            "scan_duplicates": {"task": "scan_duplicates", "data": {"include_quotes": True}},
             "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
             "notice_read": {"task": "notice", "data": {"action": "read", "notice_id": 1}},
             "notice_dismiss": {"task": "notice", "data": {"action": "dismiss", "notice_id": 1, "reason": "Reviewed; not actionable."}},
@@ -160,6 +170,18 @@ _PRODUCT_HELPS: dict[str, Any] = {
         },
         "semantic_notice_delivery": "Notices progress pending -> delivered while open, then dismissed/resolved, or stale when any frozen member is no longer active at its pinned version. Read requires freshness.fresh=true and executing every read_calls entry for complete memories before triage; two-member notices also expose optional left/right aliases. Dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict.",
         "checked_no_notice": "A completed semantic task with outcome=checked_no_notice examined its eligible candidates and emitted zero notices; it is not a claim that no conflict can exist outside that task snapshot or candidate budget.",
+        "scan_duplicates": (
+            "Full-library near-duplicate sweep in ONE bounded response: aggregates the "
+            "same duplicates detection as scan_candidates across all pages under a "
+            "global pair cap (200). Default entries are lightweight (left/right ids, "
+            "subjects, workspace, reason, distance, candidate_key_hash); "
+            "include_quotes=true adds the triggering evidence quotes. Same suppression "
+            "contract as scan_candidates (recorded not_a_conflict/open/applying pairs "
+            "are not re-listed). It does not advance conflict-scan progress or write "
+            "scan_log. Use this for duplicate triage; scan_candidates with "
+            "include_duplicates stays a single-page spot check (it returns full "
+            "record_conflict-compatible members for one page)."
+        ),
         "normalize_workspaces_scope": (
             "normalize_workspaces is a GLOBAL registry operation: it takes no workspace "
             "filter and folds spelling-variant canonicals across the whole registry. "
@@ -1022,6 +1044,8 @@ class ProductSurfaces:
                     agent_id=(identity.agent_id if identity else None),
                 )
             return self.db.state.response(result, ok=ok, extra_warnings=list(caller.warnings))
+        if task == "scan_duplicates":
+            return self._scan_duplicates_task(task, payload)
         if task == "cleanup_history":
             if "id" in payload or "memory_id" in payload:
                 invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
@@ -1214,3 +1238,109 @@ class ProductSurfaces:
                 result, ok=result.get("outcome") == "updated", extra_warnings=list(caller.warnings),
             )
         return self._invalid_product_call("memory_repair", f"unknown task: {task}", task)
+
+    def _scan_duplicates_task(self, task: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Full-library near-duplicate sweep as one bounded response (0.15.3).
+
+        Separated from the conflict scan on purpose: an agent session must
+        never have to walk scan_candidates pages with include_duplicates to
+        enumerate duplicates. The pages are aggregated server-side under one
+        global pair cap; entries are lightweight by default (ids/subjects/
+        workspace/reason/distance) and include_quotes=true adds the evidence
+        quotes. Pairs already dismissed (not_a_conflict) or inside open/
+        applying groups are suppressed by the same candidate-hash contract
+        as scan_candidates pages. This task does NOT advance conflict-scan
+        progress or write scan_log — those belong to scan_candidates.
+        """
+        caller = self._caller_workspace(payload.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+        include_quotes = self._is_truthy(payload.get("include_quotes"))
+        scan_workspace = caller.scope_canonicals() if caller.isolation == "strict" else None
+        collected: dict[tuple[int, int], dict[str, Any]] = {}
+        truncated = False
+        anchors_scanned = 0
+        anchor = 0
+        while True:
+            page = self.db.scan_rule_candidates(
+                after_memory_id=anchor,
+                anchor_batch=SCAN_DUPLICATES_BATCH,
+                include_duplicates=True,
+                workspace=scan_workspace,
+            )
+            if "error" in page:
+                return self.db.state.response(
+                    {"task": task, "error": page["error"]}, ok=False,
+                    extra_warnings=list(caller.warnings),
+                )
+            anchors_scanned += int(page.get("anchors_scanned") or 0)
+            for entry in page.get("duplicates_pool") or []:
+                pair_key = (int(entry["left_id"]), int(entry["right_id"]))
+                if pair_key not in collected and len(collected) >= SCAN_DUPLICATES_MAX_RESULTS:
+                    # Enforced inside the page too: a single page's pool (cap
+                    # 2*batch) can otherwise push past the global cap.
+                    truncated = True
+                    continue
+                # Re-hitting an already-collected pair is a dict replace.
+                collected[pair_key] = entry
+            if page.get("duplicates_truncated"):
+                truncated = True
+            next_anchor = page.get("next_anchor_memory_id")
+            if next_anchor is None:
+                break
+            if len(collected) >= SCAN_DUPLICATES_MAX_RESULTS:
+                # Bounded by design: stop at the cap instead of shipping an
+                # unbounded enumeration into one agent session.
+                truncated = True
+                break
+            anchor = int(next_anchor)
+        subject_rows: dict[int, dict[str, Any]] = {}
+        wanted_ids = sorted({memory_id for pair in collected for memory_id in pair})
+        if wanted_ids:
+            with self.db.connection() as conn:
+                for start in range(0, len(wanted_ids), 500):
+                    chunk = wanted_ids[start:start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    for row in conn.execute(
+                        "SELECT id, subject, workspace, workspace_canonical FROM memories "
+                        f"WHERE id IN ({placeholders})",
+                        chunk,
+                    ):
+                        subject_rows[int(row["id"])] = dict(row)
+        duplicates: list[dict[str, Any]] = []
+        for (left_id, right_id), entry in collected.items():
+            left_row = subject_rows.get(left_id) or {}
+            right_row = subject_rows.get(right_id) or {}
+            item: dict[str, Any] = {
+                "left_id": left_id,
+                "right_id": right_id,
+                "left_subject": str(left_row.get("subject") or ""),
+                "right_subject": str(right_row.get("subject") or ""),
+                "workspace": str(
+                    left_row.get("workspace_canonical") or left_row.get("workspace") or ""
+                ),
+                "reason": entry.get("reason"),
+                "distance": entry.get("distance"),
+                "candidate_key_hash": entry.get("candidate_key_hash"),
+            }
+            if include_quotes:
+                item["left_quote"] = entry.get("left_snippet")
+                item["right_quote"] = entry.get("right_snippet")
+            duplicates.append(item)
+        result: dict[str, Any] = {
+            "task": task,
+            "duplicates": duplicates,
+            "total_pairs": len(duplicates),
+            "truncated": truncated,
+            "anchors_scanned": anchors_scanned,
+            "max_results": SCAN_DUPLICATES_MAX_RESULTS,
+            "next_steps": (
+                "Triage silently: merge true duplicates via memory_govern(action="
+                "'merge_memories'); verify a pair's full evidence (members contract) "
+                "with scan_candidates(include_duplicates=true) before recording a "
+                "dismissal via record_conflict(status='not_a_conflict'); ask the user "
+                "only when the merge set is ambiguous."
+            ),
+        }
+        return self.db.state.response(result, extra_warnings=list(caller.warnings))

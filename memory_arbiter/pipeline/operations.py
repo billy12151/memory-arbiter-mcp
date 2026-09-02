@@ -2535,6 +2535,9 @@ class OperationsPipeline:
                 )
             if outcome == "updated":
                 updated_mem = self.db.get_memory(memory_id_int)
+                # Tags shape the duplicate-hint recall vector even though the
+                # content (and version) is unchanged.
+                self._tools._write_pipeline.refresh_subject_tags_vector(memory_id_int)
                 data = {
                     "edited": True,
                     "tags_only": True,
@@ -2641,6 +2644,9 @@ class OperationsPipeline:
         data["evidence_index"], data["semantic_conflict_check"] = (
             self._post_commit(memory_id_int, data["record"], recheck_conflicts=True)
         )
+        # Subject/tags may have changed with the content edit: re-embed the
+        # duplicate-hint recall vector for the row's current values.
+        self._tools._write_pipeline.refresh_subject_tags_vector(memory_id_int)
         unresolved = self.db.conflicts.list_open_conflicts_for_memory_ids(
             [memory_id_int], include_applying=True,
         )

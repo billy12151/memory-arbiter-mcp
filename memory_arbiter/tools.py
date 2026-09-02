@@ -115,6 +115,10 @@ class MemoryTools:
         self._notice_claim_last_error_at: str | None = None
         self._last_backup_notice_signature: tuple[int, int, int, bool] | None = None
         self._last_backup_source_signature: tuple[int, int, int] | None = None
+        # One-time-per-process subject_tags_vec backfill (0.15.3): the write-
+        # time duplicate-hint recall index must cover pre-existing active
+        # memories, not only rows written after the upgrade.
+        self._subject_tags_backfilled = False
 
     def start_update_monitor(self, monitor: UpdateMonitor | None = None) -> None:
         # Product notice delivery is owned by the four outer product wrappers,
@@ -563,7 +567,60 @@ class MemoryTools:
                 warning = f"vector space state initialization failed: {exc}"
                 self._embedder_warnings.append(warning)
                 warnings.append(warning)
+            if not self._subject_tags_backfilled:
+                # Runs under _embedder_lock like the model build above. Failure
+                # is fail-open and non-repeating in-process: the next process
+                # restart retries, because nothing marks the backfill done in
+                # the DB until its rows are actually written.
+                self._subject_tags_backfilled = True
+                try:
+                    self._backfill_subject_tags_vectors(embedder)
+                except Exception:
+                    pass
             return self._embedder, warnings
+
+    def _backfill_subject_tags_vectors(self, embedder: "ManagedEmbedder") -> int:
+        """Embed subject+tags for every active memory missing a hint vector.
+
+        Covers libraries created before 0.15.3 and any vector whose publish
+        was skipped by a failed embed. Chunked in its own transactions so a
+        large library never holds one long write lock; rows whose embedding
+        fails (empty sentinel) are left missing and retried on the next
+        process start.
+        """
+        from .pipeline.write import WritePipeline
+
+        rows = self.db.missing_subject_tags_rows()
+        for start in range(0, len(rows), 64):
+            chunk = rows[start:start + 64]
+            with self.db.write_transaction() as conn:
+                for row in chunk:
+                    try:
+                        er = embedder.embed_text(
+                            prefix="",
+                            body=WritePipeline._subject_tags_embed_text(
+                                row.get("subject"), row.get("tags"),
+                            ),
+                        )
+                        if not er or not er.embedding:
+                            continue
+                        # vec0 rejects conflict clauses; the backfill only
+                        # covers ids with no row, but the delete keeps the
+                        # statement safe against a concurrent publish.
+                        conn.execute(
+                            "DELETE FROM subject_tags_vec WHERE id = ?",
+                            (int(row["id"]),),
+                        )
+                        conn.execute(
+                            "INSERT INTO subject_tags_vec(id, embedding) VALUES (?, ?)",
+                            (
+                                int(row["id"]),
+                                json.dumps([float(x) for x in er.embedding]),
+                            ),
+                        )
+                    except Exception:
+                        continue
+        return len(rows)
 
     def _ensure_active_embedder(self) -> tuple[ManagedEmbedder | None, list[str]]:
         """Load the configured embedder, but expose it only for a ready index."""

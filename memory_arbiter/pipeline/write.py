@@ -9,6 +9,8 @@ from ..embedder import ManagedEmbedder
 
 from .. import workspace_rules
 from ..constants import (
+    WRITE_DUPLICATE_VEC_TOP_K,
+    WRITE_SIMILAR_FALLBACK_SCAN_LIMIT,
     WRITE_SIMILAR_MAX_HINTS,
     WRITE_SIMILAR_SUBJECT_RATIO,
     WRITE_SIMILAR_TAG_JACCARD,
@@ -78,28 +80,116 @@ class WritePipeline:
             return 0.0
         return len(left_set & right_set) / len(left_set | right_set)
 
+    @classmethod
+    def _subject_tags_embed_text(cls, subject: Any, tags: Any) -> str:
+        """Canonical text embedded into subject_tags_vec (owner spec: "subject
+        + 排序后 tags"). Tags are sorted so tag ORDER never changes the
+        vector; case/whitespace are left to the model like every other
+        embedded body."""
+        cleaned = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+        body = f"{str(subject or '').strip()}\n{' '.join(sorted(cleaned))}".strip()
+        return body
+
+    def _duplicate_hint_candidate_rows(
+        self, memory_id: int, record: _SubjectTagRecord, workspace_canonical: str,
+    ) -> list[dict[str, Any]]:
+        """Candidate recall for the write-time duplicate hint (0.15.3).
+
+        Primary path: embed the new memory's "subject + sorted tags", publish
+        it into subject_tags_vec, and KNN-recall the top-k same-workspace
+        active rows. Fallback (no embedder / vec index unavailable / KNN
+        error): the legacy full scan capped by WRITE_SIMILAR_FALLBACK_SCAN_
+        LIMIT rows. Fail-open like the notice itself — any unexpected error
+        degrades to the fallback scan.
+        """
+        subject = str(getattr(record, "subject", None) or "").strip()
+        if not subject:
+            return []
+        embedder, _ = self._ensure_active_embedder()
+        if embedder is not None and self.db.state.sqlite_vec_available:
+            try:
+                er = embedder.embed_text(
+                    prefix="",
+                    body=self._subject_tags_embed_text(
+                        subject, getattr(record, "tags", None),
+                    ),
+                )
+                if er is not None and er.embedding:
+                    vector = [float(x) for x in er.embedding]
+                    self.db.upsert_subject_tags_vector(memory_id, vector)
+                    rows = self.db.subject_tags_knn(
+                        vector,
+                        k=WRITE_DUPLICATE_VEC_TOP_K,
+                        exclude_memory_id=memory_id,
+                        workspace_canonical=workspace_canonical,
+                    )
+                    if rows:
+                        return rows
+            except Exception:
+                pass
+        return self.db.active_subject_tag_rows(
+            memory_id, workspace_canonical, limit=WRITE_SIMILAR_FALLBACK_SCAN_LIMIT,
+        )
+
+    def refresh_subject_tags_vector(self, memory_id: int) -> bool:
+        """Re-embed one memory's subject+tags after an in-place edit.
+
+        Keeps subject_tags_vec aligned with the row's CURRENT subject/tags
+        (tags-only and content edits both reach here). Deletes the vector
+        when the memory is no longer active. Best-effort: a failed refresh
+        self-heals on the next process start via the startup backfill.
+        """
+        try:
+            record = self.db.get_memory(int(memory_id))
+            if record is None:
+                return self.db.delete_subject_tags_vector(int(memory_id))
+            if str(record.get("status") or "") != "active":
+                return self.db.delete_subject_tags_vector(int(memory_id))
+            embedder, _ = self._ensure_active_embedder()
+            if embedder is None or not self.db.state.sqlite_vec_available:
+                return False
+            er = embedder.embed_text(
+                prefix="",
+                body=self._subject_tags_embed_text(
+                    record.get("subject"), record.get("tags"),
+                ),
+            )
+            if er is None or not er.embedding:
+                return False
+            return self.db.upsert_subject_tags_vector(
+                int(memory_id), [float(x) for x in er.embedding],
+            )
+        except Exception:
+            return False
+
     def _similar_active_notice(
         self, memory_id: int, record: _SubjectTagRecord, workspace_canonical: str | None,
     ) -> dict[str, Any] | None:
         """Write-time duplicate hint over subject/tags similarity (owner spec).
 
-        Deterministic and model-free by design: long documents rarely compare
-        equal on content, but a forgotten near-duplicate keeps a near-identical
-        subject and tag set. Fires only when BOTH bars clear. Subjects
-        identical modulo digit runs (release/checklist series such as
-        "0.15.1 发版清单" vs "0.15.2 发版清单") are suppressed outright; other
-        deliberate series entries (tier-1 vs tier-2 plans sharing most tags)
-        stay quiet unless the subjects are near-identical. Same-workspace
-        active rows only (no cross-workspace leakage); fail-open on any error.
+        Recall is vector-based since 0.15.3: the hint KNN-recalls the top-k
+        same-workspace active rows over subject_tags_vec (fallback: capped
+        legacy scan when no embedder/index is available) and then applies the
+        deterministic model-free fine-ranking. Long documents rarely compare
+        equal on content, but a forgotten near-duplicate keeps a
+        near-identical subject and tag set. Fires only when BOTH bars clear.
+        Subjects identical modulo digit runs (release/checklist series such
+        as "0.15.1 发版清单" vs "0.15.2 发版清单") are suppressed outright;
+        other deliberate series entries (tier-1 vs tier-2 plans sharing most
+        tags) stay quiet unless the subjects are near-identical.
+        Same-workspace active rows only (no cross-workspace leakage);
+        fail-open on any error.
         """
         if not workspace_canonical:
             return None
         try:
-            rows = self.db.active_subject_tag_rows(int(memory_id), workspace_canonical)
-            if not rows:
-                return None
             subject = self._normalized_subject(str(record.subject or ""))
             if not subject:
+                return None
+            rows = self._duplicate_hint_candidate_rows(
+                int(memory_id), record, workspace_canonical,
+            )
+            if not rows:
                 return None
             record_tags = list(record.tags or [])
             subject_series = self._DIGIT_RUN.sub("#", subject)
