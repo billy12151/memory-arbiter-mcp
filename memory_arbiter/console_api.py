@@ -251,6 +251,9 @@ class ConsoleAPI:
                 offset=page_offset,
                 include_linked_open_items=False,
                 include_conflict_signal=True,
+                # Console is the human-facing channel: keep full content,
+                # find's index-page preview is for agents.
+                include_content=True,
             )
         else:
             response = self.tools.memory_search_expired(
@@ -268,8 +271,12 @@ class ConsoleAPI:
         # NOT a total. `total_estimate` is the engine's total signal:
         #   - expired without query: exact (SQL COUNT) → pagination_precision="exact"
         #   - active search / expired with query: best-effort estimate (query-recall)
+        #   - v0.15.4: unfiltered query-recall reports None (no exact total
+        #     exists) — fall back to the page size so the UI shows an item count
         # `total_precise` tells the UI whether to show "共 N 条" vs "约 N 条".
-        total = data.get("total_estimate", len(data.get("results") or []))
+        total = data.get("total_estimate")
+        if total is None:
+            total = len(data.get("results") or [])
         precision = data.get("pagination_precision")
         if precision is not None:
             total_precise = precision == "exact"

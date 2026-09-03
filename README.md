@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.15.3` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
+> Current release: `0.15.4` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
 
 ## Why trust it
 
@@ -63,7 +63,7 @@ The daily loop is four calls — `remember` a reusable fact, `find` to recall, `
 
 Every product call returns the envelope `{ok, mode, warnings, degraded, data}`. Operation-specific `action_required`, `next_action`, `replan`, and records live under `data`; successful calls may additionally carry a top-level `notices` array. Each notice has its own `action_required` and machine-readable call under the notice object. Do not look for a generic top-level `action_required`.
 
-`find` responses include a `size` block: `returned_chars`/`returned_count`, a `tokens_estimate`, and matched-beyond-limit counts. `tokens_estimate` comes from a deterministic bucket-table estimator (`heuristic_v1`) calibrated against a Qwen2.5 tokenizer on real records; it runs ~30% high on pure Chinese prose and ~17% high on pure English — the estimate and the estimated share one yardstick, so savings comparisons stay valid. Follow the block's `display_hint` and surface the numbers to the user when presenting results.
+`find` is an index page: by default each result carries metadata plus `content_chars` (the full-text length — what a `read` would cost) and a bounded `outline` of up to 8 `{head, offset}` segments whose offsets share `read`'s span coordinate system, so `span=[offset, offset+N]` slices that exact segment. Full content is not returned by default; pass `include_content=true` to get it back (`content_chars`/`outline` stay either way). Scores compare only within the page, and if the top page misses you should reword the query or add `tags_filter` rather than deep-page — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact count. The `size` block meters the page as actually returned: `returned_chars`/`returned_count` and a `tokens_estimate` from a deterministic bucket-table estimator (`heuristic_v1`) calibrated against a Qwen2.5 tokenizer on real records; it runs ~30% high on pure Chinese prose and ~17% high on pure English — the estimate and the estimated share one yardstick, so savings comparisons stay valid. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, and counts those page items.
 
 ## How recall works
 

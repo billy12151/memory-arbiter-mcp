@@ -2,7 +2,7 @@
 
 **[English](INTEGRATION.md) | 中文**
 
-本指南描述 `0.15.3` 的正式契约。
+本指南描述 `0.15.4` 的正式契约。
 
 ## MCP 接口面
 
@@ -69,7 +69,9 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 配置 sqlite-vec 和本地 embedding 模型后，写入会异步发布从已存原文派生的句子/段落级证据。字面和证据通道独立召回，按记忆用倒数排名融合合并，再经过信任、时间、过滤和 workspace 调整。证据偏移量定位相关原文。
 
-`memory(action="read", data={"memory_id":42})` 返回完整原文。加 `"span":{"start":120,"end":640}` 则只返回 `data.memory.content[120:640]` 外加 `data.span.{start,end,total_chars}`。边界必须是严格 JSON 整数且满足 `0 <= start < end`；超大的 end 裁剪到正文长度，而 start 超出正文会报错。`scan_candidates.deep_read` 可能提供可直接使用的 span；语义 notice 的 read call 按设计是整记忆读取，需要完整上下文时不要带 span 参数。
+`memory(action="find")` 是索引页：默认结果只带元数据、`content_chars`（全文长度，即 read 成本）和有界 `outline`（至多 8 段 `{head, offset}`，取自证据管线的 heading/text 单元），不返回全文——传 `include_content=true` 可恢复全文（`content_chars`/`outline` 两种方式都保留）。页内 score 只做相对比较；top 页未命中时应换词或加 `tags_filter`，而不是深翻页——无过滤的 query 召回报 `total_estimate=null`/`has_more=false`，有过滤时仍是精确 SQL 计数。`unresolved_conflict_count` 只在本页条目直接命中 open/applying 冲突组时出现，值为命中的本页条目数。
+
+`memory(action="read", data={"memory_id":42})` 返回完整原文。加 `"span":{"start":120,"end":640}` 则只返回 `data.memory.content[120:640]` 外加 `data.span.{start,end,total_chars}`。边界必须是严格 JSON 整数且满足 `0 <= start < end`；超大的 end 裁剪到正文长度，而 start 超出正文会报错。find 的 `outline.offset` 与 `scan_candidates.deep_read` 都可直接用作 span（同一坐标系）；语义 notice 的 read call 按设计是整记忆读取，需要完整上下文时不要带 span 参数。
 
 用 `memory_repair(task="rebuild_evidence", data={"dry_run":true})` 检查缺失/过期的覆盖率，再排队有界的重建页。重复执行 execute/dry-run 直到没有剩余 id、status 报告合格覆盖完整。embedding 空间变化会报告 `state=mismatch` 并停用证据通道，直到每条合格记忆都重新发布。证据单元和向量都是派生的。升级只在源向量索引为 `ready` 且 active space ID 与当前模型/管线空间完全一致时复用；否则在当前空间重建索引。
 

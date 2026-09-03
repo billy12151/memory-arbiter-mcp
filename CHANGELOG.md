@@ -3,6 +3,21 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.4] — 2026-09-03
+
+**Behavior change: `find` no longer returns full content by default.** Find is now an index page — results carry metadata, `content_chars`, and a bounded outline; pass `include_content=true` to restore full text.
+
+### Changed
+
+- **`find` is an index page (mema 829 v6).** Default result items drop `content` and instead carry `content_chars` (the full-text length, i.e. the read cost) and a bounded `outline`: up to 8 `{head, offset}` segments built from the evidence pipeline's `local_text_units` heading/text units (subject unit excluded), so `outline.offset` shares read's span coordinate system and `span=[offset, offset+N]` slices that exact segment; longer contents append a trailing `{"head": "…还有 N 段", "offset": null}` marker. The `include_content=true` escape hatch restores full text with `content_chars`/`outline` kept either way, and `include_content` joins the validation registry's find field set. The console (human-facing) passes `include_content=true` internally, so its full-text view is unchanged.
+- **Unfiltered query-recall reports `total_estimate=null` / `has_more=false`.** `len(pool)` was a capped recall count, not a total — reporting it as one was misleading. Filtered recall keeps the exact `count_filtered_memories` SQL count, and offset windows still work as best-effort paging. The console adapts: `total` falls back to the page size (never marked precise) when `total_estimate` is null. Known consequence: the console UI drives paging off `has_more`, so a plain query search (no `tags_filter`/`source_type`) with more than one page of hits no longer offers page 2+ — add a filter or reword the query, same as the agent-side guidance. The expired audit path (`memory_search_expired` / `memory_review(view="expired")`) is deliberately out of scope: cursor pagination is its intended use, so it keeps the best-effort pool count, `has_more`, and `next_offset`. The memory tool docstring and `find_size_metering` help now state the continuation policy: page scores compare only within the page; if the top page misses, reword the query or add `tags_filter` instead of deep paging.
+- **`unresolved_conflict_count` is page-hit scoped.** The field now appears only when page items are direct members of an open/applying conflict group, and its value counts those page items — no longer an unconditional caller-scope group count unrelated to the results.
+- **The `size` block meters the page as actually returned.** `returned_chars`/`returned_count`/`tokens_estimate` now measure the serialized result items, so an index page reads as small and an `include_content=true` page reads as the full text it carries.
+
+### Removed
+
+- **`size.matched_beyond_limit_count` / `size.matched_beyond_limit_chars`** and the "N more matched, not returned" sentence in `display_hint` — the ghost counts extrapolated a capped recall pool and had no sound meaning after the `total_estimate=null` fix. The new `display_hint` states the page contract instead, branching by page kind (index page / full-content page / browse page — the "don't deep-page" guidance only appears where deep paging is actually discouraged).
+
 ## [0.15.3] — 2026-09-02
 
 ### Added

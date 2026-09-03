@@ -352,9 +352,12 @@ def build_runtime() -> ServerBundle:
         value enums, update modes, and action_required paths before relying on a
         result that requests attention.
 
-        find responses carry a size block (tokens_estimate, matched-beyond-limit
-        counts) with a display_hint; surface those numbers to the user when
-        presenting the results.
+        find is an index page: results carry metadata + content_chars + a
+        bounded outline (offsets usable directly as read span starts), not full
+        content — pass include_content=true for full text. Score compares only
+        within the page; if the top page misses, reword the query or add
+        tags_filter instead of deep paging. The size block meters the returned
+        page (tokens_estimate + display_hint).
         """
         identity = _identity_for_tool(app) or stdio_identity
         payload, error = _data_with_request_identity(

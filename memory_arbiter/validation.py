@@ -51,7 +51,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "query", "workspace", "tags", "limit", "offset", "debug_ranking",
         "query_embedding", "tags_filter", "after_time", "before_time",
         "source_type", "include_linked_open_items", "include_conflict_signal",
-        "include_size",
+        "include_size", "include_content",
     },
     ("memory", "read"): {"id", "memory_id", "span", "workspace"},
     ("memory", "update"): {

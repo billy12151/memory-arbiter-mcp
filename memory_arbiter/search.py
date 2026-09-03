@@ -49,7 +49,10 @@ class SearchOutcome:
     results: list[dict[str, Any]]
     warnings: list[str]
     has_more: bool
-    total_estimate: int
+    # v0.15.4: None on the unfiltered query-recall path (no exact total
+    # exists there; len(pool) was a recall count, not a total). Filtered
+    # paths keep the exact SQL count.
+    total_estimate: int | None
     retrieval_mode: RetrievalMode
 
 
@@ -984,7 +987,12 @@ def search_memories(
 
     has_more/total_estimate give the caller a way to tell exhaustive queries
     ("all release notes") from complete ones. retrieval_mode drives
-    linked_open_items triggering (only "direct" is eligible).
+    linked_open_items triggering (only "direct" is eligible). v0.15.4: on the
+    unfiltered active (find) query-recall path total_estimate is None and
+    has_more is False — len(pool) was a capped recall count, not a total, and
+    deep paging is discouraged in favour of rewording the query or adding
+    filters. The expired audit path keeps the best-effort pool count and
+    has_more inference: cursor pagination is its intended use.
 
     v0.9.4: ``offset`` enables cursor pagination. On the empty-query+filters
     path it maps to SQL OFFSET (exact, backed by count_filtered_memories). On
@@ -1095,8 +1103,10 @@ def search_memories(
 
     # === v0.7.3: pool 组装 + post-filter（design §3.5 第三步） ===
     # v0.9.4: when paginating (offset > 0), widen the recall pool past the
-    # requested window by one row so has_more can be inferred without a false
-    # negative when the window is exactly full. At offset=0 the original
+    # requested window by one row so the offset window stays reachable as a
+    # best-effort page (v0.15.4: this path reports has_more=False /
+    # total_estimate=None, so the widening now serves the window itself, not
+    # a has_more inference). At offset=0 the original
     # pool_cap is preserved (keeps the pool-saturation / Channel-6 skip
     # semantics intact). Query-recall still has no exact total; the empty-query
     # SQL paths above are the precise pagination paths.
@@ -1184,20 +1194,28 @@ def search_memories(
     # Slice to the requested page window.
     page = reranked[offset:offset + limit]
 
-    # === v0.7.3: has_more / total_estimate（design §3.6 E1） ===
-    # E1: 无过滤场景 total_estimate = len(pool)（query 召回数，反映 query
-    # 匹配，不是全库大小）；有过滤场景走 count_filtered_memories（SQL 全表
-    # 按过滤计数，受 pool_cap 截断影响的只是 reranked，total_estimate 仍准）。
+    # === v0.7.3: has_more / total_estimate（design §3.6 E1）；v0.15.4 修订 ===
+    # 有过滤场景走 count_filtered_memories（SQL 全表按过滤计数，精确）。
+    # v0.15.4: 无过滤 active（find）场景 total_estimate 报 None —— len(pool)
+    # 只是 query 召回数（受 pool_cap 截断），报成"总数"语义误导；has_more 同
+    # 步置 false，top 页未命中应换词/加 tags_filter，而不是深翻页。expired
+    # 审计路径不套此语义：它的用途就是带 next_offset 光标的审计遍历，保留
+    # 原 best-effort pool 计数与 has_more 推断。
+    total: int | None
     if has_filters:
-        total_estimate = db.count_filtered_memories(
+        total = db.count_filtered_memories(
             like_status_clause, tags_filter, after_dt, before_dt, source_type,
             ws_canonical=scope_ws,
         )
+        # K1: has_more = total > offset + len(page). 修了原公式 len==limit and total>limit
+        # 在 pool 召回不足时漏报（reranked<limit 但 total>reranked 应判 True）。
+        has_more = total > offset + len(page)
+    elif status_filter == "active":
+        total = None
+        has_more = False
     else:
-        total_estimate = len(pool)
-    # K1: has_more = total > offset + len(page). 修了原公式 len==limit and total>limit
-    # 在 pool 召回不足时漏报（reranked<limit 但 total>reranked 应判 True）。
-    has_more = total_estimate > offset + len(page)
+        total = len(pool)
+        has_more = total > offset + len(page)
 
     # hybrid mode: strip debug fields unless explicitly requested.
     if not debug_ranking:
@@ -1205,7 +1223,7 @@ def search_memories(
             for k in list(r.keys()):
                 if k.startswith("_"):
                     r.pop(k, None)
-    return SearchOutcome(page, warnings, has_more, total_estimate, "direct")
+    return SearchOutcome(page, warnings, has_more, total, "direct")
 
 
 def _coerce_tags(raw: Any) -> list[str]:

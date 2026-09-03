@@ -899,9 +899,11 @@ class ConflictStore:
     ) -> int:
         """Count open+applying groups in the caller's admitted scope.
 
-        The find response reports this as unresolved_conflict_count — an
-        admitted-scope figure, deliberately not doctor's global
-        conflicts.backlog (a strict caller must not learn about out-of-scope
+        Retained as the scope-level counterpart to the per-page
+        list_open_conflicts_for_memory_ids: since v0.15.4 find reports
+        unresolved_conflict_count from page hits instead of this scope figure
+        (an admitted-scope count, deliberately not doctor's global
+        conflicts.backlog — a strict caller must not learn about out-of-scope
         groups).
         """
         if not self._db_available:

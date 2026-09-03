@@ -531,7 +531,8 @@ def test_has_more_false_when_fewer(tmp_path: Path) -> None:
 
 
 def test_has_more_false_when_query_matches_few_no_filter(tmp_path: Path) -> None:
-    # E1：无过滤场景，query 只匹配少数，全库更大 → has_more=False（修 count_active 误报）
+    # v0.15.4：无过滤 query-recall 场景 total_estimate 报 None（len(pool) 只是
+    # 召回数，不是总数）、has_more=False——top 页未命中应换词/加过滤而非深翻页。
     tools = make_tools(tmp_path)
     _write_mem(tools, content="alpha beta", subject="alpha beta", tags=[])
     _write_mem(tools, content="alpha beta", subject="alpha beta", tags=[])
@@ -540,10 +541,9 @@ def test_has_more_false_when_query_matches_few_no_filter(tmp_path: Path) -> None
     for i in range(20):
         _write_mem(tools, content=f"noise{i}", subject=f"noise{i}", tags=[])
     res = tools.memory_search(query="alpha beta", limit=10)
-    assert res["data"]["has_more"] is False, (
-        f"E1: 无过滤场景 total_estimate 应=len(pool)=3，不是全库 23；got has_more={res['data']['has_more']}, total={res['data']['total_estimate']}"
-    )
-    assert res["data"]["total_estimate"] == 3
+    assert len(res["data"]["results"]) == 3
+    assert res["data"]["has_more"] is False
+    assert res["data"]["total_estimate"] is None
 
 
 def test_no_filters_backward_compat(tmp_path: Path) -> None:
@@ -570,7 +570,8 @@ def test_search_returns_search_outcome_at_search_memories_level(tmp_path: Path) 
     assert len(result.results) >= 1
     assert result.retrieval_mode == "direct"
     assert isinstance(result.has_more, bool)
-    assert isinstance(result.total_estimate, int)
+    # v0.15.4: unfiltered query-recall has no exact total → None.
+    assert result.total_estimate is None
 
 
 def test_tools_layer_exposes_has_more(tmp_path: Path) -> None:
@@ -697,6 +698,9 @@ def test_expired_search_honors_offset(tmp_path: Path) -> None:
     assert len(p1_ids) == 2
     assert len(p2_ids) == 2
     assert set(p1_ids).isdisjoint(p2_ids)
+    # v0.15.4: the None/False semantics apply to active find only; the expired
+    # audit path keeps cursor pagination (next_offset/has_more) because audit
+    # walkthroughs are its intended use.
     assert page1["data"]["has_more"] is True
     assert page2["data"]["offset"] == 2
     assert page2["data"]["next_offset"] == 4

@@ -552,7 +552,7 @@ def test_strict_direct_hits_are_workspace_scoped(tmp_path):
         mid = _write(tools, content, ws)["data"]["id"]
         assert _confirm_pending(tools, mid)["ok"] is True
 
-    res = _results(tools.memory_search(query="apple", workspace="projA", limit=10))
+    res = _results(tools.memory_search(query="apple", workspace="projA", limit=10, include_content=True))
 
     assert [(m["workspace"], m["content"]) for m in res] == [("projA", "apple alpha")]
 

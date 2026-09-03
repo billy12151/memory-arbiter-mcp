@@ -1,6 +1,7 @@
 """Internal read, search, comparison, and conflict-signal operations."""
 from __future__ import annotations
 
+import json
 from typing import Any, TYPE_CHECKING
 
 from ..acl import CallerWorkspace
@@ -8,6 +9,7 @@ from ..embedder import ManagedEmbedder
 
 from ..arbitration import compare_memories
 from ..constants import EMBEDDING_MAX_SECTION_CHARS, SUPERSEDED_LIMIT, strict_ws
+from ..evidence import local_text_units
 from ..models import MemoryStatus
 from ..search import search_memories
 
@@ -19,6 +21,50 @@ if TYPE_CHECKING:
 # attention flag. conflict_group is the conflict-groups producer; the retired
 # names are kept so legacy payloads still resolve.
 _STRONG_CONFLICT_SOURCES = ("open_table", "conflict_guidance", "conflict_group")
+
+# v0.15.4 find index-page preview: bounded outline per result item.
+_OUTLINE_MAX_SEGMENTS = 8
+_OUTLINE_HEAD_CHARS = 40
+
+
+def _content_outline(subject: str, content: str) -> list[dict[str, Any]]:
+    """Bounded table-of-contents for a find preview item.
+
+    Segments reuse the evidence pipeline's local_text_units (heading/text
+    kinds only; the subject unit is excluded) so offsets share read's span
+    coordinate system — span={"start": offset, "end": offset + N} slices the
+    exact source region. Over-long contents collapse into a trailing
+    "…还有 N 段" marker with offset=None.
+    """
+    units = [
+        unit for unit in local_text_units(subject, content)
+        if unit.kind in ("heading", "text")
+    ]
+    outline: list[dict[str, Any]] = [
+        {
+            "head": (unit.text.splitlines()[0] if unit.text else "")[:_OUTLINE_HEAD_CHARS],
+            "offset": unit.start_offset,
+        }
+        for unit in units[:_OUTLINE_MAX_SEGMENTS]
+    ]
+    if len(units) > _OUTLINE_MAX_SEGMENTS:
+        outline.append({"head": f"…还有 {len(units) - _OUTLINE_MAX_SEGMENTS} 段", "offset": None})
+    return outline
+
+
+def _preview_item(item: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
+    """Build one find index-page item: metadata + content_chars + outline.
+
+    content is dropped unless include_content=True (the escape hatch);
+    content_chars/outline are always present so the contract is uniform.
+    """
+    content = str(item.get("content") or "")
+    preview = dict(item)
+    preview["content_chars"] = len(content)
+    preview["outline"] = _content_outline(str(item.get("subject") or ""), content)
+    if not include_content:
+        preview.pop("content", None)
+    return preview
 
 
 class ReadPipeline:
@@ -77,7 +123,7 @@ class ReadPipeline:
         pending = int(worker.get("queue_depth") or 0) + len(worker.get("inflight") or [])
         return {"pending_evidence_index": pending}
 
-    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool = True, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool = True, include_content: bool = False, **_: Any) -> dict[str, Any]:
         if "include_superseded" in _:
             return self.db.state.response(
                 {
@@ -237,6 +283,10 @@ class ReadPipeline:
                 self.db, results, extra_warnings,
                 ws_canonical=ws_scope,
             )
+        # v0.15.4: find is an index page. Every item carries content_chars +
+        # a bounded outline (offsets share read's span coordinate system);
+        # full content only returns via the include_content=true escape hatch.
+        results = [_preview_item(r, include_content=include_content) for r in results]
         response_data = {
             "results": results,
             "count": len(results),
@@ -252,47 +302,75 @@ class ReadPipeline:
             "vector_lag": self._vector_lag(),
         }
         if include_size:
-            # v0.15.2: one-shot size metering so callers can see what a
-            # results page costs against pasting full texts; no feedback loop,
-            # limit/offset semantics untouched.
+            # v0.15.4: size metering measures the page as actually returned
+            # (post-preview), so an index page reads as small and an
+            # include_content=true page reads as the full text it carries.
             from ..tokens import estimate_tokens
 
-            contents = [
-                str(r.get("content") or "") for r in results if r.get("content") is not None
+            payloads = [
+                json.dumps(r, ensure_ascii=False, sort_keys=True, default=str)
+                for r in results
             ]
-            returned_chars = sum(len(c) for c in contents)
-            returned_tokens = sum(estimate_tokens(c) for c in contents)
-            matched_total = int(total_estimate) if total_estimate is not None else len(results)
-            beyond_count = max(0, matched_total - offset - len(results))
-            avg_chars = returned_chars // max(1, len(contents)) if contents else 0
+            returned_chars = sum(len(p) for p in payloads)
+            returned_tokens = sum(estimate_tokens(p) for p in payloads)
             display_hint = None
-            if contents:
-                display_hint = (
-                    f"Surface the result-page cost to the user when presenting "
-                    f"these results: ~{returned_tokens} tokens returned "
-                    f"({len(contents)} item{'s' if len(contents) != 1 else ''})"
-                    + (
-                        f"; {beyond_count} more matched "
-                        f"(~{beyond_count * avg_chars} chars) not returned."
-                        if beyond_count
-                        else "."
-                    )
+            if results:
+                page_cost = (
+                    f"~{returned_tokens} tokens returned "
+                    f"for {len(results)} item{'s' if len(results) != 1 else ''}"
                 )
+                if retrieval_mode != "direct":
+                    # Browse/fallback pages carry an exact total and has_more —
+                    # paging through them is the intended use, so the
+                    # "don't deep-page" guidance would contradict the signal.
+                    display_hint = (
+                        f"find browse page ({page_cost}): items are index-page "
+                        "previews (content_chars + outline); has_more/"
+                        "total_estimate are exact on this path."
+                    )
+                elif include_content:
+                    display_hint = (
+                        f"find full-content page ({page_cost}): include_content=true "
+                        "returned full texts; default find is an index page "
+                        "(content_chars + outline) that costs far less."
+                    )
+                else:
+                    display_hint = (
+                        f"find is an index page ({page_cost}): "
+                        "content_chars shows each item's read cost and outline.offset "
+                        "slices exactly via read span; if the top page misses, reword "
+                        "the query or add tags_filter instead of deep paging."
+                    )
             response_data["size"] = {
                 "returned_chars": returned_chars,
-                "returned_count": len(contents),
+                "returned_count": len(results),
                 "tokens_estimate": returned_tokens,
-                "matched_beyond_limit_chars": beyond_count * avg_chars,
-                "matched_beyond_limit_count": beyond_count,
                 # The metering only pays off if the user actually sees results;
                 # silence the hint on empty pages to avoid instructing the agent
                 # about a cost that does not exist.
                 "display_hint": display_hint,
             }
+        # v0.15.4: the field only appears when page items directly hit an
+        # open/applying conflict group, and the value is the number of page
+        # items hit — no longer an unconditional caller-scope group count.
         try:
-            response_data["unresolved_conflict_count"] = self.db.conflicts.count_open_conflicts(
-                ws_scope,
-            )
+            # list_open_conflicts_for_memory_ids degrades to [] on a down DB,
+            # so check availability explicitly — otherwise "no page hits" and
+            # "count query failed" would be indistinguishable.
+            if not self.db.db_available:
+                raise RuntimeError("conflicts DB unavailable")
+            page_ids = {int(r["id"]) for r in results if r.get("id") is not None}
+            hit_ids: set[int] = set()
+            if page_ids:
+                for group in self.db.conflicts.list_open_conflicts_for_memory_ids(
+                    sorted(page_ids), include_applying=True,
+                ):
+                    for member in group.get("member_versions") or []:
+                        member_id = member.get("memory_id") if isinstance(member, dict) else None
+                        if member_id is not None and int(member_id) in page_ids:
+                            hit_ids.add(int(member_id))
+            if hit_ids:
+                response_data["unresolved_conflict_count"] = len(hit_ids)
         except Exception as exc:
             # Never drop the field silently: a strict caller cannot tell "no
             # open conflicts" from "count query failed" without a trace.

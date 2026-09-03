@@ -192,9 +192,10 @@ def test_memories_supports_offset_for_empty_query_browse(tmp_path: Path) -> None
 
 
 def test_memories_supports_offset_for_active_search(tmp_path: Path) -> None:
-    """Active search with a query now accepts offset (was a 400 error pre-A2).
-    query-recall offset is best-effort, but for a small fixture the pages must
-    be non-overlapping and has_more must flip on the last page."""
+    """Active search with a query accepts offset as a best-effort window:
+    pages are non-overlapping, but v0.15.4 removed the total/has_more signal
+    on unfiltered query-recall — total falls back to the page size and
+    has_more is always False (reword the query instead of deep paging)."""
     api = _api(tmp_path)
     for i in range(5):
         api.tools.memory_write(
@@ -203,48 +204,45 @@ def test_memories_supports_offset_for_active_search(tmp_path: Path) -> None:
     page1 = api.memories(query="alpha", status="active", limit=2, offset=0)
     assert "error" not in page1
     assert len(page1["items"]) == 2
-    assert page1["has_more"] is True
-    # active search exposes total (from total_estimate) and marks it imprecise
-    # (query-recall). The UI shows "约 N 条" instead of "共 N 条".
-    assert page1["total"] >= 5
+    assert page1["has_more"] is False
+    # total_estimate is None on this path → console shows the page size and
+    # never marks it precise.
+    assert page1["total"] == 2
     assert page1["total_precise"] is False
     page2 = api.memories(query="alpha", status="active", limit=2, offset=2)
     assert "error" not in page2
     assert {m["id"] for m in page1["items"]}.isdisjoint({m["id"] for m in page2["items"]})
-    # last page (offset=4, limit=2, 5 total): 1 item, has_more False
+    # last window (offset=4, limit=2, 5 matches): 1 item
     page3 = api.memories(query="alpha", status="active", limit=2, offset=4)
     assert "error" not in page3
     assert len(page3["items"]) == 1
     assert page3["has_more"] is False
+    # Console is the human-facing channel: items keep full content even though
+    # find defaults to the index-page preview.
+    assert page1["items"][0].get("content")
 
 
-def test_active_search_total_drifts_across_pages_beyond_pool_cap(tmp_path: Path) -> None:
-    """T1: active search's total is a best-effort estimate (query-recall pool).
-    When the match count exceeds the pool cap (~50), total grows as offset
-    deepens because pool_cap = max(50, offset+limit+1). This test pins that
-    semantic so a future engine change (e.g. exact total for query-recall) is
-    caught explicitly, not silently."""
+def test_active_search_unfiltered_reports_page_size_total(tmp_path: Path) -> None:
+    """v0.15.4: unfiltered query-recall no longer reports a drifting
+    pool-based total. total_estimate is None, the console falls back to the
+    page size, and has_more stays False no matter how deep the offset goes.
+    Pins the semantic so a future engine change is caught explicitly."""
     api = _api(tmp_path)
-    # 60 matching memories — beyond the default pool cap of 50
     for i in range(60):
         api.tools.memory_write(
             content=f"drift memory {i}", workspace="w",
             source_type="agent_generated", subject=f"drift-{i}")
-    # page 1: pool capped at 50 → total ~50
     p1 = api.memories(query="drift", status="active", limit=10, offset=0)
     assert "error" not in p1
-    total_p1 = p1["total"]
-    assert total_p1 <= 51  # pool cap + 1
-    # deep page: offset=50 → pool_cap = 50+10+1 = 61 → total grows to 60
+    assert p1["total"] == 10  # page-size fallback, not a pool count
+    assert p1["total_precise"] is False
+    assert p1["has_more"] is False
+    # deep window still returns items (offset paging itself still works)
     p_deep = api.memories(query="drift", status="active", limit=10, offset=50)
     assert "error" not in p_deep
-    total_deep = p_deep["total"]
-    # total must have grown past the initial pool-capped estimate
-    assert total_deep > total_p1
-    assert total_deep == 60  # all matches now fit the widened pool
-    # deep page has items (offset 50 < 60 matches)
     assert len(p_deep["items"]) == 10
-    assert p_deep["has_more"] is False  # offset 50 + 10 = 60 = total
+    assert p_deep["total"] == 10
+    assert p_deep["has_more"] is False
 
 
 def test_recent_browse_count_is_total_not_page_size(tmp_path: Path) -> None:

@@ -2,7 +2,7 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.15.3` contract.
+This guide describes the `0.15.4` contract.
 
 ## MCP Surface
 
@@ -69,7 +69,9 @@ Frozen constants live in `memory_arbiter/constants.py` at their former defaults;
 
 With sqlite-vec and a local embedding model configured, writes asynchronously publish sentence/paragraph evidence derived from the stored source. Lexical and evidence channels recall independently and merge per memory with reciprocal-rank fusion before trust, recency, filters, and workspace adjustments. Evidence offsets identify relevant source text.
 
-`memory(action="read", data={"memory_id":42})` returns the complete source. Add `"span":{"start":120,"end":640}` to return only `data.memory.content[120:640]` plus `data.span.{start,end,total_chars}`. Bounds must be strict JSON integers with `0 <= start < end`; an oversized end clips to content length, while a start beyond content fails. `scan_candidates.deep_read` may provide ready-to-use spans; semantic-notice read calls are full-memory reads by design, so omit the span parameter there whenever full context is needed.
+`memory(action="find")` is an index page: by default results carry metadata plus `content_chars` (the full-text length, i.e. the read cost) and a bounded `outline` (up to 8 `{head, offset}` segments from the evidence pipeline's heading/text units), never full content — pass `include_content=true` to opt back into full text (`content_chars`/`outline` stay either way). Page scores compare only within the page; if the top page misses, reword the query or add `tags_filter` instead of deep paging — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact SQL count. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, counting those page items.
+
+`memory(action="read", data={"memory_id":42})` returns the complete source. Add `"span":{"start":120,"end":640}` to return only `data.memory.content[120:640]` plus `data.span.{start,end,total_chars}`. Bounds must be strict JSON integers with `0 <= start < end`; an oversized end clips to content length, while a start beyond content fails. `outline.offset` values from find and `scan_candidates.deep_read` provide ready-to-use spans (both share this coordinate system); semantic-notice read calls are full-memory reads by design, so omit the span parameter there whenever full context is needed.
 
 Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect missing/stale coverage, then queue bounded rebuild pages. Repeat execute/dry-run until no ids remain and status reports complete eligible coverage. A changed embedding space reports `state=mismatch` and disables the evidence channel until every eligible memory is republished. Evidence units and vectors are derived. Schema migrations explicitly declare `vector_effect=preserve|rebuild`; a preserve migration copies vectors unchanged, then evaluates compatibility separately without blocking the structural upgrade.
 

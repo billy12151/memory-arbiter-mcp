@@ -89,15 +89,25 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "re-checked with the same notice."
         ),
         "find_size_metering": (
-            "find responses carry a size block (returned_chars/returned_count, tokens_estimate, "
-            "matched_beyond_limit_*) plus the caller-scope unresolved_conflict_count; disable with "
-            "include_size=false. tokens_estimate uses a deterministic bucket estimator "
+            "find is an index page: by default each result carries metadata plus "
+            "content_chars (full-text length, i.e. the read cost) and a bounded "
+            "outline (<=8 segments of {head, offset}; heading/text units from the "
+            "evidence pipeline, so outline.offset shares read's span coordinate "
+            "system and span=[offset, offset+N] slices that exact segment). Full "
+            "content is NOT returned by default — pass include_content=true to get "
+            "it back (content_chars/outline stay either way). Score is only "
+            "meaningful relative to other items on the same page. If the top page "
+            "misses, reword the query or add tags_filter instead of deep paging: "
+            "unfiltered query-recall reports total_estimate=null/has_more=false. "
+            "The size block (returned_chars/returned_count/tokens_estimate) meters "
+            "the page as actually returned; disable with include_size=false. "
+            "tokens_estimate uses a deterministic bucket estimator "
             "(heuristic_v1, Qwen2.5-calibrated): pure Chinese prose runs ~30% high and pure English "
             "~17% high, and emoji/ZWJ sequences run systematically low (byte-level BPE means a "
             "single emoji is >=1 token) — the estimate and the estimated share one yardstick, so "
             "savings comparisons stay valid. "
-            "The block's display_hint instructs you to surface the token estimate and beyond-limit "
-            "count to the user when presenting the results."
+            "unresolved_conflict_count appears only when page items directly hit an "
+            "open/applying conflict group, and counts those page items."
         ),
         "value_reference": _memory_value_reference(),
     },
@@ -620,7 +630,7 @@ class ProductSurfaces:
         self._normalize_boolean_fields(
             payload, "authorized", "tags_only", "debug_ranking",
             "include_linked_open_items", "include_conflict_signal",
-            "include_size",
+            "include_size", "include_content",
             "affects_current_output",
         )
         if action == "help":
