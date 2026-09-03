@@ -228,6 +228,24 @@ def test_find_browse_page_hint_does_not_forbid_paging(tmp_path: Path) -> None:
     assert "browse page" in hint
 
 
+def test_find_filtered_page_hint_allows_paging(tmp_path: Path) -> None:
+    """Empty-query + tags_filter recall is retrieval_mode=direct but carries an
+    exact SQL count — the 'reword instead of deep paging' guidance would
+    contradict its own signal."""
+    tools = make_tools(tmp_path)
+    for index in range(5):
+        tools.memory_write(content=f"release note {index}", subject=f"r{index}", tags=["release"])
+    result = tools.memory_search(query="", tags_filter=["release"], limit=2)
+    assert result["ok"] is True
+    assert result["data"]["retrieval_mode"] == "direct"
+    assert result["data"]["total_estimate"] == 5
+    assert result["data"]["has_more"] is True
+    hint = result["data"]["size"]["display_hint"]
+    assert "deep paging" not in hint
+    assert "index page" in hint
+    assert "exact" in hint
+
+
 # ── v0.15.4: total_estimate=None on unfiltered query-recall ──────────────
 
 

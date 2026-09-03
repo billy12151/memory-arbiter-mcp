@@ -238,10 +238,11 @@ class ConsoleAPI:
             if not query and not tag_filter and not source_type:
                 return self._recent_browse(page_size, page_offset, workspace=workspace)
             # Active search with query/filters: memory_search supports offset as
-            # best-effort query-recall pagination (deep pages may return empty
-            # while has_more is still true, because total_estimate is an estimate).
-            # `count` in the response is the page size, not a total — the UI must
-            # drive paging off has_more, not a page count.
+            # best-effort pagination. Since 0.15.4 the unfiltered query path
+            # reports total_estimate=None and has_more=False (no exact total
+            # exists); filtered paths keep exact has_more/total. `count` in the
+            # response is the page size, not a total — the UI must drive paging
+            # off has_more, not a page count.
             response = self.tools.memory_search(
                 query=query or "",
                 workspace=workspace or None,

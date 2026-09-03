@@ -334,12 +334,23 @@ class ReadPipeline:
                         "returned full texts; default find is an index page "
                         "(content_chars + outline) that costs far less."
                     )
-                else:
+                elif total_estimate is None:
+                    # Unfiltered active query-recall: no exact total exists,
+                    # so deep paging is genuinely discouraged here.
                     display_hint = (
                         f"find is an index page ({page_cost}): "
                         "content_chars shows each item's read cost and outline.offset "
                         "slices exactly via read span; if the top page misses, reword "
                         "the query or add tags_filter instead of deep paging."
+                    )
+                else:
+                    # Filtered query / filter-driven recall: still an index
+                    # page, but the exact count makes paging legitimate.
+                    display_hint = (
+                        f"find is an index page ({page_cost}): "
+                        "content_chars shows each item's read cost and outline.offset "
+                        "slices exactly via read span; has_more/total_estimate are "
+                        "exact on this filtered path."
                     )
             response_data["size"] = {
                 "returned_chars": returned_chars,

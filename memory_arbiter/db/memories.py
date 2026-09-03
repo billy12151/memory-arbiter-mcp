@@ -409,8 +409,9 @@ class MemoriesStore:
     ) -> list[dict[str, Any]]:
         """KNN recall of same-workspace active rows over subject_tags_vec.
 
-        Same row shape as active_subject_tag_rows so the duplicate-hint
-        fine-ranking is shared. sqlite-vec applies the workspace/exclusion
+        Returns the id/subject/tags/event_time fields the duplicate-hint
+        fine-ranking consumes (unlike active_subject_tag_rows it carries no
+        ingest_time). sqlite-vec applies the workspace/exclusion
         predicates after it picks its global KNN window, so the window grows
         (evidence-knn pattern) until enough scoped rows are found or the whole
         eligible domain was considered. Returns [] whenever the index or the
