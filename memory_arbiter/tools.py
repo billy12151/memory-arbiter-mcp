@@ -438,6 +438,18 @@ class MemoryTools:
                 force_terminate = getattr(backend, "force_terminate", None)
                 if callable(force_terminate):
                     unload_result = force_terminate()
+        # Free the embedder's llama-cpp instance after the workers that use
+        # it have drained: interpreter-teardown finalization of its Metal
+        # buffers trips a ggml device-free assert (llama-cpp-python 0.3.34,
+        # Apple Silicon) that crashes one-shot processes after their work is
+        # done (see ManagedEmbedder.close). Best-effort hygiene — a close
+        # failure never fails shutdown.
+        with self._embedder_lock:
+            embedder = self._embedder
+        embedder_closed = False
+        if embedder is not None:
+            embedder.close()
+            embedder_closed = True
         ok = bool(semantic_drained and evidence_drained and unload_result.get("ok", False))
         with self._shutdown_lock:
             self._shutdown_complete = ok
@@ -450,6 +462,7 @@ class MemoryTools:
             "semantic_drained": semantic_drained,
             "evidence_drained": evidence_drained,
             "backend_unload": unload_result,
+            "embedder_closed": embedder_closed,
         }
 
     def _allowed(self, agent_id: str | None = None, client: str | None = None) -> tuple[bool, list[str]]:

@@ -432,3 +432,74 @@ class TestDoctorDeepDeviceAndBudget:
         budget = {f.check_id: f for f in report.findings}["evidence.unit_budget"]
         assert budget.status == "pass"
         assert "scan failed" in budget.detail
+
+
+class TestDeterministicClose:
+    """v0.15.7: the live llama-cpp instance must be freed deterministically
+    (interpreter-teardown finalization of Metal buffers crashes llama-cpp-
+    python 0.3.34 one-shot processes at exit, after all work completed)."""
+
+    def test_close_calls_instance_close_once_and_is_idempotent(self):
+        calls: list[int] = []
+
+        def close() -> None:
+            calls.append(1)
+
+        emb = _embedder(*_fake_closures([]), _close_instance=close)
+        emb.close()
+        emb.close()
+        assert calls == [1]
+
+    def test_close_failure_is_recorded_not_raised(self):
+        def close() -> None:
+            raise RuntimeError("device busy")
+
+        emb = _embedder(*_fake_closures([]), _close_instance=close)
+        emb.close()
+        assert any("close failed" in w for w in emb.warnings)
+
+    def test_degrade_closes_broken_gpu_instance_eagerly(self):
+        rebuild_calls: list[int] = []
+        gpu_closes: list[int] = []
+
+        def bad_encode(text: str) -> list[float]:
+            raise RuntimeError("GPU vanished")
+
+        def rebuild():
+            rebuild_calls.append(1)
+            return _fake_closures([])
+
+        def gpu_close() -> None:
+            gpu_closes.append(1)
+
+        emb = _embedder(
+            bad_encode, _fake_closures([])[1],
+            gpu_backed=True, _cpu_rebuild=rebuild, _close_instance=gpu_close,
+        )
+        assert emb.embed_text(prefix="", body="probe text").embedding
+        assert gpu_closes == [1]  # freed under the degrade path, not at exit
+        emb.close()
+        assert gpu_closes == [1]  # slot consumed; close is a no-op now
+
+    def test_shutdown_closes_embedder_and_reports_it(self, tmp_path):
+        from memory_arbiter.config import Settings
+        from memory_arbiter.tools import MemoryTools
+
+        settings = Settings(db_path=tmp_path / "m.sqlite3", backup_jsonl=tmp_path / "b.jsonl")
+        tools = MemoryTools(settings, MemoryDB(settings))
+        result = tools.shutdown(timeout=5.0)
+        assert result["ok"] is True
+        assert result["embedder_closed"] is False  # never loaded
+
+        closed: list[int] = []
+
+        def close() -> None:
+            closed.append(1)
+
+        loaded = MemoryTools(settings, MemoryDB(settings))
+        loaded._embedder = _embedder(*_fake_closures([]), _close_instance=close)
+        loaded._embedder_loaded = True
+        result2 = loaded.shutdown(timeout=5.0)
+        assert result2["ok"] is True
+        assert result2["embedder_closed"] is True
+        assert closed == [1]

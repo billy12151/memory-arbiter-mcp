@@ -29,6 +29,10 @@ TokenizeFn = Callable[[str], list[int]]
 # Rebuilds a CPU-only (encode, tokenize) pair from scratch; returns instead
 # of raising so the caller can treat failure as "no degrade possible".
 CpuRebuildFn = Callable[[], tuple["EncodeFn", "TokenizeFn"]]
+# Deterministically frees the live llama-cpp instance (see
+# ManagedEmbedder.close for why interpreter-teardown finalization is not
+# enough).
+CloseFn = Callable[[], None]
 
 
 @dataclass
@@ -67,6 +71,11 @@ class ManagedEmbedder:
     device_degraded: bool = False
     device_degraded_at: str | None = None
     _cpu_rebuild: CpuRebuildFn | None = None
+    # Frees the instance the current closures capture. Swapped to None once
+    # consumed; the GPU→CPU degrade closes the broken GPU instance eagerly
+    # and the replacement CPU instance holds no Metal buffers, so the slot
+    # stays empty after a degrade.
+    _close_instance: CloseFn | None = None
     # llama-cpp-python's GGUF inference (create_embedding AND tokenize) is not
     # thread-safe: concurrent calls on one Llama instance deadlock. The async
     # split worker runs embed on a background thread while the main thread may
@@ -183,6 +192,32 @@ class ManagedEmbedder:
                 used_tokens=used_tokens,
             )
 
+    def close(self) -> None:
+        """Deterministically free the live llama-cpp instance (shutdown path).
+
+        llama-cpp-python 0.3.34 on Apple Silicon: the process-exit Metal
+        device teardown asserts when residency sets still hold buffers, so a
+        live GPU-backed instance must be freed while the interpreter is
+        intact — one-shot CLIs otherwise crash at exit AFTER their work
+        completed (non-zero exit code with everything actually done).
+        Idempotent; a close failure is recorded in warnings, never raised —
+        shutdown must not fail on cleanup.
+        """
+        with self._embed_lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        """Caller must hold ``_embed_lock`` (serialises against in-flight
+        encode/tokenize on the same instance)."""
+        close = self._close_instance
+        self._close_instance = None
+        if close is None:
+            return
+        try:
+            close()
+        except Exception as exc:
+            self.warnings.append(f"embedder instance close failed: {exc}")
+
     def tokenize_locked(self, text: str) -> list[int]:
         """Tokenize under ``_embed_lock`` for out-of-band callers.
 
@@ -208,6 +243,10 @@ class ManagedEmbedder:
         if not self.gpu_backed or self.device_degraded or self._cpu_rebuild is None:
             return False
         self.device_degraded = True
+        # Free the broken GPU instance NOW, under the lock, instead of
+        # waiting for refcount finalization — its Metal buffers are exactly
+        # what the process-exit device teardown trips over.
+        self._close_locked()
         try:
             encode, tokenize = self._cpu_rebuild()
         except Exception as exc:
@@ -316,6 +355,13 @@ def build_embedder(
 
             return encode, tokenize
 
+        def make_close(instance: Any) -> CloseFn:
+            def close() -> None:
+                closer = getattr(instance, "close", None)
+                if callable(closer):
+                    closer()
+            return close
+
         gpu_backend = False
         try:
             import llama_cpp
@@ -389,6 +435,7 @@ def build_embedder(
             n_batch=int(getattr(llm, "n_batch", 512) or 512),
             warnings=warnings,
             gpu_backed=used_gpu,
+            _close_instance=make_close(llm),
             _cpu_rebuild=(lambda: make_closures(construct(False))) if used_gpu else None,
         ), warnings
     except Exception as exc:

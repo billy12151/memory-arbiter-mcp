@@ -3,6 +3,12 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **One-shot CLIs no longer crash at process exit with a live GPU embedder.** llama-cpp-python 0.3.34 on Apple Silicon trips a ggml device-free assert (`GGML_ASSERT([rsets->data count] == 0)`) during interpreter teardown when the embedder's Metal buffers are still alive — `mema-production-smoke` completed all work, retired its marker, then exited non-zero. The live llama-cpp instance is now freed deterministically: `ManagedEmbedder.close()` (lock-serialised, idempotent, best-effort) is called from `MemoryTools.shutdown()` after the workers drained (response gains `embedder_closed`), and the GPU→CPU degrade path frees the broken GPU instance eagerly instead of waiting for refcount finalization. Verified against the production DB: smoke exits 0 with no ggml abort.
+
 ## [0.15.6] — 2026-09-04
 
 **New: unified recall size metering — one `size` block, one global switch.** `find`'s token metering extends to every recall surface so an agent reports recall cost on one yardstick ("find page ~120 tokens + read #123 ~450 tokens"): `read` (precise recall) meters the record as actually returned — a span read meters the windowed payload, so the number is the true cost of that call — and `memory_review`'s `expired` and `history` meter their result lists (both carry full texts, which is exactly where the number matters; `list_history` is an unbounded `SELECT *` of full version snapshots).
