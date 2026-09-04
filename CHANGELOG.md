@@ -5,6 +5,10 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- **Every recall surface's `size` block now carries a `display_hint` with the token number and a report-this-recall-cost instruction** (e.g. `read (~816 tokens returned for 1 record): report this recall cost when citing it.`). This supersedes 0.15.6's numbers-only stance for read/expired/history: surfacing the cost depends on the calling agent, and an explicit instruction in the response text is the server's only lever to make clients actually show it. Empty pages stay silent (no rows, no cost to report); span reads note the window and the full-record length. ~20-40 extra tokens per response.
+
 ### Fixed
 
 - **One-shot CLIs no longer crash at process exit with a live GPU embedder.** llama-cpp-python 0.3.34 on Apple Silicon trips a ggml device-free assert (`GGML_ASSERT([rsets->data count] == 0)`) during interpreter teardown when the embedder's Metal buffers are still alive — `mema-production-smoke` completed all work, retired its marker, then exited non-zero. The live llama-cpp instance is now freed deterministically: `ManagedEmbedder.close()` (lock-serialised, idempotent, best-effort) is called from `MemoryTools.shutdown()` after the workers drained (response gains `embedder_closed`), and the GPU→CPU degrade path frees the broken GPU instance eagerly instead of waiting for refcount finalization. Verified against the production DB: smoke exits 0 with no ggml abort.

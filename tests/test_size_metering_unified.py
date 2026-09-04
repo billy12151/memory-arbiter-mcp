@@ -66,10 +66,14 @@ def test_read_full_carries_size(tmp_path: Path) -> None:
     size = result["data"]["size"]
     # Meters the record as actually returned, with the shared estimator.
     assert size["returned_count"] == 1
-    assert size == meter_payloads([result["data"]["memory"]])
+    assert {k: v for k, v in size.items() if k != "display_hint"} == meter_payloads([result["data"]["memory"]])
     assert size["tokens_estimate"] > 0
-    # Terminal recall action: numbers only, no display_hint.
-    assert "display_hint" not in size
+    # The hint is an instruction carrying the number (v0.15.6 follow-up:
+    # agents should surface recall cost when citing a record).
+    hint = size["display_hint"]
+    assert "report this recall cost" in hint
+    assert str(size["tokens_estimate"]) in hint
+    assert "1 record" in hint
 
 
 def test_read_span_meters_window_not_full_text(tmp_path: Path) -> None:
@@ -80,8 +84,10 @@ def test_read_span_meters_window_not_full_text(tmp_path: Path) -> None:
     window = tools.memory_get(memory_id=memory_id, span={"start": 0, "end": 30})
     assert window["ok"] is True
     window_size = window["data"]["size"]
-    assert window_size == meter_payloads([window["data"]["memory"]])
+    assert {k: v for k, v in window_size.items() if k != "display_hint"} == meter_payloads([window["data"]["memory"]])
     assert window_size["tokens_estimate"] < full["data"]["size"]["tokens_estimate"]
+    assert "span" in window_size["display_hint"]
+    assert "chars" in window_size["display_hint"]
 
 
 def test_read_error_paths_have_no_size(tmp_path: Path) -> None:
@@ -107,8 +113,9 @@ def test_expired_carries_size(tmp_path: Path) -> None:
     assert result["data"]["count"] >= 1
     size = result["data"]["size"]
     assert size["returned_count"] == result["data"]["count"]
-    assert size == meter_payloads(result["data"]["results"])
-    assert "display_hint" not in size
+    assert {k: v for k, v in size.items() if k != "display_hint"} == meter_payloads(result["data"]["results"])
+    assert "report this recall cost" in size["display_hint"]
+    assert str(size["tokens_estimate"]) in size["display_hint"]
 
 
 # ── history (version chain) ───────────────────────────────────────────────
@@ -123,8 +130,9 @@ def test_history_carries_size(tmp_path: Path) -> None:
     assert result["data"]["count"] == 1
     size = result["data"]["size"]
     assert size["returned_count"] == 1
-    assert size == meter_payloads(result["data"]["history"])
-    assert "display_hint" not in size
+    assert {k: v for k, v in size.items() if k != "display_hint"} == meter_payloads(result["data"]["history"])
+    assert "report this recall cost" in size["display_hint"]
+    assert "version snapshot" in size["display_hint"]
 
 
 # ── one global switch ─────────────────────────────────────────────────────
@@ -190,3 +198,17 @@ def test_config_registry_lists_include_size() -> None:
     assert descriptor["default"] is True
     groups = {g["key"]: g["items"] for g in grouped_descriptors()}
     assert descriptor in groups["reporting"]
+
+
+def test_empty_pages_silence_the_display_hint(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    # A query that matches nothing: expired/history with no rows carry the
+    # numbers but no instruction (nothing was recalled, no cost to report).
+    expired = tools.memory_search_expired(query="definitely-no-such-token-xyz", limit=5)
+    assert expired["data"]["count"] == 0
+    assert expired["data"]["size"]["display_hint"] is None
+
+    memory_id = _write_memory(tools, "no edits yet")
+    history = tools.memory_history(memory_id=memory_id)
+    assert history["data"]["count"] == 0
+    assert history["data"]["size"]["display_hint"] is None

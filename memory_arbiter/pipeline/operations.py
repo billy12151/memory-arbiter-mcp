@@ -2707,10 +2707,19 @@ class OperationsPipeline:
             # v0.15.6: the shared size block (find/read/expired/history one
             # switch). list_history is an unbounded SELECT * of full version
             # snapshots — long chains are exactly where the token number
-            # matters. Numbers only; no paging decision to steer.
+            # matters. The display_hint carries the number as a
+            # report-this-cost instruction, silent on empty history.
             from ..tokens import meter_payloads
 
-            history_data["size"] = meter_payloads(history)
+            size_block = meter_payloads(history)
+            display_hint = None
+            if history:
+                display_hint = (
+                    f"history (~{size_block['tokens_estimate']} tokens returned for "
+                    f"{len(history)} version snapshot{'s' if len(history) != 1 else ''}): "
+                    "report this recall cost when citing it."
+                )
+            history_data["size"] = {**size_block, "display_hint": display_hint}
         if caller.isolation == "strict":
             history_data.update(caller.response_fields())
         return self.db.state.response(history_data, extra_warnings=list(caller.warnings))

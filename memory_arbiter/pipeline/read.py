@@ -603,9 +603,18 @@ class ReadPipeline:
         if self.settings.include_size:
             # v0.15.6: the shared size block. Expired pages carry full texts
             # (no preview path), so the meter reads as the full-text page it
-            # is; numbers only — paging guidance stays with the pagination
-            # fields above.
-            response_data["size"] = meter_payloads(results)
+            # is; the display_hint carries the number as a report-this-cost
+            # instruction, silent on empty pages (no cost to report).
+            size_block = meter_payloads(results)
+            display_hint = None
+            if results:
+                display_hint = (
+                    f"expired recall (~{size_block['tokens_estimate']} tokens returned "
+                    f"for {len(results)} full-text item{'s' if len(results) != 1 else ''}): "
+                    "report this recall cost when citing it; narrow the query or add "
+                    "tags_filter when pages run large."
+                )
+            response_data["size"] = {**size_block, "display_hint": display_hint}
         if attention_required:
             response_data["attention_required"] = True
             response_data["attention_summary"] = attention_summary
@@ -698,11 +707,26 @@ class ReadPipeline:
         if self.settings.include_size:
             # v0.15.6: same size block as find, metering the record as
             # actually returned — a span read meters the windowed payload, so
-            # the number is the true cost of this call. Numbers only: read is
-            # the terminal action of the recall loop, so there is no paging
-            # decision a display_hint could improve (find's outline hint
-            # already teaches the span option).
-            data["size"] = meter_payloads([data["memory"]])
+            # the number is the true cost of this call.
+            # The display_hint is an instruction, not paging guidance: agents
+            # that cite a record should surface what the recall cost, and the
+            # hint carries the number so they don't have to dig for it.
+            size_block = meter_payloads([data["memory"]])
+            tokens = size_block["tokens_estimate"]
+            span_meta = data.get("span")
+            if span_meta is not None:
+                display_hint = (
+                    f"read span (~{tokens} tokens returned; window "
+                    f"{span_meta['start']}:{span_meta['end']} of "
+                    f"{span_meta['total_chars']} chars): report this recall "
+                    "cost when citing it."
+                )
+            else:
+                display_hint = (
+                    f"read (~{tokens} tokens returned for 1 record): "
+                    "report this recall cost when citing it."
+                )
+            data["size"] = {**size_block, "display_hint": display_hint}
         if caller.isolation == "strict":
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
