@@ -194,6 +194,20 @@ class ReadPipeline:
         # strict recall/ACL scope is the admitted canonical set (own +
         # in-radius neighbours). None/weak never hard-scope by it.
         ws_scope = caller.scope_canonicals() if isolation == "strict" and ws_canonical else None
+        # v0.15.5 recall blacklist: an UNSCOPED find (no explicit workspace,
+        # non-strict) excludes blacklisted workspaces (default: the mema-twin
+        # preference bucket) from the ambient pool. An explicit workspace
+        # filter — including a blacklisted one — is honored as-is, and strict
+        # scoping bypasses the blacklist via its admitted set.
+        exclude_ws: "frozenset[str] | None" = None
+        if caller.source != "explicit" and isolation != "strict":
+            from ..recall_blacklist import blacklist_path, load_blacklist
+            exclude_ws, bl_warnings = load_blacklist(blacklist_path(self.db.settings.db_path))
+            extra_warnings.extend(bl_warnings)
+            # A caller HOMED in a blacklisted bucket (settings.workspace) is
+            # effectively explicit about that bucket — don't exclude its home.
+            if exclude_ws and caller.canonical and caller.canonical in exclude_ws:
+                exclude_ws = None
         # v0.9.4: search_memories now uses status_filter instead of include_superseded
         outcome = self._search_memories(
             self.db, query, workspace, tags, limit,
@@ -209,6 +223,7 @@ class ReadPipeline:
             isolation=isolation,
             hard_scope=hard_scope,
             ws_scope=ws_scope,
+            exclude_workspaces=exclude_ws,
         )
         results = outcome.results
         warnings = outcome.warnings
@@ -279,9 +294,14 @@ class ReadPipeline:
         # never on browse/fallback/empty. Failures degrade to [] + warning.
         linked: list[dict[str, Any]] = []
         if include_linked_open_items and retrieval_mode == "direct" and results:
+            # G6 (empty query + filters) is an explicit, curated query — its
+            # linked attachments follow the same exemption as its results.
+            _explicit_filter_path = not query and bool(
+                tags_filter or after_time or before_time or source_type)
             linked = self._linked_open_items_for_search(
                 self.db, results, extra_warnings,
                 ws_canonical=ws_scope,
+                exclude_workspaces=None if _explicit_filter_path else exclude_ws,
             )
         # v0.15.4: find is an index page. Every item carries content_chars +
         # a bounded outline (offsets share read's span coordinate system);

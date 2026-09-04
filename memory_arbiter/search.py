@@ -12,7 +12,13 @@ from .anchors import (
     extract_anchors,
     score_anchor_overlap,
 )
-from .acl import WORKSPACE_EXPR, WorkspaceScope, scope_names, workspace_scope_sql
+from .acl import (
+    WORKSPACE_EXPR,
+    WorkspaceScope,
+    scope_names,
+    workspace_exclusion_sql,
+    workspace_scope_sql,
+)
 from .db import MemoryDB, row_to_dict
 
 # v0.7.4 (M2): retrieval_mode classifies how the returned rows were produced.
@@ -573,6 +579,7 @@ def _wide_recall(
     query_embedding: list[float] | None = None,
     content_like_cap: int = 30,
     ws_canonical: "WorkspaceScope" = None,
+    exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
 ) -> list[dict[str, Any]]:
     """v0.3.0 wide recall: merge multiple retrieval channels into a candidate pool.
 
@@ -599,10 +606,14 @@ def _wide_recall(
         return []
     pool: dict[int, dict[str, Any]] = {}
     scope_m_sql, scope_params = workspace_scope_sql("COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", ws_canonical)
-    scope_plain_sql, _ = workspace_scope_sql("COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical)
-    workspace_clause_m = f" AND {scope_m_sql}" if scope_m_sql else ""
-    workspace_clause = f" AND {scope_plain_sql}" if scope_plain_sql else ""
-    workspace_params: list[Any] = list(scope_params)
+    scope_plain_sql, scope_plain_params = workspace_scope_sql("COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical)
+    # v0.15.5 recall blacklist: exclusion applies with or without a positive
+    # scope (unscoped find is the headline case). Each channel embeds exactly
+    # ONE cond (m-aliased for FTS joins, plain for the LIKE scans) and extends
+    # its params once — params are per-cond, never a shared list.
+    excl_m_sql, excl_plain_sql, excl_params = workspace_exclusion_sql(exclude_workspaces)
+    workspace_clause_m = (f" AND {scope_m_sql}" if scope_m_sql else "") + (f" AND {excl_m_sql}" if excl_m_sql else "")
+    workspace_params: list[Any] = list(scope_params) + list(excl_params)  # FTS: scope_m + excl_m
     conn = db._new_connection()
     try:
         # Channel 1+2: FTS main + OR. _sanitize_fts_query already OR-joins CJK
@@ -660,7 +671,10 @@ def _wide_recall(
                 params.append(f"%{tag}%")
             if scope_plain_sql:
                 clauses.append(scope_plain_sql)
-                params.extend(workspace_params)
+                params.extend(scope_plain_params)
+            if excl_plain_sql:
+                clauses.append(excl_plain_sql)
+                params.extend(excl_params)
             params.append(pool_cap)
             sql = f"""SELECT *, 0 AS score FROM memories
                       WHERE {' AND '.join(clauses)}
@@ -689,7 +703,10 @@ def _wide_recall(
                     params.append(f"%{tag}%")
                 if scope_plain_sql:
                     clauses.append(scope_plain_sql)
-                    params.extend(workspace_params)
+                    params.extend(scope_plain_params)
+                if excl_plain_sql:
+                    clauses.append(excl_plain_sql)
+                    params.extend(excl_params)
                 params.append(content_like_cap)  # cap content-LIKE gap-fill (frozen constant CONTENT_LIKE_CAP)
                 sql = f"""SELECT *, 0 AS score FROM memories
                           WHERE {' AND '.join(clauses)}
@@ -727,6 +744,7 @@ def _wide_recall(
             k=evidence_memory_cap * 8,
             parent_status_filter=status_filter,
             workspace=ws_canonical,
+            exclude_workspaces=exclude_workspaces,
         )
         by_memory: dict[int, dict[str, Any]] = {}
         for row in evidence_rows:
@@ -982,6 +1000,7 @@ def search_memories(
     isolation: str = "none",
     hard_scope: bool = False,
     ws_scope: "WorkspaceScope" = None,
+    exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
 ) -> SearchOutcome:
     """v0.9.4: returns a SearchOutcome with retrieval_mode.
 
@@ -1022,6 +1041,11 @@ def search_memories(
         scope_ws = ws_scope if ws_scope else ws_canonical
     else:
         scope_ws = None
+    # v0.15.5 recall blacklist: only the UNSCOPED ambient pool is filtered —
+    # an explicit workspace (incl. a blacklisted one) or a strict admitted
+    # set overrides it; filter-driven recall below is explicit by construction.
+    if scope_ws is not None:
+        exclude_workspaces = None
     # v0.3.1: when a query_embedding is supplied but sqlite-vec is not active,
     # warn so the caller knows the semantic channel was silently skipped.
     if query_embedding and not db.state.sqlite_vec_available:
@@ -1074,6 +1098,7 @@ def search_memories(
         fb_ws = scope_ws
         fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(
             db, workspace, tags, limit, like_status_clause, warnings, offset=offset, ws_canonical=fb_ws,
+            exclude_workspaces=exclude_workspaces,
         )
         return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_browse")
 
@@ -1116,7 +1141,8 @@ def search_memories(
                         status_filter=status_filter, query_embedding=query_embedding,
                         pool_cap=pool_cap,
                         content_like_cap=CONTENT_LIKE_CAP,
-                        ws_canonical=scope_ws)
+                        ws_canonical=scope_ws,
+                        exclude_workspaces=exclude_workspaces)
 
     # v0.9.7: strict isolation — hard-filter the candidate pool to the query's
     # workspace. weak does NOT filter (it only nudges ranking in _soft_rerank);
@@ -1159,6 +1185,7 @@ def search_memories(
             fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(
                 db, workspace, tags, limit, like_status_clause, warnings,
                 offset=offset, ws_canonical=scope_ws,
+                exclude_workspaces=exclude_workspaces,
             )
             return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_fallback")
 
@@ -1242,6 +1269,7 @@ def _linked_open_items_for_search(
     warnings: list[str],
     max_items: int = 5,
     ws_canonical: "WorkspaceScope" = None,
+    exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
 ) -> list[dict[str, Any]]:
     """v0.7.4: attach up to ``max_items`` active todo memories that share
     meaningful tags with the current result set (linked_open_items).
@@ -1301,8 +1329,14 @@ def _linked_open_items_for_search(
         scope_sql, scope_params = workspace_scope_sql(
             "COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", ws_canonical,
         )
-        workspace_clause = f"AND {scope_sql}" if scope_sql else ""
-        workspace_params: list[Any] = list(scope_params)
+        # v0.15.5: the blacklist applies to this whole-DB todo-attachment
+        # channel too — otherwise blacklisted-bucket todos leak back into the
+        # same unscoped find payload the recall pool just excluded them from.
+        excl_m_sql, _, excl_params = workspace_exclusion_sql(exclude_workspaces)
+        workspace_clause = (
+            (f"AND {scope_sql} " if scope_sql else "") + (f"AND {excl_m_sql} " if excl_m_sql else "")
+        )
+        workspace_params: list[Any] = list(scope_params) + list(excl_params)
         try:
             # --- L1: EXISTS check for active+todo memories ---
             todo_exists = conn.execute(
@@ -1424,6 +1458,7 @@ def _recent_fallback(
     warnings: list[str],
     offset: int = 0,
     ws_canonical: "WorkspaceScope" = None,
+    exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
 ) -> tuple[list[dict[str, Any]], list[str], bool, int]:
     """Recent-memory fallback when no direct match found (r4 §4.2 safety net)."""
     clauses = [like_status_clause]
@@ -1442,6 +1477,10 @@ def _recent_fallback(
     if scope_sql:
         clauses.append(scope_sql)
         params.extend(scope_params)
+    _, excl_sql, excl_params = workspace_exclusion_sql(exclude_workspaces)
+    if excl_sql:
+        clauses.append(excl_sql)
+        params.extend(excl_params)
     conn = db._new_connection()
     try:
         count_row = conn.execute(

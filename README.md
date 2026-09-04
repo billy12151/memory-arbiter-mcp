@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.15.4` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
+> Current release: `0.15.5` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
 
 ## Why trust it
 
@@ -96,6 +96,12 @@ The single `conflicts` table stores one one-to-many event and its immutable memb
 Workspace canonical normalization runs in every `isolation` mode and is separate from access control. `none` applies no workspace ACL: an omitted workspace spans the library, while an explicitly supplied workspace is canonicalized and scopes that read. `weak` adds a soft ranking/hint signal (a fixed binary nudge — the continuous vector-distance weighting is no longer a knob). Under `strict`, Qwen never silently merges a near-match: a new workspace stays `pending` until authorized `memory_govern(confirm_pending_workspace)` activates it. Strict visibility uses guarded vector admission (always on since 0.15.0, a frozen constant): workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share one admitted set: the caller canonical plus every canonical at or below a 0.25 cosine cutoff after default-pool, short-name, and generic-substring guards. Process-global maintenance (for example semantic runtime control, backup replay, doctor, and settings) is not a workspace-scoped content view. Missing vectors or sqlite-vec degradation fall back to the exact caller canonical. The reserved `default` pool is insulated and is not visible from a strict project scope. Automatic vector/Qwen normalization affects only the memory's `workspace_canonical`; supported workspace governance uses rename, migrate, move-by-id (`move_memories_workspace`), pending confirmation, and full-registry confirmation. Internal redirect/negative-decision state prevents old names from re-splitting and suppressed candidates from reappearing, but is not a user-facing workflow.
 
 The first successful write that registers a canonical workspace returns a non-blocking top-level `workspace_review` notice in `none`/`weak`, plus `data.write_hints.new_workspace_detected`. Review possible duplicates before running authorized `confirm_workspaces`. `strict` instead returns the existing blocking `action_required=confirm_new_workspace` flow and does not emit the duplicate non-blocking notice.
+
+### Recall blacklist (0.15.5)
+
+Workspaces listed in `recall_blacklist.jsonl` (next to the database file) are excluded from **unscoped** `find` recall — the default ambient pool. One bare workspace name per line; blank lines and `#` comments are ignored; edits are live on the next find. No file → the built-in default applies (`mema-twin`, the mema-twin preference bucket); an empty file → nothing is excluded; a created file replaces the default entirely.
+
+What is *not* filtered: an explicit `workspace` argument (even a blacklisted one), strict isolation, filter-driven recall (empty query + `tags_filter`/time/`source_type`), the expired-audit path, write-time dedup, conflict scans, and id-based reads. Exclusion matches both the canonical and the raw workspace column, so rows whose canonical drifted are still caught. `doctor` reports the effective list (`recall.blacklist`).
 
 ## Operating mema
 

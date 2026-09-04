@@ -51,6 +51,38 @@ def workspace_scope_sql(expr: str, scope: WorkspaceScope) -> tuple[str, list[str
     return f"{expr} IN ({placeholders})", names
 
 
+def workspace_exclusion_sql(
+    exclude: "list[str] | set[str] | tuple[str, ...] | None",
+    expr_m: str = "COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)",
+    expr_plain: str = "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
+) -> tuple[str, str, list[str]]:
+    """Recall-blacklist NOT IN conditions (v0.15.5). Returns
+    ``(cond_m, cond_plain, params)`` without a leading AND so callers can
+    compose it either as ``f" AND {cond}"`` or a ``' AND '.join`` clause list.
+
+    Matches *both* the canonical-with-raw-fallback expression and the raw
+    workspace column: a blacklisted name must also catch rows whose canonical
+    drifted (e.g. the twin-dryrun normalization era left workspace=mema-twin
+    rows canonicalized elsewhere). Empty/absent input → no-ops.
+
+    ``params`` carries ONE cond's worth (``names * 2``): each embedding SQL
+    uses exactly one of the two conds, so a call site extends its parameter
+    list once per embedded cond — never a shared 4x list, which would
+    over-bind and get silently swallowed by per-channel try/except.
+    """
+    names = sorted({str(n).strip() for n in (exclude or []) if str(n or "").strip()})
+    if not names:
+        return "", "", []
+    placeholders = ",".join("?" for _ in names)
+    cond_m = (
+        f"({expr_m} NOT IN ({placeholders}) AND m.workspace NOT IN ({placeholders}))"
+    )
+    cond_plain = (
+        f"({expr_plain} NOT IN ({placeholders}) AND workspace NOT IN ({placeholders}))"
+    )
+    return cond_m, cond_plain, names * 2
+
+
 @dataclass(frozen=True)
 class CallerWorkspace:
     isolation: str

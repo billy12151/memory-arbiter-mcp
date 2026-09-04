@@ -3,6 +3,21 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.5] — 2026-09-04
+
+**New: recall blacklist — workspaces excluded from *unscoped* find recall.** Ships with the `mema-twin` preference bucket preloaded, so twin persona material stops double-channel-injecting (it is consumed via compiled prompt injection) and stops crowding the recall pool of ordinary finds.
+
+### Added
+
+- **`recall_blacklist.jsonl` (design 861).** One bare workspace name per line (blank lines and `#` comments allowed) next to the database file; mtime-cached and live on the very next find — no restart. An absent file applies the built-in default (`mema-twin`); an empty file excludes nothing (explicit opt-back-in); a created file replaces the default entirely. Entries are capped at 490 (each recall SQL binds 2 per entry — safe even on legacy 999-variable SQLite); invalid lines are skipped with a warning that surfaces on `find` warnings and in doctor.
+- **Exclusion scope is precisely the ambient pool.** Only a find issued *without* an explicit workspace and outside strict isolation is filtered. Everything else is exempt by construction: an explicit `workspace` — including a blacklisted one — is always honored (this is how twin's own `compile` path and governance reach the bucket on purpose); strict isolation bypasses via its admitted set; filter-driven recall (empty query + `tags_filter`/time/`source_type`) and the expired-audit path never consult it; write-time dedup, semantic-conflict scans, `memory_recent`, the console browse, and all id-based reads are untouched. A caller whose *settings home* is a blacklisted bucket keeps its home reachable. Excluded rows match both the canonical-with-raw-fallback expression and the raw workspace column, so canonical-drift rows (e.g. workspace=`mema-twin` canonicalized to `twin-dryrun` in the dry-run era) are caught too.
+- **SQL-level in every recall channel.** FTS main/OR, subject/tags LIKE, content LIKE, the recent-browse fallback, the evidence-KNN channel (post-KNN membership filter with the same over-fetch growth as the positive scope), and the `linked_open_items` todo attachment all embed the NOT-IN condition in SQL — never a post-page Python strip. On G6 (filter-driven) responses the linked attachments follow the same exemption as the results.
+- **doctor `recall.blacklist` check.** Reports the effective source (default vs file), entry count, and parse warnings; a broken check degrades loudly instead of silently disappearing.
+
+### Notes
+
+- This is the first "list-style, appendable config" file outside `config.json` (config-slim 0.15.0 policy): scalar knobs stay in the config file; growing lists get their own JSONL next to the data — documented here as the convention.
+
 ## [0.15.4] — 2026-09-03
 
 **Behavior change: `find` no longer returns full content by default.** Find is now an index page — results carry metadata, `content_chars`, and a bounded outline; pass `include_content=true` to restore full text.

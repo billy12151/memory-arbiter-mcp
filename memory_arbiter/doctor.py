@@ -265,6 +265,22 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     ))
     # full-registry workspace confirmation (read-only; the snapshot
     # is only ever written by the authorized confirm_workspaces action).
+    # v0.15.5: recall blacklist visibility — default prefill vs customized
+    # file, entry count, and any parse warnings (bad lines degrade the file).
+    try:
+        from .recall_blacklist import blacklist_path, load_blacklist
+        _bl_path = blacklist_path(settings.db_path)
+        _bl_names, _bl_warnings = load_blacklist(_bl_path)
+        _bl_source = "file" if _bl_path.exists() else "default"
+        findings.append(_finding(
+            "recall.blacklist", not _bl_warnings,
+            f"unscoped find excludes {len(_bl_names)} workspace(s) via recall blacklist "
+            f"({_bl_source}: {', '.join(sorted(_bl_names)) or 'none'})",
+            evidence={"source": _bl_source, "workspaces": sorted(_bl_names),
+                      "warnings": list(_bl_warnings)},
+        ))
+    except Exception as exc:  # degrade loudly: a silently missing check hides regressions
+        findings.append(_finding("recall.blacklist", False, f"recall blacklist check failed: {exc}"))
     findings.append(_workspace_review_finding(conn, settings))
     if settings.config_warnings:
         findings.append(_finding("config.warnings", False, "; ".join(settings.config_warnings)))

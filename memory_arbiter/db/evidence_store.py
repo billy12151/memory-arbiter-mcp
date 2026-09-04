@@ -178,6 +178,7 @@ class EvidenceStore:
         parent_status_filter: str = "active",
         workspace: "WorkspaceScope" = None,
         exclude_memory_id: int | None = None,
+        exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
     ) -> list[dict[str, Any]]:
         """KNN over evidence vectors, filtered by parent lifecycle state.
 
@@ -212,11 +213,19 @@ class EvidenceStore:
         workspace_sql, workspace_params = workspace_scope_sql(
             "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)", workspace,
         )
-        filtered = bool(workspace_sql or exclude_memory_id is not None)
+        # v0.15.5 recall blacklist: same post-KNN membership filter slot as the
+        # positive scope (canonical-with-raw-fallback AND raw workspace).
+        # Append AFTER the positive scope so clause order matches param order.
+        from ..acl import workspace_exclusion_sql
+        excl_sql, _, excl_params = workspace_exclusion_sql(exclude_workspaces)
+        filtered = bool(workspace_sql or exclude_memory_id is not None or excl_sql)
         filter_params: list[Any] = []
         if workspace_sql:
             clauses.append(workspace_sql)
             filter_params.extend(workspace_params)
+        if excl_sql:
+            clauses.append(excl_sql)
+            filter_params.extend(excl_params)
         if exclude_memory_id is not None:
             clauses.append("e.memory_id!=?")
             filter_params.append(int(exclude_memory_id))

@@ -378,8 +378,9 @@ class MemoryDB:
     def evidence_knn(
         self, query_embedding: list[float], *, k: int = 100, parent_status_filter: str = "active",
         workspace: WorkspaceScope = None, exclude_memory_id: int | None = None,
+        exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
     ) -> list[dict[str, Any]]:
-        return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id)
+        return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id, exclude_workspaces=exclude_workspaces)
 
     def scan_rule_candidates(
         self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
