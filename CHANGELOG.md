@@ -3,7 +3,7 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
-## [Unreleased]
+## [0.15.7] — 2026-09-04
 
 ### Changed
 
