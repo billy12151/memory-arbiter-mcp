@@ -11,7 +11,9 @@ comparisons stay meaningful.
 """
 from __future__ import annotations
 
+import json
 import re
+from typing import Any
 
 TOKEN_ESTIMATE_BASIS = "heuristic_v1(qwen2.5-calibrated)"
 
@@ -81,3 +83,22 @@ def estimate_tokens(text: str) -> int:
             else:
                 total += _OTHER_PER_CHAR
     return int(round(total))
+
+
+def meter_payloads(payloads: list[Any]) -> dict[str, int]:
+    """Meter response payloads for the shared size block.
+
+    One yardstick for every recall surface (find/read/expired/history):
+    each item is dumped exactly as it serializes into the response and
+    estimated with the same bucket table, so cross-surface token reports
+    ("find page ~120 + read #123 ~450") stay comparable.
+    """
+    dumps = [
+        json.dumps(p, ensure_ascii=False, sort_keys=True, default=str)
+        for p in payloads
+    ]
+    return {
+        "returned_chars": sum(len(p) for p in dumps),
+        "returned_count": len(dumps),
+        "tokens_estimate": sum(estimate_tokens(p) for p in dumps),
+    }

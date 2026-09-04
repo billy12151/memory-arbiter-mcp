@@ -65,6 +65,11 @@ class Settings:
     # workspace scopes that read) | weak (soft rerank) | strict (hard scope).
     isolation: str = "none"
     update_check_enabled: bool = True
+    # Global switch for the recall size block (v0.15.6): on = every recall
+    # surface (find/read/expired/history) attaches {returned_chars,
+    # returned_count, tokens_estimate}; off = none of them do. One knob for
+    # the whole report-a-token-cost-per-recall contract, not per-call.
+    include_size: bool = True
     # semantic_conflict: model_path → auto-enabled (explicit enabled=false
     # wins); preload/resident are frozen true — a configured model loads at
     # startup and stays resident.
@@ -226,6 +231,9 @@ class Settings:
             ),
             isolation=isolation,
             update_check_enabled=update_check_enabled,
+            include_size=pick_bool_field(
+                cfg.get("include_size"), name="include_size", default_bool=True
+            ),
             semantic_conflict_enabled=pick_bool_field(
                 semantic_cfg.get("enabled"), name="semantic_conflict.enabled",
                 default_bool=_semantic_auto_enable,

@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.15.5` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
+> Current release: `0.15.6` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
 
 ## Why trust it
 
@@ -42,7 +42,7 @@ pip install "memory-arbiter-mcp[vec]"            # sqlite-vec evidence recall
 pip install "memory-arbiter-mcp[semantic-local]" # local GGUF runtime (embeddings + Qwen)
 ```
 
-Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Since 0.15.0 configuration is file-only and the whole user surface is 18 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Since 0.15.0 configuration is file-only and the whole user surface is 19 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
 
 The server requires an explicitly configured identity: set `client` and `agent_id` in config.json or the `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` launch-context environment variables (the stdio `examples/*.mcp.json` entries do this via `env`). There are no built-in defaults — the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; `memory(action="remember")` does not accept `agent_id`/`client` in `data`. streamable-http takes caller identity from the per-request headers described below.
 
@@ -63,7 +63,7 @@ The daily loop is four calls — `remember` a reusable fact, `find` to recall, `
 
 Every product call returns the envelope `{ok, mode, warnings, degraded, data}`. Operation-specific `action_required`, `next_action`, `replan`, and records live under `data`; successful calls may additionally carry a top-level `notices` array. Each notice has its own `action_required` and machine-readable call under the notice object. Do not look for a generic top-level `action_required`.
 
-`find` is an index page: by default each result carries metadata plus `content_chars` (the full-text length — what a `read` would cost) and a bounded `outline` of up to 8 `{head, offset}` segments whose offsets share `read`'s span coordinate system, so `span=[offset, offset+N]` slices that exact segment. Full content is not returned by default; pass `include_content=true` to get it back (`content_chars`/`outline` stay either way). Scores compare only within the page, and if the top page misses you should reword the query or add `tags_filter` rather than deep-page — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact count. The `size` block meters the page as actually returned: `returned_chars`/`returned_count` and a `tokens_estimate` from a deterministic bucket-table estimator (`heuristic_v1`) calibrated against a Qwen2.5 tokenizer on real records; it runs ~30% high on pure Chinese prose and ~17% high on pure English — the estimate and the estimated share one yardstick, so savings comparisons stay valid. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, and counts those page items.
+`find` is an index page: by default each result carries metadata plus `content_chars` (the full-text length — what a `read` would cost) and a bounded `outline` of up to 8 `{head, offset}` segments whose offsets share `read`'s span coordinate system, so `span=[offset, offset+N]` slices that exact segment. Full content is not returned by default; pass `include_content=true` to get it back (`content_chars`/`outline` stay either way). Scores compare only within the page, and if the top page misses you should reword the query or add `tags_filter` rather than deep-page — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact count. The `size` block meters the page as actually returned: `returned_chars`/`returned_count` and a `tokens_estimate` from a deterministic bucket-table estimator (`heuristic_v1`) calibrated against a Qwen2.5 tokenizer on real records; it runs ~30% high on pure Chinese prose and ~17% high on pure English — the estimate and the estimated share one yardstick, so savings comparisons stay valid. Since 0.15.6 the same size block rides every recall surface — `read` (meters the record as returned, span windows included), `memory_review` `expired` and `history` (meter their result lists) — under one global config key `include_size` (default `true`); `include_size=false` turns all of them off together, and `find`'s old per-call `include_size` parameter is ignored with a warning. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, and counts those page items.
 
 ## How recall works
 
@@ -145,7 +145,7 @@ The old database is never deleted. Standard JSON configuration is backed up and 
 
 Configuration is file-only since 0.15.0. Everything tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at; `mema setup` writes the starter template). Engine parameters, timeouts, thresholds, and caps are frozen constants (`memory_arbiter/constants.py`).
 
-The complete user surface is 18 keys:
+The complete user surface is 19 keys:
 
 ```json
 {
@@ -157,6 +157,7 @@ The complete user surface is 18 keys:
   "isolation": "none",
   "policy_path": null,
   "update_check": { "enabled": true },
+  "include_size": true,
   "embedding": {
     "model_path": "~/.local/share/memory-arbiter/models/embedding.gguf",
     "auto_query": true,
@@ -183,6 +184,7 @@ The complete user surface is 18 keys:
 | `workspace` / `isolation` | Default workspace and `none`/`weak`/`strict` workspace behavior |
 | `policy_path` | Optional client/agent tool-routing policy file |
 | `update_check.enabled` | Optional one-shot background PyPI discovery (default `true`); the only network call, with cached/suppressed notices and no auto-upgrade |
+| `include_size` | Global switch for the recall size block (v0.15.6): on = `find`/`read`/`expired`/`history` all attach `{returned_chars, returned_count, tokens_estimate}`; off = none of them do |
 | `embedding.model_path` | Local GGUF embedding model — pointing at it is the sole intent to enable sqlite-vec evidence recall |
 | `embedding.auto_query` / `auto_write` | Auto-embed at query/write time (default `true`) |
 | `semantic_conflict.model_path` | Optional local Qwen2.5-0.5B GGUF for bidirectional four-field extraction; configured → auto-enabled, loaded at startup, and kept resident |

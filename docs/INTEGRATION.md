@@ -2,7 +2,7 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.15.5` contract.
+This guide describes the `0.15.6` contract.
 
 ## MCP Surface
 
@@ -18,7 +18,7 @@ Writes require a non-empty `subject`; include `source_type`, `event_time`, `sour
 
 ## Configuration Surface
 
-Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 18 keys:
+Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 19 keys:
 
 ```json
 {
@@ -26,6 +26,7 @@ Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.co
   "client": "…", "agent_id": "…", "workspace": "default",
   "isolation": "none", "policy_path": null,
   "update_check": {"enabled": true},
+  "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
   "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "max_notice_pairs": 2},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}

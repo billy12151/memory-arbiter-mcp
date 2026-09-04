@@ -2,7 +2,7 @@
 
 **[English](INTEGRATION.md) | 中文**
 
-本指南描述 `0.15.5` 的正式契约。
+本指南描述 `0.15.6` 的正式契约。
 
 ## MCP 接口面
 
@@ -18,7 +18,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ## 配置面
 
-0.15.0 起**配置只认文件**：所有用户可调项都在 `~/.config/memory-arbiter/config.json`（或 `MEMORY_ARBITER_CONFIG` 启动上下文变量指向的文件）。完整配置面共 18 键：
+0.15.0 起**配置只认文件**：所有用户可调项都在 `~/.config/memory-arbiter/config.json`（或 `MEMORY_ARBITER_CONFIG` 启动上下文变量指向的文件）。完整配置面共 19 键：
 
 ```json
 {
@@ -26,6 +26,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
   "client": "…", "agent_id": "…", "workspace": "default",
   "isolation": "none", "policy_path": null,
   "update_check": {"enabled": true},
+  "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
   "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "max_notice_pairs": 2},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}

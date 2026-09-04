@@ -1,7 +1,7 @@
 {
   "_readme": [
     "Copy to ~/.config/memory-arbiter/config.json and edit local paths.",
-    "Since 0.15.0 configuration is file-only and this is the complete 18-key user surface. Engine params, timeouts, thresholds, and caps are frozen constants (memory_arbiter/constants.py); 0.14.x keys that no longer exist are ignored with a 'no longer configurable' warning. Only six launch-context env vars remain (MEMORY_ARBITER_CONFIG/DB_PATH/BACKUP_JSONL/MCP_TRANSPORT/CLIENT/AGENT_ID); every other MEMORY_ARBITER_* variable is no longer read.",
+    "Since 0.15.0 configuration is file-only and this is the complete 19-key user surface. Engine params, timeouts, thresholds, and caps are frozen constants (memory_arbiter/constants.py); 0.14.x keys that no longer exist are ignored with a 'no longer configurable' warning. Only six launch-context env vars remain (MEMORY_ARBITER_CONFIG/DB_PATH/BACKUP_JSONL/MCP_TRANSPORT/CLIENT/AGENT_ID); every other MEMORY_ARBITER_* variable is no longer read.",
     "client and agent_id are REQUIRED with no built-in defaults: the MCP server refuses to start when either is missing or blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; streamable-http takes caller identity from the per-request X-Mema-Client / X-Mema-Agent-Id headers instead.",
     "embedding.model_path IS the intent to enable sqlite-vec evidence recall — there is no vec.enabled/provider/dim knob any more. The vector dimension comes from the model itself; switching to a model with a different dimension drops and rebuilds the vector tables at the new dimension at startup.",
     "semantic_conflict.model_path enables the local Qwen2.5-0.5B runtime: it loads at startup and stays resident (preload/resident are frozen true); scan is broad and write-time notice is strict.",
@@ -27,6 +27,7 @@
   "update_check": {
     "enabled": true
   },
+  "include_size": true,
   "embedding": {
     "model_path": "~/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf",
     "auto_query": true,

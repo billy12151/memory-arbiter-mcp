@@ -2703,6 +2703,14 @@ class OperationsPipeline:
             "history": history,
             "count": len(history),
         }
+        if self.settings.include_size:
+            # v0.15.6: the shared size block (find/read/expired/history one
+            # switch). list_history is an unbounded SELECT * of full version
+            # snapshots — long chains are exactly where the token number
+            # matters. Numbers only; no paging decision to steer.
+            from ..tokens import meter_payloads
+
+            history_data["size"] = meter_payloads(history)
         if caller.isolation == "strict":
             history_data.update(caller.response_fields())
         return self.db.state.response(history_data, extra_warnings=list(caller.warnings))

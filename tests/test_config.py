@@ -1073,6 +1073,7 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "embedding_auto_write",
         "isolation",
         "update_check_enabled",
+        "include_size",
         "semantic_conflict_enabled",
         "semantic_conflict_model_path",
         "semantic_conflict_on_write",
@@ -1082,8 +1083,8 @@ SLIM_SETTINGS_FIELDS = frozenset(
 )
 
 
-def test_settings_field_set_is_frozen_at_twenty() -> None:
-    assert len(SLIM_SETTINGS_FIELDS) == 20
+def test_settings_field_set_is_frozen_at_twenty_one() -> None:
+    assert len(SLIM_SETTINGS_FIELDS) == 21
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 

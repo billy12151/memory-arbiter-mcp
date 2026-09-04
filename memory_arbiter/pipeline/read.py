@@ -1,7 +1,6 @@
 """Internal read, search, comparison, and conflict-signal operations."""
 from __future__ import annotations
 
-import json
 from typing import Any, TYPE_CHECKING
 
 from ..acl import CallerWorkspace
@@ -12,6 +11,7 @@ from ..constants import EMBEDDING_MAX_SECTION_CHARS, SUPERSEDED_LIMIT, strict_ws
 from ..evidence import local_text_units
 from ..models import MemoryStatus
 from ..search import search_memories
+from ..tokens import meter_payloads
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
@@ -123,7 +123,16 @@ class ReadPipeline:
         pending = int(worker.get("queue_depth") or 0) + len(worker.get("inflight") or [])
         return {"pending_evidence_index": pending}
 
-    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool = True, include_content: bool = False, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool | None = None, include_content: bool = False, **_: Any) -> dict[str, Any]:
+        extra_warnings = list(self._embedder_warnings)
+        if include_size is not None:
+            # v0.15.6: the size block is one global config key covering every
+            # recall surface; the old per-call flag is accepted (registry
+            # compatibility) but only earns a pointer to the knob.
+            extra_warnings.append(
+                "include_size is a global config key since v0.15.6 (default true) "
+                "governing find/read/expired/history together; per-call value ignored"
+            )
         if "include_superseded" in _:
             return self.db.state.response(
                 {
@@ -133,7 +142,6 @@ class ReadPipeline:
                 },
                 ok=False,
             )
-        extra_warnings = list(self._embedder_warnings)
         vec_state = self.db.get_vec_index_state()
         vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
         if vec_disabled and (query_embedding is not None or (query and self.settings.embedding_auto_query)):
@@ -321,18 +329,14 @@ class ReadPipeline:
             # vNext §13.1: async evidence index lag, never pretend strong consistency.
             "vector_lag": self._vector_lag(),
         }
-        if include_size:
+        if self.settings.include_size:
             # v0.15.4: size metering measures the page as actually returned
             # (post-preview), so an index page reads as small and an
             # include_content=true page reads as the full text it carries.
-            from ..tokens import estimate_tokens
-
-            payloads = [
-                json.dumps(r, ensure_ascii=False, sort_keys=True, default=str)
-                for r in results
-            ]
-            returned_chars = sum(len(p) for p in payloads)
-            returned_tokens = sum(estimate_tokens(p) for p in payloads)
+            # v0.15.6: gated by the global config key (find/read/expired/
+            # history share one switch), not a per-call flag.
+            size_block = meter_payloads(results)
+            returned_tokens = size_block["tokens_estimate"]
             display_hint = None
             if results:
                 page_cost = (
@@ -372,15 +376,7 @@ class ReadPipeline:
                         "slices exactly via read span; has_more/total_estimate are "
                         "exact on this filtered path."
                     )
-            response_data["size"] = {
-                "returned_chars": returned_chars,
-                "returned_count": len(results),
-                "tokens_estimate": returned_tokens,
-                # The metering only pays off if the user actually sees results;
-                # silence the hint on empty pages to avoid instructing the agent
-                # about a cost that does not exist.
-                "display_hint": display_hint,
-            }
+            response_data["size"] = {**size_block, "display_hint": display_hint}
         # v0.15.4: the field only appears when page items directly hit an
         # open/applying conflict group, and the value is the number of page
         # items hit — no longer an unconditional caller-scope group count.
@@ -604,6 +600,12 @@ class ReadPipeline:
             "pagination_precision": "exact" if not str(query or "").strip() else "best_effort",
             "vector_lag": self._vector_lag(),
         }
+        if self.settings.include_size:
+            # v0.15.6: the shared size block. Expired pages carry full texts
+            # (no preview path), so the meter reads as the full-text page it
+            # is; numbers only — paging guidance stays with the pagination
+            # fields above.
+            response_data["size"] = meter_payloads(results)
         if attention_required:
             response_data["attention_required"] = True
             response_data["attention_summary"] = attention_summary
@@ -693,6 +695,14 @@ class ReadPipeline:
             }
         else:
             data = {"memory": memory}
+        if self.settings.include_size:
+            # v0.15.6: same size block as find, metering the record as
+            # actually returned — a span read meters the windowed payload, so
+            # the number is the true cost of this call. Numbers only: read is
+            # the terminal action of the recall loop, so there is no paging
+            # decision a display_hint could improve (find's outline hint
+            # already teaches the span option).
+            data["size"] = meter_payloads([data["memory"]])
         if caller.isolation == "strict":
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))

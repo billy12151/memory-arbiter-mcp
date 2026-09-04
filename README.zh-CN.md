@@ -3,7 +3,7 @@
 **[English](README.md) | 中文**
 
 > 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.15.5`（写时重复提醒升级为「主题+标签」向量召回；新增 `scan_duplicates` 一次有界清扫全库近重复）。
+> 当前正式版本 `0.15.6`（写时重复提醒升级为「主题+标签」向量召回；新增 `scan_duplicates` 一次有界清扫全库近重复）。
 
 ## 一句话说明白
 
@@ -186,7 +186,7 @@ mema doctor --json
 
 ## 配置（进阶）
 
-配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 18 个键，引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
+配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 19 个键，引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
 
 | 配置项 | 白话说明 | 默认值 |
 | --- | --- | --- |
@@ -205,6 +205,7 @@ mema doctor --json
 | `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
 | `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
 | `semantic_conflict.max_notice_pairs` | 一次写入最多提醒几对（1–3） | `2` |
+| `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
 
 关于"指向模型就是意图"再说两句：以前要 `vec.enabled`、`embedding.provider`、`vec.dim` 三个开关凑齐才算开了向量，现在**只看 `embedding.model_path` 填没填**；Qwen 那边同理，以前 `preload`/`resident` 默认不加载，现在配了模型就启动即加载、常驻不卸载。
 

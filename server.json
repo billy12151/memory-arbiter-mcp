@@ -21,12 +21,12 @@
     "local",
     "sqlite"
   ],
-  "version": "0.15.5",
+  "version": "0.15.6",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "memory-arbiter-mcp",
-      "version": "0.15.5",
+      "version": "0.15.6",
       "transport": {
         "type": "stdio"
       },
@@ -52,9 +52,14 @@
           "name": "MEMORY_ARBITER_DB_PATH"
         },
         {
-          "description": "Workspace isolation level: none (default), weak (soft rerank), or strict (hard filter)",
+          "description": "Path to the append-only fallback backup file",
           "isRequired": false,
-          "name": "MEMORY_ARBITER_ISOLATION"
+          "name": "MEMORY_ARBITER_BACKUP_JSONL"
+        },
+        {
+          "description": "MCP transport: stdio (default) or streamable-http",
+          "isRequired": false,
+          "name": "MEMORY_ARBITER_MCP_TRANSPORT"
         }
       ]
     }

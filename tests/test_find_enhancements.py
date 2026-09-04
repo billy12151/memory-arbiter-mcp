@@ -167,8 +167,13 @@ def test_find_size_block_default_on_and_opt_out(tmp_path: Path) -> None:
     assert "index page" in size["display_hint"]
     assert str(size["tokens_estimate"]) in size["display_hint"]
 
+    # v0.15.6: the per-call opt-out is gone — the global config key
+    # include_size (default true) governs; a passed flag is ignored with a
+    # pointer warning. The config-off case lives in
+    # tests/test_size_metering_unified.py.
     off = tools.memory_search(query="deployment", limit=10, include_size=False)
-    assert "size" not in off["data"]
+    assert any("global config key" in w for w in off["warnings"])
+    assert "size" in off["data"]
 
 
 def test_find_size_has_no_beyond_limit_fields_when_more_match(tmp_path: Path) -> None:

@@ -3,6 +3,24 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.6] — 2026-09-04
+
+**New: unified recall size metering — one `size` block, one global switch.** `find`'s token metering extends to every recall surface so an agent reports recall cost on one yardstick ("find page ~120 tokens + read #123 ~450 tokens"): `read` (precise recall) meters the record as actually returned — a span read meters the windowed payload, so the number is the true cost of that call — and `memory_review`'s `expired` and `history` meter their result lists (both carry full texts, which is exactly where the number matters; `list_history` is an unbounded `SELECT *` of full version snapshots).
+
+### Added
+
+- **`read` / `expired` / `history` carry the `size` block** (`returned_chars` / `returned_count` / `tokens_estimate`, same shape and same `heuristic_v1` estimator as find). Numbers only — no `display_hint` outside `find`: read/expired/history have no paging decision a hint could improve, and the span option is already taught by find's outline hint. Error responses (not found, span past end) carry no size; nothing was returned.
+- **Global config key `include_size` (default `true`).** On = every recall surface attaches the size block; off = none of them do (find included). The config surface grows 18 → 19 keys (README/zh-CN/example config updated; new `reporting` group in the console config registry).
+
+### Changed
+
+- **`find`'s per-call `include_size` parameter is deprecated.** It is still accepted (validation registry unchanged) but ignored with a warning pointing at the global key; the semantic version of "turn it off for this call" no longer exists — that decision moved to config. Callers that never passed it see no change (default on, block identical to 0.15.4/0.15.5 behavior).
+- The inline page metering in `memory_search` was extracted to a shared `meter_payloads()` helper (`memory_arbiter/tokens.py`) so all four surfaces meter through the exact same dumps-then-estimate path; find's numbers are byte-identical to before.
+
+### Fixed
+
+- `server.json` (MCP Registry manifest) advertised `MEMORY_ARBITER_ISOLATION`, dead since the 0.15.0 config slim — replaced with the two real remaining launch-context variables `MEMORY_ARBITER_BACKUP_JSONL` and `MEMORY_ARBITER_MCP_TRANSPORT`.
+
 ## [0.15.5] — 2026-09-04
 
 **New: recall blacklist — workspaces excluded from *unscoped* find recall.** Ships with the `mema-twin` preference bucket preloaded, so twin persona material stops double-channel-injecting (it is consumed via compiled prompt injection) and stops crowding the recall pool of ordinary finds.

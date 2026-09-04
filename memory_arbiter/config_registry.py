@@ -1,6 +1,6 @@
 """Read-only descriptors for current configuration fields.
 
-Since 0.15.0 the user-facing config surface is the 18-file-key slim face;
+Since 0.15.0 the user-facing config surface is the 19-file-key slim face;
 everything else is a frozen constant (memory_arbiter.constants) and no longer
 appears here.
 """
@@ -15,6 +15,7 @@ GROUPS = [
     {"key": "embedding", "label_en": "Evidence embedding", "label_zh": "Evidence 向量"},
     {"key": "semantic", "label_en": "Conflict filtering", "label_zh": "冲突降噪"},
     {"key": "update", "label_en": "Update check", "label_zh": "更新检查"},
+    {"key": "reporting", "label_en": "Recall metering", "label_zh": "召回计量"},
 ]
 
 
@@ -47,6 +48,7 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.on_write", "semantic", "semantic_conflict_on_write", "async"),
     _item("semantic_conflict.max_notice_pairs", "semantic", "semantic_conflict_max_notice_pairs", 2),
     _item("update_check.enabled", "update", "update_check_enabled", True),
+    _item("include_size", "reporting", default=True),
 ]
 
 for _descriptor in CONFIG_DESCRIPTORS:

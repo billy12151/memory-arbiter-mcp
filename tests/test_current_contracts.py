@@ -20,15 +20,16 @@ def write(tool: MemoryTools, content: str) -> int:
 
 def test_config_registry_only_describes_current_architecture() -> None:
     paths = {item["path"] for item in CONFIG_DESCRIPTORS}
-    # 0.15.0 slim surface: exactly the 18 configurable file keys. Everything
-    # else froze into memory_arbiter.constants and must NOT reappear here.
+    # 0.15.0 slim surface: exactly the 19 configurable file keys (0.15.6
+    # added include_size). Everything else froze into memory_arbiter.constants
+    # and must NOT reappear here.
     assert paths == {
         "db_path", "backup_jsonl", "policy_path", "client", "agent_id",
         "mcp.transport", "mcp.http.host", "mcp.http.port", "workspace", "isolation",
         "embedding.model_path", "embedding.auto_query", "embedding.auto_write",
         "semantic_conflict.enabled", "semantic_conflict.model_path",
         "semantic_conflict.on_write", "semantic_conflict.max_notice_pairs",
-        "update_check.enabled",
+        "update_check.enabled", "include_size",
     }
     assert not any(
         "max_unit_chars" in path or "workspace_" in path or "notice_sync_wait" in path
