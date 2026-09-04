@@ -7,7 +7,7 @@ semantics of general-purpose DB reads such as ``get_memory``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Sequence, Collection
 
 
 WORKSPACE_EXPR = "COALESCE(NULLIF(workspace_canonical, ''), workspace)"
@@ -52,7 +52,7 @@ def workspace_scope_sql(expr: str, scope: WorkspaceScope) -> tuple[str, list[str
 
 
 def workspace_exclusion_sql(
-    exclude: "list[str] | set[str] | tuple[str, ...] | None",
+    exclude: "Collection[str] | None",
     expr_m: str = "COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)",
     expr_plain: str = "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
 ) -> tuple[str, str, list[str]]:
