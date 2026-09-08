@@ -105,7 +105,11 @@ EMBEDDING_MAX_SECTION_CHARS = 3600
 EMBEDDING_DEFAULT_DIM = 768
 
 # semantic-conflict (Qwen) engine
-SEMANTIC_N_CTX = 1024
+# n_ctx 2048 (0.15.8): 1024 left no headroom — system(178) + frame/metadata
+# (~101) + two 400-char quotes (~478) + the 384-token output budget exceeded
+# the window, so long-prompt pairs had their JSON generation truncated at the
+# context wall (the top qwen_invalid_output source).
+SEMANTIC_N_CTX = 2048
 SEMANTIC_N_THREADS = 4
 SEMANTIC_N_BATCH = 128
 SEMANTIC_JOB_TIMEOUT_MS = 5000
@@ -171,7 +175,7 @@ WORKSPACE_MIN_NAME_LEN = 3
 RECALL_POOL_CAP = 50
 CONTENT_LIKE_CAP = 30
 SUPERSEDED_LIMIT = 20
-NOTICE_SYNC_WAIT_MS = 5000
+NOTICE_SYNC_WAIT_MS = 3000
 
 # HTTP transport fixed surface
 MCP_HTTP_PATH = "/mcp"

@@ -46,7 +46,7 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
-PAIR_PROMPT_VERSION = "pair-v4"
+PAIR_PROMPT_VERSION = "pair-v5"
 
 _PAIR_RESPONSE_FORMAT = {
     "type": "json_object",
@@ -65,7 +65,7 @@ _PAIR_RESPONSE_FORMAT = {
 
 _PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
-attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中的数字、名称、状态或短策略。
+attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中该属性的具体取值，取原文中的连续片段，长度不超过 64 字、不超过 12 个词；原句过长时截取最能体现取值差异的连续片段，禁止整句照抄，value 不得以句号结尾。
 无论是否能可靠抽取，都必须输出全部四个字符串字段，不得省略字段。无法可靠抽取时将对应字段写成字符串 "__unknown__"；不要输出 null、conflict、coexistence、winner、confidence 或额外字段。
 例：A=生产数据库使用 MySQL。B=生产数据库使用 SQLite。
 输出：{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}"""
@@ -238,6 +238,14 @@ _VALUE_RE = re.compile(
 )
 
 
+def _numeric_stripped_skeleton(text: str) -> str:
+    """Value-stripped normalized skeleton: what remains when every numeric
+    value (with its unit suffix) is removed. Duplicate detection compares
+    these for full equality — equal numeric sets alone must not read as a
+    duplicate when the non-numeric tokens still differ."""
+    return _normalize_evidence_text(_VALUE_RE.sub("", text or ""))
+
+
 def _normalize_evidence_text(text: str) -> str:
     value = (text or "").casefold()
     value = re.sub(r"qwen\s*([0-9]+(?:\.[0-9]+)*)", r"qwen\1", value)
@@ -356,7 +364,17 @@ def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
         return normalized
 
     # Same concrete values + high lexical overlap is a duplicate, not a conflict.
-    if numeric_values(left_text) and numeric_values(left_text) == numeric_values(right_text) and char_cosine >= 0.45:
+    # 0.15.8: the lexical rider (char_cosine>=0.45) is replaced by full
+    # equality of the value-stripped skeleton. Equal numeric sets alone say
+    # nothing — two memories sharing a date (2026-09-08 …) or any common
+    # numbers keep equal numeric sets while differing in every non-numeric
+    # token (json vs csv), and the cosine rider silently swallowed those real
+    # conflicts (the write-time silent-drop root cause R1).
+    if (
+        numeric_values(left_text)
+        and numeric_values(left_text) == numeric_values(right_text)
+        and _numeric_stripped_skeleton(left_text) == _numeric_stripped_skeleton(right_text)
+    ):
         duplicate_guard = True
 
     # Alias/name statements that share the same concrete alias tokens are duplicates.
@@ -838,8 +856,12 @@ class LocalGGUFSemanticBackend:
     @classmethod
     def _pair_text(cls, left: dict[str, Any], right: dict[str, Any]) -> str:
         """Serialize metadata first and leave both bounded quotes nearest the output."""
-        left_quote = str(left.get("quote") or left.get("content") or "")
-        right_quote = str(right.get("quote") or right.get("content") or "")
+        # 400 chars = the local-text segmenter's unit cap, so an evidence unit
+        # reaches the model whole (no second truncation); longer text only
+        # invites the 0.5B to copy whole clauses into values (the top
+        # qwen_invalid_output source before pair-v5).
+        left_quote = str(left.get("quote") or left.get("content") or "")[:400]
+        right_quote = str(right.get("quote") or right.get("content") or "")[:400]
         return (
             f"A metadata: {cls._memory_text(left)}\n"
             f"B metadata: {cls._memory_text(right)}\n"
@@ -1051,6 +1073,8 @@ class LocalGGUFSemanticBackend:
                 "unloading": self._unloading,
                 "disabled": self._disabled,
                 "generation": self._generation,
+                "n_ctx": self.n_ctx,
+                "prompt_version": PAIR_PROMPT_VERSION,
             }
 
 
@@ -1425,6 +1449,11 @@ class IsolatedGGUFSemanticBackend:
                 "child_restarts": self._restarts,
                 "timed_out_jobs": self._timed_out,
                 "max_concurrency": 1,
+                # Observability for the 0.15.8 inference-window/prompt fixes:
+                # lets an operator confirm a restarted host really runs the
+                # widened context and the new prompt without guessing.
+                "n_ctx": self.n_ctx,
+                "prompt_version": PAIR_PROMPT_VERSION,
             }
 
 

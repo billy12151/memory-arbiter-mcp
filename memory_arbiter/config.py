@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .constants import REMOVED_ENV_NAMES
+from .constants import NOTICE_SYNC_WAIT_MS, REMOVED_ENV_NAMES
 
 _TRUE_STRINGS = {"1", "true", "yes", "on"}
 _FALSE_STRINGS = {"0", "false", "no", "off"}
@@ -77,6 +77,11 @@ class Settings:
     semantic_conflict_model_path: Path | None = None
     semantic_conflict_on_write: str = "async"
     semantic_conflict_max_notice_pairs: int = 2
+    # 0.15.8: restored as a config key (was frozen 5000 in 0.15.0). Default
+    # 3000; 0 = the write response never waits for the post-commit check
+    # (batch ingestion — the job still runs and notices still deliver on a
+    # later response). Clamp matches the pre-0.15.0 semantics [0, 5000].
+    semantic_conflict_notice_sync_wait_ms: int = NOTICE_SYNC_WAIT_MS
     config_warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -244,6 +249,13 @@ class Settings:
                 pick_int_field(semantic_cfg.get("max_notice_pairs"), 2, name="semantic_conflict.max_notice_pairs"),
                 1, 3, name="semantic_conflict.max_notice_pairs", warnings=config_warnings,
             ),
+            semantic_conflict_notice_sync_wait_ms=clamp_int(
+                pick_int_field(
+                    semantic_cfg.get("notice_sync_wait_ms"), NOTICE_SYNC_WAIT_MS,
+                    name="semantic_conflict.notice_sync_wait_ms",
+                ),
+                0, 5000, name="semantic_conflict.notice_sync_wait_ms", warnings=config_warnings,
+            ),
         )
         settings.config_warnings = config_warnings
         settings.policy = load_policy(settings.policy_path, config_warnings)
@@ -255,6 +267,7 @@ class Settings:
 
 # Former config keys that are frozen constants now (0.15.0). Present in a
 # config file they produce a one-line deprecation warning and are ignored.
+# notice_sync_wait_ms left this set in 0.15.8 (restored as a live key).
 _REMOVED_TOP_LEVEL_KEYS = frozenset({
     "tool_profile", "recall_pool_cap", "content_like_cap", "superseded_limit",
     "workspace_match_distance", "workspace_qwen_candidate_distance",
@@ -268,7 +281,7 @@ _REMOVED_SEMANTIC_KEYS = frozenset({
     "backend", "max_concurrency", "queue_max_size", "n_ctx", "n_threads", "n_batch",
     "resident", "preload", "job_timeout_ms", "inference_timeout_ms", "load_timeout_ms",
     "min_pair_budget_ms", "max_evidence_units", "scan_enhance", "scan_max_pairs",
-    "scan_budget_ms", "notice_sync_wait_ms", "workspace_qwen_budget_ms",
+    "scan_budget_ms", "workspace_qwen_budget_ms",
 })
 
 

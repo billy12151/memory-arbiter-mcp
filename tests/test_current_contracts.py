@@ -42,10 +42,12 @@ def test_config_registry_only_describes_current_architecture() -> None:
 
 
 def test_notice_sync_wait_frozen_at_five_seconds() -> None:
-    # 0.15.0: notice_sync_wait_ms froze into a constant (former default 5000).
+    # 0.15.0 froze the former 5000 default into a constant; 0.15.8 restored
+    # semantic_conflict.notice_sync_wait_ms as a live config key (clamp
+    # [0, 5000], 0 = batch mode) with this default.
     from memory_arbiter.constants import NOTICE_SYNC_WAIT_MS
 
-    assert NOTICE_SYNC_WAIT_MS == 5000
+    assert NOTICE_SYNC_WAIT_MS == 3000
 
 
 def _record_current_group(tool: MemoryTools, left: int, right: int) -> dict:

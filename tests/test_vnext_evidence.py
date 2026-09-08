@@ -140,7 +140,7 @@ def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> 
     assert text.index("B metadata:") < text.index("B证据原文=数据库为 SQLite。")
     assert "entity=checkout" in text and "scope=global" in text
     assert "不应使用的全文" not in text
-    assert PAIR_PROMPT_VERSION == "pair-v4"
+    assert PAIR_PROMPT_VERSION == "pair-v5"
     assert "以 { 开头" in _PAIR_PROMPT
     assert "必须输出全部四个字符串字段" in _PAIR_PROMPT
     assert '"__unknown__"' in _PAIR_PROMPT

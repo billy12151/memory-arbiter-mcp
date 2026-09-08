@@ -200,7 +200,12 @@ class MemoryTools:
             memory_id, record, trusted_applying_context=trusted_applying_context,
         )
         task_id = index.get("semantic_task_id")
-        wait_ms = max(0, NOTICE_SYNC_WAIT_MS)
+        # 0 (semantic_conflict.notice_sync_wait_ms=0) = never block the write
+        # response on the post-commit check: batch ingestion still gets the
+        # job run and notices deliver on a later response.
+        wait_ms = max(0, int(getattr(
+            self.settings, "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS,
+        )))
         can_check = bool(self._embedding_configured()) and self.settings.semantic_conflict_on_write != "off"
         completed = (
             self._semantic_worker.wait_task(str(task_id), wait_ms / 1000.0)
@@ -1181,6 +1186,7 @@ class MemoryTools:
         return result
 
     def _semantic_status(self, workspace_canonical: WorkspaceScope = None) -> dict[str, Any]:
+        from .semantic_conflict import PAIR_PROMPT_VERSION as _semantic_prompt_version
         backend = self._get_semantic_backend_ref()
         backend_status = (
             backend.status()
@@ -1193,12 +1199,21 @@ class MemoryTools:
                 ),
                 "model_state": "unloaded",
                 "last_error": None,
+                # Same observability a live backend reports, for the config a
+                # restart would use.
+                "n_ctx": SEMANTIC_N_CTX,
+                "prompt_version": _semantic_prompt_version,
             }
         )
         return {
             "enabled": bool(self.settings.semantic_conflict_enabled),
             "configured": self._semantic_configured(),
             "on_write": self.settings.semantic_conflict_on_write,
+            # Effective write-response wait (semantic_conflict.notice_sync_wait_ms,
+            # default 3000; 0 = batch mode, never block the write response).
+            "notice_sync_wait_ms": int(getattr(
+                self.settings, "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS,
+            )),
             "max_concurrency": 1,
             "max_concurrency_note": "reserved; the semantic worker is single-threaded",
             "last_pair_duration_ms": self._last_pair_duration_ms,
@@ -1207,8 +1222,10 @@ class MemoryTools:
                 "The job budget activates only while another semantic job is queued and "
                 "gates between pairs. An inference already in flight is governed only by "
                 "the inference timeout; a timed-out child is terminated and the next request "
-                "starts a new generation. Timeouts are frozen constants since 0.15.0 "
-                "(memory_arbiter.constants)."
+                "starts a new generation. Job/inference/load timeouts are frozen constants "
+                "since 0.15.0 (memory_arbiter.constants); the write-response wait is "
+                "configurable again since 0.15.8 (semantic_conflict.notice_sync_wait_ms, "
+                "default 3000, 0 = never block the write response)."
             ),
             "worker": self._semantic_worker.status(),
             "backend": backend_status,

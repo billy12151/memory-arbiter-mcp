@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.15.7` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
+> Current release: `0.15.8` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
 
 ## Why trust it
 
@@ -190,6 +190,7 @@ The complete user surface is 19 keys:
 | `semantic_conflict.model_path` | Optional local Qwen2.5-0.5B GGUF for bidirectional four-field extraction; configured → auto-enabled, loaded at startup, and kept resident |
 | `semantic_conflict.enabled` | Explicit off-switch; unset + `model_path` means enabled, explicit `false` wins |
 | `semantic_conflict.on_write` | Write-time detection: `async` (default) or `off` |
+| `semantic_conflict.notice_sync_wait_ms` | How long the write response waits for the post-commit check so its result rides along (v0.15.8, default `3000`, clamp `0–5000`); `0` = never block the write response — batch ingestion still gets the check run asynchronously and notices deliver on a later response |
 | `semantic_conflict.max_notice_pairs` | Per-write notice cap (1–3, default `2`) |
 | `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
 | `mcp.http.host` / `port` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000`; the endpoint path is fixed at `/mcp` |

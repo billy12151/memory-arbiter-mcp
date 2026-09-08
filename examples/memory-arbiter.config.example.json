@@ -37,6 +37,7 @@
     "enabled": false,
     "model_path": "~/.local/share/memory-arbiter/models/semantic-conflict/Qwen2.5-0.5B-Instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf",
     "on_write": "async",
+    "notice_sync_wait_ms": 3000,
     "max_notice_pairs": 2
   }
 }

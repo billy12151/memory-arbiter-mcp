@@ -3,7 +3,7 @@
 **[English](README.md) | 中文**
 
 > 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.15.7`（写时重复提醒升级为「主题+标签」向量召回；新增 `scan_duplicates` 一次有界清扫全库近重复）。
+> 当前正式版本 `0.15.8`（写时重复提醒升级为「主题+标签」向量召回；新增 `scan_duplicates` 一次有界清扫全库近重复）。
 
 ## 一句话说明白
 
@@ -204,6 +204,7 @@ mema doctor --json
 | `semantic_conflict.model_path` | 本地 Qwen 小模型路径，用于写入时的冲突核对——填了就自动启用，并且启动时加载、常驻内存 | 无 |
 | `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
 | `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
+| `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |
 | `semantic_conflict.max_notice_pairs` | 一次写入最多提醒几对（1–3） | `2` |
 | `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
 

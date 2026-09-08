@@ -1078,13 +1078,15 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "semantic_conflict_model_path",
         "semantic_conflict_on_write",
         "semantic_conflict_max_notice_pairs",
+        "semantic_conflict_notice_sync_wait_ms",
         "config_warnings",
     }
 )
 
 
 def test_settings_field_set_is_frozen_at_twenty_one() -> None:
-    assert len(SLIM_SETTINGS_FIELDS) == 21
+    # 0.15.8: 22 — semantic_conflict_notice_sync_wait_ms restored as a live key.
+    assert len(SLIM_SETTINGS_FIELDS) == 22
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 
@@ -1256,6 +1258,8 @@ def test_removed_file_keys_warn_and_are_ignored(
                 "resident": False,
                 "backend": "local",
                 "job_timeout_ms": 1,
+                # notice_sync_wait_ms left this set in 0.15.8 (live key again);
+                # a value here must now take effect, not warn.
                 "notice_sync_wait_ms": 1,
             },
             "embedding": {"provider": "gguf", "n_ctx": 128},
@@ -1271,7 +1275,6 @@ def test_removed_file_keys_warn_and_are_ignored(
         "semantic_conflict.resident",
         "semantic_conflict.backend",
         "semantic_conflict.job_timeout_ms",
-        "semantic_conflict.notice_sync_wait_ms",
         "embedding.provider",
         "embedding.n_ctx",
         "vec.enabled",
@@ -1283,6 +1286,8 @@ def test_removed_file_keys_warn_and_are_ignored(
     # Ignored, not applied: the removed vec.enabled=false must not disable
     # an embedding model that IS configured.
     assert settings.semantic_conflict_enabled is False
+    # 0.15.8: the restored key is applied (clamped into [0, 5000]).
+    assert settings.semantic_conflict_notice_sync_wait_ms == 1
 
 
 def test_removed_env_exports_warn_no_longer_read(

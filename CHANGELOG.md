@@ -3,6 +3,21 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.8] — 2026-09-08
+
+**Fixed: write-time semantic-conflict notices silently dropping (three stacked causes, all verified against a live host).** Users stopped receiving conflict notices — both the ride-along form (check finished inside the write-response wait) and the next-response delivery form — even though both delivery paths were healthy. The detection layer was eating the pairs.
+
+### Fixed
+
+- **`duplicate_guard` no longer swallows conflicts that share incidental digits.** The duplicate rule was "equal numeric sets + char-cosine ≥ 0.45 → duplicate, ignore"; numeric sets are harvested from *every* number in the text, so two memories sharing a date (`2026-09-08 …`) or any common numbers kept equal numeric sets while differing in every non-numeric token (`json` vs `csv`) — real contradictions were silently ignored before Qwen ever saw them (verified: with the date present the pair died at the gate, without it the same pair produced notice #11). The rule now additionally requires full equality of the value-stripped normalized skeleton; true duplicates ("端口 6789" vs "端口 6789") are still caught. Both write-time notices and scheduled-scan candidate recall (which shares `decide_evidence`) regain the previously swallowed pairs.
+- **Qwen pair output no longer truncates on long values (`qwen_invalid_output`).** The value protocol in code (`≤64 chars / ≤12 words`, no sentence copying) was never disclosed in the prompt, so the 0.5B copied 60–100-char clauses from long evidence and its JSON died at three different validators (schema cap / whole-sentence rule / context wall). The pair prompt (pair-v4 → **pair-v5**) now states the protocol and instructs "take a contiguous fragment that best shows the value difference" — a "compress to the core value" wording was tried and rejected by experiment (it flattened opposing values into equality, hiding the conflict). Model input quotes are capped at 400 chars — the segmenter's own unit cap, so evidence units reach the model whole.
+- **`SEMANTIC_N_CTX` 1024 → 2048.** At 1024, system prompt (178 tok) + frame/metadata (~101) + two 400-char quotes (~478) + the 384-token output budget left negative headroom: long-prompt pairs had their JSON generation truncated at the context wall. 2048 leaves ~2× margin at the worst case.
+
+### Changed
+
+- **`semantic_conflict.notice_sync_wait_ms` is a config key again** (restored from the 0.15.0 frozen-constant set; the env override stays removed). Default drops 5000 → **3000**; clamp `[0, 5000]`. `0` = the write response never waits for the post-commit check — batch ingestion still gets the check run asynchronously and notices deliver on a later response. Heads-up: a pre-0.15.0 config file with a leftover `notice_sync_wait_ms` used to warn-and-ignore; it now takes effect again.
+- `memory_repair semantic_control status` exposes `backend.n_ctx`, `backend.prompt_version`, and the effective `notice_sync_wait_ms`, so an operator can confirm a restarted host really runs the widened context and pair-v5 prompt.
+
 ## [0.15.7] — 2026-09-04
 
 ### Changed
