@@ -3,6 +3,13 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.9.1] — 2026-09-08
+
+### Fixed (docs-only)
+
+- The `find_size_metering` help text's size-block surface enumeration now includes `batch_find` (shipped in the 0.15.9 wheel without it — `batch_find`'s own `batch_find_semantics` help and response `display_hint` were already complete; this closes the enumeration gap).
+- `docs/INTEGRATION.md` / `INTEGRATION.zh-CN.md` document `batch_find` end-to-end (call shape, slice-then-merge, shared filters, `matched_query_ids`/`per_query`, fail-fast) plus the 0.15.9 honest-empty and relevance-floor semantics. No code behavior changes in this release.
+
 ## [0.15.9] — 2026-09-08
 
 **Recall quality + batch recall.** Two behavior changes agents will notice (both calibrated on a 340-candidate pairwise-labeled eval of the live library — `docs/eval-relevance-floor-2026-09-08.md`): find no longer stuffs recent memories into unmatched queries, and no longer returns sub-floor candidates at all. Plus the downstream-requested multi-query `batch_find`.

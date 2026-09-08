@@ -24,13 +24,16 @@ UV_LOCK = ROOT / "uv.lock"
 
 # User-facing docs that claim the current release version. Each pattern must
 # match exactly the version-bearing phrase; a reworded doc fails the check
-# instead of silently losing coverage.
+# instead of silently losing coverage. 0.15.9.1 relaxed the version group to
+# 3-or-4 components (\d+(?:\.\d+){2,3}) — patch-after-patch releases are
+# valid PEP 440 and sort correctly on PyPI.
+_VERSION_GROUP = r"(\d+(?:\.\d+){2,3})"
 DOC_RELEASE_PATTERNS: tuple[tuple[Path, str], ...] = (
-    (ROOT / "README.md", r"Current release: `(\d+\.\d+\.\d+)`"),
-    (ROOT / "README.zh-CN.md", r"当前正式版本 `(\d+\.\d+\.\d+)`"),
-    (ROOT / "INTRO.md", r"当前文档对应 `(\d+\.\d+\.\d+)` 正式版本"),
-    (ROOT / "docs" / "INTEGRATION.md", r"describes the `(\d+\.\d+\.\d+)` contract"),
-    (ROOT / "docs" / "INTEGRATION.zh-CN.md", r"本指南描述 `(\d+\.\d+\.\d+)` 的正式契约"),
+    (ROOT / "README.md", rf"Current release: `{_VERSION_GROUP}`"),
+    (ROOT / "README.zh-CN.md", rf"当前正式版本 `{_VERSION_GROUP}`"),
+    (ROOT / "INTRO.md", rf"当前文档对应 `{_VERSION_GROUP}` 正式版本"),
+    (ROOT / "docs" / "INTEGRATION.md", rf"describes the `{_VERSION_GROUP}` contract"),
+    (ROOT / "docs" / "INTEGRATION.zh-CN.md", rf"本指南描述 `{_VERSION_GROUP}` 的正式契约"),
 )
 
 
