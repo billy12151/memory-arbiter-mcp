@@ -512,6 +512,9 @@ class ReadPipeline:
 
         extra_warnings = list(self._embedder_warnings)
         ctx = self._search_scope_context(workspace, extra_warnings)
+        # Parity with find (R1-F1): the caller-scope warnings belong to the
+        # call, so every query in the batch shares them.
+        extra_warnings.extend(list(ctx["caller"].warnings))
         if ctx["isolation"] == "strict" and not ctx["ws_canonical"]:
             denied = self._strict_acl_unavailable(ctx["caller"])
             if denied is not None:
