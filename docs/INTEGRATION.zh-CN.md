@@ -2,7 +2,7 @@
 
 **[English](INTEGRATION.md) | 中文**
 
-本指南描述 `0.15.9.1` 的正式契约。
+本指南描述 `0.15.10` 的正式契约。
 
 ## MCP 接口面
 
@@ -70,7 +70,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 配置 sqlite-vec 和本地 embedding 模型后，写入会异步发布从已存原文派生的句子/段落级证据。字面和证据通道独立召回，按记忆用倒数排名融合合并，再经过信任、时间、过滤和 workspace 调整。证据偏移量定位相关原文。
 
-`memory(action="find")` 是索引页：默认结果只带元数据、`content_chars`（全文长度，即 read 成本）和有界 `outline`（至多 8 段 `{head, offset}`，取自证据管线的 heading/text 单元），不返回全文——传 `include_content=true` 可恢复全文（`content_chars`/`outline` 两种方式都保留）。页内 score 只做相对比较；top 页未命中时应换词或加 `tags_filter`，而不是深翻页——无过滤的 query 召回报 `total_estimate=null`/`has_more=false`，有过滤时仍是精确 SQL 计数。`unresolved_conflict_count` 只在本页条目直接命中 open/applying 冲突组时出现，值为命中的本页条目数。0.15.9 起 find 对"没有"是老实的：一个 query 什么都召回不了就返回 `retrieval_mode="empty"` 加一句"换措辞或加 tags_filter"的提示（旧的"返回最近记忆"兜底和它的 `recent_fallback` 模式值都已移除）；同时综合打分低于标定及格线（8.1）的候选不再进入 query 召回结果页——空结果的含义是"这个库里没有"，不是"翻下一页试试"。
+`memory(action="find")` 是索引页：默认结果只带元数据、`content_chars`（全文长度，即 read 成本）和有界 `outline`（至多 8 段 `{head, offset}`，取自证据管线的 heading/text 单元），不返回全文。0.15.10 起内容深度改为单选枚举 `content_mode`：`"hits"` 给每条附 `hit_spans`——向量命中的原文单元 `{text, start_offset, end_offset}`（text 直接从原文切片，`read span=[start_offset, end_offset]` 取回的就是这段文字）。命中片段永不截断：合并后命中覆盖全文 ≥50% 的条目自动升级为全文、`hit_spans` 保留作标注（服务端绝不替你挑「重要的命中」）；没有向量命中的条目（纯字面召回或向量服务不可用）保持纯预览形态。`"full"` 返回整篇全文。旧布尔参数 `include_content=true` 已移除（破坏性变更）：调用会在校验层被拒并给出迁移提示——改用 `content_mode="full"`。页内 score 只做相对比较；top 页未命中时应换词或加 `tags_filter`，而不是深翻页——无过滤的 query 召回报 `total_estimate=null`/`has_more=false`，有过滤时仍是精确 SQL 计数。`unresolved_conflict_count` 只在本页条目直接命中 open/applying 冲突组时出现，值为命中的本页条目数。0.15.9 起 find 对"没有"是老实的：一个 query 什么都召回不了就返回 `retrieval_mode="empty"` 加一句"换措辞或加 tags_filter"的提示（旧的"返回最近记忆"兜底和它的 `recent_fallback` 模式值都已移除）；同时综合打分低于标定及格线（8.1）的候选不再进入 query 召回结果页——空结果的含义是"这个库里没有"，不是"翻下一页试试"。
 
 `memory(action="batch_find", data={"queries":[{"id":"催收","query":"催收 辱骂 侮辱"},{"id":"债务转移","query":"债务转移 债权人同意"}], "limit_per_query":3})` 一次调用跑最多 8 个 query，返回一页合并结果——多主题任务（比如 5 个法律问题一起问）用它替代 5~10 次串行 find。每个 query 走的是与 find 完全相同的管线（同一条及格线、同样的诚实报空），先各自取前 `limit_per_query` 条（默认 3、上限 20）再合并；共享过滤参数（`workspace`/`tags_filter`/`source_type`/时间窗）对全部 query 生效。`deduplicate=true`（默认）按 `memory_id` 去重：每条带 `matched_query_ids`（被哪些 query 命中）和 `best_query_id`，整页按最佳分排序。`per_query` 逐题报 `{id, count, has_more, retrieval_mode}`。整批请求写错（超 8 条、id 重复——`id` 不传时默认用 query 原文、query 重复、超 64KB）会整体拒绝，没有"部分成功"。
 

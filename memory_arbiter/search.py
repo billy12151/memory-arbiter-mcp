@@ -819,7 +819,7 @@ def _wide_recall(
                 by_memory[mid]["hits"],
                 key=lambda h: float(h.get("score") or 0.0),
                 reverse=True,
-            )[:3]
+            )
             if lexical_row is None:
                 evidence_only.append(mid)
             pool[mid] = d
@@ -1035,6 +1035,7 @@ def search_memories(
     hard_scope: bool = False,
     ws_scope: "WorkspaceScope" = None,
     exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
+    keep_evidence_hits: bool = False,
 ) -> SearchOutcome:
     """v0.9.4: returns a SearchOutcome with retrieval_mode.
 
@@ -1296,10 +1297,14 @@ def search_memories(
         has_more = total > offset + len(page)
 
     # hybrid mode: strip debug fields unless explicitly requested.
+    # v0.15.10: keep_evidence_hits exempts _evidence_hits from the strip so the
+    # find preview layer can build hit_spans (content_mode="hits"); the preview
+    # builder consumes and removes it before the response leaves the pipeline,
+    # so the internal field never reaches the wire.
     if not debug_ranking:
         for r in page:
             for k in list(r.keys()):
-                if k.startswith("_"):
+                if k.startswith("_") and not (keep_evidence_hits and k == "_evidence_hits"):
                     r.pop(k, None)
     return SearchOutcome(page, warnings, has_more, total, "direct")
 

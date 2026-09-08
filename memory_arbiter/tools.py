@@ -1335,13 +1335,13 @@ class MemoryTools:
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         return self._write_pipeline.memory_write(**payload)
 
-    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, content_mode: str = "preview", **_: Any) -> dict[str, Any]:
         return self._read_pipeline.memory_search(
             query=query, workspace=workspace, tags=tags, limit=limit, offset=offset,
             debug_ranking=debug_ranking, query_embedding=query_embedding,
             tags_filter=tags_filter, after_time=after_time, before_time=before_time,
             source_type=source_type, include_linked_open_items=include_linked_open_items,
-            include_conflict_signal=include_conflict_signal, **_,
+            include_conflict_signal=include_conflict_signal, content_mode=content_mode, **_,
         )
 
     def memory_batch_find(self, **payload: Any) -> dict[str, Any]:

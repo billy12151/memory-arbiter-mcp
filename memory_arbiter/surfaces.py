@@ -90,13 +90,21 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "re-checked with the same notice."
         ),
         "find_size_metering": (
-            "find is an index page: by default each result carries metadata plus "
-            "content_chars (full-text length, i.e. the read cost) and a bounded "
-            "outline (<=8 segments of {head, offset}; heading/text units from the "
-            "evidence pipeline, so outline.offset shares read's span coordinate "
-            "system and span=[offset, offset+N] slices that exact segment). Full "
-            "content is NOT returned by default — pass include_content=true to get "
-            "it back (content_chars/outline stay either way). Score is only "
+            "find is an index page: by default (content_mode=\"preview\") each result "
+            "carries metadata plus content_chars (full-text length, i.e. the read "
+            "cost) and a bounded outline (<=8 segments of {head, offset}; "
+            "heading/text units from the evidence pipeline, so outline.offset "
+            "shares read's span coordinate system and span=[offset, offset+N] "
+            "slices that exact segment). v0.15.10 replaces the removed "
+            "include_content boolean with a single-choice content_mode enum: "
+            "\"preview\" (default, no content) | \"hits\" (adds hit_spans — the "
+            "vector-matched unit text with start_offset/end_offset in read's "
+            "span coordinates; NO truncation ever: when merged hits cover >=50% "
+            "of the content the item upgrades to full text with hit_spans kept "
+            "as an annotation, so the server never picks 'the important hits' "
+            "for you; items without vector hits keep the plain preview shape) | "
+            "\"full\" (adds the whole content — the old include_content=true). "
+            "Score is only "
             "meaningful relative to other items on the same page. If the top page "
             "misses, reword the query or add tags_filter instead of deep paging: "
             "unfiltered query-recall reports total_estimate=null/has_more=false. "
@@ -134,8 +142,9 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "hit, then memory_id. per_query reports {id, count, has_more, "
             "retrieval_mode} per query — a query that recalls nothing reports "
             "count=0/empty; batch never falls back to recent memories and every "
-            "item has already passed the relevance floor. include_content=true "
-            "returns full texts — prefer the preview and read specific spans."
+            "item has already passed the relevance floor. content_mode "
+            "(v0.15.10, same enum as find: preview default | hits | full) picks "
+            "the per-item content depth; prefer the preview and read specific spans."
         ),
         "value_reference": _memory_value_reference(),
     },
@@ -665,7 +674,7 @@ class ProductSurfaces:
         self._normalize_boolean_fields(
             payload, "authorized", "tags_only", "debug_ranking",
             "include_linked_open_items", "include_conflict_signal",
-            "include_size", "include_content", "deduplicate",
+            "include_size", "deduplicate",
             "affects_current_output",
         )
         if action == "help":

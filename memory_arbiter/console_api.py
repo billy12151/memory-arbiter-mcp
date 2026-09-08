@@ -255,7 +255,7 @@ class ConsoleAPI:
                 include_conflict_signal=True,
                 # Console is the human-facing channel: keep full content,
                 # find's index-page preview is for agents.
-                include_content=True,
+                content_mode="full",
             )
         else:
             response = self.tools.memory_search_expired(

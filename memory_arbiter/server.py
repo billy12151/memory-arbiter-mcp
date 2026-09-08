@@ -357,7 +357,10 @@ def build_runtime() -> ServerBundle:
 
         find is an index page: results carry metadata + content_chars + a
         bounded outline (offsets usable directly as read span starts), not full
-        content — pass include_content=true for full text. Score compares only
+        content — content_mode (v0.15.10, preview default) is a single-choice
+        enum: "hits" adds hit_spans (vector-matched unit text + span
+        coordinates, never truncated; >=50% coverage upgrades an item to full
+        text), "full" returns whole texts. Score compares only
         within the page; if the top page misses, reword the query or add
         tags_filter instead of deep paging. The size block meters the returned
         page (tokens_estimate + display_hint).

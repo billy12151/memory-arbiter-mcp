@@ -26,6 +26,14 @@ _STRONG_CONFLICT_SOURCES = ("open_table", "conflict_guidance", "conflict_group")
 _OUTLINE_MAX_SEGMENTS = 8
 _OUTLINE_HEAD_CHARS = 40
 
+# v0.15.10 content_mode="hits": merged hit spans covering >= this share of the
+# full content upgrade the item to full text (hit_spans stays as an annotation).
+# No truncation anywhere — the owner's ruling is that server-side picking of
+# "the important hits" is a systematic bias (legal RAG loses provisos).
+_HIT_SPANS_FULL_COVERAGE = 0.5
+
+_CONTENT_MODES = ("preview", "hits", "full")
+
 
 def _content_outline(subject: str, content: str) -> list[dict[str, Any]]:
     """Bounded table-of-contents for a find preview item.
@@ -52,17 +60,84 @@ def _content_outline(subject: str, content: str) -> list[dict[str, Any]]:
     return outline
 
 
-def _preview_item(item: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
+def _hit_spans(raw_hits: Any, content: str) -> "list[dict[str, Any]] | None":
+    """v0.15.10: build hit_spans from the evidence channel's unit-level hits.
+
+    Two mandatory cleanups (adversarial-review findings, plan §2.3):
+    - subject-kind hits are dropped: the subject unit's offsets are (0,0) and
+      carry no content-span meaning (same reason outline excludes it);
+    - overlapping/adjacent intervals are merged BEFORE any length math: the
+      long-text fallback slices with overlap=60, so naive summation would
+      double-count coverage (premature full-text upgrades) and surface
+      duplicated text.
+
+    ``text`` is sliced from the source content so the span and the text are
+    strictly self-consistent: read span=[start_offset, end_offset] returns
+    exactly this text. Returns None when nothing survives (FTS/phrase-only
+    recall has no evidence hits — the item falls back to the preview shape).
+    """
+    intervals: list[tuple[int, int]] = []
+    for h in raw_hits or []:
+        if not isinstance(h, dict) or str(h.get("kind") or "") == "subject":
+            continue
+        try:
+            s = int(h.get("start_offset"))
+            e = int(h.get("end_offset"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= s < e <= len(content):
+            intervals.append((s, e))
+    if not intervals:
+        return None
+    intervals.sort()
+    merged: list[tuple[int, int]] = []
+    for s, e in intervals:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return [
+        {"text": content[s:e], "start_offset": s, "end_offset": e}
+        for s, e in merged
+    ]
+
+
+def _preview_item(item: dict[str, Any], *, content_mode: str = "preview") -> dict[str, Any]:
     """Build one find index-page item: metadata + content_chars + outline.
 
-    content is dropped unless include_content=True (the escape hatch);
-    content_chars/outline are always present so the contract is uniform.
+    v0.15.10 content_mode (single-choice enum, replaces the removed
+    include_content boolean):
+    - "preview" (default): index page, no content — unchanged contract;
+    - "hits": + hit_spans (vector-hit unit text + offsets in read's span
+      coordinate system). No truncation: when merged hits cover >= 50% of the
+      content the item upgrades to full text and hit_spans stays as an
+      annotation — the server never picks "the important hits" for the agent;
+    - "full": + full content (the old include_content=true escape hatch).
+
+    Internal underscore debug fields are passed through untouched — the
+    debug_ranking=true page contract exposes them, and search_memories strips
+    them otherwise. The single exception is _evidence_hits: in "hits" mode it
+    is consumed here (and removed) to build hit_spans.
     """
     content = str(item.get("content") or "")
     preview = dict(item)
     preview["content_chars"] = len(content)
     preview["outline"] = _content_outline(str(item.get("subject") or ""), content)
-    if not include_content:
+    keep_content = content_mode == "full"
+    if content_mode == "hits":
+        spans = _hit_spans(item.get("_evidence_hits"), content)
+        if spans:
+            covered = sum(e - s for s, e in (
+                (sp["start_offset"], sp["end_offset"]) for sp in spans
+            ))
+            if covered >= _HIT_SPANS_FULL_COVERAGE * len(content):
+                keep_content = True
+            preview["hit_spans"] = spans
+        # spans is None → vector channel contributed nothing on this item
+        # (FTS/phrase-only recall, or the embedder is down): the item keeps
+        # the plain preview shape.
+        preview.pop("_evidence_hits", None)
+    if not keep_content:
         preview.pop("content", None)
     return preview
 
@@ -123,7 +198,7 @@ class ReadPipeline:
         pending = int(worker.get("queue_depth") or 0) + len(worker.get("inflight") or [])
         return {"pending_evidence_index": pending}
 
-    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool | None = None, include_content: bool = False, **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool | None = None, content_mode: str = "preview", **_: Any) -> dict[str, Any]:
         extra_warnings = list(self._embedder_warnings)
         if include_size is not None:
             # v0.15.6: the size block is one global config key covering every
@@ -132,6 +207,27 @@ class ReadPipeline:
             extra_warnings.append(
                 "include_size is a global config key since v0.15.6 (default true) "
                 "governing find/read/expired/history together; per-call value ignored"
+            )
+        if "include_content" in _:
+            # v0.15.10 breaking: the boolean was replaced by the content_mode
+            # enum. Direct callers get the migration pointer here; the
+            # validation boundary rejects it for product calls first.
+            return self.db.state.response(
+                {
+                    "error": 'include_content was removed in v0.15.10; use content_mode="full" for full text or content_mode="hits" for vector-hit spans instead',
+                    "results": [],
+                    "count": 0,
+                },
+                ok=False,
+            )
+        if content_mode not in _CONTENT_MODES:
+            return self.db.state.response(
+                {
+                    "error": 'content_mode must be one of "preview" | "hits" | "full" (default "preview")',
+                    "results": [],
+                    "count": 0,
+                },
+                ok=False,
             )
         if "include_superseded" in _:
             return self.db.state.response(
@@ -173,6 +269,7 @@ class ReadPipeline:
             hard_scope=hard_scope,
             ws_scope=ws_scope,
             exclude_workspaces=exclude_ws,
+            keep_evidence_hits=(content_mode == "hits" and not debug_ranking),
         )
         results = outcome.results
         warnings = outcome.warnings
@@ -254,8 +351,9 @@ class ReadPipeline:
             )
         # v0.15.4: find is an index page. Every item carries content_chars +
         # a bounded outline (offsets share read's span coordinate system);
-        # full content only returns via the include_content=true escape hatch.
-        results = [_preview_item(r, include_content=include_content) for r in results]
+        # v0.15.10: content_mode picks the content depth — preview (default),
+        # hits (vector-hit spans, full-text upgrade at >=50% coverage), full.
+        results = [_preview_item(r, content_mode=content_mode) for r in results]
         response_data = {
             "results": results,
             "count": len(results),
@@ -272,8 +370,8 @@ class ReadPipeline:
         }
         if self.settings.include_size:
             # v0.15.4: size metering measures the page as actually returned
-            # (post-preview), so an index page reads as small and an
-            # include_content=true page reads as the full text it carries.
+            # (post-preview), so an index page reads as small and a
+            # content_mode="full" page reads as the full text it carries.
             # v0.15.6: gated by the global config key (find/read/expired/
             # history share one switch), not a per-call flag.
             size_block = meter_payloads(results)
@@ -293,11 +391,20 @@ class ReadPipeline:
                         "previews (content_chars + outline); has_more/"
                         "total_estimate are exact on this path."
                     )
-                elif include_content:
+                elif content_mode == "full":
                     display_hint = (
-                        f"find full-content page ({page_cost}): include_content=true "
+                        f'find full-content page ({page_cost}): content_mode="full" '
                         "returned full texts; default find is an index page "
                         "(content_chars + outline) that costs far less."
+                    )
+                elif content_mode == "hits":
+                    display_hint = (
+                        f'find hit-spans page ({page_cost}): content_mode="hits" '
+                        "returned vector-hit spans per item (hit_spans[].text + "
+                        "start/end offsets share read's span coordinates); items "
+                        "whose hits cover >=50% of the content upgraded to full "
+                        "text — hit_spans never truncates. Items without vector "
+                        "hits keep the plain preview shape."
                     )
                 elif total_estimate is None:
                     # Unfiltered active query-recall: no exact total exists,
@@ -472,7 +579,7 @@ class ReadPipeline:
         before_time: str | None = None,
         source_type: str | None = None,
         limit_per_query: int = 3,
-        include_content: bool = False,
+        content_mode: str = "preview",
         deduplicate: bool = True,
         **_: Any,
     ) -> dict[str, Any]:
@@ -497,6 +604,26 @@ class ReadPipeline:
         """
         from ..constants import BATCH_FIND_DEFAULT_LIMIT_PER_QUERY
 
+        if "include_content" in _:
+            return self.db.state.response(
+                {
+                    "error": 'include_content was removed in v0.15.10; use content_mode="full" for full text or content_mode="hits" for vector-hit spans instead',
+                    "results": [],
+                    "count": 0,
+                    "per_query": [],
+                },
+                ok=False,
+            )
+        if content_mode not in _CONTENT_MODES:
+            return self.db.state.response(
+                {
+                    "error": 'content_mode must be one of "preview" | "hits" | "full" (default "preview")',
+                    "results": [],
+                    "count": 0,
+                    "per_query": [],
+                },
+                ok=False,
+            )
         if not queries:
             return self.db.state.response(
                 {"error": "queries must be a non-empty list of {id?, query} objects",
@@ -564,8 +691,16 @@ class ReadPipeline:
                 return 0.0
 
         def _preview(row: dict[str, Any]) -> dict[str, Any]:
-            clean = {k: v for k, v in row.items() if not k.startswith("_")}
-            return _preview_item(clean, include_content=include_content)
+            # v0.15.10: batch_find searches with debug_ranking=True so rows
+            # still carry _evidence_hits; in "hits" mode it survives the clean
+            # (and only it — the merged page keeps no other debug field) so
+            # _preview_item can consume it into hit_spans.
+            keep_hits = content_mode == "hits"
+            clean = {
+                k: v for k, v in row.items()
+                if not k.startswith("_") or (keep_hits and k == "_evidence_hits")
+            }
+            return _preview_item(clean, content_mode=content_mode)
 
         results: list[dict[str, Any]] = []
         if deduplicate:
@@ -655,8 +790,11 @@ class ReadPipeline:
                     f"batch_find merged page ({page_cost}): items are index-page previews "
                     "(content_chars + outline) carrying matched_query_ids; per_query.count "
                     "is each query's recalled page size after the relevance floor. "
-                    + ("include_content=true returned full texts — per-query limits multiply."
-                       if include_content else
+                    + ('content_mode="full" returned full texts — per-query limits multiply.'
+                       if content_mode == "full" else
+                       'content_mode="hits" returned vector-hit spans per item (>=50% '
+                       'coverage items upgraded to full text).'
+                       if content_mode == "hits" else
                        "Read specific items via memory(action='read') with outline offsets.")
                 ),
             }

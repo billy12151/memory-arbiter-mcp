@@ -3,6 +3,20 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.10] — 2026-09-09
+
+**find/batch_find content depth is now a single-choice enum, and vector-hit spans are first-class.** One breaking change (parameter removal), one new content mode.
+
+### Added
+
+- **`content_mode: "preview" | "hits" | "full"`** on `find` and `batch_find` (default `"preview"`, byte-identical to the old default page). `"hits"` adds `hit_spans` to each item: the vector-matched local-text units as `{text, start_offset, end_offset}` — text is sliced from the source content, so `read span=[start_offset, end_offset]` returns exactly that text (same coordinate system as `outline.offset`). Two hard cleanups before surfacing (adversarial-review findings): `subject`-kind hits are dropped (their offsets are `(0,0)` and carry no span meaning), and overlapping/adjacent intervals are merged before any length math (the long-text fallback slices with `overlap=60`; naive summation would double-count coverage and surface duplicated text). **No truncation, ever**: when merged hits cover ≥50% of the content, the item upgrades to full text and `hit_spans` stays as an annotation — the server never picks "the important hits" for the agent (legal-RAG rationale: a dropped hit can be the proviso that flips the conclusion). Items without vector hits (FTS/phrase-only recall, or the embedder is down) keep the plain preview shape. `"full"` is the old `include_content=true` behavior.
+- The size block meters `hit_spans` text as part of the returned page (same 0.15.6 measure-what-you-return yardstick); the `display_hint` gains a hit-spans page variant explaining the ≥50% upgrade behavior.
+
+### Changed (breaking)
+
+- **`include_content` is removed** from `find` and `batch_find` (both the parameter and the old escape-hatch semantics). It was replaceable by a three-way enum on the same dimension, and two booleans invite illegal combinations. The validation boundary fails the call loudly with a migration pointer (`did_you_mean: content_mode`) instead of silently ignoring it; direct pipeline callers get the same error from the read pipeline. Migration: `include_content=true` → `content_mode="full"`. Console behavior is unchanged (it calls with `content_mode="full"` internally).
+- Internal: the evidence channel's `_evidence_hits` no longer keeps only the top-3 unit hits per memory (the cap predates coverage math and would under-count); the find read pipeline requests the full hit set only when `content_mode="hits"` and consumes it before the response leaves the pipeline.
+
 ## [0.15.9.1] — 2026-09-08
 
 ### Fixed (docs-only)

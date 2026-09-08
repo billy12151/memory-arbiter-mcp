@@ -230,7 +230,7 @@ def test_vnext_search_uses_evidence_knn_not_legacy_vectors(tmp_path: Path) -> No
     )["data"]["id"]
     tools.memory_write(content="用户今天想喝咖啡。", subject="lunch", tags=["food"])
     assert tools.wait_evidence_worker_drained(timeout=2)
-    result = tools.memory_search(query="pgsql database", limit=5, include_content=True)
+    result = tools.memory_search(query="pgsql database", limit=5, content_mode="full")
     ids = [row["id"] for row in result["data"]["results"]]
     assert target in ids
     hit = next(row for row in result["data"]["results"] if row["id"] == target)

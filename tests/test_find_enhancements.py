@@ -1,7 +1,8 @@
 """find enhancements: index-page preview (content_chars/outline,
-include_content escape hatch), size metering of the actually-returned page,
+content_mode enum), size metering of the actually-returned page,
 page-hit unresolved_conflict_count, and the unfiltered total_estimate=None
-semantics (v0.15.2 size block + v0.15.4 preview revision).
+semantics (v0.15.2 size block + v0.15.4 preview revision + v0.15.10
+content_mode/hit_spans).
 """
 from __future__ import annotations
 
@@ -70,11 +71,11 @@ def test_find_preview_default_drops_content(tmp_path: Path) -> None:
         assert key in item, key
 
 
-def test_find_include_content_restores_full_text(tmp_path: Path) -> None:
+def test_find_content_mode_full_restores_full_text(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     body = "alpha deployment note with details"
     tools.memory_write(content=body, subject="s", tags=[])
-    result = tools.memory_search(query="deployment", limit=10, include_content=True)
+    result = tools.memory_search(query="deployment", limit=10, content_mode="full")
     item = result["data"]["results"][0]
     assert item["content"] == body
     # content_chars/outline stay either way (uniform contract).
@@ -118,14 +119,14 @@ def test_find_outline_offset_interops_with_read_span(tmp_path: Path) -> None:
 
 def test_find_outline_exactly_eight_segments_has_no_overflow(tmp_path: Path) -> None:
     content = "\n\n".join(_long_paragraph(i) for i in range(8))
-    preview = _preview_item({"subject": "s", "content": content}, include_content=False)
+    preview = _preview_item({"subject": "s", "content": content}, content_mode="preview")
     assert len(preview["outline"]) == 8
     assert all(segment["offset"] is not None for segment in preview["outline"])
 
 
 def test_find_outline_overflow_marker_beyond_eight() -> None:
     content = "\n\n".join(_long_paragraph(i) for i in range(11))
-    preview = _preview_item({"subject": "s", "content": content}, include_content=False)
+    preview = _preview_item({"subject": "s", "content": content}, content_mode="preview")
     outline = preview["outline"]
     assert len(outline) == 9
     assert outline[-1] == {"head": "…还有 3 段", "offset": None}
@@ -133,7 +134,7 @@ def test_find_outline_overflow_marker_beyond_eight() -> None:
 
 def test_find_outline_single_long_line_splits_into_parts() -> None:
     content = "x" * 1000
-    preview = _preview_item({"subject": "s", "content": content}, include_content=False)
+    preview = _preview_item({"subject": "s", "content": content}, content_mode="preview")
     outline = preview["outline"]
     # No newline/heading structure: the overlap fallback still bounds the
     # outline, and offsets stay ascending source coordinates.
@@ -145,14 +146,14 @@ def test_find_outline_single_long_line_splits_into_parts() -> None:
 
 
 def test_preview_item_empty_content() -> None:
-    preview = _preview_item({"subject": "s", "content": ""}, include_content=False)
+    preview = _preview_item({"subject": "s", "content": ""}, content_mode="preview")
     assert preview["content_chars"] == 0
     assert preview["outline"] == []
     assert "content" not in preview
 
 
-def test_preview_item_include_content_keeps_content() -> None:
-    preview = _preview_item({"subject": "s", "content": "body"}, include_content=True)
+def test_preview_item_content_mode_full_keeps_content() -> None:
+    preview = _preview_item({"subject": "s", "content": "body"}, content_mode="full")
     assert preview["content"] == "body"
     assert preview["content_chars"] == 4
 
@@ -218,7 +219,7 @@ def test_find_index_page_is_far_cheaper_than_full_content(tmp_path: Path) -> Non
     body = "这是一条很长的记忆正文，用来放大预览与全文的成本差距。" * 500
     tools.memory_write(content=body, subject="big-memory", tags=[])
     preview = tools.memory_search(query="big-memory", limit=10)
-    full = tools.memory_search(query="big-memory", limit=10, include_content=True)
+    full = tools.memory_search(query="big-memory", limit=10, content_mode="full")
     preview_tokens = preview["data"]["size"]["tokens_estimate"]
     full_tokens = full["data"]["size"]["tokens_estimate"]
     assert preview_tokens * 10 < full_tokens, (
@@ -399,3 +400,145 @@ def test_find_unresolved_conflict_count_strict_scope(tmp_path: Path) -> None:
     assert not any(
         "unresolved_conflict_count" in str(warning) for warning in result["warnings"]
     )
+
+
+# ── v0.15.10: content_mode / hit_spans ─────────────────────────────────────
+
+
+def _evidence_hit(kind: str, start: int, end: int, score: float = 0.9) -> dict:
+    return {
+        "kind": kind, "text": "raw unit text is irrelevant — spans slice source",
+        "start_offset": start, "end_offset": end, "score": score,
+    }
+
+
+def _cyclic_content(length: int) -> str:
+    return "".join(str(i % 10) for i in range(length))
+
+
+def test_content_mode_invalid_value_rejected(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    result = tools.memory_search(query="x", content_mode="snippets")
+    assert result["ok"] is False
+    assert 'content_mode must be one of' in str(result["data"].get("error"))
+    batch = tools.memory_batch_find(
+        queries=[{"query": "x"}], content_mode="snippets",
+    )
+    assert batch["ok"] is False
+    assert 'content_mode must be one of' in str(batch["data"].get("error"))
+
+
+def test_include_content_removed_with_migration_pointer(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    result = tools.memory_search(query="x", include_content=True)
+    assert result["ok"] is False
+    assert "include_content was removed in v0.15.10" in str(result["data"].get("error"))
+    assert 'content_mode="full"' in str(result["data"].get("error"))
+    batch = tools.memory_batch_find(
+        queries=[{"query": "x"}], include_content=True,
+    )
+    assert batch["ok"] is False
+    assert "include_content was removed in v0.15.10" in str(batch["data"].get("error"))
+
+
+def test_hits_mode_low_coverage_keeps_spans_drops_content() -> None:
+    content = _cyclic_content(100)
+    hits = [_evidence_hit("text", 60, 75), _evidence_hit("text", 10, 30)]
+    preview = _preview_item(
+        {"subject": "s", "content": content, "_evidence_hits": hits},
+        content_mode="hits",
+    )
+    assert "content" not in preview
+    spans = preview["hit_spans"]
+    # Merged intervals in source order; text is sliced from the source so the
+    # span and text are strictly self-consistent (read span returns exactly it).
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in spans] == [
+        (10, 30), (60, 75),
+    ]
+    for sp in spans:
+        assert sp["text"] == content[sp["start_offset"]:sp["end_offset"]]
+    # Internal evidence field never leaks.
+    assert "_evidence_hits" not in preview
+
+
+def test_hits_mode_overlapping_intervals_merge() -> None:
+    content = _cyclic_content(200)
+    # Overlap of 10 chars (the long-text fallback slices with overlap=60):
+    # naive summation would double-count; merging must collapse them.
+    hits = [_evidence_hit("text", 50, 110), _evidence_hit("text", 0, 60)]
+    preview = _preview_item(
+        {"subject": "s", "content": content, "_evidence_hits": hits},
+        content_mode="hits",
+    )
+    spans = preview["hit_spans"]
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in spans] == [(0, 110)]
+    assert spans[0]["text"] == content[0:110]
+
+
+def test_hits_mode_subject_kind_hit_filtered() -> None:
+    content = _cyclic_content(50)
+    hits = [_evidence_hit("subject", 0, 0), _evidence_hit("text", 5, 20)]
+    preview = _preview_item(
+        {"subject": "s", "content": content, "_evidence_hits": hits},
+        content_mode="hits",
+    )
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in preview["hit_spans"]] == [(5, 20)]
+
+
+def test_hits_mode_high_coverage_upgrades_to_full_text() -> None:
+    content = _cyclic_content(100)
+    hits = [_evidence_hit("text", 0, 60)]  # 60% >= 50% threshold
+    preview = _preview_item(
+        {"subject": "s", "content": content, "_evidence_hits": hits},
+        content_mode="hits",
+    )
+    assert preview["content"] == content
+    # hit_spans stays as an annotation.
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in preview["hit_spans"]] == [(0, 60)]
+
+
+def test_hits_mode_coverage_exactly_half_upgrades() -> None:
+    content = _cyclic_content(100)
+    hits = [_evidence_hit("text", 0, 50)]  # exactly 50% — >= threshold upgrades
+    preview = _preview_item(
+        {"subject": "s", "content": content, "_evidence_hits": hits},
+        content_mode="hits",
+    )
+    assert preview["content"] == content
+
+
+def test_hits_mode_no_evidence_hits_keeps_plain_preview() -> None:
+    preview = _preview_item({"subject": "s", "content": "body"}, content_mode="hits")
+    assert "hit_spans" not in preview
+    assert "content" not in preview
+    assert preview["content_chars"] == 4
+
+
+def test_hits_mode_pipeline_without_embedder_stays_preview(tmp_path: Path) -> None:
+    """No embedder → no evidence channel → content_mode="hits" degrades to the
+    plain preview shape (FTS/phrase-only items carry no hit_spans)."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="alpha deployment note with details", subject="s", tags=[])
+    result = tools.memory_search(query="deployment", content_mode="hits")
+    assert result["ok"] is True
+    item = result["data"]["results"][0]
+    assert "content" not in item
+    assert "hit_spans" not in item
+    assert "hit-spans page" in result["data"]["size"]["display_hint"]
+
+
+def test_batch_find_content_mode_full_and_hits(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="alpha deployment note with details", subject="s", tags=[])
+    full = tools.memory_batch_find(
+        queries=[{"query": "deployment"}], content_mode="full",
+    )
+    assert full["ok"] is True, full["data"]
+    item = full["data"]["results"][0]
+    assert item["content"] == "alpha deployment note with details"
+    assert "full texts" in full["data"]["size"]["display_hint"]
+    hits = tools.memory_batch_find(
+        queries=[{"query": "deployment"}], content_mode="hits",
+    )
+    assert hits["ok"] is True, hits["data"]
+    assert "vector-hit spans" in str(hits["data"]["size"]["display_hint"])

@@ -58,11 +58,11 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "query", "workspace", "tags", "limit", "offset", "debug_ranking",
         "query_embedding", "tags_filter", "after_time", "before_time",
         "source_type", "include_linked_open_items", "include_conflict_signal",
-        "include_size", "include_content",
+        "include_size", "content_mode",
     },
     ("memory", "batch_find"): {
         "queries", "workspace", "tags_filter", "after_time", "before_time",
-        "source_type", "limit_per_query", "include_content", "deduplicate",
+        "source_type", "limit_per_query", "content_mode", "deduplicate",
     },
     ("memory", "read"): {"id", "memory_id", "span", "workspace"},
     ("memory", "update"): {
@@ -175,6 +175,21 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
                 return result
             if key in allowed:
                 continue
+            if (
+                key == "include_content"
+                and (surface, operation) in (("memory", "find"), ("memory", "batch_find"))
+            ):
+                # v0.15.10 breaking: silently ignoring the removed boolean would
+                # look like a working call returning previews — fail loudly with
+                # the migration pointer instead.
+                result.error = _error(
+                    key,
+                    'include_content was removed in v0.15.10; use '
+                    'content_mode="full" for full text or content_mode="hits" '
+                    "for vector-hit spans",
+                    did_you_mean="content_mode",
+                )
+                return result
             update_aliases = {
                 "content": "new_content",
                 "subject": "new_subject",
