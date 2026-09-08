@@ -248,6 +248,16 @@ def _numeric_stripped_skeleton(text: str) -> str:
     return _normalize_evidence_text(_VALUE_RE.sub("", text or ""))
 
 
+_OPERATOR_SIGNATURE_RE = re.compile(r"[<>≥≤≠]=?|(?<!\d)[+\-−](?=\d)")
+
+
+def _operator_signature(text: str) -> frozenset[str]:
+    """Comparator/sign tokens that normalization strips but contradictions
+    hinge on (``>= 100ms`` vs ``< 100ms``, ``+5%`` vs ``-5%``). Date hyphens
+    sit between two digits and are deliberately not treated as signs."""
+    return frozenset(_OPERATOR_SIGNATURE_RE.findall((text or "").casefold()))
+
+
 def _normalize_evidence_text(text: str) -> str:
     value = (text or "").casefold()
     value = re.sub(r"qwen\s*([0-9]+(?:\.[0-9]+)*)", r"qwen\1", value)
@@ -273,7 +283,11 @@ def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
     left_norm = _normalize_evidence_text(left_text)
     right_norm = _normalize_evidence_text(right_text)
     if left_norm and left_norm == right_norm:
-        return EvidenceDecision("ignore", "equivalent_value")
+        # Normalization strips comparators and signs: ">= 100ms" vs "< 100ms"
+        # and "+5%" vs "-5%" normalize equal but contradict — never let them
+        # die here as duplicates.
+        if _operator_signature(left_text) == _operator_signature(right_text):
+            return EvidenceDecision("ignore", "equivalent_value")
 
     left_lower = (left_text or "").casefold()
     right_lower = (right_text or "").casefold()
@@ -388,6 +402,13 @@ def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
     explicit_replacement = any(term in joined for term in ["以后以", "替换", "改为", "不再采用", "之前不对", "旧设计", "新设计", "新口径", "旧口径", "下线", "而不是", "不公开", "公开"])
     if polarity_diff and not explicit_replacement and len(common) >= 2 and only_right and not contains_diff:
         compatible_guard = True
+    # Comparators and signs survive neither normalization nor the value
+    # strip: pairs whose only difference is an operator (">= 100ms" vs
+    # "< 100ms", "+5%" vs "-5%") contradict and must never be suppressed
+    # by the duplicate/compatible guards.
+    if _operator_signature(left_text) != _operator_signature(right_text):
+        duplicate_guard = False
+        compatible_guard = False
     return PairEvidence(
         common_tokens=sorted(common),
         char_cosine=char_cosine,

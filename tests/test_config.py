@@ -708,6 +708,46 @@ def test_update_check_bad_config_defaults_enabled(tmp_path: Path, monkeypatch) -
     assert any("update_check.enabled" in warning for warning in settings.config_warnings)
 
 
+def test_notice_sync_wait_ms_parse_int_edges(tmp_path: Path, monkeypatch) -> None:
+    """Adversarial round 2: semantic_conflict.notice_sync_wait_ms must never
+    crash startup or silently mis-parse. bools are rejected (bool is an int
+    subclass — True would become a 1 ms wait), Infinity (1e999) overflows
+    int() and must fall back to the default instead of raising
+    OverflowError, out-of-range ints clamp with a warning, and garbage
+    strings fall back to the default."""
+    from memory_arbiter.constants import NOTICE_SYNC_WAIT_MS
+
+    cases = [
+        # (raw JSON literal, expected value, expects warning)
+        ("true", NOTICE_SYNC_WAIT_MS, True),
+        ("false", NOTICE_SYNC_WAIT_MS, True),
+        ("1e999", NOTICE_SYNC_WAIT_MS, True),  # Infinity: pre-fix OverflowError crash
+        ('"abc"', NOTICE_SYNC_WAIT_MS, True),
+        ("-100", 0, True),
+        ("99999", 5000, True),
+        ("0", 0, False),
+        ('"100"', 100, False),
+        ("1500.7", 1500, False),
+    ]
+    for raw, expected, expect_warning in cases:
+        clear_config_env(monkeypatch)
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(
+            '{"semantic_conflict": {"notice_sync_wait_ms": %s}}' % raw,
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+
+        settings = Settings.from_env()
+
+        assert settings.semantic_conflict_notice_sync_wait_ms == expected, raw
+        warned = any(
+            "semantic_conflict.notice_sync_wait_ms" in warning
+            for warning in settings.config_warnings
+        )
+        assert warned is expect_warning, (raw, settings.config_warnings)
+
+
 def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch) -> None:
     clear_config_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

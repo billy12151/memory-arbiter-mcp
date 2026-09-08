@@ -1,11 +1,13 @@
 """Read-only descriptors for current configuration fields.
 
-Since 0.15.0 the user-facing config surface is the 19-file-key slim face;
-everything else is a frozen constant (memory_arbiter.constants) and no longer
-appears here.
+Since 0.15.0 the user-facing config surface is the 20-file-key slim face
+(0.15.8 restored semantic_conflict.notice_sync_wait_ms); everything else is a
+frozen constant (memory_arbiter.constants) and no longer appears here.
 """
 from __future__ import annotations
 from typing import Any
+
+from memory_arbiter.constants import NOTICE_SYNC_WAIT_MS
 
 GROUPS = [
     {"key": "paths", "label_en": "Paths", "label_zh": "基础路径"},
@@ -47,6 +49,7 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.model_path", "semantic", "semantic_conflict_model_path"),
     _item("semantic_conflict.on_write", "semantic", "semantic_conflict_on_write", "async"),
     _item("semantic_conflict.max_notice_pairs", "semantic", "semantic_conflict_max_notice_pairs", 2),
+    _item("semantic_conflict.notice_sync_wait_ms", "semantic", "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS),
     _item("update_check.enabled", "update", "update_check_enabled", True),
     _item("include_size", "reporting", default=True),
 ]

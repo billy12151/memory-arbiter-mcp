@@ -306,6 +306,28 @@ def test_settings_homed_caller_keeps_home_bucket(tmp_path):
     assert ws == ["mema-twin"]  # home bucket reachable despite blacklist
 
 
+def test_homed_caller_unexcludes_home_only_not_whole_blacklist(tmp_path):
+    """对抗 round-2：黑名单有多个桶、调用者家在其中之一时，unscoped find
+    只放行家桶（exclude_ws - {home}），其余黑名单桶仍被排除——修复前整个
+    黑名单被丢弃，secret-bucket 会泄漏进结果。"""
+    settings = Settings(
+        db_path=tmp_path / "home2.sqlite3", backup_jsonl=tmp_path / "home2.jsonl",
+        client="zcode", agent_id="twin-host", workspace="mema-twin",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    bl = blacklist_path(tools.db.settings.db_path)
+    bl.write_text("mema-twin\nsecret-bucket\n", encoding="utf-8")
+    _write(tools, "周报偏好：结论先行", "mema-twin", "周报偏好")
+    _write(tools, "机密偏好：永不外泄", "secret-bucket", "机密偏好")
+    _write(tools, "普通偏好：字体要小", "proj-a", "普通偏好")
+
+    r = tools.memory_search(query="偏好")  # no explicit workspace param
+    ws = {x["workspace"] for x in (r.get("data") or {}).get("results") or []}
+    assert "mema-twin" in ws  # home bucket stays reachable
+    assert "secret-bucket" not in ws, f"other blacklisted bucket leaked: {ws}"
+    assert "proj-a" in ws
+
+
 def test_g6_linked_attachments_follow_exemption(tmp_path):
     """对抗#3：G6（空 query+filters）是显式查询——linked 附件同结果一样不滤。"""
     tools = make_tools(tmp_path)

@@ -435,6 +435,47 @@ class ConflictStore:
                 )
                 if not promotable_notice:
                     if duplicate_row["candidate_key"] == candidate:
+                        if status == "open" and duplicate_row.get("status") == "candidate":
+                            # A bare candidate (no notice) owns this exact frozen
+                            # event. Promote it in place — reporting "deduped"
+                            # here would leave the event candidate forever:
+                            # invisible, unactionable, and jamming every later
+                            # open recording of the same event.
+                            frozen_members = sorted(
+                                duplicate_row["member_versions"], key=lambda item: (item["memory_id"], item["version"]),
+                            )
+                            frozen_groups = sorted(
+                                duplicate_row["value_groups"], key=lambda item: item["normalized_value"],
+                            )
+                            if frozen_members != normalized_members or frozen_groups != groups:
+                                return {"outcome": "snapshot_mismatch", "conflict_id": duplicate_row["id"]}
+                            try:
+                                promoted = conn.execute(
+                                    "UPDATE conflicts SET status='open',slot_key=?,slot_key_hash=?,revision=revision+1,"
+                                    "conflict_point=?,detection_reason=?,source=?,detector_version=?,prompt_version=?,refreshed_at=? "
+                                    "WHERE id=? AND status='candidate' AND revision=?",
+                                    (_canonical_json(slot) if slot else None, slot_hash, conflict_point,
+                                     detection_reason, source, detector_version, prompt_version, now,
+                                     duplicate_row["id"], duplicate_row["revision"]),
+                                )
+                            except sqlite3.IntegrityError:
+                                # Another row already owns this event snapshot on
+                                # the target slot (workspace, slot, fingerprint).
+                                occupant = conn.execute(
+                                    "SELECT id,revision FROM conflicts WHERE workspace_canonical=? "
+                                    "AND slot_key_hash=? AND member_fingerprint=? AND id<>?",
+                                    (workspace_canonical, slot_hash, _hash_json(sorted(refs)), duplicate_row["id"]),
+                                ).fetchone()
+                                if occupant is not None:
+                                    return {"outcome": "duplicate_event", "conflict_id": int(occupant["id"]),
+                                            "revision": int(occupant["revision"])}
+                                raise
+                            if promoted.rowcount != 1:
+                                return {"outcome": "stale_conflict", "conflict_id": duplicate_row["id"]}
+                            return {
+                                "outcome": "deduped", "conflict_id": duplicate_row["id"],
+                                "revision": int(duplicate_row["revision"]) + 1,
+                            }
                         return {
                             "outcome": "deduped", "conflict_id": duplicate_row["id"],
                             "revision": duplicate_row["revision"],

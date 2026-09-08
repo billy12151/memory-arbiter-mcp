@@ -336,9 +336,17 @@ def parse_bool_warn(val: Any, default: bool, name: str = "", warnings: list[str]
 
 
 def parse_int(val: Any, default: int, name: str = "", warnings: list[str] | None = None) -> int:
+    # bool is an int subclass: True would silently become 1 (e.g. a 1 ms
+    # notice wait — the opposite of the user's intent). Reject it instead.
+    if isinstance(val, bool):
+        if warnings is not None:
+            warnings.append(f"{name}={val!r} invalid; using default {default}")
+        return default
     try:
         return int(val)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: int() of a huge float like 1e999 — a config value
+        # must never crash startup.
         if warnings is not None and val is not None:
             warnings.append(f"{name}={val!r} invalid; using default {default}")
         return default

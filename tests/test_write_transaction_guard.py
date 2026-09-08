@@ -13,6 +13,7 @@ import pytest
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
+from memory_arbiter.tools import MemoryTools
 
 
 def make_db(tmp_path: Path) -> MemoryDB:
@@ -70,3 +71,41 @@ def test_body_failure_still_rolls_back(tmp_path: Path) -> None:
             "SELECT 1 FROM workspace_canonicals WHERE name='ghost-bucket'"
         ).fetchone()
     assert row is None
+
+
+def test_post_commit_failure_after_insert_reports_ok_with_warning(tmp_path: Path) -> None:
+    """Adversarial round 2: an exception in post-commit processing (e.g. the
+    semantic worker reserve) AFTER the insert committed must not be reported
+    as {written: False} — the row is durable, so a failure response makes the
+    caller retry and duplicate the memory. The write degrades to an ok
+    response carrying the new memory id plus a warning."""
+    settings = Settings(
+        db_path=tmp_path / "post.sqlite3",
+        backup_jsonl=tmp_path / "post.jsonl",
+    )
+    db = MemoryDB(settings)
+    tools = MemoryTools(settings=settings, db=db)
+
+    baseline = tools.memory_write(content="baseline", subject="s0", tags=[])
+    assert baseline["ok"] is True
+
+    def boom(task_id):
+        raise RuntimeError("injected worker fault")
+
+    tools._semantic_worker.reserve = boom
+    failed = tools.memory_write(content="important fact", subject="dup-test", tags=[])
+
+    assert failed["ok"] is True, failed
+    assert failed["data"].get("written") is not False
+    memory_id = failed["data"]["id"]
+    assert memory_id is not None
+    assert any(
+        "post-commit processing failed" in warning
+        for warning in failed.get("warnings") or []
+    ), failed
+
+    # The row committed exactly once; a caller that only retries on
+    # ok=False never duplicates it.
+    with db.connection() as conn:
+        rows = conn.execute("SELECT id FROM memories WHERE subject='dup-test'").fetchall()
+    assert [int(r["id"]) for r in rows] == [memory_id]

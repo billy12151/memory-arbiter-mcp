@@ -213,9 +213,10 @@ class ReadPipeline:
             exclude_ws, bl_warnings = load_blacklist(blacklist_path(self.db.settings.db_path))
             extra_warnings.extend(bl_warnings)
             # A caller HOMED in a blacklisted bucket (settings.workspace) is
-            # effectively explicit about that bucket — don't exclude its home.
+            # effectively explicit about that bucket — un-exclude its home
+            # only, never drop the whole blacklist.
             if exclude_ws and caller.canonical and caller.canonical in exclude_ws:
-                exclude_ws = None
+                exclude_ws = exclude_ws - {caller.canonical}
         # v0.9.4: search_memories now uses status_filter instead of include_superseded
         outcome = self._search_memories(
             self.db, query, workspace, tags, limit,

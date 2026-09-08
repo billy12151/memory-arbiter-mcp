@@ -106,6 +106,37 @@ def test_decide_evidence_numeric_change_is_scan_candidate_not_direct_notice() ->
     assert decide_evidence("服务使用数据库。", "服务迁移到新的存储引擎。").action in {"check", "ignore"}
 
 
+def test_decide_evidence_operator_and_sign_pairs_are_check_not_duplicates() -> None:
+    """Round-2 (0.15.8): normalization strips comparators/signs, so
+    ">= 100ms" vs "< 100ms" and "+5%" vs "-5%" normalize equal — but they
+    contradict, and must surface as check candidates instead of dying as
+    ignore/equivalent_value duplicates."""
+    comparator = decide_evidence("bench 的超时阈值必须 >= 100ms。", "bench 的超时阈值必须 < 100ms。")
+    assert comparator.action == "check"
+    assert comparator.reason != "equivalent_value"
+    sign = decide_evidence("误差允许 +5%。", "误差允许 -5%。")
+    assert sign.action == "check"
+    assert sign.reason != "equivalent_value"
+
+
+def test_decide_evidence_true_duplicate_still_ignored() -> None:
+    """The operator guard must not blanket-disable duplicate detection: a
+    verbatim repeat (identical operator signature) stays ignore."""
+    duplicate = decide_evidence("超时阈值必须 100ms。", "超时阈值必须 100ms。")
+    assert duplicate.action == "ignore"
+    assert duplicate.reason == "equivalent_value"
+
+
+def test_decide_evidence_date_hyphens_are_not_signs() -> None:
+    """Date hyphens sit between two digits and are NOT operator signs; a
+    same-date pair differing only in the deliverable (json vs csv) is a real
+    conflict candidate, not a duplicate — the value-stripped skeletons
+    differ, so the duplicate guard must not fire."""
+    decision = decide_evidence("2026-09-08 交付 json 版本", "2026-09-08 交付 csv 版本")
+    assert decision.action == "check"
+    assert decision.reason != "equivalent_value"
+
+
 def test_write_notice_requires_consistent_bidirectional_qwen_mapping() -> None:
     forward = AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒")
     reverse = AttributeValueExtraction("接口超时", "30 秒", "接口超时", "5 秒")

@@ -2064,3 +2064,33 @@ def test_process_backend_recovers_with_new_generation_after_timeout(tmp_path: Pa
     assert status["generation"] == 2
     assert status["timed_out_jobs"] == 1
     backend.force_terminate()
+
+
+def test_bare_candidate_promoted_when_rerecorded_as_open(tmp_path: Path) -> None:
+    # mema 924 #2（Team 93d17fc 移植）：裸 candidate（无 notice、无 slot）撞上后续
+    # 同事件 open 记录时必须就地提升，而不是返回 deduped 把事件永久卡死在 candidate。
+    db = _db(tmp_path)
+    m1, m2 = _memory(db, "database is sqlite"), _memory(db, "database is postgres")
+    a, b = _member(m1, "sqlite"), _member(m2, "postgres")
+    created = _record(db, [a, b])
+    assert created["outcome"] == "inserted", created
+    cid = int(created["conflict_id"])
+    # 模拟任一生产者把该事件冻结为裸 candidate：status 降 candidate、slot/notice 清空。
+    with db.connection() as conn:
+        conn.execute(
+            "UPDATE conflicts SET status='candidate', slot_key=NULL, slot_key_hash=NULL, notice_type=NULL WHERE id=?",
+            (cid,),
+        )
+        conn.commit()
+    with db.connection() as conn:
+        row = conn.execute("SELECT status, slot_key, notice_type FROM conflicts WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "candidate" and row["slot_key"] is None and row["notice_type"] is None
+
+    op = _record(db, [a, b])
+    assert op["outcome"] == "deduped", op
+    assert int(op["conflict_id"]) == cid
+    assert int(op["revision"]) == int(created["revision"]) + 1
+    with db.connection() as conn:
+        row2 = conn.execute("SELECT status, slot_key FROM conflicts WHERE id=?", (cid,)).fetchone()
+    assert row2["status"] == "open", f"candidate row was not promoted: {dict(row2)}"
+    assert row2["slot_key"] is not None

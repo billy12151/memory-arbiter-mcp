@@ -292,6 +292,8 @@ class WritePipeline:
                 ok=False, extra_warnings=policy_warnings,
             )
 
+        insert_done = False
+        memory_id: int | None = None
         try:
             record = MemoryRecord.from_input(payload, self.settings.defaults())
             # Attribution channel: the trusted request identity (HTTP headers or
@@ -307,6 +309,9 @@ class WritePipeline:
                 record, workspace["canonical"], workspace.get("canonical_embedding"),
                 register_workspace_canonical=not workspace["strict_block"],
             )
+            # From here the row (or its JSONL backup) is durable; nothing below
+            # may turn this call into a failure response.
+            insert_done = True
             if any("workspace canonical vector publish failed" in warning for warning in write_warnings):
                 workspace["vector_publish_pending"] = True
             data: dict[str, Any] = {
@@ -363,6 +368,17 @@ class WritePipeline:
                     response.setdefault("notices", []).append(similar_notice)
             return response
         except Exception as exc:
+            if insert_done:
+                # The write is already durable — reporting it as failed would
+                # make callers retry and duplicate the memory. Degrade to a
+                # success response carrying the post-commit failure as a warning.
+                return self._tools.db.state.response(
+                    {"id": memory_id, "backup_only": memory_id is None},
+                    extra_warnings=(
+                        policy_warnings + validation.warnings
+                        + [f"memory written (id {memory_id}) but post-commit processing failed: {exc}"]
+                    ),
+                )
             return self._tools.db.state.response(
                 {"written": False, "error": str(exc)},
                 ok=False, extra_warnings=policy_warnings + validation.warnings,

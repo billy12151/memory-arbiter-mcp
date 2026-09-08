@@ -20,8 +20,9 @@ def write(tool: MemoryTools, content: str) -> int:
 
 def test_config_registry_only_describes_current_architecture() -> None:
     paths = {item["path"] for item in CONFIG_DESCRIPTORS}
-    # 0.15.0 slim surface: exactly the 19 configurable file keys (0.15.6
-    # added include_size). Everything else froze into memory_arbiter.constants
+    # 0.15.0 slim surface: exactly the 20 configurable file keys (0.15.6
+    # added include_size; 0.15.8 restored semantic_conflict.notice_sync_wait_ms).
+    # Everything else froze into memory_arbiter.constants
     # and must NOT reappear here.
     assert paths == {
         "db_path", "backup_jsonl", "policy_path", "client", "agent_id",
@@ -29,10 +30,11 @@ def test_config_registry_only_describes_current_architecture() -> None:
         "embedding.model_path", "embedding.auto_query", "embedding.auto_write",
         "semantic_conflict.enabled", "semantic_conflict.model_path",
         "semantic_conflict.on_write", "semantic_conflict.max_notice_pairs",
+        "semantic_conflict.notice_sync_wait_ms",
         "update_check.enabled", "include_size",
     }
     assert not any(
-        "max_unit_chars" in path or "workspace_" in path or "notice_sync_wait" in path
+        "max_unit_chars" in path or "workspace_" in path
         or path.startswith("vec.") or "provider" in path or "n_ctx" in path
         for path in paths
     )
@@ -41,7 +43,7 @@ def test_config_registry_only_describes_current_architecture() -> None:
     assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
 
 
-def test_notice_sync_wait_frozen_at_five_seconds() -> None:
+def test_notice_sync_wait_default_is_three_seconds() -> None:
     # 0.15.0 froze the former 5000 default into a constant; 0.15.8 restored
     # semantic_conflict.notice_sync_wait_ms as a live config key (clamp
     # [0, 5000], 0 = batch mode) with this default.
