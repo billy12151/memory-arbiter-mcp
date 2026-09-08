@@ -41,7 +41,6 @@ testpaths = ["tests"]
 pythonpath = ["."]
 # slow = real-Qwen tests (load the resident GGUF; ~minutes). Excluded from the
 # default run and CI; run explicitly before a release: pytest -m slow
-addopts = "-m 'not slow'"
 markers = [
     "slow: real-model tests, excluded by default; run with pytest -m slow",
 ]

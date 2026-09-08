@@ -10,8 +10,10 @@ silent-drop root causes (see mema memory id=919):
   4. sync-window three states (completed / async / wait=0 never blocks)
   5. pair prompt input caps quotes at 400 chars
 
-Real-model variants live at the bottom under @pytest.mark.slow (excluded from
-the default run; execute before a release with: pytest -m slow).
+Real-model variants live at the bottom under @pytest.mark.slow. Since 0.15.9.1 they
+run by default (the 0.15.8 release process relied on a manual "pytest -m slow" step
+that was missed): machines without the GGUF model pytest.skip cleanly, so the local
+full suite always exercises them and CI stays green via skips, never misses them.
 """
 from __future__ import annotations
 
