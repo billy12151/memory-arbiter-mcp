@@ -8,15 +8,6 @@ from __future__ import annotations
 
 import unicodedata
 
-# Recent-fallback warning prefix. Emitted by search._recent_fallback when a
-# non-empty query produced no direct match and recent memories are returned
-# instead. Tests match on the prefix substring — keep the prefix stable, never
-# inline it at a call site. Single source; ``search._NO_DIRECT_MATCH_PREFIX``
-# re-exports this. (Until 0.14.x the removed bm25 path also sniffed this
-# prefix to infer retrieval_mode; since 0.15.0 ranking is hybrid-only and the
-# warning is purely user-facing.)
-NO_DIRECT_MATCH_PREFIX = "No direct memory match"
-
 
 # ---------------------------------------------------------------------------
 # Reserved default workspace pool (single source).

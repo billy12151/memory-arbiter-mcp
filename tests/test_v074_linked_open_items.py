@@ -167,9 +167,9 @@ def test_linked_open_items_only_direct_mode(tmp_path: Path) -> None:
     """Fallback / browse modes never trigger linked_open_items."""
     tools = _tools(tmp_path)
     _write(tools, content="follow up", subject="reminder", tags=["todo", "feature-auth"])
-    # No real match → recent_fallback; linked must stay empty.
+    # No real match → empty (v0.15.9: query recall never falls back); linked stays empty.
     res_fb = tools.memory_search(query="zzz_no_match_xyz")
-    assert res_fb["data"]["retrieval_mode"] == "recent_fallback"
+    assert res_fb["data"]["retrieval_mode"] == "empty"
     assert res_fb["data"]["linked_open_items"] == []
     # Empty query → recent_browse; linked must stay empty.
     res_br = tools.memory_search(query="")

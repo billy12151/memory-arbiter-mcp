@@ -1553,12 +1553,15 @@ def test_search_source_has_no_bm25_path() -> None:
     text = source.read_text(encoding="utf-8")
     assert "_search_bm25" not in text
     assert "_get_ranking_mode" not in text
-    # The surviving helpers the hybrid path still uses.
+    # The surviving helpers the hybrid path still uses. v0.15.9: _recent_fallback
+    # is browse-only (empty query); the query fallback and its warning prefix
+    # are gone — empty is honest.
     assert "_recent_fallback" in text
+    assert "No direct memory match" not in text
     from memory_arbiter.search import _recent_fallback  # noqa: F401
-    from memory_arbiter.constants import NO_DIRECT_MATCH_PREFIX
 
-    assert NO_DIRECT_MATCH_PREFIX == "No direct memory match"
+    import memory_arbiter.constants as _constants
+    assert not hasattr(_constants, "NO_DIRECT_MATCH_PREFIX")
 
 
 def test_search_responses_have_no_ranking_mode_concept(tmp_path: Path) -> None:
@@ -1574,9 +1577,9 @@ def test_search_responses_have_no_ranking_mode_concept(tmp_path: Path) -> None:
     hit = tools.memory_search(query="hybrid")
     assert hit["ok"] is True
     assert hit["data"]["results"]
-    assert hit["data"]["retrieval_mode"] in {"direct", "recent_fallback", "empty"}
+    assert hit["data"]["retrieval_mode"] in {"direct", "empty"}
     miss = tools.memory_search(query="完全无关的查询词")
-    assert miss["data"]["retrieval_mode"] in {"direct", "recent_fallback", "empty"}
+    assert miss["data"]["retrieval_mode"] in {"direct", "empty"}
 
 
 # ---------------------------------------------------------------------------

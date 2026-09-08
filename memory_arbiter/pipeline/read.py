@@ -300,7 +300,7 @@ class ReadPipeline:
                     head += f" and {n - 1} more"
                 attention_summary = head
         # v0.7.4: linked_open_items — only on genuine query hits (direct mode),
-        # never on browse/fallback/empty. Failures degrade to [] + warning.
+        # never on browse/empty. Failures degrade to [] + warning.
         linked: list[dict[str, Any]] = []
         if include_linked_open_items and retrieval_mode == "direct" and results:
             # G6 (empty query + filters) is an explicit, curated query — its
@@ -345,7 +345,7 @@ class ReadPipeline:
                     f"for {len(results)} item{'s' if len(results) != 1 else ''}"
                 )
                 if retrieval_mode != "direct":
-                    # Browse/fallback pages carry an exact total and has_more —
+                    # Browse pages carry an exact total and has_more —
                     # paging through them is the intended use, so the
                     # "don't deep-page" guidance would contradict the signal.
                     display_hint = (

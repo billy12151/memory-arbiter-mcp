@@ -662,13 +662,15 @@ def test_empty_query_pool_cap_total_is_full_count(tmp_path: Path) -> None:
     assert res["data"]["has_more"] is True
 
 
-def test_empty_query_no_filters_goes_fallback(tmp_path: Path) -> None:
-    # 短路改造后，空 query + 无过滤仍应走 fallback（保留 v0.7.2 行为）
+def test_empty_query_no_filters_browses_recent(tmp_path: Path) -> None:
+    # 空 query + 无过滤 = 显式浏览（recent_browse），v0.15.9 起查询兜底已移除，
+    # 浏览路径是 _recent_fallback 的唯一调用方且不再附加 "No direct match" 警告。
     tools = make_tools(tmp_path)
     _write_mem(tools, content="r1", subject="r1", tags=[])
     res = tools.memory_search(query="")
-    # fallback 路径：返回 recent memories + fallback warning
-    assert any("No direct memory match" in w for w in res["warnings"]) or len(res["data"]["results"]) > 0
+    assert res["data"]["retrieval_mode"] == "recent_browse"
+    assert len(res["data"]["results"]) == 1
+    assert not any("No direct memory match" in w for w in res["warnings"])
 
 
 def test_hybrid_only_mode_applies_filter_params(tmp_path: Path) -> None:

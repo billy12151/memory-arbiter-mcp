@@ -230,7 +230,7 @@ def test_chinese_search_overspecified_query_still_matches(tmp_path: Path) -> Non
     assert not any("No direct memory match" in w for w in found["warnings"])
 
 
-def test_search_returns_recent_memories_when_no_direct_match(tmp_path: Path) -> None:
+def test_search_reports_empty_when_no_direct_match(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     tools.memory_write(
         content="来源：营销系统梳理.xlsx。营销链路包含需求提报、费用申请、设计图提报、活动配置等环节。",
@@ -240,22 +240,22 @@ def test_search_returns_recent_memories_when_no_direct_match(tmp_path: Path) -> 
         event_time="2026-07-04T09:00:30Z",
     )
 
-    # 0.15.9 phrase channel recalls rows containing a query token verbatim, so
-    # the old 营销 phrase now matches directly; use a fully unmatched query to
-    # still exercise the recent-fallback path.
+    # v0.15.9: recent-fallback removed — an unmatched query reports an honest
+    # empty page with an actionable hint instead of recency-stuffed results.
     found = tools.memory_search(query="南极科考补给计划", workspace="repo-a")
 
     assert found["ok"] is True
-    assert found["data"]["count"] == 1
-    assert found["data"]["results"][0]["subject"] == "京东科技金融-营销系统梳理"
-    assert any("No direct memory match" in warning for warning in found["warnings"])
+    assert found["data"]["count"] == 0
+    assert found["data"]["results"] == []
+    assert found["data"]["retrieval_mode"] == "empty"
+    assert any("no memories match the query" in warning for warning in found["warnings"])
 
 
-def test_recent_fallback_ranks_by_trust_then_recency(tmp_path: Path) -> None:
-    """Regression: when a query misses FTS5 and falls back to recent memories,
-    a user_confirmed+locked record must outrank a newer agent_generated+normal
-    one. Previously pure ``ingest_time DESC`` ordering let daily agent chatter
-    bury authoritative records."""
+def test_recent_browse_ranks_by_trust_then_recency(tmp_path: Path) -> None:
+    """Regression: in the empty-query browse page (the only _recent_fallback
+    caller since v0.15.9), a user_confirmed+locked record must outrank a newer
+    agent_generated+normal one. Previously pure ``ingest_time DESC`` ordering
+    let daily agent chatter bury authoritative records."""
     tools = make_tools(tmp_path)
     # Newer but low-trust: agent chatter from today.
     tools.memory_write(
@@ -273,10 +273,10 @@ def test_recent_fallback_ranks_by_trust_then_recency(tmp_path: Path) -> None:
         event_time="2026-07-04T00:00:00Z",
     )
 
-    found = tools.memory_search(query="完全不存在的查询词 xyz123", workspace="repo-a")
+    found = tools.memory_search(query="")
 
     assert found["ok"] is True
-    assert any("No direct memory match" in w for w in found["warnings"])
+    assert found["data"]["retrieval_mode"] == "recent_browse"
     results = found["data"]["results"]
     assert len(results) == 2
     # Authoritative record must rank first despite being older.

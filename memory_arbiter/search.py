@@ -27,17 +27,13 @@ from .db import MemoryDB, row_to_dict
 # modes return browse/fallback/empty rows where injecting todos would be noise.
 RetrievalMode = Literal[
     "direct",            # FTS/LIKE/evidence channels genuinely matched the query
-    "recent_fallback",   # query was non-empty but nothing matched; recent returned
     "recent_browse",     # empty query, no filters — caller is browsing recent
-    "empty",             # filters yielded nothing, or pool empty after post-filter
+    "empty",             # filters yielded nothing, pool empty, or everything
+                         # below the relevance floor (v0.15.9: recent-fallback
+                         # removed — empty is honest, no recency stuffing)
     "unavailable",       # SQLite not available
 ]
 
-# v0.7.4.1: single source of truth for the recent-fallback warning. Tests
-# match on the prefix substring, so the literal must live in ONE place —
-# never inline it. Single source: constants.NO_DIRECT_MATCH_PREFIX (Phase 1);
-# re-exported here.
-from .constants import NO_DIRECT_MATCH_PREFIX as _NO_DIRECT_MATCH_PREFIX
 from .constants import (
     CONTENT_LIKE_CAP,
     Isolation,
@@ -1210,22 +1206,25 @@ def search_memories(
                 empty_reason = "filters too restrictive or no matches; pool was empty after post-filter"
             return SearchOutcome([], warnings + [empty_reason], False, 0, "empty")
     else:
-        # 无过滤：保留 v0.7.2 行为，pool 空走 fallback。v0.9.7: strict 下
-        # query 未命中本 ws 时不应回退到「最近记忆」——strict 的语义是
-        # 「搜不到就是搜不到」，最近兜底会让用户以为 query 命中了。故
-        # strict 直接返回空；none/weak 保留全库/同 ws 最近兜底。
+        # v0.15.9: recent-fallback removed (mema 923 §5). A non-empty query
+        # that recalls nothing returns an honest empty result with an
+        # actionable hint — recency-stuffed results poisoned agent answers
+        # (downstream legal queries got unrelated recent memories). strict
+        # keeps its own, more specific message; empty-query browsing
+        # (recent_browse) is untouched — it is explicit intent, not a fallback.
         if not pool:
             if isolation == "strict" and ws_canonical:
                 return SearchOutcome(
                     [], warnings + ["no same-workspace match; strict isolation does not fall back to recent memories"],
                     False, 0, "empty",
                 )
-            fb_rows, fb_warnings, fb_hm, fb_te = _recent_fallback(
-                db, workspace, tags, limit, like_status_clause, warnings,
-                offset=offset, ws_canonical=scope_ws,
-                exclude_workspaces=exclude_workspaces,
+            return SearchOutcome(
+                [], warnings + [
+                    "no memories match the query; reword the query or add tags_filter "
+                    "(empty-query find still browses recent memories)",
+                ],
+                False, 0, "empty",
             )
-            return SearchOutcome(fb_rows, fb_warnings, fb_hm, fb_te, "recent_fallback")
 
     # precompute the canonical distance map once, after the pool
     # is assembled, so the weak-isolation rerank can weight on real vector
@@ -1563,10 +1562,8 @@ def _recent_fallback(
         ).fetchall()
     finally:
         conn.close()
-    if rows:
-        warnings.append(
-            _NO_DIRECT_MATCH_PREFIX
-            + ". Returning recent memories from the shared library; refine keywords, try memory_recent, or compare candidates before reading source files."
-        )
+    # v0.15.9: the no-direct-match warning is gone with the query fallback —
+    # the only remaining caller is explicit empty-query browsing, where
+    # "no match" wording would be noise.
     has_more = total_estimate > offset + len(rows)
     return [row_to_dict(row) for row in rows], warnings, has_more, total_estimate

@@ -230,7 +230,8 @@ class ConsoleAPI:
         page_offset = self._offset(offset)
         if normalized_status == "active":
             # Empty query + no filters → browse by recency (not memory_search,
-            # whose _recent_fallback uses a multi-level
+            # whose recent-browse path (_recent_fallback, browse-only since
+            # v0.15.9 — query recall no longer falls back) uses a multi-level
             # status→protection→source_type→confidence→time sort that buries
             # recent memories behind locked/user_confirmed ones). Direct
             # ORDER BY ingest_time DESC gives the user what they expect when

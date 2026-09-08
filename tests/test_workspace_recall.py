@@ -336,14 +336,16 @@ def test_none_explicit_workspace_filter_scopes_empty_query_pagination(tmp_path):
     assert second["data"]["has_more"] is False
 
 
-def test_none_explicit_workspace_filter_scopes_recent_fallback(tmp_path):
+def test_none_explicit_workspace_filter_scopes_recent_browse(tmp_path):
+    # v0.15.9: query recall no longer falls back to recent memories — the
+    # workspace-scoping contract moves to the (explicit) empty-query browse.
     tools = make_tools(tmp_path, "none")
     _write(tools, "alpha recent", "projA")
     _write(tools, "beta recent", "projB")
 
-    result = tools.memory_search(query="no-direct-hit-zzzz", workspace="projA", limit=10)
+    result = tools.memory_search(query="", workspace="projA", limit=10)
 
-    assert result["data"]["retrieval_mode"] == "recent_fallback"
+    assert result["data"]["retrieval_mode"] == "recent_browse"
     assert [m["workspace"] for m in _results(result)] == ["projA"]
     assert result["data"]["total_estimate"] == 1
 
@@ -356,13 +358,13 @@ def test_none_explicit_workspace_filter_scopes_expired_paths(tmp_path):
         tools.memory_supersede(memory_id=memory_id, reason="archived", authorized=True)
 
     direct = tools.memory_search_expired(query="archived", workspace="projA", limit=10)
+    # v0.15.9: expired audit recall no longer falls back either — an unmatched
+    # audit query reports empty (audit still returns everything it DOES match).
     fallback = tools.memory_search_expired(query="no-direct-hit-zzzz", workspace="projA", limit=2, offset=1)
 
     assert [m["workspace"] for m in _results(direct)] == ["projA", "projA", "projA"]
-    assert [m["workspace"] for m in _results(fallback)] == ["projA", "projA"]
-    assert fallback["data"]["retrieval_mode"] == "recent_fallback"
-    assert fallback["data"]["total_estimate"] == 3
-    assert fallback["data"]["has_more"] is False
+    assert _results(fallback) == []
+    assert fallback["data"]["retrieval_mode"] == "empty"
 
 
 # ── strict: mandatory ws, hard filter, blocking new ws ──────────────────────
@@ -1308,7 +1310,7 @@ def test_supersede_authorization_widens_with_admission(tmp_path):
     assert tools.db.get_memory(rail_id)["status"] == "superseded"
 
 
-def test_recent_fallback_scopes_to_admitted_set(tmp_path):
+def test_recent_browse_scopes_to_admitted_set(tmp_path):
     tools = strict_admission_make_tools(tmp_path)
     publish(tools, "agent-lane", VEC_SELF)
     publish(tools, "agent-rail", VEC_NEAR)
