@@ -80,11 +80,15 @@ def _hit_spans(raw_hits: Any, content: str) -> "list[dict[str, Any]] | None":
     for h in raw_hits or []:
         if not isinstance(h, dict) or str(h.get("kind") or "") == "subject":
             continue
-        try:
-            s = int(h.get("start_offset"))
-            e = int(h.get("end_offset"))
-        except (TypeError, ValueError):
+        s_raw, e_raw = h.get("start_offset"), h.get("end_offset")
+        # Strict ints (bools rejected — v0.14 span-validation lesson): these
+        # come from evidence rows, never user input, but stay defensive.
+        if (
+            isinstance(s_raw, bool) or isinstance(e_raw, bool)
+            or not isinstance(s_raw, int) or not isinstance(e_raw, int)
+        ):
             continue
+        s, e = s_raw, e_raw
         if 0 <= s < e <= len(content):
             intervals.append((s, e))
     if not intervals:
