@@ -103,7 +103,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "The size block (returned_chars/returned_count/tokens_estimate) meters "
             "the page as actually returned. Since v0.15.6 every recall surface "
             "carries the same size block under one global config key include_size "
-            "(default true): find (the page as returned), read (the record as "
+            "(default true): find and batch_find (the page as returned), read (the record as "
             "returned — a span read meters the window, so the number is the true "
             "cost of that call), memory_review expired and history (their result "
             "lists, full texts included). Each size block also carries a "
