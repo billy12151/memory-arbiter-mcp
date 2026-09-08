@@ -240,7 +240,10 @@ def test_search_returns_recent_memories_when_no_direct_match(tmp_path: Path) -> 
         event_time="2026-07-04T09:00:30Z",
     )
 
-    found = tools.memory_search(query="营销运营全流程 系统", workspace="repo-a")
+    # 0.15.9 phrase channel recalls rows containing a query token verbatim, so
+    # the old 营销 phrase now matches directly; use a fully unmatched query to
+    # still exercise the recent-fallback path.
+    found = tools.memory_search(query="南极科考补给计划", workspace="repo-a")
 
     assert found["ok"] is True
     assert found["data"]["count"] == 1
@@ -731,10 +734,11 @@ def test_sanitize_fts_query_splits_cjk_into_trigram_or_group() -> None:
     """
     from memory_arbiter.search import _sanitize_fts_query
 
-    # Pure CJK: overlapping trigrams (unquoted) joined by OR.
-    assert _sanitize_fts_query("营销交付") == "(营销交 OR 销交付)"
+    # Pure CJK: quoted exact-substring phrase first (0.15.9), then the
+    # overlapping trigrams (unquoted) joined by OR as the recall safety net.
+    assert _sanitize_fts_query("营销交付") == '("营销交付" OR 营销交 OR 销交付)'
     assert _sanitize_fts_query("营销交付系统") == (
-        "(营销交 OR 销交付 OR 交付系 OR 付系统)"
+        '("营销交付系统" OR 营销交 OR 销交付 OR 交付系 OR 付系统)'
     )
     # Single/double CJK chars cannot form a trigram → dropped (LIKE fallback
     # handles them via the empty-FTS-result path).

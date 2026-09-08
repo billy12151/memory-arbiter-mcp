@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from .anchors import (
     Anchor,
+    STOP_ANCHORS,
     classify_match_level,
     extract_anchors,
     score_anchor_overlap,
@@ -40,7 +41,9 @@ from .constants import NO_DIRECT_MATCH_PREFIX as _NO_DIRECT_MATCH_PREFIX
 from .constants import (
     CONTENT_LIKE_CAP,
     Isolation,
+    QUERY_RECALL_SCORE_FLOOR,
     RECALL_POOL_CAP,
+    SURFACE_ADMISSION_QUOTA,
     WORKSPACE_MIN_NAME_LEN,
     WORKSPACE_WEAK_VECTOR_WEIGHT,
     is_default_workspace_term,
@@ -114,7 +117,12 @@ def _sanitize_fts_query(query: str) -> str:
         if _is_cjk_token(tok):
             trigrams = _split_cjk_token(tok)
             if trigrams:
-                groups.append("(" + " OR ".join(trigrams) + ")")
+                # v0.15.9 phrase channel: a quoted phrase under the trigram
+                # tokenizer is an exact-substring match, so records containing
+                # the token verbatim always enter the pool; the OR'd trigrams
+                # stay as the recall safety net for slightly-overspecified
+                # queries. Strength separation happens in soft-rerank anchors.
+                groups.append("(" + _quote_phrase(tok) + " OR " + " OR ".join(trigrams) + ")")
         else:
             groups.append(_quote_phrase(tok))
     return " AND ".join(groups)
@@ -661,11 +669,27 @@ def _wide_recall(
                     except Exception:
                         pass
 
-        # Channel 3: subject/tags LIKE — precise surface recall.
-        if len(pool) < pool_cap:
-            like_q = f"%{query}%"
-            clauses = [like_status_clause, "(subject LIKE ? OR tags LIKE ?)"]
-            params = [like_q, like_q]
+        # Channel 3: subject/tags LIKE — precise surface recall. v0.15.9: this
+        # channel ALWAYS runs (the old pool-full short-circuit let OR-noise
+        # crowd out exact surface hits) and matches per-token in addition to
+        # the whole query string — a multi-word query's full string can never
+        # substring-match a subject, but its 法规名 token can. Function-word
+        # tokens are excluded via STOP_ANCHORS so filler never manufactures
+        # surface hits; strength separation stays with soft-rerank anchors.
+        surface_toks = [t for t in query.split() if len(t) >= 2 and t not in STOP_ANCHORS]
+        like_clauses: list[str] = []
+        like_params: list[Any] = []
+        if query:
+            like_clauses.append("(subject LIKE ? OR tags LIKE ?)")
+            like_params.extend([f"%{query}%", f"%{query}%"])
+        for tok in surface_toks:
+            if tok == query:
+                continue
+            like_clauses.append("(subject LIKE ? OR tags LIKE ?)")
+            like_params.extend([f"%{tok}%", f"%{tok}%"])
+        if like_clauses:
+            clauses = [like_status_clause, "(" + " OR ".join(like_clauses) + ")"]
+            params = list(like_params)
             for tag in tags or []:
                 clauses.append("tags LIKE ?")
                 params.append(f"%{tag}%")
@@ -684,6 +708,10 @@ def _wide_recall(
                 for row in conn.execute(sql, params).fetchall():
                     d = row_to_dict(row)
                     if d["id"] not in pool:
+                        # Surface hits enter the pool last (worst lexical
+                        # ranks); the trim below reserves bounded seats so
+                        # exact matches are never starved by fusion order.
+                        d["_surface_candidate"] = True
                         pool[d["id"]] = d
             except Exception:
                 pass
@@ -878,6 +906,16 @@ def _wide_recall(
     for row in lexical_candidates[:lexical_quota]:
         selected[int(row["id"])] = row
     for row in evidence_candidates[:evidence_quota]:
+        selected[int(row["id"])] = row
+    # v0.15.9: bounded reserved seats for channel-3 surface hits — without
+    # this, exact subject/tags matches starve in the fusion-order trim because
+    # they always carry the worst lexical ranks (they enter the pool last).
+    surface_candidates = sorted(
+        (row for row in fused
+         if row.get("_surface_candidate") and int(row["id"]) not in selected),
+        key=lambda row: int(row.get("_lexical_rank") or 10**9),
+    )
+    for row in surface_candidates[:SURFACE_ADMISSION_QUOTA]:
         selected[int(row["id"])] = row
     if len(selected) < pool_cap:
         for row in fused:
@@ -1218,6 +1256,20 @@ def search_memories(
         distance_map=weak_distance_map,
         ws_min_name_len=WORKSPACE_MIN_NAME_LEN,
     )
+    # v0.15.9 page floor: on the ACTIVE query-recall path, below-floor
+    # candidates never reach the page (宁缺毋滥). Expired audit recall keeps
+    # everything — its purpose is exhaustive review, not relevance.
+    if status_filter == "active":
+        pre_floor_count = len(reranked)
+        reranked = [
+            r for r in reranked
+            if float(r.get("_final_score") or 0.0) >= QUERY_RECALL_SCORE_FLOOR
+        ]
+        if pre_floor_count and not reranked:
+            warnings.append(
+                f"no candidates reached the relevance floor ({QUERY_RECALL_SCORE_FLOOR:g}); "
+                "reword the query or add tags_filter"
+            )
     # Slice to the requested page window.
     page = reranked[offset:offset + limit]
 

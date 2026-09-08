@@ -5,6 +5,8 @@ semantics (v0.15.2 size block + v0.15.4 preview revision).
 """
 from __future__ import annotations
 
+import pytest
+
 import json
 from pathlib import Path
 
@@ -13,6 +15,16 @@ from memory_arbiter.db import MemoryDB
 from memory_arbiter.pipeline.read import _preview_item
 from memory_arbiter.tokens import TOKEN_ESTIMATE_BASIS, estimate_tokens
 from memory_arbiter.tools import MemoryTools
+
+
+
+@pytest.fixture(autouse=True)
+def _relevance_floor_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 0.15.9: the tests in this file exercise scoping/preview/metering with
+    # content-only fixtures; the query-recall relevance floor is orthogonal to
+    # what they pin (its behavior lives in tests/test_recall_quality_0159.py).
+    # Disable it here so weak fixtures stay recallable.
+    monkeypatch.setattr("memory_arbiter.search.QUERY_RECALL_SCORE_FLOOR", -1.0)
 
 
 def make_tools(tmp_path: Path) -> MemoryTools:

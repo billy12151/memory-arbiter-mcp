@@ -272,6 +272,9 @@ def test_evidence_candidate_enters_when_lexical_pool_is_full(tmp_path: Path, mon
             "distance": 0.01,
         }]
 
+    # 0.15.9: this pins pool ADMISSION, not page relevance; disable the floor.
+    import memory_arbiter.search as _search_mod
+    monkeypatch.setattr(_search_mod, "QUERY_RECALL_SCORE_FLOOR", -1.0)
     monkeypatch.setattr(tools.db, "evidence_knn", evidence_knn)
     result = tools.memory_search(
         query="needle", limit=4, query_embedding=[1.0, 0.0],

@@ -28,6 +28,16 @@ from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryStat
 from memory_arbiter.tools import MemoryTools
 
 
+
+@pytest.fixture(autouse=True)
+def _relevance_floor_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 0.15.9: the tests in this file exercise scoping/preview/metering with
+    # content-only fixtures; the query-recall relevance floor is orthogonal to
+    # what they pin (its behavior lives in tests/test_recall_quality_0159.py).
+    # Disable it here so weak fixtures stay recallable.
+    monkeypatch.setattr("memory_arbiter.search.QUERY_RECALL_SCORE_FLOOR", -1.0)
+
+
 def make_tools(tmp_path: Path, isolation: str = "none", *, vec: bool = False) -> MemoryTools:
     # vec=True points at a (fake) GGUF model — since 0.15.0 the model path IS
     # the intent to embed — and mirrors the first successful embedder build by

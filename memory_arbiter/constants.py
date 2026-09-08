@@ -174,6 +174,18 @@ WORKSPACE_MIN_NAME_LEN = 3
 # retrieval / paging caps
 RECALL_POOL_CAP = 50
 CONTENT_LIKE_CAP = 30
+# v0.15.9 relevance floor (docs/eval-relevance-floor-2026-09-08.md): reranked
+# candidates below this final_score never enter a find query-recall result
+# page. Calibrated on the live library (340 labeled candidates): the 7.6-8.1
+# band measured 94% irrelevant; F=8.1 keeps 41/45 relevant (every affected
+# query keeps a stronger partner hit), cuts 73% of irrelevant candidates and
+# clears 91% of legal-form noise. Scope: active query-recall direct path only
+# (browse / filter-driven recall / expired audit are exempt).
+QUERY_RECALL_SCORE_FLOOR = 8.1
+# v0.15.9: bounded reserved pool seats for channel-3 surface hits (exact
+# subject/tags token matches). Without them the fusion-order trim starves
+# surface rows — they enter the pool last (worst lexical ranks) and get cut.
+SURFACE_ADMISSION_QUOTA = 10
 SUPERSEDED_LIMIT = 20
 NOTICE_SYNC_WAIT_MS = 3000
 
