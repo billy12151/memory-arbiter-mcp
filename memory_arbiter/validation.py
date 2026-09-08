@@ -31,6 +31,13 @@ MAX_REVISION = 2_147_483_647
 SEMANTIC_CONTROL_MAX_TIMEOUT = 600.0
 MAX_RESULT_LIMIT = 100
 MAX_OFFSET = 10_000
+# v0.15.9 batch_find bounds (single source: constants, re-exported for the
+# narrow validation boundary)
+from .constants import (  # noqa: E402
+    BATCH_FIND_MAX_LIMIT_PER_QUERY,
+    BATCH_FIND_TOTAL_BYTES,
+    MAX_BATCH_FIND_QUERIES,
+)
 
 _SENSITIVE_FIELDS = {
     "authorized", "workspace", "memory_id", "conflict_id", "notice_id",
@@ -52,6 +59,10 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "query_embedding", "tags_filter", "after_time", "before_time",
         "source_type", "include_linked_open_items", "include_conflict_signal",
         "include_size", "include_content",
+    },
+    ("memory", "batch_find"): {
+        "queries", "workspace", "tags_filter", "after_time", "before_time",
+        "source_type", "limit_per_query", "include_content", "deduplicate",
     },
     ("memory", "read"): {"id", "memory_id", "span", "workspace"},
     ("memory", "update"): {
@@ -184,6 +195,70 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             unknown_keys.append(key)
         for key in unknown_keys:
             payload.pop(key, None)
+
+    if (surface, operation) == ("memory", "batch_find"):
+        queries = payload.get("queries")
+        if not isinstance(queries, list) or not queries:
+            result.error = _error("queries", "must be a non-empty list of {id?, query} objects")
+            return result
+        if len(queries) > MAX_BATCH_FIND_QUERIES:
+            result.error = _error("queries", f"must contain at most {MAX_BATCH_FIND_QUERIES} items")
+            return result
+        try:
+            queries_bytes = _json_size(queries)
+        except (TypeError, ValueError, RecursionError):
+            result.error = _error("queries", "must contain only JSON-serializable values")
+            return result
+        if queries_bytes > BATCH_FIND_TOTAL_BYTES:
+            result.error = {
+                "error": "resource_limit_exceeded", "field": "queries",
+                "actual_bytes": queries_bytes, "max_bytes": BATCH_FIND_TOTAL_BYTES,
+            }
+            return result
+        seen_ids: set[str] = set()
+        seen_queries: set[str] = set()
+        for item in queries:
+            if not isinstance(item, dict):
+                result.error = _error("queries", "every item must be a JSON object with a non-empty query")
+                return result
+            unknown = set(item) - {"id", "query"}
+            if unknown:
+                result.error = _error("queries", f"unknown item field(s): {', '.join(sorted(unknown))}")
+                return result
+            q = item.get("query")
+            if not isinstance(q, str) or not q.strip():
+                result.error = _error("queries", "every item requires a non-empty string query")
+                return result
+            if len(q) > MAX_QUERY_CHARS:
+                result.error = _error("query", f"must be a string of at most {MAX_QUERY_CHARS} characters")
+                return result
+            qid = item.get("id")
+            defaulted = qid is None
+            if defaulted:
+                qid = q
+            if not isinstance(qid, str) or not qid or len(qid) > 64:
+                result.error = _error("queries", "id must be a non-empty string of at most 64 characters")
+                return result
+            if qid in seen_ids:
+                result.error = _error("queries", f"duplicate query id: {qid}")
+                return result
+            if q in seen_queries:
+                result.error = _error("queries", f"duplicate query: {q}")
+                return result
+            seen_ids.add(qid)
+            seen_queries.add(q)
+            # Normalize defaulted ids in place so dispatch sees explicit ids.
+            item["id"] = qid
+        limit_per_query = payload.get("limit_per_query")
+        if limit_per_query is not None:
+            parsed_limit = _controlled_integer(limit_per_query)
+            if parsed_limit is None or not 1 <= parsed_limit <= BATCH_FIND_MAX_LIMIT_PER_QUERY:
+                result.error = _error(
+                    "limit_per_query",
+                    f"must be an integer between 1 and {BATCH_FIND_MAX_LIMIT_PER_QUERY}",
+                )
+                return result
+            payload["limit_per_query"] = parsed_limit
 
     if (surface, operation) == ("memory", "remember"):
         for key in ("content", "subject"):

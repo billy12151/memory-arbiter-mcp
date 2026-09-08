@@ -1344,6 +1344,9 @@ class MemoryTools:
             include_conflict_signal=include_conflict_signal, **_,
         )
 
+    def memory_batch_find(self, **payload: Any) -> dict[str, Any]:
+        return self._read_pipeline.memory_batch_find(**payload)
+
     def memory_search_expired(
         self,
         query: str = "",

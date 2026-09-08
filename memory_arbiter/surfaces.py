@@ -66,10 +66,11 @@ def _memory_value_reference() -> dict[str, Any]:
 _PRODUCT_HELPS: dict[str, Any] = {
     "memory": {
         "description": "Daily memory operations: remember, find, read, update, judge, status.",
-        "actions": ["remember", "find", "read", "update", "judge", "status", "help"],
+        "actions": ["remember", "find", "batch_find", "read", "update", "judge", "status", "help"],
         "examples": {
             "remember": {"action": "remember", "data": {"content": "Fact to remember", "subject": "Short subject", "tags": ["project"]}},
             "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
+            "batch_find": {"action": "batch_find", "data": {"queries": [{"id": "collections", "query": "催收 辱骂 侮辱"}, {"id": "debt-transfer", "query": "债务转移 债权人同意"}], "limit_per_query": 3}},
             "read": {"action": "read", "data": {"memory_id": 123}},
             "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
             "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
@@ -118,6 +119,23 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "savings comparisons stay valid. "
             "unresolved_conflict_count appears only when page items directly hit an "
             "open/applying conflict group, and counts those page items."
+        ),
+        "batch_find_semantics": (
+            "batch_find runs up to 8 queries in one call and returns one merged "
+            "index page. Shared filters (workspace/tags_filter/source_type/"
+            "after_time/before_time) and the caller scope apply to every query. "
+            "id is optional and defaults to the query text; ids and queries must "
+            "be unique inside a batch (fail-fast: malformed batches are rejected "
+            "whole — there is no partial-success mode). limit_per_query (default "
+            "3, max 20) slices each query's page BEFORE merging. "
+            "deduplicate=true (default) merges by memory_id across queries: each "
+            "item carries matched_query_ids (every hitting query) and "
+            "best_query_id; the page is ordered by best final score, then first "
+            "hit, then memory_id. per_query reports {id, count, has_more, "
+            "retrieval_mode} per query — a query that recalls nothing reports "
+            "count=0/empty; batch never falls back to recent memories and every "
+            "item has already passed the relevance floor. include_content=true "
+            "returns full texts — prefer the preview and read specific spans."
         ),
         "value_reference": _memory_value_reference(),
     },
@@ -647,7 +665,7 @@ class ProductSurfaces:
         self._normalize_boolean_fields(
             payload, "authorized", "tags_only", "debug_ranking",
             "include_linked_open_items", "include_conflict_signal",
-            "include_size", "include_content",
+            "include_size", "include_content", "deduplicate",
             "affects_current_output",
         )
         if action == "help":
@@ -656,6 +674,8 @@ class ProductSurfaces:
             return self._forward("memory", action, self._tools.memory_write, **payload)
         if action == "find":
             return self._forward("memory", action, self._tools.memory_search, **payload)
+        if action == "batch_find":
+            return self._forward("memory", action, self._tools.memory_batch_find, **payload)
         if action == "read":
             self._alias_id(payload, "memory_id")
             missing = self._require_id("memory", payload, "memory_id", action)

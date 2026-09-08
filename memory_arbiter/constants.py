@@ -177,6 +177,12 @@ QUERY_RECALL_SCORE_FLOOR = 8.1
 # subject/tags token matches). Without them the fusion-order trim starves
 # surface rows — they enter the pool last (worst lexical ranks) and get cut.
 SURFACE_ADMISSION_QUOTA = 10
+
+# v0.15.9 batch_find bounds (mema 923 §6)
+MAX_BATCH_FIND_QUERIES = 8
+BATCH_FIND_DEFAULT_LIMIT_PER_QUERY = 3
+BATCH_FIND_MAX_LIMIT_PER_QUERY = 20
+BATCH_FIND_TOTAL_BYTES = 64 * 1024
 SUPERSEDED_LIMIT = 20
 NOTICE_SYNC_WAIT_MS = 3000
 

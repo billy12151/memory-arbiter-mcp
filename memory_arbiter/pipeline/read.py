@@ -142,81 +142,21 @@ class ReadPipeline:
                 },
                 ok=False,
             )
-        vec_state = self.db.get_vec_index_state()
-        vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
-        if vec_disabled and (query_embedding is not None or (query and self.settings.embedding_auto_query)):
-            disabled_reason = (
-                "embedding_space_mismatch"
-                if vec_state.get("state") == "mismatch"
-                else "embedding_migration_failed"
-            )
-            extra_warnings.append(f"vec_disabled={disabled_reason}")
-            query_embedding = None
-        elif query_embedding is None and query and self.settings.embedding_auto_query:
-            embedder, ensure_warnings = self._ensure_embedder()
-            extra_warnings.extend(ensure_warnings)
-            if embedder is not None:
-                try:
-                    # Char-level pre-trim for pathological pastes; the token
-                    # budget inside embed_text still makes the final cut.
-                    er = embedder.embed_text(
-                        prefix="", body=query,
-                        max_body_chars=max(EMBEDDING_MAX_SECTION_CHARS, 2048),
-                    )
-                    if er.embedding:
-                        refreshed_state = self.db.get_vec_index_state()
-                        if refreshed_state.get("state") in {"mismatch", "failed"}:
-                            reason = (
-                                "embedding_space_mismatch"
-                                if refreshed_state.get("state") == "mismatch"
-                                else "embedding_migration_failed"
-                            )
-                            extra_warnings.append(f"vec_disabled={reason}")
-                        else:
-                            query_embedding = er.embedding
-                    else:
-                        extra_warnings.append(
-                            f"auto-embedding query failed: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
-                        )
-                except Exception as exc:
-                    extra_warnings.append(f"auto-embedding query failed: {exc}")
-        # v0.9.7/v0.12.5: workspace isolation on the read path.
-        isolation = self.settings.isolation
-        caller = self._caller_workspace(workspace)
-        # Spec §15.6: an explicit workspace filter is canonicalized then applied
-        # in every isolation mode. In none this honors the caller's explicit
-        # filter only — never an ACL: omitted workspace still spans all
-        # workspaces and the settings fallback never filters.
-        explicit_filter = isolation != "none" or caller.source == "explicit"
-        ws_canonical = caller.canonical if explicit_filter else None
-        workspace = caller.workspace if explicit_filter else workspace
-        # A none/weak explicit filter scopes recall in SQL (hard_scope) so the
-        # limit is applied AFTER workspace scoping — never a post-page truncation.
-        hard_scope = isolation == "none" and caller.source == "explicit" and bool(caller.canonical)
+        query_embedding = self._auto_embed(query, query_embedding, extra_warnings)
+        ctx = self._search_scope_context(workspace, extra_warnings)
+        isolation = ctx["isolation"]
+        caller = ctx["caller"]
+        ws_canonical = ctx["ws_canonical"]
+        workspace = ctx["workspace"]
+        hard_scope = ctx["hard_scope"]
+        ws_scope = ctx["ws_scope"]
+        exclude_ws = ctx["exclude_ws"]
         if isolation == "strict" and not ws_canonical:
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
                 data = denied.get("data") or {}
                 data.update({"results": [], "count": 0})
                 return denied
-        # strict recall/ACL scope is the admitted canonical set (own +
-        # in-radius neighbours). None/weak never hard-scope by it.
-        ws_scope = caller.scope_canonicals() if isolation == "strict" and ws_canonical else None
-        # v0.15.5 recall blacklist: an UNSCOPED find (no explicit workspace,
-        # non-strict) excludes blacklisted workspaces (default: the mema-twin
-        # preference bucket) from the ambient pool. An explicit workspace
-        # filter — including a blacklisted one — is honored as-is, and strict
-        # scoping bypasses the blacklist via its admitted set.
-        exclude_ws: "frozenset[str] | None" = None
-        if caller.source != "explicit" and isolation != "strict":
-            from ..recall_blacklist import blacklist_path, load_blacklist
-            exclude_ws, bl_warnings = load_blacklist(blacklist_path(self.db.settings.db_path))
-            extra_warnings.extend(bl_warnings)
-            # A caller HOMED in a blacklisted bucket (settings.workspace) is
-            # effectively explicit about that bucket — un-exclude its home
-            # only, never drop the whole blacklist.
-            if exclude_ws and caller.canonical and caller.canonical in exclude_ws:
-                exclude_ws = exclude_ws - {caller.canonical}
         # v0.9.4: search_memories now uses status_filter instead of include_superseded
         outcome = self._search_memories(
             self.db, query, workspace, tags, limit,
@@ -423,6 +363,301 @@ class ReadPipeline:
             response_data,
             extra_warnings=extra_warnings + warnings + list(caller.warnings),
         )
+
+
+    def _auto_embed(
+        self, query: str, query_embedding: "list[float] | None",
+        extra_warnings: list[str],
+    ) -> "list[float] | None":
+        """v0.15.9: vec-state check + auto-embedding for ONE query.
+
+        Extracted verbatim from memory_search so batch_find can embed each
+        query through the identical path (failures degrade to shared
+        warnings; the vec index is never assumed healthy).
+        """
+        vec_state = self.db.get_vec_index_state()
+        vec_disabled = vec_state.get("state") in {"mismatch", "failed"}
+        if vec_disabled and (query_embedding is not None or (query and self.settings.embedding_auto_query)):
+            disabled_reason = (
+                "embedding_space_mismatch"
+                if vec_state.get("state") == "mismatch"
+                else "embedding_migration_failed"
+            )
+            extra_warnings.append(f"vec_disabled={disabled_reason}")
+            return None
+        if query_embedding is not None or not (query and self.settings.embedding_auto_query):
+            return query_embedding
+        embedder, ensure_warnings = self._ensure_embedder()
+        extra_warnings.extend(ensure_warnings)
+        if embedder is None:
+            return None
+        try:
+            # Char-level pre-trim for pathological pastes; the token
+            # budget inside embed_text still makes the final cut.
+            er = embedder.embed_text(
+                prefix="", body=query,
+                max_body_chars=max(EMBEDDING_MAX_SECTION_CHARS, 2048),
+            )
+            if er.embedding:
+                refreshed_state = self.db.get_vec_index_state()
+                if refreshed_state.get("state") in {"mismatch", "failed"}:
+                    reason = (
+                        "embedding_space_mismatch"
+                        if refreshed_state.get("state") == "mismatch"
+                        else "embedding_migration_failed"
+                    )
+                    extra_warnings.append(f"vec_disabled={reason}")
+                    return None
+                return er.embedding
+            extra_warnings.append(
+                f"auto-embedding query failed: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"
+            )
+        except Exception as exc:
+            extra_warnings.append(f"auto-embedding query failed: {exc}")
+        return None
+
+    def _search_scope_context(
+        self, workspace: "str | None", extra_warnings: list[str],
+    ) -> dict[str, Any]:
+        """v0.15.9: per-call scope preamble shared by find and batch_find.
+
+        Resolves isolation, caller workspace, strict admitted set, hard
+        scoping and the recall blacklist ONCE per call — every query in a
+        batch shares the same caller context by construction.
+        """
+        # v0.9.7/v0.12.5: workspace isolation on the read path.
+        isolation = self.settings.isolation
+        caller = self._caller_workspace(workspace)
+        # Spec §15.6: an explicit workspace filter is canonicalized then applied
+        # in every isolation mode. In none this honors the caller's explicit
+        # filter only — never an ACL: omitted workspace still spans all
+        # workspaces and the settings fallback never filters.
+        explicit_filter = isolation != "none" or caller.source == "explicit"
+        ws_canonical = caller.canonical if explicit_filter else None
+        workspace = caller.workspace if explicit_filter else workspace
+        # A none/weak explicit filter scopes recall in SQL (hard_scope) so the
+        # limit is applied AFTER workspace scoping — never a post-page truncation.
+        hard_scope = isolation == "none" and caller.source == "explicit" and bool(caller.canonical)
+        # strict recall/ACL scope is the admitted canonical set (own +
+        # in-radius neighbours). None/weak never hard-scope by it.
+        ws_scope = caller.scope_canonicals() if isolation == "strict" and ws_canonical else None
+        # v0.15.5 recall blacklist: an UNSCOPED find (no explicit workspace,
+        # non-strict) excludes blacklisted workspaces (default: the mema-twin
+        # preference bucket) from the ambient pool. An explicit workspace
+        # filter — including a blacklisted one — is honored as-is, and strict
+        # scoping bypasses the blacklist via its admitted set.
+        exclude_ws: "frozenset[str] | None" = None
+        if caller.source != "explicit" and isolation != "strict":
+            from ..recall_blacklist import blacklist_path, load_blacklist
+            exclude_ws, bl_warnings = load_blacklist(blacklist_path(self.db.settings.db_path))
+            extra_warnings.extend(bl_warnings)
+            # A caller HOMED in a blacklisted bucket (settings.workspace) is
+            # effectively explicit about that bucket — un-exclude its home
+            # only, never drop the whole blacklist.
+            if exclude_ws and caller.canonical and caller.canonical in exclude_ws:
+                exclude_ws = exclude_ws - {caller.canonical}
+        return {
+            "isolation": isolation, "caller": caller, "ws_canonical": ws_canonical,
+            "workspace": workspace, "hard_scope": hard_scope,
+            "ws_scope": ws_scope, "exclude_ws": exclude_ws,
+        }
+
+
+    def memory_batch_find(
+        self,
+        queries: "list[dict[str, Any]] | None" = None,
+        workspace: str | None = None,
+        tags_filter: list[str] | None = None,
+        after_time: str | None = None,
+        before_time: str | None = None,
+        source_type: str | None = None,
+        limit_per_query: int = 3,
+        include_content: bool = False,
+        deduplicate: bool = True,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """v0.15.9 batch_find (mema 923 §6): one call, N queries, merged page.
+
+        Contract highlights (pinned in tests/test_batch_find.py):
+        - fail-fast: the validation boundary rejects malformed batches whole;
+          there is no per-query runtime error channel (shared degradations —
+          embedder/vec down — surface as shared warnings);
+        - no fallback: a query that recalls nothing reports count=0 /
+          retrieval_mode="empty" — batch inherits find's honest-empty
+          semantics, never recent memories;
+        - deduplicate=true merges by memory_id across queries; each item
+          carries matched_query_ids (all hitting query ids, submission
+          order) and best_query_id (the query whose page scored it
+          highest); global order = best final score desc, then first-hit
+          query order, then memory_id asc (deterministic);
+        - per query, the page is sliced to limit_per_query BEFORE merging;
+        - shared filters (workspace/tags_filter/source_type/time window)
+          and the caller scope (isolation/ACL/recall blacklist) apply
+          identically to every query in the batch.
+        """
+        from ..constants import BATCH_FIND_DEFAULT_LIMIT_PER_QUERY
+
+        if not queries:
+            return self.db.state.response(
+                {"error": "queries must be a non-empty list of {id?, query} objects",
+                 "results": [], "count": 0, "per_query": []},
+                ok=False,
+            )
+        try:
+            limit_per_query = int(limit_per_query)
+        except (TypeError, ValueError):
+            limit_per_query = BATCH_FIND_DEFAULT_LIMIT_PER_QUERY
+        limit_per_query = max(1, min(limit_per_query, 20))
+        deduplicate = True if deduplicate is None else bool(deduplicate)
+
+        extra_warnings = list(self._embedder_warnings)
+        ctx = self._search_scope_context(workspace, extra_warnings)
+        if ctx["isolation"] == "strict" and not ctx["ws_canonical"]:
+            denied = self._strict_acl_unavailable(ctx["caller"])
+            if denied is not None:
+                data = denied.get("data") or {}
+                data.update({"results": [], "count": 0, "per_query": []})
+                return denied
+
+        per_query: list[dict[str, Any]] = []
+        # (query_order, row_in_query_order, qid, row) — rows carry debug fields
+        # for the merge; they are stripped before the preview is built.
+        collected: list[tuple[int, int, str, dict[str, Any]]] = []
+        attention_hits: list[dict[str, Any]] = []
+        for order, item in enumerate(queries):
+            qid = str(item.get("id") or item.get("query") or f"q{order}")
+            query = str(item.get("query") or "")
+            emb = self._auto_embed(query, None, extra_warnings)
+            outcome = self._search_memories(
+                self.db, query, ctx["workspace"], None, limit_per_query,
+                status_filter="active", offset=0, debug_ranking=True,
+                query_embedding=emb, tags_filter=tags_filter,
+                after_time=after_time, before_time=before_time,
+                source_type=source_type, ws_canonical=ctx["ws_canonical"],
+                isolation=ctx["isolation"], hard_scope=ctx["hard_scope"],
+                ws_scope=ctx["ws_scope"], exclude_workspaces=ctx["exclude_ws"],
+            )
+            rows = outcome.results
+            if outcome.retrieval_mode == "direct" and rows:
+                rows = self._attach_conflict_signals(rows, extra_warnings)
+                for row in rows:
+                    sig = row.get("conflict_signal") or {}
+                    if sig.get("conflict_source") in _STRONG_CONFLICT_SOURCES:
+                        attention_hits.append({"qid": qid, "row": row, "sig": sig})
+            per_query.append({
+                "id": qid,
+                "count": len(rows),
+                "has_more": bool(outcome.has_more),
+                "retrieval_mode": outcome.retrieval_mode,
+            })
+            extra_warnings.extend(outcome.warnings)
+            for row_idx, row in enumerate(rows):
+                collected.append((order, row_idx, qid, row))
+
+        def _final(row: dict[str, Any]) -> float:
+            try:
+                return float(row.get("_final_score") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _preview(row: dict[str, Any]) -> dict[str, Any]:
+            clean = {k: v for k, v in row.items() if not k.startswith("_")}
+            return _preview_item(clean, include_content=include_content)
+
+        results: list[dict[str, Any]] = []
+        if deduplicate:
+            merged: dict[int, dict[str, Any]] = {}
+            for order, row_idx, qid, row in collected:
+                mid = int(row["id"])
+                entry = merged.setdefault(mid, {
+                    "row": row, "best_final": _final(row), "best_order": order,
+                    "best_row_idx": row_idx, "best_qid": qid, "matched": [],
+                })
+                if qid not in entry["matched"]:
+                    entry["matched"].append(qid)
+                final = _final(row)
+                # Deterministic best-pick: score desc, then earliest query,
+                # then earliest position inside that query's page.
+                if (final, -order, -row_idx) > (entry["best_final"], -entry["best_order"], -entry["best_row_idx"]):
+                    entry.update({"row": row, "best_final": final, "best_order": order,
+                                  "best_row_idx": row_idx, "best_qid": qid})
+            ordered = sorted(
+                merged.values(),
+                key=lambda e: (-e["best_final"], e["best_order"], e["best_row_idx"], int(e["row"]["id"])),
+            )
+            for entry in ordered:
+                preview = _preview(entry["row"])
+                preview["matched_query_ids"] = entry["matched"]
+                preview["best_query_id"] = entry["best_qid"]
+                results.append(preview)
+        else:
+            for order, row_idx, qid, row in collected:
+                preview = _preview(row)
+                preview["matched_query_ids"] = [qid]
+                preview["best_query_id"] = qid
+                results.append(preview)
+
+        response_data: dict[str, Any] = {
+            "results": results,
+            "count": len(results),
+            "per_query": per_query,
+            "deduplicated": bool(deduplicate),
+            "query_domain": "active",
+            "vector_lag": self._vector_lag(),
+        }
+
+        # v0.8.7 loud attention flag, aggregated across the whole batch: one
+        # summary naming the first strong hit and how many more exist.
+        if attention_hits:
+            first = attention_hits[0]
+            first_row, first_sig = first["row"], first["sig"]
+            head = f"batch_find[{first['qid']}] hit #{first_row.get('id')}"
+            if first_row.get("subject"):
+                head += f" ({first_row['subject']})"
+            head += f" carries a {first_sig.get('conflict_source') or 'open_table'} signal"
+            peer = first_sig.get("conflict_peer") or {}
+            if isinstance(peer, dict) and peer.get("id") is not None:
+                peer_txt = f"#{peer['id']}"
+                if peer.get("subject"):
+                    peer_txt += f" ({peer['subject']})"
+                head += f" vs {peer_txt}"
+            if len(attention_hits) > 1:
+                head += f" and {len(attention_hits) - 1} more"
+            seen_sources: dict[str, dict[str, Any]] = {}
+            for hit in attention_hits:
+                sig = hit["sig"]
+                src = str(sig.get("conflict_source") or "conflict")
+                row = hit["row"]
+                if src in seen_sources:
+                    continue
+                seen_sources[src] = row
+                ids = [int(row["id"])] if row.get("id") is not None else []
+                peer = sig.get("conflict_peer") or {}
+                if isinstance(peer, dict) and peer.get("id") is not None:
+                    ids.append(int(peer["id"]))
+                self.db.log_attention(trigger="search", source=src, memory_ids=ids)
+            response_data["attention_required"] = True
+            response_data["attention_summary"] = head
+
+        if self.settings.include_size:
+            size_block = meter_payloads(results)
+            page_cost = (
+                f"~{size_block['tokens_estimate']} tokens returned for "
+                f"{len(results)} merged item{'s' if len(results) != 1 else ''} "
+                f"across {len(per_query)} quer{'y' if len(per_query) == 1 else 'ies'}"
+            )
+            response_data["size"] = {
+                **size_block,
+                "display_hint": (
+                    f"batch_find merged page ({page_cost}): items are index-page previews "
+                    "(content_chars + outline) carrying matched_query_ids; per_query.count "
+                    "is each query's recalled page size after the relevance floor. "
+                    + ("include_content=true returned full texts — per-query limits multiply."
+                       if include_content else
+                       "Read specific items via memory(action='read') with outline offsets.")
+                ),
+            }
+        return self.db.state.response(response_data, extra_warnings=extra_warnings)
 
     def memory_search_expired(
         self,

@@ -352,6 +352,9 @@ def build_runtime() -> ServerBundle:
         value enums, update modes, and action_required paths before relying on a
         result that requests attention.
 
+        batch_find runs up to 8 queries in one call and returns one merged
+        index page (dedup by memory_id, matched_query_ids per item).
+
         find is an index page: results carry metadata + content_chars + a
         bounded outline (offsets usable directly as read span starts), not full
         content — pass include_content=true for full text. Score compares only
