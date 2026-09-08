@@ -15,7 +15,6 @@ from .constants import (
     EMBEDDING_MAX_SECTION_CHARS,
     EMBEDDING_N_CTX,
     EMBEDDING_RESERVED_TOKENS,
-    NOTICE_SYNC_WAIT_MS,
     QWEN_BUDGET_MS,
     QWEN_CANDIDATE_DISTANCE,
     QWEN_CANDIDATE_TOP_K,
@@ -203,9 +202,7 @@ class MemoryTools:
         # 0 (semantic_conflict.notice_sync_wait_ms=0) = never block the write
         # response on the post-commit check: batch ingestion still gets the
         # job run and notices deliver on a later response.
-        wait_ms = max(0, int(getattr(
-            self.settings, "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS,
-        )))
+        wait_ms = max(0, int(self.settings.semantic_conflict_notice_sync_wait_ms))
         can_check = bool(self._embedding_configured()) and self.settings.semantic_conflict_on_write != "off"
         completed = (
             self._semantic_worker.wait_task(str(task_id), wait_ms / 1000.0)
@@ -1211,9 +1208,7 @@ class MemoryTools:
             "on_write": self.settings.semantic_conflict_on_write,
             # Effective write-response wait (semantic_conflict.notice_sync_wait_ms,
             # default 3000; 0 = batch mode, never block the write response).
-            "notice_sync_wait_ms": int(getattr(
-                self.settings, "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS,
-            )),
+            "notice_sync_wait_ms": int(self.settings.semantic_conflict_notice_sync_wait_ms),
             "max_concurrency": 1,
             "max_concurrency_note": "reserved; the semantic worker is single-threaded",
             "last_pair_duration_ms": self._last_pair_duration_ms,

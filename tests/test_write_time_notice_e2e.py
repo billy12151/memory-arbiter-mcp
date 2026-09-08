@@ -200,10 +200,11 @@ def test_sync_window_completed_rides_along(tmp_path: Path, monkeypatch: pytest.M
     record = _isolated_write(tools, "syncbench 的取值为 json。", "s1")
     peer = _isolated_write(tools, "syncbench 的取值为 csv。", "s2")
     tools.settings.semantic_conflict_notice_sync_wait_ms = 3000
-    _stub_knn_peer(monkeypatch, tools, int(record["id"]), "syncbench 的取值为 csv。")
+    _stub_knn_peer(monkeypatch, tools, int(record["id"]), "syncbench 的取值为 json。")
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _FormatBackend())
     _index, check = tools._enqueue_content_postcommit(int(peer["id"]))
     assert check["status"] == "completed", check
+    assert check["outcome"] == "notices_created", check
 
 
 def test_sync_window_timeout_returns_async_and_survives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -273,9 +274,10 @@ _SLOW_MODEL = Path(
 def _real_backend() -> "Any":
     if not _SLOW_MODEL.exists():
         pytest.skip(f"real model not installed at {_SLOW_MODEL}")
+    from memory_arbiter.constants import SEMANTIC_N_CTX
     from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
 
-    backend = LocalGGUFSemanticBackend(_SLOW_MODEL, n_ctx=2048, n_threads=4, n_batch=128)
+    backend = LocalGGUFSemanticBackend(_SLOW_MODEL, n_ctx=SEMANTIC_N_CTX, n_threads=4, n_batch=128)
     backend.load()
     return backend
 

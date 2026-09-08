@@ -52,11 +52,11 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 | `tool_profile` | 删除——四个产品工具是唯一接口面 |
 | `semantic_conflict.backend`、`semantic_conflict.max_concurrency` | 删除——死旋钮（单一本地后端、串行 worker） |
 | `semantic_conflict.preload`、`semantic_conflict.resident` | 常量冻结为 true——配置了模型即启动加载并常驻 |
-| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | 常量冻结（1024 / 4 / 128） |
+| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | 常量冻结（0.15.8 起 2048 / 4 / 128） |
 | `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | 常量冻结（5000 / 30000 / 120000 / 1000 ms） |
 | `semantic_conflict.queue_max_size`、`semantic_conflict.max_evidence_units` | 常量冻结（100 / 24） |
 | `semantic_conflict.scan_enhance`、`semantic_conflict.scan_max_pairs`、`semantic_conflict.scan_budget_ms` | 常量冻结（true / 8 / 60000） |
-| `semantic_conflict.notice_sync_wait_ms`、`semantic_conflict.workspace_qwen_budget_ms` | 常量冻结（5000 / 750 ms） |
+| `semantic_conflict.workspace_qwen_budget_ms` | 常量冻结（750 ms）——`notice_sync_wait_ms` 已于 0.15.8 移出本表，恢复为活配置键（默认 3000，范围 0–5000，0 = 写入响应不等待，批量导入用） |
 | `embedding.n_ctx`、`embedding.reserved_tokens`、`embedding.max_unit_chars` | 常量冻结（2048 / 64 / 3600） |
 | `workspace_match_distance`、`workspace_qwen_candidate_distance`、`workspace_qwen_candidate_top_k` | 常量冻结（0.25 / 0.25 / 3） |
 | `workspace_weak_vector_weight`、`workspace_min_name_len`、`workspace_recall_admission`、`workspace_recall_cutoff` | 常量冻结（false / 3 / true / 0.25） |

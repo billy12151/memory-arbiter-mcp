@@ -42,7 +42,7 @@ pip install "memory-arbiter-mcp[vec]"            # sqlite-vec evidence recall
 pip install "memory-arbiter-mcp[semantic-local]" # local GGUF runtime (embeddings + Qwen)
 ```
 
-Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Since 0.15.0 configuration is file-only and the whole user surface is 19 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Since 0.15.0 configuration is file-only and the whole user surface is 20 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
 
 The server requires an explicitly configured identity: set `client` and `agent_id` in config.json or the `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` launch-context environment variables (the stdio `examples/*.mcp.json` entries do this via `env`). There are no built-in defaults — the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; `memory(action="remember")` does not accept `agent_id`/`client` in `data`. streamable-http takes caller identity from the per-request headers described below.
 
@@ -145,7 +145,7 @@ The old database is never deleted. Standard JSON configuration is backed up and 
 
 Configuration is file-only since 0.15.0. Everything tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at; `mema setup` writes the starter template). Engine parameters, timeouts, thresholds, and caps are frozen constants (`memory_arbiter/constants.py`).
 
-The complete user surface is 19 keys:
+The complete user surface is 20 keys:
 
 ```json
 {
@@ -167,6 +167,7 @@ The complete user surface is 19 keys:
     "enabled": true,
     "model_path": "~/.local/share/memory-arbiter/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
     "on_write": "async",
+    "notice_sync_wait_ms": 3000,
     "max_notice_pairs": 2
   },
   "mcp": {

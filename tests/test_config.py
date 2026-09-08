@@ -1084,7 +1084,7 @@ SLIM_SETTINGS_FIELDS = frozenset(
 )
 
 
-def test_settings_field_set_is_frozen_at_twenty_one() -> None:
+def test_settings_field_set_is_frozen_at_twenty_two() -> None:
     # 0.15.8: 22 — semantic_conflict_notice_sync_wait_ms restored as a live key.
     assert len(SLIM_SETTINGS_FIELDS) == 22
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS

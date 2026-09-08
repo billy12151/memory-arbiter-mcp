@@ -106,7 +106,7 @@ EMBEDDING_DEFAULT_DIM = 768
 
 # semantic-conflict (Qwen) engine
 # n_ctx 2048 (0.15.8): 1024 left no headroom — system(178) + frame/metadata
-# (~101) + two 400-char quotes (~478) + the 384-token output budget exceeded
+# (~101) + two 400-char quotes (~460) + the 384-token output budget exceeded
 # the window, so long-prompt pairs had their JSON generation truncated at the
 # context wall (the top qwen_invalid_output source).
 SEMANTIC_N_CTX = 2048

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from .constants import SEMANTIC_N_CTX
+
 ACTION_TYPES = {
     "value_changed",
     "scope_changed",
@@ -65,7 +67,7 @@ _PAIR_RESPONSE_FORMAT = {
 
 _PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
-attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中该属性的具体取值，取原文中的连续片段，长度不超过 64 字、不超过 12 个词；原句过长时截取最能体现取值差异的连续片段，禁止整句照抄，value 不得以句号结尾。
+attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中该属性的具体取值，取原文中的连续片段，长度不超过 64 字、不超过 12 个词；原句过长时截取最能体现取值差异的连续片段，禁止整句照抄，value 不得以句号、叹号、分号等句末标点结尾。
 无论是否能可靠抽取，都必须输出全部四个字符串字段，不得省略字段。无法可靠抽取时将对应字段写成字符串 "__unknown__"；不要输出 null、conflict、coexistence、winner、confidence 或额外字段。
 例：A=生产数据库使用 MySQL。B=生产数据库使用 SQLite。
 输出：{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}"""
@@ -771,7 +773,7 @@ def workspace_candidate_from_text(raw: str, candidates: list[str]) -> "Workspace
 
 
 class LocalGGUFSemanticBackend:
-    def __init__(self, model_path: Path, *, n_ctx: int = 1024, n_threads: int = 4, n_batch: int = 128):
+    def __init__(self, model_path: Path, *, n_ctx: int = SEMANTIC_N_CTX, n_threads: int = 4, n_batch: int = 128):
         self.model_path = Path(model_path).expanduser()
         self.n_ctx = int(n_ctx)
         self.n_threads = int(n_threads)
@@ -1120,7 +1122,7 @@ class IsolatedGGUFSemanticBackend:
         self,
         model_path: Path,
         *,
-        n_ctx: int = 1024,
+        n_ctx: int = SEMANTIC_N_CTX,
         n_threads: int = 4,
         n_batch: int = 128,
         hard_timeout_ms: int = 30_000,

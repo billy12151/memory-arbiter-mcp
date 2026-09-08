@@ -52,11 +52,11 @@ Six environment variables remain as launch context: `MEMORY_ARBITER_CONFIG`, `ME
 | `tool_profile` | Removed — the four product tools are the only surface |
 | `semantic_conflict.backend`, `semantic_conflict.max_concurrency` | Removed — dead knobs (single local backend, serial worker) |
 | `semantic_conflict.preload`, `semantic_conflict.resident` | Frozen `true` — configured model loads at startup and stays resident |
-| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | Frozen constants (1024 / 4 / 128) |
+| `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | Frozen constants (2048 since 0.15.8 / 4 / 128) |
 | `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | Frozen constants (5000 / 30000 / 120000 / 1000 ms) |
 | `semantic_conflict.queue_max_size`, `semantic_conflict.max_evidence_units` | Frozen constants (100 / 24) |
 | `semantic_conflict.scan_enhance`, `semantic_conflict.scan_max_pairs`, `semantic_conflict.scan_budget_ms` | Frozen constants (true / 8 / 60000) |
-| `semantic_conflict.notice_sync_wait_ms`, `semantic_conflict.workspace_qwen_budget_ms` | Frozen constants (5000 / 750 ms) |
+| `semantic_conflict.workspace_qwen_budget_ms` | Frozen constant (750 ms) — `notice_sync_wait_ms` left this table in 0.15.8 (live key again: default 3000, clamp 0–5000, 0 = never block the write response) |
 | `embedding.n_ctx`, `embedding.reserved_tokens`, `embedding.max_unit_chars` | Frozen constants (2048 / 64 / 3600) |
 | `workspace_match_distance`, `workspace_qwen_candidate_distance`, `workspace_qwen_candidate_top_k` | Frozen constants (0.25 / 0.25 / 3) |
 | `workspace_weak_vector_weight`, `workspace_min_name_len`, `workspace_recall_admission`, `workspace_recall_cutoff` | Frozen constants (false / 3 / true / 0.25) |
