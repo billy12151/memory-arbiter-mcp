@@ -273,7 +273,15 @@ _SLOW_MODEL = Path(
 ).expanduser()
 
 
-def _real_backend() -> "Any":
+@pytest.fixture(scope="module")
+def real_backend() -> "Any":
+    """Load the GGUF model ONCE per module and share it across the slow tests.
+
+    The classifier is stateless (production shares one resident instance
+    across all traffic); per-test cold loads were a 0.15.8-era convenience
+    that cost ~4x model loads per suite run. Skips cleanly on machines
+    without the model file, so CI never fails on it.
+    """
     if not _SLOW_MODEL.exists():
         pytest.skip(f"real model not installed at {_SLOW_MODEL}")
     from memory_arbiter.constants import SEMANTIC_N_CTX
@@ -281,7 +289,11 @@ def _real_backend() -> "Any":
 
     backend = LocalGGUFSemanticBackend(_SLOW_MODEL, n_ctx=SEMANTIC_N_CTX, n_threads=4, n_batch=128)
     backend.load()
-    return backend
+    yield backend
+    try:
+        backend.unload()
+    except Exception:
+        pass
 
 
 def _real_gate(backend: Any, left: str, right: str):
@@ -302,9 +314,9 @@ def _real_gate(backend: Any, left: str, right: str):
 
 
 @pytest.mark.slow
-def test_slow_date_pair_end_to_end_notice_ready() -> None:
+def test_slow_date_pair_end_to_end_notice_ready(real_backend: "Any") -> None:
     """Dates differing only in value must extract and reach notice_ready."""
-    backend = _real_backend()
+    backend = real_backend
     gate, _f, _r = _real_gate(
         backend,
         "新功能 scheduled-launch 的上线日期为 2026-09-01。",
@@ -315,10 +327,10 @@ def test_slow_date_pair_end_to_end_notice_ready() -> None:
 
 
 @pytest.mark.slow
-def test_slow_long_quote_pair_outputs_complete_json() -> None:
+def test_slow_long_quote_pair_outputs_complete_json(real_backend: "Any") -> None:
     """The 2026-09-08 live-host invalid_output sample: long prose pair must
     produce a complete, extractable JSON (no truncation) under v5+2048+400."""
-    backend = _real_backend()
+    backend = real_backend
     left = (
         "经复核确认：memory-arbiter 的写入路径已不含任何 Qwen 语义冲突检测，写时语义冲突检测已整体移除。"
         "当前冲突检测仅在定时 LLM scan 中执行，写入时不同步执行语义检查。"
@@ -337,10 +349,10 @@ def test_slow_long_quote_pair_outputs_complete_json() -> None:
 
 
 @pytest.mark.slow
-def test_slow_long_values_keep_difference() -> None:
+def test_slow_long_values_keep_difference(real_backend: "Any") -> None:
     """45–58 char historical value shapes must keep their distinction under
     the v5 fragment-selection wording (compression wording flattened them)."""
-    backend = _real_backend()
+    backend = real_backend
     gate, _f, _r = _real_gate(
         backend,
         "Tier1 功能方案状态：Tier1 已确认功能方案（810 v2 重排版：merge / 定时任务引导 / find 增强，0.16 规划）。",
@@ -350,9 +362,9 @@ def test_slow_long_values_keep_difference() -> None:
 
 
 @pytest.mark.slow
-def test_slow_short_value_regression() -> None:
+def test_slow_short_value_regression(real_backend: "Any") -> None:
     """json vs csv short values: the stable baseline."""
-    backend = _real_backend()
+    backend = real_backend
     gate, _f, _r = _real_gate(
         backend,
         "conflict-bench 的 export-format 取值为 json。",
