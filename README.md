@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.15.8` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
+> Current release: `0.15.9` (write-time duplicate hints recall via subject+tags vectors; `scan_duplicates` sweeps the whole library in one bounded call).
 
 ## Why trust it
 
@@ -56,12 +56,14 @@ The daily loop is four calls — `remember` a reusable fact, `find` to recall, `
 
 ## The four tools
 
-- `memory`: `remember`, `find`, `read`, `update`, `judge`, `status`, `help`
+- `memory`: `remember`, `find`, `batch_find`, `read`, `update`, `judge`, `status`, `help`
 - `memory_review`: read-only health, conflict groups/details, history, expired memory, audit, and entities
 - `memory_govern`: explicitly authorized retirement, conflict-plan application/resolution, confirmation, and workspace governance
 - `memory_repair`: evidence rebuild, broad conflict scanning/recording, history cleanup, entity assignment, pending activation, backup replay, semantic runtime control, and notice lifecycle
 
 Every product call returns the envelope `{ok, mode, warnings, degraded, data}`. Operation-specific `action_required`, `next_action`, `replan`, and records live under `data`; successful calls may additionally carry a top-level `notices` array. Each notice has its own `action_required` and machine-readable call under the notice object. Do not look for a generic top-level `action_required`.
+
+`batch_find` runs up to 8 queries in one call and merges the pages (dedup by `memory_id`; each item carries `matched_query_ids`/`best_query_id`; `per_query` reports per-query stats) — for multi-topic tasks this replaces 5-10 tool round-trips with one. Since 0.15.9 find is also honest about emptiness: a query that recalls nothing returns an empty page with a reword hint (no recent-memory stuffing), and candidates below the calibrated relevance floor (8.1) never enter a query-recall page at all — fewer "looks related, isn't" citations.
 
 `find` is an index page: by default each result carries metadata plus `content_chars` (the full-text length — what a `read` would cost) and a bounded `outline` of up to 8 `{head, offset}` segments whose offsets share `read`'s span coordinate system, so `span=[offset, offset+N]` slices that exact segment. Full content is not returned by default; pass `include_content=true` to get it back (`content_chars`/`outline` stay either way). Scores compare only within the page, and if the top page misses you should reword the query or add `tags_filter` rather than deep-page — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact count. The `size` block meters the page as actually returned: `returned_chars`/`returned_count` and a `tokens_estimate` from a deterministic bucket-table estimator (`heuristic_v1`) calibrated against a Qwen2.5 tokenizer on real records; it runs ~30% high on pure Chinese prose and ~17% high on pure English — the estimate and the estimated share one yardstick, so savings comparisons stay valid. Since 0.15.6 the same size block rides every recall surface — `read` (meters the record as returned, span windows included), `memory_review` `expired` and `history` (meter their result lists) — under one global config key `include_size` (default `true`); each block's `display_hint` repeats the token number with a report-this-recall-cost instruction, `include_size=false` turns all of them off together, and `find`'s old per-call `include_size` parameter is ignored with a warning. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, and counts those page items.
 
