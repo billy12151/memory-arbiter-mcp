@@ -107,6 +107,16 @@ SEMANTIC_JOB_TIMEOUT_MS = 5000
 SEMANTIC_INFERENCE_TIMEOUT_MS = 30000
 SEMANTIC_LOAD_TIMEOUT_MS = 120000
 SEMANTIC_MIN_PAIR_BUDGET_MS = 1000
+# Pair-extraction feedback retry (pair-v6): a single protocol invalid output
+# (over-limit field / truncated JSON / wrong schema) earns one retry with a
+# feedback turn. Truncation retries shrink the evidence quotes and widen the
+# output budget — worst-case n_ctx: system(~250) + metadata(~101) +
+# 2x400-char quotes(~460) + previous raw(<=384) + feedback(~30) + 384 output
+# ~= 1610 < 2048; the truncation retry (~240-char quotes, 512 output) lands
+# lower still. Unknown-field/backend failures never retry.
+SEMANTIC_PAIR_MAX_ATTEMPTS = 2
+SEMANTIC_PAIR_RETRY_QUOTE_CHARS = 240
+SEMANTIC_PAIR_RETRY_MAX_TOKENS = 512
 SEMANTIC_SCAN_ENHANCE = True
 SEMANTIC_SCAN_MAX_PAIRS = 8
 SEMANTIC_SCAN_BUDGET_MS = 60000

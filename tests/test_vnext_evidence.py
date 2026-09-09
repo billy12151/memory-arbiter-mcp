@@ -171,16 +171,136 @@ def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> 
     assert text.index("B metadata:") < text.index("B证据原文=数据库为 SQLite。")
     assert "entity=checkout" in text and "scope=global" in text
     assert "不应使用的全文" not in text
-    assert PAIR_PROMPT_VERSION == "pair-v5"
+    assert PAIR_PROMPT_VERSION == "pair-v6"
     assert "以 { 开头" in _PAIR_PROMPT
     assert "必须输出全部四个字符串字段" in _PAIR_PROMPT
     assert '"__unknown__"' in _PAIR_PROMPT
     assert "设为 null" not in _PAIR_PROMPT
+    # pair-v6: prompt text stays byte-identical to pair-v5 (few-shot variants
+    # regressed side attribution on the calibration pair and were rejected);
+    # the caps moved to the decoding-level grammar instead.
+    assert "例2" not in _PAIR_PROMPT
     schema = _PAIR_RESPONSE_FORMAT["schema"]
     assert set(schema["required"]) == {
         "attribute_a", "value_a", "attribute_b", "value_b",
     }
     assert schema["additionalProperties"] is False
+    assert schema["properties"]["value_a"]["maxLength"] == 64
+    assert schema["properties"]["value_b"]["maxLength"] == 64
+    assert schema["properties"]["attribute_a"]["maxLength"] == 80
+    assert schema["properties"]["attribute_b"]["maxLength"] == 80
+
+
+# The two live qwen_invalid_output samples (2026-09-08 17:31 / 2026-09-09
+# 04:48, see semantic_control status recent_samples): a valid JSON whose
+# value_b ran 76 chars, and a JSON truncated mid-key by the token budget.
+_LIVE_SAMPLE_OVER_LIMIT = (
+    '{"attribute_a":"透出前过滤","value_a":"kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计数）",'
+    '"attribute_b":"透出前过滤","value_b":"合并覆盖≥50%全文献条目升级全文+hit_spans 转标注'
+    '（owner 拍板：服务端不替 Agent 挑重要命中，法规 RAG 漏但书是系统性偏差）"}'
+)
+_LIVE_SAMPLE_TRUNCATED = (
+    '{"attribute_a":"代码评审","value_a":"亮点=测试隔离专业、SQL 参数化、优雅降级、CAS 冲突仲裁、'
+    'loopback 安全；硬伤 P0=4个 tool 全是 (action:str, data:dict) 反模式（server.py:347-427，'
+    'LLM 必须先调 help，无 Literal 校验）、P1=90+处 except Exception 静默吞异常","attribu'
+)
+_VALID_EXTRACTION_JSON = (
+    '{"attribute_a":"透出前过滤","value_a":"只透出 kind=subject",'
+    '"attribute_b":"透出前过滤","value_b":"全部透出"}'
+)
+
+
+class _ScriptedLLM:
+    """Fake chat-completion endpoint replaying canned raw outputs in order."""
+
+    def __init__(self, outputs: list[str]) -> None:
+        self._outputs = list(outputs)
+        self.calls: list[dict[str, Any]] = []
+
+    def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        raw = self._outputs.pop(0) if len(self._outputs) > 1 else self._outputs[0]
+        return {"choices": [{"message": {"content": raw}}]}
+
+
+def _backend_with_scripted_llm(
+    monkeypatch: pytest.MonkeyPatch, outputs: list[str],
+) -> tuple[Any, _ScriptedLLM]:
+    from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
+
+    backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
+    llm = _ScriptedLLM(outputs)
+    monkeypatch.setattr(backend, "_build_llm", lambda: llm)
+    return backend, llm
+
+
+def test_pair_retry_recovers_over_limit_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live sample 1 (valid JSON, 76-char value_b): one feedback retry with the
+    original quotes and token budget, naming the offending field."""
+    backend, llm = _backend_with_scripted_llm(
+        monkeypatch, [_LIVE_SAMPLE_OVER_LIMIT, _VALID_EXTRACTION_JSON],
+    )
+    signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
+    assert signal.candidate_type == "attribute_value_extraction"
+    assert len(llm.calls) == 2
+    retry_messages = llm.calls[1]["messages"]
+    assert llm.calls[1]["max_tokens"] == 384  # budget unchanged for over-limit
+    assert retry_messages[2] == {"role": "assistant", "content": _LIVE_SAMPLE_OVER_LIMIT}
+    assert retry_messages[3]["role"] == "user"
+    assert "value_b" in retry_messages[3]["content"]
+    assert "64" in retry_messages[3]["content"]
+    assert backend._pair_retried == 1
+    assert backend._pair_retry_recovered == 1
+
+
+def test_pair_retry_shrinks_quotes_after_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live sample 2 (JSON truncated mid-key): the retry cuts quotes to the
+    retry cap and widens max_tokens with the freed n_ctx budget."""
+    backend, llm = _backend_with_scripted_llm(
+        monkeypatch, [_LIVE_SAMPLE_TRUNCATED, _VALID_EXTRACTION_JSON],
+    )
+    long_quote = "证" * 300
+    signal = backend.classify_pair({"quote": long_quote}, {"quote": long_quote}, deadline_monotonic=None)
+    assert signal.candidate_type == "attribute_value_extraction"
+    assert len(llm.calls) == 2
+    first_user = llm.calls[0]["messages"][1]["content"]
+    retry = llm.calls[1]
+    assert retry["max_tokens"] == 512
+    assert "证" * 240 in retry["messages"][1]["content"]
+    assert "证" * 241 not in retry["messages"][1]["content"]
+    assert len(first_user) > len(retry["messages"][1]["content"])
+    assert retry["messages"][2] == {"role": "assistant", "content": _LIVE_SAMPLE_TRUNCATED}
+    assert backend._pair_retried == 1
+    assert backend._pair_retry_recovered == 1
+
+
+def test_pair_retry_exhausted_keeps_last_invalid_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two consecutive failures: the degradation path sees the last raw output,
+    exactly as the pre-retry single-shot behaviour saw its only output."""
+    second_truncation = '{"attribute_a":"代码评审","value_a":"更长的输出依然被截断","attr'
+    backend, llm = _backend_with_scripted_llm(
+        monkeypatch, [_LIVE_SAMPLE_TRUNCATED, second_truncation],
+    )
+    signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
+    assert signal.candidate_type == "invalid_json"
+    assert signal.raw == second_truncation
+    assert len(llm.calls) == 2
+    assert backend._pair_retried == 1
+    assert backend._pair_retry_recovered == 0
+
+
+def test_pair_retry_skips_unknown_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """__unknown__ is a protocol-legal negative, not a technical failure: no retry."""
+    unknown_json = (
+        '{"attribute_a":"__unknown__","value_a":"__unknown__",'
+        '"attribute_b":"__unknown__","value_b":"__unknown__"}'
+    )
+    backend, llm = _backend_with_scripted_llm(monkeypatch, [unknown_json])
+    signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
+    assert signal.candidate_type == "unknown_field"
+    assert len(llm.calls) == 1
+    assert backend._pair_retried == 0
+    assert backend._pair_retry_recovered == 0
 
 
 def test_write_notice_rejects_whole_quote_values_but_accepts_short_values() -> None:

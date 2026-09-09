@@ -9,6 +9,9 @@ silent-drop root causes (see mema memory id=919):
   3. true duplicates stay guarded (no Qwen call, no notice)
   4. sync-window three states (completed / async / wait=0 never blocks)
   5. pair prompt input caps quotes at 400 chars
+  6. live-degradation replays: the two 2026-09-08/09 qwen_invalid_output
+     samples (mema id=925 / id=926 evidence) must extract cleanly under the
+     current prompt+retry protocol
 
 Real-model variants live at the bottom under @pytest.mark.slow. Since 0.15.9.1 they
 run by default (the 0.15.8 release process relied on a manual "pytest -m slow" step
@@ -371,3 +374,92 @@ def test_slow_short_value_regression(real_backend: "Any") -> None:
         "conflict-bench 的 export-format 取值为 csv。",
     )
     assert gate.state == "notice_ready", gate
+
+
+def _assert_no_invalid_output(forward: "Any", reverse: "Any") -> None:
+    """The regression these replays guard: qwen_invalid_output (invalid_json /
+    invalid_schema) in either direction. unknown_field stays acceptable — it is
+    a protocol-legal negative, not a technical failure."""
+    for signal in (forward, reverse):
+        assert signal.candidate_type not in {"invalid_json", "invalid_schema"}, (
+            f"{signal.candidate_type}: {signal.error} raw={signal.raw[:200]}"
+        )
+
+
+def _faithful_env(
+    quote: str, *, subject: str, tags: list[str], workspace: str,
+    memory_id: int, version: int, event_time: "str | None",
+) -> dict[str, Any]:
+    """Envelope matching the live pair call: real subjects/tags/workspace from
+    the degrading memories. Teeth depend on it — with a minimal placeholder
+    envelope even the pre-fix code extracts these pairs cleanly (verified
+    2026-09-09 by replaying pair-v5 + no-retry against both fixtures)."""
+    return {"quote": quote[:400], "subject": subject, "tags": tags,
+            "workspace_canonical": workspace, "memory_id": memory_id, "version": version,
+            "event_time": event_time, "metadata": {}}
+
+
+@pytest.mark.slow
+def test_slow_live_degradation_replay_over_limit_value(real_backend: "Any") -> None:
+    """Replay of the 2026-09-08 17:31 degradation (mema id=925 evidence).
+
+    Pre-fix (pair-v5, no retry) the reverse direction of this exact fixture
+    answers invalid_schema/invalid_value_b — the 0.5B copies the 76-char
+    "合并覆盖≥50%…（owner 拍板：…）" clause into value_b, reproducing the live
+    qwen_invalid_output sample almost verbatim. Both directions must now
+    produce protocol-valid extractions (short values or legal unknown_field).
+    """
+    backend = real_backend
+    left = _faithful_env(
+        "透出前过滤 kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计数）；"
+        "永不截断：合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
+        "（owner 拍板：服务端不替 Agent 挑重要命中，法规 RAG 漏但书是系统性偏差）",
+        subject="0.15.10 方案定稿待审：content_mode 三态（preview/hits/full）+ hit_spans 命中透出，include_content 删除（breaking），多轮否决清单存档",
+        tags=["mema", "mema-core", "0.15.10", "content-mode", "hit-spans", "find", "batch-find",
+              "implementation-plan", "owner-pending-review"],
+        workspace="memory-arbiter-mcp", memory_id=925, version=5,
+        event_time="2026-09-09T00:00:00+00:00",
+    )
+    right = _faithful_env(
+        "透出前过滤：kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计数），"
+        "其余命中一律不透出，不做升级全文。",
+        subject="透出前过滤", tags=["hit-spans"],
+        workspace="memory-arbiter-mcp", memory_id=903, version=1,
+        event_time="2026-09-08T00:00:00+00:00",
+    )
+    forward = backend.classify_pair(left, right, deadline_monotonic=None)
+    reverse = backend.classify_pair(right, left, deadline_monotonic=None)
+    _assert_no_invalid_output(forward, reverse)
+
+
+@pytest.mark.slow
+def test_slow_live_degradation_replay_truncated_json(real_backend: "Any") -> None:
+    """Replay of the 2026-09-09 04:48 degradation (mema id=926 evidence).
+
+    Pre-fix (pair-v5, no retry) the forward direction of this exact fixture
+    answers invalid_schema/invalid_value_a — the 0.5B copies the 200+ char
+    review clause into value_a (in the live incident it kept going until the
+    384-token budget killed the JSON mid-key). Both directions must now
+    complete a protocol-valid extraction.
+    """
+    backend = real_backend
+    left = _faithful_env(
+        "代码评审综合 2.7/5：亮点=测试隔离专业、SQL 参数化、优雅降级、CAS 冲突仲裁、loopback 安全；"
+        "硬伤 P0=4个 tool 全是 (action:str, data:dict) 反模式（server.py:347-427，LLM 必须先调 help，"
+        "无 Literal 校验）、P1=90+处 except Exception 静默吞异常、P2=operations.py 2969行上帝文件、"
+        "P3=help 文本 50 行术语、P4=5步安装含 200MB GGUF、P5=无 optional-dependencies。",
+        subject="memarbiter/mema 项目战略评估结论",
+        tags=["memarbiter", "mema", "mema-twin", "项目战略", "竞品分析", "代码评审", "止损决策"],
+        workspace="default", memory_id=926, version=1,
+        event_time="2026-09-09T04:48:12+00:00",
+    )
+    right = _faithful_env(
+        "memory_arbiter 两轮 review 汇总：core 历史待办 + 新一轮 adversarial 发现（6 个开放问题）。"
+        "建议修复前用 core/main 最新代码重新确认问题仍存在。",
+        subject="memory_arbiter 两轮 review 汇总", tags=["code-review", "memory-arbiter"],
+        workspace="memory-arbiter-mcp", memory_id=758, version=10,
+        event_time="2026-08-27T14:32:04+00:00",
+    )
+    forward = backend.classify_pair(left, right, deadline_monotonic=None)
+    reverse = backend.classify_pair(right, left, deadline_monotonic=None)
+    _assert_no_invalid_output(forward, reverse)

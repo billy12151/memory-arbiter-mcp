@@ -3,6 +3,12 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.11] — 2026-09-09
+
+### Fixed
+
+- **Qwen pair extraction can no longer die on copied long values (`qwen_invalid_output`, pair-v6).** Two live degradations (2026-09-08 17:31 / 2026-09-09 04:48) showed the 0.5B still copying whole evidence clauses into `value_a`/`value_b` — one produced a protocol-valid JSON whose `value_b` ran 76 chars (rejected by the ≤64-char slot protocol), the other burned the 384-token budget and the JSON died mid-key. The 0.15.8 fix (max_tokens 120→384) only addressed the token budget; even a complete over-limit value failed validation, so the root behavior was never covered. pair-v6 fixes it structurally: the pair response format now declares `maxLength` (values 64 / attributes 80, mirroring `_MAX_VALUE_CHARS`/`_MAX_ATTRIBUTE_CHARS`), and llama.cpp enforces string length **at the decoding level** — an over-limit value can no longer be emitted in the first place (same precedent as the workspace suggester's `evidence maxLength=200`). As a backstop for the failure shapes a grammar cannot bound (>12-word values, wrong field sets, rare truncations), `classify_pair` earns one feedback retry with the offending raw echoed back and a strategy-specific correction (over-limit → fragment-selection reminder; truncation → quotes pre-shrunk 400→240 and max_tokens 384→512 with the freed n_ctx; schema → four-field reminder). The prompt text is byte-identical to pair-v5: two few-shot variants teaching fragment selection were tried and **rejected by experiment** — both broke side attribution on the Tier1 calibration pair (the model adopted positional heuristics from the example), the same lesson as the rejected "compress to the core value" wording. Both live incidents are pinned as faithful real-model replays in `tests/test_write_time_notice_e2e.py` (verified to fail on the pre-fix configuration and pass on pair-v6); the local backend status gains `pair_retried`/`pair_retry_recovered` counters.
+
 ## [0.15.10] — 2026-09-09
 
 **find/batch_find content depth is now a single-choice enum, and vector-hit spans are first-class.** One breaking change (parameter removal), one new content mode.

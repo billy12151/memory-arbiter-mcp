@@ -18,7 +18,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from .constants import SEMANTIC_N_CTX
+from .constants import (
+    SEMANTIC_N_CTX,
+    SEMANTIC_PAIR_MAX_ATTEMPTS,
+    SEMANTIC_PAIR_RETRY_MAX_TOKENS,
+    SEMANTIC_PAIR_RETRY_QUOTE_CHARS,
+)
 
 ACTION_TYPES = {
     "value_changed",
@@ -48,17 +53,23 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
-PAIR_PROMPT_VERSION = "pair-v5"
+PAIR_PROMPT_VERSION = "pair-v6"
 
 _PAIR_RESPONSE_FORMAT = {
     "type": "json_object",
     "schema": {
         "type": "object",
         "properties": {
-            "attribute_a": {"type": "string"},
-            "value_a": {"type": "string"},
-            "attribute_b": {"type": "string"},
-            "value_b": {"type": "string"},
+            # maxLength mirrors the protocol caps (_MAX_ATTRIBUTE_CHARS=80 /
+            # _MAX_VALUE_CHARS=64) at the decoding level: llama.cpp enforces
+            # string maxLength in the grammar, so a copy-prone 0.5B cannot
+            # emit an over-limit value in the first place (the two 2026-09
+            # qwen_invalid_output degradations). Same precedent as
+            # _WORKSPACE_RESPONSE_FORMAT's evidence maxLength=200.
+            "attribute_a": {"type": "string", "maxLength": 80},
+            "value_a": {"type": "string", "maxLength": 64},
+            "attribute_b": {"type": "string", "maxLength": 80},
+            "value_b": {"type": "string", "maxLength": 64},
         },
         "required": ["attribute_a", "value_a", "attribute_b", "value_b"],
         "additionalProperties": False,
@@ -71,6 +82,14 @@ attribute 是两侧正在回答的最小可比较问题，不包含具体值、�
 无论是否能可靠抽取，都必须输出全部四个字符串字段，不得省略字段。无法可靠抽取时将对应字段写成字符串 "__unknown__"；不要输出 null、conflict、coexistence、winner、confidence 或额外字段。
 例：A=生产数据库使用 MySQL。B=生产数据库使用 SQLite。
 输出：{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}"""
+# pair-v6 note: the prompt text is deliberately identical to pair-v5. Two
+# few-shot variants teaching long-evidence fragment selection were tried and
+# rejected by experiment (2026-09-09 calibration matrix): any added example
+# broke side attribution on the Tier1 calibration pair (the 0.5B adopted
+# positional heuristics from the example, e.g. copying the B-side opening into
+# value_a) — same lesson as the rejected "compress to the core value" wording.
+# v6 instead enforces the value/attribute caps at the decoding level
+# (_PAIR_RESPONSE_FORMAT maxLength) and adds one feedback retry.
 
 
 _WORKSPACE_RESPONSE_FORMAT = {
@@ -793,6 +812,45 @@ def workspace_candidate_from_text(raw: str, candidates: list[str]) -> "Workspace
     return WorkspaceCandidateSignal(candidate, relation, confidence, evidence, raw or "", None)
 
 
+def _pair_retry_strategy(error: str | None) -> str | None:
+    """Map a failed pair extraction's error to a feedback-retry strategy.
+
+    Returns None when a retry cannot help: legal negatives (unknown_field),
+    backend failures, and successful extractions never reach here — the caller
+    only consults this for invalid_json/invalid_schema signals.
+    """
+    if not error:
+        return None
+    if error.startswith(("invalid_value_", "invalid_attribute_")):
+        return "over_limit"
+    if error == "missing_json" or error.startswith("invalid_json"):
+        return "truncated"
+    if error.startswith("invalid_schema"):
+        return "schema"
+    return None
+
+
+def _pair_retry_feedback(strategy: str, error: str) -> str:
+    """Feedback turn for the retry. Wording mirrors the pair-v6 prompt's own
+    fragment-selection instruction (a "compress the value" phrasing was tried
+    and rejected: it flattened opposing values into equality)."""
+    if strategy == "over_limit":
+        field_name = error.removeprefix("invalid_")
+        return (
+            f"上次输出的 {field_name} 超过协议上限（不超过 64 字、不超过 12 个词）。"
+            "只截取原证据中最能体现取值差异的连续片段重出，禁止整句照抄，直接以 { 开头输出完整 JSON。"
+        )
+    if strategy == "truncated":
+        return (
+            "上次输出未完成就被截断。value 只截取最短的取值片段（不超过 64 字），"
+            "禁止照抄整句，直接以 { 开头输出完整 JSON。"
+        )
+    return (
+        "上次输出的 JSON 结构不合协议：必须恰好包含 attribute_a、value_a、attribute_b、value_b "
+        "四个字符串字段，不要输出其他字段或数组，直接以 { 开头输出完整 JSON。"
+    )
+
+
 class LocalGGUFSemanticBackend:
     def __init__(self, model_path: Path, *, n_ctx: int = SEMANTIC_N_CTX, n_threads: int = 4, n_batch: int = 128):
         self.model_path = Path(model_path).expanduser()
@@ -810,6 +868,8 @@ class LocalGGUFSemanticBackend:
         self._loading = False
         self._disabled = False
         self._generation = 0
+        self._pair_retried = 0
+        self._pair_retry_recovered = 0
 
     def _build_llm(self) -> Any:
         if not self.model_path.exists():
@@ -877,14 +937,16 @@ class LocalGGUFSemanticBackend:
         )
 
     @classmethod
-    def _pair_text(cls, left: dict[str, Any], right: dict[str, Any]) -> str:
+    def _pair_text(cls, left: dict[str, Any], right: dict[str, Any], *, quote_cap: int = 400) -> str:
         """Serialize metadata first and leave both bounded quotes nearest the output."""
         # 400 chars = the local-text segmenter's unit cap, so an evidence unit
         # reaches the model whole (no second truncation); longer text only
         # invites the 0.5B to copy whole clauses into values (the top
-        # qwen_invalid_output source before pair-v5).
-        left_quote = str(left.get("quote") or left.get("content") or "")[:400]
-        right_quote = str(right.get("quote") or right.get("content") or "")[:400]
+        # qwen_invalid_output source before pair-v5). Truncation retries pass a
+        # smaller cap: the copy-prone tail is cut and the freed n_ctx budget
+        # funds a larger max_tokens for the retry.
+        left_quote = str(left.get("quote") or left.get("content") or "")[:quote_cap]
+        right_quote = str(right.get("quote") or right.get("content") or "")[:quote_cap]
         return (
             f"A metadata: {cls._memory_text(left)}\n"
             f"B metadata: {cls._memory_text(right)}\n"
@@ -943,24 +1005,64 @@ class LocalGGUFSemanticBackend:
             if llm is None:
                 return ModelSignal(False, "backend_unavailable", None, "", None, "disabled")
             acquired = True
-            text = self._pair_text(left, right)
-            with self._infer_lock:
-                # max_tokens: 120 truncated the grammar-constrained JSON
-                # whenever extracted values ran long (protocol allows 80-char
-                # attributes / 64-char values) — the top source of
-                # qwen_invalid_output. 384 covers the protocol worst case
-                # (~330 tokens). "</s>" was a dead stop: Qwen2.5's EOS
-                # (<|im_end|>) comes from the chat template.
-                out = llm.create_chat_completion(
-                    messages=[{"role": "system", "content": _PAIR_PROMPT}, {"role": "user", "content": f"输入: {text}\n输出:"}],
-                    max_tokens=384,
-                    temperature=0.0,
-                    top_p=0.9,
-                    stop=["\n\n"],
-                    response_format=_PAIR_RESPONSE_FORMAT,
-                )
-            raw = out["choices"][0]["message"]["content"]
-            return model_signal_from_text(raw)
+            # max_tokens: 120 truncated the grammar-constrained JSON whenever
+            # extracted values ran long (protocol allows 80-char attributes /
+            # 64-char values) — the top source of qwen_invalid_output. 384
+            # covers the protocol worst case (~330 tokens). "</s>" was a dead
+            # stop: Qwen2.5's EOS (<|im_end|>) comes from the chat template.
+            max_tokens = 384
+            messages = [
+                {"role": "system", "content": _PAIR_PROMPT},
+                {"role": "user", "content": f"输入: {self._pair_text(left, right)}\n输出:"},
+            ]
+            retried = False
+            signal: ModelSignal | None = None
+            for attempt in range(max(1, SEMANTIC_PAIR_MAX_ATTEMPTS)):
+                with self._infer_lock:
+                    out = llm.create_chat_completion(
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=0.0,
+                        top_p=0.9,
+                        stop=["\n\n"],
+                        response_format=_PAIR_RESPONSE_FORMAT,
+                    )
+                raw = out["choices"][0]["message"]["content"]
+                signal = model_signal_from_text(raw)
+                strategy = None
+                if signal.candidate_type in {"invalid_json", "invalid_schema"}:
+                    strategy = _pair_retry_strategy(signal.error)
+                if strategy is None or attempt + 1 >= max(1, SEMANTIC_PAIR_MAX_ATTEMPTS):
+                    if retried and signal.candidate_type == "attribute_value_extraction":
+                        with self._cond:
+                            self._pair_retry_recovered += 1
+                    return signal
+                # One protocol invalid output earns a single retry with the
+                # offending raw echoed back plus a strategy-specific feedback
+                # turn. Truncation retries additionally shrink the quotes and
+                # widen the output budget (freed n_ctx funds it; see constants).
+                retried = True
+                with self._cond:
+                    self._pair_retried += 1
+                feedback = _pair_retry_feedback(strategy, signal.error or "")
+                if strategy == "truncated":
+                    max_tokens = SEMANTIC_PAIR_RETRY_MAX_TOKENS
+                    messages = [
+                        {"role": "system", "content": _PAIR_PROMPT},
+                        {"role": "user", "content": f"输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"},
+                        {"role": "assistant", "content": raw},
+                        {"role": "user", "content": feedback},
+                    ]
+                else:
+                    messages = [
+                        *messages,
+                        {"role": "assistant", "content": raw},
+                        {"role": "user", "content": feedback},
+                    ]
+            # Unreachable (the loop always returns); the loop runs at least
+            # once because attempts is clamped to >= 1.
+            assert signal is not None
+            return signal
         except Exception as exc:
             with self._cond:
                 self._last_error = str(exc)
@@ -1098,6 +1200,8 @@ class LocalGGUFSemanticBackend:
                 "generation": self._generation,
                 "n_ctx": self.n_ctx,
                 "prompt_version": PAIR_PROMPT_VERSION,
+                "pair_retried": self._pair_retried,
+                "pair_retry_recovered": self._pair_retry_recovered,
             }
 
 
