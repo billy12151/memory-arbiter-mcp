@@ -17,7 +17,11 @@ BACKGROUND_TIMEOUT_SECONDS = 10
 RETRY_AFTER_FAILURE = timedelta(hours=6)
 NOTICE_SUPPRESS = timedelta(days=7)
 AGENT_ONBOARDING_NOTICE_ID = "agent-onboarding"
-AGENT_ONBOARDING_NOTICE_VERSION = "v1"
+# v2 (0.15.11): the notice now carries the capability health card. Bumping the
+# version re-delivers ONCE to every agent — existing installs are exactly the
+# audience the health card targets, and v1's one-shot delivery had already
+# fired for them.
+AGENT_ONBOARDING_NOTICE_VERSION = "v2"
 
 Fetcher = Callable[[str, float], str]
 

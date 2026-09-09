@@ -385,7 +385,7 @@ class ProductSurfaces:
             return {
                 "description": "Agent onboarding guide for using mema / Memory Arbiter correctly.",
                 "topic": AGENT_ONBOARDING_TOPIC,
-                "notice": "agent-onboarding:v1",
+                "notice": "agent-onboarding:v2",
                 "guide_file": "memory_arbiter/AGENT_ONBOARDING.md",
                 "content": _agent_onboarding_guide(),
             }

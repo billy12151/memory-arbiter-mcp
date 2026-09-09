@@ -24,6 +24,7 @@ from .constants import (
     SEMANTIC_PAIR_RETRY_MAX_TOKENS,
     SEMANTIC_PAIR_RETRY_QUOTE_CHARS,
 )
+from .tokens import estimate_tokens
 
 ACTION_TYPES = {
     "value_changed",
@@ -602,6 +603,25 @@ def _bounded_short_value(value: str, quote: str) -> bool:
     # instead of extracting a name, number, state, or short policy value.
     if re.search(r"[。！？!?；;](?:[\"'”’）)]*)$", compact):
         return False
+    # Continuation marks at the end (，、：；—) are the same signal from the
+    # decoding-level maxLength cap: the grammar guillotines an over-long copy
+    # at exactly 64 chars, which often lands mid-clause (observed live:
+    # "…不替 Agent 挑重要命中，").
+    if re.search(r"[，、：；—…]$", compact):
+        return False
+    folded_value = compact.casefold()
+    folded_quote = source.casefold()
+    if folded_value in folded_quote:
+        # Guillotine detection, the other tell: an exact-copy fragment whose
+        # every occurrence is immediately followed by a word character is the
+        # hard-cut head of a longer token/clause ("重新确" before "认"), not a
+        # value the model chose. Boundaries at punctuation/space/end are fine.
+        for occurrence in re.finditer(re.escape(folded_value), folded_quote):
+            end = occurrence.end()
+            if end >= len(folded_quote) or not re.match(r"\w", folded_quote[end]):
+                break
+        else:
+            return False
     return True
 
 
@@ -836,9 +856,19 @@ def _pair_retry_feedback(strategy: str, error: str) -> str:
     and rejected: it flattened opposing values into equality)."""
     if strategy == "over_limit":
         field_name = error.removeprefix("invalid_")
+        # The strategy name predates the decoding-level maxLength cap: with the
+        # grammar enforcing length, invalid_<field> can now only mean the field
+        # came back empty/pure-whitespace or carrying an embedded newline —
+        # name that cause, not a length overflow that can no longer happen.
+        if field_name.startswith("attribute_"):
+            return (
+                f"上次输出的 {field_name} 为空、是纯空白或含换行。attribute 是两侧正在回答的"
+                "最小可比较问题，不包含具体值，长度不超过 80 字，直接以 { 开头输出完整 JSON。"
+            )
         return (
-            f"上次输出的 {field_name} 超过协议上限（不超过 64 字、不超过 12 个词）。"
-            "只截取原证据中最能体现取值差异的连续片段重出，禁止整句照抄，直接以 { 开头输出完整 JSON。"
+            f"上次输出的 {field_name} 为空、是纯空白或含换行。value 是原证据中该属性的具体"
+            "取值片段（不超过 64 字、不超过 12 个词），截取最能体现取值差异的连续片段，"
+            "禁止整句照抄，直接以 { 开头输出完整 JSON。"
         )
     if strategy == "truncated":
         return (
@@ -1041,24 +1071,37 @@ class LocalGGUFSemanticBackend:
                 # offending raw echoed back plus a strategy-specific feedback
                 # turn. Truncation retries additionally shrink the quotes and
                 # widen the output budget (freed n_ctx funds it; see constants).
-                retried = True
-                with self._cond:
-                    self._pair_retried += 1
                 feedback = _pair_retry_feedback(strategy, signal.error or "")
                 if strategy == "truncated":
-                    max_tokens = SEMANTIC_PAIR_RETRY_MAX_TOKENS
-                    messages = [
+                    retry_max_tokens = SEMANTIC_PAIR_RETRY_MAX_TOKENS
+                    retry_messages = [
                         {"role": "system", "content": _PAIR_PROMPT},
                         {"role": "user", "content": f"输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"},
                         {"role": "assistant", "content": raw},
                         {"role": "user", "content": feedback},
                     ]
                 else:
-                    messages = [
+                    retry_max_tokens = max_tokens
+                    retry_messages = [
                         *messages,
                         {"role": "assistant", "content": raw},
                         {"role": "user", "content": feedback},
                     ]
+                # n_ctx guard (dense CJK runs ~1 token/char, so the echoed raw
+                # can push the retry past the window — llama-cpp-python then
+                # raises ValueError and a clean qwen_invalid_output turns into
+                # a backend_error). estimate_tokens under-reads dense CJK by
+                # ~30%, hence the 1.3x margin plus chat-template headroom.
+                prompt_estimate = int(
+                    estimate_tokens("".join(message["content"] for message in retry_messages)) * 1.3
+                ) + 64
+                if prompt_estimate + retry_max_tokens >= self.n_ctx:
+                    return signal
+                retried = True
+                with self._cond:
+                    self._pair_retried += 1
+                max_tokens = retry_max_tokens
+                messages = retry_messages
             # Unreachable (the loop always returns); the loop runs at least
             # once because attempts is clamped to >= 1.
             assert signal is not None
@@ -1184,6 +1227,14 @@ class LocalGGUFSemanticBackend:
             if acquired:
                 self._release_llm_for_call()
 
+    def pair_retry_stats(self) -> dict[str, int]:
+        """Retry counters for the parent process to piggyback on responses."""
+        with self._cond:
+            return {
+                "pair_retried": self._pair_retried,
+                "pair_retry_recovered": self._pair_retry_recovered,
+            }
+
     def status(self) -> dict[str, Any]:
         with self._cond:
             state = "resident" if self._llm is not None else "unloaded"
@@ -1225,6 +1276,15 @@ def _semantic_inference_process(conn: Any, config: dict[str, Any]) -> None:
                     result: Any = {"loaded": True}
                 elif command == "classify_pair":
                     result = backend.classify_pair(request["left"], request["right"])
+                    conn.send({
+                        "ok": True,
+                        "result": result,
+                        # Piggyback retry counters so the parent's status()
+                        # exposes them without a separate (potentially
+                        # blocking) status RPC. Envelope keys are additive.
+                        "backend_status": backend.pair_retry_stats(),
+                    })
+                    continue
                 elif command == "suggest_workspace_candidate":
                     result = backend.suggest_workspace_candidate(
                         request["workspace"], request["evidence"], request["candidates"],
@@ -1281,6 +1341,7 @@ class IsolatedGGUFSemanticBackend:
         self._loaded_at: float | None = None
         self._inflight_started: float | None = None
         self._child_loaded = False
+        self._last_child_backend_status: dict[str, Any] | None = None
 
     def _start_locked(self) -> None:
         if self._disabled:
@@ -1483,6 +1544,12 @@ class IsolatedGGUFSemanticBackend:
                 if not response.get("ok"):
                     self._last_error = str(response.get("error") or "semantic child error")
                     raise RuntimeError(self._last_error)
+                child_status = response.get("backend_status")
+                if isinstance(child_status, dict):
+                    # classify_pair piggybacks retry counters; older children
+                    # simply omit the key and the parent stays at the default.
+                    with self._state_lock:
+                        self._last_child_backend_status = child_status
                 return response.get("result")
         except TimeoutError:
             raise
@@ -1561,6 +1628,7 @@ class IsolatedGGUFSemanticBackend:
             age_ms = None
             if self._inflight_started is not None:
                 age_ms = int((time.monotonic() - self._inflight_started) * 1000)
+            child_status = dict(self._last_child_backend_status or {})
             return {
                 "backend": "local_gguf_process",
                 "model_path": str(self.model_path),
@@ -1581,6 +1649,10 @@ class IsolatedGGUFSemanticBackend:
                 # widened context and the new prompt without guessing.
                 "n_ctx": self.n_ctx,
                 "prompt_version": PAIR_PROMPT_VERSION,
+                # Retry counters piggybacked from the child's classify_pair
+                # responses; absent until the first pair completes.
+                "pair_retried": child_status.get("pair_retried"),
+                "pair_retry_recovered": child_status.get("pair_retry_recovered"),
             }
 
 

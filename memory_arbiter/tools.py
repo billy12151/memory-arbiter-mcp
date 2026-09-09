@@ -127,11 +127,11 @@ class MemoryTools:
     def _setup_health(self) -> dict[str, Any]:
         """Capability health for the first-call onboarding notice (P1)."""
         embedding = self.settings.embedding_model_path
-        embedding_state = "ok" if (embedding is not None and embedding.exists()) else "missing"
+        embedding_state = "ok" if (embedding is not None and embedding.is_file()) else "missing"
         semantic_path = self.settings.semantic_conflict_model_path
         if self.settings.semantic_conflict_enabled:
             semantic_state = (
-                "ok" if (semantic_path is not None and semantic_path.exists()) else "missing"
+                "ok" if (semantic_path is not None and semantic_path.is_file()) else "missing"
             )
         elif semantic_path is not None:
             # enabled=false with a configured model: deliberate opt-out.
@@ -170,12 +170,12 @@ class MemoryTools:
             return None
         missing: list[str] = []
         embedding = self.settings.embedding_model_path
-        if embedding is None or not embedding.exists():
+        if embedding is None or not embedding.is_file():
             missing.append("✗ 向量召回未启用（embedding 模型未找到）")
         if self.settings.semantic_conflict_enabled:
             semantic_missing = (
                 self.settings.semantic_conflict_model_path is None
-                or not self.settings.semantic_conflict_model_path.exists()
+                or not self.settings.semantic_conflict_model_path.is_file()
             )
         else:
             semantic_missing = self.settings.semantic_conflict_model_path is None

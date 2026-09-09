@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +31,13 @@ from typing import Any, Callable
 
 # Model + download sources — kept as module constants so they are easy to update.
 DEFAULT_MODEL_FILENAME = "embeddinggemma-300m-qat-Q8_0.gguf"
-EXPECTED_MODEL_BYTES = 329 * 1024 * 1024  # ~329 MB; we tolerate ±20% (see _size_ok)
+# Exact upstream byte counts (HF Content-Length verified 2026-09-09; qwen
+# matches the production model on disk). --install downloads these known files
+# and validates EXACTLY — a ±20% tolerance would let a silent truncation land
+# as a corrupt model that every later run then "skips as already present".
+# The tolerance in MODEL_SIZE_TOLERANCE is only for Step-2's check of
+# user-supplied models (different quants are legitimate there).
+EXPECTED_MODEL_BYTES = 328_577_056
 MODEL_SIZE_TOLERANCE = 0.20
 
 HF_DOWNLOAD_URL = (
@@ -48,7 +55,7 @@ LLAMA_CPP_CPU_EXTRA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 # ranged probe (the downloader treats an ignored Range as restart-from-zero).
 QWEN_MODEL_FILENAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 QWEN_MODEL_DIRNAME = "Qwen2.5-0.5B-Instruct"
-EXPECTED_QWEN_BYTES = 491_400_032  # q4_k_m; same ±20% tolerance as embedding
+EXPECTED_QWEN_BYTES = 491_400_032  # q4_k_m; exact (production model on disk)
 QWEN_HF_URL = (
     "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
     "/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
@@ -146,6 +153,33 @@ def _default_qwen_path() -> Path:
     )
 
 
+def _detect_existing_qwen_path(config_path: Path) -> tuple[Path | None, str]:
+    """Semantic-side counterpart of _detect_existing_model_path: an existing
+    config whose semantic_conflict.model_path points at a real file is kept
+    (guidance mode must not wipe what --install wrote). Only real files count,
+    and only non-default locations are "preserved" — the default path is what
+    --install writes anyway.
+    """
+    if not config_path.exists():
+        return None, ""
+    try:
+        parsed = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, ""
+    if not isinstance(parsed, dict):
+        return None, ""
+    semantic = parsed.get("semantic_conflict")
+    raw = semantic.get("model_path") if isinstance(semantic, dict) else None
+    if not raw:
+        return None, ""
+    resolved = Path(str(raw)).expanduser()
+    if not resolved.is_file():
+        return None, ""
+    if resolved.name == QWEN_MODEL_FILENAME:
+        return None, ""
+    return resolved, f"检测到你已配置的语义模型: {resolved.name}（沿用，未覆盖）"
+
+
 # ── Execution mode (--install) ─────────────────────────────────────────────
 
 def _download_with_resume(
@@ -156,40 +190,86 @@ def _download_with_resume(
 ) -> bool:
     """Download *url* to *part_path*, resuming a partial file when possible.
 
-    Returns True once the file is fully downloaded (caller validates the size
-    and atomically renames). Servers that ignore the Range header (ModelScope
-    answers 200 to a ranged probe) make us restart from zero — the .part file
-    is truncated and refilled, never served as-is.
+    Returns True only when the file is COMPLETE: http.client does not raise on
+    early close for sized reads, so a silent truncation surfaces as a clean
+    EOF — we therefore compare the final byte count against the server's own
+    declared total (Content-Range total for 206, Content-Length for 200) and
+    refuse to report success on a mismatch. Servers that ignore the Range
+    header (ModelScope answers 200 to a ranged probe) make us restart from
+    zero. A 416 (range unsatisfiable, e.g. the .part grew past the server's
+    file or the upstream file changed) drops the .part and retries once fresh.
     """
-    resume_from = 0
-    try:
-        if part_path.exists():
-            resume_from = part_path.stat().st_size
-    except OSError:
+    for attempt in range(2):
         resume_from = 0
-    headers = {"User-Agent": _DOWNLOAD_USER_AGENT}
-    if resume_from > 0:
-        headers["Range"] = f"bytes={resume_from}-"
-        log(f"  断点续传: 已有 {resume_from / (1024 * 1024):.0f} MB，继续下载")
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_S) as response:
-            status = int(getattr(response, "status", 200) or 200)
-            if resume_from > 0 and status != 206:
-                # Range ignored → full body coming; restart from scratch.
-                resume_from = 0
-            part_path.parent.mkdir(parents=True, exist_ok=True)
-            mode = "ab" if resume_from > 0 else "wb"
-            with part_path.open(mode) as handle:
-                while True:
-                    chunk = response.read(_DOWNLOAD_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-    except (OSError, ValueError) as exc:
-        log(f"  ✗ 下载失败: {type(exc).__name__}: {exc}")
-        return False
-    return True
+        try:
+            if part_path.exists():
+                resume_from = part_path.stat().st_size
+        except OSError:
+            resume_from = 0
+        headers = {"User-Agent": _DOWNLOAD_USER_AGENT}
+        if resume_from > 0:
+            headers["Range"] = f"bytes={resume_from}-"
+            log(f"  断点续传: 已有 {resume_from / (1024 * 1024):.0f} MB，继续下载")
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_S) as response:
+                status = int(getattr(response, "status", 200) or 200)
+                if resume_from > 0 and status != 206:
+                    # Range ignored → full body coming; restart from scratch.
+                    resume_from = 0
+                declared_total = _declared_total_bytes(response, status)
+                part_path.parent.mkdir(parents=True, exist_ok=True)
+                mode = "ab" if resume_from > 0 else "wb"
+                with part_path.open(mode) as handle:
+                    while True:
+                        chunk = response.read(_DOWNLOAD_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and attempt == 0:
+                log("  ⚠ 续传偏移已失效（HTTP 416），丢弃 .part 从零重下")
+                try:
+                    part_path.unlink()
+                except OSError:
+                    pass
+                continue
+            log(f"  ✗ 下载失败: HTTP {exc.code}")
+            return False
+        except (OSError, ValueError) as exc:
+            log(f"  ✗ 下载失败: {type(exc).__name__}: {exc}")
+            return False
+        if declared_total is not None:
+            try:
+                final_size = part_path.stat().st_size
+            except OSError:
+                final_size = -1
+            if final_size != declared_total:
+                log(
+                    f"  ✗ 下载不完整（{final_size} / {declared_total} bytes），"
+                    "保留 .part 供下次续传"
+                )
+                return False
+        return True
+    return False
+
+
+def _declared_total_bytes(response: Any, status: int) -> int | None:
+    """The full-file byte count the server itself declares, if any."""
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    if status == 206:
+        content_range = headers.get("Content-Range") or ""
+        # "bytes 100-999/328577056" (or "/*" when the total is unknown)
+        total = content_range.rsplit("/", 1)[-1].strip()
+        if total.isdigit():
+            return int(total)
+        return None
+    content_length = headers.get("Content-Length")
+    if content_length and content_length.isdigit():
+        return int(content_length)
+    return None
 
 
 def _part_path_for(dest: Path, url: str) -> Path:
@@ -210,28 +290,42 @@ def _install_model(
     expected_bytes: int,
     log: Callable[[str], None] = print,
 ) -> bool:
-    """Ensure the GGUF at *dest* exists and passes the size check.
+    """Ensure the GGUF at *dest* exists and is byte-exact.
 
-    Already-good files are kept (idempotent re-runs). Otherwise each mirror is
-    tried in order with same-URL resume; the first download passing the size
-    check is atomically renamed into place and stale partials from other
-    mirrors are cleaned up.
+    Already-good files are kept (idempotent re-runs); a present-but-wrong-size
+    file is re-downloaded (a silent truncation from an older run must not be
+    "skipped as present" forever). Each mirror is tried in order with same-URL
+    resume; the first download matching the exact known byte count is
+    atomically renamed into place and stale partials from other mirrors are
+    cleaned up. The byte count is exact by design — see EXPECTED_MODEL_BYTES.
     """
-    size_ok, size_bytes = _model_size_ok(dest, expected=expected_bytes)
-    if size_ok:
-        log(f"✓ {label}: 已存在 ({size_bytes / (1024 * 1024):.0f} MB)，跳过下载")
-        return True
+    if dest.is_file():
+        try:
+            actual = dest.stat().st_size
+        except OSError:
+            actual = -1
+        if actual == expected_bytes:
+            log(f"✓ {label}: 已存在 ({actual / (1024 * 1024):.0f} MB)，跳过下载")
+            return True
+        log(f"  ⚠ {label}: 已存在但大小不符（{actual} bytes），重新下载")
     for url in urls:
         part_path = _part_path_for(dest, url)
         log(f"→ 下载 {label}: {url}")
         if not _download_with_resume(url, part_path, log=log):
             continue
-        ok, actual = _model_size_ok(part_path, expected=expected_bytes)
-        if not ok:
-            log(f"  ✗ 大小校验失败（{actual} bytes，预期约 {expected_bytes}），尝试下一个镜像")
+        try:
+            actual = part_path.stat().st_size
+        except OSError:
+            actual = -1
+        if actual != expected_bytes:
+            log(f"  ✗ 大小校验失败（{actual} bytes，预期 {expected_bytes}），尝试下一个镜像")
             continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        part_path.replace(dest)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            part_path.replace(dest)
+        except OSError as exc:
+            log(f"  ✗ 落盘失败: {type(exc).__name__}: {exc}")
+            return False
         for stale in dest.parent.glob(f"{dest.name}.*.part"):
             try:
                 stale.unlink()
@@ -243,19 +337,40 @@ def _install_model(
     return False
 
 
-def _pip_install(packages: list[str], *, log: Callable[[str], None] = print) -> bool:
-    """pip-install *packages* into the current interpreter. Never raises."""
-    cmd = [
-        sys.executable, "-m", "pip", "install",
-        *packages,
-        "--extra-index-url", LLAMA_CPP_CPU_EXTRA_INDEX,
-    ]
+def _pip_install(
+    packages: list[str],
+    *,
+    extra_index: str | None = None,
+    log: Callable[[str], None] = print,
+) -> bool:
+    """pip-install *packages* into the current interpreter. Never raises.
+
+    ``extra_index`` is only passed for llama-cpp-python's CPU wheels — handing
+    a third-party index to unrelated packages (e.g. sqlite-vec) would expose
+    them to that index's supply chain for no benefit. Interpreters without pip
+    (uv tool environments) fall back to ``uv pip``.
+    """
+    cmd = [sys.executable, "-m", "pip", "install", *packages]
+    if extra_index:
+        cmd += ["--extra-index-url", extra_index]
     log(f"→ {' '.join(cmd)}")
     try:
         result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=600)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log(f"  ✗ pip 执行失败: {type(exc).__name__}: {exc}")
         return False
+    if result.returncode != 0 and "No module named pip" in (result.stderr or ""):
+        import shutil
+
+        uv = shutil.which("uv")
+        if uv:
+            uv_cmd = [uv, "pip", "install", "--python", sys.executable, *packages]
+            log(f"  当前环境无 pip，改用: {' '.join(uv_cmd)}")
+            try:
+                result = subprocess.run(uv_cmd, check=False, capture_output=True, text=True, timeout=600)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                log(f"  ✗ uv pip 执行失败: {type(exc).__name__}: {exc}")
+                return False
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
         for line in tail:
@@ -274,7 +389,8 @@ def _pyenv_guidance_lines(py_str: str) -> list[str]:
         "     pyenv install 3.12",
         "     pyenv local 3.12   # 或: pyenv shell 3.12",
         "     python3.12 -m pip install memory-arbiter-mcp[vec,semantic-local]",
-        "   （无 pyenv 时：brew install pyenv，或改用远程 API embedding，见 README）",
+        "   （无 pyenv 时：brew install pyenv，或用 uv: uv tool install --python 3.12 "
+        "memory-arbiter-mcp[vec,semantic-local]）",
     ]
 
 
@@ -530,12 +646,23 @@ def run_cli(argv: list[str]) -> int:
     parser.add_argument("--no-config", action="store_true", help="跳过 config 生成，只跑环境自检")
     parser.add_argument("--install", action="store_true", help="执行模式：装依赖 + 下载两个模型 + 回写 config（默认只指导不执行）")
     args = parser.parse_args(argv)
+    if args.install and (args.print_config or args.no_config):
+        parser.error("--install 与 --print-config/--no-config 不能同用（执行模式必须写 config）")
 
     use_color = sys.stdout.isatty()
 
-    # Resolve paths (all platform-correct via Path.home()).
+    # Resolve paths (all platform-correct via Path.home()). The config target
+    # honours MEMORY_ARBITER_CONFIG the same way the runtime does — otherwise
+    # --install would write a file the server never reads and the banner would
+    # nag forever.
     default_config_path, default_model_path, default_db_path, default_backup_jsonl = _default_paths()
-    config_path = Path(args.config_path).expanduser() if args.config_path else default_config_path
+    env_config = os.getenv("MEMORY_ARBITER_CONFIG")
+    if args.config_path:
+        config_path = Path(args.config_path).expanduser()
+    elif env_config:
+        config_path = Path(env_config).expanduser()
+    else:
+        config_path = default_config_path
     qwen_path = _default_qwen_path()
 
     # Honour a user-supplied model already present in an existing config:
@@ -544,9 +671,15 @@ def run_cli(argv: list[str]) -> int:
     # --force bypasses this: it means "reset to defaults, including model".
     if args.force:
         preserved_model, preserve_note = None, ""
+        preserved_qwen, preserve_qwen_note = None, ""
     else:
         preserved_model, preserve_note = _detect_existing_model_path(config_path)
+        preserved_qwen, preserve_qwen_note = _detect_existing_qwen_path(config_path)
     model_path = preserved_model or default_model_path
+    # The semantic side mirrors embedding: a preserved qwen is used as the
+    # config's model_path in BOTH modes and is never downloaded over; guidance
+    # mode writes it back (instead of null), --install skips its download.
+    effective_qwen_path = preserved_qwen or qwen_path
 
     out_lines: list[str] = []
     out_lines.append(_color("memory-arbiter setup — 配置助手（半自动）", _BOLD, use_color))
@@ -556,11 +689,13 @@ def run_cli(argv: list[str]) -> int:
         out_lines.append(_color("生成 config + 检测环境 + 给出可复制的命令。--install 可直接执行全部安装。", _DIM, use_color))
     if preserved_model is not None:
         out_lines.append(_color(f"  ℹ {preserve_note}", _CYAN, use_color))
+    if preserved_qwen is not None:
+        out_lines.append(_color(f"  ℹ {preserve_qwen_note}", _CYAN, use_color))
 
     # ── Step 1: config.json ──
     config_dict = _default_config_dict(
         model_path, default_db_path, default_backup_jsonl,
-        qwen_model_path=qwen_path if args.install else None,
+        qwen_model_path=effective_qwen_path if (args.install or preserved_qwen is not None) else None,
     )
     backup_path: Path | None = None
     written = False
@@ -618,7 +753,7 @@ def run_cli(argv: list[str]) -> int:
             out_lines.append(_color("✓ sqlite-vec: 已装，跳过", _GREEN, use_color))
         if not _check_llama_cpp():
             if py_ok:
-                if _pip_install(["llama-cpp-python"]):
+                if _pip_install(["llama-cpp-python"], extra_index=LLAMA_CPP_CPU_EXTRA_INDEX):
                     out_lines.append(_color("✓ llama-cpp-python 安装完成", _GREEN, use_color))
                 else:
                     out_lines.append(_color("✗ llama-cpp-python 安装失败（见上方 pip 输出）", _RED, use_color))
@@ -626,16 +761,22 @@ def run_cli(argv: list[str]) -> int:
                 out_lines.extend(_color(line, _YELLOW, use_color) for line in _pyenv_guidance_lines(py_str))
         else:
             out_lines.append(_color("✓ llama-cpp-python: 已装，跳过", _GREEN, use_color))
-        _install_model(
-            "embedding 模型", model_path,
-            [HF_DOWNLOAD_URL, MODELSCOPE_DOWNLOAD_URL],
-            expected_bytes=EXPECTED_MODEL_BYTES,
-        )
-        _install_model(
-            "Qwen 语义模型", qwen_path,
-            [QWEN_HF_URL, QWEN_MODELSCOPE_URL],
-            expected_bytes=EXPECTED_QWEN_BYTES,
-        )
+        if preserved_model is None:
+            _install_model(
+                "embedding 模型", model_path,
+                [HF_DOWNLOAD_URL, MODELSCOPE_DOWNLOAD_URL],
+                expected_bytes=EXPECTED_MODEL_BYTES,
+            )
+        else:
+            out_lines.append(_color("✓ embedding 模型: 沿用已配置模型，跳过下载", _GREEN, use_color))
+        if preserved_qwen is None:
+            _install_model(
+                "Qwen 语义模型", qwen_path,
+                [QWEN_HF_URL, QWEN_MODELSCOPE_URL],
+                expected_bytes=EXPECTED_QWEN_BYTES,
+            )
+        else:
+            out_lines.append(_color("✓ Qwen 语义模型: 沿用已配置模型，跳过下载", _GREEN, use_color))
 
     # ── Step 2: environment checks ──
     # Config-load check: try to load via Settings.from_env() AFTER we may have
@@ -684,14 +825,14 @@ def run_cli(argv: list[str]) -> int:
         "model_exists": model_path.exists(),
         "model_size_ok": size_ok,
         "model_size_bytes": size_bytes,
-        "qwen_exists": qwen_path.exists(),
-        "qwen_size_bytes": qwen_path.stat().st_size if qwen_path.exists() else 0,
+        "qwen_exists": effective_qwen_path.is_file(),
+        "qwen_size_bytes": effective_qwen_path.stat().st_size if effective_qwen_path.is_file() else 0,
         "config_load_ok": config_load_ok,
         "config_load_error": config_load_error_str,
         "config_warnings": config_warnings,
     }
     check_lines, all_ok = _render_check_step(
-        checks, model_path, qwen_path, use_color, require_qwen=args.install,
+        checks, model_path, effective_qwen_path, use_color, require_qwen=args.install,
     )
     out_lines.extend(check_lines)
 

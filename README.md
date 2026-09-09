@@ -38,7 +38,7 @@ The agent should treat this README as the source of truth, inspect the local env
 
 ```bash
 # One command: package + deps + both models + config.json (resumable downloads, ModelScope fallback)
-curl -fsSL https://memarbiter.cn/install.sh | sh
+curl -fsSL https://memarbiter.cn/install.sh | bash
 ```
 
 Or step by step:

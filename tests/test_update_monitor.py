@@ -38,7 +38,7 @@ def test_agent_onboarding_notice_is_once_per_agent_and_version(tmp_path: Path) -
 
     first = monitor.consume_agent_onboarding_notice("agent-a")
     assert [n["type"] for n in first] == ["agent_onboarding"]
-    assert first[0]["suppression_key"] == "agent-a:agent-onboarding:v1"
+    assert first[0]["suppression_key"] == "agent-a:agent-onboarding:v2"
     assert monitor.consume_agent_onboarding_notice("agent-a") == []
 
     other_agent = monitor.consume_agent_onboarding_notice("agent-b")
@@ -46,8 +46,8 @@ def test_agent_onboarding_notice_is_once_per_agent_and_version(tmp_path: Path) -
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     delivered = state["agent_notices_delivered"]
-    assert "agent-a:agent-onboarding:v1" in delivered
-    assert "agent-b:agent-onboarding:v1" in delivered
+    assert "agent-a:agent-onboarding:v2" in delivered
+    assert "agent-b:agent-onboarding:v2" in delivered
 
 
 def test_agent_onboarding_notice_persists_when_update_check_disabled(tmp_path: Path) -> None:
@@ -62,7 +62,7 @@ def test_agent_onboarding_notice_persists_when_update_check_disabled(tmp_path: P
     assert [n["type"] for n in monitor.consume_agent_onboarding_notice("agent-a")] == ["agent_onboarding"]
     assert monitor.consume_agent_onboarding_notice("agent-a") == []
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert "agent-a:agent-onboarding:v1" in state["agent_notices_delivered"]
+    assert "agent-a:agent-onboarding:v2" in state["agent_notices_delivered"]
 
 
 def test_update_notice_uses_cache_and_suppresses_for_seven_days(tmp_path: Path) -> None:

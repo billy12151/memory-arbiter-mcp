@@ -59,7 +59,7 @@ Agent 应以这份 README 为事实来源，先检查本机环境，再判断使
 
 ```bash
 # 一条命令全搞定：装包 + 装依赖 + 下两个模型（约 800MB，断点续传/国内镜像）+ 写配置
-curl -fsSL https://memarbiter.cn/install.sh | sh
+curl -fsSL https://memarbiter.cn/install.sh | bash
 ```
 
 或者分步来：

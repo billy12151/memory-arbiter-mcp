@@ -430,6 +430,10 @@ def test_slow_live_degradation_replay_over_limit_value(real_backend: "Any") -> N
     forward = backend.classify_pair(left, right, deadline_monotonic=None)
     reverse = backend.classify_pair(right, left, deadline_monotonic=None)
     _assert_no_invalid_output(forward, reverse)
+    # Surface (do not assert) retry activity: today the grammar cap alone
+    # passes these fixtures; if a future change lets copying through again,
+    # this readout shows whether the retry backstop is absorbing it.
+    print(f"pair retry stats: {backend.pair_retry_stats()}")
 
 
 @pytest.mark.slow
@@ -463,3 +467,7 @@ def test_slow_live_degradation_replay_truncated_json(real_backend: "Any") -> Non
     forward = backend.classify_pair(left, right, deadline_monotonic=None)
     reverse = backend.classify_pair(right, left, deadline_monotonic=None)
     _assert_no_invalid_output(forward, reverse)
+    # Surface (do not assert) retry activity: today the grammar cap alone
+    # passes these fixtures; if a future change lets copying through again,
+    # this readout shows whether the retry backstop is absorbing it.
+    print(f"pair retry stats: {backend.pair_retry_stats()}")

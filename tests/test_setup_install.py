@@ -178,11 +178,145 @@ def test_install_model_rejects_wrong_size(monkeypatch, tmp_path):
     monkeypatch.setattr(setup_cli.urllib.request, "urlopen", _fake_urlopen(calls))
     assert not setup_cli._install_model(
         "m", dest, ["https://a/m", "https://b/m"],
-        expected_bytes=len(_BODY) * 4,  # way outside the ±20% tolerance
+        expected_bytes=len(_BODY) * 4,  # wrong count: both mirrors rejected
         log=lambda _msg: None,
     )
     assert not dest.exists()
     assert len(calls) == 2  # both mirrors tried
+
+
+def test_download_rejects_declared_length_mismatch(monkeypatch, tmp_path):
+    """A silent truncation (clean EOF short of the server's declared total)
+    must not report success — the 0.15.11 review's P0: a ±20% size gate would
+    have installed a corrupt model that later runs skip as 'already present'."""
+    import email.message
+
+    calls: list[tuple[str, str | None]] = []
+
+    def urlopen(request, timeout: int = 0):
+        calls.append((request.full_url, request.headers.get("Range")))
+        response = io.BytesIO(_BODY[: len(_BODY) // 2])  # server dies halfway
+        response.status = 200  # type: ignore[attr-defined]
+        headers = email.message.Message()
+        headers["Content-Length"] = str(len(_BODY))
+        response.headers = headers  # type: ignore[attr-defined]
+        return response
+
+    monkeypatch.setattr(setup_cli.urllib.request, "urlopen", urlopen)
+    part = tmp_path / "m.gguf.part"
+    assert not setup_cli._download_with_resume("https://a/m", part, log=lambda _msg: None)
+    assert part.read_bytes() == _BODY[: len(_BODY) // 2]  # kept for resume
+
+
+def test_download_416_drops_part_and_retries_fresh(monkeypatch, tmp_path):
+    import urllib.error
+
+    attempts = {"n": 0}
+
+    def urlopen(request, timeout: int = 0):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise urllib.error.HTTPError(
+                "https://a/m", 416, "Range Not Satisfiable", hdrs=None, fp=None,  # type: ignore[arg-type]
+            )
+        response = io.BytesIO(_BODY)
+        response.status = 200  # type: ignore[attr-defined]
+        return response
+
+    monkeypatch.setattr(setup_cli.urllib.request, "urlopen", urlopen)
+    part = tmp_path / "m.gguf.part"
+    part.write_bytes(b"stale-partial-larger-than-server-file")
+    assert setup_cli._download_with_resume("https://a/m", part, log=lambda _msg: None)
+    assert part.read_bytes() == _BODY  # fresh download, not resumed garbage
+    assert attempts["n"] == 2
+
+
+def test_guidance_setup_preserves_installed_qwen_path(isolated_env, monkeypatch):
+    """Bare `mema setup` after a successful --install must not wipe the qwen
+    config (agents re-run setup to verify — the review's P1)."""
+    monkeypatch.setattr(setup_cli, "_check_sqlite_vec", lambda: True)
+    monkeypatch.setattr(setup_cli, "_check_llama_cpp", lambda: True)
+    config_path = isolated_env / ".config" / "memory-arbiter" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    qwen = isolated_env / "models" / "my-qwen.gguf"
+    qwen.parent.mkdir()
+    qwen.write_bytes(b"q")
+    config_path.write_text(json.dumps({
+        "embedding": {"model_path": None},
+        "semantic_conflict": {"model_path": str(qwen)},
+    }), encoding="utf-8")
+    setup_cli.run_cli([])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["semantic_conflict"]["model_path"] == str(qwen)
+
+
+def test_install_skips_download_for_preserved_models(isolated_env, monkeypatch, capsys):
+    """A user-supplied embedding model must never be overwritten by the
+    bundled embeddinggemma download (P1)."""
+    monkeypatch.setattr(setup_cli, "_check_sqlite_vec", lambda: True)
+    monkeypatch.setattr(setup_cli, "_check_llama_cpp", lambda: True)
+    config_path = isolated_env / ".config" / "memory-arbiter" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    own = isolated_env / "models" / "my-embed.gguf"
+    own.parent.mkdir()
+    own.write_bytes(b"e")
+    qwen = isolated_env / "models" / "my-qwen.gguf"
+    qwen.write_bytes(b"q")
+    config_path.write_text(json.dumps({
+        "embedding": {"model_path": str(own)},
+        "semantic_conflict": {"model_path": str(qwen)},
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        setup_cli, "_install_model",
+        lambda label, dest, urls, *, expected_bytes, log=print: (_ for _ in ()).throw(
+            AssertionError(f"must not download over preserved model: {label}"),
+        ),
+    )
+    rc = setup_cli.run_cli(["--install"])
+    out = capsys.readouterr().out
+    assert "沿用已配置模型" in out
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["embedding"]["model_path"] == str(own)
+    assert config["semantic_conflict"]["model_path"] == str(qwen)
+    assert rc == 0
+
+
+def test_install_respects_memory_arbiter_config_env(isolated_env, monkeypatch, tmp_path):
+    """--install must write the config the runtime actually reads (the env
+    pointer), not just the XDG default (P2)."""
+    monkeypatch.setattr(setup_cli, "_check_sqlite_vec", lambda: True)
+    monkeypatch.setattr(setup_cli, "_check_llama_cpp", lambda: True)
+    env_config = tmp_path / "custom-config.json"
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(env_config))
+
+    def fake_install(label, dest, urls, *, expected_bytes, log=print):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake-model")
+        return True
+
+    monkeypatch.setattr(setup_cli, "_install_model", fake_install)
+    setup_cli.run_cli(["--install"])
+    config = json.loads(env_config.read_text(encoding="utf-8"))
+    assert config["semantic_conflict"]["model_path"].endswith(setup_cli.QWEN_MODEL_FILENAME)
+
+
+def test_install_rejects_dry_run_combination(isolated_env):
+    with pytest.raises(SystemExit) as excinfo:
+        setup_cli.run_cli(["--install", "--no-config"])
+    assert excinfo.value.code == 2
+
+
+def test_pip_extra_index_scoped_to_llama_cpp(monkeypatch):
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        setup_cli.subprocess, "run",
+        lambda cmd, **kw: seen.append({"cmd": cmd, "kw": kw}) or
+        type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})(),
+    )
+    assert setup_cli._pip_install(["sqlite-vec"], log=lambda _m: None)
+    assert "--extra-index-url" not in seen[0]["cmd"]
+    assert setup_cli._pip_install(["llama-cpp-python"], extra_index=setup_cli.LLAMA_CPP_CPU_EXTRA_INDEX, log=lambda _m: None)
+    assert "--extra-index-url" in seen[1]["cmd"]
 
 
 # ── --install end-to-end (pip + downloads mocked) ───────────────────────────

@@ -303,6 +303,111 @@ def test_pair_retry_skips_unknown_field(monkeypatch: pytest.MonkeyPatch) -> None
     assert backend._pair_retry_recovered == 0
 
 
+def test_pair_retry_schema_branch_names_four_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A structurally wrong JSON (extra field) gets the four-field reminder."""
+    extra_field_json = (
+        '{"attribute_a":"接口超时","value_a":"5 秒","attribute_b":"接口超时",'
+        '"value_b":"30 秒","confidence":0.9}'
+    )
+    backend, llm = _backend_with_scripted_llm(
+        monkeypatch, [extra_field_json, _VALID_EXTRACTION_JSON],
+    )
+    signal = backend.classify_pair({"quote": "超时为 5 秒"}, {"quote": "超时为 30 秒"}, deadline_monotonic=None)
+    assert signal.candidate_type == "attribute_value_extraction"
+    assert len(llm.calls) == 2
+    feedback = llm.calls[1]["messages"][-1]["content"]
+    assert "attribute_a" in feedback and "value_b" in feedback
+    assert backend._pair_retry_recovered == 1
+
+
+def test_pair_retry_feedback_matches_attribute_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """invalid_attribute_* names the 80-char attribute contract, not value's 64/12."""
+    overlong_attribute = '{"attribute_a":"' + "问" * 90 + '","value_a":"5 秒","attribute_b":"x","value_b":"y"}'
+    backend, llm = _backend_with_scripted_llm(
+        monkeypatch, [overlong_attribute, _VALID_EXTRACTION_JSON],
+    )
+    signal = backend.classify_pair({"quote": "超时为 5 秒"}, {"quote": "超时为 30 秒"}, deadline_monotonic=None)
+    assert signal.candidate_type == "attribute_value_extraction"
+    feedback = llm.calls[1]["messages"][-1]["content"]
+    assert "attribute_a" in feedback
+    assert "80 字" in feedback
+    assert "12 个词" not in feedback  # word rule is value-only
+
+
+def test_pair_retry_skipped_when_window_cannot_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The n_ctx guard: a retry whose prompt+output cannot fit the window is
+    skipped instead of dying as a backend ValueError (which would reclassify
+    the degradation as qwen_backend_error)."""
+    backend, llm = _backend_with_scripted_llm(
+        monkeypatch, [_LIVE_SAMPLE_TRUNCATED, _VALID_EXTRACTION_JSON],
+    )
+    backend.n_ctx = 700  # far too small for system prompt + retry headroom
+    signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
+    assert signal.candidate_type == "invalid_json"
+    assert signal.raw == _LIVE_SAMPLE_TRUNCATED  # first failure returned as-is
+    assert len(llm.calls) == 1
+    assert backend._pair_retried == 0
+
+
+# Guillotine detection: the decoding-level maxLength cap hard-cuts an over-long
+# copy at exactly 64 chars; the cut fragment is an exact substring of the quote
+# and otherwise passes every gate. Those heads must fail grounding (adversarial
+# review P1: two exact-copy fragments built from the live evidence produce a
+# notice_ready with beheaded-prose values under the cap alone).
+_GUILOTINE_QUOTE_A = (
+    "永不截断：合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
+    "（owner 拍板：服务端不替 Agent 挑重要命中，法规 RAG 漏但书是系统性偏差）"
+)
+_GUILOTINE_QUOTE_B = "透出前过滤：kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计数）。"
+
+
+def test_bounded_short_value_rejects_guillotine_fragments() -> None:
+    from memory_arbiter.semantic_conflict import _bounded_short_value
+
+    # Exact head of the live sample, cut mid-clause by the decoding cap (ends
+    # "不替 Agent 挑重要命中，" — the observed guillotine shape).
+    beheaded = (
+        "合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
+        "（owner 拍板：服务端不替 Agent 挑重要命中，"
+    )
+    assert beheaded in _GUILOTINE_QUOTE_A
+    assert len(beheaded) <= 64
+    assert not _bounded_short_value(beheaded, _GUILOTINE_QUOTE_A)
+    # Mid-word cut (every occurrence followed by a word character).
+    assert not _bounded_short_value("合并覆盖≥50%全文献条目升级全文+hit_spans 转标注（owner 拍板：服务端不替 Agent 挑重要命", _GUILOTINE_QUOTE_A)
+
+
+def test_bounded_short_value_accepts_clean_fragments() -> None:
+    from memory_arbiter.semantic_conflict import _bounded_short_value
+
+    # Legit short values still pass: bounded by punctuation/space/quote-end.
+    assert _bounded_short_value("全部透出", "owner 拍板：命中全部透出。")
+    assert _bounded_short_value("MySQL", "生产数据库使用 MySQL。")
+    assert _bounded_short_value("5 秒", "生产环境的接口超时策略明确设置为 5 秒。")
+    assert _bounded_short_value("高 ROI 候选分析", "Tier1 仍为高 ROI 候选分析（809：三项待排期）。")
+    # A fragment ending before a comma stays fine (clause boundary, not a cut).
+    assert _bounded_short_value("只透出 kind=subject 的命中", "只透出 kind=subject 的命中，其余折叠。")
+    # Non-verbatim-but-grounded values (spacing/units) are unaffected.
+    assert _bounded_short_value("8GB", "内存配额为 8 GB。")
+
+
+def test_guillotine_pair_yields_review_candidate_not_notice() -> None:
+    """Both sides copying hard-cut heads must NOT reach notice_ready."""
+    beheaded_a = (
+        "合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
+        "（owner 拍板：服务端不替 Agent 挑重要命中，"
+    )
+    beheaded_b = "透出前过滤：kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计"
+    gate = evaluate_pair_extractions(
+        AttributeValueExtraction("命中透出策略", beheaded_a, "命中透出策略", beheaded_b),
+        AttributeValueExtraction("命中透出策略", beheaded_b, "命中透出策略", beheaded_a),
+        {"quote": _GUILOTINE_QUOTE_A}, {"quote": _GUILOTINE_QUOTE_B},
+        require_bidirectional=True,
+    )
+    assert gate.state == "review_candidate", gate
+    assert gate.reason == "qwen_unverified"
+
+
 def test_write_notice_rejects_whole_quote_values_but_accepts_short_values() -> None:
     left_quote = "生产环境的接口超时策略明确设置为 5 秒。"
     right_quote = "生产环境的接口超时策略明确设置为 30 秒。"

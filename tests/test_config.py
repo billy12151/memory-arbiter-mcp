@@ -417,7 +417,7 @@ def test_product_help_exposes_agent_onboarding_topic(tmp_path: Path) -> None:
 
     help_doc = tools.memory(action="help", data={"topic": "agent_onboarding"})["data"]
     assert help_doc["topic"] == "agent_onboarding"
-    assert help_doc["notice"] == "agent-onboarding:v1"
+    assert help_doc["notice"] == "agent-onboarding:v2"
     assert help_doc["guide_file"] == "memory_arbiter/AGENT_ONBOARDING.md"
     content = help_doc["content"]
     assert "Memory Arbiter Agent Rule" in content

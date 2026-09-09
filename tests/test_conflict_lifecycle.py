@@ -1929,6 +1929,41 @@ def _backend(tmp_path: Path, target, timeout=500) -> IsolatedGGUFSemanticBackend
     )
 
 
+def _status_piggyback_child(conn, config):
+    """Child that reports retry counters in the classify_pair envelope (the
+    0.15.11 production child does this so the parent's status() can surface
+    them without a blocking status RPC)."""
+    calls = 0
+    try:
+        while True:
+            request = conn.recv()
+            if request.get("command") == "load":
+                conn.send({"ok": True, "result": {"loaded": True}})
+                continue
+            calls += 1
+            conn.send({
+                "ok": True,
+                "result": ModelSignal(True, "replacement", 0.9, "{}", {"pid": os.getpid()}),
+                "backend_status": {"pair_retried": calls, "pair_retry_recovered": calls - 1},
+            })
+    except (EOFError, OSError):
+        return
+
+
+def test_process_backend_surfaces_child_retry_counters(tmp_path: Path) -> None:
+    backend = _backend(tmp_path, _status_piggyback_child)
+    before = backend.status()
+    assert before["pair_retried"] is None  # no pair completed yet
+    assert backend.classify_pair({}, {}).candidate_type == "replacement"
+    after = backend.status()
+    assert after["pair_retried"] == 1
+    assert after["pair_retry_recovered"] == 0
+    assert backend.classify_pair({}, {}).candidate_type == "replacement"
+    assert backend.status()["pair_retried"] == 2
+    assert backend.status()["pair_retry_recovered"] == 1
+    backend.unload()
+
+
 def test_process_backend_reuses_one_resident_child(tmp_path: Path) -> None:
     backend = _backend(tmp_path, _responsive_child)
     first = backend.classify_pair({}, {})
