@@ -1130,13 +1130,15 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "semantic_conflict_max_notice_pairs",
         "semantic_conflict_notice_sync_wait_ms",
         "config_warnings",
+        "config_file_loaded",
     }
 )
 
 
-def test_settings_field_set_is_frozen_at_twenty_two() -> None:
-    # 0.15.8: 22 — semantic_conflict_notice_sync_wait_ms restored as a live key.
-    assert len(SLIM_SETTINGS_FIELDS) == 22
+def test_settings_field_set_is_frozen_at_twenty_three() -> None:
+    # 0.15.11: 23 — config_file_loaded added as a runtime-injected field (same
+    # class as config_warnings/policy: never a file key, not in the registry).
+    assert len(SLIM_SETTINGS_FIELDS) == 23
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 
@@ -1177,7 +1179,8 @@ def test_from_env_empty_config_matches_dataclass_defaults(
     defaults = Settings(db_path=Path("d.sqlite3"), backup_jsonl=Path("b.jsonl"))
     # Environment-dependent fields are excluded by design: db/backup paths are
     # cwd-based, client/agent_id/mcp_transport read launch env, config_warnings
-    # collects parse-time diagnostics.
+    # collects parse-time diagnostics, and config_file_loaded records whether
+    # a real config file was found (runtime provenance, not a setting).
     excluded = {
         "db_path",
         "backup_jsonl",
@@ -1185,6 +1188,7 @@ def test_from_env_empty_config_matches_dataclass_defaults(
         "agent_id",
         "mcp_transport",
         "config_warnings",
+        "config_file_loaded",
     }
     for field in dataclasses.fields(Settings):
         if field.name in excluded:

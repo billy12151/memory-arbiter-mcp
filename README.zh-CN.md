@@ -58,13 +58,27 @@ Agent 应以这份 README 为事实来源，先检查本机环境，再判断使
 前提：电脑上装了 Python 3.11+。
 
 ```bash
-# 1. 安装
-pip install memory-arbiter-mcp
+# 一条命令全搞定：装包 + 装依赖 + 下两个模型（约 800MB，断点续传/国内镜像）+ 写配置
+curl -fsSL https://memarbiter.cn/install.sh | sh
+```
 
-# 2. 生成配置（会自检环境，不会乱下载东西）
-mema setup
+或者分步来：
 
-# 3. 在你的 AI 客户端里接入（照抄示例改一下就行）
+```bash
+# 1. 安装（含向量召回和本地小模型运行时）
+pip install "memory-arbiter-mcp[vec,semantic-local]"
+
+# 2. 完整安装：自动下载两个模型并写好配置
+mema setup --install
+
+# 3. 验证
+mema doctor
+```
+
+`mema setup`（不带 `--install`）仍是"只指导不执行"：写 `~/.config/memory-arbiter/config.json` 并自检环境，不动 pip、不联网；`--install` 才是执行模式。模型没装全时，每次工具响应都会带一条降级提示（附 `mema setup --install` 补齐命令），每个 Agent 的第一次调用也会收到能力健康卡——残缺安装不会静悄悄地被当成完整版用。
+
+```bash
+# 4. 在你的 AI 客户端里接入（照抄示例改一下就行）
 #    示例文件：examples/ 目录下的 *.mcp.json
 ```
 

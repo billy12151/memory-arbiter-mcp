@@ -1,25 +1,32 @@
 """CLI shell for ``memory-arbiter setup``.
 
-Semi-automatic one-shot setup helper: generates a current starter
+One-shot setup helper: generates a current starter
 ``~/.config/memory-arbiter/config.json``, then runs read-only environment checks
 and prints concrete commands and download URLs for remaining prerequisites.
 
-Design stance (deliberate): this command does **not** call ``pip``, does **not**
-download the model, does **not** touch the network. Failing installs of
+Network stance: the bare command does **not** call ``pip``, does **not**
+download models, does **not** touch the network — failing installs of
 ``llama-cpp-python`` or a blocked model download are environment problems the
-user must handle; setup only tells them precisely what to do. Dispatch is
+user must handle, and setup only tells them precisely what to do. Passing
+``--install`` flips the command into execution mode: it pip-installs the
+optional dependencies, downloads both GGUF models (embedding + semantic,
+HuggingFace with ModelScope fallback, resumable), and writes the finished
+config itself — one command an agent can run end-to-end. Dispatch is
 wired in ``server.main`` by intercepting ``argv[1]=="setup"``; no new console
 script is added (pyproject unchanged).
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import sys
+import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Model + download sources — kept as module constants so they are easy to update.
 DEFAULT_MODEL_FILENAME = "embeddinggemma-300m-qat-Q8_0.gguf"
@@ -35,6 +42,25 @@ MODELSCOPE_DOWNLOAD_URL = (
     "/resolve/master/embeddinggemma-300m-qat-Q8_0.gguf"
 )
 LLAMA_CPP_CPU_EXTRA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+
+# Semantic-conflict (Qwen) model — the second half of a "full" install. URLs
+# verified 2026-09-09: HF honours Range (206), ModelScope answers 200 to a
+# ranged probe (the downloader treats an ignored Range as restart-from-zero).
+QWEN_MODEL_FILENAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+QWEN_MODEL_DIRNAME = "Qwen2.5-0.5B-Instruct"
+EXPECTED_QWEN_BYTES = 491_400_032  # q4_k_m; same ±20% tolerance as embedding
+QWEN_HF_URL = (
+    "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+    "/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+)
+QWEN_MODELSCOPE_URL = (
+    "https://modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+    "/resolve/master/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+)
+
+_DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
+_DOWNLOAD_TIMEOUT_S = 60
+_DOWNLOAD_USER_AGENT = "memory-arbiter-setup"
 
 # llama-cpp-python prebuilt CPU wheels cover this Python range. Outside it pip
 # falls back to source build (needs VS Build Tools on Windows).
@@ -54,12 +80,20 @@ def _color(text: str, code: str, use_color: bool) -> str:
     return f"{code}{text}{_RESET}" if use_color else text
 
 
-def _default_config_dict(model_path: Path, db_path: Path, backup_jsonl: Path) -> dict[str, Any]:
+def _default_config_dict(
+    model_path: Path,
+    db_path: Path,
+    backup_jsonl: Path,
+    *,
+    qwen_model_path: Path | None = None,
+) -> dict[str, Any]:
     """Return the 0.15.0 slim starter config (18 user keys, file-only).
 
     Everything else the 0.14.x config carried is a frozen constant now.
     Identity (client/agent_id) is intentionally left empty: the MCP server
-    refuses to start until it is filled in.
+    refuses to start until it is filled in. ``qwen_model_path`` is only
+    supplied by ``--install`` (execution mode points semantic_conflict at the
+    downloaded model); guidance mode leaves it None.
     """
     return {
         "db_path": str(db_path),
@@ -76,7 +110,7 @@ def _default_config_dict(model_path: Path, db_path: Path, backup_jsonl: Path) ->
             "auto_write": True,
         },
         "semantic_conflict": {
-            "model_path": None,
+            "model_path": str(qwen_model_path) if qwen_model_path is not None else None,
             "on_write": "async",
             "max_notice_pairs": 2,
         },
@@ -102,6 +136,146 @@ def _default_paths() -> tuple[Path, Path, Path, Path]:
     db_path = data_dir / "memory.sqlite3"
     backup_jsonl = data_dir / "memory.backup.jsonl"
     return config_path, model_path, db_path, backup_jsonl
+
+
+def _default_qwen_path() -> Path:
+    """The runtime's default semantic-conflict model location."""
+    return (
+        Path.home() / ".local" / "share" / "memory-arbiter" / "models"
+        / "semantic-conflict" / QWEN_MODEL_DIRNAME / QWEN_MODEL_FILENAME
+    )
+
+
+# ── Execution mode (--install) ─────────────────────────────────────────────
+
+def _download_with_resume(
+    url: str,
+    part_path: Path,
+    *,
+    log: Callable[[str], None] = print,
+) -> bool:
+    """Download *url* to *part_path*, resuming a partial file when possible.
+
+    Returns True once the file is fully downloaded (caller validates the size
+    and atomically renames). Servers that ignore the Range header (ModelScope
+    answers 200 to a ranged probe) make us restart from zero — the .part file
+    is truncated and refilled, never served as-is.
+    """
+    resume_from = 0
+    try:
+        if part_path.exists():
+            resume_from = part_path.stat().st_size
+    except OSError:
+        resume_from = 0
+    headers = {"User-Agent": _DOWNLOAD_USER_AGENT}
+    if resume_from > 0:
+        headers["Range"] = f"bytes={resume_from}-"
+        log(f"  断点续传: 已有 {resume_from / (1024 * 1024):.0f} MB，继续下载")
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_S) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            if resume_from > 0 and status != 206:
+                # Range ignored → full body coming; restart from scratch.
+                resume_from = 0
+            part_path.parent.mkdir(parents=True, exist_ok=True)
+            mode = "ab" if resume_from > 0 else "wb"
+            with part_path.open(mode) as handle:
+                while True:
+                    chunk = response.read(_DOWNLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+    except (OSError, ValueError) as exc:
+        log(f"  ✗ 下载失败: {type(exc).__name__}: {exc}")
+        return False
+    return True
+
+
+def _part_path_for(dest: Path, url: str) -> Path:
+    """Per-URL partial file: resume only ever continues bytes from the SAME
+    mirror. Two mirrors serving different content would otherwise produce a
+    hybrid file that passes the size gate but is corrupt (observed live:
+    an HF attempt truncated at 47MB, then ModelScope resumed over it).
+    """
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+    return dest.with_name(f"{dest.name}.{digest}.part")
+
+
+def _install_model(
+    label: str,
+    dest: Path,
+    urls: list[str],
+    *,
+    expected_bytes: int,
+    log: Callable[[str], None] = print,
+) -> bool:
+    """Ensure the GGUF at *dest* exists and passes the size check.
+
+    Already-good files are kept (idempotent re-runs). Otherwise each mirror is
+    tried in order with same-URL resume; the first download passing the size
+    check is atomically renamed into place and stale partials from other
+    mirrors are cleaned up.
+    """
+    size_ok, size_bytes = _model_size_ok(dest, expected=expected_bytes)
+    if size_ok:
+        log(f"✓ {label}: 已存在 ({size_bytes / (1024 * 1024):.0f} MB)，跳过下载")
+        return True
+    for url in urls:
+        part_path = _part_path_for(dest, url)
+        log(f"→ 下载 {label}: {url}")
+        if not _download_with_resume(url, part_path, log=log):
+            continue
+        ok, actual = _model_size_ok(part_path, expected=expected_bytes)
+        if not ok:
+            log(f"  ✗ 大小校验失败（{actual} bytes，预期约 {expected_bytes}），尝试下一个镜像")
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part_path.replace(dest)
+        for stale in dest.parent.glob(f"{dest.name}.*.part"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        log(f"✓ {label}: 下载完成 → {dest}")
+        return True
+    log(f"✗ {label}: 所有镜像均失败，可手动下载后放入 {dest}")
+    return False
+
+
+def _pip_install(packages: list[str], *, log: Callable[[str], None] = print) -> bool:
+    """pip-install *packages* into the current interpreter. Never raises."""
+    cmd = [
+        sys.executable, "-m", "pip", "install",
+        *packages,
+        "--extra-index-url", LLAMA_CPP_CPU_EXTRA_INDEX,
+    ]
+    log(f"→ {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"  ✗ pip 执行失败: {type(exc).__name__}: {exc}")
+        return False
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+        for line in tail:
+            log(f"  {line}")
+        log("  ✗ pip 安装失败，可手动重试上述命令")
+        return False
+    return True
+
+
+def _pyenv_guidance_lines(py_str: str) -> list[str]:
+    """Executable remediation for Python versions without llama.cpp wheels."""
+    return [
+        f"  ⚠ 你的 Python 是 {py_str}，llama-cpp-python CPU 预构建 wheel 只支持 "
+        f"{LLAMA_CPP_SUPPORTED_PY[0][0]}.{LLAMA_CPP_SUPPORTED_PY[0][1]}–"
+        f"{LLAMA_CPP_SUPPORTED_PY[1][0]}.{LLAMA_CPP_SUPPORTED_PY[1][1]}。可执行修复：",
+        "     pyenv install 3.12",
+        "     pyenv local 3.12   # 或: pyenv shell 3.12",
+        "     python3.12 -m pip install memory-arbiter-mcp[vec,semantic-local]",
+        "   （无 pyenv 时：brew install pyenv，或改用远程 API embedding，见 README）",
+    ]
 
 
 def _python_version_supported() -> tuple[bool, str]:
@@ -219,9 +393,17 @@ def _render_config_step(
 def _render_check_step(
     checks: dict[str, Any],
     model_path: Path,
+    qwen_path: Path,
     use_color: bool,
+    *,
+    require_qwen: bool = False,
 ) -> tuple[list[str], bool]:
-    """Render environment checks + remediation hints. Returns (lines, all_ok)."""
+    """Render environment checks + remediation hints. Returns (lines, all_ok).
+
+    The semantic (qwen) model is informational in guidance mode — a minimal
+    install is legitimate — but counts toward readiness under ``--install``,
+    which promises a full install.
+    """
     lines: list[str] = []
     lines.append(_render_step_header("Step 2 — 环境自检", use_color))
     all_ok = True
@@ -251,16 +433,7 @@ def _render_check_step(
             )
         )
         if not py_ok:
-            lines.append(
-                _color(
-                    f"  ⚠ 你的 Python 是 {py_str}，但 llama-cpp-python CPU 预构建 wheel "
-                    f"只支持 {LLAMA_CPP_SUPPORTED_PY[0][0]}.{LLAMA_CPP_SUPPORTED_PY[0][1]}–"
-                    f"{LLAMA_CPP_SUPPORTED_PY[1][0]}.{LLAMA_CPP_SUPPORTED_PY[1][1]}。"
-                    "装不上时可改用远程 API embedding（见 README “Optional: Semantic Recall”）。",
-                    _YELLOW,
-                    use_color,
-                )
-            )
+            lines.extend(_color(line, _YELLOW, use_color) for line in _pyenv_guidance_lines(py_str))
 
     # GGUF model file
     exists = checks["model_exists"]
@@ -285,6 +458,25 @@ def _render_check_step(
         lines.append(_color("  → 国内镜像（ModelScope，访问 HF 不稳时用）:", _DIM, use_color))
         lines.append(_color(f"     {MODELSCOPE_DOWNLOAD_URL}", _CYAN, use_color))
         lines.append(_color("  → 下完放到上述路径，或改 config.json 的 embedding.model_path 指向实际位置", _DIM, use_color))
+        lines.append(_color("  → 或运行 `mema setup --install` 自动下载（含断点续传/镜像切换）", _DIM, use_color))
+
+    # semantic-conflict (qwen) model — informational unless --install asked for
+    # a full install.
+    qwen_exists = checks["qwen_exists"]
+    if qwen_exists:
+        qwen_mb = checks["qwen_size_bytes"] / (1024 * 1024)
+        lines.append(f"{_color('✓', _GREEN, use_color)} Qwen 语义模型: 存在 ({qwen_mb:.0f} MB)")
+        lines.append(_color(f"     路径: {qwen_path}", _DIM, use_color))
+    else:
+        if require_qwen:
+            all_ok = False
+            lines.append(f"{mark(False)} Qwen 语义模型: 未找到（冲突检测不可用）")
+        else:
+            lines.append(f"{_color('⚠', _YELLOW, use_color)} Qwen 语义模型: 未找到（冲突检测不可用，属可选能力）")
+        lines.append(_color(f"     预期路径: {qwen_path}", _DIM, use_color))
+        lines.append(_color("  → 运行 `mema setup --install` 自动下载并写 config（推荐）", _DIM, use_color))
+        lines.append(_color(f"  → 手动（HuggingFace）: {QWEN_HF_URL}", _CYAN, use_color))
+        lines.append(_color(f"  → 国内镜像（ModelScope）: {QWEN_MODELSCOPE_URL}", _CYAN, use_color))
 
     # config load
     cl = checks["config_load_ok"]
@@ -322,15 +514,21 @@ def _render_summary(all_ok: bool, use_color: bool, config_written: bool, *, supp
 # ── Main entry ─────────────────────────────────────────────────────────────
 
 def run_cli(argv: list[str]) -> int:
-    """CLI entry: generate config, run checks, print remediation. Return exit code."""
+    """CLI entry: generate config, run checks, print remediation. Return exit code.
+
+    ``--install`` switches from guidance to execution: pip-install the optional
+    dependencies, download both GGUF models (resumable, mirror fallback), and
+    write the finished config (including semantic_conflict.model_path) itself.
+    """
     parser = argparse.ArgumentParser(
         prog="memory-arbiter setup",
-        description="memory-arbiter 一键配置（生成 config.json + 环境自检 + 精确指引，不替你装包/下载）",
+        description="memory-arbiter 一键配置（生成 config.json + 环境自检 + 精确指引；--install 直接执行安装）",
     )
     parser.add_argument("--force", action="store_true", help="config.json 已存在时直接覆盖（默认备份不覆盖）")
     parser.add_argument("--config-path", type=str, default=None, help="自定义 config.json 写入路径")
     parser.add_argument("--print-config", action="store_true", help="只打印将生成的 config 内容，不写盘")
     parser.add_argument("--no-config", action="store_true", help="跳过 config 生成，只跑环境自检")
+    parser.add_argument("--install", action="store_true", help="执行模式：装依赖 + 下载两个模型 + 回写 config（默认只指导不执行）")
     args = parser.parse_args(argv)
 
     use_color = sys.stdout.isatty()
@@ -338,6 +536,7 @@ def run_cli(argv: list[str]) -> int:
     # Resolve paths (all platform-correct via Path.home()).
     default_config_path, default_model_path, default_db_path, default_backup_jsonl = _default_paths()
     config_path = Path(args.config_path).expanduser() if args.config_path else default_config_path
+    qwen_path = _default_qwen_path()
 
     # Honour a user-supplied model already present in an existing config:
     # if embedding.model_path points at a real file (and isn't our default
@@ -351,12 +550,18 @@ def run_cli(argv: list[str]) -> int:
 
     out_lines: list[str] = []
     out_lines.append(_color("memory-arbiter setup — 配置助手（半自动）", _BOLD, use_color))
-    out_lines.append(_color("生成 config + 检测环境 + 给出可复制的命令。不调 pip、不下模型。", _DIM, use_color))
+    if args.install:
+        out_lines.append(_color("--install 执行模式：装依赖 + 下载 embedding/qwen 模型 + 回写 config。", _DIM, use_color))
+    else:
+        out_lines.append(_color("生成 config + 检测环境 + 给出可复制的命令。--install 可直接执行全部安装。", _DIM, use_color))
     if preserved_model is not None:
         out_lines.append(_color(f"  ℹ {preserve_note}", _CYAN, use_color))
 
     # ── Step 1: config.json ──
-    config_dict = _default_config_dict(model_path, default_db_path, default_backup_jsonl)
+    config_dict = _default_config_dict(
+        model_path, default_db_path, default_backup_jsonl,
+        qwen_model_path=qwen_path if args.install else None,
+    )
     backup_path: Path | None = None
     written = False
     config_write_error: str | None = None
@@ -400,6 +605,38 @@ def run_cli(argv: list[str]) -> int:
     if config_write_error is not None:
         out_lines.append(_color(f"✗ config.json 写入失败: {config_write_error}", _RED, use_color))
 
+    # ── Step 1.5 (--install only): execute pip + model downloads ──
+    if args.install:
+        out_lines.append(_render_step_header("Step 1.5 — 执行安装（--install）", use_color))
+        py_ok, py_str = _python_version_supported()
+        if not _check_sqlite_vec():
+            if _pip_install(["sqlite-vec"]):
+                out_lines.append(_color("✓ sqlite-vec 安装完成", _GREEN, use_color))
+            else:
+                out_lines.append(_color("✗ sqlite-vec 安装失败（见上方 pip 输出）", _RED, use_color))
+        else:
+            out_lines.append(_color("✓ sqlite-vec: 已装，跳过", _GREEN, use_color))
+        if not _check_llama_cpp():
+            if py_ok:
+                if _pip_install(["llama-cpp-python"]):
+                    out_lines.append(_color("✓ llama-cpp-python 安装完成", _GREEN, use_color))
+                else:
+                    out_lines.append(_color("✗ llama-cpp-python 安装失败（见上方 pip 输出）", _RED, use_color))
+            else:
+                out_lines.extend(_color(line, _YELLOW, use_color) for line in _pyenv_guidance_lines(py_str))
+        else:
+            out_lines.append(_color("✓ llama-cpp-python: 已装，跳过", _GREEN, use_color))
+        _install_model(
+            "embedding 模型", model_path,
+            [HF_DOWNLOAD_URL, MODELSCOPE_DOWNLOAD_URL],
+            expected_bytes=EXPECTED_MODEL_BYTES,
+        )
+        _install_model(
+            "Qwen 语义模型", qwen_path,
+            [QWEN_HF_URL, QWEN_MODELSCOPE_URL],
+            expected_bytes=EXPECTED_QWEN_BYTES,
+        )
+
     # ── Step 2: environment checks ──
     # Config-load check: try to load via Settings.from_env() AFTER we may have
     # just written the file. If user passed --config-path to a non-default
@@ -429,7 +666,6 @@ def run_cli(argv: list[str]) -> int:
             config_load_ok = False
             config_load_error_str = f"{type(exc).__name__}: {exc}"
 
-    model_exists = model_path.exists()
     # For a user-supplied model we can't know the right size, so only run the
     # baseline comparison against embeddinggemma; otherwise just report size.
     if preserved_model is not None:
@@ -445,14 +681,18 @@ def run_cli(argv: list[str]) -> int:
     checks = {
         "sqlite_vec": _check_sqlite_vec(),
         "llama_cpp": _check_llama_cpp(),
-        "model_exists": model_exists,
+        "model_exists": model_path.exists(),
         "model_size_ok": size_ok,
         "model_size_bytes": size_bytes,
+        "qwen_exists": qwen_path.exists(),
+        "qwen_size_bytes": qwen_path.stat().st_size if qwen_path.exists() else 0,
         "config_load_ok": config_load_ok,
         "config_load_error": config_load_error_str,
         "config_warnings": config_warnings,
     }
-    check_lines, all_ok = _render_check_step(checks, model_path, use_color)
+    check_lines, all_ok = _render_check_step(
+        checks, model_path, qwen_path, use_color, require_qwen=args.install,
+    )
     out_lines.extend(check_lines)
 
     # ── Step 3: summary ──

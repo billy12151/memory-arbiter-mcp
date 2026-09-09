@@ -37,12 +37,21 @@ The agent should treat this README as the source of truth, inspect the local env
 ### Install manually
 
 ```bash
-pip install memory-arbiter-mcp
-pip install "memory-arbiter-mcp[vec]"            # sqlite-vec evidence recall
-pip install "memory-arbiter-mcp[semantic-local]" # local GGUF runtime (embeddings + Qwen)
+# One command: package + deps + both models + config.json (resumable downloads, ModelScope fallback)
+curl -fsSL https://memarbiter.cn/install.sh | sh
 ```
 
-Run `mema setup` to write `~/.config/memory-arbiter/config.json` and self-check the embedding environment (it never installs or downloads anything). Since 0.15.0 configuration is file-only and the whole user surface is 20 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+Or step by step:
+
+```bash
+pip install "memory-arbiter-mcp[vec,semantic-local]"  # core + sqlite-vec + local GGUF runtime
+mema setup --install   # downloads both models (~800MB, resumable) and writes config.json
+mema doctor            # verify
+```
+
+`mema setup` without `--install` stays guidance-only: it writes `~/.config/memory-arbiter/config.json` and self-checks the environment without touching pip or the network; `--install` is the execution mode (pip installs the extras, downloads the embedding + Qwen GGUF models with resume/mirror fallback, and writes the finished config itself). Since 0.15.0 configuration is file-only and the whole user surface is 20 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+
+When a capability is missing (e.g. the models were never downloaded), every tool response carries a persistent degraded-mode banner with the `mema setup --install` remediation, and each agent's first call includes a capability health card — an incomplete install cannot pass for a complete one silently.
 
 The server requires an explicitly configured identity: set `client` and `agent_id` in config.json or the `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` launch-context environment variables (the stdio `examples/*.mcp.json` entries do this via `env`). There are no built-in defaults — the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; `memory(action="remember")` does not accept `agent_id`/`client` in `data`. streamable-http takes caller identity from the per-request headers described below.
 

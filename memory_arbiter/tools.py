@@ -118,6 +118,77 @@ class MemoryTools:
         # time duplicate-hint recall index must cover pre-existing active
         # memories, not only rows written after the upgrade.
         self._subject_tags_backfilled = False
+        banner = self._setup_capability_banner()
+        if banner is not None:
+            # Persistent (deduped) — rides every response's warnings until the
+            # capability is installed and the process restarts.
+            self.db.state.warn(banner)
+
+    def _setup_health(self) -> dict[str, Any]:
+        """Capability health for the first-call onboarding notice (P1)."""
+        embedding = self.settings.embedding_model_path
+        embedding_state = "ok" if (embedding is not None and embedding.exists()) else "missing"
+        semantic_path = self.settings.semantic_conflict_model_path
+        if self.settings.semantic_conflict_enabled:
+            semantic_state = (
+                "ok" if (semantic_path is not None and semantic_path.exists()) else "missing"
+            )
+        elif semantic_path is not None:
+            # enabled=false with a configured model: deliberate opt-out.
+            semantic_state = "disabled"
+        else:
+            semantic_state = "missing"
+        try:
+            import sqlite_vec  # noqa: F401
+            vec_state = "ok"
+        except Exception:
+            vec_state = "missing"
+        health: dict[str, Any] = {
+            "sqlite_vec": vec_state,
+            "embedding_model": embedding_state,
+            "semantic_model": semantic_state,
+        }
+        if "missing" in health.values():
+            health["hint"] = (
+                "mema 正在以降级模式运行：缺失能力见上。"
+                "运行 mema setup --install 补齐（自动装依赖+下载模型+回写 config，"
+                "支持断点续传与 ModelScope 国内镜像）。"
+            )
+        return health
+
+    def _setup_capability_banner(self) -> str | None:
+        """The loud degraded-mode banner, or None when the install is full.
+
+        Gated on config_file_loaded: real installs load Settings from an
+        on-disk config via from_env; directly-constructed Settings (tests,
+        embedded use) never nag. An explicit semantic_conflict.enabled=false
+        with a configured model is a deliberate minimal install and stays
+        quiet; enabled=false with NO model path means "never installed" and
+        nags like any other missing capability.
+        """
+        if not self.settings.config_file_loaded:
+            return None
+        missing: list[str] = []
+        embedding = self.settings.embedding_model_path
+        if embedding is None or not embedding.exists():
+            missing.append("✗ 向量召回未启用（embedding 模型未找到）")
+        if self.settings.semantic_conflict_enabled:
+            semantic_missing = (
+                self.settings.semantic_conflict_model_path is None
+                or not self.settings.semantic_conflict_model_path.exists()
+            )
+        else:
+            semantic_missing = self.settings.semantic_conflict_model_path is None
+        if semantic_missing:
+            missing.append("✗ 冲突检测未启用（qwen 语义模型未找到）")
+        if not missing:
+            return None
+        return "\n".join([
+            "mema 正在以【降级模式】运行：",
+            *missing,
+            "当前只有基础全文搜索/写入可用，这不是 mema 的完整能力。",
+            "→ 运行 mema setup --install 补齐（自动装依赖+下载模型+回写 config，支持断点续传与国内镜像）",
+        ])
 
     def start_update_monitor(self, monitor: UpdateMonitor | None = None) -> None:
         # Product notice delivery is owned by the four outer product wrappers,
@@ -355,7 +426,14 @@ class MemoryTools:
     def _consume_notices(self) -> list[dict[str, Any]]:
         notices: list[dict[str, Any]] = []
         if self._update_monitor is not None:
-            notices.extend(self._update_monitor.consume_agent_onboarding_notice(self.current_agent_id()))
+            onboarding = self._update_monitor.consume_agent_onboarding_notice(self.current_agent_id())
+            for notice in onboarding:
+                if notice.get("type") == "agent_onboarding":
+                    # First call per agent doubles as the health card (P1): the
+                    # agent sees capability gaps immediately instead of waiting
+                    # for a human to run doctor.
+                    notice["health"] = self._setup_health()
+            notices.extend(onboarding)
             notices.extend(self._update_monitor.consume_notices())
             notices.extend(self._scheduled_task_notices())
         try:

@@ -83,6 +83,11 @@ class Settings:
     # later response). Clamp matches the pre-0.15.0 semantics [0, 5000].
     semantic_conflict_notice_sync_wait_ms: int = NOTICE_SYNC_WAIT_MS
     config_warnings: list[str] = field(default_factory=list)
+    # Runtime-injected (never a file key, like config_warnings/policy): True
+    # when these settings were built by from_env from a real on-disk config.
+    # The degraded-capability banner keys off it — directly-constructed
+    # Settings (tests, embedded use) do not get per-response install nags.
+    config_file_loaded: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -259,6 +264,7 @@ class Settings:
         )
         settings.config_warnings = config_warnings
         settings.policy = load_policy(settings.policy_path, config_warnings)
+        settings.config_file_loaded = config_path is not None
         return settings
 
     def defaults(self) -> dict[str, str]:
