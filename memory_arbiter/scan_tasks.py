@@ -34,12 +34,53 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                     "data": {"anchor_memory_id": 0, "batch": 200, "k": 10},
                 },
                 {
+                    "tool": "memory_repair", "task": "record_conflict",
+                    "data": {
+                        "slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"},
+                        "members": [
+                            {
+                                "memory_id": 12, "version": 1, "attribute_raw": "database",
+                                "value_raw": "MySQL", "normalized_attribute": "database",
+                                "normalized_value": "mysql", "evidence_quote": "database is MySQL",
+                                "evidence_span": [0, 17],
+                                "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+                                "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1",
+                            },
+                            {
+                                "memory_id": 34, "version": 1, "attribute_raw": "database",
+                                "value_raw": "SQLite", "normalized_attribute": "database",
+                                "normalized_value": "sqlite", "evidence_quote": "database is SQLite",
+                                "evidence_span": [0, 18],
+                                "content_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                                "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1",
+                            },
+                        ],
+                        "value_groups": [
+                            {"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]},
+                            {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]},
+                        ],
+                        "status": "open",
+                        "detector_version": "d1",
+                        "source": "scheduled_scan",
+                        "reason": "Reviewed conflicting values from the scan page.",
+                    },
+                },
+                {
                     "note": (
                         "Start at anchor_memory_id=0; use each page's next_anchor_memory_id as the "
-                        "next anchor_memory_id until it returns null. After a process restart, run "
-                        "memory_repair(task='rebuild_evidence') before resuming to catch up on "
+                        "next anchor_memory_id until it returns null. After each page returns, "
+                        "immediately triage that page's candidates: a real conflict -> record_conflict "
+                        "with status='open' (shape as the sample call above, values taken from the "
+                        "page's slot_groups/candidates); not a conflict -> record_conflict with "
+                        "status='not_a_conflict' (same shape; requires authorized=true because it "
+                        "suppresses future detection of the same candidate). Both dispositions are "
+                        "recorded — do not batch them to the end of the round: an interrupted run "
+                        "must not lose the triage of already-fetched pages. After a process restart, "
+                        "run memory_repair(task='rebuild_evidence') before resuming to catch up on "
                         "evidence indexing. If you receive a queue_full response, the semantic worker "
-                        "is saturated — back off and retry the scan page later."
+                        "is saturated — back off and retry the scan page later. Hourly is the "
+                        "recommended cadence; a weekly rhythm also works (a full pass over ~550 "
+                        "memories takes about 15 minutes)."
                     ),
                 },
             ],
