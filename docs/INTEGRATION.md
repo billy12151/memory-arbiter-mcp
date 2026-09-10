@@ -2,7 +2,7 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.15.11` contract.
+This guide describes the `0.15.12` contract.
 
 ## MCP Surface
 
