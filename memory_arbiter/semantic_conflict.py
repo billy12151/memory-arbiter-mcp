@@ -237,6 +237,24 @@ def _cosine(left: set[str], right: set[str]) -> float:
     return len(left & right) / math.sqrt(len(left) * len(right))
 
 
+def vector_cosine(left: list[float] | None, right: list[float] | None) -> float:
+    """Cosine over two embedding vectors (soft-ordering score, v0.15.12 C4).
+
+    Distinct from the token-set ``_cosine`` above: this one scores a pair of
+    subject+tags hint vectors. Mismatched lengths or either side missing
+    score 0 — the caller treats that as "no overlap signal", ranked last,
+    never an error.
+    """
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    norm_left = math.sqrt(sum(a * a for a in left))
+    norm_right = math.sqrt(sum(b * b for b in right))
+    if norm_left == 0.0 or norm_right == 0.0:
+        return 0.0
+    return dot / (norm_left * norm_right)
+
+
 _EVIDENCE_ALIASES = {
     "pgsql": "postgresql",
     "postgres": "postgresql",

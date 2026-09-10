@@ -262,10 +262,29 @@ class EvidencePipeline:
             }
 
         backend = self._ensure_semantic_backend()
+        # C4 soft ordering (⑦ 定案): rank same-level pairs by subject+tags
+        # overlap before distance — the Qwen budget should spend on pairs the
+        # owner's signals (subject/tag) already flag as related. Deterministic
+        # notify pairs stay first (never demoted by the score); zero-overlap
+        # pairs are only ordered later, never excluded.
+        from ..semantic_conflict import vector_cosine
+
+        hint_vectors = self.db.memories.subject_tags_vectors(
+            [memory_id, *[peer_id for peer_id in by_peer]],
+        )
+        own_vector = hint_vectors.get(int(memory_id))
+        if own_vector is None:
+            overlap_rank = {peer_id: 0.0 for peer_id in by_peer}
+        else:
+            overlap_rank = {
+                peer_id: vector_cosine(own_vector, hint_vectors.get(peer_id))
+                for peer_id in by_peer
+            }
         ordered = sorted(
             by_peer.items(),
             key=lambda item: (
                 item[1][2].action != "notify",
+                -overlap_rank.get(item[0], 0.0),
                 float(item[1][0].get("distance") or 9),
             ),
         )

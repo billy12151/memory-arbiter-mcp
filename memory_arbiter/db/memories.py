@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import struct
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -518,6 +519,48 @@ class MemoriesStore:
             return True
         except sqlite3.Error:
             return False
+
+    def subject_tags_vectors(self, memory_ids: list[int]) -> dict[int, list[float]]:
+        """Point-read several memories' subject+tags vectors in one connection.
+
+        Soft ordering (v0.15.12 C4) consumes these to score pair overlap. The
+        vec0 point lookup (``WHERE id IN (...)``) was probe-verified to return
+        the float32 blob and no row for a missing id; ids absent from the
+        table are simply omitted so callers score them 0. One connection for
+        the whole batch — a per-id helper would open/close one connection per
+        pair and the scan path feeds hundreds of pairs.
+        """
+        if not self._db_available or not self.state.sqlite_vec_available or not memory_ids:
+            return {}
+        wanted = sorted({int(mid) for mid in memory_ids if int(mid) > 0})
+        if not wanted:
+            return {}
+        found: dict[int, list[float]] = {}
+        try:
+            with self.connection() as conn:
+                # Point reads, not a KNN match: the vec0 virtual table still
+                # honors plain rowid membership, but keep the batch bounded so
+                # the IN list stays sane even for a large pool.
+                for start in range(0, len(wanted), 500):
+                    chunk = wanted[start:start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        f"SELECT id, embedding FROM subject_tags_vec WHERE id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    for row in rows:
+                        if row["embedding"] is None:
+                            continue
+                        try:
+                            blob = bytes(row["embedding"])
+                            found[int(row["id"])] = list(
+                                struct.unpack(f"{len(blob) // 4}f", blob)
+                            )
+                        except (struct.error, TypeError):
+                            continue
+        except sqlite3.Error:
+            return {}
+        return found
 
     def missing_subject_tags_rows(self) -> list[dict[str, Any]]:
         """Active memories whose hint vector is absent (startup backfill set).

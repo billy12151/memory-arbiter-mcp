@@ -1221,6 +1221,25 @@ class MemoryTools:
             if state["evaluated"] >= max_pairs or time.monotonic() >= deadline:
                 break
             last_reason = enhance_guarded(item) or last_reason
+        # C4 soft ordering (⑦ 定案): similarity-pool pairs enter the Qwen loop
+        # by subject+tags overlap, descending. Rule candidates above keep
+        # their existing order (deterministic notify level is not demoted).
+        # Red line: ordering only, never exclusion — with a large budget every
+        # pool pair (zero overlap included) is still evaluated; the score only
+        # decides who has been checked when the budget runs out.
+        if pool:
+            from .semantic_conflict import vector_cosine
+
+            pool_ids: list[int] = []
+            for item in pool:
+                pool_ids.append(int(item.get("left_id") or 0))
+                pool_ids.append(int(item.get("right_id") or 0))
+            hint_vectors = self.db.memories.subject_tags_vectors(pool_ids)
+            def _overlap(item: dict[str, Any]) -> float:
+                left_vec = hint_vectors.get(int(item.get("left_id") or 0))
+                right_vec = hint_vectors.get(int(item.get("right_id") or 0))
+                return vector_cosine(left_vec, right_vec)
+            pool = sorted(pool, key=_overlap, reverse=True)
         added: list[dict[str, Any]] = []
         for item in pool:
             if state["evaluated"] >= max_pairs or time.monotonic() >= deadline:
