@@ -12,6 +12,7 @@ import pytest
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
+from memory_arbiter.scan_tasks import SCHEDULED_TASKS_SPEC
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.update_monitor import UpdateMonitor
 
@@ -268,3 +269,82 @@ def test_scheduled_tasks_help_topic_self_serve(tmp_path: Path) -> None:
     assert names == ["conflict_scan", "governance_reminder"]
     cadences = {task["name"]: task["cadence"] for task in data["setup"]["tasks"]}
     assert cadences == {"conflict_scan": "hourly", "governance_reminder": "daily"}
+
+
+# ── 0.15.12 C3: the conflict_scan spec carries an executable record_conflict
+# sample and per-page triage semantics (D6 fix: the old spec's calls array had
+# only scan_candidates + paging, so workbuddy's task paged but never triaged). ──
+
+
+def _conflict_scan_spec() -> dict:
+    return next(t for t in SCHEDULED_TASKS_SPEC["tasks"] if t["name"] == "conflict_scan")
+
+
+def test_spec_calls_include_record_conflict_sample() -> None:
+    calls = _conflict_scan_spec()["calls"]
+    tools_entries = [call for call in calls if "tool" in call]
+    assert [call["task"] for call in tools_entries] == ["scan_candidates", "record_conflict"]
+    sample = tools_entries[1]
+    assert sample["tool"] == "memory_repair"
+    for required in (
+        "slot_key", "members", "value_groups", "status", "detector_version",
+        "source", "reason",
+    ):
+        assert required in sample["data"], f"sample record_conflict missing {required}"
+    assert sample["data"]["status"] == "open"
+    assert sample["data"]["source"] == "scheduled_scan"
+    assert len(sample["data"]["members"]) == 2
+    assert all("memory_id" in member and "normalized_value" in member for member in sample["data"]["members"])
+    assert any("note" in call for call in calls)
+
+
+def test_spec_note_carries_per_page_triage_semantics() -> None:
+    note = next(call["note"] for call in _conflict_scan_spec()["calls"] if "note" in call)
+    lowered = note.lower()
+    assert "immediately triage" in lowered
+    assert "not_a_conflict" in note
+    assert "do not batch" in lowered
+    assert "must not lose" in lowered
+    # cadence expectation for the weekly rhythm
+    assert "weekly" in lowered
+
+
+def test_record_conflict_sample_passes_validation_registry(tmp_path: Path) -> None:
+    """The spec's sample must be a valid memory_repair record_conflict payload."""
+    from memory_arbiter.validation import validate_product_payload
+
+    sample = next(
+        call for call in _conflict_scan_spec()["calls"] if call.get("task") == "record_conflict"
+    )["data"]
+    result = validate_product_payload("memory_repair", "record_conflict", dict(sample))
+    assert result.error is None, result.error
+    assert result.warnings == []
+
+
+def test_record_conflict_sample_executes_end_to_end(tmp_path: Path) -> None:
+    """A5: the sample shape must survive a real record_conflict round-trip
+    (validation -> surface -> db insert) with live member ids."""
+    import tests.test_vnext_evidence as tv
+
+    tools = tv.make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    # No explicit workspace: the surface derives the group's workspace from the
+    # member rows themselves, exactly what a scheduled_scan caller sees.
+    left = tools.memory_write(content="database is mysql", subject="db", tags=[])["data"]
+    right = tools.memory_write(content="database is sqlite", subject="db2", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+
+    sample = next(
+        call for call in _conflict_scan_spec()["calls"] if call.get("task") == "record_conflict"
+    )["data"]
+    payload = json.loads(json.dumps(sample))  # deep copy off the shared spec
+    payload["members"][0]["memory_id"] = int(left["id"])
+    payload["members"][1]["memory_id"] = int(right["id"])
+    payload["value_groups"][0]["members"] = [f"{left['id']}@1"]
+    payload["value_groups"][1]["members"] = [f"{right['id']}@1"]
+
+    result = tools.memory_repair("record_conflict", payload)
+    assert result["ok"] is True, result
+    assert result["data"].get("outcome") in {"inserted", "appended", "deduped"}
+    groups = tools.memory_review("conflicts", {"status": "open"})["data"]
+    assert groups, "recorded conflict must be listable"
