@@ -1246,6 +1246,10 @@ class MemoriesStore:
                         "error": f"patches[{patch_index}].old_text not found in current content (after applying patches 0..{patch_index - 1})",
                     }
                 resolved_content = resolved_content.replace(old_piece, str(patch["new_text"]), 1)
+            if not resolved_content.strip():
+                # Same guard as the new_content path: deletion-only patch
+                # batches must not silently wipe the memory.
+                return {"outcome": "invalid", "memory_id": int(memory_id), "error": "patches would empty the content; refusing to wipe memory content (use memory_supersede to retire it)"}
         else:
             return {"outcome": "invalid", "memory_id": int(memory_id), "error": "provide new_content for full replace, or old_text+new_text for partial replace, or patches for sequential partial replace, or tags_only=true"}
         if new_subject is not None and not str(new_subject).strip():

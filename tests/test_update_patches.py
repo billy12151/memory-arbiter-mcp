@@ -243,3 +243,42 @@ def test_e2e_post_commit_fires_once_for_patches(tmp_path: Path, monkeypatch: pyt
     )
     assert result["ok"] is True
     assert fired["post_commit"] == 1
+
+
+# ── adversarial-review round 2 (R1/R2): silent-intent-eating defenses ──────────
+
+
+def test_tags_only_cannot_be_combined_with_patches(tmp_path: Path) -> None:
+    """R1: tags_only + content edits must be rejected loudly, not half-run.
+
+    The tags-only fast path never touches content; before this guard the
+    patches half of the call was silently dropped (content unchanged, tags
+    applied) and the caller's edit intent vanished.
+    """
+    tools = make_tools(tmp_path)
+    record = _write(tools, "hello world")
+    memory_id = int(record["id"])
+
+    result = tools.memory_edit(memory_id, tags_only=True, patches=[{"old_text": "hello", "new_text": "hi"}], add_tags=["t"])
+    assert result["ok"] is False
+    assert "tags_only" in result["data"]["error"]
+    updated = tools.db.get_memory(memory_id)
+    assert updated["content"] == "hello world"
+    assert updated["tags"] == [], "the whole call must be rejected, not half-applied"
+
+    # …and the same for the pre-existing content modes the guard now covers.
+    result = tools.memory_edit(memory_id, tags_only=True, new_content="other")
+    assert result["ok"] is False
+
+
+def test_patches_cannot_wipe_content_empty(tmp_path: Path) -> None:
+    """R2: a deletion-only batch must hit the same wipe guard as new_content."""
+    tools = make_tools(tmp_path)
+    record = _write(tools, "ab")
+    memory_id = int(record["id"])
+
+    result = tools.memory_edit(memory_id, patches=[{"old_text": "ab", "new_text": ""}])
+    assert result["ok"] is False
+    assert result["data"]["outcome"] == "invalid"
+    assert "wipe" in result["data"]["error"]
+    assert tools.db.get_memory(memory_id)["content"] == "ab"

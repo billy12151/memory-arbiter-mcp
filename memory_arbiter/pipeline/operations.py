@@ -2522,6 +2522,14 @@ class OperationsPipeline:
             )
 
         # ---- tags-only fast path (v0.7.6) ----
+        if tags_only and (new_content is not None or old_text is not None or new_text is not None or patches is not None):
+            # A silent ignore here would eat the caller's edit intent: the
+            # tags-only path never touches content, so a combined call must
+            # be rejected loudly instead of half-executed.
+            return self.db.state.response(
+                {"error": "tags_only=true cannot be combined with content edits (new_content / old_text+new_text / patches); make two calls", "edited": False},
+                ok=False,
+            )
         if tags_only:
             tag_result: dict[str, Any]
             try:
