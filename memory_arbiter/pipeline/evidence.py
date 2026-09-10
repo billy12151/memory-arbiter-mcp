@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 _TECHNICAL_REASONS = {
     "qwen_timeout", "qwen_unavailable", "qwen_backend_error",
     "qwen_invalid_output", "qwen_budget_exhausted", "notice_budget_exhausted",
+    "evidence_units_capped",
 }
 
 
@@ -218,15 +219,21 @@ class EvidencePipeline:
                 if embedded.embedding:
                     unit_vectors.append((unit, list(embedded.embedding)))
         units_examined = 0
-        gathering_truncated = False
+        # Spec §15.5: a bounded check that ran out of budget must not later
+        # claim checked_no_notice. The two truncation causes report
+        # distinctly (2026-09-10 #957/#959 diagnosis: the shared string cost
+        # an extra investigation round): the per-memory evidence-unit cap is
+        # evidence_units_capped; the fair job deadline stays
+        # notice_budget_exhausted. The cap is checked first so a state where
+        # both hold attributes to the more specific cause.
+        truncation_reason: str | None = None
         for unit, embedding in unit_vectors:
             active_deadline = backlog_deadline()
-            if units_examined >= max_units or (
-                active_deadline is not None and time.monotonic() >= active_deadline
-            ):
-                # Spec §15.5: a bounded check that ran out of budget must not
-                # later claim checked_no_notice.
-                gathering_truncated = True
+            if units_examined >= max_units:
+                truncation_reason = "evidence_units_capped"
+                break
+            if active_deadline is not None and time.monotonic() >= active_deadline:
+                truncation_reason = "notice_budget_exhausted"
                 break
             units_examined += 1
             for hit in self.db.evidence_knn(
@@ -247,10 +254,10 @@ class EvidencePipeline:
                 # check decision by a merely closer neighbour.
                 if existing is None or priority > existing_priority or (priority == existing_priority and closer):
                     by_peer[peer_id] = (hit, unit, decision)
-        if gathering_truncated:
-            record_degradation("notice_budget_exhausted")
+        if truncation_reason:
+            record_degradation(truncation_reason)
             return {
-                "status": "incomplete", "reason": "notice_budget_exhausted",
+                "status": "incomplete", "reason": truncation_reason,
                 "notices_created": 0, "reasons_seen": reasons_seen,
             }
 
