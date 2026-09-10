@@ -53,6 +53,7 @@ def _memory_value_reference() -> dict[str, Any]:
         "update_modes": {
             "replace_content": "memory_id plus new_content, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
             "replace_text": "memory_id plus old_text and new_text, optionally new_subject/new_tags/add_tags/remove_tags/reason.",
+            "patches": "memory_id plus patches: [{old_text, new_text}, ...] (1..8, applied in order, first occurrence, atomic all-or-nothing), optionally new_subject/new_tags/add_tags/remove_tags/reason.",
             "tags_only": "memory_id plus tags_only=true with add_tags and/or remove_tags; content is unchanged.",
         },
     }
@@ -73,6 +74,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "batch_find": {"action": "batch_find", "data": {"queries": [{"id": "collections", "query": "催收 辱骂 侮辱"}, {"id": "debt-transfer", "query": "债务转移 债权人同意"}], "limit_per_query": 3}},
             "read": {"action": "read", "data": {"memory_id": 123}},
             "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
+            "update_patches": {"action": "update", "data": {"memory_id": 123, "patches": [{"old_text": "MySQL 5.7", "new_text": "MySQL 8.0"}, {"old_text": "us-east-1", "new_text": "us-west-2"}], "reason": "Two spotted corrections in one edit."}},
             "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
         },
         "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",

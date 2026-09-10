@@ -1104,6 +1104,7 @@ class MemoriesStore:
         new_content: str | None = None,
         old_text: str | None = None,
         new_text: str | None = None,
+        patches: list[dict[str, Any]] | None = None,
         new_subject: str | None = None,
         new_tags: list[str] | None = None,
         add_tags: list[str] | None = None,
@@ -1155,8 +1156,17 @@ class MemoriesStore:
                 "reason": "content_hash_mismatch",
                 "current_version": old_version,
             }
-        if new_content is not None and (old_text is not None or new_text is not None):
-            return {"outcome": "invalid", "memory_id": int(memory_id), "error": "pass either new_content (full replace) or old_text+new_text (partial), not both"}
+        # CAS pins are validated against the pre-edit row; content application
+        # happens after, in every mode.
+        content_modes = sum(
+            1 for flag in (
+                new_content is not None,
+                (old_text is not None or new_text is not None),
+                patches is not None,
+            ) if flag
+        )
+        if content_modes > 1:
+            return {"outcome": "invalid", "memory_id": int(memory_id), "error": "pass exactly one content mode: new_content (full replace), old_text+new_text (single partial), or patches (sequential partial), not a combination"}
         if new_content is not None:
             if not str(new_content).strip():
                 return {"outcome": "invalid", "memory_id": int(memory_id), "error": "new_content is empty; refusing to wipe memory content (use memory_supersede to retire it, or pass real content)"}
@@ -1165,8 +1175,36 @@ class MemoriesStore:
             if str(old_text) not in old_content:
                 return {"outcome": "stale_edit", "memory_id": int(memory_id), "reason": "old_text_not_found", "error": "old_text not found in current content"}
             resolved_content = old_content.replace(str(old_text), str(new_text), 1)
+        elif patches is not None:
+            # Defensive shape re-check (the validation boundary already
+            # normalized the list): a direct pipeline caller bypassing the
+            # product surface must not reach the replace loop with a
+            # malformed batch.
+            if (
+                not isinstance(patches, list) or not 1 <= len(patches) <= 8
+                or any(
+                    not isinstance(patch, dict) or set(patch) != {"old_text", "new_text"}
+                    or not isinstance(patch.get("old_text"), str) or not patch["old_text"]
+                    or not isinstance(patch.get("new_text"), str)
+                    for patch in patches
+                )
+            ):
+                return {"outcome": "invalid", "memory_id": int(memory_id), "error": "patches must be a list of 1..8 objects with exactly old_text (non-empty string) and new_text (string)"}
+            resolved_content = old_content
+            for patch_index, patch in enumerate(patches):
+                old_piece = str(patch["old_text"])
+                if old_piece not in resolved_content:
+                    # Atomic all-or-nothing: any miss rejects the whole call
+                    # with zero side effects (this helper has written nothing
+                    # yet; the caller's transaction stays pristine).
+                    return {
+                        "outcome": "stale_edit", "memory_id": int(memory_id),
+                        "reason": "old_text_not_found", "patch_index": patch_index,
+                        "error": f"patches[{patch_index}].old_text not found in current content (after applying patches 0..{patch_index - 1})",
+                    }
+                resolved_content = resolved_content.replace(old_piece, str(patch["new_text"]), 1)
         else:
-            return {"outcome": "invalid", "memory_id": int(memory_id), "error": "provide new_content for full replace, or old_text+new_text for partial replace, or tags_only=true"}
+            return {"outcome": "invalid", "memory_id": int(memory_id), "error": "provide new_content for full replace, or old_text+new_text for partial replace, or patches for sequential partial replace, or tags_only=true"}
         if new_subject is not None and not str(new_subject).strip():
             return {"outcome": "invalid", "memory_id": int(memory_id), "error": "new_subject is empty; refusing to wipe subject (pass None to keep current)"}
         old_subject = current.get("subject")
@@ -1254,6 +1292,7 @@ class MemoriesStore:
         new_content: str | None = None,
         old_text: str | None = None,
         new_text: str | None = None,
+        patches: list[dict[str, Any]] | None = None,
         new_subject: str | None = None,
         new_tags: list[str] | None = None,
         add_tags: list[str] | None = None,
@@ -1272,6 +1311,7 @@ class MemoriesStore:
                 new_content=new_content,
                 old_text=old_text,
                 new_text=new_text,
+                patches=patches,
                 new_subject=new_subject,
                 new_tags=new_tags,
                 add_tags=add_tags,
@@ -1292,6 +1332,7 @@ class MemoriesStore:
                     new_content=new_content,
                     old_text=old_text,
                     new_text=new_text,
+                    patches=patches,
                     new_subject=new_subject,
                     new_tags=new_tags,
                     add_tags=add_tags,

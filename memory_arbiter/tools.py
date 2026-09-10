@@ -1586,6 +1586,7 @@ class MemoryTools:
         new_content: str | None = None,
         old_text: str | None = None,
         new_text: str | None = None,
+        patches: list[dict[str, Any]] | None = None,
         new_subject: str | None = None,
         new_tags: list[str] | None = None,
         reason: str = "",
@@ -1596,8 +1597,19 @@ class MemoryTools:
         **_: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_edit(
-            memory_id, new_content, old_text, new_text, new_subject, new_tags,
-            reason, self._is_truthy(authorized), tags_only, add_tags, remove_tags, **_,
+            memory_id,
+            new_content=new_content,
+            old_text=old_text,
+            new_text=new_text,
+            patches=patches,
+            new_subject=new_subject,
+            new_tags=new_tags,
+            reason=reason,
+            authorized=self._is_truthy(authorized),
+            tags_only=tags_only,
+            add_tags=add_tags,
+            remove_tags=remove_tags,
+            **_,
         )
 
     def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:

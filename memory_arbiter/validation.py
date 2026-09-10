@@ -19,6 +19,8 @@ MAX_TAG_CHARS = 256
 MAX_METADATA_BYTES = 256 * 1024
 MAX_TEXT_FIELD_CHARS = 2_000
 MAX_REPLACEMENT_TEXT_CHARS = 1_000_000
+MAX_UPDATE_PATCHES = 8
+MAX_UPDATE_PATCHES_BYTES = 2 * 1024 * 1024
 MAX_BATCH_IDS = 1_000
 MAX_CONFLICT_MEMBERS = 256
 MAX_CONFLICT_MEMBERS_BYTES = 256 * 1024
@@ -66,9 +68,10 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     },
     ("memory", "read"): {"id", "memory_id", "span", "workspace"},
     ("memory", "update"): {
-        "id", "memory_id", "new_content", "old_text", "new_text", "new_subject",
-        "new_tags", "reason", "authorized", "tags_only", "add_tags", "remove_tags",
-        "expected_version", "expected_content_hash", "content_hash", "workspace",
+        "id", "memory_id", "new_content", "old_text", "new_text", "patches",
+        "new_subject", "new_tags", "reason", "authorized", "tags_only", "add_tags",
+        "remove_tags", "expected_version", "expected_content_hash", "content_hash",
+        "workspace",
     },
     ("memory", "judge"): {
         "id", "conflict_id", "expected_revision", "chosen_value", "decided_by",
@@ -466,6 +469,52 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
                 f"must be a list of at most 100 strings, each at most {MAX_TEXT_FIELD_CHARS} characters",
             )
             return result
+
+    # update patches (v0.15.12): [{old_text, new_text}, ...] — sequential
+    # partial replacements applied atomically in one write transaction.
+    # Guard here at the boundary (shape/count/size) so a malformed batch
+    # never reaches the edit loop; the db layer re-checks defensively.
+    patches_value = payload.get("patches")
+    if patches_value is not None:
+        if not isinstance(patches_value, list) or not 1 <= len(patches_value) <= MAX_UPDATE_PATCHES:
+            result.error = _error("patches", f"must be a list of 1..{MAX_UPDATE_PATCHES} patch objects")
+            return result
+        if any(not isinstance(item, dict) for item in patches_value):
+            result.error = _error("patches", "must contain only JSON objects")
+            return result
+        normalized_patches: list[dict[str, Any]] = []
+        for item in patches_value:
+            if set(item) != {"old_text", "new_text"}:
+                result.error = _error(
+                    "patches",
+                    "each patch must have exactly the keys old_text and new_text",
+                )
+                return result
+            old_text_value, new_text_value = item["old_text"], item["new_text"]
+            if not isinstance(old_text_value, str) or not old_text_value:
+                result.error = _error("patches.old_text", "must be a non-empty string")
+                return result
+            if not isinstance(new_text_value, str):
+                result.error = _error("patches.new_text", "must be a string (empty deletes the fragment)")
+                return result
+            if len(old_text_value) > MAX_REPLACEMENT_TEXT_CHARS or len(new_text_value) > MAX_REPLACEMENT_TEXT_CHARS:
+                result.error = _error(
+                    "patches", f"old_text/new_text must each be at most {MAX_REPLACEMENT_TEXT_CHARS} characters",
+                )
+                return result
+            normalized_patches.append({"old_text": old_text_value, "new_text": new_text_value})
+        try:
+            patches_bytes = _json_size(normalized_patches)
+        except (TypeError, ValueError, RecursionError):
+            result.error = _error("patches", "must contain only JSON-serializable values")
+            return result
+        if patches_bytes > MAX_UPDATE_PATCHES_BYTES:
+            result.error = {
+                "error": "resource_limit_exceeded", "field": "patches",
+                "actual_bytes": patches_bytes, "max_bytes": MAX_UPDATE_PATCHES_BYTES,
+            }
+            return result
+        payload["patches"] = normalized_patches
 
     integer_limits = {
         "limit": (1, 10_000 if (surface, operation) == ("memory_repair", "replay_backup") else MAX_RESULT_LIMIT),

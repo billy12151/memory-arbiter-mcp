@@ -2463,6 +2463,7 @@ class OperationsPipeline:
         new_content: str | None = None,
         old_text: str | None = None,
         new_text: str | None = None,
+        patches: list[dict[str, Any]] | None = None,
         new_subject: str | None = None,
         new_tags: list[str] | None = None,
         reason: str = "",
@@ -2480,9 +2481,17 @@ class OperationsPipeline:
             content, memory_history, version, or the evidence index
             (content is unchanged, so no re-embedding is needed).
             FTS is re-synced because tags are indexed in FTS5.
-          * full replace: pass ``new_content`` (old_text/new_text must be empty)
-          * partial replace: pass ``old_text`` + ``new_text`` for an exact
-            substring substitution (new_content must be empty)
+          * full replace: pass ``new_content`` (old_text/new_text/patches
+            must be empty)
+          * single partial replace: pass ``old_text`` + ``new_text`` for an
+            exact substring substitution (new_content/patches must be empty)
+          * sequential partial replace (v0.15.12): pass ``patches=[{old_text,
+            new_text}, ...]`` (1..8 pairs, new_content/old_text/new_text
+            must be empty) — applied in order, each match computed on the
+            result of the previous patches, first occurrence replaced. Any
+            miss rejects the whole call atomically (stale_edit with
+            patch_index); one call = one version bump + one history row +
+            one evidence republish + one post-commit check.
 
         Tags in content modes: ``add_tags``/``remove_tags`` also work in
         full/partial mode — they overlay on top of ``new_tags`` (if given)
@@ -2603,6 +2612,7 @@ class OperationsPipeline:
                         new_content=new_content,
                         old_text=old_text,
                         new_text=new_text,
+                        patches=patches,
                         new_subject=new_subject,
                         new_tags=new_tags,
                         add_tags=add_tags,
