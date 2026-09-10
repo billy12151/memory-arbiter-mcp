@@ -268,6 +268,98 @@ def test_pair_prompt_caps_quotes_at_400_chars() -> None:
     assert "甲" * 401 not in text
 
 
+# ── 0.15.12 C1: the two gathering-truncation causes report distinctly ─────────
+
+
+def _write_many_units(tools: MemoryTools, paragraphs: int) -> int:
+    """Write one memory whose content segments into many text units."""
+    content = "\n\n".join(
+        f"第{index}条部署记录涉及网关配置与索引参数。" for index in range(paragraphs)
+    )
+    written = tools.memory_write(content=content, subject="deployment log", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    return int(written["id"])
+
+
+def test_over_cap_memory_reports_evidence_units_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """>24 text units -> incomplete/evidence_units_capped (was notice_budget_exhausted)."""
+    from memory_arbiter.constants import SEMANTIC_MAX_EVIDENCE_UNITS
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", lambda timeout: None)
+    memory_id = _write_many_units(tools, SEMANTIC_MAX_EVIDENCE_UNITS + 10)
+
+    result = tools._process_semantic_conflict_job(memory_id, _job_snapshot(tools, memory_id))
+
+    assert result["status"] == "incomplete"
+    assert result["reason"] == "evidence_units_capped"
+    assert result["notices_created"] == 0
+    assert result["reasons_seen"] == ["evidence_units_capped"]
+    status = tools._check_degradation_status()
+    assert status["last_reason"] == "evidence_units_capped"
+    assert "evidence_units_capped" in status["note"]
+
+
+def test_job_deadline_keeps_notice_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fair-deadline truncation (<24 units) keeps the original reason string."""
+    import time as _time
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    monkeypatch.setattr(
+        tools._semantic_worker, "pending_job_deadline", lambda timeout: _time.monotonic() - 1.0,
+    )
+    written = tools.memory_write(content="两条记录而已。", subject="small", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    memory_id = int(written["id"])
+
+    result = tools._process_semantic_conflict_job(memory_id, _job_snapshot(tools, memory_id))
+
+    assert result["status"] == "incomplete"
+    assert result["reason"] == "notice_budget_exhausted"
+    assert result["notices_created"] == 0
+
+
+def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both the unit cap and a past deadline -> the more specific cap wins.
+
+    The deadline is pushed past only after the 24th unit has been examined, so
+    the 25th loop iteration sees both causes; the cap check runs first.
+    """
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    memory_id = _write_many_units(tools, 40)
+
+    clock = {"now": 100.0}
+    fairness_deadline = 100.5
+    knn_calls = {"n": 0}
+
+    def fake_knn(*a: Any, **k: Any) -> list[dict[str, Any]]:
+        knn_calls["n"] += 1
+        if knn_calls["n"] >= 24:
+            clock["now"] = fairness_deadline + 1.0
+        return []
+
+    monkeypatch.setattr(tools.db, "evidence_knn", fake_knn)
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        tools._semantic_worker, "pending_job_deadline", lambda timeout: fairness_deadline,
+    )
+
+    result = tools._process_semantic_conflict_job(memory_id, _job_snapshot(tools, memory_id))
+
+    assert knn_calls["n"] == 24
+    assert result["reason"] == "evidence_units_capped"
+
+
+def test_technical_reasons_registry_includes_evidence_units_capped() -> None:
+    from memory_arbiter.pipeline.evidence import _TECHNICAL_REASONS
+
+    assert "evidence_units_capped" in _TECHNICAL_REASONS
+    assert "notice_budget_exhausted" in _TECHNICAL_REASONS
+
+
 # ── slow: real Qwen2.5-0.5B model (pytest -m slow; excluded by default) ──────
 
 _SLOW_MODEL = Path(
