@@ -362,14 +362,14 @@ def test_scan_duplicates_pool_default_off_and_opt_in(vec_tools: MemoryTools) -> 
     _write_for_scan(tools, "release version 1.2.3 is shipped")
     assert tools.wait_evidence_worker_drained(timeout=5)
 
-    baseline = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    baseline = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     assert baseline["ok"] is True, baseline
     assert baseline["data"]["duplicates_pool"] == []
     assert baseline["data"]["duplicates_truncated"] is False
     assert baseline["data"]["counts"]["duplicates"] == 0
 
     with_pool = tools.memory_repair("scan_candidates", {
-        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True,
+        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True, "include_quotes": True,
     })
     assert with_pool["ok"] is True, with_pool
     pool = with_pool["data"]["duplicates_pool"]
@@ -390,7 +390,7 @@ def test_scan_duplicates_pool_respects_recorded_suppression(vec_tools: MemoryToo
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     scan = tools.memory_repair("scan_candidates", {
-        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True,
+        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True, "include_quotes": True,
     })
     assert scan["ok"] is True, scan
     pool = scan["data"]["duplicates_pool"]
@@ -422,7 +422,7 @@ def test_scan_duplicates_pool_respects_recorded_suppression(vec_tools: MemoryToo
     })
     assert recorded["ok"] is True, recorded["data"]
     after = tools.memory_repair("scan_candidates", {
-        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True,
+        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True, "include_quotes": True,
     })
     assert after["ok"] is True
     assert after["data"]["duplicates_pool"] == [], (
@@ -436,7 +436,7 @@ def test_scan_duplicates_pool_cap_and_truncation(vec_tools: MemoryTools) -> None
         _write_for_scan(tools, f"cap probe identical statement number {index % 2}")
     assert tools.wait_evidence_worker_drained(timeout=5)
     result = tools.memory_repair("scan_candidates", {
-        "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True,
+        "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True, "include_quotes": True,
     })
     assert result["ok"] is True, result
     assert len(result["data"]["duplicates_pool"]) <= 2 * 1
@@ -469,7 +469,7 @@ def test_scan_duplicates_pool_full_rehit_does_not_flag_truncation(vec_tools: Mem
     _write_for_scan(tools, "shared statement alpha")
     assert tools.wait_evidence_worker_drained(timeout=5)
     result = tools.memory_repair("scan_candidates", {
-        "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True,
+        "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True, "include_quotes": True,
     })
     assert result["ok"] is True, result
     assert len(result["data"]["duplicates_pool"]) == 2

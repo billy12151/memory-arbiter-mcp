@@ -553,7 +553,7 @@ def test_numeric_candidate_fails_closed_without_qwen(tmp_path: Path, monkeypatch
     assert result["reason"] == "qwen_unavailable"
     assert result["notices_created"] == 0
     assert tools.db.list_semantic_notices(status="open") == []
-    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     pair = (min(old["id"], new["id"]), max(old["id"], new["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
     assert clue["route"] == "review_candidate"
@@ -2344,7 +2344,7 @@ def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> Non
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     result = tools.memory_repair(
-        "scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10},
+        "scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True},
     )
     assert result["ok"] is True
     data = result["data"]
@@ -2364,7 +2364,7 @@ def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> Non
 
     # Enumeration alone does not claim persistence: an external loop may retry
     # until record_conflict succeeds, with the same frozen candidate identity.
-    repeated = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    repeated = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     repeated_clue = next(c for c in repeated["data"]["candidates"] if (c["left_id"], c["right_id"]) == key)
     assert repeated_clue["candidate_key_hash"] == clue["candidate_key_hash"]
 
@@ -2376,11 +2376,11 @@ def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> Non
         detector_version="attribute-value-v1", status="not_a_conflict",
     )
     assert registered["outcome"] == "inserted"
-    dismissed_scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    dismissed_scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     assert key not in {(c["left_id"], c["right_id"]) for c in dismissed_scan["data"]["candidates"]}
     tools.memory("update", {"memory_id": a["id"], "new_content": "接口超时为 60 秒，已修订。", "reason": "r"})
     assert tools.wait_evidence_worker_drained(timeout=5)
-    reopened = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    reopened = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     assert key in {(c["left_id"], c["right_id"]) for c in reopened["data"]["candidates"]}
 
 
@@ -2410,7 +2410,7 @@ def test_scan_candidates_pagination_and_check_gate(tmp_path: Path) -> None:
 
     # include_check gates rule-level check clues in and out.
     chk_key = (min(chk1["id"], chk2["id"]), max(chk1["id"], chk2["id"]))
-    base = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 10, "k": 10})
+    base = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 10, "k": 10, "include_quotes": True})
     with_check = tools.memory_repair(
         "scan_candidates", {"anchor_memory_id": 0, "batch": 10, "k": 10, "include_check": True},
     )
@@ -2429,7 +2429,7 @@ def test_record_conflict_not_a_conflict_registration(tmp_path: Path) -> None:
     a = tools.memory_write(content="阈值 100。", subject="th", tags=[])["data"]
     b = tools.memory_write(content="阈值 200。", subject="th", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
-    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
 
@@ -2454,7 +2454,7 @@ def test_record_conflict_not_a_conflict_registration(tmp_path: Path) -> None:
 
     repeat = tools.memory_repair("record_conflict", payload)
     assert repeat["ok"] is True and repeat["data"]["outcome"] == "deduped"
-    after = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    after = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     assert pair not in {(c["left_id"], c["right_id"]) for c in after["data"]["candidates"]}
 
     invalid_open = tools.memory_repair("record_conflict", {**payload, "status": "open"})
@@ -2476,7 +2476,7 @@ def test_scan_candidates_review_regression_batch(tmp_path: Path) -> None:
     v1 = tools.memory_write(content="服务部署文档正文内容，部署步骤说明。", subject="服务 2024 规划", tags=[])["data"]
     v2 = tools.memory_write(content="服务部署文档正文内容，回滚步骤说明。", subject="服务 2025 规划", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
-    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     subject_pair = (min(v1["id"], v2["id"]), max(v1["id"], v2["id"]))
     assert subject_pair not in {(c["left_id"], c["right_id"]) for c in scan["data"]["candidates"]}
 
@@ -2489,7 +2489,7 @@ def test_scan_candidates_review_regression_batch(tmp_path: Path) -> None:
         content="完全相同的开场说明。\n重试次数为 5 次。", subject="mixed", tags=[],
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
-    scan2 = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    scan2 = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     mixed_pair = (min(mixed["id"], twin["id"]), max(mixed["id"], twin["id"]))
     clue = next(
         (c for c in scan2["data"]["candidates"] if (c["left_id"], c["right_id"]) == mixed_pair), None,
@@ -2545,7 +2545,7 @@ def test_not_a_conflict_candidate_version_change_can_be_reevaluated(tmp_path: Pa
     a = tools.memory_write(content="上限 10。", subject="cap", tags=[])["data"]
     b = tools.memory_write(content="上限 99。", subject="cap", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
-    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
     payload = {
@@ -2562,7 +2562,7 @@ def test_not_a_conflict_candidate_version_change_can_be_reevaluated(tmp_path: Pa
 
     tools.memory("update", {"memory_id": a["id"], "new_content": "上限 20。", "reason": "新版本"})
     assert tools.wait_evidence_worker_drained(timeout=5)
-    again = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    again = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     fresh = next(c for c in again["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
     assert fresh["candidate_key_hash"] != clue["candidate_key_hash"]
 
@@ -2592,7 +2592,7 @@ def test_read_span_window_and_clue_deep_read(tmp_path: Path) -> None:
 
     # The clue's deep_read spans round-trip: reading each span returns the
     # triggering numeric text.
-    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
     assert "numeric_value_candidate" in clue["reasons"]
@@ -2633,7 +2633,7 @@ def test_deep_read_spans_follow_clue_upgrade_and_drifted_offsets(tmp_path: Path)
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     scan = tools.memory_repair(
-        "scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_check": True},
+        "scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_check": True, "include_quotes": True},
     )
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
@@ -2665,7 +2665,7 @@ def test_deep_read_survives_offset_drift_on_dense_content(tmp_path: Path) -> Non
     a = tools.memory_write(content=dense("30"), subject="cfg", tags=[])["data"]
     b = tools.memory_write(content=dense("90"), subject="cfg", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
-    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10})
+    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
     for side in ("left", "right"):
@@ -3150,7 +3150,7 @@ def test_scan_candidates_qwen_enhancement_populates_value_groups(tmp_path: Path,
     assert tools.wait_evidence_worker_drained(timeout=2)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
 
-    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10})
+    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10, "include_quotes": True})
     assert result["ok"] is True
     enhancement = result["data"].get("qwen_enhancement") or {}
     assert enhancement.get("status") == "ok"
@@ -3172,7 +3172,7 @@ def test_scan_enhancement_fails_open_without_backend(tmp_path: Path, monkeypatch
     assert tools.wait_evidence_worker_drained(timeout=2)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
 
-    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10})
+    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10, "include_quotes": True})
     assert result["ok"] is True
     # Deterministic baseline is preserved; enhancement reports it was skipped.
     assert result["data"]["qwen_enhancement"]["status"] == "skipped_unavailable"

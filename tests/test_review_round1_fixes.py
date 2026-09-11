@@ -611,7 +611,7 @@ def test_scan_reverse_only_extraction_grounds_each_member_to_own_value(tmp_path:
             return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
     tools._ensure_semantic_backend = lambda: RevOnly()
 
-    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10})
+    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10, "include_quotes": True})
     enriched = [c for c in result["data"]["candidates"] if c.get("value_groups")]
     assert enriched
     by_mid = {m["memory_id"]: m["normalized_value"] for m in enriched[0]["members"]}
