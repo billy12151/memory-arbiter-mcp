@@ -94,7 +94,7 @@ def _default_config_dict(
     *,
     qwen_model_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Return the 0.15.0 slim starter config (18 user keys, file-only).
+    """Return the slim starter config (19 user keys, file-only; 0.15.14 count).
 
     Everything else the 0.14.x config carried is a frozen constant now.
     Identity (client/agent_id) is intentionally left empty: the MCP server

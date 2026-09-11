@@ -28,7 +28,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
   "update_check": {"enabled": true},
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
-  "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "max_notice_pairs": 2},
+  "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "n_gpu_layers": -1},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
 }
 ```

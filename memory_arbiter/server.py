@@ -311,7 +311,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory(action: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Daily memory operations: remember, find, read, update, judge, status, help.
+        """Daily memory operations: remember, find, batch_find, read, update, judge, status, help.
 
         Call memory(action="help") to discover accepted fields, judge requirements,
         value enums, update modes, and action_required paths before relying on a

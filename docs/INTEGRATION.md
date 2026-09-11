@@ -18,7 +18,7 @@ Writes require a non-empty `subject`; include `source_type`, `event_time`, `sour
 
 ## Configuration Surface
 
-Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 20 keys:
+Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 19 keys (0.15.14: `semantic_conflict.n_gpu_layers` added, `semantic_conflict.max_notice_pairs` and `policy_path` removed):
 
 ```json
 {
@@ -28,7 +28,7 @@ Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.co
   "update_check": {"enabled": true},
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
-  "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "max_notice_pairs": 2, "notice_sync_wait_ms": 3000},
+  "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "n_gpu_layers": -1, "notice_sync_wait_ms": 3000},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
 }
 ```

@@ -208,7 +208,7 @@ mema doctor --json
 
 ## 配置（进阶）
 
-配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 20 个键，引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
+配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 19 个键（0.15.14：新增 `semantic_conflict.n_gpu_layers`，删除 `semantic_conflict.max_notice_pairs` 与 `policy_path`），引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
 
 | 配置项 | 白话说明 | 默认值 |
 | --- | --- | --- |
@@ -226,7 +226,7 @@ mema doctor --json
 | `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
 | `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
 | `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |
-| `semantic_conflict.max_notice_pairs` | 一次写入最多提醒几对（1–3） | `2` |
+| `semantic_conflict.n_gpu_layers` | Qwen GPU 卸载层数（`-1`=全卸载，`0`=纯 CPU；无 GPU 后端时忽略） | `-1` |
 | `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
 
 关于"指向模型就是意图"再说两句：以前要 `vec.enabled`、`embedding.provider`、`vec.dim` 三个开关凑齐才算开了向量，现在**只看 `embedding.model_path` 填没填**；Qwen 那边同理，以前 `preload`/`resident` 默认不加载，现在配了模型就启动即加载、常驻不卸载。

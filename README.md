@@ -49,7 +49,7 @@ mema setup --install   # downloads both models (~800MB, resumable) and writes co
 mema doctor            # verify
 ```
 
-`mema setup` without `--install` stays guidance-only: it writes `~/.config/memory-arbiter/config.json` and self-checks the environment without touching pip or the network; `--install` is the execution mode (pip installs the extras, downloads the embedding + Qwen GGUF models with resume/mirror fallback, and writes the finished config itself). Since 0.15.0 configuration is file-only and the whole user surface is 20 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+`mema setup` without `--install` stays guidance-only: it writes `~/.config/memory-arbiter/config.json` and self-checks the environment without touching pip or the network; `--install` is the execution mode (pip installs the extras, downloads the embedding + Qwen GGUF models with resume/mirror fallback, and writes the finished config itself). Since 0.15.0 configuration is file-only and the whole user surface is 19 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict Qwen model, and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
 
 When a capability is missing (e.g. the models were never downloaded), every tool response carries a persistent degraded-mode banner with the `mema setup --install` remediation, and each agent's first call includes a capability health card — an incomplete install cannot pass for a complete one silently.
 
@@ -156,7 +156,7 @@ The old database is never deleted. Standard JSON configuration is backed up and 
 
 Configuration is file-only since 0.15.0. Everything tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at; `mema setup` writes the starter template). Engine parameters, timeouts, thresholds, and caps are frozen constants (`memory_arbiter/constants.py`).
 
-The complete user surface is 20 keys:
+The complete user surface is 19 keys (0.15.14: added `semantic_conflict.n_gpu_layers`, removed `semantic_conflict.max_notice_pairs` and `policy_path`):
 
 ```json
 {
@@ -178,7 +178,7 @@ The complete user surface is 20 keys:
     "model_path": "~/.local/share/memory-arbiter/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
     "on_write": "async",
     "notice_sync_wait_ms": 3000,
-    "max_notice_pairs": 2
+    "n_gpu_layers": -1
   },
   "mcp": {
     "transport": "stdio",
@@ -201,7 +201,7 @@ The complete user surface is 20 keys:
 | `semantic_conflict.enabled` | Explicit off-switch; unset + `model_path` means enabled, explicit `false` wins |
 | `semantic_conflict.on_write` | Write-time detection: `async` (default) or `off` |
 | `semantic_conflict.notice_sync_wait_ms` | How long the write response waits for the post-commit check so its result rides along (v0.15.8, default `3000`, clamp `0–5000`); `0` = never block the write response — batch ingestion still gets the check run asynchronously and notices deliver on a later response |
-| `semantic_conflict.max_notice_pairs` | Per-write notice cap (1–3, default `2`) |
+| `semantic_conflict.n_gpu_layers` | Qwen GPU offload layers (`-1` = full offload, `0` = CPU; ignored without a GPU backend) |
 | `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
 | `mcp.http.host` / `port` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000`; the endpoint path is fixed at `/mcp` |
 
