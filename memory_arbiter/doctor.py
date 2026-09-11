@@ -16,6 +16,7 @@ from .constants import (
     EMBEDDING_MAX_SECTION_CHARS,
     EMBEDDING_N_CTX,
     EMBEDDING_RESERVED_TOKENS,
+    SCAN_CHAIN_STALE_HOURS,
     SCAN_TASK_STALE_DAYS,
     is_default_workspace_term,
 )
@@ -187,10 +188,32 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     findings.append(_finding("evidence.freshness", stale == 0, f"{stale} stale evidence rows", evidence={"stale": stale}))
     findings.append(_finding("evidence.orphans", orphan == 0, f"{orphan} orphan evidence rows", evidence={"orphan": orphan}))
     unresolved_conflicts = open_conflicts + len(applying_rows)
+    # C4 (0.15.13): triage counters double as the C2 pair@version
+    # suppression's convergence observability — sustained weekly growth means
+    # memories keep churning versions or suppression is failing.
+    dismissed_total = int(conn.execute(
+        "SELECT COUNT(*) FROM conflicts WHERE status='not_a_conflict'"
+    ).fetchone()[0])
+    week_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    dismissed_week = int(conn.execute(
+        "SELECT COUNT(*) FROM conflicts WHERE status='not_a_conflict' "
+        "AND created_at >= ?", (week_cutoff,),
+    ).fetchone()[0])
+    dismissed_latest = conn.execute(
+        "SELECT refreshed_at FROM conflicts WHERE status='not_a_conflict' "
+        "ORDER BY refreshed_at DESC LIMIT 1"
+    ).fetchone()
+    dismissed_latest_at = str(dismissed_latest[0]) if dismissed_latest else None
     findings.append(_finding(
         "conflicts.backlog", unresolved_conflicts < 100,
-        f"{unresolved_conflicts} unresolved conflicts ({open_conflicts} open, {len(applying_rows)} applying)",
-        evidence={"open": open_conflicts, "applying": len(applying_rows)},
+        f"{unresolved_conflicts} unresolved conflicts ({open_conflicts} open, {len(applying_rows)} applying); "
+        f"triage dismissed {dismissed_total} total, {dismissed_week} this week",
+        evidence={
+            "open": open_conflicts, "applying": len(applying_rows),
+            "not_a_conflict_total": dismissed_total,
+            "not_a_conflict_this_week": dismissed_week,
+            "latest_triage_at": dismissed_latest_at,
+        },
     ))
     findings.append(_finding(
         "conflicts.scan_required", not conflict_scan_required,
@@ -216,6 +239,41 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
                 f"activity beyond {SCAN_TASK_STALE_DAYS} days means the scheduled task is not running",
                 evidence={"last_scan_time": last_scan.get("scan_time"), "age_days": age_days},
             ))
+    # C5 (0.15.13): broken-chain alarm over the routine scan's page-progress
+    # kv. A whole chain normally completes in 15-20 minutes; an incomplete
+    # record older than an hour with no completion line after it means the
+    # round was interrupted mid-walk. scan_log.jsonl keeps its
+    # completed-lines-only audit semantics (#825) — pacing lives in the kv.
+    page_progress_row = conn.execute(
+        "SELECT value FROM migration_state WHERE key='scan_page_progress'"
+    ).fetchone()
+    if page_progress_row is not None:
+        try:
+            page_progress = json.loads(str(page_progress_row[0]))
+        except (TypeError, ValueError):
+            page_progress = None
+        if isinstance(page_progress, dict) and not page_progress.get("complete"):
+            progress_at = parse_iso8601_utc(str(page_progress.get("at") or ""))
+            if progress_at is not None:
+                progress_age = datetime.now(timezone.utc) - progress_at
+                completed_after = bool(
+                    last_scan is not None
+                    and str(last_scan.get("scan_time") or "") > str(page_progress.get("at") or "")
+                )
+                if progress_age > timedelta(hours=SCAN_CHAIN_STALE_HOURS) and not completed_after:
+                    findings.append(_finding(
+                        "conflicts.scan_chain", False,
+                        f"conflict scan interrupted at anchor {page_progress.get('next_anchor')} "
+                        f"({str(page_progress.get('at') or '')}); a full chain normally completes "
+                        f"in 15-20 minutes — resume paging from that anchor",
+                        evidence={
+                            "after": page_progress.get("after"),
+                            "next_anchor": page_progress.get("next_anchor"),
+                            "at": page_progress.get("at"),
+                            "client": page_progress.get("client"),
+                            "groups": page_progress.get("groups"),
+                        },
+                    ))
     # Applying is a transient execution state: a healthy apply completes in
     # minutes, so any group still applying at doctor time is either mid-flight
     # or wedged. Flag every one with id/idle-days evidence (replaces the

@@ -1132,6 +1132,19 @@ class ProductSurfaces:
                 # the full member/slot envelope record_conflict consumes.
                 result = self._tools._lightweight_scan_candidates(result)
             ok = "error" not in result
+            if ok and scan_workspace is None and int(result.get("anchors_scanned") or 0) > 0:
+                # C5: per-group pacing record for the ROUTINE scan. Global
+                # pages only — a strict workspace-scoped page sees part of the
+                # library and must not advance the global walk (same scoping
+                # rule as the upgrade-gate cursor below). Doctor's
+                # broken-chain alarm reads this kv.
+                identity = get_request_identity()
+                self.db.record_scan_page_progress(
+                    after_memory_id=anchor_value,
+                    next_anchor_memory_id=result.get("next_anchor_memory_id"),
+                    anchor_buckets=result.get("anchor_buckets"),
+                    client=(identity.client if identity else None),
+                )
             scan_state = self.db.conflict_scan_state()
             if ok and scan_state.get("required"):
                 # Compare the PERSISTED requirement against the RUNNING

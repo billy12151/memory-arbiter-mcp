@@ -77,6 +77,16 @@ class ConsoleAPI:
         last_scan = self.tools.db._scan_log_last_completed()
         open_conflicts = int(audit.get("total_open_conflicts") or counts.get("open_conflicts") or 0)
         counts["open_conflicts"] = open_conflicts
+        # C4 (0.15.13): triage counter visibility for the console metrics row
+        # (doctor's conflicts.backlog carries the same numbers with weekly
+        # detail + latest time).
+        try:
+            with self.tools.db.connection() as conn:
+                counts["dismissed_conflicts"] = int(conn.execute(
+                    "SELECT COUNT(*) FROM conflicts WHERE status='not_a_conflict'"
+                ).fetchone()[0])
+        except sqlite3.Error:
+            counts["dismissed_conflicts"] = 0
         return {
             "version": __version__,
             "brand": {"en": "mema", "zh": "迷码", "full": "Memory Arbiter"},

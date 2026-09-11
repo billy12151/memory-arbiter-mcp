@@ -865,6 +865,23 @@ class MemoryDB:
     def conflict_scan_state(self) -> dict[str, Any]:
         return self.meta.conflict_scan_state()
 
+    def scan_page_progress_state(self) -> dict[str, Any] | None:
+        return self.meta.scan_page_progress_state()
+
+    def record_scan_page_progress(
+        self, *,
+        after_memory_id: int,
+        next_anchor_memory_id: int | None,
+        anchor_buckets: list[dict[str, Any]] | None,
+        client: str | None,
+    ) -> bool:
+        return self.meta.record_scan_page_progress(
+            after_memory_id=after_memory_id,
+            next_anchor_memory_id=next_anchor_memory_id,
+            anchor_buckets=anchor_buckets,
+            client=client,
+        )
+
     def rearm_conflict_scan_if_drifted(self) -> bool:
         return self.meta.rearm_conflict_scan_if_drifted()
 

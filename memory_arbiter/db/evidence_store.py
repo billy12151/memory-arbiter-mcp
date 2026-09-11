@@ -395,6 +395,7 @@ class EvidenceStore:
                                                  "filtered_open": 0, "filtered_dismissed": 0,
                                                  "duplicates": 0},
                     "duplicates_pool": [], "duplicates_truncated": False,
+                    "cross_bucket_references": [], "anchor_buckets": [],
                 }
             # The group schema has no left/right columns. Suppression is tied
             # to the exact candidate snapshot successfully persisted by
@@ -452,6 +453,7 @@ class EvidenceStore:
             filtered_open = 0
             filtered_dismissed = 0
             cross_bucket_refs: dict[tuple[int, int], dict[str, Any]] = {}
+            anchor_buckets: dict[str, dict[str, int]] = {}
             # C3b: suspected misplaced memories (from ACTIVE workspace_review
             # notices) are ALSO paired against their suspected bucket. Those
             # pairs are cross-bucket, cannot land in record_conflict, and go
@@ -472,6 +474,14 @@ class EvidenceStore:
                 anchor_bucket = (
                     str(anchor_row["workspace"] or "").strip() if anchor_row else ""
                 )
+                # C5 per-group page accounting: doctor's broken-chain alarm
+                # needs to know which bucket the walk was last inside.
+                if anchor_bucket:
+                    entry = anchor_buckets.setdefault(
+                        anchor_bucket, {"count": 0, "last_anchor": 0},
+                    )
+                    entry["count"] += 1
+                    entry["last_anchor"] = max(entry["last_anchor"], anchor_id)
                 # Only body-text units participate, matching the write-time
                 # notice path: subjects/headings are version-progression
                 # heavy and fire numeric_value_changed on their own.
@@ -815,6 +825,11 @@ class EvidenceStore:
                 "duplicates_pool": duplicates_ordered,
                 "duplicates_truncated": duplicates_truncated,
                 "cross_bucket_references": cross_refs_ordered,
+                "anchor_buckets": [
+                    {"workspace": ws, "anchors_scanned": entry["count"],
+                     "last_anchor": entry["last_anchor"]}
+                    for ws, entry in sorted(anchor_buckets.items())
+                ],
                 "counts": {
                     "knn_pairs": knn_pair_count,
                     "rule_pass": len(ordered),

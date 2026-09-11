@@ -10,6 +10,7 @@ from typing import Any, TYPE_CHECKING
 from ..acl import WorkspaceScope, workspace_scope_sql
 from ..constants import is_default_workspace_term
 from ..evidence import INDEXABLE_PREFILTER_SQL, has_indexable_text
+from ..models import utc_now_iso
 
 # _vec_index_meta key holding the library's active embedding dimension. The
 # model that produced it is the fact source (there is no configured vec.dim
@@ -108,6 +109,100 @@ class MetaStore:
             str(row["key"]): str(row["value"])
             for row in conn.execute("SELECT key,value FROM migration_state")
         }
+
+    SCAN_PAGE_PROGRESS_KEY = "scan_page_progress"
+
+    def scan_page_progress_state(self) -> dict[str, Any] | None:
+        """C5 routine-scan pacing record (per-workspace accounting).
+
+        Shape: {after, next_anchor, at, client, complete, groups:
+        {ws: {anchors_scanned, last_anchor, at}}}. Distinct from the
+        upgrade-gate conflict_scan_progress (single global CAS cursor);
+        this kv is written per successful page of the SCHEDULED scan and
+        read by doctor's broken-chain alarm.
+        """
+        if not self._db._db_available:
+            return None
+        with self._db.connection() as conn:
+            raw = conn.execute(
+                "SELECT value FROM migration_state WHERE key=?",
+                (self.SCAN_PAGE_PROGRESS_KEY,),
+            ).fetchone()
+        if raw is None:
+            return None
+        try:
+            state = json.loads(str(raw[0]))
+        except (TypeError, ValueError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    def record_scan_page_progress(
+        self,
+        *,
+        after_memory_id: int,
+        next_anchor_memory_id: int | None,
+        anchor_buckets: list[dict[str, Any]] | None,
+        client: str | None,
+    ) -> bool:
+        """Upsert the routine scan's per-page progress (C5).
+
+        A new round (after=0) resets the group tallies; otherwise the page's
+        per-bucket counts merge into the running record. Terminal pages
+        (next_anchor null) flip complete=true.
+        """
+        if not self._db._db_available or not self._db.state.sqlite_writable:
+            return False
+        now = utc_now_iso()
+        with self._db.write_transaction() as conn:
+            current = None
+            raw = conn.execute(
+                "SELECT value FROM migration_state WHERE key=?",
+                (self.SCAN_PAGE_PROGRESS_KEY,),
+            ).fetchone()
+            if raw is not None:
+                try:
+                    current = json.loads(str(raw[0]))
+                except (TypeError, ValueError):
+                    current = None
+            new_round = int(after_memory_id) <= 0
+            if new_round or not isinstance(current, dict):
+                current = {"groups": {}}
+            prior_groups = current.get("groups")
+            groups: dict[str, Any] = (
+                dict(prior_groups) if isinstance(prior_groups, dict) else {}
+            )
+            for entry in anchor_buckets or []:
+                ws = str(entry.get("workspace") or "")
+                if not ws:
+                    continue
+                existing = groups.get(ws)
+                group = dict(existing) if isinstance(existing, dict) else {}
+                groups[ws] = {
+                    "anchors_scanned": int(group.get("anchors_scanned") or 0)
+                    + int(entry.get("anchors_scanned") or 0),
+                    "last_anchor": max(
+                        int(group.get("last_anchor") or 0), int(entry.get("last_anchor") or 0),
+                    ),
+                    "at": now,
+                }
+            payload = {
+                "after": int(after_memory_id),
+                "next_anchor": (
+                    int(next_anchor_memory_id)
+                    if next_anchor_memory_id is not None else None
+                ),
+                "at": now,
+                "client": str(client or "") or None,
+                "complete": next_anchor_memory_id is None,
+                "groups": groups,
+            }
+            conn.execute(
+                """INSERT INTO migration_state(key,value,updated_at)
+                   VALUES(?,?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                (self.SCAN_PAGE_PROGRESS_KEY, json.dumps(payload, ensure_ascii=False)),
+            )
+        return True
 
     def conflict_scan_state(self) -> dict[str, Any]:
         if not self._db._db_available:

@@ -130,6 +130,10 @@ SEMANTIC_RESIDENT = True
 # newest completed scan is older than this, or that has never completed one,
 # prompts the agent to offer setting up the two scheduled tasks.
 SCAN_TASK_STALE_DAYS = 14
+# C5 broken-chain alarm (0.15.13): a routine scan's page-progress kv that is
+# incomplete and older than this many hours, with no completion line after
+# it, means the round was interrupted mid-walk (a whole chain is 15-20 min).
+SCAN_CHAIN_STALE_HOURS = 1
 # Negative-cache TTL for the notice check: without it every product response
 # would re-read scan_log.jsonl end to end.
 SCAN_TASK_RECHECK_SECONDS = 3600
