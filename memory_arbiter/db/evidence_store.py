@@ -537,16 +537,18 @@ class EvidenceStore:
                         "end": min(len(content), end + 128),
                     }
 
+                # C3b: same-bucket pairing. Under a strict caller scope the
+                # anchor bucket must stay inside the admitted set.
+                admitted_names = set(workspace_names) if workspace_names else set()
+                pairing_scope = anchor_bucket if (
+                    anchor_bucket and (workspace is None or anchor_bucket in admitted_names)
+                ) else workspace
+                suspect_bucket = suspected.get(anchor_id)
                 for unit in (() if first_unit is None else itertools.chain((first_unit,), units)):
                     text = str(unit["text"] or "")
                     if not text:
                         continue
                     unit_vector = self._blob_to_vector(bytes(unit["embedding"]))
-                    # C3b: same-bucket pairing. Under a strict caller scope the
-                    # anchor bucket must stay inside the admitted set.
-                    pairing_scope = anchor_bucket if (
-                        anchor_bucket and (workspace is None or anchor_bucket in set(workspace_names))
-                    ) else workspace
                     hits = self.knn(
                         unit_vector,
                         k=max(1, int(neighbor_k)) + 1,
@@ -554,7 +556,6 @@ class EvidenceStore:
                         exclude_memory_id=anchor_id,
                     )
                     # C3b: the suspected-bucket sweep for misplaced memories.
-                    suspect_bucket = suspected.get(anchor_id)
                     suspect_hits: list[dict[str, Any]] = []
                     if suspect_bucket and suspect_bucket != anchor_bucket:
                         suspect_hits = self.knn(
