@@ -444,7 +444,6 @@ class ConsoleAPI:
             "semantic_conflict.model_path": self.settings.semantic_conflict_model_path,
             "semantic_conflict.on_write": self.settings.semantic_conflict_on_write,
             "semantic_conflict.n_gpu_layers": self.settings.semantic_conflict_gpu_layers,
-            "semantic_conflict.max_notice_pairs": self.settings.semantic_conflict_max_notice_pairs,
             "mcp.http.host": self.settings.mcp_http_host,
             "mcp.http.port": self.settings.mcp_http_port,
             "update_check.enabled": self.settings.update_check_enabled,

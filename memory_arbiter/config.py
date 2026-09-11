@@ -81,7 +81,6 @@ class Settings:
     # ~1.1-1.25x), 0 = CPU-only, N = first N layers. Ignored where no GPU
     # backend is compiled in.
     semantic_conflict_gpu_layers: int = -1
-    semantic_conflict_max_notice_pairs: int = 2
     # 0.15.8: restored as a config key (was frozen 5000 in 0.15.0). Default
     # 3000; 0 = the write response never waits for the post-commit check
     # (batch ingestion — the job still runs and notices still deliver on a
@@ -134,6 +133,14 @@ class Settings:
         warn_removed("embedding.", emb_cfg, _REMOVED_EMBEDDING_KEYS)
         semantic_cfg = section("semantic_conflict")
         warn_removed("semantic_conflict.", semantic_cfg, _REMOVED_SEMANTIC_KEYS)
+        # A5 (0.15.14): max_notice_pairs was not frozen — the notice-count cap
+        # itself was removed (notices are bounded by the examined-pairs cap);
+        # name that instead of the generic frozen-constant wording.
+        if "max_notice_pairs" in semantic_cfg:
+            config_warnings.append(
+                "semantic_conflict.max_notice_pairs is no longer read "
+                "(removed in 0.15.14: notices are bounded by the examined-pairs cap); value ignored"
+            )
         mcp_cfg = section("mcp")
         mcp_http_cfg = mcp_cfg.get("http")
         if not isinstance(mcp_http_cfg, dict):
@@ -258,10 +265,6 @@ class Settings:
             semantic_conflict_gpu_layers=clamp_int(
                 pick_int_field(semantic_cfg.get("n_gpu_layers"), -1, name="semantic_conflict.n_gpu_layers"),
                 -1, 999, name="semantic_conflict.n_gpu_layers", warnings=config_warnings,
-            ),
-            semantic_conflict_max_notice_pairs=clamp_int(
-                pick_int_field(semantic_cfg.get("max_notice_pairs"), 2, name="semantic_conflict.max_notice_pairs"),
-                1, 3, name="semantic_conflict.max_notice_pairs", warnings=config_warnings,
             ),
             semantic_conflict_notice_sync_wait_ms=clamp_int(
                 pick_int_field(

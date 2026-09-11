@@ -129,7 +129,16 @@ SEMANTIC_SCAN_MAX_PAIRS = 8
 SEMANTIC_SCAN_BUDGET_MS = 60000
 SEMANTIC_QUEUE_MAX_SIZE = 100
 EVIDENCE_QUEUE_MAX_SIZE = 200
-SEMANTIC_MAX_EVIDENCE_UNITS = 24
+# 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
+# collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
+# expensive resource is Qwen pairs, bounded separately below.
+SEMANTIC_MAX_EVIDENCE_UNITS = 64
+# 0.15.14 (A5): deterministic second gate on Qwen work per write-check — the
+# fair job deadline remains the first. Formula (plan mema-01514 §A5):
+# clamp(6, 16, round(20s target check budget ÷ p95 pair wall)); with the
+# grammar-free decode (A2) the measured p95 pair ≈ 1.6s ×1.5 load margin
+# ⇒ 10. Pairs beyond the cap report incomplete reason=pairs_examined_capped.
+SEMANTIC_MAX_EXAMINED_PAIRS = 10
 SEMANTIC_PRELOAD = True
 SEMANTIC_RESIDENT = True
 

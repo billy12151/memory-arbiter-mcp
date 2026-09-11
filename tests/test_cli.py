@@ -73,8 +73,9 @@ def test_config_template_has_required_fields():
     assert cfg["semantic_conflict"] == {
         "model_path": None,
         "on_write": "async",
-        "max_notice_pairs": 2,
     }
+    # 0.15.14 A5: the notice-count key is gone from the starter template too.
+    assert "max_notice_pairs" not in cfg["semantic_conflict"]
     # Removed groups must not reappear in the starter template.
     for removed in ("tool_profile", "vec", "workspace_match_distance",
                     "workspace_weak_vector_weight", "workspace_min_name_len",

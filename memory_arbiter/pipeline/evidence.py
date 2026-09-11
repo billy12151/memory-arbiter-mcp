@@ -10,6 +10,7 @@ from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
     SEMANTIC_JOB_TIMEOUT_MS,
     SEMANTIC_MAX_EVIDENCE_UNITS,
+    SEMANTIC_MAX_EXAMINED_PAIRS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
 from ..evidence import evidence_content_hash, local_text_units
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
 _TECHNICAL_REASONS = {
     "qwen_timeout", "qwen_unavailable", "qwen_backend_error",
     "qwen_invalid_output", "qwen_budget_exhausted", "notice_budget_exhausted",
-    "evidence_units_capped",
+    "evidence_units_capped", "pairs_examined_capped",
 }
 
 
@@ -288,11 +289,15 @@ class EvidencePipeline:
                 float(item[1][0].get("distance") or 9),
             ),
         )
-        # Spec §6.4: at most 1-2 memory pairs may become Agent notices per
-        # write (hard cap 3 for debug/high-recall runs).
-        max_pairs = int(getattr(
-            self.settings, "semantic_conflict_max_notice_pairs", 2,
-        ))
+        # 0.15.14 (A5): the former surfaced>=max_notice_pairs early stop is
+        # gone — notices are recorded per-pair inside the loop (write-on-
+        # discovery), so an early stop only saved Qwen time, which the
+        # examined-pairs cap now bounds deterministically. The check examines
+        # up to SEMANTIC_MAX_EXAMINED_PAIRS pairs (fair deadline first, cap
+        # second) and surfaces every notice it finds; the notice count is
+        # therefore bounded by the pairs cap.
+        max_examined_pairs = max(1, SEMANTIC_MAX_EXAMINED_PAIRS)
+        pairs_examined = 0
         surfaced = 0
         incomplete_reason: str | None = None
 
@@ -328,9 +333,6 @@ class EvidencePipeline:
                 return backend.classify_pair(left_env, right_env)
 
         for peer_id, (hit, unit, decision) in ordered:
-            if surfaced >= max(1, min(3, max_pairs)):
-                incomplete_reason = "notice_budget_exhausted"
-                break
             peer = self.db.get_memory(peer_id)
             if not peer or peer.get("status") != "active":
                 continue
@@ -349,6 +351,13 @@ class EvidencePipeline:
                 record_degradation("qwen_budget_exhausted")
                 incomplete_reason = "qwen_budget_exhausted"
                 continue
+            # A5 deterministic cap: only pairs that actually reach Qwen count;
+            # skipped (closed/inactive) pairs never consume the budget.
+            if pairs_examined >= max_examined_pairs:
+                record_degradation("pairs_examined_capped")
+                incomplete_reason = "pairs_examined_capped"
+                break
+            pairs_examined += 1
             left_env = envelope(record_row, unit.text)
             right_env = envelope(peer_row, str(hit.get("text") or ""))
             started = time.monotonic()
@@ -492,9 +501,8 @@ class EvidencePipeline:
                 left_version=left_version, right_version=right_version,
                 source="semantic_evidence",
             )
-            # Only a notice actually created consumes the per-write budget:
-            # deduped pairs were already surfaced, and error/unavailable
-            # outcomes must not starve a fresh deterministic notify pair.
+            # surfaced counts notices actually created (deduped pairs were
+            # already surfaced) — since A5 it is a result summary, not a gate.
             if outcome.get("outcome") == "created":
                 surfaced += 1
         if surfaced:

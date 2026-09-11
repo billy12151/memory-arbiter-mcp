@@ -119,7 +119,6 @@ def _default_config_dict(
         "semantic_conflict": {
             "model_path": str(qwen_model_path) if qwen_model_path is not None else None,
             "on_write": "async",
-            "max_notice_pairs": 2,
         },
         "mcp": {
             "transport": "stdio",

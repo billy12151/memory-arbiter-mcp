@@ -943,7 +943,10 @@ def _strict_pair_backend():
     return Backend()
 
 
-def test_notice_pairs_capped_in_unified_conflicts_table(tmp_path: Path, monkeypatch) -> None:
+def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
+    """0.15.14 (A5): the surfaced>=max_notice_pairs early stop is gone — every
+    examined pair surfaces its notice (count bounded only by the examined-
+    pairs cap, which these 4 pairs stay under)."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     metadata = {"entity": "checkout-api", "scope": "production"}
@@ -966,23 +969,21 @@ def test_notice_pairs_capped_in_unified_conflicts_table(tmp_path: Path, monkeypa
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 2}
+    assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4}
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
-    assert len(notices) == tools.settings.semantic_conflict_max_notice_pairs == 2
+    assert len(notices) == 4
     assert all(n["payload"]["route"] == "notice_ready" for n in notices)
     with tools.db.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM conflicts WHERE notice_type IS NOT NULL").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM conflicts WHERE notice_type IS NOT NULL").fetchone()[0] == 4
 
-    tools.settings.semantic_conflict_max_notice_pairs = 99
     second = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    assert second["notices_created"] == 2
+    assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
     assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 4
 
 
 def test_unified_notice_dedupe_does_not_starve_fresh_pair(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    tools.settings.semantic_conflict_max_notice_pairs = 2
     metadata = {"entity": "checkout-api", "scope": "production"}
     peers = [
         tools.memory_write(
@@ -2872,7 +2873,6 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     tools.settings.semantic_conflict_on_write = "off"
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_JOB_TIMEOUT_MS", 40)
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MIN_PAIR_BUDGET_MS", 5)
-    tools.settings.semantic_conflict_max_notice_pairs = 3
     metadata = {"entity": "svc", "scope": "production"}
     peer_values = ("mysql", "postgres")
     peers = [

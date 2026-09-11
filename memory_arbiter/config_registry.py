@@ -1,7 +1,9 @@
 """Read-only descriptors for current configuration fields.
 
-Since 0.15.0 the user-facing config surface is the 20-file-key slim face
-(0.15.8 restored semantic_conflict.notice_sync_wait_ms); everything else is a
+Since 0.15.0 the user-facing config surface is the slim file-key face
+(0.15.8 restored semantic_conflict.notice_sync_wait_ms; 0.15.14 added
+semantic_conflict.n_gpu_layers and removed semantic_conflict.max_notice_pairs
+and policy_path); everything else is a
 frozen constant (memory_arbiter.constants) and no longer appears here.
 """
 from __future__ import annotations
@@ -49,7 +51,6 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.model_path", "semantic", "semantic_conflict_model_path"),
     _item("semantic_conflict.on_write", "semantic", "semantic_conflict_on_write", "async"),
     _item("semantic_conflict.n_gpu_layers", "semantic", "semantic_conflict_gpu_layers", -1),
-    _item("semantic_conflict.max_notice_pairs", "semantic", "semantic_conflict_max_notice_pairs", 2),
     _item("semantic_conflict.notice_sync_wait_ms", "semantic", "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS),
     _item("update_check.enabled", "update", "update_check_enabled", True),
     _item("include_size", "reporting", default=True),

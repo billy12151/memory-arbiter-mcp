@@ -286,7 +286,7 @@ def _write_many_units(tools: MemoryTools, paragraphs: int) -> int:
 
 
 def test_over_cap_memory_reports_evidence_units_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """>24 text units -> incomplete/evidence_units_capped (was notice_budget_exhausted)."""
+    """>64 text units (cap since 0.15.14 A5) -> incomplete/evidence_units_capped."""
     from memory_arbiter.constants import SEMANTIC_MAX_EVIDENCE_UNITS
 
     tools = make_tools(tmp_path)
@@ -306,7 +306,7 @@ def test_over_cap_memory_reports_evidence_units_capped(tmp_path: Path, monkeypat
 
 
 def test_job_deadline_keeps_notice_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fair-deadline truncation (<24 units) keeps the original reason string."""
+    """Fair-deadline truncation (units under the cap) keeps the original reason string."""
     import time as _time
 
     tools = make_tools(tmp_path)
@@ -331,9 +331,11 @@ def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkey
     The deadline is pushed past only after the 24th unit has been examined, so
     the 25th loop iteration sees both causes; the cap check runs first.
     """
+    from memory_arbiter.constants import SEMANTIC_MAX_EVIDENCE_UNITS as _UNITS
+
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    memory_id = _write_many_units(tools, 40)
+    memory_id = _write_many_units(tools, _UNITS + 16)
 
     clock = {"now": 100.0}
     fairness_deadline = 100.5
@@ -341,7 +343,7 @@ def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkey
 
     def fake_knn(*a: Any, **k: Any) -> list[dict[str, Any]]:
         knn_calls["n"] += 1
-        if knn_calls["n"] >= 24:
+        if knn_calls["n"] >= _UNITS:
             clock["now"] = fairness_deadline + 1.0
         return []
 
@@ -353,7 +355,7 @@ def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkey
 
     result = tools._process_semantic_conflict_job(memory_id, _job_snapshot(tools, memory_id))
 
-    assert knn_calls["n"] == 24
+    assert knn_calls["n"] == _UNITS
     assert result["reason"] == "evidence_units_capped"
 
 

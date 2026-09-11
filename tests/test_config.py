@@ -1128,7 +1128,6 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "semantic_conflict_model_path",
         "semantic_conflict_on_write",
         "semantic_conflict_gpu_layers",
-        "semantic_conflict_max_notice_pairs",
         "semantic_conflict_notice_sync_wait_ms",
         "config_warnings",
         "config_file_loaded",
@@ -1136,11 +1135,13 @@ SLIM_SETTINGS_FIELDS = frozenset(
 )
 
 
-def test_settings_field_set_is_frozen_at_twenty_four() -> None:
-    # 0.15.14: 24 — semantic_conflict_gpu_layers added (A3 Qwen offload).
+def test_settings_field_set_is_frozen_at_twenty_three() -> None:
+    # 0.15.14: 23 — semantic_conflict_gpu_layers added (A3), and
+    # semantic_conflict_max_notice_pairs removed (A5: the notice-count cap is
+    # gone; notices are bounded by the examined-pairs constant).
     # 0.15.11: 23 — config_file_loaded added as a runtime-injected field (same
     # class as config_warnings/policy: never a file key, not in the registry).
-    assert len(SLIM_SETTINGS_FIELDS) == 24
+    assert len(SLIM_SETTINGS_FIELDS) == 23
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 

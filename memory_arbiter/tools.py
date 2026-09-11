@@ -246,14 +246,14 @@ class MemoryTools:
                 "check-route candidates are fail-closed (no notice) while Qwen "
                 "is unavailable (qwen_unavailable/qwen_backend_error), times out "
                 "(qwen_timeout), returns invalid output (qwen_invalid_output), "
-                "or the check budget is exhausted (evidence_units_capped: the "
-                "memory exceeds the 24-unit evidence cap; "
-                "notice_budget_exhausted: the fair job deadline hit). While any "
-                "of those hold, the "
-                "write-time check route creates no notices at all — including "
-                "pairs the deterministic rules classified as notify — and "
-                "recall is guaranteed only by scheduled scan. Semantic-worker "
-                "queue overflow shows as worker.dropped_queue_full."
+                "or the check is truncated (evidence_units_capped: the memory "
+                "exceeds the 64-unit evidence cap; pairs_examined_capped: the "
+                "10-pair examined cap; notice_budget_exhausted: the fair job "
+                "deadline hit). Pairs beyond a truncation — including ones the "
+                "deterministic rules classified as notify — are covered only by "
+                "scheduled scan. Since 0.15.14 the former notice-count early "
+                "stop is gone: every examined pair may surface its notice. "
+                "Semantic-worker queue overflow shows as worker.dropped_queue_full."
             ),
         }
 
