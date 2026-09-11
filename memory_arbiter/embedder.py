@@ -94,8 +94,11 @@ class ManagedEmbedder:
         (n_ctx - reserved_tokens, the semantic ceiling) and the library batch
         ceiling (n_batch, what one llama-cpp-python embed() forward can
         actually chew — inputs beyond it are silently truncated there).
+        Floored at 1: a nonsensical config (n_ctx below the reserved tokens)
+        must degrade to prefix-only truncation, never to a zero/negative
+        budget that would silently embed only the empty string.
         """
-        return min(self.n_ctx - self.reserved_tokens, self.n_batch)
+        return max(1, min(self.n_ctx - self.reserved_tokens, self.n_batch))
 
     def embed_text(
         self,
@@ -393,6 +396,7 @@ def build_embedder(
             # at first eval, GPU reset between construct and probe); retry
             # once on CPU before declaring the embedder unavailable.
             warnings.append(f"GPU dimension probe failed ({exc}); retrying on CPU")
+            make_close(llm)()  # release the faulted GPU instance, mirroring the runtime degrade path
             llm = construct(False)
             used_gpu = False
             encode, tokenize = make_closures(llm)

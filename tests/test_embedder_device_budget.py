@@ -242,6 +242,7 @@ class _FakeLlama:
             raise RuntimeError(_FakeLlama.gpu_construction_error)
         self.kwargs = kwargs
         self.n_batch = int(kwargs.get("n_batch", 512))
+        self.close_count = 0
         _FakeLlama.instances.append(self)
 
     def create_embedding(self, text):
@@ -255,6 +256,9 @@ class _FakeLlama:
 
     def tokenize(self, data, add_bos=False):
         return list(range(max(1, len(data))))
+
+    def close(self):
+        self.close_count += 1
 
 
 @pytest.fixture()
@@ -312,6 +316,36 @@ class TestBuildEmbedderDevicePolicy:
         assert embedder is not None
         assert embedder.gpu_backed is False
         assert any("GPU dimension probe failed" in w for w in warnings)
+
+    def test_gpu_probe_exception_closes_faulted_gpu_instance(self, fake_llama_cpp, tmp_path):
+        # The faulted GPU instance must be released before the CPU retry,
+        # mirroring the runtime degrade path (_close_locked) — otherwise the
+        # only reference to a device-OOM'd Llama is dropped without close.
+        _FakeLlama.gpu_encode_error = "metal device removed"
+        embedder, _warnings = build_embedder(self._model(tmp_path))
+        assert embedder is not None
+        gpu_instance = _FakeLlama.instances[0]
+        assert gpu_instance.close_count == 1
+        # The surviving CPU instance is untouched by the cleanup.
+        assert _FakeLlama.instances[1].close_count == 0
+
+    def test_gpu_construction_failure_leaves_no_instance_to_close(self, fake_llama_cpp, tmp_path):
+        _FakeLlama.gpu_construction_error = "no metal device available"
+        embedder, _warnings = build_embedder(self._model(tmp_path))
+        assert embedder is not None
+        assert all(instance.close_count == 0 for instance in _FakeLlama.instances)
+
+    def test_token_budget_floored_at_one(self, fake_llama_cpp, tmp_path):
+        # A nonsensical context window below the reserved tokens must
+        # degrade to a prefix-only budget, never a zero/negative budget
+        # (which would silently embed only the empty string).
+        embedder, _warnings = build_embedder(self._model(tmp_path), n_ctx=64)
+        assert embedder.reserved_tokens == 64
+        assert embedder.token_budget() == 1
+
+    def test_token_budget_normal_case_unchanged(self, fake_llama_cpp, tmp_path):
+        embedder, _warnings = build_embedder(self._model(tmp_path), n_ctx=2048)
+        assert embedder.token_budget() == min(2048 - 64, embedder.n_batch)
 
     def test_cpu_probe_exception_disables_embedder(self, fake_llama_cpp, tmp_path):
         fake_llama_cpp.llama_supports_gpu_offload = lambda: False

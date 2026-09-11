@@ -96,9 +96,13 @@ class LocalTextIndexWorker:
                     return
                 memory_id = next(iter(self._pending))
                 snapshot = self._pending.pop(memory_id)
+                # Registered under the same cond hold as the pop: wait_drained
+                # must never observe a popped-but-unregistered item. Every
+                # fallible step after the block (task_id construction included)
+                # sits inside the try, so the finally always discards.
                 self._inflight.add(memory_id)
-            task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")
             try:
+                task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")
                 current = self._tools.db.get_memory(memory_id)
                 if current is None or int(current.get("version") or 1) != int(snapshot.get("version") or 1):
                     result = {"status": "skipped", "reason": "stale_or_missing"}
