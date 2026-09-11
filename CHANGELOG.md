@@ -25,6 +25,11 @@ Versions follow semantic versioning.
 - **COUNT and page paths share one filter predicate (B2).** `db.memories.row_passes_filters` is now the single source for tags/time/source_type filtering, used by the count, the filter-driven recall, and search's post-filter — the two former mirrors disagreed on sub-second time bounds (SQL truncated them) and numeric tags (SQL never matched them). SQL still pre-filters where that cannot exclude a row the predicate would keep, so the pagination path keeps its index plans; boundary regressions pinned by tests.
 - **Documentation drift cleared (B3).** The configuration-surface count now reads 19 keys everywhere (0.15.8's restore, 0.15.14's add/removals), the `memory` tool description lists `batch_find`, and the setup starter template carries the live key set.
 
+### Fixed
+
+- **CI was red since 0.15.13 (quality + vec jobs).** The numpy-backed workspace-anomaly check needs a stub declaration for `mypy --strict` and numpy itself in the vec-only test env; the test files now skip cleanly when numpy is absent. The anomaly check's neighbour selection is deterministic now: `argpartition` returns tied similarities in arbitrary order (CI selected one beta neighbour where the local run selected nine — the same library reported 9 vs 12 suspects), replaced by a stable descending sort with the column index as tie-break.
+- **The pair retry names the real violation.** `invalid_<field>` covers over-long / empty / malformed alike, and the pre-0.15.14 feedback wording always claimed "empty" (grammar-era maxLength kept over-long values from ever reaching a retry) — an over-long copy therefore got told its field was empty, and the 0.5B answered by inventing values (`{"value_a":"无"}` observed). The feedback now reads the raw and distinguishes the causes.
+
 ### Notes
 
 - `PAIR_PROMPT_VERSION` stays `pair-v6` — prompt text is byte-identical.
