@@ -295,6 +295,59 @@ class ProductSurfaces:
     def _strict_acl_unavailable(self, *args: Any, **kwargs: Any) -> "dict[str, Any] | None":
         return self._tools._strict_acl_unavailable(*args, **kwargs)
 
+    def _active_workspace_anomalies(self) -> "dict[int, str]":
+        """C3b: {memory_id: suspected_bucket} from live workspace_review notices.
+
+        The memory id is parsed from the dedupe key (workspace-anomaly:{id});
+        only notices whose subject memory STILL sits in the notice's pinned
+        workspace participate — a post-move notice that has not been lazily
+        staled yet must not re-inject a sweep against its old suspicion.
+        """
+        import json as _json
+
+        out: dict[int, str] = {}
+        try:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT notice_dedupe_key, notice_payload, workspace_canonical "
+                    "FROM conflicts WHERE notice_type='workspace_review' "
+                    "AND notice_delivery_status IN ('pending','delivered') "
+                    "AND notice_dedupe_key LIKE 'workspace-anomaly:%'"
+                ).fetchall()
+                if not rows:
+                    return out
+                wanted: dict[int, tuple[str, str]] = {}
+                for row in rows:
+                    dedupe = str(row["notice_dedupe_key"] or "")
+                    try:
+                        memory_id = int(dedupe.rsplit(":", 1)[1])
+                    except (IndexError, ValueError):
+                        continue
+                    try:
+                        payload = _json.loads(str(row["notice_payload"] or "{}"))
+                    except (TypeError, ValueError):
+                        continue
+                    suspected = str(payload.get("suspected_workspace") or "").strip()
+                    if suspected:
+                        wanted[memory_id] = (suspected, str(row["workspace_canonical"] or ""))
+                if not wanted:
+                    return out
+                placeholders = ",".join("?" for _ in wanted)
+                current = {
+                    int(r["id"]): str(r["workspace"] or "")
+                    for r in conn.execute(
+                        "SELECT id, COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                        f"FROM memories WHERE id IN ({placeholders}) AND status='active'",
+                        list(wanted),
+                    )
+                }
+                for memory_id, (suspected, pinned) in wanted.items():
+                    if current.get(memory_id) == pinned:
+                        out[memory_id] = suspected
+        except Exception:
+            return {}
+        return out
+
     def memory_audit_summary(self, **kwargs: Any) -> dict[str, Any]:
         return self._tools.memory_audit_summary(**kwargs)
 
@@ -1050,6 +1103,13 @@ class ProductSurfaces:
             if not (1 <= batch_value <= 200) or not (1 <= k_value <= 20) or anchor_value < 0:
                 return self._invalid_product_call("memory_repair", "scan_candidates requires 1<=batch<=200, 1<=k<=20, anchor_memory_id>=0", task)
             scan_workspace = caller.scope_canonicals() if caller.isolation == "strict" else None
+            # C3b: the suspected-bucket sweep for misplaced memories. Global
+            # scans only — a strict caller's admitted set usually excludes the
+            # suspected bucket, and the cross-bucket reference snippets must
+            # not leak outside the caller's scope.
+            suspected_anomalies = (
+                self._active_workspace_anomalies() if scan_workspace is None else None
+            )
             scan_enhance = SEMANTIC_SCAN_ENHANCE
             scan_started = time.perf_counter()
             result = self.db.scan_rule_candidates(
@@ -1061,6 +1121,7 @@ class ProductSurfaces:
                 workspace=scan_workspace,
                 similarity_pool_limit=(max(0, SEMANTIC_SCAN_MAX_PAIRS) if scan_enhance else 0),
                 include_duplicates=self._is_truthy(payload.get("include_duplicates")),
+                suspected_anomalies=suspected_anomalies,
             )
             if "error" not in result:
                 # Spec §7.1 wide gate: bounded Qwen enhancement over the page.

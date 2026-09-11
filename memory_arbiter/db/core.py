@@ -386,7 +386,7 @@ class MemoryDB:
         self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
         include_check: bool = False, max_distance: float | None = None,
         workspace: WorkspaceScope = None, similarity_pool_limit: int = 0,
-        include_duplicates: bool = False,
+        include_duplicates: bool = False, suspected_anomalies: dict[int, str] | None = None,
     ) -> dict[str, Any]:
         return self.evidence.scan_rule_candidates(
             after_memory_id=after_memory_id, anchor_batch=anchor_batch,
@@ -394,6 +394,7 @@ class MemoryDB:
             max_distance=max_distance, workspace=workspace,
             similarity_pool_limit=similarity_pool_limit,
             include_duplicates=include_duplicates,
+            suspected_anomalies=suspected_anomalies,
         )
 
     def insert_memory(

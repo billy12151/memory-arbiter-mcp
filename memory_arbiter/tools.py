@@ -1826,11 +1826,25 @@ class MemoryTools:
                     peer_version = int(peer.get("version") or 1)
                 else:
                     peer_id = None
+            if peer_id is None:
+                # A STRONGLY misplaced memory's top-10 may contain no
+                # same-bucket neighbour at all. Fall back to any other active
+                # row in the same bucket (the pair shape needs one); a true
+                # bucket-of-one has no peer and cannot host a notice.
+                with self.db.connection() as conn:
+                    row = conn.execute(
+                        "SELECT id, version FROM memories WHERE status='active' "
+                        "AND id != ? AND COALESCE(NULLIF(workspace_canonical,''),workspace)=? "
+                        "ORDER BY id LIMIT 1",
+                        (memory_id, item["workspace"]),
+                    ).fetchone()
+                if row is not None:
+                    peer_id = int(row["id"])
+                    peer_version = int(row["version"] or 1)
             if peer_id is None or peer_version is None:
-                # No same-bucket neighbour at all (bucket of one): the vote
-                # evidence alone still goes out via the findings list; a
-                # notice without a pair member cannot satisfy the group
-                # identity model, so skip recording for this row.
+                # Bucket of one: the vote evidence still goes out via the
+                # findings list; a notice without a pair member cannot
+                # satisfy the group identity model.
                 continue
             foreign_id = item.get("foreign_neighbour_id")
             foreign = (

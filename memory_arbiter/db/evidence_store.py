@@ -323,6 +323,7 @@ class EvidenceStore:
         workspace: "WorkspaceScope" = None,
         similarity_pool_limit: int = 0,
         include_duplicates: bool = False,
+        suspected_anomalies: dict[int, str] | None = None,
     ) -> dict[str, Any]:
         """Enumerate conflict-candidate pairs for an external scan loop.
 
@@ -342,6 +343,18 @@ class EvidenceStore:
         pairs (ignore/equivalent_value|compatible_evidence) as a bounded
         duplicates_pool for governance merge; recorded pairs are suppressed
         with the same candidate-hash contract.
+
+        C3b (0.15.13): pairing is workspace-grouped. Each anchor's KNN is
+        scoped to the anchor's OWN bucket, so cross-bucket pairs are never
+        generated (they cannot satisfy record_conflict's single-bucket
+        group identity and used to loop weekly without landing).
+        suspected_anomalies ({memory_id: suspected_bucket} from the active
+        workspace_review notices) additionally sweeps each suspected
+        misplaced memory against its SUSPECTED bucket: those hits are
+        cross-bucket by construction and surface in a separate
+        cross_bucket_references list for the running agent — authoritative
+        disposition is the workspace_review notice (move), never
+        record_conflict.
 
         Calibrated on a real 474-memory production copy: absolute vector
         distance has no discrimination there (random same-workspace pairs
@@ -438,7 +451,27 @@ class EvidenceStore:
             stale_anchors = 0
             filtered_open = 0
             filtered_dismissed = 0
+            cross_bucket_refs: dict[tuple[int, int], dict[str, Any]] = {}
+            # C3b: suspected misplaced memories (from ACTIVE workspace_review
+            # notices) are ALSO paired against their suspected bucket. Those
+            # pairs are cross-bucket, cannot land in record_conflict, and go
+            # to a reference list only.
+            suspected = {
+                int(mid): str(bucket)
+                for mid, bucket in (suspected_anomalies or {}).items()
+            }
             for anchor_id in anchors:
+                anchor_row = conn.execute(
+                    "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=?",
+                    (anchor_id,),
+                ).fetchone()
+                # C3b grouping: pair only within the anchor's own bucket. The
+                # strict caller scope (workspace) already bounds the whole
+                # page; the anchor bucket narrows pairing further.
+                anchor_bucket = (
+                    str(anchor_row["workspace"] or "").strip() if anchor_row else ""
+                )
                 # Only body-text units participate, matching the write-time
                 # notice path: subjects/headings are version-progression
                 # heavy and fire numeric_value_changed on their own.
@@ -498,17 +531,54 @@ class EvidenceStore:
                     text = str(unit["text"] or "")
                     if not text:
                         continue
+                    unit_vector = self._blob_to_vector(bytes(unit["embedding"]))
+                    # C3b: same-bucket pairing. Under a strict caller scope the
+                    # anchor bucket must stay inside the admitted set.
+                    pairing_scope = anchor_bucket if (
+                        anchor_bucket and (workspace is None or anchor_bucket in set(workspace_names))
+                    ) else workspace
                     hits = self.knn(
-                        self._blob_to_vector(bytes(unit["embedding"])),
+                        unit_vector,
                         k=max(1, int(neighbor_k)) + 1,
-                        workspace=workspace,
+                        workspace=pairing_scope,
                         exclude_memory_id=anchor_id,
                     )
-                    for hit in hits:
+                    # C3b: the suspected-bucket sweep for misplaced memories.
+                    suspect_bucket = suspected.get(anchor_id)
+                    suspect_hits: list[dict[str, Any]] = []
+                    if suspect_bucket and suspect_bucket != anchor_bucket:
+                        suspect_hits = self.knn(
+                            unit_vector,
+                            k=max(1, int(neighbor_k)) + 1,
+                            workspace=suspect_bucket,
+                            exclude_memory_id=anchor_id,
+                        )
+                    for hit in itertools.chain(hits, suspect_hits):
                         if hit.get("kind") != "text":
                             continue
                         peer_id = int(hit["memory_id"])
                         if peer_id == anchor_id:
+                            continue
+                        peer_bucket = str(hit.get("workspace_canonical") or hit.get("workspace") or "").strip()
+                        if peer_bucket and anchor_bucket and peer_bucket != anchor_bucket:
+                            # C3b: cross-bucket hits exist only in the
+                            # suspected-bucket sweep (regular pairing is
+                            # bucket-scoped). Reference-only: they can never
+                            # satisfy record_conflict's single-bucket group
+                            # identity. Authority is the workspace_review
+                            # notice (move), never a conflict group.
+                            pair_key = (min(anchor_id, peer_id), max(anchor_id, peer_id))
+                            decision = decide_evidence(text, str(hit.get("text") or ""))
+                            ref = cross_bucket_refs.setdefault(pair_key, {
+                                "left_id": pair_key[0], "right_id": pair_key[1],
+                                "workspace": anchor_bucket,
+                                "suspected_workspace": suspect_bucket,
+                                "reasons": set(), "distance": float(hit.get("distance") or 0),
+                                "left_snippet": text[:200], "right_snippet": str(hit.get("text") or "")[:200],
+                                "note": "cross-bucket reference only; disposition via the workspace_review notice (move), not record_conflict",
+                            })
+                            ref["reasons"].add(decision.reason)
+                            ref["distance"] = min(ref["distance"], float(hit.get("distance") or 0))
                             continue
                         knn_pair_count += 1
                         # Every unit pair is judged: an earlier equivalent
@@ -733,6 +803,10 @@ class EvidenceStore:
             duplicates_ordered = [
                 duplicates_pool[pair] for pair in sorted(duplicates_pool)
             ]
+            cross_refs_ordered = [
+                {**cross_bucket_refs[pair], "reasons": sorted(cross_bucket_refs[pair]["reasons"])}
+                for pair in sorted(cross_bucket_refs)
+            ]
             return {
                 "anchors_scanned": len(anchors),
                 "next_anchor_memory_id": int(next_anchor) if more else None,
@@ -740,6 +814,7 @@ class EvidenceStore:
                 "similarity_pool": similarity_ordered,
                 "duplicates_pool": duplicates_ordered,
                 "duplicates_truncated": duplicates_truncated,
+                "cross_bucket_references": cross_refs_ordered,
                 "counts": {
                     "knn_pairs": knn_pair_count,
                     "rule_pass": len(ordered),

@@ -1,8 +1,9 @@
 """Scheduled-task specification shared by the guidance notice and help topic.
 
-Single source of truth for the two tasks mema asks agents to schedule
-(hourly conflict scan, daily governance reminder). The notice payload and
-the ``memory(action="help", data={"topic": "scheduled_tasks"})`` document
+Single source of truth for the three tasks mema asks agents to schedule
+(hourly conflict scan, weekly workspace anomaly check, daily governance
+reminder). The notice payload and the
+``memory(action="help", data={"topic": "scheduled_tasks"})`` document
 both render from this module so they cannot drift apart.
 
 Platform-agnostic by design (owner decision 2026-09-02): the server never
@@ -16,9 +17,10 @@ from typing import Any
 SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 
 AGENT_INSTRUCTION = (
-    "Tell the user: mema needs two scheduled tasks (hourly conflict scan, daily governance "
-    "reminder) to discover conflicts automatically. Ask whether to set them up now; on consent, "
-    "create the equivalent tasks on your own platform from setup.tasks. The notice disappears "
+    "Tell the user: mema needs three scheduled tasks (hourly conflict scan, weekly "
+    "workspace anomaly check, daily governance reminder) to discover conflicts "
+    "automatically. Ask whether to set them up now; on consent, create the "
+    "equivalent tasks on your own platform from setup.tasks. The notice disappears "
     "by itself once the tasks run — no report-back needed."
 )
 
@@ -67,6 +69,12 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                 },
                 {
                     "note": (
+                        "Pairing is workspace-grouped (0.15.13): candidates only ever pair memories "
+                        "within one workspace bucket, and a page may also carry cross_bucket_references "
+                        "— pairs a suspected-misplaced memory forms with its likely home bucket. Those "
+                        "references cannot be recorded as conflicts; handle them through the "
+                        "workspace_review notice flow (confirm with the user, then "
+                        "memory_govern(action='move_memories_workspace')). "
                         "Start at anchor_memory_id=0; use each page's next_anchor_memory_id as the "
                         "next anchor_memory_id until it returns null. The response is lightweight by "
                         "default (pair ids, workspace, reasons, short quotes); the sample call passes "
@@ -90,6 +98,30 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
             ],
         },
         {
+            "name": "workspace_anomaly_check",
+            "purpose": (
+                "One-call workspace health check: flags memories whose nearest-content "
+                "neighbours overwhelmingly sit in another workspace (misplacement), before "
+                "the conflict scan round it precedes."
+            ),
+            "cadence": "weekly",
+            "calls": [
+                {
+                    "tool": "memory_repair", "task": "scan_workspace_anomalies",
+                    "data": {},
+                    "note": (
+                        "Runs BEFORE the week's conflict scan rounds. Each flagged memory gets one "
+                        "workspace_review notice (max 10 per run; the rest surface in later weeks). "
+                        "Read each notice (memory_repair task='notice' action='read'), verify with "
+                        "the user, then move confirmed memories via "
+                        "memory_govern(action='move_memories_workspace') or dismiss false alarms. "
+                        "Same-week conflict scans automatically sweep suspected memories against "
+                        "their likely home bucket (cross_bucket_references)."
+                    ),
+                },
+            ],
+        },
+        {
             "name": "governance_reminder",
             "purpose": "Check semantic notices and the unresolved conflict backlog, remind the user to govern.",
             "cadence": "daily",
@@ -103,9 +135,9 @@ def scheduled_tasks_help() -> dict[str, Any]:
     """Full self-serve document for the scheduled_tasks help topic."""
     return {
         "description": (
-            "The two scheduled tasks mema relies on for automated conflict discovery and "
-            "governance follow-up. Platform-agnostic: create the equivalent tasks on whatever "
-            "scheduler your host provides."
+            "The three scheduled tasks mema relies on for automated conflict discovery, "
+            "workspace placement health, and governance follow-up. Platform-agnostic: "
+            "create the equivalent tasks on whatever scheduler your host provides."
         ),
         "topic": SCHEDULED_TASKS_TOPIC,
         "setup": SCHEDULED_TASKS_SPEC,
