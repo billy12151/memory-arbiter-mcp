@@ -3,6 +3,32 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.15.14] — 2026-09-11
+
+**Qwen write-time check performance pack + cleanup pack (mema #964, owner-approved 2026-09-11).** The write-time semantic check stops paying grammar tax on every token, examines and surfaces more of a long memory, and the dead AgentPolicy half-wiring is gone. One breaking change: `policy_path` is removed.
+
+### Performance (A pack — Qwen write-time check)
+
+- **Grammar-free first attempt (A2).** The pair-extraction call no longer sends `response_format` on its first attempt: the grammar's per-token evaluation halved decode throughput (measured 45 vs 86 tok/s on the calibration matrix; n=62, wall −72%, validity 62/62 — `scripts/eval_grammar_free_matrix.py`, data in `docs/eval/eval-grammar-free-matrix-2026-09-11.json`). Caps are enforced post-hoc instead: over-64-char values are **truncated at their last clause/word boundary inside the cap** (never mid-run; a value whose distinguishing part falls beyond the cut is refused rather than silently equalised), and the existing grounding gates still gate every value. The **retry attempt restores the schema grammar** — that is the one place where grammar cost buys something: the 0.5B's verbatim-copy loop (which neither feedback text nor quote shrinking breaks) recovers deterministically under it. Assistant-prefix seeding was tried and rejected in integration (it mis-aligned extraction on the Tier1 calibration pair); prompt wording is unchanged (`pair-v6`).
+- **Pair-timing instrumentation (A1).** `last_pair_duration_ms` grew into a 20-sample ring (`pair_ms`, `prompt_tokens`, `generated_tokens`, `retried`, `at`) with mean/p95/retry-ratio/long-decode-ratio aggregates in `status.backend.pair_timing` and `doctor.semantic_pair_timing` — one real run now separates queue competition from long decodes from retries.
+- **Qwen GPU offload (A3).** New config key `semantic_conflict.n_gpu_layers` (default `-1` = full offload; `0` = CPU, N = first N layers) replaces the hard-wired CPU build. Measured on Apple M3: ~1.1× mean (short decodes), 1.15–1.25× on long ones; prefill gain independent of grammar. A GPU-init failure falls back to CPU once and reports `gpu_fallback` in status instead of failing every pair. The child process explicitly releases the model before exit (llama-cpp-python 0.3.34 Metal teardown SIGABRT).
+- **Wider unit cap + examined-pairs cap (A5).** `SEMANTIC_MAX_EVIDENCE_UNITS` 24 → 64 (covers the real-library maximum; collection is milliseconds per unit) and a new `SEMANTIC_MAX_EXAMINED_PAIRS = 10` bounds the expensive resource — pairs that actually reach Qwen (formula: 20 s target check budget ÷ p95 pair wall, clamped 6–16). Beyond it the job reports `incomplete/pairs_examined_capped`. The **notice-count early stop is gone**: notices are recorded per pair, so the check surfaces every conflict it examines (bounded by the pairs cap) instead of stopping at 2–3.
+- **Retry queue gate (A6).** The one feedback retry is skipped (single attempt, invalid output stands) while other semantic jobs or queued requests wait — a busy queue no longer doubles the wait of everything behind it.
+
+### Removed (breaking)
+
+- **AgentPolicy is gone (B1).** `policy_path`, the `AgentPolicy` class, `Settings.policy`, the server-side `policy_check` pipeline, the write gate, the `status.policy` echo, the config-registry/setup-template entries, and `examples/openclaw.agent-policy.json` are all removed — its original OpenClaw per-agent scenario died long ago, the `MEMORY_ARBITER_POLICY` env var had already been dropped in 0.15.0 unnoticed, and the half-wiring only ever guarded writes (a false sense of coverage). A `policy_path` key in config.json now warns (`removed in 0.15.14`). Identity attribution is unchanged.
+- **`semantic_conflict.max_notice_pairs` is gone (A5).** The notice count is bounded by the examined-pairs cap now; a leftover key warns.
+
+### Fixed
+
+- **COUNT and page paths share one filter predicate (B2).** `db.memories.row_passes_filters` is now the single source for tags/time/source_type filtering, used by the count, the filter-driven recall, and search's post-filter — the two former mirrors disagreed on sub-second time bounds (SQL truncated them) and numeric tags (SQL never matched them). SQL still pre-filters where that cannot exclude a row the predicate would keep, so the pagination path keeps its index plans; boundary regressions pinned by tests.
+- **Documentation drift cleared (B3).** The configuration-surface count now reads 19 keys everywhere (0.15.8's restore, 0.15.14's add/removals), the `memory` tool description lists `batch_find`, and the setup starter template carries the live key set.
+
+### Notes
+
+- `PAIR_PROMPT_VERSION` stays `pair-v6` — prompt text is byte-identical.
+
 ## [Unreleased]
 
 ## [0.15.13.1] — 2026-09-11
