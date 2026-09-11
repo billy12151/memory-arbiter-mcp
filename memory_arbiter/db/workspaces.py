@@ -959,6 +959,42 @@ class WorkspaceStore:
         except sqlite3.Error:
             return None
 
+    @staticmethod
+    def _conflict_slot_collision_warning_on_conn(
+        conn: sqlite3.Connection, source: str, destination: str,
+    ) -> list[str] | None:
+        """Refuse a workspace move that would collide active conflict slots.
+
+        ``idx_conflicts_active_slot`` is a partial unique index over
+        (workspace_canonical, slot_key_hash) WHERE status IN ('open','applying'),
+        and a slot_key carries no workspace — so re-pointing the source
+        workspace's active conflicts to the destination can collide with the
+        destination's own active row for the same slot. The bulk UPDATE would
+        abort the whole migration transaction. Silently resolving either
+        side (closing/dropping an open conflict) would fabricate a triage
+        decision, so the move is refused up front with the colliding ids so
+        the operator can triage via the normal governance flow and retry.
+        """
+        rows = conn.execute(
+            "SELECT s.id AS src_id, d.id AS dst_id FROM conflicts s "
+            "JOIN conflicts d ON d.slot_key_hash = s.slot_key_hash "
+            "WHERE s.workspace_canonical = ? AND d.workspace_canonical = ? "
+            "AND s.status IN ('open','applying') AND d.status IN ('open','applying') "
+            "AND s.slot_key_hash IS NOT NULL",
+            (source, destination),
+        ).fetchall()
+        if not rows:
+            return None
+        pairs = ", ".join(f"#{int(row['src_id'])}->#{int(row['dst_id'])}" for row in rows)
+        return [
+            f"workspace move {source!r} -> {destination!r} refused: active "
+            f"conflicts would collide on the same slot in the destination "
+            f"workspace (source conflict id -> destination conflict id: {pairs}). "
+            f"Resolve or triage the listed conflicts first "
+            f"(memory_review conflict_detail + memory_govern resolve_conflict), "
+            f"then retry the move."
+        ]
+
     def _competing_move_warning_on_conn(
         self, conn: sqlite3.Connection, source: str, destination: str,
     ) -> list[str] | None:
@@ -1052,6 +1088,9 @@ class WorkspaceStore:
                 competing = self._competing_move_warning_on_conn(conn, old, new)
                 if competing is not None:
                     return 0, competing
+                collision = self._conflict_slot_collision_warning_on_conn(conn, old, new)
+                if collision is not None:
+                    return 0, collision
                 cur = conn.execute(
                     "UPDATE memories SET workspace_canonical = ? "
                     "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
@@ -1143,6 +1182,12 @@ class WorkspaceStore:
         check stay with the caller.
         """
         warnings: list[str] = []
+        # Guard shared with rename: a slot collision would abort the bulk
+        # conflict re-point mid-transaction, and auto-resolving either side
+        # would fabricate a triage decision — refuse instead.
+        collision = WorkspaceStore._conflict_slot_collision_warning_on_conn(conn, from_ws, to_ws)
+        if collision is not None:
+            return 0, collision
         alias_key = _normalize_alias_key(from_ws)
         to_key = _normalize_alias_key(to_ws)
         cur = conn.execute(
@@ -1513,7 +1558,30 @@ class WorkspaceStore:
                         conn, loser, winner,
                     )
                     result["warnings"].extend(merge_warnings)
+                    if merge_warnings:
+                        # The merge was refused (e.g. active-conflict slot
+                        # collision) — report it as skipped-with-reason, not
+                        # as a zero-row merge that silently did not happen.
+                        result["skipped"].append({
+                            "type": "merge_refused",
+                            "from": loser,
+                            "to": winner,
+                            "reason": " ".join(merge_warnings),
+                        })
+                        continue
                 else:
+                    # Plan honesty: the same read-only collision guard runs
+                    # in dry-run so the plan reports a would-be refusal as
+                    # skipped, not as a merge the execute pass must refuse.
+                    collision = WorkspaceStore._conflict_slot_collision_warning_on_conn(conn, loser, winner)
+                    if collision is not None:
+                        result["skipped"].append({
+                            "type": "merge_refused",
+                            "from": loser,
+                            "to": winner,
+                            "reason": " ".join(collision),
+                        })
+                        continue
                     updated = int(conn.execute(
                         "SELECT COUNT(*) AS c FROM memories "
                         "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",

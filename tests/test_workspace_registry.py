@@ -1205,7 +1205,12 @@ def test_migrate_moves_conflicts_with_their_members(tmp_path: Path) -> None:
     assert tools.db.get_conflict(conflict_id)["workspace_canonical"] == "Main"
 
 
-def test_migrate_conflict_slot_collision_rolls_back_everything(tmp_path: Path) -> None:
+def test_migrate_conflict_slot_collision_refused_up_front(tmp_path: Path) -> None:
+    # v0.15.12+: the move is refused BEFORE any write with the colliding
+    # conflict ids spelled out, instead of aborting mid-transaction on the
+    # partial unique index with a bare sqlite error. Auto-resolving either
+    # open conflict would fabricate a triage decision, so refusal is the only
+    # honest outcome; triage then happens via the normal governance flow.
     tools = alias_governance_make_tools(tmp_path)
     old_left = write(tools, "Old", "old mysql")
     old_right = write(tools, "Old", "old sqlite")
@@ -1219,15 +1224,115 @@ def test_migrate_conflict_slot_collision_rolls_back_everything(tmp_path: Path) -
     })
 
     assert result["ok"] is False
-    assert any("migrate_workspace failed" in warning for warning in result["warnings"])
+    warning = next(w for w in result["warnings"] if "would collide" in w)
+    assert f"#{old_conflict}->#{new_conflict}" in warning
     assert tools.db.get_memory(old_left)["workspace_canonical"] == "Old"
     assert tools.db.get_memory(old_right)["workspace_canonical"] == "Old"
     assert tools.db.get_conflict(old_conflict)["workspace_canonical"] == "Old"
     assert tools.db.get_conflict(new_conflict)["workspace_canonical"] == "New"
 
+    # Resolving the colliding source conflict unblocks the move. The full
+    # open -> applying -> resolved chain is exercised in the lifecycle
+    # tests; here we only need the row out of the active-slot index.
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE conflicts SET status='resolved' WHERE id=?", (old_conflict,),
+        )
+    retry = tools.memory_govern("migrate_workspace", {
+        "from": "Old", "to": "New", "authorized": True,
+    })
+    assert retry["ok"] is True
+    assert tools.db.get_memory(old_left)["workspace_canonical"] == "New"
+    assert tools.db.get_conflict(new_conflict)["workspace_canonical"] == "New"
 
-def test_migrate_without_existing_rows_installs_redirect(tmp_path: Path) -> None:
+
+def test_rename_conflict_slot_collision_refused_up_front(tmp_path: Path) -> None:
     tools = alias_governance_make_tools(tmp_path)
+    old_left = write(tools, "Old", "old mysql")
+    old_right = write(tools, "Old", "old sqlite")
+    new_left = write(tools, "New", "new mysql")
+    new_right = write(tools, "New", "new sqlite")
+    old_conflict = record_conflict(tools, "Old", old_left, old_right)
+    new_conflict = record_conflict(tools, "New", new_left, new_right)
+
+    result = tools.memory_govern("rename_workspace_canonical", {
+        "old": "Old", "new": "New", "authorized": True,
+    })
+
+    assert result["ok"] is False
+    warning = next(w for w in result["warnings"] if "would collide" in w)
+    assert f"#{old_conflict}->#{new_conflict}" in warning
+    assert tools.db.get_memory(old_left)["workspace_canonical"] == "Old"
+    assert tools.db.get_conflict(new_conflict)["workspace_canonical"] == "New"
+
+
+def test_migrate_different_slot_conflicts_do_not_collide(tmp_path: Path) -> None:
+    # Same-slot pairs collide; different slots must keep moving normally.
+    tools = alias_governance_make_tools(tmp_path)
+    left = write(tools, "Old", "old mysql")
+    right = write(tools, "Old", "old sqlite")
+    conflict_id = record_conflict(tools, "Old", left, right)
+
+    result = tools.memory_govern("migrate_workspace", {
+        "from": "Old", "to": "New", "authorized": True,
+    })
+
+    assert result["ok"] is True
+    assert tools.db.get_memory(left)["workspace_canonical"] == "New"
+    assert tools.db.get_conflict(conflict_id)["workspace_canonical"] == "New"
+
+
+def test_slot_collision_guard_ignores_terminal_status_rows(tmp_path: Path) -> None:
+    # Only 'open'/'applying' rows occupy the active-slot index; resolved /
+    # not_a_conflict rows sharing a slot must NOT trigger the refusal.
+    tools = alias_governance_make_tools(tmp_path)
+    a_left, a_right = write(tools, "A", "a mysql"), write(tools, "A", "a sqlite")
+    b_left, b_right = write(tools, "B", "b mysql"), write(tools, "B", "b sqlite")
+    c_left, c_right = write(tools, "C", "c mysql"), write(tools, "C", "c sqlite")
+    a_conflict = record_conflict(tools, "A", a_left, a_right)
+    b_conflict = record_conflict(tools, "B", b_left, b_right)
+    c_conflict = record_conflict(tools, "C", c_left, c_right)
+    with tools.db.write_transaction() as conn:
+        # All three share one slot (record_conflict's fixed slot key) but only
+        # B stays active.
+        conn.execute("UPDATE conflicts SET status='resolved' WHERE id=?", (a_conflict,))
+        conn.execute("UPDATE conflicts SET status='not_a_conflict' WHERE id=?", (c_conflict,))
+
+    from memory_arbiter.db.workspaces import WorkspaceStore
+    with tools.db.connection() as conn:
+        assert WorkspaceStore._conflict_slot_collision_warning_on_conn(conn, "B", "A") is None
+        assert WorkspaceStore._conflict_slot_collision_warning_on_conn(conn, "B", "C") is None
+        assert WorkspaceStore._conflict_slot_collision_warning_on_conn(conn, "A", "C") is None
+
+
+def test_normalize_reports_refused_merge_as_skipped_in_plan_and_execute(tmp_path: Path) -> None:
+    # A would-be collision must show up as skipped-with-reason in the DRY-RUN
+    # plan (plan honesty: not as a merge the execute pass must refuse), and
+    # the execute pass must refuse the same merge and keep both canonicals.
+    tools = alias_governance_make_tools(tmp_path)
+    register(tools, "AgentLane", "agent-lane")
+    winner_left = write(tools, "AgentLane", "winner mysql")
+    winner_right = write(tools, "AgentLane", "winner sqlite")
+    loser_left = write(tools, "agent-lane", "loser mysql")
+    loser_right = write(tools, "agent-lane", "loser sqlite")
+    record_conflict(tools, "AgentLane", winner_left, winner_right)
+    record_conflict(tools, "agent-lane", loser_left, loser_right)
+
+    plan = tools.db.workspaces.normalize_workspace_canonicals(dry_run=True)
+    assert plan["ok"] is True
+    refused = [item for item in plan["skipped"] if item.get("type") == "merge_refused"]
+    assert len(refused) == 1
+    assert refused[0]["from"] == "agent-lane" and refused[0]["to"] == "AgentLane"
+    assert any(merge["from"] != "agent-lane" for merge in plan["merged"]) is False or all(
+        merge["from"] != "agent-lane" for merge in plan["merged"]
+    )
+
+    executed = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
+    assert executed["ok"] is True
+    assert [item for item in executed["skipped"] if item.get("type") == "merge_refused"]
+    assert tools.db.get_memory(loser_left)["workspace_canonical"] == "agent-lane"
+    assert tools.db.get_memory(winner_left)["workspace_canonical"] == "AgentLane"
+    assert any("would collide" in warning for warning in executed["warnings"])
     result = tools.memory_govern("migrate_workspace", {
         "from": "mema", "to": "memory-arbiter-mcp", "authorized": True,
     })
