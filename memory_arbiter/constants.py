@@ -117,6 +117,13 @@ SEMANTIC_MIN_PAIR_BUDGET_MS = 1000
 SEMANTIC_PAIR_MAX_ATTEMPTS = 2
 SEMANTIC_PAIR_RETRY_QUOTE_CHARS = 240
 SEMANTIC_PAIR_RETRY_MAX_TOKENS = 512
+# A1 ring (0.15.14): recent examined-pair samples kept for status/doctor
+# aggregation (mean/p95 pair_ms, retried ratio, long-decode ratio). A sample
+# whose generated tokens reach this share of the 384-token output budget
+# counts as a long decode — the slow-but-valid rambling/copy mode that
+# neither queue competition nor retries explain.
+SEMANTIC_PAIR_RING_SIZE = 20
+SEMANTIC_PAIR_LONG_DECODE_TOKENS = 256
 SEMANTIC_SCAN_ENHANCE = True
 SEMANTIC_SCAN_MAX_PAIRS = 8
 SEMANTIC_SCAN_BUDGET_MS = 60000

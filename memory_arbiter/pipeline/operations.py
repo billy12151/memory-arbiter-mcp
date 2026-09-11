@@ -1973,6 +1973,10 @@ class OperationsPipeline:
             self._update_monitor.record_doctor_run()
         data = report_to_dict(report)
         data["update_check"] = self._update_check_status()
+        # A1 (0.15.14): the pair-timing ring rides on doctor so the
+        # slow-vs-clean question (competition / long decode / retry) is
+        # answerable from one health view without a separate status call.
+        data["semantic_pair_timing"] = self._tools._pair_timing_summary()
         return self.db.state.response(data)
 
     def memory_set_entity(

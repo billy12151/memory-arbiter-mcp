@@ -348,7 +348,11 @@ class EvidencePipeline:
             started = time.monotonic()
             forward_signal = classify(left_env, right_env)
             reverse_signal = classify(right_env, left_env)
-            self._tools._last_pair_duration_ms = int((time.monotonic() - started) * 1000)
+            self._tools._record_pair_sample(
+                pair_ms=int((time.monotonic() - started) * 1000),
+                forward=forward_signal,
+                reverse=reverse_signal,
+            )
             gate = evaluate_pair_extractions(
                 signal_extraction(forward_signal), signal_extraction(reverse_signal), left_env, right_env,
                 require_bidirectional=True,

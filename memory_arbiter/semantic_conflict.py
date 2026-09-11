@@ -155,6 +155,12 @@ class ModelSignal:
     raw: str
     parsed: dict[str, Any] | None
     error: str | None = None
+    # A1 ring instrumentation (0.15.14): per-call token accounting so the
+    # parent's pair-timing ring can separate long decodes from queue waits.
+    # Filled only by backends that actually ran the model; None on errors.
+    prompt_tokens: int | None = None
+    generated_tokens: int | None = None
+    retried: bool = False
 
 
 @dataclass
@@ -1065,6 +1071,8 @@ class LocalGGUFSemanticBackend:
             ]
             retried = False
             signal: ModelSignal | None = None
+            prompt_tokens_total = 0
+            generated_tokens_total = 0
             for attempt in range(max(1, SEMANTIC_PAIR_MAX_ATTEMPTS)):
                 with self._infer_lock:
                     out = llm.create_chat_completion(
@@ -1075,6 +1083,9 @@ class LocalGGUFSemanticBackend:
                         stop=["\n\n"],
                         response_format=_PAIR_RESPONSE_FORMAT,
                     )
+                usage = out.get("usage") or {}
+                prompt_tokens_total += int(usage.get("prompt_tokens") or 0)
+                generated_tokens_total += int(usage.get("completion_tokens") or 0)
                 raw = out["choices"][0]["message"]["content"]
                 signal = model_signal_from_text(raw)
                 strategy = None
@@ -1084,6 +1095,9 @@ class LocalGGUFSemanticBackend:
                     if retried and signal.candidate_type == "attribute_value_extraction":
                         with self._cond:
                             self._pair_retry_recovered += 1
+                    signal.prompt_tokens = prompt_tokens_total
+                    signal.generated_tokens = generated_tokens_total
+                    signal.retried = retried
                     return signal
                 # One protocol invalid output earns a single retry with the
                 # offending raw echoed back plus a strategy-specific feedback
@@ -1114,6 +1128,9 @@ class LocalGGUFSemanticBackend:
                     estimate_tokens("".join(message["content"] for message in retry_messages)) * 1.3
                 ) + 64
                 if prompt_estimate + retry_max_tokens >= self.n_ctx:
+                    signal.prompt_tokens = prompt_tokens_total
+                    signal.generated_tokens = generated_tokens_total
+                    signal.retried = retried
                     return signal
                 retried = True
                 with self._cond:

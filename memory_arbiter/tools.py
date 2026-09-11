@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import threading
 import time
+from collections import deque
 from contextvars import ContextVar
 from typing import Any, Callable, cast
 
@@ -25,6 +27,8 @@ from .constants import (
     SEMANTIC_N_BATCH,
     SEMANTIC_N_CTX,
     SEMANTIC_N_THREADS,
+    SEMANTIC_PAIR_LONG_DECODE_TOKENS,
+    SEMANTIC_PAIR_RING_SIZE,
     SEMANTIC_SCAN_BUDGET_MS,
     SEMANTIC_SCAN_ENHANCE,
     SEMANTIC_SCAN_MAX_PAIRS,
@@ -97,7 +101,11 @@ class MemoryTools:
         self._product_caller: ContextVar[CallerWorkspace | None] = ContextVar(
             "memory_arbiter_product_caller", default=None,
         )
-        self._last_pair_duration_ms: int | None = None
+        # A1 ring (0.15.14): recent examined-pair samples {pair_ms,
+        # prompt_tokens, generated_tokens, retried, at} replacing the single
+        # last_pair_duration_ms scalar, so status/doctor aggregates can
+        # separate queue competition from long decodes from retries.
+        self._pair_samples: deque[dict[str, Any]] = deque(maxlen=SEMANTIC_PAIR_RING_SIZE)
         # Spec §7: check-route fail-closed degradation must stay observable
         # (qwen unavailable / per-job budget exhausted), not silently skipped.
         self._check_degradation_reason: str | None = None
@@ -246,6 +254,52 @@ class MemoryTools:
                 "pairs the deterministic rules classified as notify — and "
                 "recall is guaranteed only by scheduled scan. Semantic-worker "
                 "queue overflow shows as worker.dropped_queue_full."
+            ),
+        }
+
+    def _record_pair_sample(self, *, pair_ms: int, forward: Any, reverse: Any) -> None:
+        """A1 ring: one sample per examined pair (forward+reverse combined)."""
+        def token_sum(field: str) -> int | None:
+            values: list[int] = []
+            for signal in (forward, reverse):
+                value = getattr(signal, field, None)
+                if isinstance(value, int):
+                    values.append(value)
+            return sum(values) if values else None
+
+        self._pair_samples.append({
+            "pair_ms": int(pair_ms),
+            "prompt_tokens": token_sum("prompt_tokens"),
+            "generated_tokens": token_sum("generated_tokens"),
+            "retried": bool(
+                getattr(forward, "retried", False) or getattr(reverse, "retried", False)
+            ),
+            "at": time.time(),
+        })
+
+    def _pair_timing_summary(self) -> dict[str, Any]:
+        """Aggregates over the recent ring: separates queue competition
+        (long pair_ms with modest tokens) from long decodes and retries."""
+        samples = list(self._pair_samples)
+        if not samples:
+            return {"samples": 0}
+        durations = sorted(int(item["pair_ms"]) for item in samples)
+        generated = [
+            int(item["generated_tokens"]) for item in samples
+            if isinstance(item.get("generated_tokens"), int)
+        ]
+        retried = sum(1 for item in samples if item.get("retried"))
+        long_decode = sum(
+            1 for item in generated if item >= SEMANTIC_PAIR_LONG_DECODE_TOKENS
+        )
+        return {
+            "samples": len(samples),
+            "mean_pair_ms": round(sum(durations) / len(durations)),
+            "p95_pair_ms": durations[max(0, math.ceil(0.95 * len(durations)) - 1)],
+            "retried_ratio": round(retried / len(samples), 3),
+            "long_decode_ratio": round(long_decode / len(samples), 3),
+            "mean_generated_tokens": (
+                round(sum(generated) / len(generated)) if generated else None
             ),
         }
 
@@ -1450,7 +1504,10 @@ class MemoryTools:
             "notice_sync_wait_ms": int(self.settings.semantic_conflict_notice_sync_wait_ms),
             "max_concurrency": 1,
             "max_concurrency_note": "reserved; the semantic worker is single-threaded",
-            "last_pair_duration_ms": self._last_pair_duration_ms,
+            "last_pair_duration_ms": (
+                int(self._pair_samples[-1]["pair_ms"]) if self._pair_samples else None
+            ),
+            "pair_timing": self._pair_timing_summary(),
             "check_degradation": self._check_degradation_status(),
             "job_deadline_behavior": (
                 "The job budget activates only while another semantic job is queued and "
