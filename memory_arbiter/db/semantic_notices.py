@@ -444,14 +444,46 @@ class SemanticNoticeStore:
             return result
 
     def is_semantic_pair_closed(self, left_id: int, right_id: int, left_version: int | None = None, right_version: int | None = None, notice_type: str = "semantic_evidence") -> bool:
-        for notice in self.list_semantic_notices("dismissed", 10000) + self.list_semantic_notices("resolved", 10000):
-            if notice.get("notice_type") != notice_type:
+        """True when a dismissed/resolved notice already covers this pair.
+
+        Direct query, not list_semantic_notices: the list path clamps ``limit``
+        to 100 (newest first), so a closed pair older than the newest 100
+        notices would wrongly look open and be re-detected. Querying by
+        member ids has no such window.
+        """
+        left_id, right_id = int(left_id), int(right_id)
+        if left_id == right_id:
+            # A self-pair cannot be covered by any two-member dismissal; the
+            # two EXISTS clauses below would otherwise collapse into one.
+            return False
+        # Malformed legacy JSON must not abort the check (mirrors the
+        # json_valid guard used in filter clauses).
+        members_json = "CASE WHEN json_valid(member_versions) THEN member_versions ELSE '[]' END"
+        with self._db.connection() as conn:
+            rows = conn.execute(
+                "SELECT member_versions FROM conflicts "
+                "WHERE notice_delivery_status IN ('dismissed','resolved') AND notice_type=? "
+                f"AND EXISTS (SELECT 1 FROM json_each({members_json}) "
+                "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?) "
+                f"AND EXISTS (SELECT 1 FROM json_each({members_json}) "
+                "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?)",
+                (notice_type, left_id, right_id),
+            ).fetchall()
+        if left_version is None or right_version is None:
+            # The two EXISTS clauses already prove both ids share one notice.
+            return bool(rows)
+        pins: set[tuple[int, int]]
+        for row in rows:
+            try:
+                members = json.loads(row["member_versions"] or "[]")
+            except (TypeError, ValueError):
                 continue
-            pins = {(int(member["memory_id"]), int(member["version"])) for member in notice.get("member_versions") or []}
-            if left_version is None or right_version is None:
-                if {left_id, right_id} <= {pin[0] for pin in pins}:
-                    return True
-            elif {(int(left_id), int(left_version)), (int(right_id), int(right_version))} <= pins:
+            pins = {
+                (int(member["memory_id"]), int(member["version"]))
+                for member in members
+                if member.get("memory_id") is not None and member.get("version") is not None
+            }
+            if {(left_id, int(left_version)), (right_id, int(right_version))} <= pins:
                 return True
         return False
 
