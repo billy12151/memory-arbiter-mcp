@@ -266,9 +266,12 @@ def test_scheduled_tasks_help_topic_self_serve(tmp_path: Path) -> None:
     data = result["data"]
     assert data["topic"] == "scheduled_tasks"
     names = [task["name"] for task in data["setup"]["tasks"]]
-    assert names == ["conflict_scan", "governance_reminder"]
+    assert names == ["conflict_scan", "workspace_anomaly_check", "governance_reminder"]
     cadences = {task["name"]: task["cadence"] for task in data["setup"]["tasks"]}
-    assert cadences == {"conflict_scan": "hourly", "governance_reminder": "daily"}
+    assert cadences == {
+        "conflict_scan": "hourly", "workspace_anomaly_check": "weekly",
+        "governance_reminder": "daily",
+    }
 
 
 # ── 0.15.12 C3: the conflict_scan spec carries an executable record_conflict
