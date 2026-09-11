@@ -767,6 +767,88 @@ def test_count_matches_post_filter(tmp_path: Path) -> None:
     assert res["data"]["has_more"] is False
 
 
+# ── 0.15.14 (B2): count/page agreement on sub-second bounds & numeric tags ──
+
+def test_subsecond_after_boundary_count_matches_page(tmp_path: Path) -> None:
+    """A sub-second after_time cuts same-second stored rows out of BOTH the
+    count and the page (the old SQL bound truncated to whole seconds, so the
+    count admitted rows the Python post-filter dropped — #962 P1#6).
+    Product writes store whole-second ingest_time; a legacy/imported row with
+    a stored sub-second value is compared at full precision."""
+    tools = make_tools(tmp_path)
+    early = _write_mem(tools, content="subsec early", subject="sub", tags=[],
+                       ingest_time="2026-09-11T10:00:00+00:00")
+    late = _write_mem(tools, content="subsec late", subject="sub", tags=[],
+                      ingest_time="2026-09-11T10:00:01+00:00")
+
+    res = tools.memory_search(query="", after_time="2026-09-11T10:00:00.300000+00:00", limit=10)
+    assert res["data"]["total_estimate"] == 1
+    assert [r["id"] for r in res["data"]["results"]] == [late]
+
+    # whole-second bound is inclusive of the same-second row
+    res_whole = tools.memory_search(query="", after_time="2026-09-11T10:00:00+00:00", limit=10)
+    assert res_whole["data"]["total_estimate"] == 2
+
+    # legacy sub-second stored value: full-precision compare on both bounds
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE memories SET ingest_time = ? WHERE id = ?",
+            ("2026-09-11T10:00:00.700000+00:00", early),
+        )
+    res_legacy_in = tools.memory_search(query="", after_time="2026-09-11T10:00:00.300000+00:00", limit=10)
+    assert res_legacy_in["data"]["total_estimate"] == 2  # .700 clears the .300 bound
+    res_legacy_out = tools.memory_search(query="", before_time="2026-09-11T10:00:00.500000+00:00", limit=10)
+    assert res_legacy_out["data"]["total_estimate"] == 0  # .700 fails the .500 upper bound
+
+
+def test_numeric_tag_filter_count_matches_page(tmp_path: Path) -> None:
+    """Numeric JSON tags: membership compares string forms ('1' vs '1.0' are
+    different tags) and the count agrees with the page on both the empty-query
+    recall path and the query post-filter path (SQL json_each never matched
+    numeric tags at all — #962 P1#6)."""
+    tools = make_tools(tmp_path)
+    _write_mem(tools, content="normal tag", subject="t", tags=["发版"])
+    numeric = _write_mem(tools, content="numeric tag row", subject="t", tags=["x"])
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET tags = ? WHERE id = ?", ('[1.0]', numeric))
+
+    res = tools.memory_search(query="", tags_filter=["1.0"], limit=10)
+    assert res["data"]["total_estimate"] == 1
+    assert [r["id"] for r in res["data"]["results"]] == [numeric]
+
+    res_int = tools.memory_search(query="", tags_filter=["1"], limit=10)
+    assert res_int["data"]["total_estimate"] == 0
+
+    # Query path: the count side follows the shared predicate too. (Whether
+    # the row reaches the page is pool-recall's job — orthogonal to B2 and
+    # pool-capped by design; here no embedder is configured.)
+    qres = tools.memory_search(query="numeric", tags_filter=["1.0"], limit=10)
+    assert qres["data"]["total_estimate"] == 1
+
+
+def test_row_passes_filters_shared_predicate_units() -> None:
+    from datetime import datetime, timezone
+
+    from memory_arbiter.db.memories import row_passes_filters
+
+    after = datetime(2026, 9, 11, 10, 0, 0, 300000, tzinfo=timezone.utc)
+    # sub-second cut at the exact instant
+    assert row_passes_filters("[]", "2026-09-11T10:00:00.100000+00:00", None,
+                              tags_filter=None, after_dt=after, before_dt=None, source_type=None) is False
+    assert row_passes_filters("[]", "2026-09-11T10:00:00.300000+00:00", None,
+                              tags_filter=None, after_dt=after, before_dt=None, source_type=None) is True
+    # numeric tags compare string forms
+    assert row_passes_filters("[1.0]", None, None,
+                              tags_filter=["1.0"], after_dt=None, before_dt=None, source_type=None) is True
+    assert row_passes_filters("[1.0]", None, None,
+                              tags_filter=["1"], after_dt=None, before_dt=None, source_type=None) is False
+    assert row_passes_filters("[1]", None, None,
+                              tags_filter=["1"], after_dt=None, before_dt=None, source_type=None) is True
+    # malformed tags row never matches a filter
+    assert row_passes_filters("{bad", None, None,
+                              tags_filter=["any"], after_dt=None, before_dt=None, source_type=None) is False
+
+
 # ── from test_cjk_characterization.py ──
 
 """Characterization tests: lock the CURRENT (pre-refactor) CJK regex behavior.
