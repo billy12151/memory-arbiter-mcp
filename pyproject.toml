@@ -52,6 +52,6 @@ select = ["E9", "F63", "F7", "F82", "UP006", "UP007", "UP045"]
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec", "llama_cpp"]
+module = ["sqlite_vec", "llama_cpp", "numpy"]
 ignore_missing_imports = true
 

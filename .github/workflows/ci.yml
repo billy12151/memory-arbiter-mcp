@@ -37,7 +37,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e '.[test,vec]'
+      - run: python -m pip install -e '.[test,vec]' numpy  # numpy backs the C3a anomaly check in the vec-only env
       - run: python -m pytest -q
 
   quality:

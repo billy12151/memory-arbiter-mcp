@@ -18,6 +18,7 @@ from memory_arbiter.tools import MemoryTools
 
 @pytest.fixture()
 def vec_tools(tmp_path: Path):
+    pytest.importorskip("numpy")  # rides the semantic-local/llama-cpp extra
     import tests.test_vnext_evidence as tv
 
     tools = tv.make_tools(tmp_path)
