@@ -31,7 +31,7 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
             "calls": [
                 {
                     "tool": "memory_repair", "task": "scan_candidates",
-                    "data": {"anchor_memory_id": 0, "batch": 200, "k": 10},
+                    "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True},
                 },
                 {
                     "tool": "memory_repair", "task": "record_conflict",
@@ -68,7 +68,11 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                 {
                     "note": (
                         "Start at anchor_memory_id=0; use each page's next_anchor_memory_id as the "
-                        "next anchor_memory_id until it returns null. After each page returns, "
+                        "next anchor_memory_id until it returns null. The response is lightweight by "
+                        "default (pair ids, workspace, reasons, short quotes); the sample call passes "
+                        "include_quotes=true so each candidate carries the full members/slot envelope "
+                        "record_conflict needs — keep it when triaging, drop it only when a scan "
+                        "returns nothing. After each page returns, "
                         "immediately triage that page's candidates: a real conflict -> record_conflict "
                         "with status='open' (shape as the sample call above, values taken from the "
                         "page's slot_groups/candidates); not a conflict -> record_conflict with "

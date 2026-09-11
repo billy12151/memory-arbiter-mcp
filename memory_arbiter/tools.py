@@ -1282,6 +1282,75 @@ class MemoryTools:
             ]
         return result
 
+    QUOTE_LIGHT_CHARS = 60
+
+    def _lightweight_scan_candidate(self, item: dict[str, Any]) -> dict[str, Any]:
+        """C1 lightweight projection of one scan candidate for the default page.
+
+        The full candidate payload (full quotes/spans/members/slot payloads)
+        was calibrated for batch=2 reads and explodes the response at the
+        spec's batch sizes (12MB pages). The default page keeps only the
+        triage identity — pair ids, workspace, reasons, route/state and a
+        short quote per side — while include_quotes=true restores the full
+        envelope (whose members/slot_key/value_groups record_conflict needs).
+        The full payload is computed first and projected last so enhancement
+        order and suppression counting are unaffected.
+        """
+        members = item.get("members") if isinstance(item.get("members"), list) else []
+
+        def member_quote(index: int) -> str:
+            if 0 <= index < len(members):
+                quote = str((members[index] or {}).get("evidence_quote") or "")
+                if quote:
+                    return quote[:self.QUOTE_LIGHT_CHARS]
+            return str(item.get("left_snippet") or item.get("right_snippet") or "")[:self.QUOTE_LIGHT_CHARS]
+
+        members = item.get("members") if isinstance(item.get("members"), list) else []
+        workspace = item.get("workspace")
+        if not workspace and members:
+            left_mem = self.db.get_memory(int((members[0] or {}).get("memory_id") or 0))
+            if left_mem:
+                workspace = (
+                    left_mem.get("workspace_canonical")
+                    or left_mem.get("workspace")
+                )
+        light: dict[str, Any] = {
+            "left_id": item.get("left_id"),
+            "right_id": item.get("right_id"),
+            "workspace": workspace,
+            "state": item.get("state"),
+            "route": item.get("route"),
+            "reasons": list(item.get("reasons") or []),
+            "distance": item.get("distance"),
+            "left_quote": member_quote(0),
+            "right_quote": member_quote(1),
+        }
+        qwen_signal = item.get("qwen_signal") if isinstance(item.get("qwen_signal"), dict) else None
+        if qwen_signal:
+            light["qwen_signal"] = {
+                key: qwen_signal.get(key) for key in ("state", "reason", "prompt_version")
+            }
+        return light
+
+    def _lightweight_scan_candidates(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Apply the C1 lightweight projection to a finished scan page.
+
+        Candidates carry pair ids/workspace/state/reasons and a short quote
+        per side; the full quotes/spans/members/value_groups envelope comes
+        back only with include_quotes=true (record_conflict needs it).
+        similarity_pool/duplicates_pool pairs get the same treatment via the
+        shared per-item projection. slot_groups stay untouched: they are the
+        grouping evidence for triage, not per-pair payload bloat.
+        """
+        for key in ("candidates", "similarity_pool", "duplicates_pool"):
+            items = result.get(key)
+            if isinstance(items, list):
+                result[key] = [
+                    (self._lightweight_scan_candidate(item) if isinstance(item, dict) else item)
+                    for item in items
+                ]
+        return result
+
     def _semantic_status(self, workspace_canonical: WorkspaceScope = None) -> dict[str, Any]:
         from .semantic_conflict import PAIR_PROMPT_VERSION as _semantic_prompt_version
         backend = self._get_semantic_backend_ref()

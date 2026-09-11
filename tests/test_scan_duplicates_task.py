@@ -68,7 +68,8 @@ def test_scan_duplicates_suppresses_recorded_pairs(vec_tools: MemoryTools) -> No
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     page = tools.memory_repair("scan_candidates", {
-        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True,
+        "anchor_memory_id": 0, "batch": 50, "k": 10,
+        "include_duplicates": True, "include_quotes": True,
     })
     pool = page["data"]["duplicates_pool"]
     assert len(pool) == 1

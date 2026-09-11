@@ -210,6 +210,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "normalize_workspaces_apply": {"task": "normalize_workspaces", "data": {"dry_run": False, "authorized": True}},
             "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
             "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
+            "scan_candidates_quotes": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True}},
             "scan_candidates_duplicates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True}},
             "scan_duplicates": {"task": "scan_duplicates", "data": {"include_quotes": True}},
             "notice": {"task": "notice", "data": {"action": "list", "status": "open", "limit": 5}},
@@ -1063,6 +1064,11 @@ class ProductSurfaces:
             if "error" not in result:
                 # Spec §7.1 wide gate: bounded Qwen enhancement over the page.
                 result = self._tools._enhance_scan_candidates(result)
+            if "error" not in result and not self._is_truthy(payload.get("include_quotes")):
+                # C1 response slimming: the default page carries only the
+                # lightweight triage identity; include_quotes=true restores
+                # the full member/slot envelope record_conflict consumes.
+                result = self._tools._lightweight_scan_candidates(result)
             ok = "error" not in result
             scan_state = self.db.conflict_scan_state()
             if ok and scan_state.get("required"):
