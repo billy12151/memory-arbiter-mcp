@@ -24,6 +24,7 @@ Steps (plan mema #963):
 """
 from __future__ import annotations
 
+import gc
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,31 @@ _QWEN_MODEL = Path(
 ).expanduser()
 
 _PORT_META = {"entity": "dbport", "scope": "production"}
+
+
+def _release_real_models(tools: MemoryTools) -> None:
+    """Teardown contract (owner rule, 2026-09-11): any test that loads a real
+    GGUF model must release it EXPLICITLY — unload the semantic backend, close
+    the embedder, then drop the references and gc. Leaving finalization to
+    interpreter exit crashes inside ggml_metal_device_free (pytest reports all
+    green while the process exits 134, polluting the release gate's and CI's
+    exit-code checks)."""
+    try:
+        backend = getattr(tools, "_semantic_backend", None)
+        if backend is not None:
+            backend.unload(timeout=10.0)
+    except Exception:
+        pass
+    tools._semantic_backend = None
+    try:
+        embedder = getattr(tools, "_embedder", None)
+        if embedder is not None:
+            embedder.close()
+    except Exception:
+        pass
+    tools._embedder = None
+    tools._embedder_loaded = False
+    gc.collect()
 
 
 def _make_real_tools(tmp_path: Path) -> MemoryTools:
@@ -173,9 +199,12 @@ def _record_conflict_spec_shaped(
 
 
 @pytest.mark.slow
-def test_scan_capability_e2e_real_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scan_capability_e2e_real_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest,
+) -> None:
     started = time.monotonic()
     tools = _make_real_tools(tmp_path)
+    request.addfinalizer(lambda: _release_real_models(tools))
     lib = _build_library(tools)
     port_pair = tuple(sorted((lib["port_a"]["id"], lib["port_b"]["id"])))
     misplaced_id = int(lib["misplaced"]["id"])

@@ -376,9 +376,17 @@ def real_backend() -> "Any":
     across all traffic); per-test cold loads were a 0.15.8-era convenience
     that cost ~4x model loads per suite run. Skips cleanly on machines
     without the model file, so CI never fails on it.
+
+    Teardown contract (owner rule, 2026-09-11): real-model tests must
+    release explicitly — unload, drop the reference, gc. Finalizing at
+    interpreter exit crashes in ggml_metal_device_free: pytest reports all
+    green while the process exits 134, poisoning the release gate's and
+    CI's exit-code checks.
     """
     if not _SLOW_MODEL.exists():
         pytest.skip(f"real model not installed at {_SLOW_MODEL}")
+    import gc
+
     from memory_arbiter.constants import SEMANTIC_N_CTX
     from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
 
@@ -389,6 +397,8 @@ def real_backend() -> "Any":
         backend.unload()
     except Exception:
         pass
+    del backend
+    gc.collect()
 
 
 def _real_gate(backend: Any, left: str, right: str):
