@@ -414,7 +414,13 @@ def load_config_file(path: Path | None, warnings: list[str]) -> dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
-        return data or {}
+        if not isinstance(data, dict):
+            warnings.append(
+                f"Config file {path} root must be a JSON object, got "
+                f"{type(data).__name__}; falling back to env."
+            )
+            return {}
+        return data
     except json.JSONDecodeError as exc:
         warnings.append(f"Config file {path} JSON parse failed: {exc}; falling back to env.")
         return {}

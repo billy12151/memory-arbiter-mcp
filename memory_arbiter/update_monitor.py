@@ -14,6 +14,10 @@ PACKAGE_NAME = "memory-arbiter-mcp"
 PYPI_JSON_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CHECK_INTERVAL = timedelta(hours=24)
 BACKGROUND_TIMEOUT_SECONDS = 10
+# The PyPI JSON document is well under 1 MB; anything past this bound is a
+# misbehaving/hijacked endpoint, not a version listing. Cap the read so a
+# daemon thread can never be fed an unbounded body.
+MAX_FETCH_BYTES = 5 * 1024 * 1024
 RETRY_AFTER_FAILURE = timedelta(hours=6)
 NOTICE_SUPPRESS = timedelta(days=7)
 AGENT_ONBOARDING_NOTICE_ID = "agent-onboarding"
@@ -74,7 +78,10 @@ def compare_versions(left: str, right: str) -> int:
 def _default_fetcher(url: str, timeout: float) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": f"{PACKAGE_NAME}/{__version__}"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310: fixed PyPI HTTPS URL
-        return str(resp.read().decode("utf-8"))
+        body: bytes = resp.read(MAX_FETCH_BYTES + 1)
+        if len(body) > MAX_FETCH_BYTES:
+            raise ValueError(f"update-check response exceeded {MAX_FETCH_BYTES} bytes")
+        return body.decode("utf-8")
 
 
 class UpdateMonitor:
