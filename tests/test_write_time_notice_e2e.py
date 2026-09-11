@@ -136,6 +136,8 @@ def test_digit_free_contradiction_produces_notice(tmp_path: Path, monkeypatch: p
     assert result["status"] == "completed", result
     assert result["outcome"] == "notices_created", result
     assert result["notices_created"] == 1
+    # A1: an examined pair leaves a ring sample on the tools instance.
+    assert tools._pair_timing_summary()["samples"] == 1
 
 
 def test_shared_date_contradiction_produces_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,6 +163,8 @@ def test_shared_date_contradiction_produces_notice(tmp_path: Path, monkeypatch: 
     )
     assert result["outcome"] == "notices_created", result
     assert result["notices_created"] == 1
+    # A1: an examined pair leaves a ring sample on the tools instance.
+    assert tools._pair_timing_summary()["samples"] == 1
 
 
 def test_true_duplicates_stay_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
