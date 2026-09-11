@@ -1102,6 +1102,22 @@ def _hermetic_env(
     return cfg
 
 
+def test_policy_path_key_warns_after_agent_policy_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 (0.15.14): AgentPolicy is gone; a configured policy_path must warn
+    (removed-feature wording), not fail startup or silently no-op."""
+    _hermetic_env(monkeypatch, tmp_path, {"policy_path": "/tmp/policy.json"})
+    settings = Settings.from_env()
+    assert not hasattr(settings, "policy_path")
+    assert not hasattr(settings, "policy")
+    assert any(
+        "policy_path is no longer read" in warning
+        and "AgentPolicy was removed in 0.15.14" in warning
+        for warning in settings.config_warnings
+    )
+
+
 # ---------------------------------------------------------------------------
 # (e) frozen field set — the slim dataclass is the contract
 # ---------------------------------------------------------------------------
