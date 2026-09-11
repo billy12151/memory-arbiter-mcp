@@ -1681,6 +1681,16 @@ class IsolatedGGUFSemanticBackend:
     def load(self) -> None:
         self._request("load")
 
+    def _effective_retry_allowed(self, retry_allowed: bool) -> bool:
+        """A6 queue gate, scheduler half: when other requests already wait on
+        this single-flight scheduler, the child runs one attempt only. The
+        caller's retry_allowed carries the semantic-worker job queue — the
+        other half of the same gate."""
+        with self._schedule_cond:
+            return retry_allowed and not any(
+                len(queue) for queue in self._schedule_queues.values()
+            )
+
     def classify_pair(
         self, left: dict[str, Any], right: dict[str, Any],
         *,
@@ -1688,18 +1698,10 @@ class IsolatedGGUFSemanticBackend:
         retry_allowed: bool = True,
     ) -> ModelSignal:
         try:
-            # A6 queue gate, scheduler half: when other requests already wait
-            # on this single-flight scheduler, the child runs one attempt only
-            # (the caller's retry_allowed carries the semantic-worker job
-            # queue — the other half of the same gate).
-            with self._schedule_cond:
-                scheduler_busy = any(
-                    len(queue) for queue in self._schedule_queues.values()
-                )
             result = self._request(
                 "classify_pair", left=left, right=right,
                 deadline_monotonic=deadline_monotonic,
-                retry_allowed=retry_allowed and not scheduler_busy,
+                retry_allowed=self._effective_retry_allowed(retry_allowed),
             )
             return result if isinstance(result, ModelSignal) else ModelSignal(False, "backend_error", None, "", None, "invalid child response")
         except Exception as exc:
