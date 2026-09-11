@@ -179,15 +179,10 @@ def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> 
     # pair-v6: prompt text stays byte-identical to pair-v5 (few-shot variants
     # regressed side attribution on the calibration pair and were rejected).
     assert "例2" not in _PAIR_PROMPT
-    # 0.15.14 (A2/L0 + round-2 fix): the FIRST attempt is grammar-free (caps
-    # post-hoc: L3 truncation + grounding); the RETRY attempt restores the
-    # schema grammar to break the 0.5B's verbatim-copy loop.
-    schema = sc._PAIR_RESPONSE_FORMAT["schema"]
-    assert set(schema["required"]) == {
-        "attribute_a", "value_a", "attribute_b", "value_b",
-    }
-    assert schema["properties"]["value_a"]["maxLength"] == 64
-    assert schema["properties"]["attribute_a"]["maxLength"] == 80
+    # 0.15.14 (A2 + round-3): the whole pair path is grammar-free — caps are
+    # post-hoc (L3 truncation + grounding) and the retry is a targeted text
+    # turn, so no response_format schema exists any more.
+    assert not hasattr(sc, "_PAIR_RESPONSE_FORMAT")
 
 
 # The two live qwen_invalid_output samples (2026-09-08 17:31 / 2026-09-09
@@ -278,11 +273,11 @@ def test_pair_retry_shrinks_quotes_after_truncation(monkeypatch: pytest.MonkeyPa
     assert "证" * 240 in retry["messages"][1]["content"]
     assert "证" * 241 not in retry["messages"][1]["content"]
     assert len(first_user) > len(retry["messages"][1]["content"])
-    assert retry["messages"][2] == {"role": "assistant", "content": _LIVE_SAMPLE_TRUNCATED}
-    # A2/L0 + round-2 fix: attempt 0 is grammar-free, the retry carries the
-    # schema grammar.
+    # A2 + round-3: no grammar anywhere; the failed raw is NOT echoed (an
+    # echoed failure keeps the 0.5B locked in its copy state).
     assert "response_format" not in llm.calls[0]
-    assert retry["response_format"]["schema"]["properties"]["value_a"]["maxLength"] == 64
+    assert "response_format" not in retry
+    assert all(m.get("role") != "assistant" for m in retry["messages"])
     assert backend._pair_retried == 1
     assert backend._pair_retry_recovered == 1
 

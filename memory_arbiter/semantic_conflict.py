@@ -57,34 +57,6 @@ _STOPWORDS = {
 
 PAIR_PROMPT_VERSION = "pair-v6"
 
-# Grammar-free decoding runs the FIRST attempt (A2, 0.15.14) — response_format's
-# per-token grammar evaluation halved decode throughput (45 vs 86 tok/s; eval
-# eval-grammar-free-matrix 2026-09-11, n=62) and the caps are post-hoc (L3
-# truncation + grounding). The RETRY attempt restores the grammar
-# (_PAIR_RESPONSE_FORMAT below): the retry only happens after the 0.5B already
-# failed once, and the failure mode is the 0.5B falling into a verbatim-copy
-# loop whose 250-token partial JSON neither feedback text nor quote shrinking
-# breaks (verified: 4 retry-format variants incl. no-echo and 120-char quotes
-# all re-produced the same partial copy). Running the retry UNDER the grammar
-# — schema + maxLength enforced at the decoding level — recovers that fixture
-# deterministically (3/3) at one grammar-cost attempt, which is exactly when
-# that cost is worth paying. The queue gate (A6) still cancels the retry when
-# other jobs wait.
-_PAIR_RESPONSE_FORMAT = {
-    "type": "json_object",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "attribute_a": {"type": "string", "maxLength": 80},
-            "value_a": {"type": "string", "maxLength": 64},
-            "attribute_b": {"type": "string", "maxLength": 80},
-            "value_b": {"type": "string", "maxLength": 64},
-        },
-        "required": ["attribute_a", "value_a", "attribute_b", "value_b"],
-        "additionalProperties": False,
-    },
-}
-
 _PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
 attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中该属性的具体取值，取原文中的连续片段，长度不超过 64 字、不超过 12 个词；原句过长时截取最能体现取值差异的连续片段，禁止整句照抄，value 不得以句号、叹号、分号等句末标点结尾。
@@ -97,11 +69,15 @@ attribute 是两侧正在回答的最小可比较问题，不包含具体值、�
 # broke side attribution on the Tier1 calibration pair (the 0.5B adopted
 # positional heuristics from the example, e.g. copying the B-side opening into
 # value_a) — same lesson as the rejected "compress to the core value" wording.
-# Since 0.15.14 (A2) decoding is grammar-free: no response_format (its
-# per-token grammar evaluation halved decode throughput); the value/attribute
-# caps are enforced post-hoc (L3 truncation + grounding gates). One feedback
-# retry is kept for schema/truncation/empty-field failures; a queue gate (A6)
-# may skip it while other requests wait.
+# Since 0.15.14 (A2) decoding is grammar-free: no response_format anywhere on
+# this path (its per-token grammar evaluation halved decode throughput, and
+# even on the retry it cost 3-5x the alternative — see _pair_retry_feedback);
+# the value/attribute caps are enforced post-hoc (L3 truncation + grounding
+# gates). One retry is kept for schema/truncation/empty-field failures, built
+# from the SPECIFIC violation the first attempt tripped with the offending
+# output deliberately NOT echoed back (echo locks the 0.5B into the failed
+# copy state; both measured 2026-09-11). A queue gate (A6) may skip the
+# retry while other requests wait.
 
 
 _WORKSPACE_RESPONSE_FORMAT = {
@@ -880,31 +856,108 @@ def _pair_retry_strategy(error: str | None) -> str | None:
     return None
 
 
-def _pair_retry_feedback(strategy: str, error: str) -> str:
-    """Feedback turn for the retry. Wording mirrors the pair-v6 prompt's own
-    fragment-selection instruction (a "compress the value" phrasing was tried
-    and rejected: it flattened opposing values into equality)."""
+def _extra_field_names(raw: str) -> list[str]:
+    """Top-level keys of the parsed object that the four-field protocol rejects
+    (the 0.5B writes __unknown__ / event_time / workspace_canonical as FIELD
+    names when it confuses metadata with the schema)."""
+    snippet = _extract_first_json_object(raw or "")
+    if not snippet:
+        return []
+    try:
+        parsed = json.loads(snippet)
+    except ValueError:
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    return [str(key) for key in parsed if key not in _EXTRACTION_FIELDS]
+
+
+def _field_state(raw: str, error: str) -> str:
+    """What actually went wrong with the named field, read from the raw output.
+
+    ``invalid_<field>`` is a single error code covering three different causes,
+    and the feedback must name the REAL one: the pre-0.15.14 wording assumed
+    "empty/whitespace/newline" because grammar-era maxLength kept over-long
+    values from ever reaching a retry. With grammar-free decoding an over-long
+    copy lands here instead — and telling the 0.5B "your field is empty" when
+    it just copied 257 chars sends the retry to guess a value out of thin air
+    (observed live: the retry answered {"attribute_a":"历史待办","value_a":"无"}).
+    """
+    field_name = error.removeprefix("invalid_")
+    snippet = _extract_first_json_object(raw or "")
+    field_value: Any = None
+    if snippet:
+        try:
+            parsed = json.loads(snippet)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            field_value = parsed.get(field_name)
+    if not isinstance(field_value, str):
+        # Not a string at all (missing object, wrong type, unparseable raw):
+        # only a fresh, well-formed attempt can fix this.
+        return "shape"
+    limit = _MAX_ATTRIBUTE_CHARS if field_name.startswith("attribute_") else _MAX_VALUE_CHARS
+    if len(field_value.strip()) > limit:
+        return "too_long"
+    if not field_value.strip() or "\n" in field_value or "\r" in field_value:
+        return "empty"
+    return "shape"
+
+
+def _pair_retry_feedback(strategy: str, error: str, raw: str = "") -> str:
+    """Feedback turn for the retry — names the SPECIFIC violation.
+
+    Measured (2026-09-11, real-model fixtures): the generic four-field reminder
+    cannot fix the "extra field" family at all (0/6), while naming the actual
+    offending keys with no echo recovers 5/5 in 0.5-0.9 s. The failed output
+    is deliberately NOT echoed: with the raw in context the 0.5B stays locked
+    in the copy state and re-produces it (0/9 across echo variants). Wording
+    for the fragment rules mirrors the pair-v6 prompt's own instruction (a
+    "compress the value" phrasing was tried and rejected: it flattened
+    opposing values into equality).
+    """
     if strategy == "over_limit":
         field_name = error.removeprefix("invalid_")
-        # The strategy name predates grammar-free decoding: over-long VALUES no
-        # longer reach the retry (L3 truncation intercepts them in
-        # classify_pair); invalid_<field> here means an over-long ATTRIBUTE, or
-        # a value that came back empty/pure-whitespace/with an embedded
-        # newline (L3 refuses those). The wording names the field contract.
-        if field_name.startswith("attribute_"):
+        state = _field_state(raw, error)
+        if state == "too_long":
+            if field_name.startswith("attribute_"):
+                return (
+                    f"上次输出的 {field_name} 超过 80 字。attribute 是两侧正在回答的最小可比较"
+                    "问题，不包含具体值，只写短词，直接以 { 开头输出完整 JSON。"
+                )
             return (
-                f"上次输出的 {field_name} 为空、是纯空白或含换行。attribute 是两侧正在回答的"
-                "最小可比较问题，不包含具体值，长度不超过 80 字，直接以 { 开头输出完整 JSON。"
+                f"上次输出的 {field_name} 超过 64 字（照抄了整段原文）。value 只保留最能体现"
+                "取值差异的最短连续片段，长度不超过 64 字、不超过 12 个词，禁止整句照抄，"
+                "两个 value 不得写成同一段；直接以 { 开头输出完整 JSON。"
+            )
+        if state == "empty":
+            if field_name.startswith("attribute_"):
+                return (
+                    f"上次输出的 {field_name} 为空、是纯空白或含换行。attribute 是两侧正在回答的"
+                    "最小可比较问题，不包含具体值，长度不超过 80 字，直接以 { 开头输出完整 JSON。"
+                )
+            return (
+                f"上次输出的 {field_name} 为空、是纯空白或含换行。value 是原证据中该属性的具体"
+                "取值片段（不超过 64 字、不超过 12 个词），截取最能体现取值差异的连续片段，"
+                "禁止整句照抄，直接以 { 开头输出完整 JSON。"
             )
         return (
-            f"上次输出的 {field_name} 为空、是纯空白或含换行。value 是原证据中该属性的具体"
-            "取值片段（不超过 64 字、不超过 12 个词），截取最能体现取值差异的连续片段，"
-            "禁止整句照抄，直接以 { 开头输出完整 JSON。"
+            f"上次输出的 {field_name} 不合协议。它必须是原证据中的短取值片段：value 不超过 "
+            "64 字、不超过 12 个词，attribute 不超过 80 字，禁止整句照抄，"
+            "直接以 { 开头输出完整 JSON。"
         )
     if strategy == "truncated":
         return (
             "上次输出未完成就被截断。value 只截取最短的取值片段（不超过 64 字），"
             "禁止照抄整句，直接以 { 开头输出完整 JSON。"
+        )
+    extra = _extra_field_names(raw)
+    if extra:
+        quoted = "、".join(f"“{name}”" for name in extra)
+        return (
+            f"上次输出多出了字段 {quoted}。这些不是字段名——只有 attribute_a、value_a、"
+            "attribute_b、value_b 四个字段合法，其余一律不要输出；直接以 { 开头输出完整 JSON。"
         )
     return (
         "上次输出的 JSON 结构不合协议：必须恰好包含 attribute_a、value_a、attribute_b、value_b "
@@ -1220,21 +1273,16 @@ class LocalGGUFSemanticBackend:
             attempts = 1 if not retry_allowed else max(1, SEMANTIC_PAIR_MAX_ATTEMPTS)
             signal: ModelSignal | None = None
             for attempt in range(attempts):
-                # Attempt 0 grammar-free (throughput); the retry (attempt 1)
-                # runs under the schema grammar, which breaks the copy loop
-                # that plain decoding leaves unbreakable — see the
-                # _PAIR_RESPONSE_FORMAT note.
-                completion_kwargs: dict[str, Any] = {
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": 0.0,
-                    "top_p": 0.9,
-                    "stop": ["\n\n"],
-                }
-                if attempt > 0:
-                    completion_kwargs["response_format"] = _PAIR_RESPONSE_FORMAT
+                # Every attempt is grammar-free (see the PAIR_PROMPT note): the
+                # retry differs only in its feedback turn.
                 with self._infer_lock:
-                    out = llm.create_chat_completion(**completion_kwargs)
+                    out = llm.create_chat_completion(
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=0.0,
+                        top_p=0.9,
+                        stop=["\n\n"],
+                    )
                 usage = out.get("usage") or {}
                 prompt_tokens_total += int(usage.get("prompt_tokens") or 0)
                 generated_tokens_total += int(usage.get("completion_tokens") or 0)
@@ -1257,24 +1305,25 @@ class LocalGGUFSemanticBackend:
                     signal.generated_tokens = generated_tokens_total
                     signal.retried = retried
                     return signal
-                # One protocol invalid output earns a single retry with the
-                # offending raw echoed back plus a strategy-specific feedback
-                # turn. Truncation retries additionally shrink the quotes and
-                # widen the output budget (freed n_ctx funds it; see constants).
-                feedback = _pair_retry_feedback(strategy, signal.error or "")
+                # One protocol invalid output earns a single retry: same input,
+                # plus a feedback turn naming the specific violation (measured
+                # 2026-09-11 — no echo: an echoed bad output keeps the 0.5B in
+                # its copy state; naming the real offending keys beats the
+                # generic four-field reminder). Truncation retries shrink the
+                # quotes and widen the output budget (freed n_ctx funds it).
+                feedback = _pair_retry_feedback(strategy, signal.error or "", raw)
                 if strategy == "truncated":
                     retry_max_tokens = SEMANTIC_PAIR_RETRY_MAX_TOKENS
                     retry_messages = [
                         messages[0],
                         {"role": "user", "content": f"输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"},
-                        {"role": "assistant", "content": raw},
                         {"role": "user", "content": feedback},
                     ]
                 else:
                     retry_max_tokens = max_tokens
                     retry_messages = [
-                        *messages,
-                        {"role": "assistant", "content": raw},
+                        messages[0],
+                        {"role": "user", "content": messages[1]["content"]},
                         {"role": "user", "content": feedback},
                     ]
                 # n_ctx guard (dense CJK runs ~1 token/char, so the echoed raw

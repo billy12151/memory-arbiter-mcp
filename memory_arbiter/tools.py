@@ -1831,14 +1831,22 @@ class MemoryTools:
             block = 512
             for start in range(0, n, block):
                 sims = unit[start:start + block] @ unit.T  # (rows, n)
+                # Self-exclusion before the sort (the diagonal is this block's
+                # own rows), then a STABLE descending sort with the column
+                # index as the tie-break: equal similarities (FakeEmbedder's
+                # binary vectors, duplicated content) must pick the same
+                # neighbours on every machine/numpy version. np.argpartition
+                # leaves tied entries in arbitrary order — CI selected one
+                # beta neighbour where the local run selected nine, and the
+                # same library produced 9 vs 12 suspected memories.
+                sims[np.arange(sims.shape[0]), np.arange(start, start + sims.shape[0])] = -1.0
                 for local_row in range(sims.shape[0]):
                     row = start + local_row
-                    sims[local_row, row] = -1.0  # exclude self
-                    top = np.argpartition(sims[local_row], -neighbour_k)[-neighbour_k:]
+                    order = np.argsort(-sims[local_row], kind="stable")[:neighbour_k]
                     votes: dict[str, int] = {}
                     foreign_best: tuple[float, int] = (-2.0, -1)  # (sim, id)
                     own_best: tuple[float, int] = (-2.0, -1)
-                    for col in top:
+                    for col in order:
                         col = int(col)
                         bucket = workspaces[col]
                         votes[bucket] = votes.get(bucket, 0) + 1

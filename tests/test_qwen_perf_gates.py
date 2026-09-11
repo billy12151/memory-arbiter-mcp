@@ -459,24 +459,44 @@ def test_example_config_uses_only_live_keys() -> None:
 # Second-round adversarial review fixes
 # ---------------------------------------------------------------------------
 
-def test_retry_attempt_carries_schema_grammar(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Round-2: attempt 0 is grammar-free (throughput); the retry restores
-    response_format to break the 0.5B's verbatim-copy loop (verified stable
-    on the live 926 fixture: 3/3 recovered under grammar, 0/6 without)."""
+def test_retry_is_targeted_text_without_echo_or_grammar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-3 (measured 2026-09-11): the retry is grammar-free text feedback
+    that names the specific violation; the failed output is NOT echoed (echo
+    keeps the 0.5B locked in its copy state — 0/9 echo variants vs 5/5
+    no-echo) and no response_format is sent on any attempt."""
     backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
     llm = _ScriptedLLM([_TRUNCATED, _VALID])
-    backend._llm = llm  # pre-loaded: skip the acquisition path
+    backend._llm = llm
     signal = backend.classify_pair({"quote": "A"}, {"quote": "B"})
     assert signal.candidate_type == "attribute_value_extraction"
     assert "response_format" not in llm.calls[0]
-    fmt = llm.calls[1]["response_format"]
-    assert fmt["schema"]["properties"]["value_a"]["maxLength"] == 64
-    assert fmt["schema"]["required"] == ["attribute_a", "value_a", "attribute_b", "value_b"]
-    # the gated single-attempt path never carries the grammar either
+    retry = llm.calls[1]
+    assert "response_format" not in retry
+    assert all(m.get("role") != "assistant" for m in retry["messages"])
+    assert retry["messages"][-1]["role"] == "user"
+
+    # gated single-attempt path: same shape, one call
     llm2 = _ScriptedLLM([_TRUNCATED, _VALID])
     backend._llm = llm2
     backend.classify_pair({"quote": "A"}, {"quote": "B"}, retry_allowed=False)
     assert len(llm2.calls) == 1 and "response_format" not in llm2.calls[0]
+
+
+def test_feedback_names_extra_field_keys() -> None:
+    """Round-3: the 'extra field' family gets the actual offending key names
+    (the 0.5B writes __unknown__ / event_time as field names)."""
+    from memory_arbiter.semantic_conflict import _pair_retry_feedback
+
+    raw = ('{"attribute_a":"a","value_a":"b","attribute_b":"c","value_b":"d",'
+           '"__unknown__":"6 个开放问题","event_time":"2026-08-27"}')
+    feedback = _pair_retry_feedback("schema", "invalid_schema", raw)
+    assert "“__unknown__”" in feedback
+    assert "“event_time”" in feedback
+    # Generic shape (unparseable raw) falls back to the four-field reminder.
+    generic = _pair_retry_feedback("schema", "invalid_schema", "not json")
+    assert "四个字符串字段" in generic
+    # over_limit branch still names the field
+    assert "value_a" in _pair_retry_feedback("over_limit", "invalid_value_a", "")
 
 
 def test_gpu_load_failure_falls_back_to_cpu_once(tmp_path: Path) -> None:
@@ -607,3 +627,38 @@ def test_b2_sql_prefilter_is_a_safe_superset(tmp_path: Path) -> None:
         page = tools.db.recall_by_filters("status='active'", **case, limit=50, offset=0)
         assert count == expected, case
         assert len(page) == expected, case
+
+
+def test_feedback_names_the_real_cause_for_long_fields() -> None:
+    """Round-3 fix: the over_limit feedback reads the RAW to tell 'too long'
+    from 'empty' — pre-0.15.14 wording always said 'empty' (grammar-era
+    maxLength kept over-long values from reaching a retry), which made the
+    retry invent values out of thin air (live: {"value_a":"无"})."""
+    from memory_arbiter.semantic_conflict import _pair_retry_feedback
+
+    long_raw = json.dumps({
+        "attribute_a": "代码评审", "value_a": "亮点" * 60,
+        "attribute_b": "代码评审", "value_b": "问题",
+    }, ensure_ascii=False)
+    feedback = _pair_retry_feedback("over_limit", "invalid_value_a", long_raw)
+    assert "超过 64 字（" in feedback
+    assert "为空" not in feedback
+
+    empty_raw = json.dumps({
+        "attribute_a": "代码评审", "value_a": "  ",
+        "attribute_b": "代码评审", "value_b": "问题",
+    }, ensure_ascii=False)
+    feedback = _pair_retry_feedback("over_limit", "invalid_value_a", empty_raw)
+    assert "为空" in feedback
+    assert "超过 64 字（" not in feedback  # the too-long diagnosis must not appear
+
+    attr_raw = json.dumps({
+        "attribute_a": "问" * 90, "value_a": "短",
+        "attribute_b": "属性", "value_b": "短",
+    }, ensure_ascii=False)
+    feedback = _pair_retry_feedback("over_limit", "invalid_attribute_a", attr_raw)
+    assert "超过 80 字" in feedback
+
+    # Unparseable raw: the shape fallback, not a fabricated cause.
+    feedback = _pair_retry_feedback("over_limit", "invalid_value_a", "not json")
+    assert "不合协议" in feedback
