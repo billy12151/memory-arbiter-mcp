@@ -344,3 +344,71 @@ def test_l3_rejects_non_qualifying_shapes() -> None:
     assert _l3_truncated_signal(newline_val) is None
     # Missing json entirely.
     assert _l3_truncated_signal("no json here") is None
+
+
+def test_l3_keeps_strict_protocol_rejections() -> None:
+    """First-round review M1: L3 relaxes the LENGTH caps only. Array-wrapped
+    raws (spec §15.4) and duplicated fields must stay on the retry path even
+    when the surviving value is over the cap (plain json.loads would accept
+    both, silently widening the protocol)."""
+    over = "值" * 70
+    inner = json.dumps(
+        {"attribute_a": "属性", "value_a": "短", "attribute_b": "属性", "value_b": over},
+        ensure_ascii=False,
+    )
+    assert _l3_truncated_signal(f"[{inner}]") is None
+    duplicated = (
+        '{"attribute_a":"属性","value_a":"短","attribute_b":"属性",'
+        f'"value_b":"ok","value_b":"{over}"}}'
+    )
+    assert _l3_truncated_signal(duplicated) is None
+
+
+def test_classify_pair_error_keeps_accumulated_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """First-round review L3: a raised retry attempt must not reset the pair's
+    token accounting — the error signal carries what the first attempt used."""
+    from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
+
+    backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
+
+    class _ExplodingSecondCall:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "choices": [{"message": {"content": _TRUNCATED}}],
+                    "usage": {"prompt_tokens": 700, "completion_tokens": 10},
+                }
+            raise RuntimeError("context window blown")
+
+    llm = _ExplodingSecondCall()
+    monkeypatch.setattr(backend, "_build_llm", lambda: llm)
+    signal = backend.classify_pair({"quote": "A"}, {"quote": "B"})
+    assert signal.candidate_type == "backend_error"
+    assert signal.prompt_tokens == 700
+    assert signal.generated_tokens == 10
+    assert signal.retried is True
+    assert llm.calls == 2
+
+
+def test_example_config_uses_only_live_keys() -> None:
+    """B3/round-1 M2: the reference example and the setup starter template
+    must carry the live key set — no removed max_notice_pairs (which would
+    trip the bespoke removed-key warning on every startup), and
+    n_gpu_layers present."""
+    example = json.loads(
+        (Path(__file__).parents[1] / "examples" / "memory-arbiter.config.example.json")
+        .read_text(encoding="utf-8")
+    )
+    sem = example["semantic_conflict"]
+    assert "max_notice_pairs" not in sem
+    assert sem["n_gpu_layers"] == -1
+    assert "policy_path" not in example
+
+    from memory_arbiter.setup_cli import _default_config_dict
+    template = _default_config_dict(Path("/tmp/m.gguf"), Path("/tmp/db"), Path("/tmp/bk"))
+    assert "max_notice_pairs" not in template["semantic_conflict"]
+    assert "policy_path" not in template

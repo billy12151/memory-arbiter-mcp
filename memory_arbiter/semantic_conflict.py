@@ -548,16 +548,8 @@ def extraction_from_text(raw: str) -> tuple[AttributeValueExtraction | None, str
         # prose (spec §15.4).
         return None, "invalid_schema:array_wrapper"
 
-    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        decoded: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in decoded:
-                raise ValueError(f"duplicate field: {key}")
-            decoded[key] = value
-        return decoded
-
     try:
-        parsed = json.loads(snippet, object_pairs_hook=reject_duplicates)
+        parsed = json.loads(snippet, object_pairs_hook=_reject_duplicate_fields)
     except Exception as exc:
         return None, f"invalid_json:{exc}"
     if not isinstance(parsed, dict) or set(parsed) != _EXTRACTION_FIELDS:
@@ -905,6 +897,15 @@ def _pair_retry_feedback(strategy: str, error: str) -> str:
     )
 
 
+def _reject_duplicate_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    decoded: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in decoded:
+            raise ValueError(f"duplicate field: {key}")
+        decoded[key] = value
+    return decoded
+
+
 def _l3_truncated_signal(raw: str) -> ModelSignal | None:
     """L3 post-hoc leniency (A2, 0.15.14): a value field over the 64-char cap
     is cut to the cap instead of invalidating the whole output — this replaces
@@ -912,13 +913,23 @@ def _l3_truncated_signal(raw: str) -> ModelSignal | None:
     with cuttable values qualifies; anything else (extra/missing fields, bad
     attributes, embedded newlines) stays on the retry path. Attributes are
     never truncated: an over-long attribute is a malformed question, not a
-    value the evidence supports."""
+    value the evidence supports.
+
+    L3 relaxes the LENGTH caps only — the strict parser's other protocol
+    rejections still apply: an array-wrapped raw (first structural token is
+    "[", spec §15.4) and duplicated fields (ambiguous which value was meant)
+    are refused here too instead of being silently accepted by plain
+    json.loads. First-round review M1 (0.15.14)."""
     snippet = _extract_first_json_object(raw or "")
     if not snippet:
         return None
+    text = raw or ""
+    bracket, brace = text.find("["), text.find("{")
+    if bracket != -1 and (brace == -1 or bracket < brace):
+        return None
     try:
-        parsed = json.loads(snippet)
-    except ValueError:
+        parsed = json.loads(snippet, object_pairs_hook=_reject_duplicate_fields)
+    except (ValueError, TypeError):
         return None
     if not isinstance(parsed, dict) or set(parsed) != _EXTRACTION_FIELDS:
         return None
@@ -1110,6 +1121,12 @@ class LocalGGUFSemanticBackend:
     ) -> ModelSignal:
         llm: Any | None = None
         acquired = False
+        # Attempt accounting lives outside the try so the except branch can
+        # carry whatever the failed run consumed (first-round review L3):
+        # a raised retry attempt must not reset the pair's usage to None.
+        retried = False
+        prompt_tokens_total = 0
+        generated_tokens_total = 0
         try:
             llm = self._acquire_llm_for_call()
             if llm is None:
@@ -1132,10 +1149,7 @@ class LocalGGUFSemanticBackend:
             # an invalid output then fails fast instead of doubling the wait
             # of everything behind it.
             attempts = 1 if not retry_allowed else max(1, SEMANTIC_PAIR_MAX_ATTEMPTS)
-            retried = False
             signal: ModelSignal | None = None
-            prompt_tokens_total = 0
-            generated_tokens_total = 0
             for attempt in range(attempts):
                 with self._infer_lock:
                     out = llm.create_chat_completion(
@@ -1212,7 +1226,12 @@ class LocalGGUFSemanticBackend:
         except Exception as exc:
             with self._cond:
                 self._last_error = str(exc)
-            return ModelSignal(False, "backend_error", None, "", None, str(exc))
+            return ModelSignal(
+                False, "backend_error", None, "", None, str(exc),
+                prompt_tokens=prompt_tokens_total or None,
+                generated_tokens=generated_tokens_total or None,
+                retried=retried,
+            )
         finally:
             if acquired:
                 self._release_llm_for_call()
