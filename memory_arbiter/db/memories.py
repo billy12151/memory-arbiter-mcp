@@ -23,9 +23,57 @@ from ..text import (
     coerce_tags as _coerce_tags_db,
     subject_tokens as _subject_tokens,
 )
+from ..timeutil import parse_iso8601_utc
 
 if TYPE_CHECKING:
     from .core import MemoryDB
+
+
+def row_passes_filters(
+    tags_raw: Any,
+    ingest_time_raw: Any,
+    source_type_value: Any,
+    *,
+    tags_filter: list[str] | None,
+    after_dt: datetime | None,
+    before_dt: datetime | None,
+    source_type: str | None,
+) -> bool:
+    """Single source of truth for the user-provided list filters (B2, 0.15.14).
+
+    Both the COUNT path (count_filtered_memories) and the row paths
+    (recall_by_filters, search's post-filter) run this exact predicate, so
+    totals and pages can never disagree. It replaces two SQL/Python mirror
+    implementations whose drift was measured live (#962 P1#6):
+      - sub-second time boundaries: SQL truncated the bound to whole seconds
+        (``replace(microsecond=0)``), so a .300s ``after`` bound admitted .100s
+        rows that the Python post-filter dropped;
+      - numeric tags: SQL ``json_each.value = ?`` never matches a JSON number
+        against a string filter (TEXT/REAL storage classes never compare
+        equal), while Python's ``str(t)`` set membership does — here membership
+        compares string forms: '1' and '1.0' are different tags.
+    """
+    if tags_filter:
+        try:
+            tags = json.loads(tags_raw) if isinstance(tags_raw, str) else tags_raw
+            tag_set = {str(tag) for tag in (tags or [])}
+        except Exception:
+            tag_set = set()
+        if not all(tag in tag_set for tag in tags_filter):
+            return False
+    if source_type and source_type_value != source_type:
+        return False
+    if after_dt is not None or before_dt is not None:
+        parsed = parse_iso8601_utc(ingest_time_raw)
+        if parsed is None:
+            # Time filter active but the row has no parseable time — drop
+            # conservatively (same as the former post-filter).
+            return False
+        if after_dt is not None and parsed < after_dt:
+            return False
+        if before_dt is not None and parsed > before_dt:
+            return False
+    return True
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
@@ -709,45 +757,6 @@ class MemoriesStore:
         except sqlite3.Error:
             return False
 
-    @staticmethod
-    def _filter_clauses(
-        like_status_clause: str,
-        tags_filter: list[str] | None,
-        after_dt: datetime | None,
-        before_dt: datetime | None,
-        source_type: str | None,
-    ) -> tuple[list[str], list[Any]]:
-        """WHERE clause + params shared by count_filtered_memories and recall_by_filters.
-
-        Mirrors search._passes_filters: like_status_clause + per-tag json_each exact
-        match (AND semantics) + ingest_time ISO-string bounds + source_type equality.
-        workspace is intentionally NOT filtered (v0.7.4 cross-workspace search).
-        """
-        clauses: list[str] = [like_status_clause]
-        params: list[Any] = []
-        if tags_filter:
-            for tag in tags_filter:
-                # CASE guard: json_each raises on malformed JSON, and one
-                # legacy/imported row with bad tags would abort the whole
-                # aggregate (the callers' sqlite3.Error handlers silently
-                # return 0 rows). Bad rows simply match nothing.
-                clauses.append(
-                    "EXISTS (SELECT 1 FROM json_each("
-                    "CASE WHEN json_valid(tags) THEN tags ELSE '[]' END"
-                    ") WHERE json_each.value = ?)"
-                )
-                params.append(tag)
-        if after_dt is not None:
-            clauses.append("ingest_time >= ?")
-            params.append(after_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat())
-        if before_dt is not None:
-            clauses.append("ingest_time <= ?")
-            params.append(before_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat())
-        if source_type:
-            clauses.append("source_type = ?")
-            params.append(source_type)
-        return clauses, params
-
     def count_filtered_memories(
         self,
         like_status_clause: str,
@@ -759,29 +768,38 @@ class MemoriesStore:
     ) -> int:
         """v0.7.3: COUNT(*) under the same filters used by search's _passes_filters.
 
-        Only called when has_filters=True. Clauses are built by _filter_clauses so the
-        SQL count and the SQL recall (recall_by_filters) share one source of truth.
-        Cross-workspace (v0.7.4) — workspace is not filtered, EXCEPT under strict
-        isolation where ``ws_canonical`` scopes the count. Strict admission widens
-        it from one name to the admitted canonical set, so the total keeps
-        matching the paginated recall under vector admission.
+        0.15.14 (B2): the user-facing predicates (tags/time/source_type) run in
+        Python via the shared row_passes_filters so the count matches the
+        post-filtered pages exactly; SQL keeps only the structural narrowing
+        (status, workspace scope). Cross-workspace (v0.7.4) — workspace is not
+        filtered, EXCEPT under strict isolation where ``ws_canonical`` scopes
+        the count; strict admission widens it to the admitted canonical set so
+        the total keeps matching the paginated recall.
         """
         if not self._db_available:
             return 0
-        clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
+        clauses: list[str] = [like_status_clause]
+        params: list[Any] = []
         scope_sql, scope_params = workspace_scope_sql(
             "COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical,
         )
         if scope_sql:
             clauses.append(scope_sql)
             params.extend(scope_params)
-        sql = f"SELECT COUNT(*) AS c FROM memories WHERE {' AND '.join(clauses)}"
+        sql = f"SELECT tags, ingest_time, source_type FROM memories WHERE {' AND '.join(clauses)}"
         with self.connection() as conn:
             try:
-                row = conn.execute(sql, params).fetchone()
-                return int(row["c"]) if row else 0
+                rows = conn.execute(sql, params).fetchall()
             except sqlite3.Error:
                 return 0
+        return sum(
+            1 for row in rows
+            if row_passes_filters(
+                row["tags"], row["ingest_time"], row["source_type"],
+                tags_filter=tags_filter, after_dt=after_dt, before_dt=before_dt,
+                source_type=source_type,
+            )
+        )
 
     def recall_by_filters(
         self,
@@ -796,33 +814,45 @@ class MemoriesStore:
     ) -> list[dict[str, Any]]:
         """G6 (v0.8.5): filter-driven recall for empty-query + filters in memory_search.
 
-        SELECT * mirroring count_filtered_memories' WHERE (via _filter_clauses),
-        ordered by ingest_time DESC, capped at ``limit`` (pool_cap). Returns
-        row_to_dict rows — same shape as _wide_recall pool rows. Enables
-        list-by-tag / by-source_type / by-time when query is empty.
+        SELECT * narrowed structurally in SQL (status + workspace scope), then
+        filtered by the same shared row_passes_filters as the count (B2,
+        0.15.14) so pagination and totals stay exact on sub-second bounds and
+        numeric tags. Ordered by ingest_time DESC, capped at ``limit``;
+        returns row_to_dict rows — same shape as _wide_recall pool rows.
+        Enables list-by-tag / by-source_type / by-time when query is empty.
 
-        v0.9.4: ``offset`` adds SQL OFFSET for cursor pagination on the
-        exact-count filter path (used by ``memory_search_expired``).
-        v0.9.7/``ws_canonical`` hard-scopes to the admitted canonical
-        set in SQL, so pagination and totals stay correct (a Python post-filter
-        on an already-paginated page would not).
+        v0.9.4: ``offset`` windows the passing rows (cursor pagination, used by
+        ``memory_search_expired``). v0.9.7/``ws_canonical`` hard-scopes to the
+        admitted canonical set.
         """
         if not self._db_available:
             return []
-        clauses, params = self._filter_clauses(like_status_clause, tags_filter, after_dt, before_dt, source_type)
+        clauses: list[str] = [like_status_clause]
+        params: list[Any] = []
         scope_sql, scope_params = workspace_scope_sql(
             "COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical,
         )
         if scope_sql:
             clauses.append(scope_sql)
             params.extend(scope_params)
-        sql = f"SELECT * FROM memories WHERE {' AND '.join(clauses)} ORDER BY ingest_time DESC LIMIT ? OFFSET ?"
+        sql = f"SELECT * FROM memories WHERE {' AND '.join(clauses)} ORDER BY ingest_time DESC"
         with self.connection() as conn:
             try:
-                rows = conn.execute(sql, params + [int(limit), int(offset)]).fetchall()
+                rows = conn.execute(sql, params).fetchall()
             except sqlite3.Error:
                 return []
-        return [_row_to_dict(row) for row in rows]
+        passing: list[dict[str, Any]] = []
+        for row in rows:
+            if not row_passes_filters(
+                row["tags"], row["ingest_time"], row["source_type"],
+                tags_filter=tags_filter, after_dt=after_dt, before_dt=before_dt,
+                source_type=source_type,
+            ):
+                continue
+            passing.append(_row_to_dict(row))
+            if len(passing) >= int(offset) + int(limit):
+                break  # window filled; later rows can never enter the page
+        return passing[int(offset):int(offset) + int(limit)]
 
     # ------------------------------------------------------------------
     #  Conflicts

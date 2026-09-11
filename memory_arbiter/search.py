@@ -983,36 +983,18 @@ def _passes_filters(
 ) -> bool:
     """v0.7.3: post-filter a candidate row against user-provided filters.
 
-    Mirrors db.count_filtered_memories so COUNT and post-filter stay in sync
-    (design §3.5/§3.7 B2).
-      - tags_filter: AND semantics — rec['tags'] (JSON list) must contain every
-        listed tag (set intersection, equivalent to SQL json_each AND EXISTS).
-      - after_dt / before_dt: compare against ingest_time (parsed aware UTC).
-        rec's ingest_time goes through _parse_ingest_time (search.py:162);
-        naive treated as UTC.
-      - source_type: equality.
+    0.15.14 (B2): delegates to the single shared predicate
+    (db.memories.row_passes_filters) so this post-filter, the COUNT and the
+    filter-driven recall all run identical logic — the former SQL mirror
+    drifted on sub-second time bounds and numeric tags (#962 P1#6).
     """
-    if tags_filter:
-        try:
-            rec_tags_raw = rec.get("tags") or "[]"
-            rec_tags = json.loads(rec_tags_raw) if isinstance(rec_tags_raw, str) else rec_tags_raw
-            rec_tags_set = {str(t) for t in rec_tags}
-        except Exception:
-            rec_tags_set = set()
-        if not all(t in rec_tags_set for t in tags_filter):
-            return False
-    if source_type and rec.get("source_type") != source_type:
-        return False
-    if after_dt or before_dt:
-        rec_dt = _parse_ingest_time(rec)
-        if rec_dt is None:
-            # Time filter active but rec has no parseable time — drop conservatively.
-            return False
-        if after_dt and rec_dt < after_dt:
-            return False
-        if before_dt and rec_dt > before_dt:
-            return False
-    return True
+    from .db.memories import row_passes_filters
+
+    return row_passes_filters(
+        rec.get("tags"), rec.get("ingest_time"), rec.get("source_type"),
+        tags_filter=tags_filter, after_dt=after_dt, before_dt=before_dt,
+        source_type=source_type,
+    )
 
 
 def search_memories(

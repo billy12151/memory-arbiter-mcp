@@ -490,18 +490,6 @@ class MemoryDB:
     def delete_summary_vector(self, memory_id: int) -> bool:
         return self.memories.delete_summary_vector(memory_id)
 
-    def _filter_clauses(
-        self,
-        like_status_clause: str,
-        tags_filter: list[str] | None,
-        after_dt: datetime | None,
-        before_dt: datetime | None,
-        source_type: str | None,
-    ) -> tuple[list[str], list[Any]]:
-        return MemoriesStore._filter_clauses(
-            like_status_clause, tags_filter, after_dt, before_dt, source_type,
-        )
-
     def count_filtered_memories(
         self,
         like_status_clause: str,
