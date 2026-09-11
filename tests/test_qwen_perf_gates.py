@@ -317,7 +317,9 @@ def test_gpu_layers_flows_to_backends(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_l3_truncates_only_over_limit_values() -> None:
-    over = "值" * 80
+    """Second-round M1: the cut lands on the LAST clause/word boundary inside
+    the cap — never mid-run."""
+    over = "第一段取值说明，" + "值" * 80
     raw = json.dumps(
         {"attribute_a": "属性", "value_a": "短值", "attribute_b": "属性", "value_b": over},
         ensure_ascii=False,
@@ -326,8 +328,47 @@ def test_l3_truncates_only_over_limit_values() -> None:
     assert signal is not None
     assert signal.candidate_type == "attribute_value_extraction"
     assert signal.parsed is not None
-    assert len(signal.parsed["value_b"]) == 64
+    assert signal.parsed["value_b"] == "第一段取值说明"
     assert signal.parsed["value_a"] == "短值"
+
+
+def test_l3_refuses_mid_run_cut_without_boundary() -> None:
+    """No clause/word boundary inside the first 64 chars -> retry path, so no
+    beheaded fragment is ever manufactured (second-round M1)."""
+    run = "值" * 80
+    raw = json.dumps(
+        {"attribute_a": "属性", "value_a": "短", "attribute_b": "属性", "value_b": run},
+        ensure_ascii=False,
+    )
+    assert _l3_truncated_signal(raw) is None
+
+
+def test_l3_refuses_equal_values_after_cut() -> None:
+    """Second-round M2: when cutting collapses both sides to the same value,
+    L3 refuses — the pair retries instead of reading as a clean negative."""
+    shared = "共同前缀" * 20  # >64 chars, boundary-free, identical on both sides
+    raw = json.dumps(
+        {"attribute_a": "属性", "value_a": shared, "attribute_b": "属性", "value_b": shared},
+        ensure_ascii=False,
+    )
+    assert _l3_truncated_signal(raw) is None
+
+
+def test_l3_cut_lands_on_last_boundary_inside_cap() -> None:
+    from memory_arbiter.semantic_conflict import _l3_cut_value
+
+    # clause punctuation inside the window: cut just before it
+    assert _l3_cut_value("甲" * 50 + "，" + "乙" * 40) == "甲" * 50
+    # clause punctuation wins over a LATER whitespace inside the window
+    assert _l3_cut_value("甲" * 50 + "，" + "乙" * 10 + " " + "丙" * 20) == "甲" * 50
+    # whitespace fallback when no clause char is in the window
+    assert _l3_cut_value("甲" * 50 + " " + "乙" * 30) == "甲" * 50
+    # no boundary at all inside the window -> retry path
+    assert _l3_cut_value("甲" * 70) is None
+    # a window whose only boundary is beyond the cap does not count
+    assert _l3_cut_value("甲" * 70 + " " + "乙" * 10) is None
+    # trailing boundary chars are stripped from the cut head
+    assert _l3_cut_value("甲" * 50 + "，、：") == "甲" * 50
 
 
 def test_l3_rejects_non_qualifying_shapes() -> None:
@@ -412,3 +453,157 @@ def test_example_config_uses_only_live_keys() -> None:
     template = _default_config_dict(Path("/tmp/m.gguf"), Path("/tmp/db"), Path("/tmp/bk"))
     assert "max_notice_pairs" not in template["semantic_conflict"]
     assert "policy_path" not in template
+
+
+# ---------------------------------------------------------------------------
+# Second-round adversarial review fixes
+# ---------------------------------------------------------------------------
+
+def test_retry_attempt_carries_schema_grammar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2: attempt 0 is grammar-free (throughput); the retry restores
+    response_format to break the 0.5B's verbatim-copy loop (verified stable
+    on the live 926 fixture: 3/3 recovered under grammar, 0/6 without)."""
+    backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
+    llm = _ScriptedLLM([_TRUNCATED, _VALID])
+    backend._llm = llm  # pre-loaded: skip the acquisition path
+    signal = backend.classify_pair({"quote": "A"}, {"quote": "B"})
+    assert signal.candidate_type == "attribute_value_extraction"
+    assert "response_format" not in llm.calls[0]
+    fmt = llm.calls[1]["response_format"]
+    assert fmt["schema"]["properties"]["value_a"]["maxLength"] == 64
+    assert fmt["schema"]["required"] == ["attribute_a", "value_a", "attribute_b", "value_b"]
+    # the gated single-attempt path never carries the grammar either
+    llm2 = _ScriptedLLM([_TRUNCATED, _VALID])
+    backend._llm = llm2
+    backend.classify_pair({"quote": "A"}, {"quote": "B"}, retry_allowed=False)
+    assert len(llm2.calls) == 1 and "response_format" not in llm2.calls[0]
+
+
+def test_gpu_load_failure_falls_back_to_cpu_once(tmp_path: Path) -> None:
+    """Round-2 L3: with offload now the default, a failing GPU init must fall
+    back to CPU (once, remembered, visible) instead of failing every pair."""
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"fake")
+    backend = LocalGGUFSemanticBackend(model, n_gpu_layers=-1)
+    calls: list[dict[str, Any]] = []
+
+    class _FakeLlama:
+        def __init__(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+            if kwargs.get("n_gpu_layers", 0) != 0:
+                raise RuntimeError("Metal init failed")
+
+    import sys
+    import types
+    fake_module = types.ModuleType("llama_cpp")
+    fake_module.Llama = _FakeLlama  # type: ignore[attr-defined]
+    monkeypatched = sys.modules.get("llama_cpp")
+    sys.modules["llama_cpp"] = fake_module
+    try:
+        llm = backend._build_llm()
+        assert isinstance(llm, _FakeLlama)
+        assert calls[0]["n_gpu_layers"] == -1
+        assert calls[1]["n_gpu_layers"] == 0
+        assert backend._gpu_fallback is True
+        assert backend.status()["gpu_fallback"] is True
+        assert backend.pair_retry_stats()["gpu_fallback"] is True
+    finally:
+        if monkeypatched is not None:
+            sys.modules["llama_cpp"] = monkeypatched
+        else:
+            del sys.modules["llama_cpp"]
+
+
+def test_gpu_fallback_absent_when_cpu_already(tmp_path: Path) -> None:
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"fake")
+    backend = LocalGGUFSemanticBackend(model, n_gpu_layers=0)
+    class _Boom:
+        def __init__(self, **kwargs: Any) -> None:
+            raise RuntimeError("no model")
+    import sys, types
+    fake = types.ModuleType("llama_cpp")
+    fake.Llama = _Boom  # type: ignore[attr-defined]
+    prev = sys.modules.get("llama_cpp")
+    sys.modules["llama_cpp"] = fake
+    try:
+        with pytest.raises(RuntimeError):
+            backend._build_llm()
+        assert backend._gpu_fallback is False
+    finally:
+        if prev is not None:
+            sys.modules["llama_cpp"] = prev
+        else:
+            del sys.modules["llama_cpp"]
+
+
+def test_notice_write_failure_is_visible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2: a ready pair whose notice cannot be persisted must degrade
+    visibly (notice_write_failed) instead of reporting checked_no_notice."""
+    tools = make_tools(tmp_path)
+    scene = _write_check_scene(tools, peers=1)
+    monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", lambda timeout: None)
+    monkeypatch.setattr(
+        tools.db, "record_semantic_notice",
+        lambda **kwargs: {"outcome": "unavailable"},
+    )
+    result = _run_job(monkeypatch, tools, scene, _ValueBackend)
+    assert result["status"] == "incomplete"
+    assert result["reason"] == "notice_write_failed"
+    assert result["notices_created"] == 0
+    assert tools._check_degradation_status()["last_reason"] == "notice_write_failed"
+
+
+def test_notice_dedupe_still_not_a_degradation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools = make_tools(tmp_path)
+    scene = _write_check_scene(tools, peers=1)
+    monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", lambda timeout: None)
+    monkeypatch.setattr(
+        tools.db, "record_semantic_notice",
+        lambda **kwargs: {"outcome": "deduped"},
+    )
+    result = _run_job(monkeypatch, tools, scene, _ValueBackend)
+    assert result["outcome"] == "checked_no_notice"
+    assert "reasons_seen" not in result
+
+
+def test_b2_sql_prefilter_is_a_safe_superset(tmp_path: Path) -> None:
+    """Round-2 M3: the SQL prefilter must never drop a row the shared
+    predicate would have kept (numeric tags, sub-second bounds)."""
+    from memory_arbiter.db.memories import MemoriesStore, row_passes_filters
+    from datetime import datetime, timezone
+
+    tools = make_tools(tmp_path)
+    rows = [
+        # (tags json, ingest_time, source_type)
+        ('[1.0]', "2026-09-11T10:00:00.700000+00:00", "agent_generated"),
+        ("[1]", "2026-09-11T10:00:00+00:00", "agent_generated"),
+        ('["1.0"]', "2026-09-11T10:00:01+00:00", "user_confirmed"),
+        ('"abc"', "2026-09-11T10:00:02+00:00", "agent_generated"),
+        ("{bad", "2026-09-11T10:00:03+00:00", "agent_generated"),
+    ]
+    for i, (tags, ts, st) in enumerate(rows):
+        with tools.db.write_transaction() as conn:
+            conn.execute(
+                "INSERT INTO memories (subject, content, agent_id, tags, event_time, ingest_time, "
+                "source_type, status, workspace, workspace_canonical, version, protection_level, created_at) "
+                "VALUES (?,?,?,?,?,?,?,'active','ws','ws',1,'normal',?)",
+                (f"s{i}", "c", "tester", tags, ts, ts, st, ts),
+            )
+    after = datetime(2026, 9, 11, 10, 0, 0, 300000, tzinfo=timezone.utc)
+    cases = [
+        {"tags_filter": ["1.0"], "after_dt": None, "before_dt": None, "source_type": None},
+        {"tags_filter": None, "after_dt": after, "before_dt": None, "source_type": None},
+        {"tags_filter": ["agent_generated"], "after_dt": None, "before_dt": None, "source_type": "agent_generated"},
+    ]
+    for case in cases:
+        with tools.db.connection() as conn:
+            all_rows = conn.execute("SELECT tags, ingest_time, source_type FROM memories").fetchall()
+        expected = sum(
+            1 for r in all_rows
+            if row_passes_filters(r["tags"], r["ingest_time"], r["source_type"], **case)
+        )
+        count = tools.db.count_filtered_memories("status='active'", **case)
+        page = tools.db.recall_by_filters("status='active'", **case, limit=50, offset=0)
+        assert count == expected, case
+        assert len(page) == expected, case

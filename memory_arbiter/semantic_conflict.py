@@ -57,18 +57,33 @@ _STOPWORDS = {
 
 PAIR_PROMPT_VERSION = "pair-v6"
 
-# A2 (0.15.14): the pair path decodes grammar-free — response_format was
-# removed (its per-token grammar evaluation halved decode throughput:
-# 45 vs 86 tok/s; eval-grammar-free-matrix 2026-09-11, n=62). The value/
-# attribute caps it enforced at decode level are post-hoc now: L3 truncation
-# in classify_pair plus the grounding gates. Assistant-prefix seeding (the
-# matrix's L2) was tried in integration and REJECTED by the real-model e2e
-# gate: on the Tier1 calibration pair the seeded reverse direction
-# deterministically extracted misaligned fragments ("高 ROI 候选分析" vs
-# "重排版") — the matrix measured protocol validity, not gate quality.
-# Plain chat completion without response_format (L0) keeps both: 62/62
-# validity and −70% wall clock in the matrix, and identical gate behaviour
-# on the calibration pair.
+# Grammar-free decoding runs the FIRST attempt (A2, 0.15.14) — response_format's
+# per-token grammar evaluation halved decode throughput (45 vs 86 tok/s; eval
+# eval-grammar-free-matrix 2026-09-11, n=62) and the caps are post-hoc (L3
+# truncation + grounding). The RETRY attempt restores the grammar
+# (_PAIR_RESPONSE_FORMAT below): the retry only happens after the 0.5B already
+# failed once, and the failure mode is the 0.5B falling into a verbatim-copy
+# loop whose 250-token partial JSON neither feedback text nor quote shrinking
+# breaks (verified: 4 retry-format variants incl. no-echo and 120-char quotes
+# all re-produced the same partial copy). Running the retry UNDER the grammar
+# — schema + maxLength enforced at the decoding level — recovers that fixture
+# deterministically (3/3) at one grammar-cost attempt, which is exactly when
+# that cost is worth paying. The queue gate (A6) still cancels the retry when
+# other jobs wait.
+_PAIR_RESPONSE_FORMAT = {
+    "type": "json_object",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "attribute_a": {"type": "string", "maxLength": 80},
+            "value_a": {"type": "string", "maxLength": 64},
+            "attribute_b": {"type": "string", "maxLength": 80},
+            "value_b": {"type": "string", "maxLength": 64},
+        },
+        "required": ["attribute_a", "value_a", "attribute_b", "value_b"],
+        "additionalProperties": False,
+    },
+}
 
 _PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
@@ -906,20 +921,55 @@ def _reject_duplicate_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return decoded
 
 
+# Clause/word boundaries an over-long value may be cut at (L3, second-round
+# review M1). Cutting anywhere else would manufacture a beheaded fragment
+# ("…挑重要命") that grounds as a verbatim substring yet no longer reads as
+# a value.
+_L3_CUT_BOUNDARIES = "，、：；。！？!?…—,;:()（）"
+
+
+def _l3_cut_value(value: str) -> str | None:
+    """Cut an over-long value at the last clause or word boundary inside the cap.
+
+    Clause punctuation wins over whitespace even when a space sits later in
+    the window: the live sample's 64-char window ends "…命中，法规 RA", and a
+    space-first cut would leave the mid-word tail "法规" while the comma at 58
+    terminates the clause cleanly. Returns None when the window holds no
+    boundary at all — a mid-run cut would invent exactly the guillotine
+    fragment the grounding gates exist to reject, so the pair stays on the
+    retry path instead.
+    """
+    window = value[:_MAX_VALUE_CHARS]
+    index = max((i for i, ch in enumerate(window) if ch in _L3_CUT_BOUNDARIES), default=-1)
+    if index < 0:
+        index = max((i for i, ch in enumerate(window) if ch.isspace()), default=-1)
+    if index < 0:
+        return None
+    cut = window[:index].strip().rstrip(_L3_CUT_BOUNDARIES).strip()
+    return cut or None
+
+
 def _l3_truncated_signal(raw: str) -> ModelSignal | None:
     """L3 post-hoc leniency (A2, 0.15.14): a value field over the 64-char cap
-    is cut to the cap instead of invalidating the whole output — this replaces
-    the grammar-era decoding-level maxLength. Only the exact-four-field shape
-    with cuttable values qualifies; anything else (extra/missing fields, bad
-    attributes, embedded newlines) stays on the retry path. Attributes are
-    never truncated: an over-long attribute is a malformed question, not a
-    value the evidence supports.
+    is cut to a clause boundary inside the cap instead of invalidating the
+    whole output — this replaces the grammar-era decoding-level maxLength.
+    Only the exact-four-field shape with cuttable values qualifies; anything
+    else (extra/missing fields, bad attributes, embedded newlines, no clause
+    boundary inside the window) stays on the retry path. Attributes are never
+    truncated: an over-long attribute is a malformed question, not a value the
+    evidence supports.
 
     L3 relaxes the LENGTH caps only — the strict parser's other protocol
     rejections still apply: an array-wrapped raw (first structural token is
     "[", spec §15.4) and duplicated fields (ambiguous which value was meant)
     are refused here too instead of being silently accepted by plain
-    json.loads. First-round review M1 (0.15.14)."""
+    json.loads (first-round review M1).
+
+    Second-round review M1/M2 fixes: the cut lands on a clause/word boundary
+    (never mid-clause), and a pair whose two values normalize EQUAL after
+    cutting is refused — otherwise a real conflict whose divergence sits
+    beyond the cap would silently become a definitive
+    not_same_attribute_different_value negative."""
     snippet = _extract_first_json_object(raw or "")
     if not snippet:
         return None
@@ -951,12 +1001,17 @@ def _l3_truncated_signal(raw: str) -> ModelSignal | None:
         if not value or "\n" in value or "\r" in value:
             return None
         if len(value) > _MAX_VALUE_CHARS:
-            value = value[:_MAX_VALUE_CHARS].strip()
-            cut_any = True
-            if not value:
+            cut = _l3_cut_value(value)
+            if cut is None:
                 return None
+            value = cut
+            cut_any = True
         fields[name] = value
     if not cut_any:
+        return None
+    if normalize_value(fields["value_a"]) == normalize_value(fields["value_b"]):
+        # Truncation collapsed the distinguishing part: refuse so the pair
+        # retries / degrades instead of reading as a clean negative.
         return None
     return model_signal_from_text(json.dumps(fields, ensure_ascii=False))
 
@@ -988,6 +1043,7 @@ class LocalGGUFSemanticBackend:
         self._pair_retried = 0
         self._pair_retry_recovered = 0
         self._pair_l3_truncated = 0
+        self._gpu_fallback = False
 
     def _build_llm(self) -> Any:
         if not self.model_path.exists():
@@ -1002,7 +1058,20 @@ class LocalGGUFSemanticBackend:
         }
         if self.n_batch > 0:
             kwargs["n_batch"] = self.n_batch
-        return Llama(**kwargs)
+        try:
+            return Llama(**kwargs)
+        except Exception:
+            # A3 fallback (second-round review L3): with the offload default
+            # flipped on, a host whose Metal/GPU init fails would otherwise
+            # re-attempt the failing load on EVERY pair (no backoff, invisible
+            # in counters). Mirror the embedder's self-healing policy: fall
+            # back to CPU once, remember it, and report it in status().
+            if self.n_gpu_layers == 0:
+                raise
+            kwargs["n_gpu_layers"] = 0
+            llm = Llama(**kwargs)
+            self._gpu_fallback = True
+            return llm
 
     def _ensure_llm(self) -> Any:
         with self._cond:
@@ -1151,14 +1220,21 @@ class LocalGGUFSemanticBackend:
             attempts = 1 if not retry_allowed else max(1, SEMANTIC_PAIR_MAX_ATTEMPTS)
             signal: ModelSignal | None = None
             for attempt in range(attempts):
+                # Attempt 0 grammar-free (throughput); the retry (attempt 1)
+                # runs under the schema grammar, which breaks the copy loop
+                # that plain decoding leaves unbreakable — see the
+                # _PAIR_RESPONSE_FORMAT note.
+                completion_kwargs: dict[str, Any] = {
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.0,
+                    "top_p": 0.9,
+                    "stop": ["\n\n"],
+                }
+                if attempt > 0:
+                    completion_kwargs["response_format"] = _PAIR_RESPONSE_FORMAT
                 with self._infer_lock:
-                    out = llm.create_chat_completion(
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.0,
-                        top_p=0.9,
-                        stop=["\n\n"],
-                    )
+                    out = llm.create_chat_completion(**completion_kwargs)
                 usage = out.get("usage") or {}
                 prompt_tokens_total += int(usage.get("prompt_tokens") or 0)
                 generated_tokens_total += int(usage.get("completion_tokens") or 0)
@@ -1349,13 +1425,14 @@ class LocalGGUFSemanticBackend:
             if acquired:
                 self._release_llm_for_call()
 
-    def pair_retry_stats(self) -> dict[str, int]:
-        """Retry/L3 counters for the parent process to piggyback on responses."""
+    def pair_retry_stats(self) -> dict[str, Any]:
+        """Retry/L3/fallback counters for the parent to piggyback on responses."""
         with self._cond:
             return {
                 "pair_retried": self._pair_retried,
                 "pair_retry_recovered": self._pair_retry_recovered,
                 "pair_l3_truncated": self._pair_l3_truncated,
+                "gpu_fallback": self._gpu_fallback,
             }
 
     def status(self) -> dict[str, Any]:
@@ -1374,6 +1451,7 @@ class LocalGGUFSemanticBackend:
                 "generation": self._generation,
                 "n_ctx": self.n_ctx,
                 "n_gpu_layers": self.n_gpu_layers,
+                "gpu_fallback": self._gpu_fallback,
                 "prompt_version": PAIR_PROMPT_VERSION,
                 "pair_retried": self._pair_retried,
                 "pair_retry_recovered": self._pair_retry_recovered,
@@ -1811,6 +1889,9 @@ class IsolatedGGUFSemanticBackend:
                 "pair_retried": child_status.get("pair_retried"),
                 "pair_retry_recovered": child_status.get("pair_retry_recovered"),
                 "pair_l3_truncated": child_status.get("pair_l3_truncated"),
+                # True once the child's GPU offload failed and it fell back to
+                # CPU (A3 self-healing; visible only after a classify_pair).
+                "gpu_fallback": child_status.get("gpu_fallback"),
             }
 
 

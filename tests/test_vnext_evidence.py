@@ -179,9 +179,15 @@ def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> 
     # pair-v6: prompt text stays byte-identical to pair-v5 (few-shot variants
     # regressed side attribution on the calibration pair and were rejected).
     assert "例2" not in _PAIR_PROMPT
-    # 0.15.14 (A2/L0): the pair path is grammar-free — the response_format
-    # schema is gone (caps are post-hoc: L3 truncation + grounding).
-    assert not hasattr(sc, "_PAIR_RESPONSE_FORMAT")
+    # 0.15.14 (A2/L0 + round-2 fix): the FIRST attempt is grammar-free (caps
+    # post-hoc: L3 truncation + grounding); the RETRY attempt restores the
+    # schema grammar to break the 0.5B's verbatim-copy loop.
+    schema = sc._PAIR_RESPONSE_FORMAT["schema"]
+    assert set(schema["required"]) == {
+        "attribute_a", "value_a", "attribute_b", "value_b",
+    }
+    assert schema["properties"]["value_a"]["maxLength"] == 64
+    assert schema["properties"]["attribute_a"]["maxLength"] == 80
 
 
 # The two live qwen_invalid_output samples (2026-09-08 17:31 / 2026-09-09
@@ -234,8 +240,9 @@ def _backend_with_scripted_llm(
 
 def test_pair_over_limit_value_l3_truncates_without_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Live sample 1 (valid JSON, 76-char value_b): since 0.15.14 the caps are
-    post-hoc (A2/L3) — the over-long value is cut to 64 chars in place instead
-    of invalidating the output and costing a feedback retry. One call total."""
+    post-hoc (A2/L3) — the over-long value is cut at its last clause boundary
+    inside the cap (58 chars here: the comma before "法规 RAG …"), not
+    invalidated, so no feedback retry is spent. One call total."""
     import json as _json
     backend, llm = _backend_with_scripted_llm(
         monkeypatch, [_LIVE_SAMPLE_OVER_LIMIT],
@@ -246,8 +253,8 @@ def test_pair_over_limit_value_l3_truncates_without_retry(monkeypatch: pytest.Mo
     original = _json.loads(_LIVE_SAMPLE_OVER_LIMIT)
     assert len(original["value_b"]) > 64  # the live sample really was over cap
     assert signal.parsed is not None
-    assert len(signal.parsed["value_b"]) == 64
-    assert signal.parsed["value_b"] == original["value_b"][:64]
+    assert signal.parsed["value_b"] == original["value_b"][:58]  # clause-boundary cut
+    assert len(signal.parsed["value_b"]) <= 64
     assert signal.parsed["value_a"] == original["value_a"]  # within-cap fields untouched
     assert signal.retried is False
     assert backend._pair_retried == 0
@@ -272,8 +279,10 @@ def test_pair_retry_shrinks_quotes_after_truncation(monkeypatch: pytest.MonkeyPa
     assert "证" * 241 not in retry["messages"][1]["content"]
     assert len(first_user) > len(retry["messages"][1]["content"])
     assert retry["messages"][2] == {"role": "assistant", "content": _LIVE_SAMPLE_TRUNCATED}
-    # A2/L0: the grammar-free call carries no response_format.
-    assert "response_format" not in retry
+    # A2/L0 + round-2 fix: attempt 0 is grammar-free, the retry carries the
+    # schema grammar.
+    assert "response_format" not in llm.calls[0]
+    assert retry["response_format"]["schema"]["properties"]["value_a"]["maxLength"] == 64
     assert backend._pair_retried == 1
     assert backend._pair_retry_recovered == 1
 
@@ -2909,10 +2918,12 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
 
     # reasons_seen is attached because the second pair hit the job budget
-    # (qwen_budget_exhausted) after the first pair's notice was created.
+    # (qwen_budget_exhausted) after the first pair's notice was created;
+    # truncated flags that the check was bounded, not exhaustive
+    # (second-round review).
     assert result == {
         "status": "completed", "outcome": "notices_created", "notices_created": 1,
-        "reasons_seen": ["qwen_budget_exhausted"],
+        "truncated": True, "reasons_seen": ["qwen_budget_exhausted"],
     }
     assert deadlines == [None, None]
     assert len(tools.db.list_semantic_notices(status="open", limit=10)) == 1

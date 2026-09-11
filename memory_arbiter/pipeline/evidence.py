@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 _TECHNICAL_REASONS = {
     "qwen_timeout", "qwen_unavailable", "qwen_backend_error",
     "qwen_invalid_output", "qwen_budget_exhausted", "notice_budget_exhausted",
-    "evidence_units_capped", "pairs_examined_capped",
+    "evidence_units_capped", "pairs_examined_capped", "notice_write_failed",
 }
 
 
@@ -505,10 +505,24 @@ class EvidencePipeline:
             # already surfaced) — since A5 it is a result summary, not a gate.
             if outcome.get("outcome") == "created":
                 surfaced += 1
+            elif outcome.get("outcome") not in {"deduped"}:
+                # Second-round review: a ready pair whose notice could not be
+                # persisted (workspace_mismatch / invalid_snapshot /
+                # unavailable / error) must not vanish silently — without this
+                # the run could report checked_no_notice while a real conflict
+                # was found and lost.
+                record_degradation("notice_write_failed")
+                incomplete_reason = "notice_write_failed"
         if surfaced:
             result: dict[str, Any] = {
                 "status": "completed", "outcome": "notices_created", "notices_created": surfaced,
             }
+            if incomplete_reason:
+                # Notices went out, but later pairs hit a truncation/degradation
+                # — surface it instead of a bare completed (second-round
+                # review): the caller would otherwise read a bounded, partial
+                # check as a full one.
+                result["truncated"] = True
         elif incomplete_reason:
             result = {"status": "incomplete", "reason": incomplete_reason, "notices_created": 0}
         else:
