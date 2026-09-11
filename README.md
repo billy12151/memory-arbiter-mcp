@@ -53,9 +53,9 @@ mema doctor            # verify
 
 When a capability is missing (e.g. the models were never downloaded), every tool response carries a persistent degraded-mode banner with the `mema setup --install` remediation, and each agent's first call includes a capability health card — an incomplete install cannot pass for a complete one silently.
 
-The server requires an explicitly configured identity: set `client` and `agent_id` in config.json or the `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` launch-context environment variables (the stdio `examples/*.mcp.json` entries do this via `env`). There are no built-in defaults — the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity used for attribution and policy decisions; `memory(action="remember")` does not accept `agent_id`/`client` in `data`. streamable-http takes caller identity from the per-request headers described below.
+The server requires an explicitly configured identity: set `client` and `agent_id` in config.json or the `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` launch-context environment variables (the stdio `examples/*.mcp.json` entries do this via `env`). There are no built-in defaults — the server refuses to start when either is blank. Under stdio this configured identity is the process-level caller identity used for attribution; `memory(action="remember")` does not accept `agent_id`/`client` in `data`. streamable-http takes caller identity from the per-request headers described below.
 
-stdio remains the default. For one local server shared by several clients, set `mcp.transport` to `streamable-http` (or `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`, one of the six retained launch-context variables) and connect to `http://127.0.0.1:8000/mcp`. Each client's MCP server entry must set fixed `X-Mema-Client` and `X-Mema-Agent-Id` headers; see [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json). The client sends them automatically on every HTTP MCP request—agents should not add identity to individual tool calls. Missing, empty, invalid, duplicated, or conflicting identity is rejected instead of falling back to defaults. Community HTTP mode binds only to localhost, and these headers are advisory provenance and policy input, **not authentication or multi-tenant isolation**.
+stdio remains the default. For one local server shared by several clients, set `mcp.transport` to `streamable-http` (or `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`, one of the six retained launch-context variables) and connect to `http://127.0.0.1:8000/mcp`. Each client's MCP server entry must set fixed `X-Mema-Client` and `X-Mema-Agent-Id` headers; see [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json). The client sends them automatically on every HTTP MCP request—agents should not add identity to individual tool calls. Missing, empty, invalid, duplicated, or conflicting identity is rejected instead of falling back to defaults. Community HTTP mode binds only to localhost, and these headers are advisory provenance, **not authentication or multi-tenant isolation**.
 
 The daily loop is four calls — `remember` a reusable fact, `find` to recall, `read` for exact lookup, `update` when a newer source replaces an existing current memory (never create a second active copy of one source of truth). Point any agent at the packaged rule:
 
@@ -166,7 +166,6 @@ The complete user surface is 20 keys:
   "agent_id": "your-agent-id",
   "workspace": "default",
   "isolation": "none",
-  "policy_path": null,
   "update_check": { "enabled": true },
   "include_size": true,
   "embedding": {
@@ -194,7 +193,6 @@ The complete user surface is 20 keys:
 | `backup_jsonl` | Append-only fallback when SQLite cannot write |
 | `client` / `agent_id` | Required caller identity; no built-in defaults — the server refuses to start when either is blank |
 | `workspace` / `isolation` | Default workspace and `none`/`weak`/`strict` workspace behavior |
-| `policy_path` | Optional client/agent tool-routing policy file |
 | `update_check.enabled` | Optional one-shot background PyPI discovery (default `true`); the only network call, with cached/suppressed notices and no auto-upgrade |
 | `include_size` | Global switch for the recall size block (v0.15.6): on = `find`/`read`/`expired`/`history` all attach `{returned_chars, returned_count, tokens_estimate}`; off = none of them do |
 | `embedding.model_path` | Local GGUF embedding model — pointing at it is the sole intent to enable sqlite-vec evidence recall |

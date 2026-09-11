@@ -109,7 +109,6 @@ def _default_config_dict(
         "agent_id": "",
         "workspace": "default",
         "isolation": "none",
-        "policy_path": None,
         "update_check": {"enabled": True},
         "embedding": {
             "model_path": str(model_path),

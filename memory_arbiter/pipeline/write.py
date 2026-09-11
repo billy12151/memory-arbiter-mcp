@@ -36,9 +36,6 @@ class WritePipeline:
         self.db = tools.db
         self.settings = tools.settings
 
-    def _allowed(self, *args: Any, **kwargs: Any) -> "tuple[bool, list[str]]":
-        return self._tools._allowed(*args, **kwargs)
-
     def _post_commit(
         self, *args: Any, **kwargs: Any,
     ) -> "tuple[dict[str, Any], dict[str, Any]]":
@@ -291,22 +288,15 @@ class WritePipeline:
             return self._tools.db.state.response(
                 {"written": False, **error}, ok=False,
             )
-        # Policy is evaluated against the trusted request identity, never
-        # caller-supplied payload fields (agent_id/client are not write inputs).
-        allowed, policy_warnings = self._allowed()
-        if not allowed:
-            return self._tools.db.state.response(
-                {"written": False}, ok=False, extra_warnings=policy_warnings,
-            )
         if not str(payload.get("subject") or "").strip():
             return self._tools.db.state.response(
                 {"written": False, "error": "subject is required"},
-                ok=False, extra_warnings=policy_warnings,
+                ok=False,
             )
         if self.settings.isolation == "strict" and not str(payload.get("workspace") or "").strip():
             return self._tools.db.state.response(
                 {"written": False, "error": "isolation=strict requires a workspace on every write"},
-                ok=False, extra_warnings=policy_warnings,
+                ok=False,
             )
         # Authoritative guard for callers that bypass product-surface validation
         # (console API, direct MemoryTools use): superseded/conflicted/deleted
@@ -322,7 +312,7 @@ class WritePipeline:
                     "field": "status",
                     "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs",
                 },
-                ok=False, extra_warnings=policy_warnings,
+                ok=False,
             )
 
         insert_done = False
@@ -362,7 +352,7 @@ class WritePipeline:
             response = self._tools.db.state.response(
                 data,
                 extra_warnings=(
-                    policy_warnings + validation.warnings + write_warnings + workspace["warnings"]
+                    validation.warnings + write_warnings + workspace["warnings"]
                 ),
             )
             if data.get("evidence_index", {}).get("status") == "busy":
@@ -415,13 +405,13 @@ class WritePipeline:
                 return self._tools.db.state.response(
                     {"id": memory_id, "backup_only": memory_id is None},
                     extra_warnings=(
-                        policy_warnings + validation.warnings
+                        validation.warnings
                         + [f"memory written (id {memory_id}) but post-commit processing failed: {exc}"]
                     ),
                 )
             return self._tools.db.state.response(
                 {"written": False, "error": str(exc)},
-                ok=False, extra_warnings=policy_warnings + validation.warnings,
+                ok=False, extra_warnings=validation.warnings,
             )
 
     def _resolve_write_workspace(self, record: MemoryRecord) -> dict[str, Any]:

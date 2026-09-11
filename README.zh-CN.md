@@ -217,7 +217,6 @@ mema doctor --json
 | `backup_jsonl` | 数据库写不进去时的兜底备份文件（只追加） | 安装时生成 |
 | `workspace` | 写入时不带 workspace 用的默认工作区 | `default` |
 | `isolation` | workspace 隔离档：`none` / `weak` / `strict` | `none` |
-| `policy_path` | 可选：按客户端/agent 控制工具开关的策略文件 | 无 |
 | `mcp.transport` | `stdio`（默认，一对一）或 `streamable-http`（多个客户端共享一个本地服务） | `stdio` |
 | `mcp.http.host` / `mcp.http.port` | HTTP 模式的监听地址（只允许本机）和端口；地址路径固定是 `/mcp`，不用配 | `127.0.0.1:8000` |
 | `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |

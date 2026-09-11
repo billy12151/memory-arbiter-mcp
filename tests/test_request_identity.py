@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from memory_arbiter.config import AgentPolicy, Settings
+from memory_arbiter.config import Settings
 from memory_arbiter.request_identity import (
     AGENT_ID_HEADER,
     CLIENT_HEADER,
@@ -403,60 +403,6 @@ def test_stdio_write_keeps_settings_identity(tmp_path: Path, monkeypatch: pytest
     bundle.tools.shutdown(timeout=1)
 
 
-def test_header_identity_controls_all_http_mutation_policy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = AgentPolicy(default_enabled=True, deny_agents=["blocked"])
-    bundle = _runtime(tmp_path, monkeypatch, policy=policy)
-    seed = bundle.tools.memory(
-        "remember", {"content": "seed", "subject": "policy"},
-    )
-    memory_id = seed["data"]["id"]
-    with request_identity_scope(RequestIdentity(client="header-client", agent_id="blocked")):
-        readable = [
-            bundle.app.tools["memory_repair"](
-                task="semantic_control", data={"action": "status"},
-            ),
-            bundle.app.tools["memory_repair"](
-                task="notice", data={"action": "list"},
-            ),
-            bundle.app.tools["memory_repair"](
-                task="rebuild_evidence", data={"dry_run": True},
-            ),
-            bundle.app.tools["memory_repair"](
-                task="rebuild_evidence", data={},
-            ),
-            bundle.app.tools["memory_repair"](
-                task="replay_backup", data={"dry_run": "true"},
-            ),
-            bundle.app.tools["memory_repair"](
-                task="replay_backup", data={},
-            ),
-        ]
-        results = [
-            bundle.app.tools["memory"](
-                action="remember", data={"content": "fact", "subject": "policy"},
-            ),
-            bundle.app.tools["memory"](
-                action="update", data={"memory_id": memory_id, "new_content": "changed"},
-            ),
-            bundle.app.tools["memory_govern"](
-                action="confirm", data={"memory_id": memory_id, "authorized": True},
-            ),
-            bundle.app.tools["memory_repair"](
-                task="set_entity", data={"memory_id": memory_id, "entity": "secret"},
-            ),
-            bundle.app.tools["memory_repair"](
-                task="scan_candidates", data={"anchor_memory_id": 0},
-            ),
-        ]
-    assert all(result["ok"] is True for result in readable)
-    assert all(result["ok"] is False for result in results)
-    assert all(any("agent_id=blocked" in warning for warning in result["warnings"]) for result in results)
-    assert bundle.tools.db.get_memory(memory_id)["content"] == "seed"
-    bundle.tools.shutdown(timeout=1)
-
-
 def test_onboarding_notice_uses_header_agent_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = _runtime(tmp_path, monkeypatch)
 
@@ -584,7 +530,7 @@ def test_build_runtime_requires_configured_identity(
     assert not settings.db_path.exists()
 
 
-def test_stdio_bridge_status_and_policy_use_process_identity(
+def test_stdio_bridge_status_uses_process_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle = _runtime(tmp_path, monkeypatch)
@@ -593,35 +539,17 @@ def test_stdio_bridge_status_and_policy_use_process_identity(
     status = bundle.app.tools["memory"](action="status", data={})
     assert status["data"]["client"] == "settings-client"
     assert status["data"]["agent_id"] == "settings-agent"
-    assert status["data"]["policy"] == {"caller_allowed": True}
-    bundle.tools.shutdown(timeout=1)
-
-    denied_settings = Settings(
-        db_path=tmp_path / "denied.sqlite3",
-        backup_jsonl=tmp_path / "denied.jsonl",
-        update_check_enabled=False,
-        client="settings-client",
-        agent_id="blocked",
-        policy=AgentPolicy(default_enabled=True, deny_agents=["blocked"]),
-    )
-    from memory_arbiter import server
-    monkeypatch.setattr(server.Settings, "from_env", classmethod(lambda cls: denied_settings))
-    _install_fake_fastmcp(monkeypatch)
-    denied_bundle = server.build_runtime()
-    written = denied_bundle.app.tools["memory"](
-        action="remember", data={"content": "fact", "subject": "stdio-policy"},
-    )
-    assert written["ok"] is False
-    assert written["data"]["written"] is False
-    # A payload agent_id cannot launder policy: it conflicts with the trusted
-    # process identity and is rejected as a mismatch before any write happens.
-    laundered = denied_bundle.app.tools["memory"](
+    # 0.15.14 (B1): the AgentPolicy echo is gone from the status surface.
+    assert "policy" not in status["data"]
+    # A payload agent_id still cannot launder attribution: it conflicts with
+    # the trusted process identity and is rejected as a mismatch.
+    laundered = bundle.app.tools["memory"](
         action="remember",
-        data={"content": "fact", "subject": "stdio-policy", "agent_id": "unblocked"},
+        data={"content": "fact", "subject": "stdio-identity", "agent_id": "other"},
     )
     assert laundered["ok"] is False
     assert laundered["data"]["error"] == "identity_mismatch"
-    denied_bundle.tools.shutdown(timeout=1)
+    bundle.tools.shutdown(timeout=1)
 
 
 def test_remember_payload_agent_id_is_ignored_without_request_identity(

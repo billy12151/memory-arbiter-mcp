@@ -1,7 +1,7 @@
 import math
 from pathlib import Path
 
-from memory_arbiter.config import AgentPolicy, Settings
+from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.validation import (
@@ -132,19 +132,6 @@ def test_status_unknown_field_is_warned_and_removed(tmp_path: Path) -> None:
     result = tools.memory("status", {"unused": "value"})
     assert result["ok"] is True
     assert "unknown field ignored: unused" in result["warnings"]
-
-
-def test_agent_policy_precedence_deny_allow_client_default() -> None:
-    policy = AgentPolicy(
-        client_defaults={"codex": False, "claude": True},
-        default_enabled=False,
-        allow_agents=["allowed", "both"],
-        deny_agents=["denied", "both"],
-    )
-    assert policy.enabled_for("claude", "both") is False
-    assert policy.enabled_for("codex", "allowed") is True
-    assert policy.enabled_for("codex", "ordinary") is False
-    assert policy.enabled_for("unknown", "ordinary") is False
 
 
 def test_controlled_numeric_string_coercion_matches_consumed_value() -> None:

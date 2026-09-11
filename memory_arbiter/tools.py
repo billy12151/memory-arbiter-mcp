@@ -605,13 +605,6 @@ class MemoryTools:
             "embedder_closed": embedder_closed,
         }
 
-    def _allowed(self, agent_id: str | None = None, client: str | None = None) -> tuple[bool, list[str]]:
-        actual_agent = agent_id or self.current_agent_id()
-        actual_client = client or self.current_client()
-        if self.settings.policy.enabled_for(actual_client, actual_agent):
-            return True, []
-        return False, [f"Memory arbiter disabled by policy for client={actual_client}, agent_id={actual_agent}."]
-
     @staticmethod
     def _payload_dict(data: dict[str, Any] | None) -> dict[str, Any]:
         return dict(data) if isinstance(data, dict) else {}

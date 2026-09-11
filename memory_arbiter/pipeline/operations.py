@@ -63,9 +63,6 @@ class OperationsPipeline:
         # Assigned on MemoryTools after pipeline construction: resolve lazily.
         return self._tools._update_monitor
 
-    def _allowed(self, *args: Any, **kwargs: Any) -> "tuple[bool, list[str]]":
-        return self._tools._allowed(*args, **kwargs)
-
     def _caller_workspace(self, *args: Any, **kwargs: Any) -> "CallerWorkspace":
         return self._tools._caller_workspace(*args, **kwargs)
 
@@ -1944,10 +1941,6 @@ class OperationsPipeline:
                 "semantic_conflict": self._semantic_status(
                     self._semantic_notice_workspace_scope(_.get("workspace")),
                 ),
-                # Policy echo is reduced to "is the current caller allowed":
-                # the trusted request identity is evaluated, and the raw
-                # allow/deny lists no longer leak through the status surface.
-                "policy": {"caller_allowed": self._allowed()[0]},
             },
             extra_warnings=self.settings.config_warnings,
         )

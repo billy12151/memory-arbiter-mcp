@@ -1110,14 +1110,12 @@ SLIM_SETTINGS_FIELDS = frozenset(
     {
         "db_path",
         "backup_jsonl",
-        "policy_path",
         "client",
         "agent_id",
         "workspace",
         "mcp_transport",
         "mcp_http_host",
         "mcp_http_port",
-        "policy",
         "embedding_model_path",
         "embedding_auto_query",
         "embedding_auto_write",
@@ -1135,13 +1133,12 @@ SLIM_SETTINGS_FIELDS = frozenset(
 )
 
 
-def test_settings_field_set_is_frozen_at_twenty_three() -> None:
-    # 0.15.14: 23 — semantic_conflict_gpu_layers added (A3), and
-    # semantic_conflict_max_notice_pairs removed (A5: the notice-count cap is
-    # gone; notices are bounded by the examined-pairs constant).
-    # 0.15.11: 23 — config_file_loaded added as a runtime-injected field (same
-    # class as config_warnings/policy: never a file key, not in the registry).
-    assert len(SLIM_SETTINGS_FIELDS) == 23
+def test_settings_field_set_matches_slim_contract() -> None:
+    # 0.15.14: 21 — semantic_conflict_gpu_layers added (A3),
+    # semantic_conflict_max_notice_pairs removed (A5) and policy_path/policy
+    # removed (B1: AgentPolicy deleted). config_file_loaded stays a
+    # runtime-injected field (never a file key, not in the registry).
+    assert len(SLIM_SETTINGS_FIELDS) == 21
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 

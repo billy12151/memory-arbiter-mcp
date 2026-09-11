@@ -24,7 +24,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 {
   "db_path": "…", "backup_jsonl": "…",
   "client": "…", "agent_id": "…", "workspace": "default",
-  "isolation": "none", "policy_path": null,
+  "isolation": "none",
   "update_check": {"enabled": true},
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},

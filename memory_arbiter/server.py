@@ -221,50 +221,15 @@ def _identity_mismatch(
     )
 
 
-def _policy_denied(tools: MemoryTools, identity: RequestIdentity) -> dict[str, Any] | None:
-    allowed, warnings = tools._allowed(identity.agent_id, identity.client)
-    if allowed:
-        return None
-    return tools.db.state.response(
-        {"error": "agent_policy_denied", "client": identity.client, "agent_id": identity.agent_id},
-        ok=False,
-        extra_warnings=warnings,
-    )
-
-
-def _repair_policy_check(task: str, data: dict[str, Any] | None) -> bool:
-    operation = task.strip().lower()
-    payload = data if isinstance(data, dict) else {}
-    if operation == "help":
-        return False
-    if operation in {"rebuild_evidence", "replay_backup"}:
-        dry_run = payload.get("dry_run", True)
-        if isinstance(dry_run, str):
-            is_dry_run = dry_run.strip().lower() in {"true", "1", "yes", "on"}
-        elif isinstance(dry_run, (bool, int, float)):
-            is_dry_run = bool(dry_run)
-        else:
-            is_dry_run = False
-        return not is_dry_run
-    if operation == "semantic_control":
-        return str(payload.get("action") or "status").strip().lower() != "status"
-    if operation == "notice":
-        return str(payload.get("action") or "list").strip().lower() not in {"list", "read"}
-    return operation != "help"
-
-
 def _invoke_with_identity(
     tools: MemoryTools,
     identity: RequestIdentity | None,
     fn: Callable[..., dict[str, Any]],
-    *,
-    policy_check: bool,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    if identity is not None and policy_check:
-        denied = _policy_denied(tools, identity)
-        if denied is not None:
-            return denied
+    # 0.15.14 (B1): the AgentPolicy gate is gone (its OpenClaw scenario died
+    # with v0.1.0 and the half-wiring only ever guarded writes); identity
+    # scoping for attribution remains.
     with request_identity_scope(identity):
         return fn(**kwargs)
 
@@ -298,8 +263,8 @@ def build_runtime() -> ServerBundle:
             "(127.0.0.1, ::1, or localhost); X-Mema-* headers are not authentication."
         )
     # Normalize the configured identity once: an unstripped config value would
-    # otherwise be stored verbatim as attribution and silently miss exact-match
-    # policy rules (header identities are strip-validated on the HTTP path).
+    # otherwise be stored verbatim as attribution while header identities are
+    # strip-validated on the HTTP path.
     configured_client = settings.client.strip()
     configured_agent_id = settings.agent_id.strip()
     if not configured_client or not configured_agent_id:
@@ -375,7 +340,6 @@ def build_runtime() -> ServerBundle:
         )
         return error or _invoke_with_identity(
             tools, identity, tools.memory,
-            policy_check=action.strip().lower() in {"update", "judge"},
             action=action, data=payload,
         )
 
@@ -393,7 +357,7 @@ def build_runtime() -> ServerBundle:
         )
         return error or _invoke_with_identity(
             tools, identity, tools.memory_review,
-            policy_check=False, view=view, data=payload,
+            view=view, data=payload,
         )
 
     @app.tool()
@@ -410,7 +374,7 @@ def build_runtime() -> ServerBundle:
         )
         return error or _invoke_with_identity(
             tools, identity, tools.memory_govern,
-            policy_check=action.strip().lower() != "help", action=action, data=payload,
+            action=action, data=payload,
         )
 
     @app.tool()
@@ -427,7 +391,7 @@ def build_runtime() -> ServerBundle:
         )
         return error or _invoke_with_identity(
             tools, identity, tools.memory_repair,
-            policy_check=_repair_policy_check(task, payload), task=task, data=payload,
+            task=task, data=payload,
         )
 
     return ServerBundle(app, tools)

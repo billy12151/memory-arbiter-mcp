@@ -22,12 +22,12 @@ def test_config_registry_only_describes_current_architecture() -> None:
     paths = {item["path"] for item in CONFIG_DESCRIPTORS}
     # 0.15.0 slim surface: the configurable file keys (0.15.6 added
     # include_size; 0.15.8 restored semantic_conflict.notice_sync_wait_ms;
-    # 0.15.14 added semantic_conflict.n_gpu_layers and removed
-    # semantic_conflict.max_notice_pairs).
+    # 0.15.14 added semantic_conflict.n_gpu_layers, removed
+    # semantic_conflict.max_notice_pairs and removed policy_path (B1).
     # Everything else froze into memory_arbiter.constants
     # and must NOT reappear here.
     assert paths == {
-        "db_path", "backup_jsonl", "policy_path", "client", "agent_id",
+        "db_path", "backup_jsonl", "client", "agent_id",
         "mcp.transport", "mcp.http.host", "mcp.http.port", "workspace", "isolation",
         "embedding.model_path", "embedding.auto_query", "embedding.auto_write",
         "semantic_conflict.enabled", "semantic_conflict.model_path",

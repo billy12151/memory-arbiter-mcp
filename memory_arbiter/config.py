@@ -14,28 +14,6 @@ _FALSE_STRINGS = {"0", "false", "no", "off"}
 
 
 @dataclass
-class AgentPolicy:
-    # Per-client overrides. Unlisted clients use ``default_enabled``.
-    client_defaults: dict[str, bool] = field(default_factory=dict)
-    default_enabled: bool = True
-    allow_agents: list[str] = field(default_factory=list)
-    deny_agents: list[str] = field(default_factory=list)
-
-    def enabled_for(self, client: str | None, agent_id: str | None) -> bool:
-        # Identity may be absent (no trusted request identity); an unknown
-        # caller is neither denied nor allowed by name and lands on the
-        # client/default policy.
-        if agent_id in self.deny_agents:
-            return False
-        if agent_id in self.allow_agents:
-            return True
-        normalized = (client or "").lower()
-        if normalized in self.client_defaults:
-            return self.client_defaults[normalized]
-        return self.default_enabled
-
-
-@dataclass
 class Settings:
     """Runtime settings — file-driven since 0.15.0.
 
@@ -46,7 +24,6 @@ class Settings:
 
     db_path: Path
     backup_jsonl: Path
-    policy_path: Path | None = None
     # No built-in identity: the MCP server refuses to start without an
     # explicitly configured client/agent_id (see server.build_runtime).
     client: str = ""
@@ -55,7 +32,6 @@ class Settings:
     mcp_transport: str = "stdio"
     mcp_http_host: str = "127.0.0.1"
     mcp_http_port: int = 8000
-    policy: AgentPolicy = field(default_factory=AgentPolicy)
     # Pointing at a GGUF model IS the intent to embed: no provider or
     # vec.enabled knob any more (one intent, one knob).
     embedding_model_path: Path | None = None
@@ -87,7 +63,7 @@ class Settings:
     # later response). Clamp matches the pre-0.15.0 semantics [0, 5000].
     semantic_conflict_notice_sync_wait_ms: int = NOTICE_SYNC_WAIT_MS
     config_warnings: list[str] = field(default_factory=list)
-    # Runtime-injected (never a file key, like config_warnings/policy): True
+    # Runtime-injected (never a file key, like config_warnings): True
     # when these settings were built by from_env from a real on-disk config.
     # The degraded-capability banner keys off it — directly-constructed
     # Settings (tests, embedded use) do not get per-response install nags.
@@ -110,6 +86,13 @@ class Settings:
                 )
         config_path = _find_config_file(config_warnings)
         cfg = load_config_file(config_path, config_warnings)
+        # B1 (0.15.14): AgentPolicy was removed (its OpenClaw per-agent
+        # whitelist scenario died long ago and the half-wiring only guarded
+        # writes). A configured policy_path must not fail silently.
+        if "policy_path" in cfg:
+            config_warnings.append(
+                "policy_path is no longer read (AgentPolicy was removed in 0.15.14); value ignored"
+            )
         cwd = Path.cwd()
 
         def section(name: str) -> dict[str, Any]:
@@ -234,7 +217,6 @@ class Settings:
         settings = cls(
             db_path=pick_env_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),
             backup_jsonl=pick_env_path("backup_jsonl", "MEMORY_ARBITER_BACKUP_JSONL", cwd / "memory_arbiter.backup.jsonl"),
-            policy_path=Path(str(cfg.get("policy_path"))).expanduser() if cfg.get("policy_path") else None,
             client=pick_env_str("client", "MEMORY_ARBITER_CLIENT", ""),
             agent_id=pick_env_str("agent_id", "MEMORY_ARBITER_AGENT_ID", ""),
             workspace=pick_str("workspace", "default"),
@@ -275,7 +257,6 @@ class Settings:
             ),
         )
         settings.config_warnings = config_warnings
-        settings.policy = load_policy(settings.policy_path, config_warnings)
         settings.config_file_loaded = config_path is not None
         return settings
 
@@ -301,26 +282,6 @@ _REMOVED_SEMANTIC_KEYS = frozenset({
     "min_pair_budget_ms", "max_evidence_units", "scan_enhance", "scan_max_pairs",
     "scan_budget_ms", "workspace_qwen_budget_ms",
 })
-
-
-def load_policy(path: Path | None, warnings: list[str] | None = None) -> AgentPolicy:
-    if not path or not path.exists():
-        return AgentPolicy()
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            raw: dict[str, Any] = json.load(fh)
-    except (json.JSONDecodeError, OSError) as exc:
-        # Malformed/missing policy must not crash startup — fall back to default allow-all.
-        if warnings is not None:
-            warnings.append(f"Policy file {path} parse failed: {exc}; using default allow-all policy.")
-        return AgentPolicy()
-    # parse_bool so a hand-edited JSON string like "false" isn't truthy (#5).
-    return AgentPolicy(
-        client_defaults={str(k): parse_bool(v, True) for k, v in (raw.get("client_defaults") or {}).items()},
-        default_enabled=parse_bool(raw.get("default_enabled", True), True),
-        allow_agents=list(raw.get("allow_agents") or []),
-        deny_agents=list(raw.get("deny_agents") or []),
-    )
 
 
 def parse_bool(val: Any, default: bool = False) -> bool:

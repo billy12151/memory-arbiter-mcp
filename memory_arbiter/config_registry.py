@@ -36,7 +36,6 @@ def _item(path: str, group: str, attr: str | None = None, default: Any = None) -
 CONFIG_DESCRIPTORS = [
     _item("db_path", "paths"),
     _item("backup_jsonl", "paths"),
-    _item("policy_path", "paths"),
     _item("client", "identity"),
     _item("agent_id", "identity"),
     _item("mcp.transport", "server", "mcp_transport", "stdio"),
