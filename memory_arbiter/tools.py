@@ -1750,6 +1750,17 @@ class MemoryTools:
                     "semantic-local extra); install numpy to run it"
                 ),
             }, ok=False)
+        # Fresh-boot coverage: the first run after an upgrade (before any
+        # write) has no summary vectors yet — the write-path publish and the
+        # startup backfill both ride the first embedder load. Ensure that load
+        # happens here so the weekly task never no-ops its first round.
+        if self.db.missing_summary_vec_rows():
+            embedder, _warnings = self._ensure_embedder()
+            if embedder is not None:
+                try:
+                    self._backfill_memory_summary_vectors(embedder)
+                except Exception:
+                    pass
         vectors = self.db.all_summary_vectors()
         if not vectors:
             return self.db.state.response({

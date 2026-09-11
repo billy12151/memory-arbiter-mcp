@@ -171,6 +171,24 @@ def test_move_stales_the_notice(vec_tools: MemoryTools) -> None:
     )
 
 
+def test_anomaly_scan_self_heals_missing_vectors(vec_tools: MemoryTools) -> None:
+    """Fresh-boot coverage: the task itself backfills missing summary vectors
+    (upgrade-before-first-write must not no-op the first weekly round)."""
+    tools = vec_tools
+    _beta_clan(tools, 2)
+    _alpha_clan(tools, 2)
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    with tools.db.write_transaction() as conn:
+        conn.execute("DELETE FROM memory_summary_vec")
+
+    result = tools.memory_repair("scan_workspace_anomalies", {})
+    assert result["ok"] is True, result
+    assert result["data"]["checked"] == 4, "task must backfill and vote over the full set"
+    with tools.db.connection() as conn:
+        covered = int(conn.execute("SELECT COUNT(*) FROM memory_summary_vec").fetchone()[0])
+    assert covered == 4
+
+
 def test_anomaly_scan_requires_numpy(vec_tools: MemoryTools, monkeypatch: pytest.MonkeyPatch) -> None:
     import builtins
 
