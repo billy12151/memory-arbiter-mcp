@@ -5,6 +5,14 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.15.13.1] — 2026-09-11
+
+**Post-release corrections to 0.15.13 (adversarial round 2 + owner rule), shipped minutes after the original so git main and the PyPI artifact agree.** No behavior beyond the one fix below changes; the 0.15.13 wheel remains usable for anyone who grabbed it in between.
+
+- **The workspace anomaly check self-heals missing summary vectors.** First run after upgrading, before any write/search had loaded the embedder, found an empty `memory_summary_vec` and returned "backfill pending" — the weekly task's first round would have been a no-op. The task now probes `missing_summary_vec_rows()`, ensures the embedder load (which runs the startup backfill), and backfills explicitly — idempotent, so a fresh process pays the one-time embed cost and votes over the full set.
+- **Real-model tests release their models in teardown (owner rule, 2026-09-11).** Any test loading a real GGUF model must `unload`/`close`, drop the references, and `gc.collect()` — finalization left to interpreter exit crashes in `ggml_metal_device_free`: pytest reports all green while the process exits 134, poisoning the release gate's and CI's exit-code checks. The C6 e2e finalizer and the write-time e2e `real_backend` fixture both comply; full suite now exits 0 with zero GGML asserts.
+- **Scan loop micro-hoist (round-2 review):** the per-anchor `pairing_scope`/suspect-bucket derivation moved out of the per-unit loop (it rebuilt a set per evidence unit).
+
 ## [0.15.13] — 2026-09-11
 
 **Scan capability repairs + two-layer workspace governance (mema #963, owner-approved 2026-09-11): the four workbuddy first-round blockers each land as a first-class change — page responses slim by default, dismissed pairs stay dismissed across evidence slices, cross-bucket pairs stop being enumerated into a dead loop, and misplaced memories get a millisecond-level weekly health check — plus scan-page pacing with a doctor broken-chain alarm, triage counters, and a real-model seven-step e2e release gate.** The five security fixes landed on main after 0.15.12 ship with this release (section below); they had not passed a full release gate until now.
