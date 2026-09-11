@@ -315,8 +315,14 @@ class EvidencePipeline:
                 raise RuntimeError("semantic backend unavailable mid-pair")
             try:
                 # Once a pair starts, only the inference hard timeout may stop
-                # it. The job budget is a fairness gate between pairs.
-                return backend.classify_pair(left_env, right_env, deadline_monotonic=None)
+                # it. The job budget is a fairness gate between pairs; the
+                # retry gate (A6) is the same fairness idea one level down:
+                # with another job queued, a protocol-invalid output fails
+                # fast instead of doubling its own latency.
+                return backend.classify_pair(
+                    left_env, right_env, deadline_monotonic=None,
+                    retry_allowed=not self._semantic_worker.has_pending_jobs(),
+                )
             except TypeError:
                 # Test/legacy backends implementing the original two-arg protocol.
                 return backend.classify_pair(left_env, right_env)

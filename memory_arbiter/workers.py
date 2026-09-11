@@ -301,6 +301,12 @@ class SemanticConflictWorker:
             )
             return oldest + max(0.0, float(timeout_seconds))
 
+    def has_pending_jobs(self) -> bool:
+        """A6 retry gate: True while another semantic job is queued — the
+        in-flight pair classification should then skip its feedback retry."""
+        with self._cond:
+            return bool(self._pending)
+
     def pause(self) -> None:
         with self._cond:
             self._paused = True

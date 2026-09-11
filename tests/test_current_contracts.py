@@ -21,7 +21,8 @@ def write(tool: MemoryTools, content: str) -> int:
 def test_config_registry_only_describes_current_architecture() -> None:
     paths = {item["path"] for item in CONFIG_DESCRIPTORS}
     # 0.15.0 slim surface: exactly the 20 configurable file keys (0.15.6
-    # added include_size; 0.15.8 restored semantic_conflict.notice_sync_wait_ms).
+    # added include_size; 0.15.8 restored semantic_conflict.notice_sync_wait_ms;
+    # 0.15.14 added semantic_conflict.n_gpu_layers).
     # Everything else froze into memory_arbiter.constants
     # and must NOT reappear here.
     assert paths == {
@@ -29,7 +30,8 @@ def test_config_registry_only_describes_current_architecture() -> None:
         "mcp.transport", "mcp.http.host", "mcp.http.port", "workspace", "isolation",
         "embedding.model_path", "embedding.auto_query", "embedding.auto_write",
         "semantic_conflict.enabled", "semantic_conflict.model_path",
-        "semantic_conflict.on_write", "semantic_conflict.max_notice_pairs",
+        "semantic_conflict.on_write", "semantic_conflict.n_gpu_layers",
+        "semantic_conflict.max_notice_pairs",
         "semantic_conflict.notice_sync_wait_ms",
         "update_check.enabled", "include_size",
     }

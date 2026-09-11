@@ -6,6 +6,7 @@ semantic notices still require an agent to read both memories before acting.
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
@@ -56,26 +57,18 @@ _STOPWORDS = {
 
 PAIR_PROMPT_VERSION = "pair-v6"
 
-_PAIR_RESPONSE_FORMAT = {
-    "type": "json_object",
-    "schema": {
-        "type": "object",
-        "properties": {
-            # maxLength mirrors the protocol caps (_MAX_ATTRIBUTE_CHARS=80 /
-            # _MAX_VALUE_CHARS=64) at the decoding level: llama.cpp enforces
-            # string maxLength in the grammar, so a copy-prone 0.5B cannot
-            # emit an over-limit value in the first place (the two 2026-09
-            # qwen_invalid_output degradations). Same precedent as
-            # _WORKSPACE_RESPONSE_FORMAT's evidence maxLength=200.
-            "attribute_a": {"type": "string", "maxLength": 80},
-            "value_a": {"type": "string", "maxLength": 64},
-            "attribute_b": {"type": "string", "maxLength": 80},
-            "value_b": {"type": "string", "maxLength": 64},
-        },
-        "required": ["attribute_a", "value_a", "attribute_b", "value_b"],
-        "additionalProperties": False,
-    },
-}
+# A2 (0.15.14): the pair path decodes grammar-free — response_format was
+# removed (its per-token grammar evaluation halved decode throughput:
+# 45 vs 86 tok/s; eval-grammar-free-matrix 2026-09-11, n=62). The value/
+# attribute caps it enforced at decode level are post-hoc now: L3 truncation
+# in classify_pair plus the grounding gates. Assistant-prefix seeding (the
+# matrix's L2) was tried in integration and REJECTED by the real-model e2e
+# gate: on the Tier1 calibration pair the seeded reverse direction
+# deterministically extracted misaligned fragments ("高 ROI 候选分析" vs
+# "重排版") — the matrix measured protocol validity, not gate quality.
+# Plain chat completion without response_format (L0) keeps both: 62/62
+# validity and −70% wall clock in the matrix, and identical gate behaviour
+# on the calibration pair.
 
 _PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
@@ -89,8 +82,11 @@ attribute 是两侧正在回答的最小可比较问题，不包含具体值、�
 # broke side attribution on the Tier1 calibration pair (the 0.5B adopted
 # positional heuristics from the example, e.g. copying the B-side opening into
 # value_a) — same lesson as the rejected "compress to the core value" wording.
-# v6 instead enforces the value/attribute caps at the decoding level
-# (_PAIR_RESPONSE_FORMAT maxLength) and adds one feedback retry.
+# Since 0.15.14 (A2) decoding is grammar-free: no response_format (its
+# per-token grammar evaluation halved decode throughput); the value/attribute
+# caps are enforced post-hoc (L3 truncation + grounding gates). One feedback
+# retry is kept for schema/truncation/empty-field failures; a queue gate (A6)
+# may skip it while other requests wait.
 
 
 _WORKSPACE_RESPONSE_FORMAT = {
@@ -193,7 +189,9 @@ class PairGateResult:
 class SemanticBackend(Protocol):
     def classify_pair(
         self, left: dict[str, Any], right: dict[str, Any],
-        *, deadline_monotonic: float | None = None,
+        *,
+        deadline_monotonic: float | None = None,
+        retry_allowed: bool = True,
     ) -> ModelSignal:
         ...
 
@@ -628,8 +626,9 @@ def _bounded_short_value(value: str, quote: str) -> bool:
     if re.search(r"[。！？!?；;](?:[\"'”’）)]*)$", compact):
         return False
     # Continuation marks at the end (，、：；—) are the same signal from the
-    # decoding-level maxLength cap: the grammar guillotines an over-long copy
-    # at exactly 64 chars, which often lands mid-clause (observed live:
+    # 64-char hard cut: the cap (grammar era: decode-level maxLength; since
+    # 0.15.14: L3 truncation) guillotines an over-long copy at exactly 64
+    # chars, which often lands mid-clause (observed live:
     # "…不替 Agent 挑重要命中，").
     if re.search(r"[，、：；—…]$", compact):
         return False
@@ -880,10 +879,11 @@ def _pair_retry_feedback(strategy: str, error: str) -> str:
     and rejected: it flattened opposing values into equality)."""
     if strategy == "over_limit":
         field_name = error.removeprefix("invalid_")
-        # The strategy name predates the decoding-level maxLength cap: with the
-        # grammar enforcing length, invalid_<field> can now only mean the field
-        # came back empty/pure-whitespace or carrying an embedded newline —
-        # name that cause, not a length overflow that can no longer happen.
+        # The strategy name predates grammar-free decoding: over-long VALUES no
+        # longer reach the retry (L3 truncation intercepts them in
+        # classify_pair); invalid_<field> here means an over-long ATTRIBUTE, or
+        # a value that came back empty/pure-whitespace/with an embedded
+        # newline (L3 refuses those). The wording names the field contract.
         if field_name.startswith("attribute_"):
             return (
                 f"上次输出的 {field_name} 为空、是纯空白或含换行。attribute 是两侧正在回答的"
@@ -905,12 +905,64 @@ def _pair_retry_feedback(strategy: str, error: str) -> str:
     )
 
 
+def _l3_truncated_signal(raw: str) -> ModelSignal | None:
+    """L3 post-hoc leniency (A2, 0.15.14): a value field over the 64-char cap
+    is cut to the cap instead of invalidating the whole output — this replaces
+    the grammar-era decoding-level maxLength. Only the exact-four-field shape
+    with cuttable values qualifies; anything else (extra/missing fields, bad
+    attributes, embedded newlines) stays on the retry path. Attributes are
+    never truncated: an over-long attribute is a malformed question, not a
+    value the evidence supports."""
+    snippet = _extract_first_json_object(raw or "")
+    if not snippet:
+        return None
+    try:
+        parsed = json.loads(snippet)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or set(parsed) != _EXTRACTION_FIELDS:
+        return None
+    fields: dict[str, str] = {}
+    for name in ("attribute_a", "attribute_b"):
+        value = parsed.get(name)
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if not value or len(value) > _MAX_ATTRIBUTE_CHARS or "\n" in value or "\r" in value:
+            return None
+        fields[name] = value
+    cut_any = False
+    for name in ("value_a", "value_b"):
+        value = parsed.get(name)
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if not value or "\n" in value or "\r" in value:
+            return None
+        if len(value) > _MAX_VALUE_CHARS:
+            value = value[:_MAX_VALUE_CHARS].strip()
+            cut_any = True
+            if not value:
+                return None
+        fields[name] = value
+    if not cut_any:
+        return None
+    return model_signal_from_text(json.dumps(fields, ensure_ascii=False))
+
+
 class LocalGGUFSemanticBackend:
-    def __init__(self, model_path: Path, *, n_ctx: int = SEMANTIC_N_CTX, n_threads: int = 4, n_batch: int = 128):
+    def __init__(
+        self, model_path: Path, *, n_ctx: int = SEMANTIC_N_CTX, n_threads: int = 4,
+        n_batch: int = 128, n_gpu_layers: int = 0,
+    ) -> None:
         self.model_path = Path(model_path).expanduser()
         self.n_ctx = int(n_ctx)
         self.n_threads = int(n_threads)
         self.n_batch = int(n_batch)
+        # 0 = CPU-only (llama-cpp-python's own default); -1 = full offload.
+        # A3 (0.15.14): GPU helps prefill regardless of decode length (~1.1x
+        # mean on short decodes, 1.15-1.25x on long ones — eval 2026-09-11).
+        self.n_gpu_layers = int(n_gpu_layers)
         self._llm: Any = None
         self._cond = threading.Condition(threading.Lock())
         self._load_lock = threading.Lock()
@@ -924,6 +976,7 @@ class LocalGGUFSemanticBackend:
         self._generation = 0
         self._pair_retried = 0
         self._pair_retry_recovered = 0
+        self._pair_l3_truncated = 0
 
     def _build_llm(self) -> Any:
         if not self.model_path.exists():
@@ -933,6 +986,7 @@ class LocalGGUFSemanticBackend:
             "model_path": str(self.model_path),
             "n_ctx": self.n_ctx,
             "n_threads": self.n_threads,
+            "n_gpu_layers": self.n_gpu_layers,
             "verbose": False,
         }
         if self.n_batch > 0:
@@ -1050,7 +1104,9 @@ class LocalGGUFSemanticBackend:
 
     def classify_pair(
         self, left: dict[str, Any], right: dict[str, Any],
-        *, deadline_monotonic: float | None = None,
+        *,
+        deadline_monotonic: float | None = None,
+        retry_allowed: bool = True,
     ) -> ModelSignal:
         llm: Any | None = None
         acquired = False
@@ -1059,21 +1115,28 @@ class LocalGGUFSemanticBackend:
             if llm is None:
                 return ModelSignal(False, "backend_unavailable", None, "", None, "disabled")
             acquired = True
-            # max_tokens: 120 truncated the grammar-constrained JSON whenever
-            # extracted values ran long (protocol allows 80-char attributes /
-            # 64-char values) — the top source of qwen_invalid_output. 384
-            # covers the protocol worst case (~330 tokens). "</s>" was a dead
-            # stop: Qwen2.5's EOS (<|im_end|>) comes from the chat template.
+            # Grammar-free decoding since 0.15.14 (A2/L0): plain chat
+            # completion WITHOUT response_format — the per-token grammar
+            # evaluation halved decode throughput; the caps it used to enforce
+            # are post-hoc now (L3 truncation + grounding). Seeding (the
+            # matrix's L2) was rejected in integration — see the PAIR_PROMPT
+            # note. max_tokens 384 covers the protocol worst case (~330
+            # tokens); "</s>" was a dead stop: Qwen2.5's EOS (<|im_end|>)
+            # comes from the chat template.
             max_tokens = 384
-            messages = [
+            messages: list[dict[str, str]] = [
                 {"role": "system", "content": _PAIR_PROMPT},
                 {"role": "user", "content": f"输入: {self._pair_text(left, right)}\n输出:"},
             ]
+            # A6 queue gate: with other requests waiting, one attempt only —
+            # an invalid output then fails fast instead of doubling the wait
+            # of everything behind it.
+            attempts = 1 if not retry_allowed else max(1, SEMANTIC_PAIR_MAX_ATTEMPTS)
             retried = False
             signal: ModelSignal | None = None
             prompt_tokens_total = 0
             generated_tokens_total = 0
-            for attempt in range(max(1, SEMANTIC_PAIR_MAX_ATTEMPTS)):
+            for attempt in range(attempts):
                 with self._infer_lock:
                     out = llm.create_chat_completion(
                         messages=messages,
@@ -1081,17 +1144,22 @@ class LocalGGUFSemanticBackend:
                         temperature=0.0,
                         top_p=0.9,
                         stop=["\n\n"],
-                        response_format=_PAIR_RESPONSE_FORMAT,
                     )
                 usage = out.get("usage") or {}
                 prompt_tokens_total += int(usage.get("prompt_tokens") or 0)
                 generated_tokens_total += int(usage.get("completion_tokens") or 0)
-                raw = out["choices"][0]["message"]["content"]
+                raw = str(out["choices"][0]["message"]["content"] or "")
                 signal = model_signal_from_text(raw)
                 strategy = None
                 if signal.candidate_type in {"invalid_json", "invalid_schema"}:
-                    strategy = _pair_retry_strategy(signal.error)
-                if strategy is None or attempt + 1 >= max(1, SEMANTIC_PAIR_MAX_ATTEMPTS):
+                    l3_signal = _l3_truncated_signal(raw)
+                    if l3_signal is not None:
+                        with self._cond:
+                            self._pair_l3_truncated += 1
+                        signal = l3_signal
+                    else:
+                        strategy = _pair_retry_strategy(signal.error)
+                if strategy is None or attempt + 1 >= attempts:
                     if retried and signal.candidate_type == "attribute_value_extraction":
                         with self._cond:
                             self._pair_retry_recovered += 1
@@ -1107,7 +1175,7 @@ class LocalGGUFSemanticBackend:
                 if strategy == "truncated":
                     retry_max_tokens = SEMANTIC_PAIR_RETRY_MAX_TOKENS
                     retry_messages = [
-                        {"role": "system", "content": _PAIR_PROMPT},
+                        messages[0],
                         {"role": "user", "content": f"输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"},
                         {"role": "assistant", "content": raw},
                         {"role": "user", "content": feedback},
@@ -1263,11 +1331,12 @@ class LocalGGUFSemanticBackend:
                 self._release_llm_for_call()
 
     def pair_retry_stats(self) -> dict[str, int]:
-        """Retry counters for the parent process to piggyback on responses."""
+        """Retry/L3 counters for the parent process to piggyback on responses."""
         with self._cond:
             return {
                 "pair_retried": self._pair_retried,
                 "pair_retry_recovered": self._pair_retry_recovered,
+                "pair_l3_truncated": self._pair_l3_truncated,
             }
 
     def status(self) -> dict[str, Any]:
@@ -1285,9 +1354,11 @@ class LocalGGUFSemanticBackend:
                 "disabled": self._disabled,
                 "generation": self._generation,
                 "n_ctx": self.n_ctx,
+                "n_gpu_layers": self.n_gpu_layers,
                 "prompt_version": PAIR_PROMPT_VERSION,
                 "pair_retried": self._pair_retried,
                 "pair_retry_recovered": self._pair_retry_recovered,
+                "pair_l3_truncated": self._pair_l3_truncated,
             }
 
 
@@ -1298,6 +1369,7 @@ def _semantic_inference_process(conn: Any, config: dict[str, Any]) -> None:
         n_ctx=int(config["n_ctx"]),
         n_threads=int(config["n_threads"]),
         n_batch=int(config["n_batch"]),
+        n_gpu_layers=int(config.get("n_gpu_layers", 0)),
     )
     try:
         while True:
@@ -1310,11 +1382,14 @@ def _semantic_inference_process(conn: Any, config: dict[str, Any]) -> None:
                     backend.load()
                     result: Any = {"loaded": True}
                 elif command == "classify_pair":
-                    result = backend.classify_pair(request["left"], request["right"])
+                    result = backend.classify_pair(
+                        request["left"], request["right"],
+                        retry_allowed=bool(request.get("retry_allowed", True)),
+                    )
                     conn.send({
                         "ok": True,
                         "result": result,
-                        # Piggyback retry counters so the parent's status()
+                        # Piggyback retry/L3 counters so the parent's status()
                         # exposes them without a separate (potentially
                         # blocking) status RPC. Envelope keys are additive.
                         "backend_status": backend.pair_retry_stats(),
@@ -1332,6 +1407,17 @@ def _semantic_inference_process(conn: Any, config: dict[str, Any]) -> None:
     except (EOFError, BrokenPipeError, OSError):
         return
     finally:
+        # A3 (0.15.14): llama-cpp-python 0.3.34 loads Metal buffers that
+        # SIGABRT the process inside __cxa_finalize on interpreter exit unless
+        # the model is explicitly freed first (verified mitigation: unload +
+        # del + gc — see the 0.15.13.1 teardown rule and llama-cpp-metal-exit
+        # crash notes). SIGTERM termination skips destructors and is immune.
+        try:
+            backend.unload()
+        except Exception:
+            pass
+        del backend
+        gc.collect()
         conn.close()
 
 
@@ -1345,6 +1431,7 @@ class IsolatedGGUFSemanticBackend:
         n_ctx: int = SEMANTIC_N_CTX,
         n_threads: int = 4,
         n_batch: int = 128,
+        n_gpu_layers: int = 0,
         hard_timeout_ms: int = 30_000,
         load_timeout_ms: int = 120_000,
         process_target: Any = _semantic_inference_process,
@@ -1353,6 +1440,7 @@ class IsolatedGGUFSemanticBackend:
         self.n_ctx = int(n_ctx)
         self.n_threads = int(n_threads)
         self.n_batch = int(n_batch)
+        self.n_gpu_layers = int(n_gpu_layers)
         self.hard_timeout_ms = max(1, int(hard_timeout_ms))
         self.load_timeout_ms = max(1, int(load_timeout_ms))
         self._process_target = process_target
@@ -1393,6 +1481,7 @@ class IsolatedGGUFSemanticBackend:
                 "n_ctx": self.n_ctx,
                 "n_threads": self.n_threads,
                 "n_batch": self.n_batch,
+                "n_gpu_layers": self.n_gpu_layers,
             }),
             name="memory-arbiter-semantic-inference",
             daemon=True,
@@ -1594,12 +1683,23 @@ class IsolatedGGUFSemanticBackend:
 
     def classify_pair(
         self, left: dict[str, Any], right: dict[str, Any],
-        *, deadline_monotonic: float | None = None,
+        *,
+        deadline_monotonic: float | None = None,
+        retry_allowed: bool = True,
     ) -> ModelSignal:
         try:
+            # A6 queue gate, scheduler half: when other requests already wait
+            # on this single-flight scheduler, the child runs one attempt only
+            # (the caller's retry_allowed carries the semantic-worker job
+            # queue — the other half of the same gate).
+            with self._schedule_cond:
+                scheduler_busy = any(
+                    len(queue) for queue in self._schedule_queues.values()
+                )
             result = self._request(
                 "classify_pair", left=left, right=right,
                 deadline_monotonic=deadline_monotonic,
+                retry_allowed=retry_allowed and not scheduler_busy,
             )
             return result if isinstance(result, ModelSignal) else ModelSignal(False, "backend_error", None, "", None, "invalid child response")
         except Exception as exc:
@@ -1683,11 +1783,13 @@ class IsolatedGGUFSemanticBackend:
                 # lets an operator confirm a restarted host really runs the
                 # widened context and the new prompt without guessing.
                 "n_ctx": self.n_ctx,
+                "n_gpu_layers": self.n_gpu_layers,
                 "prompt_version": PAIR_PROMPT_VERSION,
-                # Retry counters piggybacked from the child's classify_pair
+                # Retry/L3 counters piggybacked from the child's classify_pair
                 # responses; absent until the first pair completes.
                 "pair_retried": child_status.get("pair_retried"),
                 "pair_retry_recovered": child_status.get("pair_retry_recovered"),
+                "pair_l3_truncated": child_status.get("pair_l3_truncated"),
             }
 
 

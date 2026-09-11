@@ -48,6 +48,7 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.enabled", "semantic", "semantic_conflict_enabled", False),
     _item("semantic_conflict.model_path", "semantic", "semantic_conflict_model_path"),
     _item("semantic_conflict.on_write", "semantic", "semantic_conflict_on_write", "async"),
+    _item("semantic_conflict.n_gpu_layers", "semantic", "semantic_conflict_gpu_layers", -1),
     _item("semantic_conflict.max_notice_pairs", "semantic", "semantic_conflict_max_notice_pairs", 2),
     _item("semantic_conflict.notice_sync_wait_ms", "semantic", "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS),
     _item("update_check.enabled", "update", "update_check_enabled", True),

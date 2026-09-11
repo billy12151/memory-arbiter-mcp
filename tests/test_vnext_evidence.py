@@ -157,9 +157,9 @@ def test_write_notice_requires_consistent_bidirectional_qwen_mapping() -> None:
 
 
 def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> None:
+    from memory_arbiter import semantic_conflict as sc
     from memory_arbiter.semantic_conflict import (
         LocalGGUFSemanticBackend, PAIR_PROMPT_VERSION, _PAIR_PROMPT,
-        _PAIR_RESPONSE_FORMAT,
     )
 
     text = LocalGGUFSemanticBackend._pair_text(
@@ -177,18 +177,11 @@ def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> 
     assert '"__unknown__"' in _PAIR_PROMPT
     assert "设为 null" not in _PAIR_PROMPT
     # pair-v6: prompt text stays byte-identical to pair-v5 (few-shot variants
-    # regressed side attribution on the calibration pair and were rejected);
-    # the caps moved to the decoding-level grammar instead.
+    # regressed side attribution on the calibration pair and were rejected).
     assert "例2" not in _PAIR_PROMPT
-    schema = _PAIR_RESPONSE_FORMAT["schema"]
-    assert set(schema["required"]) == {
-        "attribute_a", "value_a", "attribute_b", "value_b",
-    }
-    assert schema["additionalProperties"] is False
-    assert schema["properties"]["value_a"]["maxLength"] == 64
-    assert schema["properties"]["value_b"]["maxLength"] == 64
-    assert schema["properties"]["attribute_a"]["maxLength"] == 80
-    assert schema["properties"]["attribute_b"]["maxLength"] == 80
+    # 0.15.14 (A2/L0): the pair path is grammar-free — the response_format
+    # schema is gone (caps are post-hoc: L3 truncation + grounding).
+    assert not hasattr(sc, "_PAIR_RESPONSE_FORMAT")
 
 
 # The two live qwen_invalid_output samples (2026-09-08 17:31 / 2026-09-09
@@ -211,7 +204,9 @@ _VALID_EXTRACTION_JSON = (
 
 
 class _ScriptedLLM:
-    """Fake chat-completion endpoint replaying canned raw outputs in order."""
+    """Fake chat-completion endpoint replaying canned raw outputs in order.
+    Since 0.15.14 (A2/L0) the product calls it WITHOUT response_format
+    (grammar-free decode); caps are enforced post-hoc by L3 truncation."""
 
     def __init__(self, outputs: list[str]) -> None:
         self._outputs = list(outputs)
@@ -220,7 +215,10 @@ class _ScriptedLLM:
     def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         raw = self._outputs.pop(0) if len(self._outputs) > 1 else self._outputs[0]
-        return {"choices": [{"message": {"content": raw}}]}
+        return {
+            "choices": [{"message": {"content": raw}}],
+            "usage": {"prompt_tokens": 700, "completion_tokens": 50},
+        }
 
 
 def _backend_with_scripted_llm(
@@ -234,23 +232,27 @@ def _backend_with_scripted_llm(
     return backend, llm
 
 
-def test_pair_retry_recovers_over_limit_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Live sample 1 (valid JSON, 76-char value_b): one feedback retry with the
-    original quotes and token budget, naming the offending field."""
+def test_pair_over_limit_value_l3_truncates_without_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live sample 1 (valid JSON, 76-char value_b): since 0.15.14 the caps are
+    post-hoc (A2/L3) — the over-long value is cut to 64 chars in place instead
+    of invalidating the output and costing a feedback retry. One call total."""
+    import json as _json
     backend, llm = _backend_with_scripted_llm(
-        monkeypatch, [_LIVE_SAMPLE_OVER_LIMIT, _VALID_EXTRACTION_JSON],
+        monkeypatch, [_LIVE_SAMPLE_OVER_LIMIT],
     )
     signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
     assert signal.candidate_type == "attribute_value_extraction"
-    assert len(llm.calls) == 2
-    retry_messages = llm.calls[1]["messages"]
-    assert llm.calls[1]["max_tokens"] == 384  # budget unchanged for over-limit
-    assert retry_messages[2] == {"role": "assistant", "content": _LIVE_SAMPLE_OVER_LIMIT}
-    assert retry_messages[3]["role"] == "user"
-    assert "value_b" in retry_messages[3]["content"]
-    assert "64" in retry_messages[3]["content"]
-    assert backend._pair_retried == 1
-    assert backend._pair_retry_recovered == 1
+    assert len(llm.calls) == 1
+    original = _json.loads(_LIVE_SAMPLE_OVER_LIMIT)
+    assert len(original["value_b"]) > 64  # the live sample really was over cap
+    assert signal.parsed is not None
+    assert len(signal.parsed["value_b"]) == 64
+    assert signal.parsed["value_b"] == original["value_b"][:64]
+    assert signal.parsed["value_a"] == original["value_a"]  # within-cap fields untouched
+    assert signal.retried is False
+    assert backend._pair_retried == 0
+    assert backend._pair_l3_truncated == 1
+    assert backend._pair_retry_recovered == 0
 
 
 def test_pair_retry_shrinks_quotes_after_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,6 +272,8 @@ def test_pair_retry_shrinks_quotes_after_truncation(monkeypatch: pytest.MonkeyPa
     assert "证" * 241 not in retry["messages"][1]["content"]
     assert len(first_user) > len(retry["messages"][1]["content"])
     assert retry["messages"][2] == {"role": "assistant", "content": _LIVE_SAMPLE_TRUNCATED}
+    # A2/L0: the grammar-free call carries no response_format.
+    assert "response_format" not in retry
     assert backend._pair_retried == 1
     assert backend._pair_retry_recovered == 1
 
@@ -349,11 +353,12 @@ def test_pair_retry_skipped_when_window_cannot_fit(monkeypatch: pytest.MonkeyPat
     assert backend._pair_retried == 0
 
 
-# Guillotine detection: the decoding-level maxLength cap hard-cuts an over-long
-# copy at exactly 64 chars; the cut fragment is an exact substring of the quote
-# and otherwise passes every gate. Those heads must fail grounding (adversarial
-# review P1: two exact-copy fragments built from the live evidence produce a
-# notice_ready with beheaded-prose values under the cap alone).
+# Guillotine detection: a 64-char hard cut of an over-long copy (grammar era:
+# decode-level maxLength; since 0.15.14: L3 truncation) leaves the fragment an
+# exact substring of the quote that otherwise passes every gate. Those heads
+# must fail grounding (adversarial review P1: two exact-copy fragments built
+# from the live evidence produce a notice_ready with beheaded-prose values
+# under the cap alone).
 _GUILOTINE_QUOTE_A = (
     "永不截断：合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
     "（owner 拍板：服务端不替 Agent 挑重要命中，法规 RAG 漏但书是系统性偏差）"

@@ -76,6 +76,11 @@ class Settings:
     semantic_conflict_enabled: bool = False
     semantic_conflict_model_path: Path | None = None
     semantic_conflict_on_write: str = "async"
+    # A3 (0.15.14): Qwen offload layer count. -1 = full Metal offload (the
+    # default since grammar-free decoding restored GPU value: prefill speedup
+    # ~1.1-1.25x), 0 = CPU-only, N = first N layers. Ignored where no GPU
+    # backend is compiled in.
+    semantic_conflict_gpu_layers: int = -1
     semantic_conflict_max_notice_pairs: int = 2
     # 0.15.8: restored as a config key (was frozen 5000 in 0.15.0). Default
     # 3000; 0 = the write response never waits for the post-commit check
@@ -250,6 +255,10 @@ class Settings:
             ),
             semantic_conflict_model_path=Path(str(semantic_model_raw)).expanduser() if semantic_model_raw else None,
             semantic_conflict_on_write=semantic_on_write,
+            semantic_conflict_gpu_layers=clamp_int(
+                pick_int_field(semantic_cfg.get("n_gpu_layers"), -1, name="semantic_conflict.n_gpu_layers"),
+                -1, 999, name="semantic_conflict.n_gpu_layers", warnings=config_warnings,
+            ),
             semantic_conflict_max_notice_pairs=clamp_int(
                 pick_int_field(semantic_cfg.get("max_notice_pairs"), 2, name="semantic_conflict.max_notice_pairs"),
                 1, 3, name="semantic_conflict.max_notice_pairs", warnings=config_warnings,

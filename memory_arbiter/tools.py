@@ -1113,6 +1113,7 @@ class MemoryTools:
                 n_ctx=SEMANTIC_N_CTX,
                 n_threads=SEMANTIC_N_THREADS,
                 n_batch=SEMANTIC_N_BATCH,
+                n_gpu_layers=self.settings.semantic_conflict_gpu_layers,
                 hard_timeout_ms=SEMANTIC_INFERENCE_TIMEOUT_MS,
                 load_timeout_ms=SEMANTIC_LOAD_TIMEOUT_MS,
             )
