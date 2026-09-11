@@ -390,6 +390,7 @@ class EvidenceStore:
             # versions/evidence to be reconsidered.
             recorded_candidate_statuses: dict[str, str] = {}
             active_group_members: list[frozenset[str]] = []
+            dismissed_group_members: list[frozenset[str]] = []
             for row in conn.execute(
                 "SELECT status,candidate_key_hash,member_versions FROM conflicts "
                 "WHERE status IN ('open','applying','not_a_conflict')"
@@ -406,8 +407,18 @@ class EvidenceStore:
                     )
                 except (TypeError, ValueError, KeyError, json.JSONDecodeError):
                     continue
+                # C2 (0.15.13): a dismissed not_a_conflict pair now suppresses
+                # by MEMORY-PAIR @version, not only by its exact evidence
+                # snapshot. The same pair re-enumerated through different unit
+                # slices (new hashes) used to resurface forever. Version
+                # pinning stays: an edited memory lifts the suppression and
+                # the pair is reconsidered. open/applying stay a separate
+                # set so a pair with BOTH an open group and a dismissal
+                # keeps the open group's precedence.
                 if refs and status in {"open", "applying"}:
                     active_group_members.append(refs)
+                elif refs and status == "not_a_conflict":
+                    dismissed_group_members.append(refs)
             candidates: dict[tuple[int, int], dict[str, Any]] = {}
             # Spec §7.1 wide gate: similarity-only pairs dropped from the
             # default candidate set stay available as a bounded pool for the
@@ -514,6 +525,8 @@ class EvidenceStore:
                                 recorded = recorded_candidate_statuses.get(candidate_hash)
                                 if recorded is None and not any(
                                     member_refs <= group_members for group_members in active_group_members
+                                ) and not any(
+                                    member_refs <= group_members for group_members in dismissed_group_members
                                 ):
                                     hit_text_ignored = str(hit.get("text") or "")
                                     # Re-hitting an already-pooled pair is a
@@ -603,6 +616,13 @@ class EvidenceStore:
                             member_refs <= group_members for group_members in active_group_members
                         ):
                             recorded_status = "open"
+                        if recorded_status is None and any(
+                            member_refs <= group_members for group_members in dismissed_group_members
+                        ):
+                            # C2: pair@version dismissal. Counted as dismissed,
+                            # never silently folded into filtered_open — the
+                            # counter is the convergence observability face.
+                            recorded_status = "not_a_conflict"
                         if recorded_status is not None:
                             if recorded_status == "not_a_conflict":
                                 filtered_dismissed += 1
