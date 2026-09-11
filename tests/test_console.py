@@ -440,7 +440,12 @@ def test_overview_counts_and_doctor_agree_on_unresolved_conflicts(tmp_path: Path
     with api.tools.db.connection() as conn:
         report = run_all_checks(conn, api.tools.settings)
     backlog = next(f for f in report.findings if f.check_id == "conflicts.backlog")
-    assert backlog.evidence == {"open": 1, "applying": 1}
+    # C4 (0.15.13): the triage counters ride the same evidence block.
+    assert backlog.evidence == {
+        "open": 1, "applying": 1,
+        "not_a_conflict_total": 0, "not_a_conflict_this_week": 0,
+        "latest_triage_at": None,
+    }
 
 
 # ── from test_console_server.py ──

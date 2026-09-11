@@ -185,7 +185,10 @@ def test_doctor_backlog_counts_open_and_applying(tmp_path: Path) -> None:
         conn.close()
     backlog = next(f for f in report.findings if f.check_id == "conflicts.backlog")
     assert "2 unresolved conflicts (1 open, 1 applying)" in backlog.detail
-    assert backlog.evidence == {"open": 1, "applying": 1}
+    # C4 (0.15.13): the triage counters ride the same evidence block.
+    assert backlog.evidence["open"] == 1
+    assert backlog.evidence["applying"] == 1
+    assert backlog.evidence["not_a_conflict_total"] == 0
 
 
 def test_doctor_flags_every_applying_group_with_idle_age(tmp_path: Path) -> None:
