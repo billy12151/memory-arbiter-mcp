@@ -167,6 +167,39 @@ class WritePipeline:
         except Exception:
             return False
 
+    def refresh_summary_vector(self, memory_id: int) -> bool:
+        """Re-embed one memory's C3a summary vector after an in-place edit.
+
+        Keeps memory_summary_vec aligned with the row's CURRENT
+        subject/tags/content. Deletes the vector when the memory is no
+        longer active. Best-effort, same self-heal contract as
+        refresh_subject_tags_vector.
+        """
+        try:
+            record = self.db.get_memory(int(memory_id))
+            if record is None:
+                return self.db.delete_summary_vector(int(memory_id))
+            if str(record.get("status") or "") != "active":
+                return self.db.delete_summary_vector(int(memory_id))
+            embedder, _ = self._ensure_active_embedder()
+            if embedder is None or not self.db.state.sqlite_vec_available:
+                return False
+            from ..tools import MemoryTools
+
+            er = embedder.embed_text(
+                prefix="",
+                body=MemoryTools._summary_embed_text(
+                    record.get("subject"), record.get("tags"), record.get("content"),
+                ),
+            )
+            if er is None or not er.embedding:
+                return False
+            return self.db.upsert_summary_vector(
+                int(memory_id), [float(x) for x in er.embedding],
+            )
+        except Exception:
+            return False
+
     def _similar_active_notice(
         self, memory_id: int, record: _SubjectTagRecord, workspace_canonical: str | None,
     ) -> dict[str, Any] | None:
@@ -366,6 +399,13 @@ class WritePipeline:
                 )
                 if similar_notice is not None:
                     response.setdefault("notices", []).append(similar_notice)
+                # C3a summary vector: publish on the write path so the
+                # anomaly index tracks new rows without waiting for a
+                # restart backfill. Best-effort, fail-open.
+                try:
+                    self.refresh_summary_vector(int(memory_id))
+                except Exception:
+                    pass
             return response
         except Exception as exc:
             if insert_done:

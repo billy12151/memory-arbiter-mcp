@@ -597,6 +597,118 @@ class MemoriesStore:
             })
         return out
 
+    def missing_summary_vec_rows(self) -> list[dict[str, Any]]:
+        """Active memories whose summary vector is absent (C3a backfill set).
+
+        Mirrors missing_subject_tags_rows: vec-id membership in Python, one
+        plain scan per side, content included so the caller can build the
+        summary text without a second query.
+        """
+        if not self._db_available:
+            return []
+        try:
+            with self.connection() as conn:
+                vector_ids = {
+                    int(row["id"]) for row in conn.execute("SELECT id FROM memory_summary_vec")
+                }
+                rows = conn.execute(
+                    "SELECT id, subject, tags, content FROM memories WHERE status='active' "
+                    "ORDER BY id"
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if int(row["id"]) in vector_ids:
+                continue
+            try:
+                tags = json.loads(row["tags"]) if row["tags"] else []
+            except (TypeError, ValueError):
+                tags = []
+            out.append({
+                "id": int(row["id"]),
+                "subject": str(row["subject"] or ""),
+                "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
+                "content": str(row["content"] or ""),
+            })
+        return out
+
+    def all_summary_vectors(self) -> dict[int, tuple[str, list[float]]]:
+        """Single-trip read of every active memory's summary vector (C3a).
+
+        The anomaly check needs the FULL matrix — KNN per row would be N
+        queries and cannot vote on neighbourhood composition. One SELECT
+        over the vec table joined to the active set; the ~770-row library
+        is ~2.3MB of float32. Returns {memory_id: (workspace, vector)}.
+        """
+        if not self._db_available or not self.state.sqlite_vec_available:
+            return {}
+        found: dict[int, tuple[str, list[float]]] = {}
+        try:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    "SELECT v.id AS id, v.embedding AS embedding, "
+                    "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace) AS workspace "
+                    "FROM memory_summary_vec v "
+                    "JOIN memories m ON m.id=v.id AND m.status='active'"
+                ).fetchall()
+                for row in rows:
+                    if row["embedding"] is None:
+                        continue
+                    try:
+                        blob = bytes(row["embedding"])
+                        found[int(row["id"])] = (
+                            str(row["workspace"] or ""),
+                            list(struct.unpack(f"{len(blob) // 4}f", blob)),
+                        )
+                    except (struct.error, TypeError):
+                        continue
+        except sqlite3.Error:
+            return {}
+        return found
+
+    def upsert_summary_vector(self, memory_id: int, embedding: list[float]) -> bool:
+        """Publish/refresh one memory's summary vector (C3a ownership index).
+
+        Same vec0 conflict-clause constraint as subject_tags_vec: DELETE+INSERT
+        in one transaction, active status re-checked under the write lock.
+        """
+        if not self._db_available or not self.state.sqlite_writable or not embedding:
+            return False
+        try:
+            with self.write_transaction() as conn:
+                status_row = conn.execute(
+                    "SELECT status FROM memories WHERE id = ?", (int(memory_id),)
+                ).fetchone()
+                if status_row is None or str(status_row["status"]) != "active":
+                    conn.execute(
+                        "DELETE FROM memory_summary_vec WHERE id = ?", (int(memory_id),)
+                    )
+                    return False
+                conn.execute(
+                    "DELETE FROM memory_summary_vec WHERE id = ?", (int(memory_id),)
+                )
+                conn.execute(
+                    "INSERT INTO memory_summary_vec(id, embedding) VALUES (?, ?)",
+                    (int(memory_id), json.dumps([float(x) for x in embedding])),
+                )
+            return True
+        except sqlite3.Error:
+            return False
+
+    def delete_summary_vector(self, memory_id: int) -> bool:
+        """Drop one memory's summary vector (status left active / hard delete)."""
+        if not self._db_available or not self.state.sqlite_writable:
+            return False
+        try:
+            with self.write_transaction() as conn:
+                conn.execute(
+                    "DELETE FROM memory_summary_vec WHERE id = ?", (int(memory_id),)
+                )
+            return True
+        except sqlite3.Error:
+            return False
+
     @staticmethod
     def _filter_clauses(
         like_status_clause: str,

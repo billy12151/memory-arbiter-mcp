@@ -200,12 +200,13 @@ _PRODUCT_HELPS: dict[str, Any] = {
     },
     "memory_repair": {
         "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-        "tasks": ["rebuild_evidence", "scan_candidates", "scan_duplicates", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
+        "tasks": ["rebuild_evidence", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
         "examples": {
             "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
             "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
             "semantic_control": {"task": "semantic_control", "data": {"action": "status"}},
             "replay_backup": {"task": "replay_backup", "data": {"dry_run": True}},
+            "scan_workspace_anomalies": {"task": "scan_workspace_anomalies", "data": {}},
             "normalize_workspaces": {"task": "normalize_workspaces", "data": {"dry_run": True}},
             "normalize_workspaces_apply": {"task": "normalize_workspaces", "data": {"dry_run": False, "authorized": True}},
             "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
@@ -1133,6 +1134,16 @@ class ProductSurfaces:
             return self._forward("memory_repair", task, self._tools.memory_activate, **payload)
         if task == "replay_backup":
             return self._forward("memory_repair", task, self._tools.memory_replay_backup, **payload)
+        if task == "scan_workspace_anomalies":
+            # C3a: the anomaly check reads the FULL summary-vector matrix —
+            # it is inherently global (voting needs cross-bucket neighbours),
+            # so the strict-ACL gate resolves the caller from settings only,
+            # same as normalize_workspaces/scan_candidates.
+            caller = self._caller_workspace(None)
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+            return self._forward("memory_repair", task, self._tools.memory_scan_workspace_anomalies, **payload)
         if task == "normalize_workspaces":
             # normalize is a GLOBAL registry operation (see the help note):
             # the payload carries no workspace filter, so the strict-ACL gate

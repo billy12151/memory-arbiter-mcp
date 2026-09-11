@@ -2560,6 +2560,11 @@ class OperationsPipeline:
                 # Tags shape the duplicate-hint recall vector even though the
                 # content (and version) is unchanged.
                 self._tools._write_pipeline.refresh_subject_tags_vector(memory_id_int)
+                # ...and the C3a summary vector likewise (tags are its input).
+                try:
+                    self._tools._write_pipeline.refresh_summary_vector(memory_id_int)
+                except Exception:
+                    pass
                 data = {
                     "edited": True,
                     "tags_only": True,
@@ -2670,6 +2675,13 @@ class OperationsPipeline:
         # Subject/tags may have changed with the content edit: re-embed the
         # duplicate-hint recall vector for the row's current values.
         self._tools._write_pipeline.refresh_subject_tags_vector(memory_id_int)
+        # C3a summary vector follows the same realignment (content edits
+        # change its segment inputs; edits bump the version, which is the
+        # anomaly vote's natural refresh point).
+        try:
+            self._tools._write_pipeline.refresh_summary_vector(memory_id_int)
+        except Exception:
+            pass
         unresolved = self.db.conflicts.list_open_conflicts_for_memory_ids(
             [memory_id_int], include_applying=True,
         )
@@ -2852,6 +2864,11 @@ class OperationsPipeline:
         # restores base rows, not derived indexes); publish one so the
         # write-time duplicate hint can recall them before the next restart.
         self._tools._write_pipeline.refresh_subject_tags_vector(memory_id)
+        # Same for the C3a summary vector (anomaly voting index).
+        try:
+            self._tools._write_pipeline.refresh_summary_vector(memory_id)
+        except Exception:
+            pass
         outcome = str(result.get("status") or "unknown")
         if outcome == "queued":
             stages["evidence"] = "queued"

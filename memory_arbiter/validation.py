@@ -125,6 +125,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "include_duplicates", "include_quotes", "workspace",
     },
     ("memory_repair", "scan_duplicates"): {"include_quotes", "workspace"},
+    ("memory_repair", "scan_workspace_anomalies"): {"workspace"},
     ("memory_repair", "record_conflict"): {
         "slot_key", "members", "value_groups", "candidate_key", "status",
         "detector_version", "prompt_version", "source", "reason", "conflict_point",

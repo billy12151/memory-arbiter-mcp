@@ -477,6 +477,18 @@ class MemoryDB:
     def missing_subject_tags_rows(self) -> list[dict[str, Any]]:
         return self.memories.missing_subject_tags_rows()
 
+    def missing_summary_vec_rows(self) -> list[dict[str, Any]]:
+        return self.memories.missing_summary_vec_rows()
+
+    def all_summary_vectors(self) -> dict[int, tuple[str, list[float]]]:
+        return self.memories.all_summary_vectors()
+
+    def upsert_summary_vector(self, memory_id: int, embedding: list[float]) -> bool:
+        return self.memories.upsert_summary_vector(memory_id, embedding)
+
+    def delete_summary_vector(self, memory_id: int) -> bool:
+        return self.memories.delete_summary_vector(memory_id)
+
     def _filter_clauses(
         self,
         like_status_clause: str,

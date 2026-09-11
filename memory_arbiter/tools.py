@@ -118,6 +118,9 @@ class MemoryTools:
         # time duplicate-hint recall index must cover pre-existing active
         # memories, not only rows written after the upgrade.
         self._subject_tags_backfilled = False
+        # Same contract for the C3a summary vectors (0.15.13): one per active
+        # memory, workspace-anomaly voting index.
+        self._summary_vec_backfilled = False
         banner = self._setup_capability_banner()
         if banner is not None:
             # Persistent (deduped) — rides every response's warnings until the
@@ -675,7 +678,73 @@ class MemoryTools:
                     self._backfill_subject_tags_vectors(embedder)
                 except Exception:
                     pass
+            if not self._summary_vec_backfilled:
+                # C3a summary vectors: same fail-open, non-repeating contract.
+                self._summary_vec_backfilled = True
+                try:
+                    self._backfill_memory_summary_vectors(embedder)
+                except Exception:
+                    pass
             return self._embedder, warnings
+
+    SUMMARY_SEGMENT_CHARS = 40
+    SUMMARY_TOTAL_CHARS = 800
+
+    @classmethod
+    def _summary_embed_text(cls, subject: Any, tags: Any, content: Any) -> str:
+        """C3a canonical summary text: subject + sorted tags + each body
+        segment's first 40 chars, capped ~800 chars total.
+
+        Segments split on blank lines (local_text_units' paragraph shape);
+        ownership voting needs topical signal, not full bodies — a misplaced
+        memory keeps its subject/tag vocabulary even when bodies drift.
+        """
+        cleaned = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+        parts = [f"{str(subject or '').strip()}\n{' '.join(sorted(cleaned))}".strip()]
+        body = str(content or "")
+        for segment in body.split("\n\n"):
+            segment = segment.strip()
+            if segment:
+                parts.append(segment[:cls.SUMMARY_SEGMENT_CHARS])
+        return "\n".join(parts)[:cls.SUMMARY_TOTAL_CHARS]
+
+    def _backfill_memory_summary_vectors(self, embedder: "ManagedEmbedder") -> int:
+        """Embed the C3a summary vector for every active memory missing one.
+
+        Same chunked embed-outside-transaction contract as the
+        subject_tags_vec backfill (see _backfill_subject_tags_vectors):
+        prepare per chunk, commit in one short transaction, failures leave
+        rows missing for the next restart.
+        """
+        rows = self.db.missing_summary_vec_rows()
+        written = 0
+        try:
+            with self.db.write_transaction() as conn:
+                conn.execute(
+                    "DELETE FROM memory_summary_vec WHERE id NOT IN "
+                    "(SELECT id FROM memories WHERE status='active')"
+                )
+        except Exception:
+            pass
+        for start in range(0, len(rows), 64):
+            chunk = rows[start:start + 64]
+            prepared: list[tuple[int, list[float]]] = []
+            for row in chunk:
+                try:
+                    er = embedder.embed_text(
+                        prefix="",
+                        body=self._summary_embed_text(
+                            row.get("subject"), row.get("tags"), row.get("content"),
+                        ),
+                    )
+                    if er and er.embedding:
+                        prepared.append((int(row["id"]), [float(x) for x in er.embedding]))
+                except Exception:
+                    continue
+            for memory_id, vector in prepared:
+                if self.db.upsert_summary_vector(memory_id, vector):
+                    written += 1
+        return written
 
     def _backfill_subject_tags_vectors(self, embedder: "ManagedEmbedder") -> int:
         """Embed subject+tags for every active memory missing a hint vector.
@@ -1296,7 +1365,9 @@ class MemoryTools:
         The full payload is computed first and projected last so enhancement
         order and suppression counting are unaffected.
         """
-        members = item.get("members") if isinstance(item.get("members"), list) else []
+        members = item.get("members")
+        if not isinstance(members, list):
+            members = []
 
         def member_quote(index: int) -> str:
             if 0 <= index < len(members):
@@ -1305,7 +1376,6 @@ class MemoryTools:
                     return quote[:self.QUOTE_LIGHT_CHARS]
             return str(item.get("left_snippet") or item.get("right_snippet") or "")[:self.QUOTE_LIGHT_CHARS]
 
-        members = item.get("members") if isinstance(item.get("members"), list) else []
         workspace = item.get("workspace")
         if not workspace and members:
             left_mem = self.db.get_memory(int((members[0] or {}).get("memory_id") or 0))
@@ -1658,6 +1728,163 @@ class MemoryTools:
         self, limit: int = 50, include_unassigned: bool = True, **_: Any,
     ) -> dict[str, Any]:
         return self._operations.memory_list_entities(limit, include_unassigned, **_)
+
+    def memory_scan_workspace_anomalies(self, **_: Any) -> dict[str, Any]:
+        """C3a workspace anomaly check: single-pass matmul over all summary vectors.
+
+        One SELECT reads every active memory's summary vector; numpy computes
+        the N×N cosine in row-blocks (bounded memory); each row votes over its
+        top-10 neighbours. A memory whose neighbourhood is ≥8/10 in ONE other
+        bucket is a suspected misplacement: one workspace_review notice per
+        memory (pair-shaped with the bucket's best neighbour so move/supersede
+        auto-stales it), capped at 10 per run. Zero Qwen, milliseconds.
+        numpy absence degrades with a structured outcome (it is not a
+        declared dependency — llama-cpp-python normally brings it).
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            return self.db.state.response({
+                "error": "numpy_unavailable", "detail": (
+                    "workspace anomaly check needs numpy (bundled with the "
+                    "semantic-local extra); install numpy to run it"
+                ),
+            }, ok=False)
+        vectors = self.db.all_summary_vectors()
+        if not vectors:
+            return self.db.state.response({
+                "status": "ok", "checked": 0, "suspected": 0, "notices": 0,
+                "note": "no summary vectors yet (backfill pending or empty library)",
+            })
+        ids = sorted(vectors)
+        workspaces = [vectors[mid][0] for mid in ids]
+        matrix = np.array([vectors[mid][1] for mid in ids], dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1)
+        norms[norms == 0] = 1.0
+        unit = matrix / norms[:, None]
+        n = len(ids)
+        neighbour_k = min(10, n - 1) if n > 1 else 0
+        suspected: list[dict[str, Any]] = []
+        if neighbour_k > 0:
+            block = 512
+            for start in range(0, n, block):
+                sims = unit[start:start + block] @ unit.T  # (rows, n)
+                for local_row in range(sims.shape[0]):
+                    row = start + local_row
+                    sims[local_row, row] = -1.0  # exclude self
+                    top = np.argpartition(sims[local_row], -neighbour_k)[-neighbour_k:]
+                    votes: dict[str, int] = {}
+                    foreign_best: tuple[float, int] = (-2.0, -1)  # (sim, id)
+                    own_best: tuple[float, int] = (-2.0, -1)
+                    for col in top:
+                        col = int(col)
+                        bucket = workspaces[col]
+                        votes[bucket] = votes.get(bucket, 0) + 1
+                        sim = float(sims[local_row, col])
+                        if bucket == workspaces[row]:
+                            if sim > own_best[0]:
+                                own_best = (sim, ids[col])
+                        elif sim > foreign_best[0]:
+                            foreign_best = (sim, ids[col])
+                    own = workspaces[row]
+                    # ≥8/10 pointing at ONE foreign bucket → suspected.
+                    if neighbour_k >= 8:
+                        best_bucket, best_votes = max(
+                            ((b, c) for b, c in votes.items() if b != own),
+                            key=lambda item: item[1],
+                            default=("", 0),
+                        )
+                        if best_votes >= 8:
+                            suspected.append({
+                                "memory_id": ids[row],
+                                "workspace": own,
+                                "suspected_workspace": best_bucket,
+                                "foreign_votes": best_votes,
+                                "neighbours_checked": neighbour_k,
+                                "foreign_neighbour_id": foreign_best[1],
+                                "own_neighbour_id": own_best[1],
+                            })
+        suspected.sort(key=lambda item: (-item["foreign_votes"], item["memory_id"]))
+        capped = suspected[:10]
+        noticed = 0
+        for item in capped:
+            memory_id = int(item["memory_id"])
+            record = self.db.get_memory(memory_id)
+            if record is None or str(record.get("status") or "") != "active":
+                continue
+            # The notice is pair-shaped and its member workspace check is
+            # single-bucket (the 0.14 group identity model): the PEER must sit
+            # in the memory's CURRENT bucket. The cross-bucket evidence lives
+            # in the payload/message; the memory's own move/supersede still
+            # stales the notice through member freshness.
+            peer_id = item.get("own_neighbour_id")
+            peer_id = int(peer_id) if peer_id and int(peer_id) > 0 else None
+            peer_version: int | None = None
+            if peer_id is not None and peer_id != memory_id:
+                peer = self.db.get_memory(peer_id)
+                if peer is not None and str(peer.get("status") or "") == "active":
+                    peer_version = int(peer.get("version") or 1)
+                else:
+                    peer_id = None
+            if peer_id is None or peer_version is None:
+                # No same-bucket neighbour at all (bucket of one): the vote
+                # evidence alone still goes out via the findings list; a
+                # notice without a pair member cannot satisfy the group
+                # identity model, so skip recording for this row.
+                continue
+            foreign_id = item.get("foreign_neighbour_id")
+            foreign = (
+                self.db.get_memory(int(foreign_id)) if foreign_id and int(foreign_id) > 0 else None
+            )
+            result = self.db.record_semantic_notice(
+                memory_id=memory_id,
+                peer_id=peer_id,
+                severity="normal",
+                notice_type="workspace_review",
+                title=f"Memory {memory_id} looks misplaced in workspace {item['workspace']!r}",
+                message=(
+                    f"{item['foreign_votes']}/{item['neighbours_checked']} nearest summary "
+                    f"neighbours sit in {item['suspected_workspace']!r}"
+                    + (
+                        f" (closest: memory {foreign['id']} in {item['suspected_workspace']!r})"
+                        if foreign is not None else ""
+                    )
+                    + ". If confirmed, move it with memory_govern(action="
+                    "'move_memories_workspace'); if it belongs, dismiss this notice."
+                ),
+                payload={
+                    "reason": "workspace_anomaly_vote",
+                    "suspected_workspace": item["suspected_workspace"],
+                    "foreign_votes": item["foreign_votes"],
+                    "neighbours_checked": item["neighbours_checked"],
+                    "current_workspace": item["workspace"],
+                    **({"foreign_neighbour_id": int(foreign["id"])} if foreign is not None else {}),
+                },
+                dedupe_key=f"workspace-anomaly:{memory_id}",
+                left_version=int(record.get("version") or 1),
+                right_version=peer_version,
+                source="workspace_anomaly_scan",
+            )
+            if str(result.get("outcome") or "") in {"created", "deduped"}:
+                noticed += 1
+        return self.db.state.response({
+            "status": "ok",
+            "checked": n,
+            "suspected": len(suspected),
+            "returned": len(capped),
+            "notices": noticed,
+            "cap": 10,
+            **({"capped": True} if len(suspected) > len(capped) else {}),
+            "findings": [
+                {
+                    "memory_id": item["memory_id"],
+                    "workspace": item["workspace"],
+                    "suspected_workspace": item["suspected_workspace"],
+                    "votes": f"{item['foreign_votes']}/{item['neighbours_checked']}",
+                }
+                for item in capped
+            ],
+        })
 
     def memory_rebuild_evidence(
         self, memory_ids: list[int] | None = None, dry_run: bool = True,
