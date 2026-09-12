@@ -317,7 +317,61 @@ def test_replan_chosen_value_update_changes_stored_choice(tmp_path: Path) -> Non
     row = db.get_conflict(created["conflict_id"])
     assert row is not None
     assert row["chosen_value"] == "sqlite"
-    assert row["resolution_memory_id"] is None or row["resolution_memory_id"] == left
+    # P1 (#970 adversarial): a chosen_value replacement moves the resolution
+    # holder to a member of the new value group; keeping the old holder would
+    # record the rejected value's owner as the surviving authority.
+    assert row["resolution_memory_id"] == right
+
+
+def test_use_as_resolution_rejects_non_chosen_value_holder(tmp_path: Path) -> None:
+    """P1 (#970 adversarial): use_as_resolution must fail on a member whose
+    own value group is not the chosen value — otherwise a plan could mark a
+    mysql holder as the sqlite resolution and resolve the group, leaving the
+    wrong data in place. The failure is recoverable via replan."""
+    db = _db(tmp_path)
+    tools = MemoryTools(db.settings, db)
+    left, right = _memory(db, "db is mysql"), _memory(db, "db is sqlite")
+    members = [_member(left, "mysql"), _member(right, "sqlite")]
+    created = db.record_conflict_group(
+        workspace_canonical="w",
+        slot_key={"entity": "project", "attribute": "database", "scope": "global"},
+        members=members, value_groups=_groups(*members),
+        detection_reason="different database", source="scan", detector_version="d1",
+    )
+    judged = db.judge_conflict(
+        created["conflict_id"], expected_revision=1, chosen_value="sqlite",
+        decided_by="user", decided_ref="chat", decision_reason="misplanned",
+        apply_plan=[{"memory_id": right, "action": "preserve_historical_record"},
+                    {"memory_id": left, "action": "use_as_resolution"}],
+        resolution_memory_id=left,
+    )
+    assert judged["outcome"] == "applying"
+    step1 = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": judged["revision"],
+        "memory_id": right, "action": "preserve_historical_record", "authorized": True,
+    })["data"]
+    assert step1["outcome"] == "completed"
+    misplaced = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": step1["revision"],
+        "memory_id": left, "action": "use_as_resolution", "authorized": True,
+    })["data"]
+    assert misplaced["outcome"] == "apply_failed"
+    assert misplaced["apply_summary"]["plan"][1]["error"] == "resolution_member_value_mismatch"
+    assert misplaced["action_required"] == "replan_conflict"
+    # Recovery: replan points the marker at the actual sqlite holder.
+    recovered = db.conflicts.replan_conflict(
+        created["conflict_id"], expected_revision=misplaced["revision"],
+        apply_plan=[{"memory_id": right, "action": "use_as_resolution"}],
+        resolution_memory_id=right,
+    )
+    assert recovered["outcome"] == "replanned"
+    step2 = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": recovered["revision"],
+        "memory_id": right, "action": "use_as_resolution", "authorized": True,
+    })["data"]
+    assert step2["outcome"] == "completed"
+    resolved = db.resolve_conflict(created["conflict_id"], expected_revision=step2["revision"])
+    assert resolved["outcome"] == "resolved"
 
 
 def test_use_as_resolution_survives_stale_conflict_not_grounded(tmp_path: Path) -> None:

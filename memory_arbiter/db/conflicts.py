@@ -844,6 +844,23 @@ class ConflictStore:
                 if not normalized_new or normalized_new not in existing_values:
                     return {"outcome": "invalid_chosen_value"}
                 new_chosen = existing_values[normalized_new]
+                # A chosen_value replacement moves the resolution holder with
+                # it unless the caller pins one explicitly (P1 #970 adversarial
+                # pass): keeping the old resolution would record the holder of
+                # the REJECTED value as the surviving authority.
+                if resolution_memory_id is None:
+                    new_group_refs: list[str] = next(
+                        (group["members"] for group in conflict.get("value_groups") or []
+                         if str(group.get("normalized_value") or "") == new_chosen), [],
+                    )
+                    member_by_ref = {
+                        _member_ref(member): member for member in conflict["member_versions"]
+                    }
+                    new_resolution = next(
+                        (int(str(ref).split("@", 1)[0]) for ref in new_group_refs
+                         if ref in member_by_ref), None,
+                    )
+                    resolution_memory_id = new_resolution
             members = {int(member["memory_id"]): member for member in conflict["member_versions"]}
             plan: list[dict[str, Any]] = []
             seen: set[int] = set()

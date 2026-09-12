@@ -249,6 +249,22 @@ class OperationsPipeline:
             result, ok=result.get("outcome") == "resolved", extra_warnings=list(caller.warnings),
         )
 
+    @staticmethod
+    def _member_value_mismatches(
+        conn: sqlite3.Connection, conflict: dict[str, Any], target_id: int, chosen: str,
+    ) -> bool:
+        """Whether the use_as_resolution target's own value group differs from
+        the chosen value (P1 #970 adversarial pass).
+
+        Uses the frozen member snapshot pinned on the conflict row, not the
+        live memory: apply semantics operate on the recorded group identity.
+        """
+        chosen_norm = normalize_value(chosen)
+        for member in conflict.get("member_versions") or []:
+            if int(member.get("memory_id") or 0) == int(target_id):
+                return normalize_value(str(member.get("normalized_value") or "")) != chosen_norm
+        return True  # target not among the frozen members: judge already rejects this
+
     def memory_apply_conflict_action(
         self, conflict_id: int, expected_revision: int, memory_id: int, action: str,
         content: str | None = None, old_text: str | None = None,
@@ -332,6 +348,21 @@ class OperationsPipeline:
                     step.update(status="failed", result_version=int(updated.get("version") or 0),
                                 result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
                                 error="chosen_value_not_grounded", orphaned_edit=edit_committed)
+                elif action == "use_as_resolution" and chosen and self._member_value_mismatches(
+                    conn, conflict, target_id, chosen,
+                ):
+                    # use_as_resolution must land on a member that actually
+                    # holds the chosen value group (P1 #970 adversarial pass):
+                    # without this check a plan could mark a mysql holder as
+                    # the sqlite resolution and resolve the group, leaving the
+                    # wrong data in place. Group membership, not content
+                    # grounding (D2): the member-vs-group equality is an
+                    # intake invariant (D1), so this check is always
+                    # satisfiable — unlike the removed grounding check it
+                    # cannot recreate the #970 deadlock.
+                    step.update(status="failed", result_version=int(updated.get("version") or 0),
+                                result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
+                                error="resolution_member_value_mismatch", orphaned_edit=False)
                 else:
                     step.update(status="completed", result_version=int(updated.get("version") or step["expected_version"]),
                                 result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(), error=None)
@@ -373,9 +404,10 @@ class OperationsPipeline:
             # never succeed.
             result["note"] = (
                 "The committed member content does not establish the chosen value. Recover via "
-                "memory_govern(action='replan_conflict'): re-edit so the chosen value appears "
-                "verbatim in the member content, or pass a replacement chosen_value drawn from "
-                "the conflict's value_groups together with a fresh plan."
+                "memory_govern(action='replan_conflict'): re-edit so the chosen value (the stored "
+                "machine-normalized form, not its display casing) appears verbatim in the member "
+                "content, or pass a replacement chosen_value drawn from the conflict's "
+                "value_groups together with a fresh plan."
             )
         if successful and action not in {"preserve_historical_record", "use_as_resolution"}:
             # Post-commit only: index the committed result, then let the normal

@@ -225,11 +225,14 @@ def test_slow_governance_lifecycle_e2e_real_models(tmp_path: Path, real_backend:
         revision = int(judged["data"]["revision"])
 
         # update_current_claim: rewrite the wrong recipe to carry the chosen
-        # value verbatim (the grounded edit path).
+        # value. The grounding gate matches the machine-normalized form, so
+        # embed the stored normalized string itself — embedding the display
+        # original instead would make the test depend on Qwen's output shape
+        # (mixed-script values lose their spaces under normalization).
         rewrite = _govern(tools, "apply_conflict_action", {
             "conflict_id": conflict_id, "expected_revision": revision,
             "memory_id": int(left["id"]), "action": "update_current_claim", "authorized": True,
-            "content": f"发版流程：mema-core 发版第 7 步按 {value_right} 上传（旧配方 twine upload dist/* 已废止）。",
+            "content": f"发版流程：mema-core 发版第 7 步按 {chosen} 上传（旧配方 twine upload dist/* 已废止）。",
         })
         assert rewrite["outcome"] == "completed"
         revision = int(rewrite["revision"])
@@ -308,7 +311,7 @@ def test_slow_governance_recovery_e2e_real_models(tmp_path: Path, real_backend: 
         applied = _govern(tools, "apply_conflict_action", {
             "conflict_id": conflict_id, "expected_revision": int(replanned["revision"]),
             "memory_id": int(left["id"]), "action": "update_current_claim", "authorized": True,
-            "content": f"发版流程：mema-core 发版第 7 步按 {value_right} 上传（已裁决）。",
+            "content": f"发版流程：mema-core 发版第 7 步按 {chosen} 上传（已裁决）。",
         })
         assert applied["outcome"] == "completed"
         resolved = _govern(tools, "resolve_conflict", {

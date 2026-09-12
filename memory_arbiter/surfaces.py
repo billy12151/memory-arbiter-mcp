@@ -403,7 +403,9 @@ class ProductSurfaces:
             "replan_conflict": (
                 "A plan step failed or a member changed mid-apply. Re-read the group and members, then "
                 "call authorized memory_govern(action='replan_conflict') with the current revision and a "
-                "replacement plan; prior plan history is preserved."
+                "replacement plan; a grounding-failed update_current_claim is also recovered by passing "
+                "chosen_value (drawn from the conflict's value_groups) to replace the deadlocked choice. "
+                "Prior plan history is preserved."
             ),
             "confirm_new_workspace": (
                 "Explain the proposed canonical workspace and ask the user to authorize confirmation. After "
