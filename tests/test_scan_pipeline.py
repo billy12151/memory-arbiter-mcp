@@ -303,18 +303,12 @@ def test_kick_queues_notify_pair_and_auto_rejects_numeric(tmp_path: Path) -> Non
 
     counts = tools.db.scan_queue.counts()
     auto_reject_rows = tools.db.list_conflicts(status="not_a_conflict", source="scan_numeric_autoreject")
-    queued_pairs = [
-        row for row in tools.db.scan_queue.counts().items()
-    ]
     # numeric pair auto-rejected with an audit row, not queued (cap allows)
     assert len(auto_reject_rows) >= 1, auto_reject_rows
     for row in auto_reject_rows:
         members = {m["memory_id"] for m in row["member_versions"]}
         assert members == {n1, n2}
-    # the postgres pair (decide_evidence: similar pool / check or notify) —
-    # whatever the rule route, a non-numeric suspect pair must be in the queue
-    assert counts.get("pending", 0) + counts.get("confirmed", 0) >= 0
-    queue_rows = tools.db.scan_queue
+    # a non-numeric suspect pair must be in the queue
     with tools.db.connection() as conn:
         rows = conn.execute("SELECT kind,member_versions FROM scan_queue").fetchall()
     queued_member_sets = [
@@ -351,16 +345,19 @@ def test_edit_lifts_suppression_and_requeues_new_identity(tmp_path: Path) -> Non
     assert tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
-        rows = [dict(r) for r in conn.execute("SELECT * FROM scan_queue").fetchall()]
+        rows = [dict(r) for r in conn.execute("SELECT kind, member_versions FROM scan_queue WHERE kind='conflict'").fetchall()]
     assert rows
     # Dismiss everything (agent judgment) → suppression source lands
+    from memory_arbiter.db_generation import CONFLICT_DETECTOR_VERSION
+
     for row in rows:
-        tools.db.record_conflict_group(
+        outcome = tools.db.record_conflict_group(
             workspace_canonical="ws", slot_key=None,
-            members=row["member_versions"], value_groups=[],
-            status="not_a_conflict", detector_version="attribute-value-v1",
+            members=json.loads(row["member_versions"]), value_groups=[],
+            status="not_a_conflict", detector_version=CONFLICT_DETECTOR_VERSION,
             source="scan_queue_test", detection_reason="test dismissal",
         )
+        assert outcome.get("outcome") in {"inserted", "deduped"}, outcome
     tools.db.mark_scanned(a, tools.db.get_memory(a)["version"])
     tools.db.mark_scanned(b, tools.db.get_memory(b)["version"])
     # Edit one memory → version lift → new identity → clean re-queue
@@ -417,8 +414,20 @@ def test_move_after_queue_requeues_in_new_bucket_only(tmp_path: Path) -> None:
         rows = [dict(r) for r in conn.execute(
             "SELECT workspace_canonical,member_versions FROM scan_queue WHERE status='pending'"
         ).fetchall()]
-    # The moved memory alone (its old peer stayed in ws) must not produce a
-    # cross-bucket pair — every pending pair sits inside one bucket.
+    # §6⑤ negative assertion: the moved memory must NOT re-pair with its old
+    # "ws" peer — every pending pair sits wholly inside its row's bucket.
+    current_buckets = {}
     for row in rows:
         members = json.loads(row["member_versions"])
-        assert len({m["memory_id"] for m in members}) in (1, 2)
+        for m in members:
+            mid = int(m["memory_id"])
+            if mid not in current_buckets:
+                current_buckets[mid] = (
+                    tools.db.get_memory(mid).get("workspace_canonical")
+                    or tools.db.get_memory(mid).get("workspace")
+                )
+        member_buckets = {current_buckets[int(m["memory_id"])] for m in members}
+        assert member_buckets <= {row["workspace_canonical"]}, (
+            f"cross-bucket pair leaked: {members} buckets={member_buckets} "
+            f"row_ws={row['workspace_canonical']}"
+        )

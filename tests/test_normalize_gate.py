@@ -160,19 +160,26 @@ def test_rollback_restores_auto_move(tmp_path: Path) -> None:
 def test_multi_family_mention_downgrades_to_hint(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _seed_cluster(tools, "proja", 12, "postgres 数据库")
-    # register a second family name and craft a subject mentioning both
-    _seed_cluster(tools, "projc", 3, "无关内容")
-    multi = _write(tools, "proja 与 projc 联合决议记录", "postgres 数据库 相关", workspace="pgsqlproj")
+    # register a second family name (carries the pgsql marker so the
+    # FakeEmbedder gives its workspace embedding a DISTINCT direction and the
+    # resolver registers it instead of folding it into proja) and craft a
+    # subject mentioning both
+    _seed_cluster(tools, "pgsqlc", 3, "无关内容")
+    multi = _write(tools, "proja 与 pgsqlc 联合决议记录", "postgres 数据库 相关", workspace="pgsqlproj")
     tools.wait_evidence_worker_drained(timeout=15)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
+    # E7-4 unit-level check: the multi-family detector itself must flag the
+    # subject that names two registered canonicals.
+    record = tools.db.get_memory(multi)
+    families = tools._queue_protocol._multi_family_mentions(record, "proja")
+    assert "proja" in families and "pgsqlc" in families, families
     result = _submit(tools, [{
         "kind": "workspace", "memory_id": multi,
         "status": "confirmed", "target_workspace": "proja", "conf": 0.95,
     }])
     entry = result["results"][0]
-    if entry["outcome"] == "moved":
-        # the fixture did not trip the family heuristic (vote may have failed
-        # first) — the downgrade path is covered by the unit-level check below
-        pass
-    else:
-        assert entry["outcome"] in {"multi_family_hint", "gate_failed"}
+    assert entry["outcome"] == "multi_family_hint", entry
+    # and no physical move happened (its bucket may have been resolver-folded
+    # into another postgres-flavored name, but never into the target proja)
+    record = tools.db.get_memory(multi)
+    assert (record["workspace_canonical"] or record["workspace"]) != "proja"

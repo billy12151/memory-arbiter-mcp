@@ -44,14 +44,28 @@ class ScanPipeline:
     # ── public API ──────────────────────────────────────────────────────────
 
     def status(self) -> dict[str, Any]:
-        pending = self.db.pending_scan_memory_count()
+        import sqlite3 as _sqlite3
+
+        try:
+            pending = self.db.pending_scan_memory_count()
+            queue_counts: dict[str, int] = self.db.scan_queue_counts()
+            queue_backlog = self.db.scan_queue_backlog()
+        except _sqlite3.Error as exc:
+            # Additive completion may have been skipped (read-only file): the
+            # 0.16.0 surfaces degrade with a structured response, never a raw
+            # sqlite error through the tool boundary.
+            return {
+                "ok": False,
+                "error": "scan_structures_unavailable",
+                "detail": str(exc),
+            }
         state = self.db.meta.scan_pipeline_state() or {}
         return {
             "ok": True,
             "detector_version": CONFLICT_DETECTOR_VERSION,
             "pending_memories": pending,
-            "queue": self.db.scan_queue_counts(),
-            "queue_backlog": self.db.scan_queue_backlog(),
+            "queue": queue_counts,
+            "queue_backlog": queue_backlog,
             "pipeline": {
                 "round_id": state.get("round_id"),
                 "mode": state.get("mode"),
@@ -109,13 +123,17 @@ class ScanPipeline:
             }
         state["updated_at"] = now
         self.db.meta.record_scan_pipeline_state(state)
+        self._expire_stale_internal()
 
         suppression = self._load_suppression()
         fresh_round = int(state.get("processed") or 0) == 0
         started = time.monotonic()
         budget = time_budget_s
         last_id = int(state.get("last_id") or 0)
-        processed = int(state.get("processed") or 0)
+        round_processed = int(state.get("processed") or 0)
+        processed = 0  # per-kick counter: bounds THIS call's work — the round
+        # total lives in state["processed"]; comparing the cumulative number
+        # against the per-call cap would jam every resumed kick at zero work.
         queued = int(state.get("queued") or 0)
         auto_rejected = int(state.get("auto_rejected") or 0)
         internal_found = int(state.get("internal_found") or 0)
@@ -161,7 +179,7 @@ class ScanPipeline:
         normalized = self._enqueue_workspace_suspects(processed_ids)
         state.update({
             "last_id": last_id,
-            "processed": processed,
+            "processed": round_processed + processed,
             "queued": queued,
             "auto_rejected": auto_rejected,
             "internal_found": internal_found,
@@ -191,6 +209,7 @@ class ScanPipeline:
             "round_id": state.get("round_id"),
             "mode": state.get("mode"),
             "processed_this_kick": processed,
+            "processed_round_total": round_processed + processed,
             "queued_total": queued,
             "auto_rejected_total": auto_rejected,
             "internal_found_total": internal_found,
@@ -536,6 +555,26 @@ class ScanPipeline:
             if outcome.get("outcome") == "queued":
                 landed += 1
         return landed
+
+    def _expire_stale_internal(self) -> int:
+        """Opportunistic sweep (plan review P2-10): internal rows pinned to a
+        version that has been edited away can never be judged — mark them
+        stale so counts() stops over-reporting."""
+        from .models import utc_now_iso
+
+        try:
+            with self.db.write_transaction() as conn:
+                cur = conn.execute(
+                    """UPDATE internal_conflicts SET status='stale', updated_at=?
+                       WHERE status='pending'
+                         AND EXISTS(SELECT 1 FROM memories m WHERE m.id=internal_conflicts.memory_id
+                                    AND (m.version != internal_conflicts.memory_version
+                                         OR m.status != 'active'))""",
+                    (utc_now_iso(),),
+                )
+                return int(cur.rowcount or 0)
+        except Exception:
+            return 0
 
     def _complete_round(self, state: dict[str, Any]) -> None:
         """Round completion bookkeeping: audit line + legacy-gate clearing.

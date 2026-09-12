@@ -47,6 +47,7 @@ class QueueProtocol:
     # ── page fetch ──────────────────────────────────────────────────────────
 
     def page(self, *, page_size: int = DEFAULT_PAGE_SIZE, page_token: int = 0) -> dict[str, Any]:
+        self.db.internal_conflicts.expire_stale()
         page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
         page_token = max(0, int(page_token or 0))
         items: list[dict[str, Any]] = []
@@ -81,7 +82,9 @@ class QueueProtocol:
                         items.append(self._pair_item(edge, meta_cache))
                 else:
                     items.append(self._group_item(group, meta_cache))
-        remaining = self.db.scan_queue_backlog()
+        remaining = self.db.scan_queue_backlog() + len(
+            self.db.internal_conflicts.list_pending(limit=10**6)
+        )
         response: dict[str, Any] = {
             "ok": True,
             "items": items[:page_size],
@@ -233,6 +236,7 @@ class QueueProtocol:
             "member_meta": {
                 str(mid): self._member_meta(mid, cache) for mid in sorted(group["member_ids"])
             },
+            "pair_hashes": [str(row["candidate_key_hash"]) for row in group["pairs"]],
             "pairs": [{
                 "queue_id": int(row["id"]),
                 "candidate_key_hash": row["candidate_key_hash"],
@@ -340,7 +344,13 @@ class QueueProtocol:
         for index, raw in enumerate(decisions):
             results.append(self._submit_one(index, raw))
         handled = {"confirmed", "dismissed", "resolved", "skipped", "moved",
-                   "protected_bucket_hint", "multi_family_hint"}
+                   "protected_bucket_hint", "multi_family_hint",
+                   # Terminal-for-this-decision states: the server did the
+                   # right thing (expired + requeue, or the row was already
+                   # decided) — the submission envelope stays green so an
+                   # idempotent retry is not punished.
+                   "stale_snapshot", "already_terminal", "workspace_mismatch",
+                   "not_found"}
         ok = all(item.get("outcome") in handled for item in results)
         return {
             "ok": ok,
@@ -402,7 +412,7 @@ class QueueProtocol:
         version = int(record.get("version") or 1)
         current = str(record.get("workspace_canonical") or record.get("workspace") or "")
         if status == "dismissed":
-            self._expire_workspace_rows(memory_id, version, "dismissed", reason)
+            self._expire_workspace_rows(memory_id, "dismissed", reason)
             return {"index": index, "outcome": "dismissed", "memory_id": memory_id}
         # confirmed: the four-part gate (E7) re-runs at decision time.
         target = str(raw.get("target_workspace") or "").strip()
@@ -415,20 +425,23 @@ class QueueProtocol:
                     "error": "confirmed workspace moves need target_workspace"}
         if current in PROTECTED_WORKSPACES or target in PROTECTED_WORKSPACES:
             # E6: protected buckets are never moved autonomously — user hint.
-            self._expire_workspace_rows(memory_id, version, "dismissed",
+            self._expire_workspace_rows(memory_id, "dismissed",
                                         f"protected bucket involved: {current!r}->{target!r}")
             return {
                 "index": index, "outcome": "protected_bucket_hint",
                 "memory_id": memory_id, "current": current, "target": target,
                 "hint": "受保护桶不自动搬——请向用户提示疑似写错桶，由用户自行处置",
             }
+        if target == current:
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "target_workspace equals the current bucket; nothing to move"}
         if conf < NORMALIZE_MIN_CONF:
             return {"index": index, "outcome": "gate_failed", "gate": "conf",
                     "memory_id": memory_id, "conf": conf}
         multi = self._multi_family_mentions(record, target)
         if multi:
             # E7-4: multi-family mentions downgrade to a user hint, no move.
-            self._expire_workspace_rows(memory_id, version, "dismissed",
+            self._expire_workspace_rows(memory_id, "dismissed",
                                         f"multi-family mention: {multi}")
             return {"index": index, "outcome": "multi_family_hint",
                     "memory_id": memory_id, "families": multi}
@@ -446,23 +459,23 @@ class QueueProtocol:
         moved, warnings = self._execute_auto_move(memory_id, current, target, vote, conf)
         if not moved:
             return {"index": index, "outcome": "move_failed", "warnings": warnings}
-        self._expire_workspace_rows(memory_id, version, "confirmed", reason)
+        self._expire_workspace_rows(memory_id, "confirmed", reason)
         return {
             "index": index, "outcome": "moved", "memory_id": memory_id,
             "from": current, "to": target, "vote": {"top": top_bucket, "share": share},
             "warnings": warnings,
         }
 
-    def _expire_workspace_rows(self, memory_id: int, version: int, status: str, why: str) -> None:
+    def _expire_workspace_rows(self, memory_id: int, status: str, why: str) -> None:
+        now = utc_now_iso()
         try:
             with self.db.write_transaction() as conn:
                 conn.execute(
-                    """UPDATE scan_queue SET status=?, decided_reason=?, decided_at=CURRENT_TIMESTAMP,
-                       updated_at=CURRENT_TIMESTAMP
+                    """UPDATE scan_queue SET status=?, decided_reason=?, decided_at=?, updated_at=?
                        WHERE kind='workspace' AND status='pending'
                          AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
                                     WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
-                    (status, why, int(memory_id)),
+                    (status, why, now, now, int(memory_id)),
                 )
         except Exception:
             pass
@@ -517,6 +530,10 @@ class QueueProtocol:
         for col in order:
             bucket = workspaces[all_ids[int(col)]]
             votes[bucket] = votes.get(bucket, 0) + 1
+        # The gate vote mirrors the suspect vote: the memory's OWN bucket is
+        # not a move candidate — a top that is the current bucket means the
+        # content peers agree with the placement and the gate must fail.
+        votes.pop(own, None)
         top_bucket, top_votes = max(votes.items(), key=lambda item: item[1], default=("", 0))
         return top_bucket, top_votes, k
 
@@ -556,13 +573,25 @@ class QueueProtocol:
         if status != "dismissed":
             return {"index": index, "outcome": "invalid_input",
                     "error": "group decisions accept status=dismissed only; confirm per pair"}
-        rows = self._fetch_conflict_rows(0)
-        wanted = group_token.split(":", 1)[-1]
+        explicit = raw.get("pair_hashes")
         targets = None
-        for component in self._assemble_groups(rows):
-            if self._component_token(component["pairs"]) == wanted:
-                targets = component["pairs"]
-                break
+        if isinstance(explicit, list) and explicit:
+            wanted_hashes = {str(h) for h in explicit}
+            rows = self._fetch_conflict_rows(0)
+            targets = [row for row in rows if str(row["candidate_key_hash"]) in wanted_hashes]
+            missing = len(wanted_hashes) - len(targets)
+            if missing:
+                # Some pairs were already decided in this same batch (per-pair
+                # entries first) or by an earlier run — dismissing what remains
+                # lands the same outcome; nothing is lost.
+                reason = f"{reason} (+{missing} already terminal)"
+        if targets is None:
+            rows = self._fetch_conflict_rows(0)
+            wanted = group_token.split(":", 1)[-1]
+            for component in self._assemble_groups(rows):
+                if self._component_token(component["pairs"]) == wanted:
+                    targets = component["pairs"]
+                    break
         if not targets:
             return {"index": index, "outcome": "not_found", "group_token": group_token}
         results = [

@@ -39,15 +39,12 @@ def test_page_returns_pair_items_with_evidence_quotes(tmp_path: Path) -> None:
     page = _page(tools)
     items = [item for item in page["items"] if item["kind"] == "conflict"]
     assert items, page
-    covered = set()
     for item in items:
         for pair in item["pairs"]:
-            covered |= {int(m["memory_id"]) for m in tools.db.scan_queue and []}
             assert pair["candidate_key_hash"]
             assert pair["evidence"], "引句分诊载荷必须带 evidence"
             for entry in pair["evidence"]:
                 assert entry.get("evidence_quote")
-    assert covered or True
 
 
 def test_page_closure_merges_pairs_sharing_a_member(tmp_path: Path) -> None:
@@ -213,15 +210,14 @@ def test_submit_confirm_with_stale_versions_expires_row(tmp_path: Path) -> None:
         ],
     }])
     entry = result["results"][0]
-    assert entry["outcome"] in {"stale_snapshot", "confirmed", "dismiss_failed"}, entry
-    if entry["outcome"] == "stale_snapshot":
-        assert entry["requeued"] is True
-        with tools.db.connection() as conn:
-            status = conn.execute(
-                "SELECT status FROM scan_queue WHERE candidate_key_hash=?",
-                (pair["candidate_key_hash"],),
-            ).fetchone()[0]
-        assert status == "expired", "版本漂移必须过期重排，不得静默丢弃"
+    assert entry["outcome"] == "stale_snapshot", entry
+    assert entry["requeued"] is True
+    with tools.db.connection() as conn:
+        status = conn.execute(
+            "SELECT status FROM scan_queue WHERE candidate_key_hash=?",
+            (pair["candidate_key_hash"],),
+        ).fetchone()[0]
+    assert status == "expired", "版本漂移必须过期重排，不得静默丢弃"
 
 
 # ── internal decisions ─────────────────────────────────────────────────────

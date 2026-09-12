@@ -108,6 +108,27 @@ class InternalConflictStore:
                 return {"outcome": "not_found"}
         return {"outcome": "updated", "status": status}
 
+    def expire_stale(self) -> int:
+        """Version-lifted pending rows can no longer be judged — mark stale
+        (opportunistic sweep; counts() then reports honestly)."""
+        if not self._db._db_available or not self._db.state.sqlite_writable:
+            return 0
+        now = utc_now_iso()
+        try:
+            with self._db.write_transaction() as conn:
+                cur = conn.execute(
+                    """UPDATE internal_conflicts SET status='stale', updated_at=?
+                       WHERE status='pending'
+                         AND EXISTS(SELECT 1 FROM memories m
+                                    WHERE m.id=internal_conflicts.memory_id
+                                      AND (m.version != internal_conflicts.memory_version
+                                           OR m.status != 'active'))""",
+                    (now,),
+                )
+                return int(cur.rowcount or 0)
+        except sqlite3.Error:
+            return 0
+
     def counts(self) -> dict[str, int]:
         if not self._db._db_available:
             return {}

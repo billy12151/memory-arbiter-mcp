@@ -437,7 +437,10 @@ class MemoryTools:
 
         Fires while an armed epoch round has not completed, regardless of any
         scheduled task — agents without one learn immediately that a full
-        scan is pending. Self-closing: gone once the pipeline round completes.
+        scan is pending. One-shot per detector epoch (a 7-day suppression
+        window keyed by the armed identity keeps the multi-kick first round
+        from repeating the notice on every response) and self-closing: gone
+        once the pipeline round completes under the armed detector.
         """
         arm = self.db.meta.scan_epoch_arm()
         if not arm:
@@ -449,6 +452,21 @@ class MemoryTools:
         state = self.db.meta.scan_pipeline_state() or {}
         if state.get("complete") and str(state.get("detector_version") or "") == CONFLICT_DETECTOR_VERSION:
             return None
+        monitor = self._update_monitor
+        if monitor is not None:
+            try:
+                from .update_monitor import NOTICE_SUPPRESS
+
+                state_key = f"full_scan_notice:{CONFLICT_DETECTOR_VERSION}"
+                notice_state = monitor.read_state_key(state_key)
+                notice_state = notice_state if isinstance(notice_state, dict) else {}
+                last_at = float(notice_state.get("last_at") or 0)
+                now = time.time()
+                if last_at and now - last_at < NOTICE_SUPPRESS.total_seconds():
+                    return None
+                monitor.write_state_key(state_key, {"last_at": now})
+            except Exception:
+                pass
         return {
             "type": "full_scan_required",
             "severity": "warning",

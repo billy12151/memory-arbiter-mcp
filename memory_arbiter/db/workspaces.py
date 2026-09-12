@@ -1750,6 +1750,21 @@ class WorkspaceStore:
                 conn, [int(memory_id)],
                 reason=f"workspace move -> {workspace!r}",
             )
+            # §6⑤ companion: pending JUDGMENT QUEUE rows that pair the moved
+            # memory with its old-bucket peers describe a bucket identity that
+            # just died — expire them (the pipeline re-enqueues valid pairs in
+            # the new bucket); stale workspace suspects likewise.
+            try:
+                conn.execute(
+                    """UPDATE scan_queue SET status='voided',
+                       decided_reason='member moved to '||?, decided_at=?, updated_at=?
+                       WHERE kind IN ('conflict','workspace') AND status IN ('pending','in_review')
+                         AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
+                                    WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
+                    (workspace, utc_now_iso(), utc_now_iso(), int(memory_id)),
+                )
+            except sqlite3.Error:
+                pass
             if voided:
                 # Structured sentinel consumed by the move surface (0.16.0):
                 # "voided_conflict_tickets:<n>" is reported in the response,
