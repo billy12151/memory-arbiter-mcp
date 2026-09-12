@@ -124,6 +124,11 @@ class MemoryTools:
         self._check_degradation_samples: list[dict[str, str]] = []
         self._notice_claim_error_count = 0
         self._notice_claim_last_error: str | None = None
+        # 0.16.0 §6⑪: detector-epoch arm runs once at boot — a running
+        # CONFLICT_DETECTOR_VERSION newer than the persisted arm re-arms a
+        # full pipeline round (watermark-NULL) and records the reason for
+        # doctor + the first-call side-channel notice.
+        self._arm_scan_epoch_if_needed()
         self._notice_claim_last_error_at: str | None = None
         self._last_backup_notice_signature: tuple[int, int, int, bool] | None = None
         self._last_backup_source_signature: tuple[int, int, int] | None = None
@@ -390,6 +395,73 @@ class MemoryTools:
         identity = get_request_identity()
         return identity.agent_id if identity is not None else None
 
+    def _arm_scan_epoch_if_needed(self) -> None:
+        """Boot-time epoch arm (plan §6⑪): detector bump ⇒ full round.
+
+        Two insurance paths for the first full scan coexist by design: the
+        watermark-NULL default on never-scanned memories, and THIS arm —
+        clearing every watermark when the running detector identity is newer
+        than the persisted one. Also expires pending queue rows whose
+        identity semantics belong to the old detector epoch, so the queue is
+        re-populated under the new semantics instead of mixing epochs.
+        """
+        try:
+            from .db_generation import CONFLICT_DETECTOR_VERSION
+
+            arm = self.db.meta.scan_epoch_arm()
+            current_to = str((arm or {}).get("to") or "")
+            if current_to == CONFLICT_DETECTOR_VERSION:
+                return
+            cleared = self.db.clear_all_scan_watermarks()
+            try:
+                with self.db.write_transaction() as conn:
+                    conn.execute(
+                        "UPDATE scan_queue SET status='expired', decided_reason=?, "
+                        "updated_at=CURRENT_TIMESTAMP WHERE status IN ('pending','in_review')",
+                        (f"detector epoch change {current_to or 'none'} -> {CONFLICT_DETECTOR_VERSION}",),
+                    )
+            except Exception:
+                pass
+            self.db.meta.record_scan_epoch_arm(
+                previous=current_to or None,
+                current=CONFLICT_DETECTOR_VERSION,
+                reason=f"detector identity change at boot (cleared {cleared} watermarks)",
+            )
+        except Exception:
+            # Arm is best-effort at boot; the watermark-NULL path still covers
+            # never-scanned memories even if this fails.
+            pass
+
+    def _detect_full_scan_notice(self) -> dict[str, Any] | None:
+        """E9 ③ side-channel: one-shot full_scan_required notice.
+
+        Fires while an armed epoch round has not completed, regardless of any
+        scheduled task — agents without one learn immediately that a full
+        scan is pending. Self-closing: gone once the pipeline round completes.
+        """
+        arm = self.db.meta.scan_epoch_arm()
+        if not arm:
+            return None
+        from .db_generation import CONFLICT_DETECTOR_VERSION
+
+        if str(arm.get("to") or "") != CONFLICT_DETECTOR_VERSION:
+            return None
+        state = self.db.meta.scan_pipeline_state() or {}
+        if state.get("complete") and str(state.get("detector_version") or "") == CONFLICT_DETECTOR_VERSION:
+            return None
+        return {
+            "type": "full_scan_required",
+            "severity": "warning",
+            "notice_id": f"full-scan-required-{CONFLICT_DETECTOR_VERSION}",
+            "message": (
+                f"Conflict detection upgraded to {CONFLICT_DETECTOR_VERSION} "
+                f"(from {arm.get('from') or 'none'}): one full scan round is pending. "
+                "Run memory_repair(task='scan_pipeline', data={'action': 'kick'}) repeatedly "
+                "until complete=true, then clear the judgment queue "
+                "(memory_repair task='scan_queue')."
+            ),
+        }
+
     def _detect_scheduled_task_notice(self, now_epoch: float) -> dict[str, Any] | None:
         """Three-tier detection over conflict-scan activity evidence."""
         from .timeutil import parse_iso8601_utc
@@ -501,6 +573,12 @@ class MemoryTools:
             notices.extend(onboarding)
             notices.extend(self._update_monitor.consume_notices())
             notices.extend(self._scheduled_task_notices())
+            try:
+                full_scan = self._detect_full_scan_notice()
+                if full_scan is not None:
+                    notices.append(full_scan)
+            except Exception:
+                pass
         try:
             source_signature = self.db.backup_replay.state_signature()
             if source_signature == self._last_backup_source_signature:

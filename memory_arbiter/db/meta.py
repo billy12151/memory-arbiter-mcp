@@ -112,6 +112,44 @@ class MetaStore:
 
     SCAN_PAGE_PROGRESS_KEY = "scan_page_progress"
     SCAN_PIPELINE_STATE_KEY = "scan_pipeline_state"
+    SCAN_EPOCH_ARM_KEY = "scan_epoch_armed"
+
+    def scan_epoch_arm(self) -> dict[str, Any] | None:
+        """0.16.0 detector-epoch arm record (plan §6⑪/commit 8).
+
+        Shape: {from, to, at, reason}. Written by the boot-time arm when the
+        running CONFLICT_DETECTOR_VERSION first differs from the persisted
+        one; consumed by doctor (finding with reason) and the first-call
+        side-channel notice (one-shot until the full round completes).
+        """
+        if not self._db._db_available:
+            return None
+        with self._db.connection() as conn:
+            raw = conn.execute(
+                "SELECT value FROM migration_state WHERE key=?",
+                (self.SCAN_EPOCH_ARM_KEY,),
+            ).fetchone()
+        if raw is None:
+            return None
+        try:
+            state = json.loads(str(raw[0]))
+        except (TypeError, ValueError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    def record_scan_epoch_arm(self, *, previous: str | None, current: str, reason: str) -> bool:
+        if not self._db._db_available or not self._db.state.sqlite_writable:
+            return False
+        with self._db.write_transaction() as conn:
+            conn.execute(
+                """INSERT INTO migration_state(key,value,updated_at)
+                   VALUES(?,?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                (self.SCAN_EPOCH_ARM_KEY, json.dumps({
+                    "from": previous, "to": current, "at": utc_now_iso(), "reason": reason,
+                }, ensure_ascii=False)),
+            )
+        return True
 
     def scan_pipeline_state(self) -> dict[str, Any] | None:
         """0.16.0 conflict-scan pipeline round state (breakpoint resume).

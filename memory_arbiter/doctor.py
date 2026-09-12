@@ -224,6 +224,36 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
             else "no completed conflict scan on record — scheduled scan tasks are not set up; see memory_repair help (topic: scheduled_tasks)"
         ),
     ))
+    # 0.16.0 §6⑪: detector-epoch arm visibility — report the identity change
+    # WITH its reason (E9 ②) so an upcoming full round is explained, not
+    # mysterious. A stale arm (persisted 'to' != running detector) means the
+    # arm ran under an older binary; the boot path re-arms anyway.
+    epoch_row = conn.execute(
+        "SELECT value FROM migration_state WHERE key='scan_epoch_armed'"
+    ).fetchone() if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_state'"
+    ).fetchone() else None
+    if epoch_row is not None:
+        try:
+            epoch_arm = json.loads(str(epoch_row[0]))
+        except (TypeError, ValueError):
+            epoch_arm = None
+        if isinstance(epoch_arm, dict):
+            from .db_generation import CONFLICT_DETECTOR_VERSION
+
+            armed_to = str(epoch_arm.get("to") or "")
+            fresh = armed_to == CONFLICT_DETECTOR_VERSION
+            findings.append(_finding(
+                "conflicts.scan_epoch", fresh,
+                (
+                    f"detector epoch armed: {epoch_arm.get('from') or 'none'} → {armed_to} "
+                    f"at {epoch_arm.get('at')} ({epoch_arm.get('reason')}); "
+                    "first full scan round pending"
+                )
+                if fresh
+                else f"epoch arm stale (persisted to={armed_to}, running={CONFLICT_DETECTOR_VERSION})",
+                evidence=epoch_arm,
+            ))
     if last_scan is not None:
         scanned_at = parse_iso8601_utc(last_scan.get("scan_time"))
         if scanned_at is not None:

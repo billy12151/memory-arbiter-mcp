@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from memory_arbiter.config import Settings
+from memory_arbiter.db_generation import CONFLICT_DETECTOR_VERSION
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.evidence import evidence_content_hash, local_text_units
@@ -1824,7 +1825,7 @@ def _conflict_member(memory_id: int, value: str, quote: str, *, version: int = 1
         content_hash=evidence_content_hash(quote),
         direction="a_to_b",
         prompt_version="pair-v1",
-        detector_version="attribute-value-v1",
+        detector_version=CONFLICT_DETECTOR_VERSION,
     ).to_dict()
 
 
@@ -1840,7 +1841,7 @@ def _structured_conflict_payload(left_id: int, right_id: int, *, left_version: i
             ConflictValueGroup("5s", "5 秒", (f"{left_id}@{left_version}",)).to_dict(),
             ConflictValueGroup("30s", "30 秒", (f"{right_id}@{right_version}",)).to_dict(),
         ],
-        "detector_version": "attribute-value-v1",
+        "detector_version": CONFLICT_DETECTOR_VERSION,
         "prompt_version": "pair-v1",
         "source": "scheduled_scan",
         "reason": "同一生产接口超时槽位存在不同值",
@@ -1863,7 +1864,7 @@ def _seed_notice(
         "left_evidence": {"text": "接口超时为 5 秒。", "start_offset": 0, "end_offset": 10},
         "right_evidence": {"text": "接口超时为 30 秒。", "start_offset": 0, "end_offset": 11},
         "candidate_key": {
-            "detector_version": "attribute-value-v1",
+            "detector_version": CONFLICT_DETECTOR_VERSION,
             "members": sorted([f"{left_id}@{left_version}", f"{right_id}@{right_version}"]),
         },
         "task_id": f"semantic:{left_id}@{left_version}",
@@ -2384,7 +2385,7 @@ def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> Non
     registered = tools.db.record_conflict_group(
         workspace_canonical="default", slot_key=None, members=clue["members"], value_groups=[],
         candidate_key=clue["candidate_key"], detection_reason="已分诊", source="scheduled_scan",
-        detector_version="attribute-value-v1", status="not_a_conflict",
+        detector_version=CONFLICT_DETECTOR_VERSION, status="not_a_conflict",
     )
     assert registered["outcome"] == "inserted"
     dismissed_scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
@@ -2450,7 +2451,7 @@ def test_record_conflict_not_a_conflict_registration(tmp_path: Path) -> None:
         "value_groups": [],
         "candidate_key": clue["candidate_key"],
         "status": "not_a_conflict",
-        "detector_version": "attribute-value-v1",
+        "detector_version": CONFLICT_DETECTOR_VERSION,
         "source": "scheduled_scan",
         "reason": "同主题演进，无需治理",
         # not_a_conflict dispositions require explicit authorization (B-C3).
@@ -2562,7 +2563,7 @@ def test_not_a_conflict_candidate_version_change_can_be_reevaluated(tmp_path: Pa
     payload = {
         "slot_key": None, "members": clue["members"], "value_groups": [],
         "candidate_key": clue["candidate_key"], "status": "not_a_conflict",
-        "detector_version": "attribute-value-v1", "source": "scheduled_scan", "reason": "演进",
+        "detector_version": CONFLICT_DETECTOR_VERSION, "source": "scheduled_scan", "reason": "演进",
         # not_a_conflict dispositions require explicit authorization (B-C3).
         "authorized": True,
     }

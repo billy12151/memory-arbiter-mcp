@@ -45,7 +45,11 @@ SCHEMA_MIGRATIONS = {
 # requirement against this running constant, and scan candidate keys stamp it;
 # a future detector change bumps this once and old-detector scans can no longer
 # clear conflict_scan_required.
-CONFLICT_DETECTOR_VERSION = "attribute-value-v1"
+# v2 (0.16.0): the scan pipeline switched to server-orchestrated rank pairing
+# with same-memory internal examination and queue-landed suspects (plan #971
+# E10/E11) — a real detection-semantic change, so the epoch re-arms a full
+# round (watermark-NULL arm + this stamped identity).
+CONFLICT_DETECTOR_VERSION = "attribute-value-v2"
 LEGACY_DERIVED_TABLES = {
     "memory_claims", "memories_vec", "memory_sections_vec",
 }

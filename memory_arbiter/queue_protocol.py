@@ -585,6 +585,12 @@ class QueueProtocol:
         members = row["member_versions"] or []
         detail = row["detail"] if isinstance(row["detail"], dict) else {}
         candidate_key = detail.get("candidate_key")
+        # Migrated legacy rows freeze their ORIGINAL detector identity — the
+        # intake gate rejects a member/detector mismatch (D1 family), so the
+        # disposition runs under the row's own stamp, never the running one.
+        row_detector = str(
+            (members[0] or {}).get("detector_version") or ""
+        ).strip() or self._detector_version()
         if status == "dismissed":
             result = self.db.record_conflict_group(
                 workspace_canonical=row["workspace_canonical"],
@@ -593,7 +599,7 @@ class QueueProtocol:
                 value_groups=[],
                 candidate_key=candidate_key,
                 status="not_a_conflict",
-                detector_version=self._detector_version(),
+                detector_version=row_detector,
                 source="scan_queue",
                 detection_reason=reason or "dismissed from scan queue",
             )
@@ -630,7 +636,7 @@ class QueueProtocol:
             value_groups=normalized_groups,
             candidate_key=candidate_key,
             status="open",
-            detector_version=self._detector_version(),
+            detector_version=row_detector,
             source="scan_queue",
             detection_reason=reason or "confirmed from scan queue",
         )
