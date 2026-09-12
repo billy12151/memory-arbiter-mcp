@@ -79,6 +79,10 @@ def test_doctor_reports_over_cap_stock(tmp_path: Path) -> None:
             "UPDATE memories SET tags=? WHERE id=?",
             (_json.dumps([f"t{i}" for i in range(40)]), mid),
         )
+        # The out-of-band UPDATE simulates a pre-0.16.0 legacy row; rebuild
+        # FTS so the simulated row is internally consistent (real legacy
+        # rows always were — their writes went through the synced API).
+        conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
     report = tools.memory_doctor_overview(deep=False)
     payload = report.get("data") or report
     findings = {f["check_id"]: f for f in payload["findings"]}
@@ -88,3 +92,10 @@ def test_doctor_reports_over_cap_stock(tmp_path: Path) -> None:
     assert any(item["id"] == mid and item["count"] == 40 for item in finding["evidence"]["over_limit"])
     # Stock reads stay unaffected (no retro truncation)
     assert len(tools.db.get_memory(mid)["tags"]) == 40
+    # over-cap stock stays TRIMMABLE: a pure remove passes even though the
+    # merged total (39) is still over the cap
+    trim = tools.memory("update", {
+        "memory_id": mid, "tags_only": True, "remove_tags": ["t0"], "reason": "trim stock",
+    })
+    assert trim.get("ok"), trim
+    assert len(tools.db.get_memory(mid)["tags"]) == 39

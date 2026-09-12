@@ -1036,8 +1036,9 @@ class MemoriesStore:
         if new_tags_list == old_tags:
             return {"outcome": "no_change", "memory_id": memory_id, "tags": old_tags}
         # 0.16.0 §6⑮: persisted tag total cap (remove+add in one call is
-        # legal; the cap applies to the merged result).
-        if len(new_tags_list) > MAX_MEMORY_TOTAL_TAGS:
+        # legal; the cap applies to the merged result). Net shrinks always
+        # pass so over-cap stock stays trimmable.
+        if len(new_tags_list) > len(old_tags) and len(new_tags_list) > MAX_MEMORY_TOTAL_TAGS:
             return {
                 "outcome": "tags_over_limit",
                 "memory_id": memory_id,
@@ -1524,7 +1525,9 @@ class MemoriesStore:
         # retrieval dimension, not an event log. remove-then-add in one call
         # is legal (the cap applies to the merged result); over-limit rejects
         # the WHOLE edit with the current count so the agent can remove first.
-        if len(resolved_tags) > MAX_MEMORY_TOTAL_TAGS:
+        # Net SHRINKS are always allowed: pre-cap stock rows (doctor
+        # tags.over_limit) must stay trimmable, not frozen.
+        if len(resolved_tags) > len(old_tags) and len(resolved_tags) > MAX_MEMORY_TOTAL_TAGS:
             return {
                 "outcome": "tags_over_limit",
                 "memory_id": int(memory_id),
