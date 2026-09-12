@@ -7,6 +7,7 @@ from pathlib import Path
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryRecord
+from memory_arbiter.semantic_conflict import normalize_value
 from memory_arbiter.tools import MemoryTools
 
 
@@ -24,7 +25,7 @@ def _member(memory_id: int, value: str, version: int = 1) -> ConflictMember:
     quote = f"database is {value}"
     return ConflictMember(
         memory_id=memory_id, version=version, attribute_raw="database", value_raw=value,
-        normalized_attribute="database", normalized_value=value.casefold(), evidence_quote=quote,
+        normalized_attribute="database", normalized_value=normalize_value(value), evidence_quote=quote,
         evidence_span=(0, len(quote)), content_hash=(str(memory_id) * 64)[:64], direction="a_to_b",
         prompt_version="p1", detector_version="d1",
     )
@@ -170,6 +171,189 @@ def test_judge_and_replan_reject_non_object_plan_entries(tmp_path: Path) -> None
         apply_plan=["bad"],
     )
     assert replanned["outcome"] == "invalid_plan"
+
+
+def test_long_phrase_use_as_resolution_completes_after_deadlock_fix(tmp_path: Path) -> None:
+    """#970 regression: conflict #50's exact shape.
+
+    A long English normalized_value chosen against Chinese member content
+    used to fail apply-side grounding for use_as_resolution and dead-end the
+    applying group. The action must complete mechanically now (D2) and the
+    group must resolve (D1 keeps the paraphrase out at intake, so the stored
+    group value here equals normalize_value(value_raw)).
+    """
+    db = _db(tmp_path)
+    tools = MemoryTools(db.settings, db)
+    left = _memory(db, "发版上传：twine upload dist/* 全部文件")
+    right = _memory(db, "发版经验：上传要显式文件名，不用 dist/*")
+    raw_left, raw_right = "upload dist/*", "upload explicit filenames"
+    members = [_member(left, raw_left), _member(right, raw_right)]
+    created = db.record_conflict_group(
+        workspace_canonical="w",
+        slot_key={"entity": "release", "attribute": "upload", "scope": "pypi"},
+        members=members, value_groups=_groups(*members),
+        detection_reason="different upload recipe", source="scan",
+        detector_version="d1", prompt_version="p1", conflict_point="upload",
+    )
+    assert created["outcome"] == "inserted"
+    chosen = normalize_value(raw_right)
+    judged = db.judge_conflict(
+        created["conflict_id"], expected_revision=1, chosen_value=chosen,
+        decided_by="user", decided_ref="chat", decision_reason="explicit filenames win",
+        apply_plan=[{"memory_id": left, "action": "preserve_historical_record"},
+                    {"memory_id": right, "action": "use_as_resolution"}],
+        resolution_memory_id=right,
+    )
+    assert judged["outcome"] == "applying"
+    step1 = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": judged["revision"],
+        "memory_id": left, "action": "preserve_historical_record", "authorized": True,
+    })["data"]
+    assert step1["outcome"] == "completed"
+    step2 = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": step1["revision"],
+        "memory_id": right, "action": "use_as_resolution", "authorized": True,
+    })["data"]
+    assert step2["outcome"] == "completed"
+    resolved = db.resolve_conflict(created["conflict_id"], expected_revision=step2["revision"])
+    assert resolved["outcome"] == "resolved"
+
+
+def test_record_conflict_rejects_paraphrased_normalized_value(tmp_path: Path) -> None:
+    """D1 (#970): a member whose normalized_value is an agent's paraphrase of
+    value_raw (not its mechanical normalization) must be rejected at intake."""
+    db = _db(tmp_path)
+    left = _memory(db, "database is mysql")
+    member = _member(left, "mysql")
+    paraphrased = member.to_dict()
+    paraphrased["normalized_value"] = "use mysql only"
+    rejected = db.record_conflict_group(
+        workspace_canonical="w",
+        slot_key={"entity": "project", "attribute": "database", "scope": "global"},
+        members=[paraphrased],
+        value_groups=[{"normalized_value": "use mysql only", "display_value": "x",
+                       "members": [f"{left}@1"]}],
+        detection_reason="different", source="scan", detector_version="d1",
+    )
+    assert rejected["outcome"] == "invalid_input"
+    assert "normalize_value" in str(rejected.get("error"))
+
+
+def test_replan_updates_chosen_value_and_recovers_grounding_failure(tmp_path: Path) -> None:
+    """D3 (#970): chosen_value is mutable via replan, and the update_current_claim
+    grounding failure carries the recovery note."""
+    db = _db(tmp_path)
+    tools = MemoryTools(db.settings, db)
+    left, right = _memory(db, "database is mysql"), _memory(db, "database is sqlite")
+    members = [_member(left, "mysql"), _member(right, "sqlite")]
+    created = db.record_conflict_group(
+        workspace_canonical="w",
+        slot_key={"entity": "project", "attribute": "database", "scope": "global"},
+        members=members, value_groups=_groups(*members),
+        detection_reason="different database", source="scan", detector_version="d1",
+    )
+    judged = db.judge_conflict(
+        created["conflict_id"], expected_revision=1, chosen_value="sqlite",
+        decided_by="user", decided_ref="chat", decision_reason="confirmed",
+        apply_plan=[{"memory_id": left, "action": "update_current_claim"}],
+        resolution_memory_id=right,
+    )
+    assert judged["outcome"] == "applying"
+
+    bad = db.conflicts.replan_conflict(
+        created["conflict_id"], expected_revision=judged["revision"],
+        apply_plan=[{"memory_id": left, "action": "update_current_claim"}],
+        chosen_value="not a stored value",
+    )
+    assert bad["outcome"] == "invalid_chosen_value"
+
+    # update_current_claim still grounds: an edit that does not contain the
+    # chosen value fails, names the replan recovery, and stays recoverable.
+    failed = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": judged["revision"],
+        "memory_id": left, "action": "update_current_claim", "authorized": True,
+        "content": "数据库仍然使用 mysql，未定论。",
+    })["data"]
+    assert failed["outcome"] == "apply_failed"
+    assert failed["apply_summary"]["plan"][0]["error"] == "chosen_value_not_grounded"
+    assert failed["action_required"] == "replan_conflict"
+    assert "chosen_value" in failed["note"]
+
+    # Recovery A: rewrite the content so the chosen value is grounded.
+    recovered = db.conflicts.replan_conflict(
+        created["conflict_id"], expected_revision=failed["revision"],
+        apply_plan=[{"memory_id": left, "action": "update_current_claim"}],
+    )
+    assert recovered["outcome"] == "replanned"
+    rewritten = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": recovered["revision"],
+        "memory_id": left, "action": "update_current_claim", "authorized": True,
+        "content": "database is sqlite",
+    })["data"]
+    assert rewritten["outcome"] == "completed"
+    resolved = db.resolve_conflict(created["conflict_id"], expected_revision=rewritten["revision"])
+    assert resolved["outcome"] == "resolved"
+
+
+def test_replan_chosen_value_update_changes_stored_choice(tmp_path: Path) -> None:
+    """D3 (#970): a replan with chosen_value replaces the stored choice with
+    the value_groups' own normalized form (canonical, not caller casing)."""
+    db = _db(tmp_path)
+    left, right = _memory(db, "mysql"), _memory(db, "sqlite")
+    created = _record(db, [_member(left, "mysql"), _member(right, "sqlite")])
+    judged = db.judge_conflict(
+        created["conflict_id"], expected_revision=1, chosen_value="mysql",
+        decided_by="user", decided_ref="chat", decision_reason="first pick",
+        apply_plan=[{"memory_id": left, "action": "use_as_resolution"}],
+        resolution_memory_id=left,
+    )
+    assert judged["outcome"] == "applying"
+    updated = db.conflicts.replan_conflict(
+        created["conflict_id"], expected_revision=judged["revision"],
+        apply_plan=[{"memory_id": right, "action": "use_as_resolution"}],
+        chosen_value=" SQLITE ",
+    )
+    assert updated["outcome"] == "replanned"
+    row = db.get_conflict(created["conflict_id"])
+    assert row is not None
+    assert row["chosen_value"] == "sqlite"
+    assert row["resolution_memory_id"] is None or row["resolution_memory_id"] == left
+
+
+def test_use_as_resolution_survives_stale_conflict_not_grounded(tmp_path: Path) -> None:
+    """D2 (#970): use_as_resolution no longer depends on content grounding;
+    only the CAS revision still guards it."""
+    db = _db(tmp_path)
+    tools = MemoryTools(db.settings, db)
+    left, right = _memory(db, "无英文短语的中文正文甲"), _memory(db, "无英文短语的中文正文乙")
+    members = [_member(left, "上传 dist/*"), _member(right, "显式文件名上传")]
+    created = db.record_conflict_group(
+        workspace_canonical="w",
+        slot_key={"entity": "release", "attribute": "upload", "scope": "pypi"},
+        members=members, value_groups=_groups(*members),
+        detection_reason="different", source="scan", detector_version="d1",
+    )
+    judged = db.judge_conflict(
+        created["conflict_id"], expected_revision=1,
+        chosen_value=normalize_value("显式文件名上传"),
+        decided_by="user", decided_ref="chat", decision_reason="confirmed",
+        apply_plan=[{"memory_id": left, "action": "preserve_historical_record"},
+                    {"memory_id": right, "action": "use_as_resolution"}],
+        resolution_memory_id=right,
+    )
+    assert judged["outcome"] == "applying"
+    step1 = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": judged["revision"],
+        "memory_id": left, "action": "preserve_historical_record", "authorized": True,
+    })["data"]
+    assert step1["outcome"] == "completed"
+    step2 = tools.memory_govern("apply_conflict_action", {
+        "conflict_id": created["conflict_id"], "expected_revision": step1["revision"],
+        "memory_id": right, "action": "use_as_resolution", "authorized": True,
+    })["data"]
+    assert step2["outcome"] == "completed"
+    resolved = db.resolve_conflict(created["conflict_id"], expected_revision=step2["revision"])
+    assert resolved["outcome"] == "resolved"
 
 
 def test_conflict_detail_exposes_group_snapshot_resolution_and_next_call(tmp_path: Path) -> None:
@@ -332,6 +516,7 @@ from pathlib import Path
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryRecord
+from memory_arbiter.semantic_conflict import normalize_value
 from memory_arbiter.tools import MemoryTools
 
 
@@ -354,7 +539,7 @@ def _product_member(memory_id: int, value: str) -> dict:
     quote = f"database is {value}"
     return ConflictMember(
         memory_id=memory_id, version=1, attribute_raw="database", value_raw=value,
-        normalized_attribute="database", normalized_value=value.casefold(), evidence_quote=quote,
+        normalized_attribute="database", normalized_value=normalize_value(value), evidence_quote=quote,
         evidence_span=(0, len(quote)), content_hash=(str(memory_id) * 64)[:64], direction="a_to_b",
         prompt_version="p1", detector_version="d1",
     ).to_dict()
@@ -735,7 +920,7 @@ def _slot_member(memory_id: int, value: str) -> dict:
     quote = f"连接池上限为 {value}。"
     return ConflictMember(
         memory_id=memory_id, version=1, attribute_raw="连接池上限", value_raw=value,
-        normalized_attribute="连接池上限", normalized_value=value, evidence_quote=quote,
+        normalized_attribute="连接池上限", normalized_value=normalize_value(value), evidence_quote=quote,
         evidence_span=(0, len(quote)), content_hash=(str(memory_id) * 64)[:64],
         direction="a_to_b", prompt_version="p1", detector_version="d1",
     ).to_dict()

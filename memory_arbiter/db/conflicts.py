@@ -129,6 +129,18 @@ class ConflictStore:
                 raise ValueError("evidence_unit must be non-negative")
             if len(str(member["content_hash"])) != 64:
                 raise ValueError("member content_hash must be 64 characters")
+            # D1 (#970): the stored normalized_value is every later gate's
+            # anchor (judge canonicalization, D1 group validation). A
+            # paraphrased value_raw (an agent's retelling rather than the
+            # mechanically normalized extraction) would silently poison all
+            # of them, so reject it at intake. Unenhanced scan candidates
+            # legitimately carry no values (value_raw=None from the
+            # deterministic route); those are not D1's concern.
+            raw_value = member["value_raw"]
+            if raw_value is not None and str(raw_value) != "" and str(member["normalized_value"]) != normalize_value(str(raw_value)):
+                raise ValueError(
+                    "member normalized_value must equal normalize_value(value_raw)"
+                )
             for key, value in member.items():
                 if isinstance(value, str) and len(value) > _MAX_FIELD_CHARS:
                     raise ValueError(f"member field {key} exceeds size bound")
@@ -796,9 +808,15 @@ class ConflictStore:
     def replan_conflict(
         self, conflict_id: int, *, expected_revision: int,
         apply_plan: list[dict[str, Any]], resolution_memory_id: int | None = None,
+        chosen_value: str | None = None,
         strict_workspace: "WorkspaceScope" = None,
     ) -> dict[str, Any]:
-        """CAS-reset an applying plan while retaining every prior plan snapshot."""
+        """CAS-reset an applying plan while retaining every prior plan snapshot.
+
+        An explicit chosen_value (D3, #970) is the recovery for an applying
+        group whose original choice cannot be grounded; it canonicalizes
+        against the stored value groups exactly like judge.
+        """
         if not isinstance(apply_plan, list) or len(apply_plan) > _MAX_MEMBERS or any(
             not isinstance(item, dict) for item in apply_plan
         ):
@@ -816,6 +834,16 @@ class ConflictStore:
                 conn, conflict, strict_workspace,
             ):
                 return {"outcome": "workspace_mismatch"}
+            new_chosen = conflict.get("chosen_value")
+            if chosen_value is not None and str(chosen_value).strip():
+                normalized_new = normalize_value(str(chosen_value))
+                existing_values = {
+                    normalize_value(str(group.get("normalized_value") or "")): str(group.get("normalized_value") or "")
+                    for group in conflict.get("value_groups") or []
+                }
+                if not normalized_new or normalized_new not in existing_values:
+                    return {"outcome": "invalid_chosen_value"}
+                new_chosen = existing_values[normalized_new]
             members = {int(member["memory_id"]): member for member in conflict["member_versions"]}
             plan: list[dict[str, Any]] = []
             seen: set[int] = set()
@@ -862,9 +890,9 @@ class ConflictStore:
                 return {"outcome": "invalid_plan"}
             now = utc_now_iso()
             cur = conn.execute(
-                "UPDATE conflicts SET revision=revision+1,apply_summary=?,resolution_memory_id=?,"
+                "UPDATE conflicts SET revision=revision+1,chosen_value=?,apply_summary=?,resolution_memory_id=?,"
                 "resolution_memory_version=?,refreshed_at=? WHERE id=? AND status='applying' AND revision=?",
-                (summary_json, resolution_id, resolution_version, now,
+                (new_chosen, summary_json, resolution_id, resolution_version, now,
                  int(conflict_id), int(expected_revision)),
             )
             if cur.rowcount != 1:

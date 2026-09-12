@@ -316,15 +316,18 @@ class OperationsPipeline:
                     # replan; no edit happened.
                     step.update(status="blocked", result_version=None, result_hash=None,
                                 error="needs_authorization")
-                elif action in {"update_current_claim", "use_as_resolution"} and not value_is_grounded(
+                elif action == "update_current_claim" and not value_is_grounded(
                     chosen, updated_content
                 ):
                     # The memory edit (if any) and failure bookkeeping must commit
                     # together: applying remains retryable/replannable and history
                     # accurately records that this attempt did not establish the
                     # chosen value. orphaned_edit flags that the content actually
-                    # changed (update_current_claim) so a replan accounts for it;
-                    # use_as_resolution takes the no_change path and is not orphaned.
+                    # changed (update_current_claim) so a replan accounts for it.
+                    # use_as_resolution does not ground here (D2, #970): judge
+                    # already guarantees its value-group membership, and the
+                    # whole-content grounding of a long normalized value was
+                    # structurally impossible.
                     edit_committed = edited.get("outcome") == "edited"
                     step.update(status="failed", result_version=int(updated.get("version") or 0),
                                 result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
@@ -363,6 +366,17 @@ class OperationsPipeline:
             return self.db.state.response(data, ok=False, extra_warnings=list(caller.warnings))
         successful = step.get("status") == "completed"
         result = {"outcome": "completed" if successful else "apply_failed", "conflict_id": conflict_id_int, "revision": revision + 1, "memory_id": target_id, "action": action, "apply_summary": summary}
+        if not successful and step.get("error") == "chosen_value_not_grounded":
+            # D3 (#970): a grounding failure used to dead-end the applying
+            # group because replan could not touch chosen_value. Name the two
+            # real recoveries so the caller does not loop on a retry that can
+            # never succeed.
+            result["note"] = (
+                "The committed member content does not establish the chosen value. Recover via "
+                "memory_govern(action='replan_conflict'): re-edit so the chosen value appears "
+                "verbatim in the member content, or pass a replacement chosen_value drawn from "
+                "the conflict's value_groups together with a fresh plan."
+            )
         if successful and action not in {"preserve_historical_record", "use_as_resolution"}:
             # Post-commit only: index the committed result, then let the normal
             # semantic worker re-enter. Its task remains allowed to discover
@@ -422,7 +436,8 @@ class OperationsPipeline:
 
     def memory_replan_conflict(
         self, conflict_id: int, expected_revision: int, apply_plan: list[dict[str, Any]],
-        resolution_memory_id: int | None = None, authorized: bool = False, **_: Any,
+        resolution_memory_id: int | None = None, chosen_value: str | None = None,
+        authorized: bool = False, **_: Any,
     ) -> dict[str, Any]:
         if not self._is_truthy(authorized):
             return self.db.state.response({"error": "authorized=True is required"}, ok=False)
@@ -441,7 +456,7 @@ class OperationsPipeline:
             )
         result = self.db.conflicts.replan_conflict(
             int(conflict_id), expected_revision=int(expected_revision), apply_plan=apply_plan,
-            resolution_memory_id=resolution_memory_id,
+            resolution_memory_id=resolution_memory_id, chosen_value=chosen_value,
             strict_workspace=caller.scope_canonicals() if caller.isolation == "strict" else None,
         )
         return self.db.state.response(result, ok=result.get("outcome") == "replanned", extra_warnings=list(caller.warnings))

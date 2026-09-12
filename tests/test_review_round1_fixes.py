@@ -14,6 +14,7 @@ import pytest
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryRecord
+from memory_arbiter.semantic_conflict import normalize_value
 from memory_arbiter.tools import MemoryTools
 
 
@@ -39,7 +40,7 @@ def _member(memory_id: int, version: int, value: str, *, detector: str = "d1") -
     quote = f"database is {value}"
     return ConflictMember(
         memory_id=memory_id, version=version, attribute_raw="database", value_raw=value,
-        normalized_attribute="database", normalized_value=value.casefold(), evidence_quote=quote,
+        normalized_attribute="database", normalized_value=normalize_value(value), evidence_quote=quote,
         evidence_span=(0, len(quote)), content_hash=(f"{memory_id}@{version}" * 64)[:64],
         direction="a_to_b", prompt_version="p1", detector_version=detector,
     ).to_dict()
@@ -91,7 +92,7 @@ def test_judge_pins_current_member_version_after_edit(tmp_path: Path) -> None:
         **_record_payload(a, b),
         "members": [_member(a, 2, "postgres"), _member(b, 1, "sqlite")],
         "value_groups": [
-            ConflictValueGroup("postgres", "Postgres", (f"{a}@2",)).to_dict(),
+            ConflictValueGroup("postgresql", "Postgres", (f"{a}@2",)).to_dict(),
             ConflictValueGroup("sqlite", "SQLite", (f"{b}@1",)).to_dict(),
         ],
         "expected_revision": 1,
@@ -168,7 +169,7 @@ def test_escalate_appends_into_existing_open_group(tmp_path: Path) -> None:
         "members": [_member(a, 1, "mysql"), _member(c, 1, "postgres")],
         "value_groups": [
             ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
-            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+            ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict(),
         ],
     })["data"]["conflict_id"]
     escalated = tools.memory_repair("notice", {
@@ -197,7 +198,7 @@ def test_escalate_links_when_members_already_covered(tmp_path: Path) -> None:
         "value_groups": [
             ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
             ConflictValueGroup("sqlite", "SQLite", (f"{b}@1",)).to_dict(),
-            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+            ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict(),
         ],
     })["data"]["conflict_id"]
     escalated = tools.memory_repair("notice", {"action": "escalate", "notice_id": notice_id, "reason": "verified"})
@@ -239,7 +240,7 @@ def test_notice_resolve_keeps_candidate_status_out_of_open_conflicts(tmp_path: P
         "members": [_member(a, 1, "mysql"), _member(c, 1, "postgres")],
         "value_groups": [
             ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
-            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+            ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict(),
         ],
     })
     assert recorded["ok"] is True, recorded
@@ -256,7 +257,7 @@ def test_notice_resolve_with_formal_group_on_slot_returns_structured(tmp_path: P
         "members": [_member(a, 1, "mysql"), _member(c, 1, "postgres")],
         "value_groups": [
             ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
-            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+            ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict(),
         ],
     })
     resolved = tools.memory_repair("notice", {
@@ -277,7 +278,7 @@ def test_escalate_reports_applying_group_exists(tmp_path: Path) -> None:
         "members": [_member(a, 1, "mysql"), _member(c, 1, "postgres")],
         "value_groups": [
             ConflictValueGroup("mysql", "MySQL", (f"{a}@1",)).to_dict(),
-            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+            ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict(),
         ],
     })["data"]["conflict_id"]
     _judge(tools, conflict_id, [{"memory_id": a, "action": "update_current_claim"},
@@ -322,7 +323,7 @@ def test_append_candidate_key_covers_combined_snapshot(tmp_path: Path) -> None:
     appended = tools.memory_repair("record_conflict", {
         **_record_payload(a, c),
         "members": [_member(c, 1, "postgres")],
-        "value_groups": [ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict()],
+        "value_groups": [ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict()],
         "expected_revision": 1,
     })
     assert appended["data"]["outcome"] == "appended"
@@ -333,7 +334,7 @@ def test_append_candidate_key_covers_combined_snapshot(tmp_path: Path) -> None:
     duplicate = tools.memory_repair("record_conflict", {
         **_record_payload(a, c),
         "members": [_member(c, 1, "postgres")],
-        "value_groups": [ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict()],
+        "value_groups": [ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict()],
         "expected_revision": 2,
     })
     assert duplicate["data"]["outcome"] == "deduped"
@@ -360,7 +361,7 @@ def test_single_member_append_to_open_group(tmp_path: Path) -> None:
     appended = tools.memory_repair("record_conflict", {
         **_record_payload(a, c),
         "members": [_member(c, 1, "postgres")],
-        "value_groups": [ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict()],
+        "value_groups": [ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict()],
         "expected_revision": 1,
     })
     assert appended["ok"] is True
@@ -398,7 +399,7 @@ def test_overflow_append_flags_manual_review(tmp_path: Path, monkeypatch) -> Non
     overflowed = tools.memory_repair("record_conflict", {
         **_record_payload(a, c),
         "members": [_member(c, 1, "postgres")],
-        "value_groups": [ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict()],
+        "value_groups": [ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict()],
         "expected_revision": 1,
     })
     assert overflowed["data"]["outcome"] == "overflow"
@@ -447,7 +448,7 @@ def test_post_resolution_new_value_creates_new_event(tmp_path: Path) -> None:
         "members": [_member(b, 1, "sqlite"), _member(c, 1, "postgres")],
         "value_groups": [
             ConflictValueGroup("sqlite", "SQLite", (f"{b}@1",)).to_dict(),
-            ConflictValueGroup("postgres", "Postgres", (f"{c}@1",)).to_dict(),
+            ConflictValueGroup("postgresql", "Postgres", (f"{c}@1",)).to_dict(),
         ],
     })
     assert new_event["data"]["outcome"] == "inserted"

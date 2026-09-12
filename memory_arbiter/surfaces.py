@@ -369,6 +369,7 @@ class ProductSurfaces:
                 "expected_revision must match the current conflict revision.",
                 "apply_plan contains each planned member at most once.",
                 "resolution_memory_id is required and must identify an active memory; prefer the existing correct member as the resolution.",
+                "The default judgment corrects the wrong data in memory: plan update_current_claim or append_superseded_context for members holding superseded claims; use preserve_historical_record only when the user explicitly asks to keep the historical record.",
                 "Each plan step is applied sequentially with memory_govern(action='apply_conflict_action').",
             ],
         }

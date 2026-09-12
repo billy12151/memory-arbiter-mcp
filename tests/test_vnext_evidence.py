@@ -19,6 +19,7 @@ from memory_arbiter.semantic_conflict import (
     ModelSignal,
     decide_evidence,
     evaluate_pair_extractions,
+    normalize_value,
 )
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.vnext_migration import build, inspect
@@ -1817,7 +1818,7 @@ def _conflict_member(memory_id: int, value: str, quote: str, *, version: int = 1
         attribute_raw="接口超时",
         value_raw=value,
         normalized_attribute="接口超时",
-        normalized_value=value,
+        normalized_value=normalize_value(value),
         evidence_quote=quote,
         evidence_span=(0, len(quote)),
         content_hash=evidence_content_hash(quote),
@@ -1836,8 +1837,8 @@ def _structured_conflict_payload(left_id: int, right_id: int, *, left_version: i
             _conflict_member(right_id, "30秒", right_quote, version=right_version),
         ],
         "value_groups": [
-            ConflictValueGroup("5秒", "5 秒", (f"{left_id}@{left_version}",)).to_dict(),
-            ConflictValueGroup("30秒", "30 秒", (f"{right_id}@{right_version}",)).to_dict(),
+            ConflictValueGroup("5s", "5 秒", (f"{left_id}@{left_version}",)).to_dict(),
+            ConflictValueGroup("30s", "30 秒", (f"{right_id}@{right_version}",)).to_dict(),
         ],
         "detector_version": "attribute-value-v1",
         "prompt_version": "pair-v1",
@@ -1947,7 +1948,7 @@ def test_notice_escalation_requires_structured_slot_snapshot(tmp_path: Path) -> 
     assert detail["source"] == "semantic_notice"
     assert detail["notice_delivery_status"] == "resolved"
     assert detail["slot_key"]["entity"] == "checkout-api"
-    assert {group["normalized_value"] for group in detail["value_groups"]} == {"5秒", "30秒"}
+    assert {group["normalized_value"] for group in detail["value_groups"]} == {"5s", "30s"}
 
 
 def test_notice_freshness_and_terminal_lifecycle_use_api(tmp_path: Path) -> None:
@@ -2003,7 +2004,7 @@ def test_structured_record_conflict_validates_slot_members_and_revision(tmp_path
         **payload,
         "members": payload["members"] + [third_member],
         "value_groups": payload["value_groups"] + [
-            ConflictValueGroup("60秒", "60 秒", (f"{third['id']}@1",)).to_dict(),
+            ConflictValueGroup("60s", "60 秒", (f"{third['id']}@1",)).to_dict(),
         ],
         "expected_revision": 1,
     }
@@ -2023,7 +2024,7 @@ def test_judge_uses_group_revision_and_apply_plan(tmp_path: Path) -> None:
     judged = tools.memory("judge", {
         "conflict_id": conflict_id,
         "expected_revision": 1,
-        "chosen_value": "30秒",
+        "chosen_value": "30s",
         "decided_by": "user",
         "ref": "test",
         "reason": "用户确认生产超时",

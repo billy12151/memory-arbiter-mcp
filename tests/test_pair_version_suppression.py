@@ -45,6 +45,9 @@ def _find(data: dict, pair: tuple[int, int]) -> dict | None:
 
 
 def _dismiss_pair(tools: MemoryTools, clue: dict, reason: str = "not a conflict", workspace: str | None = None) -> None:
+    # Unenhanced clue members carry value_raw=None (deterministic scan route);
+    # the intake consistency check skips them, and the group value must equal
+    # their stored normalized form (str(None) -> "None").
     recorded = tools.memory_repair("record_conflict", {
         "slot_key": None,
         "members": clue["members"],
@@ -162,7 +165,7 @@ def test_open_group_precedence_over_dismissal(vec_tools: MemoryTools) -> None:
     # rewrite) must not un-open the pair.
     raw_clue = {
         "members": [
-            {**m, "normalized_value": "None", "value_raw": "same value"}
+            {**m, "normalized_value": "samevalue", "value_raw": "same value"}
             for m in members
         ],
     }
@@ -171,7 +174,7 @@ def test_open_group_precedence_over_dismissal(vec_tools: MemoryTools) -> None:
         "members": raw_clue["members"],
         "value_groups": [
             {
-                "normalized_value": "None", "display_value": "no conflict",
+                "normalized_value": "samevalue", "display_value": "no conflict",
                 "members": [f"{m['memory_id']}@{m['version']}" for m in raw_clue["members"]],
             },
         ],

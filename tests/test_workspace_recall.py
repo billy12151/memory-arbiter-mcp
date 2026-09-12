@@ -90,7 +90,7 @@ def _record_group(tools: MemoryTools, member_ids: list[int], *, conflict_point: 
     groups = []
     for index, memory_id in enumerate(member_ids):
         record = tools.db.get_memory(memory_id)
-        value = f"value-{index}"
+        value = f"value{index}"
         quote = record["content"]
         members.append(ConflictMember(
             memory_id=memory_id, version=record["version"], attribute_raw="database", value_raw=value,
@@ -144,7 +144,7 @@ def test_strict_conflict_creation_rejects_cross_workspace_members(tmp_path):
     groups = []
     for index, memory_id in enumerate((a_id, b_id)):
         record = tools.db.get_memory(memory_id)
-        value = f"value-{index}"
+        value = f"value{index}"
         quote = record["content"]
         members.append(ConflictMember(
             memory_id=memory_id, version=record["version"], attribute_raw="database", value_raw=value,
@@ -1446,7 +1446,7 @@ def test_conflict_detail_visible_across_admitted_workspaces(tmp_path):
     groups = []
     for index, memory_id in enumerate((first, second)):
         record = tools.db.get_memory(memory_id)
-        value = f"value-{index}"
+        value = f"value{index}"
         quote = record["content"]
         members.append(ConflictMember(
             memory_id=memory_id, version=record["version"], attribute_raw="database",
@@ -1471,7 +1471,7 @@ def test_conflict_detail_visible_across_admitted_workspaces(tmp_path):
 
     judged = tools.memory("judge", {
         "workspace": "agent-lane", "conflict_id": conflict_id,
-        "expected_revision": 1, "chosen_value": "value-1",
+        "expected_revision": 1, "chosen_value": "value_1",
         "decided_by": "user", "ref": "chat", "reason": "confirmed",
         "authorized": True,
         "apply_plan": [
@@ -1498,7 +1498,7 @@ def test_conflict_outside_admitted_set_stays_hidden(tmp_path):
     groups = []
     for index, memory_id in enumerate((first, second)):
         record = tools.db.get_memory(memory_id)
-        value = f"value-{index}"
+        value = f"value{index}"
         quote = record["content"]
         members.append(ConflictMember(
             memory_id=memory_id, version=record["version"], attribute_raw="database",

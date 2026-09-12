@@ -103,7 +103,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "old_text", "new_text", "reason", "authorized", "workspace",
     },
     ("memory_govern", "replan_conflict"): {
-        "id", "conflict_id", "expected_revision", "apply_plan",
+        "id", "conflict_id", "expected_revision", "apply_plan", "chosen_value",
         "resolution_memory_id", "authorized", "workspace",
     },
     ("memory_govern", "confirm"): {"id", "memory_id", "source_ref", "confidence", "authorized", "workspace"},
