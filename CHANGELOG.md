@@ -3,6 +3,17 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **Conflict-governance deadlock (mema #970, conflict #50).** Three interface defects made the standard judge → apply → replan → resolve flow dead-end whenever the chosen value was a long phrase (every existing test used short values like "sqlite", which happened to satisfy both ends of a mismatched pair of checks). No scan logic changed — `CONFLICT_DETECTOR_VERSION` and `PAIR_PROMPT_VERSION` are untouched, so upgrading triggers zero rescans.
+  - **D1 — paraphrased values are rejected at intake.** `record_conflict` now requires each member's `normalized_value` to equal `normalize_value(value_raw)`; an agent's retelling used to be silently stored and poison every later validation anchor. Value-less candidates (the deterministic scan route stores `value_raw=null`) are not affected.
+  - **D2 — `use_as_resolution` no longer grounds against member content.** Its validity is already guaranteed at judge time (chosen ∈ value_groups, resolution memory active); the apply-side whole-content substring check was both redundant and structurally unsatisfiable for long normalized phrases. `update_current_claim` keeps the check — the agent can still ground it by writing the chosen value into the content.
+  - **D3 — `replan_conflict` can update `chosen_value`.** New optional parameter (validated like judge's, stored in the value_groups' own canonical form, new `invalid_chosen_value` error code, committed atomically with the replacement plan), and the `chosen_value_not_grounded` failure response now names the two real recoveries instead of dead-ending the applying group.
+  - **D4 — judgment guidance defaults to correcting wrong data.** `judge_constraints` now states the default plan: `update_current_claim` / `append_superseded_context` for members holding superseded claims; `preserve_historical_record` only on explicit user request. No read-path annotation or other new mechanism.
+  - Real-model release gate: a slow e2e test runs the full lifecycle (real Qwen extraction → record → judge → apply → resolve) plus the grounding-failure → replan → resolve recovery drill.
+
 ## [0.15.14] — 2026-09-11
 
 **Qwen write-time check performance pack + cleanup pack (mema #964, owner-approved 2026-09-11).** The write-time semantic check stops paying grammar tax on every token, examines and surfaces more of a long memory, and the dead AgentPolicy half-wiring is gone. One breaking change: `policy_path` is removed.

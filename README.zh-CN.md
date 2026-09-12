@@ -131,6 +131,7 @@ mema doctor
 - **想清一遍全库的重复记忆？** 用 `memory_repair(task="scan_duplicates")` 一次拿全：服务端把所有页的近重复对聚合成一份有界结果（最多 200 对，默认只给 id/主题/workspace/原因/距离这类轻量字段，`include_quotes=true` 再附上证据引文），不会把 agent 会话撑爆。分诊后该合并的走 `merge_memories`，误报的照旧用 `record_conflict` 压掉。
 - **装完记得设两个定时任务。** 迷码自己不带定时器（扫描的价值闭环在 agent 分诊，得靠外部调度器到点唤醒 agent）：①每小时跑一轮 `scan_candidates` 分页循环（把每页返回的 `next_anchor_memory_id` 当下一页的入参，直到返回空）；②每天跑一次 `doctor` 做治理提醒。每完成一轮完整扫描边界（某页返回 `next_anchor_memory_id=null` 且确有 anchor 被扫）才向 `scan_log.jsonl` 记一行轻量审计记录；在看到运行证据之前，agent 会收到设置引导提示，doctor 也会对「重建欠账」（`conflicts.scan_required`）和「扫描停滞超过 14 天」（`conflicts.scan_stale`）亮黄灯——任务跑起来后它们会自动安静。完整规格：`memory(action="help", data={"topic": "scheduled_tasks"})`。
 - **改坏了能查。** 冲突单里钉死了当时的记忆版本和证据原文位置，每一步修改都有记录，改错了能追回来。
+- **裁决默认改数据，卡住能救。** 裁决的默认动作是修正记忆里错的数据（`update_current_claim` 改写正文 / `append_superseded_context` 补充取代说明）；只有你明确说"保留历史记录"才走 `preserve_historical_record`。0.15.15 之前，选中的值如果是长短语（比如"上传要用显式文件名"），`use_as_resolution` 会被一个结构性不可能通过的正文校验卡死，整个冲突单进退不得；现在这个校验只留给 `update_current_claim`（你可以把选定值写进正文来自证），`replan_conflict` 还支持直接换 `chosen_value`，改错值也能救回来。
 
 ## 多个项目怎么隔开？
 
