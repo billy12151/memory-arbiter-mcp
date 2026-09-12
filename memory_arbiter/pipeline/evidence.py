@@ -219,6 +219,37 @@ class EvidencePipeline:
                 embedded = embedder.embed_text(prefix="", body=unit.text)
                 if embedded.embedding:
                     unit_vectors.append((unit, list(embedded.embedding)))
+        # 0.16.0 E10① (§6⑳): same-memory internal examination comes FIRST —
+        # units are in hand (no KNN), the rule is deterministic, and the
+        # finding lands in the dedicated internal_conflicts structure (the
+        # conflicts table's pair invariants reject a single memory@version
+        # twice). It consumes no Qwen budget; the cross-memory loop below is
+        # untouched in shape, and a truncated cross loop still reports the
+        # internal findings already landed this run.
+        internal_found = 0
+        internal_version = int(record.get("version") or 1)
+        text_units = [unit for unit, _embedding in unit_vectors]
+        for i in range(len(text_units)):
+            for j in range(i + 1, len(text_units)):
+                unit_a, unit_b = text_units[i], text_units[j]
+                internal_decision = decide_evidence(unit_a.text, unit_b.text)
+                if internal_decision.action == "ignore":
+                    continue
+                if self.db.internal_conflicts.exists(
+                    int(memory_id), internal_version,
+                    unit_a.unit_index, unit_b.unit_index,
+                ):
+                    continue
+                if self.db.internal_conflicts.create(
+                    memory_id=int(memory_id), memory_version=internal_version,
+                    unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
+                    quote_a=unit_a.text, quote_b=unit_b.text,
+                    span_a=[unit_a.start_offset, unit_a.end_offset],
+                    span_b=[unit_b.start_offset, unit_b.end_offset],
+                    reason=internal_decision.reason,
+                    detector_version=CONFLICT_DETECTOR_VERSION,
+                ):
+                    internal_found += 1
         units_examined = 0
         # Spec §15.5: a bounded check that ran out of budget must not later
         # claim checked_no_notice. The two truncation causes report
@@ -517,6 +548,8 @@ class EvidencePipeline:
             result: dict[str, Any] = {
                 "status": "completed", "outcome": "notices_created", "notices_created": surfaced,
             }
+            if internal_found:
+                result["internal_conflicts"] = internal_found
             if incomplete_reason:
                 # Notices went out, but later pairs hit a truncation/degradation
                 # — surface it instead of a bare completed (second-round
@@ -527,6 +560,10 @@ class EvidencePipeline:
             result = {"status": "incomplete", "reason": incomplete_reason, "notices_created": 0}
         else:
             result = {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
+        if internal_found and "internal_conflicts" not in result:
+            # Internal findings survive a truncated cross-memory loop: they
+            # were landed BEFORE the loop ran (E10① order guarantee).
+            result["internal_conflicts"] = internal_found
         if reasons_seen:
             # Degradations may also occur on pairs before a later pair surfaces
             # a notice, so the list is attached to completed outcomes too.
