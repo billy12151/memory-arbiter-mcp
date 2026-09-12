@@ -165,8 +165,48 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     cleaned = _cleanup_first_round_artifacts(conn)
     if cleaned:
         applied.append(cleaned)
+    swept = _sweep_queued_numeric_rows(conn)
+    if swept:
+        applied.append(swept)
     conn.commit()
     return applied
+
+
+_NUMERIC_SWEEP_KEY = "scan_pipeline_numeric_sweep_v1"
+
+
+def _sweep_queued_numeric_rows(conn: sqlite3.Connection) -> str:
+    """One-shot: queued numeric-route pairs → voided (identity released) and
+    watermarks reset, so the calibrated per-kick auto-reject cap (5000)
+    classifies them into the audit trail on the re-run instead of burning
+    agent judgment. Runs once; steady-state libraries see a no-op."""
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_NUMERIC_SWEEP_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    from ..models import utc_now_iso as _now
+
+    now = _now()
+    rows = conn.execute(
+        "SELECT id, candidate_key_hash FROM scan_queue "
+        "WHERE kind='conflict' AND status='pending' AND reason LIKE '%numeric_value_candidate%'"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE scan_queue SET status='voided', candidate_key_hash=?, "
+            "decided_reason='numeric sweep: reclassified to auto-reject', decided_at=?, updated_at=? "
+            "WHERE id=?",
+            (voided_identity_hash(str(row["candidate_key_hash"]), int(row["id"])), now, now, int(row["id"])),
+        )
+    conn.execute("DELETE FROM migration_state WHERE key='scan_pipeline_state'")
+    conn.execute("UPDATE memories SET scan_watermark=NULL WHERE status='active'")
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_NUMERIC_SWEEP_KEY, f"voided={len(rows)}"),
+    )
+    return f"numeric_sweep(voided={len(rows)}, watermarks_reset)"
 
 
 _CLEANUP_KEY = "scan_pipeline_gate_v2_cleanup_v1"

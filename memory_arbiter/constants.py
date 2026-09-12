@@ -236,7 +236,12 @@ MAX_MEMORY_TOTAL_TAGS = 32
 # machine-exercised numeric auto-reject. Beyond the cap the pair falls back
 # to the judgment queue so a numeric-noise flood can never silently consume
 # the whole round's suppression authority.
-SCAN_PIPELINE_AUTO_REJECT_CAP = 1000
+# Calibrated on the first real-library round (2026-09-13): ~11k numeric
+# pairs across ~574 memories — a 200/kick cap just relocated the noise into
+# the agent's queue. 5000/kick covers a full round in ~3 kicks while still
+# bounding machine suppression per bounded batch (each rejection = one
+# reviewable not_a_conflict audit row).
+SCAN_PIPELINE_AUTO_REJECT_CAP = 5000
 # Pipeline kick defaults: one kick is a bounded synchronous batch (the task
 # re-kicks until complete; no resident walker per §6⑦).
 SCAN_PIPELINE_KICK_TIME_BUDGET_S = 45.0
