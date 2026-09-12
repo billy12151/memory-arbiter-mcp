@@ -104,4 +104,3 @@ def test_spec_sample_carries_include_quotes() -> None:
     )
     assert conflict_scan["calls"], "v2 spec must describe the task's calls"
     assert not any(call.get("task") == "scan_candidates" for call in conflict_scan["calls"])
-    )
