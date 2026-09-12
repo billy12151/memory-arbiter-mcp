@@ -468,6 +468,9 @@ def test_moved_non_active_annotation(tmp_path: Path) -> None:
 
 
 def test_conflict_scope_note_lists_foreign_scoped_conflicts(tmp_path: Path) -> None:
+    """0.16.0 §6⑯: a move VOIDS the moved memory's non-terminal tickets —
+    the response reports the void count; the pipeline re-establishes the
+    conflict inside the new bucket."""
     tools = make_tools(tmp_path)
     left = write(tools, "ws-old")
     right = write(tools, "ws-old", content="other value")
@@ -475,9 +478,13 @@ def test_conflict_scope_note_lists_foreign_scoped_conflicts(tmp_path: Path) -> N
 
     outcome = move(tools, {"memory_ids": [left], "new_workspace": "proj-x", "authorized": True})
     assert outcome["ok"], outcome
-    note = outcome["data"]["conflict_scope_note"]
-    assert note["conflict_ids"] == [conflict_id]
-    assert "scan_candidates" in note["note"]
+    voided = outcome["data"]["conflict_tickets_voided"]
+    assert voided["count"] >= 1
+    moved_ticket = tools.db.get_conflict(conflict_id)
+    assert moved_ticket["status"] == "resolved"
+    assert str(moved_ticket["decision_reason"] or "").startswith("voided:")
+    # "released, not suppressed": no not_a_conflict suppression source exists
+    assert not tools.db.is_pair_dismissed(left, right)
 
 
 def test_governance_impact_and_help_disclosures(tmp_path: Path) -> None:

@@ -969,40 +969,19 @@ class OperationsPipeline:
         except sqlite3.Error as exc:
             return aborted(exc)
 
-        # Open/applying conflicts keep their NOT NULL scope key: a by-id move
-        # must not rewrite conflict scopes wholesale (only migrate, which owns
-        # a whole canonical, does). Moved members whose conflict is scoped
-        # elsewhere are reported for a scan instead.
-        conflict_scope_ids: list[int] = []
-        try:
-            with self.db.connection() as conn:
-                rows = conn.execute(
-                    "SELECT id, workspace_canonical, member_versions FROM conflicts "
-                    "WHERE status IN ('open','applying')"
-                ).fetchall()
-            moved_set = set(moved)
-            for row in rows:
-                if str(row["workspace_canonical"] or "") == target:
-                    continue
+        # 0.16.0 §6⑯: a move VOIDS the moved memory's non-terminal conflict
+        # tickets (releasing slot/candidate identities, suppressing nothing);
+        # the pipeline re-establishes them in the new bucket on its next pass.
+        # The store reports the count via a structured sentinel warning —
+        # surface it as response data, never as a raw warning.
+        voided_ticket_total = 0
+        for warning in list(warnings):
+            if warning.startswith("voided_conflict_tickets:"):
                 try:
-                    members = json.loads(str(row["member_versions"] or "[]"))
-                except (TypeError, ValueError):
-                    continue
-                member_ids: set[int] = set()
-                for member in members if isinstance(members, list) else []:
-                    if not isinstance(member, dict):
-                        continue
-                    raw_member_id = member.get("memory_id")
-                    if raw_member_id is None:
-                        continue
-                    try:
-                        member_ids.add(int(raw_member_id))
-                    except (TypeError, ValueError):
-                        continue
-                if member_ids & moved_set:
-                    conflict_scope_ids.append(int(row["id"]))
-        except sqlite3.Error:
-            conflict_scope_ids = []
+                    voided_ticket_total += int(warning.split(":", 1)[1])
+                except ValueError:
+                    pass
+                warnings.remove(warning)
 
         data: dict[str, Any] = {
             "moved": not failures,
@@ -1011,6 +990,15 @@ class OperationsPipeline:
             "errors": failures,
             "new_workspace": target,
         }
+        if voided_ticket_total:
+            data["conflict_tickets_voided"] = {
+                "count": voided_ticket_total,
+                "note": (
+                    "The moved memories' non-terminal conflict tickets were voided "
+                    "(released, not suppressed). The scan pipeline re-establishes "
+                    "them inside the new bucket on its next pass."
+                ),
+            }
         if requested != target:
             data["requested_new_workspace"] = requested
         if forced:
@@ -1034,16 +1022,6 @@ class OperationsPipeline:
             }
         if non_active:
             data["moved_non_active"] = non_active
-        if conflict_scope_ids:
-            data["conflict_scope_note"] = {
-                "conflict_ids": conflict_scope_ids,
-                "note": (
-                    "These open/applying conflicts are scoped to a different "
-                    "workspace_canonical than the destination; their scope keys were "
-                    "left unchanged on purpose. Re-check them via "
-                    "memory_repair(task='scan_candidates')."
-                ),
-            }
         if any("workspace canonical vector publish failed" in warning for warning in warnings):
             data["workspace_vector_publish"] = {
                 "status": "pending_retry",

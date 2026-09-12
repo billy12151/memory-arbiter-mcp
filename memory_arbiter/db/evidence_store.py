@@ -879,6 +879,44 @@ class EvidenceStore:
                 },
             }
 
+    def scan_units(self, memory_id: int, memory_version: int) -> list[dict[str, Any]]:
+        """Current-version text units with evidence-row identity + vectors.
+
+        The pipeline's per-memory unit source: each row carries ``eid``
+        (memory_evidence.id) and ``content_hash`` so candidate identities match
+        the legacy scan path byte-for-byte, plus the published embedding when
+        the vec table has it (a unit without an embedding still participates
+        in internal examination, never in KNN).
+        """
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    """SELECT e.id AS eid, e.unit_index AS unit_index, e.kind AS kind,
+                              e.text AS text, e.start_offset AS start_offset,
+                              e.end_offset AS end_offset, e.content_hash AS content_hash,
+                              v.embedding AS embedding
+                       FROM memory_evidence e
+                       LEFT JOIN memory_evidence_vec v ON v.id=e.id
+                       WHERE e.memory_id=? AND e.memory_version=? AND e.kind='text'
+                       ORDER BY e.unit_index""",
+                    (int(memory_id), int(memory_version)),
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+        units: list[dict[str, Any]] = []
+        for row in rows:
+            unit = dict(row)
+            blob = unit.get("embedding")
+            if blob is not None:
+                try:
+                    unit["embedding"] = self._blob_to_vector(bytes(blob))
+                except (struct.error, TypeError, ValueError):
+                    unit["embedding"] = None
+            else:
+                unit["embedding"] = None
+            units.append(unit)
+        return units
+
     @staticmethod
     def _blob_to_vector(blob: bytes) -> list[float]:
         count = len(blob) // 4

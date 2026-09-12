@@ -111,6 +111,42 @@ class MetaStore:
         }
 
     SCAN_PAGE_PROGRESS_KEY = "scan_page_progress"
+    SCAN_PIPELINE_STATE_KEY = "scan_pipeline_state"
+
+    def scan_pipeline_state(self) -> dict[str, Any] | None:
+        """0.16.0 conflict-scan pipeline round state (breakpoint resume).
+
+        Shape: {round_id, detector_version, mode, last_id, processed, complete,
+        started_at, updated_at}. A kick resumes from ``last_id``; a detector
+        mismatch restarts the round (suppression/identity semantics changed).
+        """
+        if not self._db._db_available:
+            return None
+        with self._db.connection() as conn:
+            raw = conn.execute(
+                "SELECT value FROM migration_state WHERE key=?",
+                (self.SCAN_PIPELINE_STATE_KEY,),
+            ).fetchone()
+        if raw is None:
+            return None
+        try:
+            state = json.loads(str(raw[0]))
+        except (TypeError, ValueError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    def record_scan_pipeline_state(self, payload: dict[str, Any]) -> bool:
+        if not self._db._db_available or not self._db.state.sqlite_writable:
+            return False
+        with self._db.write_transaction() as conn:
+            conn.execute(
+                """INSERT INTO migration_state(key,value,updated_at)
+                   VALUES(?,?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                (self.SCAN_PIPELINE_STATE_KEY, json.dumps(payload, ensure_ascii=False)),
+            )
+        return True
+
 
     def scan_page_progress_state(self) -> dict[str, Any] | None:
         """C5 routine-scan pacing record (per-workspace accounting).

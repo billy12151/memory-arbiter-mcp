@@ -232,6 +232,17 @@ BATCH_READ_FULL_BUDGET_MAX_BYTES = 100 * 1024
 # keep the MAX_TAGS=100 bound; the total cap applies to the merged on-row set.
 MAX_MEMORY_TOTAL_TAGS = 32
 
+# 0.16.0 scan pipeline (plan §2 commits 3-5, E11 ③): per-round cap on the
+# machine-exercised numeric auto-reject. Beyond the cap the pair falls back
+# to the judgment queue so a numeric-noise flood can never silently consume
+# the whole round's suppression authority.
+SCAN_PIPELINE_AUTO_REJECT_CAP = 200
+# Pipeline kick defaults: one kick is a bounded synchronous batch (the task
+# re-kicks until complete; no resident walker per §6⑦).
+SCAN_PIPELINE_KICK_TIME_BUDGET_S = 45.0
+SCAN_PIPELINE_KICK_MAX_MEMORIES = 400
+SCAN_PIPELINE_NEIGHBOR_K = 10
+
 # HTTP transport fixed surface
 MCP_HTTP_PATH = "/mcp"
 MCP_HTTP_BODY_LIMIT = 4 * 1024 * 1024

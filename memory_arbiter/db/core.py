@@ -31,6 +31,8 @@ from .conflicts import ConflictStore
 from .memories import MemoriesStore
 from .backup_replay import BackupReplayStore
 from .evidence_store import EvidenceStore
+from .scan_queue import ScanQueueStore
+from .internal_conflicts import InternalConflictStore
 
 # Explicit export list. The pre-split db.py surfaced its top-level imports
 # (json/re/sqlite3/…) as module attributes; the package facade re-exports them
@@ -99,6 +101,8 @@ class MemoryDB:
         self.memories = MemoriesStore(self)
         self.backup_replay = BackupReplayStore(self)
         self.evidence = EvidenceStore(self)
+        self.scan_queue = ScanQueueStore(self)
+        self.internal_conflicts = InternalConflictStore(self)
         # Hold one lock across the generation gate and any first-start schema
         # creation. Current databases skip DDL entirely at normal startup.
         with database_startup_lock(settings.db_path):
@@ -226,6 +230,24 @@ class MemoryDB:
                 if initialize_schema:
                     self._init_schema(conn)
                 self._probe_features(conn, initialize=initialize_schema)
+                # 0.16.0 §6⑲: the additive completion channel runs on BOTH
+                # fresh and existing databases — historically an existing DB
+                # ran zero DDL at startup, leaving new columns/tables without
+                # a creation point. Failures (read-only files) degrade to a
+                # warning, never a failed boot.
+                try:
+                    from .additive import ensure_additive_structures
+                    applied = ensure_additive_structures(conn)
+                    if applied:
+                        self.state.warn(
+                            "additive schema completion applied: " + ", ".join(applied)
+                        )
+                except sqlite3.Error as exc:
+                    self.state.warn(
+                        f"additive schema completion skipped: {exc}. "
+                        "0.16.0 scan structures are unavailable until the "
+                        "database is writable."
+                    )
                 if not db_preexisted:
                     try:
                         os.chmod(self.settings.db_path, 0o600)
@@ -521,6 +543,79 @@ class MemoryDB:
 
     def record_conflict_group(self, **kwargs: Any) -> dict[str, Any]:
         return self.conflicts.record_conflict_group(**kwargs)
+
+    def void_conflicts(self, memory_ids: list[int], *, reason: str) -> int:
+        return self.conflicts.void_conflicts(memory_ids, reason=reason)
+
+    # ------------------------------------------------------------------
+    #  0.16.0 conflict-scan pipeline (watermarks + judgment queue)
+    # ------------------------------------------------------------------
+
+    def scan_queue_enqueue(self, **kwargs: Any) -> dict[str, Any]:
+        return self.scan_queue.enqueue(**kwargs)
+
+    def scan_queue_counts(self) -> dict[str, int]:
+        return self.scan_queue.counts()
+
+    def scan_queue_backlog(self) -> int:
+        return self.scan_queue.backlog()
+
+    def scan_queue_refresh_stale_pins(self) -> int:
+        return self.scan_queue.refresh_stale_pins()
+
+    def pending_scan_memory_ids(self, *, after_id: int = 0, limit: int = 100) -> list[int]:
+        """Active memories whose scan watermark is missing or behind their
+        version (never-scanned, edited since the last pass, or moved)."""
+        if not self._db_available:
+            return []
+        with self.connection() as conn:
+            return [
+                int(row["id"]) for row in conn.execute(
+                    """SELECT id FROM memories
+                       WHERE status='active' AND id > ?
+                         AND (scan_watermark IS NULL OR scan_watermark < version)
+                       ORDER BY id LIMIT ?""",
+                    (int(after_id), max(1, int(limit))),
+                ).fetchall()
+            ]
+
+    def pending_scan_memory_count(self) -> int:
+        if not self._db_available:
+            return 0
+        with self.connection() as conn:
+            return int(conn.execute(
+                """SELECT COUNT(*) FROM memories
+                   WHERE status='active'
+                     AND (scan_watermark IS NULL OR scan_watermark < version)"""
+            ).fetchone()[0])
+
+    def mark_scanned(self, memory_id: int, version: int) -> bool:
+        """Advance one memory's watermark; a no-op when the version moved on."""
+        if not self._db_available or not self.state.sqlite_writable:
+            return False
+        try:
+            with self.write_transaction() as conn:
+                cur = conn.execute(
+                    "UPDATE memories SET scan_watermark=? WHERE id=? AND version=?",
+                    (int(version), int(memory_id), int(version)),
+                )
+                return bool(cur.rowcount)
+        except sqlite3.Error:
+            return False
+
+    def clear_all_scan_watermarks(self) -> int:
+        """Arm a full pipeline round: every active memory becomes pending.
+
+        This is the detector/prompt epoch 布防 path (plan §6⑪/commit 8) —
+        watermark-NULL first-scan memories were already covered implicitly.
+        """
+        if not self._db_available or not self.state.sqlite_writable:
+            return 0
+        with self.write_transaction() as conn:
+            cur = conn.execute(
+                "UPDATE memories SET scan_watermark=NULL WHERE status='active'"
+            )
+            return int(cur.rowcount or 0)
 
     def get_conflict(self, conflict_id: int) -> dict[str, Any] | None:
         return self.conflicts.get_conflict(conflict_id)

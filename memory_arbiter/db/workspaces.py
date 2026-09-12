@@ -1191,7 +1191,7 @@ class WorkspaceStore:
         alias_key = _normalize_alias_key(from_ws)
         to_key = _normalize_alias_key(to_ws)
         cur = conn.execute(
-            "UPDATE memories SET workspace_canonical = ? "
+            "UPDATE memories SET workspace_canonical = ?, scan_watermark = NULL "
             "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
             (to_ws, from_ws),
         )
@@ -1670,9 +1670,27 @@ class WorkspaceStore:
         canonical = _coerce_ws(canonical)
         if not canonical:
             return False, ["canonical must be a non-empty workspace string."]
+        current = conn.execute(
+            "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "
+            "FROM memories WHERE id = ?",
+            (int(memory_id),),
+        ).fetchone()
+        bucket_changed = bool(current and str(current["bucket"] or "") != canonical)
+        if bucket_changed:
+            # 0.16.0 §6⑤/§6⑯: a bucket reassignment is a move — void the
+            # memory's old-bucket tickets and invalidate its scan watermark
+            # so the pipeline re-pairs it inside the new bucket.
+            self._db.conflicts.void_conflicts_on_conn(
+                conn, [int(memory_id)],
+                reason=f"canonical reassignment -> {canonical!r}",
+            )
         cur = conn.execute(
-            "UPDATE memories SET workspace_canonical = ? WHERE id = ?",
-            (canonical, int(memory_id)),
+            "UPDATE memories SET workspace_canonical = ?, "
+            "scan_watermark = CASE WHEN "
+            "COALESCE(NULLIF(workspace_canonical,''),workspace) != ? "
+            "THEN NULL ELSE scan_watermark END "
+            "WHERE id = ?",
+            (canonical, canonical, int(memory_id)),
         )
         if (cur.rowcount or 0) == 0:
             return False, ["memory id not found."]
@@ -1716,9 +1734,34 @@ class WorkspaceStore:
         workspace = _coerce_ws(workspace)
         if not workspace or is_default_workspace_term(workspace):
             return False, ["move destination must be a non-default workspace string."]
+        current = conn.execute(
+            "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "
+            "FROM memories WHERE id = ?",
+            (int(memory_id),),
+        ).fetchone()
+        bucket_changed = bool(current and str(current["bucket"] or "") != workspace)
+        move_warnings: list[str] = []
+        if bucket_changed:
+            # 0.16.0 §6⑤/§6⑯: move 视同编辑 — void old-bucket tickets
+            # (releasing slot/candidate identities, suppressing nothing) and
+            # clear the scan watermark so the pipeline re-pairs the memory in
+            # its new bucket. Same-bucket no-ops stay side-effect free.
+            voided = self._db.conflicts.void_conflicts_on_conn(
+                conn, [int(memory_id)],
+                reason=f"workspace move -> {workspace!r}",
+            )
+            if voided:
+                # Structured sentinel consumed by the move surface (0.16.0):
+                # "voided_conflict_tickets:<n>" is reported in the response,
+                # never shown as a raw warning.
+                move_warnings.append(f"voided_conflict_tickets:{voided}")
         cur = conn.execute(
-            "UPDATE memories SET workspace = ?, workspace_canonical = ? WHERE id = ?",
-            (workspace, workspace, int(memory_id)),
+            "UPDATE memories SET workspace = ?, workspace_canonical = ?, "
+            "scan_watermark = CASE WHEN "
+            "COALESCE(NULLIF(workspace_canonical,''),workspace) != ? "
+            "THEN NULL ELSE scan_watermark END "
+            "WHERE id = ?",
+            (workspace, workspace, workspace, int(memory_id)),
         )
         if (cur.rowcount or 0) == 0:
             return False, ["memory id not found."]
@@ -1737,10 +1780,10 @@ class WorkspaceStore:
                         (int(row["id"]), json.dumps(precomputed_embedding)),
                     )
                 except sqlite3.Error as exc:
-                    return True, [
+                    return True, move_warnings + [
                         f"workspace canonical vector publish failed for {workspace!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
                     ]
-        return True, []
+        return True, move_warnings
 
     def set_memory_workspace_canonical(
         self,

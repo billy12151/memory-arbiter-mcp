@@ -1012,6 +1012,72 @@ class ConflictStore:
         # Generic memory mutation cannot complete a revisioned application plan.
         return 0
 
+    def void_conflicts_on_conn(
+        self, conn: sqlite3.Connection, memory_ids: list[int], *, reason: str,
+    ) -> int:
+        """Void every non-terminal conflict row involving any of ``memory_ids``.
+
+        0.16.0 §6⑯ (作废重立) — the move/auto-move companion: a moved memory's
+        old-bucket tickets must die, not linger as unfreshable rows (judge →
+        stale_member, dismiss → workspace_mismatch, resolve → not_applying).
+        Implementation constraints, each owner-verified:
+        - terminal status = ``resolved``: NOT in the suppression loader's
+          status set (open/applying/not_a_conflict), so nothing is suppressed
+          and the pair can re-establish in the new bucket (§6⑯②);
+        - ``candidate_key_hash`` is rewritten (UNIQUE index spans ALL
+          statuses) so the candidate identity is released for re-recording
+          (§6⑯③);
+        - ``member_fingerprint`` is rewritten so the event-snapshot index
+          (workspace, slot, fingerprint — all statuses) releases too;
+        - the active-slot index releases itself: its partial predicate only
+          covers open/applying (§6⑯④).
+        The caller owns the write transaction (move + void must be atomic).
+        """
+        if not memory_ids:
+            return 0
+        from .additive import voided_identity_hash
+
+        placeholders = ",".join("?" for _ in memory_ids)
+        rows = conn.execute(
+            f"""SELECT c.id, c.candidate_key_hash, c.member_fingerprint
+                FROM conflicts AS c
+                JOIN json_each(c.member_versions) AS member
+                WHERE CAST(json_extract(member.value,'$.memory_id') AS INTEGER)
+                      IN ({placeholders})
+                  AND c.status IN ('open','applying','candidate')""",
+            tuple(int(value) for value in memory_ids),
+        ).fetchall()
+        now = utc_now_iso()
+        voided = 0
+        for row in rows:
+            row_id = int(row["id"])
+            base_hash = str(row["candidate_key_hash"] or "")
+            base_fp = str(row["member_fingerprint"] or "")
+            conn.execute(
+                """UPDATE conflicts SET status='resolved',
+                     candidate_key_hash=?, member_fingerprint=?,
+                     decided_by='agent', decision_reason=?, decided_at=?, resolved_at=?,
+                     notice_delivery_status=CASE
+                       WHEN notice_delivery_status IN ('pending','delivered') THEN 'stale'
+                       ELSE notice_delivery_status END,
+                     revision=revision+1, refreshed_at=?
+                   WHERE id=? AND status IN ('open','applying','candidate')""",
+                (
+                    voided_identity_hash(base_hash, row_id),
+                    voided_identity_hash(base_fp or f"fp-missing:{row_id}", row_id),
+                    f"voided: {reason}", now, now, now, row_id,
+                ),
+            )
+            voided += 1
+        return voided
+
+    def void_conflicts(self, memory_ids: list[int], *, reason: str) -> int:
+        """Standalone (own-transaction) variant of ``void_conflicts_on_conn``."""
+        if not memory_ids or not self._db_available or not self.state.sqlite_writable:
+            return 0
+        with self.write_transaction() as conn:
+            return self.void_conflicts_on_conn(conn, memory_ids, reason=reason)
+
     def resolve_conflicts_for(self, memory_id: int, *, conn: sqlite3.Connection | None = None) -> int:
         return 0
 
