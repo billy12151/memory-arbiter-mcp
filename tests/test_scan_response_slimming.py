@@ -93,16 +93,15 @@ def test_lightweight_page_size_bound(vec_tools: MemoryTools) -> None:
 
 
 def test_spec_sample_carries_include_quotes() -> None:
+    """0.16.0 spec v2: the scheduled conflict_scan task no longer pages
+    scan_candidates (server-orchestrated pipeline + judgment queue). The
+    include_quotes contract now lives on the MANUAL scan_candidates channel,
+    which the surface's own examples carry."""
     from memory_arbiter.scan_tasks import SCHEDULED_TASKS_SPEC
 
     conflict_scan = next(
         task for task in SCHEDULED_TASKS_SPEC["tasks"] if task["name"] == "conflict_scan"
     )
-    scan_call = next(
-        call for call in conflict_scan["calls"] if call.get("task") == "scan_candidates"
-    )
-    assert scan_call["data"]["batch"] == 50
-    assert scan_call["data"].get("include_quotes") is True, (
-        "the spec sample must pass include_quotes=true: triage builds "
-        "record_conflict members from the page payload"
+    assert conflict_scan["calls"], "v2 spec must describe the task's calls"
+    assert not any(call.get("task") == "scan_candidates" for call in conflict_scan["calls"])
     )

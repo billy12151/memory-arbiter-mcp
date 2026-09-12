@@ -555,6 +555,21 @@ class ScanPipeline:
                 )
         except Exception:
             pass
+        # §6⑩ drift detection anchor: a completed round proves a v2-contract
+        # task exists on the host. Doctor compares this stamp against the
+        # current SCHEDULED_TASKS_SPEC_VERSION to flag v1-era tasks.
+        try:
+            from .scan_tasks import SCHEDULED_TASKS_SPEC_VERSION
+
+            with self.db.write_transaction() as conn:
+                conn.execute(
+                    """INSERT INTO migration_state(key,value,updated_at)
+                       VALUES('scheduled_tasks_spec_confirmed',?,CURRENT_TIMESTAMP)
+                       ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                    (str(SCHEDULED_TASKS_SPEC_VERSION),),
+                )
+        except Exception:
+            pass
 
     @staticmethod
     def _now() -> str:

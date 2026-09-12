@@ -274,80 +274,111 @@ def test_scheduled_tasks_help_topic_self_serve(tmp_path: Path) -> None:
     }
 
 
-# ── 0.15.12 C3: the conflict_scan spec carries an executable record_conflict
-# sample and per-page triage semantics (D6 fix: the old spec's calls array had
-# only scan_candidates + paging, so workbuddy's task paged but never triaged). ──
+# ── 0.16.0 §6⑩: spec v2 — the conflict_scan task kicks the server-orchestrated
+# pipeline and clears the judgment queue; spec_version drives drift detection. ──
 
 
 def _conflict_scan_spec() -> dict:
     return next(t for t in SCHEDULED_TASKS_SPEC["tasks"] if t["name"] == "conflict_scan")
 
 
-def test_spec_calls_include_record_conflict_sample() -> None:
+def test_spec_v2_declares_version_and_pipeline_calls() -> None:
+    assert SCHEDULED_TASKS_SPEC["spec_version"] == 2
     calls = _conflict_scan_spec()["calls"]
     tools_entries = [call for call in calls if "tool" in call]
-    assert [call["task"] for call in tools_entries] == ["scan_candidates", "record_conflict"]
-    sample = tools_entries[1]
-    assert sample["tool"] == "memory_repair"
-    for required in (
-        "slot_key", "members", "value_groups", "status", "detector_version",
-        "source", "reason",
-    ):
-        assert required in sample["data"], f"sample record_conflict missing {required}"
-    assert sample["data"]["status"] == "open"
-    assert sample["data"]["source"] == "scheduled_scan"
-    assert len(sample["data"]["members"]) == 2
-    assert all("memory_id" in member and "normalized_value" in member for member in sample["data"]["members"])
+    assert [call["task"] for call in tools_entries] == ["scan_pipeline", "scan_queue"]
+    kick = tools_entries[0]
+    assert kick["data"]["action"] == "kick"
+    page = tools_entries[1]
+    assert page["data"]["action"] == "page"
     assert any("note" in call for call in calls)
 
 
-def test_spec_note_carries_per_page_triage_semantics() -> None:
-    note = next(call["note"] for call in _conflict_scan_spec()["calls"] if "note" in call)
-    lowered = note.lower()
-    assert "immediately triage" in lowered
-    assert "not_a_conflict" in note
-    assert "do not batch" in lowered
-    assert "must not lose" in lowered
-    # cadence expectation for the weekly rhythm
-    assert "weekly" in lowered
+def test_spec_note_carries_kick_and_queue_semantics() -> None:
+    notes = [call["note"] for call in _conflict_scan_spec()["calls"] if "note" in call]
+    combined = " ".join(notes).lower()
+    assert "spec_version=2" in combined
+    assert "scan_queue" in combined
+    assert "judgment queue" in combined
+    assert "rebuild" in combined
 
 
-def test_record_conflict_sample_passes_validation_registry(tmp_path: Path) -> None:
-    """The spec's sample must be a valid memory_repair record_conflict payload."""
+def test_spec_sample_calls_pass_validation_registry(tmp_path) -> None:
+    """The spec's sample calls must be valid product payloads."""
     from memory_arbiter.validation import validate_product_payload
 
-    sample = next(
-        call for call in _conflict_scan_spec()["calls"] if call.get("task") == "record_conflict"
-    )["data"]
-    result = validate_product_payload("memory_repair", "record_conflict", dict(sample))
+    calls = _conflict_scan_spec()["calls"]
+    kick = next(c for c in calls if c.get("task") == "scan_pipeline")
+    result = validate_product_payload("memory_repair", "scan_pipeline", dict(kick["data"]))
     assert result.error is None, result.error
-    assert result.warnings == []
+    page = next(c for c in calls if c.get("task") == "scan_queue")
+    result = validate_product_payload("memory_repair", "scan_queue", dict(page["data"]))
+    assert result.error is None, result.error
 
 
-def test_record_conflict_sample_executes_end_to_end(tmp_path: Path) -> None:
-    """A5: the sample shape must survive a real record_conflict round-trip
-    (validation -> surface -> db insert) with live member ids."""
+def test_spec_sample_calls_execute_end_to_end(tmp_path: Path) -> None:
+    """The v2 sample shapes must survive real dispatch: kick then page."""
     import tests.test_vnext_evidence as tv
 
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    # No explicit workspace: the surface derives the group's workspace from the
-    # member rows themselves, exactly what a scheduled_scan caller sees.
-    left = tools.memory_write(content="database is mysql", subject="db", tags=[])["data"]
-    right = tools.memory_write(content="database is sqlite", subject="db2", tags=[])["data"]
+    tools.memory_write(content="database is mysql", subject="db", tags=[])["data"]
+    tools.memory_write(content="database is sqlite", subject="db2", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
 
-    sample = next(
-        call for call in _conflict_scan_spec()["calls"] if call.get("task") == "record_conflict"
-    )["data"]
-    payload = json.loads(json.dumps(sample))  # deep copy off the shared spec
-    payload["members"][0]["memory_id"] = int(left["id"])
-    payload["members"][1]["memory_id"] = int(right["id"])
-    payload["value_groups"][0]["members"] = [f"{left['id']}@1"]
-    payload["value_groups"][1]["members"] = [f"{right['id']}@1"]
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick"})
+    assert kick["ok"] is True, kick
+    assert kick["data"]["complete"] is True
+    page = tools.memory_repair("scan_queue", {"action": "page"})
+    assert page["ok"] is True, page
+    assert "items" in page["data"]
 
-    result = tools.memory_repair("record_conflict", payload)
+
+# ── 0.16.0 §6⑩: drift detection — scan activity without a current-version
+# pipeline stamp = a v1-era task; the doctor finding tells the agent to rebuild. ──
+
+
+def test_doctor_flags_spec_drift_until_pipeline_kick(tmp_path: Path) -> None:
+    import tests.test_vnext_evidence as tv
+
+    tools = tv.make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    tools.memory_write(content="drift memory", subject="drift", tags=[], workspace="w")
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    # Simulate the v1-era flow the old task used: a completed scan_candidates
+    # boundary writes scan activity WITHOUT the v2 spec stamp.
+    result = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
     assert result["ok"] is True, result
-    assert result["data"].get("outcome") in {"inserted", "appended", "deduped"}
-    groups = tools.memory_review("conflicts", {"status": "open"})["data"]
-    assert groups, "recorded conflict must be listable"
+    assert result["data"].get("next_anchor_memory_id") is None
+
+    def finding_map() -> dict[str, dict]:
+        report = tools.memory_doctor_overview(deep=False)
+        data = report.get("data") or report
+        return {f.get("check_id"): f for f in data.get("findings", [])}
+
+    findings = finding_map()
+    drift = findings.get("conflicts.spec_drift")
+    assert drift is not None and drift["status"] == "warn"
+    assert "rebuild" in drift["detail"]
+    assert "scan_pipeline" in drift["detail"]
+    # v2 evidence (scan_candidates pages must NOT stamp the spec): only a
+    # completed pipeline round does.
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
+    findings = finding_map()
+    drift = findings.get("conflicts.spec_drift")
+    assert drift is None or drift["status"] == "pass"
+
+
+def test_scan_candidates_echoes_spec_drift_hint(tmp_path: Path) -> None:
+    import tests.test_vnext_evidence as tv
+
+    tools = tv.make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    tools.memory_write(content="echo memory", subject="echo", tags=[], workspace="w")
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    result = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
+    assert result["ok"] is True, result
+    echo = result["data"].get("scheduled_tasks_spec")
+    assert echo is not None
+    assert echo["spec_version"] == 2
+    assert "scan_pipeline" in echo["drift"]

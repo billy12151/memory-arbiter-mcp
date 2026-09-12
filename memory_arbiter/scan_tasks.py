@@ -1,10 +1,15 @@
 """Scheduled-task specification shared by the guidance notice and help topic.
 
 Single source of truth for the three tasks mema asks agents to schedule
-(hourly conflict scan, weekly workspace anomaly check, daily governance
+(0.16.0 spec v2: kick the server-orchestrated conflict-scan pipeline and clear
+the judgment queue; weekly workspace anomaly check; daily governance
 reminder). The notice payload and the
 ``memory(action="help", data={"topic": "scheduled_tasks"})`` document
 both render from this module so they cannot drift apart.
+
+``spec_version`` drives drift detection: the pipeline stamps the version it
+served on every completed round, and doctor flags a library whose scan
+activity predates the current spec (§6⑩) — the host task needs rebuilding.
 
 Platform-agnostic by design (owner decision 2026-09-02): the server never
 guesses the caller's platform from X-Mema-Client; the agent knows how to
@@ -16,83 +21,74 @@ from typing import Any
 
 SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 
+# 0.16.0 §6⑩: bump on any change to task responsibilities or call shapes;
+# drift detection keys off this number (v1 = page-driven scan_candidates
+# triage, retired by the server-orchestrated pipeline).
+SCHEDULED_TASKS_SPEC_VERSION = 2
+
 AGENT_INSTRUCTION = (
-    "Tell the user: mema needs three scheduled tasks (hourly conflict scan, weekly "
-    "workspace anomaly check, daily governance reminder) to discover conflicts "
-    "automatically. Ask whether to set them up now; on consent, create the "
-    "equivalent tasks on your own platform from setup.tasks. The notice disappears "
-    "by itself once the tasks run — no report-back needed."
+    "Tell the user: mema needs three scheduled tasks (a conflict-scan pipeline "
+    "kick + judgment-queue cleanup, a weekly workspace anomaly check, and a "
+    "daily governance reminder) to discover conflicts automatically. Ask "
+    "whether to set them up now; on consent, create the equivalent tasks on "
+    "your own platform from setup.tasks. The notice disappears by itself once "
+    "the tasks run — no report-back needed."
 )
 
 SCHEDULED_TASKS_SPEC: dict[str, Any] = {
+    "spec_version": SCHEDULED_TASKS_SPEC_VERSION,
     "tasks": [
         {
             "name": "conflict_scan",
-            "purpose": "Page through scan_candidates and triage candidates (record_conflict open/not_a_conflict).",
+            "purpose": (
+                "Kick the server-orchestrated conflict-scan pipeline until it reports "
+                "complete=true, then clear the judgment queue page by page. The server "
+                "decides full-vs-incremental and resumes from breakpoints on its own."
+            ),
             "cadence": "hourly",
             "calls": [
                 {
-                    "tool": "memory_repair", "task": "scan_candidates",
-                    "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True},
+                    "tool": "memory_repair", "task": "scan_pipeline",
+                    "data": {"action": "kick"},
+                    "note": (
+                        "Each kick is a bounded synchronous batch (default 45s / 400 "
+                        "memories). Repeat the kick in the same run until the response "
+                        "says complete=true — the first round after an upgrade is a full "
+                        "scan and may need several kicks; steady-state rounds finish in "
+                        "one and usually queue nothing."
+                    ),
                 },
                 {
-                    "tool": "memory_repair", "task": "record_conflict",
-                    "data": {
-                        "slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"},
-                        "members": [
-                            {
-                                "memory_id": 12, "version": 1, "attribute_raw": "database",
-                                "value_raw": "MySQL", "normalized_attribute": "database",
-                                "normalized_value": "mysql", "evidence_quote": "database is MySQL",
-                                "evidence_span": [0, 17],
-                                "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-                                "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1",
-                            },
-                            {
-                                "memory_id": 34, "version": 1, "attribute_raw": "database",
-                                "value_raw": "SQLite", "normalized_attribute": "database",
-                                "normalized_value": "sqlite", "evidence_quote": "database is SQLite",
-                                "evidence_span": [0, 18],
-                                "content_hash": "1111111111111111111111111111111111111111111111111111111111111111",
-                                "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1",
-                            },
-                        ],
-                        "value_groups": [
-                            {"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]},
-                            {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]},
-                        ],
-                        "status": "open",
-                        "detector_version": "d1",
-                        "source": "scheduled_scan",
-                        "reason": "Reviewed conflicting values from the scan page.",
-                    },
+                    "tool": "memory_repair", "task": "scan_queue",
+                    "data": {"action": "page"},
+                    "note": (
+                        "After complete=true, drain pending queue items: judge each item "
+                        "from its evidence quotes (upgrade to batch_read hits windows or "
+                        "full reads when uncertain; read full texts before any "
+                        "confirm-driven edit). Submit dispositions with "
+                        "memory_repair(task='scan_queue', action='submit'): per-pair "
+                        "{candidate_key_hash, status: confirmed|dismissed, reason} — "
+                        "confirms add slot_key + value_groups (display values per member); "
+                        "a whole noise group can be dismissed with one group_token entry. "
+                        "Dismissals require authorized=true when they land "
+                        "not_a_conflict suppressions via record_conflict. Workspace "
+                        "suspects: confirm with target_workspace + conf — the server "
+                        "re-runs the vector vote and only moves when both signals agree "
+                        "(protected buckets are never moved autonomously). If the queue "
+                        "is large, keep paging in later runs — page boundaries are "
+                        "breakpoints and nothing is lost between runs."
+                    ),
                 },
                 {
                     "note": (
-                        "Pairing is workspace-grouped (0.15.13): candidates only ever pair memories "
-                        "within one workspace bucket, and a page may also carry cross_bucket_references "
-                        "— pairs a suspected-misplaced memory forms with its likely home bucket. Those "
-                        "references cannot be recorded as conflicts; handle them through the "
-                        "workspace_review notice flow (confirm with the user, then "
-                        "memory_govern(action='move_memories_workspace')). "
-                        "Start at anchor_memory_id=0; use each page's next_anchor_memory_id as the "
-                        "next anchor_memory_id until it returns null. The response is lightweight by "
-                        "default (pair ids, workspace, reasons, short quotes); the sample call passes "
-                        "include_quotes=true so each candidate carries the full members/slot envelope "
-                        "record_conflict needs — keep it when triaging, drop it only when a scan "
-                        "returns nothing. After each page returns, "
-                        "immediately triage that page's candidates: a real conflict -> record_conflict "
-                        "with status='open' (shape as the sample call above, values taken from the "
-                        "page's slot_groups/candidates); not a conflict -> record_conflict with "
-                        "status='not_a_conflict' (same shape; requires authorized=true because it "
-                        "suppresses future detection of the same candidate). Both dispositions are "
-                        "recorded — do not batch them to the end of the round: an interrupted run "
-                        "must not lose the triage of already-fetched pages. After a process restart, "
-                        "run memory_repair(task='rebuild_evidence') before resuming to catch up on "
-                        "evidence indexing. If you receive a queue_full response, the semantic worker "
-                        "is saturated — back off and retry the scan page later. Hourly is the "
-                        "recommended cadence; a weekly rhythm also works (a full pass over ~550 "
-                        "memories takes about 15 minutes)."
+                        "v2 contract (spec_version=2): the pipeline replaced the v1 "
+                        "page-driven scan_candidates triage loop — the server now walks "
+                        "the library itself, lands suspects in an independent judgment "
+                        "queue, and never surfaces them as notices or in user-facing "
+                        "conflict lists. scan_candidates remains as a manual/diagnostic "
+                        "channel only. If your current task still pages scan_candidates "
+                        "and triages record_conflict envelopes, rebuild it from this "
+                        "spec (doctor's conflicts.spec_drift finding says so too)."
                     ),
                 },
             ],
@@ -100,9 +96,10 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
         {
             "name": "workspace_anomaly_check",
             "purpose": (
-                "One-call workspace health check: flags memories whose nearest-content "
-                "neighbours overwhelmingly sit in another workspace (misplacement), before "
-                "the conflict scan round it precedes."
+                "One-call full-library workspace health sweep: flags memories whose "
+                "nearest-content neighbours overwhelmingly sit in another workspace. "
+                "Complements the pipeline's incremental per-memory vote by catching "
+                "neighbourhood drift between scans."
             ),
             "cadence": "weekly",
             "calls": [
@@ -110,13 +107,13 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                     "tool": "memory_repair", "task": "scan_workspace_anomalies",
                     "data": {},
                     "note": (
-                        "Runs BEFORE the week's conflict scan rounds. Each flagged memory gets one "
-                        "workspace_review notice (max 10 per run; the rest surface in later weeks). "
-                        "Read each notice (memory_repair task='notice' action='read'), verify with "
-                        "the user, then move confirmed memories via "
-                        "memory_govern(action='move_memories_workspace') or dismiss false alarms. "
-                        "Same-week conflict scans automatically sweep suspected memories against "
-                        "their likely home bucket (cross_bucket_references)."
+                        "Each flagged memory gets one workspace_review notice (max 10 per "
+                        "run; the rest surface in later weeks). The 0.16.0 pipeline also "
+                        "lands its own vector-vote suspects in the judgment queue — this "
+                        "weekly sweep is the full-library backstop. Read each notice, "
+                        "verify with the user, then move confirmed memories via "
+                        "memory_govern(action='move_memories_workspace') or dismiss false "
+                        "alarms."
                     ),
                 },
             ],
@@ -140,11 +137,13 @@ def scheduled_tasks_help() -> dict[str, Any]:
             "create the equivalent tasks on whatever scheduler your host provides."
         ),
         "topic": SCHEDULED_TASKS_TOPIC,
+        "spec_version": SCHEDULED_TASKS_SPEC_VERSION,
         "setup": SCHEDULED_TASKS_SPEC,
         "self_closing": (
-            "A completed full-scan boundary (a scan_candidates page whose next_anchor_memory_id "
-            "returns null) appends one line to scan_log.jsonl; once that line appears, the "
-            "scan_never_run/scan_stale guidance notice stops appearing and doctor's "
-            "conflicts.scan_required / conflicts.scan_stale findings turn green."
+            "A completed pipeline round (a scan_pipeline kick reporting complete=true) "
+            "records the served spec_version; once that marker exists at the current "
+            "version, the scan_never_run/scan_stale guidance notice stops appearing and "
+            "doctor's conflicts.scan_required / conflicts.scan_stale / conflicts.spec_drift "
+            "findings turn green."
         ),
     }

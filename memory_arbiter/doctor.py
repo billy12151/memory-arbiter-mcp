@@ -304,6 +304,34 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
                             "groups": page_progress.get("groups"),
                         },
                     ))
+    # 0.16.0 §6⑩: scheduled-task spec drift. Any completed scan activity
+    # proves A task exists; the spec stamp says WHICH contract it runs. Scan
+    # activity without a current-version stamp = a v1 page-driven task that
+    # should be rebuilt (the pipeline never got a kick).
+    spec_stamp_row = conn.execute(
+        "SELECT value FROM migration_state WHERE key='scheduled_tasks_spec_confirmed'"
+    ).fetchone()
+    if (last_scan is not None or has_scan_progress) and not conflict_scan_required:
+        from .scan_tasks import SCHEDULED_TASKS_SPEC_VERSION
+
+        try:
+            spec_stamp = int(str(spec_stamp_row[0])) if spec_stamp_row is not None else None
+        except (TypeError, ValueError):
+            spec_stamp = None
+        if spec_stamp != SCHEDULED_TASKS_SPEC_VERSION:
+            findings.append(_finding(
+                "conflicts.spec_drift", False,
+                (
+                    f"scheduled task appears to follow spec v{spec_stamp or 1} while the "
+                    f"server serves v{SCHEDULED_TASKS_SPEC_VERSION}: rebuild the "
+                    "conflict_scan task from memory(action='help', "
+                    "data={'topic': 'scheduled_tasks'}) — v2 tasks kick "
+                    "memory_repair(task='scan_pipeline') and clear the scan_queue "
+                    "judgment queue instead of paging scan_candidates"
+                ),
+                evidence={"served_spec_version": SCHEDULED_TASKS_SPEC_VERSION,
+                          "task_spec_version": spec_stamp},
+            ))
     # Applying is a transient execution state: a healthy apply completes in
     # minutes, so any group still applying at doctor time is either mid-flight
     # or wedged. Flag every one with id/idle-days evidence (replaces the

@@ -16,7 +16,11 @@ from .constants import (
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .models import MemoryStatus, ProtectionLevel, SourceType
 from .request_identity import get_request_identity
-from .scan_tasks import SCHEDULED_TASKS_TOPIC, scheduled_tasks_help
+from .scan_tasks import (
+    SCHEDULED_TASKS_SPEC_VERSION,
+    SCHEDULED_TASKS_TOPIC,
+    scheduled_tasks_help,
+)
 from .validation import PRODUCT_FIELD_REGISTRY, _controlled_integer, validate_product_payload
 
 if TYPE_CHECKING:
@@ -1164,6 +1168,19 @@ class ProductSurfaces:
                 # the full member/slot envelope record_conflict consumes.
                 result = self._tools._lightweight_scan_candidates(result)
             ok = "error" not in result
+            if ok:
+                # 0.16.0 §6⑩/§3: scan_candidates is now the manual/diagnostic
+                # channel; every page echoes the served spec so a still-v1
+                # scheduled task sees the drift hint on its next run.
+                result["scheduled_tasks_spec"] = {
+                    "spec_version": SCHEDULED_TASKS_SPEC_VERSION,
+                    "drift": (
+                        "the page-driven triage loop is the v1 scheduled-task "
+                        "contract; v2 tasks kick memory_repair(task='scan_pipeline') "
+                        "and clear the scan_queue — rebuild your task (help topic "
+                        "scheduled_tasks)"
+                    ),
+                }
             if ok and scan_workspace is None and int(result.get("anchors_scanned") or 0) > 0:
                 # C5: per-group pacing record for the ROUTINE scan. Global
                 # pages only — a strict workspace-scoped page sees part of the
