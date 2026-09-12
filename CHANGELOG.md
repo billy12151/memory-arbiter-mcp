@@ -3,6 +3,12 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.1] — 2026-09-13
+
+### Fixed
+
+- **The 32-tag cap never blocks net shrinks.** The 0.16.0 merge cap refused a pure `remove_tags` on a pre-0.16.0 over-cap row (the merged total is still over 32 even after removing one) — the stock rows the cap was meant to herd toward cleanup were frozen instead. The cap now applies to net growth only (a merge that GROWS the total beyond 32 is refused; equal-size swaps and any reduction pass). Found live on the reference library: memory #971's own 62-tag stock could not be trimmed.
+
 ## [0.16.0] — 2026-09-13
 
 **Server-orchestrated conflict-scan pipeline (mema #971 乙包, thirteen owner rulings E1-E11 + three adversarial review rounds).** The scan flips from "agent pages `scan_candidates` and triages raw envelopes" to "the server walks the library itself; the agent only judges". Breaking changes are listed at the end.
