@@ -19,6 +19,11 @@ from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
 
 
+def _sc(result):
+    """Unwrap the 0.16.0 single-copy FastMCP response (CallToolResult)."""
+    return result.structuredContent
+
+
 
 @pytest.fixture(autouse=True)
 def _relevance_floor_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,6 +73,11 @@ def clear_config_env(monkeypatch) -> None:
 
 
 
+
+def _sc(result):
+    """Unwrap the 0.16.0 single-copy FastMCP response (CallToolResult)."""
+    return result.structuredContent
+
 def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path, monkeypatch) -> None:
     """Regression: the MCP wrapper must pass new_tags=None through.
 
@@ -109,7 +119,7 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     bundle = build_runtime()
     app = bundle.app
     assert set(app.tools) == {"memory", "memory_review", "memory_govern", "memory_repair"}
-    written = app.tools["memory"](
+    written = _sc(app.tools["memory"](
         action="remember",
         data={
             "content": "draft content",
@@ -118,13 +128,13 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
             "source_type": "agent_generated",
             "event_time": "2026-01-01T00:00:00Z",
         },
-    )
+    ))
     memory_id = written["data"]["id"]
 
-    edited = app.tools["memory"](
+    edited = _sc(app.tools["memory"](
         action="update",
         data={"memory_id": memory_id, "new_content": "edited content"},
-    )
+    ))
 
     assert edited["ok"] is True
     assert edited["data"]["record"]["content"] == "edited content"
@@ -967,7 +977,7 @@ def test_real_server_product_wrappers_preserve_non_object_data(tmp_path: Path, m
         ("memory_repair", {"task": "notice", "data": False}),
     ]
     for name, kwargs in calls:
-        result = bundle.app.tools[name](**kwargs)
+        result = _sc(bundle.app.tools[name](**kwargs))
         assert result["ok"] is False
         assert "data must be a JSON object" in result["data"]["error"]
     bundle.tools.shutdown(timeout=1)

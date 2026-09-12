@@ -8,6 +8,8 @@ import signal
 import sys
 from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple
 
+from mcp.types import CallToolResult
+
 from . import __version__
 from .config import Settings
 from .constants import MCP_HTTP_BODY_LIMIT, MCP_HTTP_PATH
@@ -234,6 +236,24 @@ def _invoke_with_identity(
         return fn(**kwargs)
 
 
+def _structured_only(result: dict[str, Any]) -> Any:
+    """0.16.0 single-copy serialization (plan §6⑱).
+
+    The SDK's FastMCP serializes a plain dict return TWICE: once as
+    ``structuredContent`` (compact ``separators=(",", ":")``) and once as an
+    ``indent=2`` ``content[0].text`` copy — a measured 2-3x wire inflation.
+    Returning a ``CallToolResult`` makes ``func_metadata.convert_result``
+    pass the object through untouched (no ``_convert_to_content`` copy), so
+    the wire carries ONLY the compact structured copy. Breaking by design:
+    clients reading ``content[0].text`` must move to ``structuredContent``.
+
+    The declared ``-> dict[str, Any]`` annotations stay untouched on the tool
+    functions — the output schema (and with it structured-output negotiation)
+    is derived from the annotation, not the runtime type.
+    """
+    return CallToolResult(content=[], structuredContent=result)
+
+
 def _data_with_request_identity(
     tools: MemoryTools,
     data: dict[str, Any] | None,
@@ -338,10 +358,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return error or _invoke_with_identity(
+        return _structured_only(error or _invoke_with_identity(
             tools, identity, tools.memory,
             action=action, data=payload,
-        )
+        ))
 
     @app.tool()
     def memory_review(view: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -355,10 +375,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return error or _invoke_with_identity(
+        return _structured_only(error or _invoke_with_identity(
             tools, identity, tools.memory_review,
             view=view, data=payload,
-        )
+        ))
 
     @app.tool()
     def memory_govern(action: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -372,10 +392,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return error or _invoke_with_identity(
+        return _structured_only(error or _invoke_with_identity(
             tools, identity, tools.memory_govern,
             action=action, data=payload,
-        )
+        ))
 
     @app.tool()
     def memory_repair(task: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -389,10 +409,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return error or _invoke_with_identity(
+        return _structured_only(error or _invoke_with_identity(
             tools, identity, tools.memory_repair,
             task=task, data=payload,
-        )
+        ))
 
     return ServerBundle(app, tools)
 

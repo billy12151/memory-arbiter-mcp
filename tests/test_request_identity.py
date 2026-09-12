@@ -33,6 +33,11 @@ class MultiHeaders(dict[str, str]):
         return [value for key, value in self._items if key.casefold() == name.casefold()]
 
 
+
+def _sc(result):
+    """Unwrap the 0.16.0 single-copy FastMCP response (CallToolResult)."""
+    return result.structuredContent
+
 def test_identity_header_parser_accepts_case_insensitive_valid_values() -> None:
     identity = parse_identity_headers({
         "x-mema-client": "claude-code",
@@ -324,21 +329,21 @@ def test_http_identity_attributes_write_provenance_and_rejects_mismatch(
     bundle = _runtime(tmp_path, monkeypatch)
     identity = RequestIdentity(client="header-client", agent_id="header-agent")
     with request_identity_scope(identity):
-        written = bundle.app.tools["memory"](
+        written = _sc(bundle.app.tools["memory"](
             action="remember", data={"content": "fact", "subject": "identity"},
-        )
-        matching = bundle.app.tools["memory"](
+        ))
+        matching = _sc(bundle.app.tools["memory"](
             action="remember",
             data={
                 "content": "matching", "subject": "identity",
                 "client": "header-client", "agent_id": "header-agent",
             },
-        )
-        mismatch = bundle.app.tools["memory"](
+        ))
+        mismatch = _sc(bundle.app.tools["memory"](
             action="remember",
             data={"content": "bad", "subject": "identity", "agent_id": "other"},
-        )
-        status = bundle.app.tools["memory"](action="status", data={})
+        ))
+        status = _sc(bundle.app.tools["memory"](action="status", data={}))
 
     assert written["data"]["record"]["agent_id"] == "header-agent"
     assert matching["data"]["record"]["agent_id"] == "header-agent"
@@ -364,10 +369,10 @@ def test_tool_identity_prefers_current_mcp_request_over_stale_context(
 
     bundle.app.get_context = lambda: Context()
     with request_identity_scope(RequestIdentity(client="stale-client", agent_id="stale-agent")):
-        status = bundle.app.tools["memory"](action="status", data={})
-        written = bundle.app.tools["memory"](
+        status = _sc(bundle.app.tools["memory"](action="status", data={}))
+        written = _sc(bundle.app.tools["memory"](
             action="remember", data={"content": "current", "subject": "session"},
-        )
+        ))
     assert status["data"]["client"] == "current-client"
     assert status["data"]["agent_id"] == "current-agent"
     assert written["data"]["record"]["agent_id"] == "current-agent"
@@ -390,15 +395,15 @@ def test_tool_identity_invalid_request_headers_fail_closed(
     bundle.app.get_context = lambda: Context()
     with request_identity_scope(RequestIdentity(client="stale-client", agent_id="stale-agent")):
         with pytest.raises(IdentityHeaderError):
-            bundle.app.tools["memory"](action="status", data={})
+            _sc(bundle.app.tools["memory"](action="status", data={}))
     bundle.tools.shutdown(timeout=1)
 
 
 def test_stdio_write_keeps_settings_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = _runtime(tmp_path, monkeypatch)
-    written = bundle.app.tools["memory"](
+    written = _sc(bundle.app.tools["memory"](
         action="remember", data={"content": "fact", "subject": "stdio"},
-    )
+    ))
     assert written["data"]["record"]["agent_id"] == "settings-agent"
     bundle.tools.shutdown(timeout=1)
 
@@ -423,7 +428,7 @@ def test_onboarding_notice_uses_header_agent_id(tmp_path: Path, monkeypatch: pyt
     monitor = Monitor()
     bundle.tools._update_monitor = monitor  # type: ignore[assignment]
     with request_identity_scope(RequestIdentity(client="header-client", agent_id="notice-agent")):
-        bundle.app.tools["memory"](action="status", data={})
+        _sc(bundle.app.tools["memory"](action="status", data={}))
     assert monitor.agent_ids == ["notice-agent"]
     bundle.tools.shutdown(timeout=1)
 
@@ -536,17 +541,17 @@ def test_stdio_bridge_status_uses_process_identity(
     bundle = _runtime(tmp_path, monkeypatch)
     # No request scope at all: the stdio process identity established in
     # build_runtime is the trusted source for every tool call.
-    status = bundle.app.tools["memory"](action="status", data={})
+    status = _sc(bundle.app.tools["memory"](action="status", data={}))
     assert status["data"]["client"] == "settings-client"
     assert status["data"]["agent_id"] == "settings-agent"
     # 0.15.14 (B1): the AgentPolicy echo is gone from the status surface.
     assert "policy" not in status["data"]
     # A payload agent_id still cannot launder attribution: it conflicts with
     # the trusted process identity and is rejected as a mismatch.
-    laundered = bundle.app.tools["memory"](
+    laundered = _sc(bundle.app.tools["memory"](
         action="remember",
         data={"content": "fact", "subject": "stdio-identity", "agent_id": "other"},
-    )
+    ))
     assert laundered["ok"] is False
     assert laundered["data"]["error"] == "identity_mismatch"
     bundle.tools.shutdown(timeout=1)
