@@ -3,7 +3,7 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
-## [Unreleased]
+## [0.15.15] — 2026-09-12
 
 ### Fixed
 
@@ -45,7 +45,7 @@ Versions follow semantic versioning.
 
 - `PAIR_PROMPT_VERSION` stays `pair-v6` — prompt text is byte-identical.
 
-## [Unreleased]
+## [0.15.15] — 2026-09-12
 
 ## [0.15.13.1] — 2026-09-11
 
