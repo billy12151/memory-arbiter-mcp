@@ -59,6 +59,7 @@ from .pipeline.read import ReadPipeline
 from .pipeline.operations import OperationsPipeline
 from .pipeline.evidence import EvidencePipeline
 from .scan_pipeline import ScanPipeline
+from .queue_protocol import QueueProtocol
 
 
 # Backup-replay notice signatures compared in _consume_notices. EMPTY means
@@ -90,6 +91,7 @@ class MemoryTools:
         self._operations = OperationsPipeline(self)
         self._evidence = EvidencePipeline(self)
         self._scan_pipeline = ScanPipeline(self)
+        self._queue_protocol = QueueProtocol(self)
         self._semantic_backend: SemanticBackend | None = None
         self._semantic_backend_lock = threading.Lock()
         self._semantic_runtime_disabled = False
@@ -1794,6 +1796,15 @@ class MemoryTools:
 
     def scan_pipeline_status(self) -> dict[str, Any]:
         return self._scan_pipeline.status()
+
+    def scan_queue_page(self, **payload: Any) -> dict[str, Any]:
+        return self._queue_protocol.page(
+            page_size=payload.get("page_size") or 10,
+            page_token=payload.get("page_token") or 0,
+        )
+
+    def scan_queue_submit(self, **payload: Any) -> dict[str, Any]:
+        return self._queue_protocol.submit(payload.get("decisions") or [])
 
     def memory_scan_workspace_anomalies(self, **_: Any) -> dict[str, Any]:
         """C3a workspace anomaly check: single-pass matmul over all summary vectors.

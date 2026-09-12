@@ -222,11 +222,18 @@ def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:
             }
             for member in members
         ]
+        try:
+            legacy_row = conn.execute(
+                "SELECT candidate_key FROM conflicts WHERE id=?", (row_id,)
+            ).fetchone()
+            legacy_candidate_key = json.loads(str(legacy_row[0] or "null")) if legacy_row else None
+        except (TypeError, ValueError, sqlite3.Error):
+            legacy_candidate_key = None
         conn.execute(
             """INSERT OR IGNORE INTO scan_queue(
                  kind,workspace_canonical,status,candidate_key_hash,member_versions,
-                 evidence,reason,severity,source,created_at,updated_at)
-               VALUES('conflict',?, 'pending', ?, ?, ?, ?, 'normal', ?, ?, ?)""",
+                 evidence,reason,severity,source,detail,created_at,updated_at)
+               VALUES('conflict',?, 'pending', ?, ?, ?, ?, 'normal', ?, ?, ?, ?)""",
             (
                 str(row["workspace_canonical"] or ""),
                 str(row["candidate_key_hash"]),
@@ -234,6 +241,7 @@ def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:
                 json.dumps({"evidence": evidence, "value_groups": groups}, ensure_ascii=False),
                 str(row["detection_reason"] or ""),
                 str(row["source"] or "scan_pipeline"),
+                json.dumps({"candidate_key": legacy_candidate_key}, ensure_ascii=False),
                 now, now,
             ),
         )

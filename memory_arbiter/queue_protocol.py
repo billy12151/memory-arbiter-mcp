@@ -1,0 +1,517 @@
+"""Judgment-queue protocol (0.16.0 plan §6㉑/§2 commit 5).
+
+The agent processes the scan_queue page by page — "handle page 1, submit its
+dispositions with the next page fetch" — while the server does all the
+transport work:
+
+- Page assembly builds TRANSITIVE-CLOSURE GROUPS from pair rows (A↔B + A↔C →
+  {A,B,C}) purely as judgment units (§6⑥): groups are never persisted; the
+  landed state is per-pair. Oversized components (>N members) are split back
+  into their constituent edges.
+- Submission is server-side land-from-reference: the agent submits
+  ``{candidate_key_hash, status, reason}`` plus — only for confirms — the
+  slot key and per-group display values; the server resolves the frozen
+  envelope from the queue row and drives the existing ``record_conflict``
+  (confirm → open, dismiss → not_a_conflict suppression source). Queue rows
+  NEVER enter ``conflicts`` themselves.
+- Page boundaries are natural breakpoints: a decision that arrives after a
+  crash resumes from wherever the queue stands; nothing is lost because
+  nothing was held in memory.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any, TYPE_CHECKING
+
+from .models import utc_now_iso
+
+if TYPE_CHECKING:
+    from .tools import MemoryTools
+
+# §1.5: 10-30 groups per page (owner-pinned band; default at the band floor).
+DEFAULT_PAGE_SIZE = 10
+MAX_PAGE_SIZE = 30
+# §6⑬: a closure component with more than N members is split back into its
+# edges — one judgment item per pair — instead of one mega-group.
+GROUP_MEMBER_CAP = 10
+# Fetch window for group assembly per page call (rows, not groups).
+ASSEMBLY_WINDOW = 400
+
+
+class QueueProtocol:
+    def __init__(self, tools: "MemoryTools") -> None:
+        self._tools = tools
+        self.db = tools.db
+
+    # ── page fetch ──────────────────────────────────────────────────────────
+
+    def page(self, *, page_size: int = DEFAULT_PAGE_SIZE, page_token: int = 0) -> dict[str, Any]:
+        page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
+        page_token = max(0, int(page_token or 0))
+        rows = self._fetch_conflict_rows(page_token)
+        items: list[dict[str, Any]] = []
+        meta_cache: dict[int, dict[str, Any]] = {}
+        last_id = page_token
+        for group in self._assemble_groups(rows):
+            last_id = max(last_id, group["last_queue_id"])
+            if len(group["member_ids"]) > GROUP_MEMBER_CAP:
+                # §6⑬: oversize component → split back into edges.
+                for edge in group["pairs"]:
+                    items.append(self._pair_item(edge, meta_cache))
+            else:
+                items.append(self._group_item(group, meta_cache))
+            if len(items) >= page_size:
+                break
+        internal = self.db.internal_conflicts.list_pending(limit=page_size)
+        for row in internal:
+            items.append(self._internal_item(row, meta_cache))
+            if len(items) >= page_size:
+                break
+        remaining = self.db.scan_queue_backlog()
+        response: dict[str, Any] = {
+            "ok": True,
+            "items": items[:page_size],
+            "count": len(items[:page_size]),
+            "queue_backlog": remaining,
+            "detector_version": self._detector_version(),
+            "instruction": (
+                "Judge each item from the evidence quotes; upgrade an uncertain item with "
+                "memory(action='batch_read', content_mode='hits', spans={...evidence_span...}) "
+                "before deciding, and read full texts before any confirm-driven edit. Submit "
+                "dispositions with memory_repair(task='scan_queue', action='submit'): per-pair "
+                "{candidate_key_hash, status: confirmed|dismissed, reason} + (confirms) "
+                "slot_key + value_groups with display_value per member group. A whole group "
+                "that is noise can be dismissed in one entry with the group's group_token."
+            ),
+        }
+        has_more = remaining > 0 or len(internal) > page_size
+        if items and (last_id > page_token or remaining):
+            response["next_page_token"] = last_id
+        response["has_more"] = bool(has_more)
+        if self.db.settings.include_size and items:
+            from .tokens import meter_payloads
+
+            response["size"] = meter_payloads(items[:page_size])
+        return response
+
+    @staticmethod
+    def _component_token(pairs: list[dict[str, Any]]) -> str:
+        import hashlib
+
+        joined = ":".join(sorted(str(pair["candidate_key_hash"]) for pair in pairs))
+        return hashlib.sha256(joined.encode()).hexdigest()[:16]
+
+    def _fetch_conflict_rows(self, after_id: int) -> list[dict[str, Any]]:
+        if not self.db.db_available:
+            return []
+        try:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    """SELECT id,kind,workspace_canonical,status,candidate_key_hash,
+                              member_versions,evidence,reason,severity,source,detail
+                       FROM scan_queue WHERE status='pending' AND kind='conflict' AND id>?
+                       ORDER BY id LIMIT ?""",
+                    (int(after_id), ASSEMBLY_WINDOW),
+                ).fetchall()
+        except Exception:
+            return []
+        decoded: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for key in ("member_versions", "evidence", "detail"):
+                if isinstance(item.get(key), str):
+                    try:
+                        item[key] = json.loads(item[key])
+                    except (TypeError, json.JSONDecodeError):
+                        item[key] = None
+            decoded.append(item)
+        return decoded
+
+    def _assemble_groups(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Union-find pair rows into closure groups by shared member refs."""
+        parent: dict[str, str] = {}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: str, b: str) -> None:
+            parent.setdefault(a, a)
+            parent.setdefault(b, b)
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        row_refs: dict[int, list[str]] = {}
+        for row in rows:
+            refs = [
+                f"{int(member['memory_id'])}@{int(member.get('version') or 1)}"
+                for member in (row.get("member_versions") or [])
+                if member.get("memory_id") is not None
+            ]
+            row_refs[int(row["id"])] = refs
+            for ref in refs:
+                union(ref, refs[0])
+
+        components: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            refs = row_refs[int(row["id"])]
+            root = find(refs[0]) if refs else f"row:{row['id']}"
+            component = components.setdefault(root, {"pairs": [], "member_ids": set(), "last_queue_id": 0})
+            component["pairs"].append(row)
+            component["last_queue_id"] = max(component["last_queue_id"], int(row["id"]))
+            for member in row.get("member_versions") or []:
+                if member.get("memory_id") is not None:
+                    component["member_ids"].add(int(member["memory_id"]))
+        return sorted(components.values(), key=lambda c: c["last_queue_id"])
+
+    def _member_meta(self, memory_id: int, cache: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+        if memory_id not in cache:
+            record = self.db.get_memory(memory_id)
+            if not record:
+                cache[memory_id] = None
+            else:
+                tags = record.get("tags")
+                cache[memory_id] = {
+                    "subject": str(record.get("subject") or "")[:200],
+                    "tags": (tags if isinstance(tags, list) else [])[:20],
+                    "event_time": record.get("event_time"),
+                    "workspace": record.get("workspace_canonical") or record.get("workspace"),
+                    "version": int(record.get("version") or 1),
+                }
+        return cache[memory_id]
+
+    def _pair_item(self, row: dict[str, Any], cache: dict[int, dict[str, Any]]) -> dict[str, Any]:
+        members = row.get("member_versions") or []
+        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        return {
+            "kind": "conflict",
+            "group_token": f"pair:{row['candidate_key_hash'][:16]}",
+            "pair_count": 1,
+            "member_ids": sorted({int(m["memory_id"]) for m in members if m.get("memory_id") is not None}),
+            "member_meta": {
+                str(m["memory_id"]): self._member_meta(int(m["memory_id"]), cache)
+                for m in members if m.get("memory_id") is not None
+            },
+            "pairs": [{
+                "queue_id": int(row["id"]),
+                "candidate_key_hash": row["candidate_key_hash"],
+                "severity": row.get("severity"),
+                "reason": row.get("reason"),
+                "workspace": row.get("workspace_canonical"),
+                "evidence": row.get("evidence") or [],
+                "candidate_key": detail.get("candidate_key"),
+            }],
+        }
+
+    def _group_item(self, group: dict[str, Any], cache: dict[int, dict[str, Any]]) -> dict[str, Any]:
+        members = group["pairs"][0].get("member_versions") or []
+        return {
+            "kind": "conflict",
+            "group_token": f"group:{self._component_token(group['pairs'])}",
+            "pair_count": len(group["pairs"]),
+            "member_ids": sorted(group["member_ids"]),
+            "member_meta": {
+                str(mid): self._member_meta(mid, cache) for mid in sorted(group["member_ids"])
+            },
+            "pairs": [{
+                "queue_id": int(row["id"]),
+                "candidate_key_hash": row["candidate_key_hash"],
+                "severity": row.get("severity"),
+                "reason": row.get("reason"),
+                "workspace": row.get("workspace_canonical"),
+                "evidence": row.get("evidence") or [],
+                "candidate_key": (row.get("detail") or {}).get("candidate_key")
+                if isinstance(row.get("detail"), dict) else None,
+            } for row in group["pairs"]],
+        }
+
+    def _internal_item(self, row: dict[str, Any], cache: dict[int, dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "kind": "internal",
+            "internal_id": int(row["id"]),
+            "memory_id": int(row["memory_id"]),
+            "memory_version": int(row["memory_version"]),
+            "member_meta": {str(row["memory_id"]): self._member_meta(int(row["memory_id"]), cache)},
+            "quote_a": row.get("quote_a"),
+            "quote_b": row.get("quote_b"),
+            "span_a": row.get("span_a"),
+            "span_b": row.get("span_b"),
+            "reason": row.get("reason"),
+            "instruction": (
+                "One memory contradicting itself: dismiss if compatible, or fix the memory "
+                "(memory action='update') — the row auto-stales once the version lifts."
+            ),
+        }
+
+    def _detector_version(self) -> str:
+        from .db_generation import CONFLICT_DETECTOR_VERSION
+
+        return CONFLICT_DETECTOR_VERSION
+
+    # ── submission (server-side land-from-reference) ───────────────────────
+
+    def submit(self, decisions: list[dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(decisions, list) or not decisions:
+            return {"ok": False, "error": "decisions must be a non-empty list"}
+        if len(decisions) > 200:
+            return {"ok": False, "error": "at most 200 decisions per submission"}
+        results: list[dict[str, Any]] = []
+        for index, raw in enumerate(decisions):
+            results.append(self._submit_one(index, raw))
+        ok = all(item.get("outcome") in {"confirmed", "dismissed", "resolved", "skipped"} for item in results)
+        return {
+            "ok": ok,
+            "results": results,
+            "queue_backlog": self.db.scan_queue_backlog(),
+        }
+
+    def _submit_one(self, index: int, raw: Any) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            return {"index": index, "outcome": "invalid_input", "error": "decision must be an object"}
+        status = str(raw.get("status") or "").strip().lower()
+        reason = str(raw.get("reason") or "")
+        kind = str(raw.get("kind") or "conflict").strip().lower()
+        if kind == "internal":
+            internal_id = raw.get("internal_id")
+            if status not in {"dismissed", "resolved"}:
+                return {"index": index, "outcome": "invalid_input",
+                        "error": "internal decisions accept status dismissed|resolved"}
+            outcome = self.db.internal_conflicts.decide(
+                int(internal_id), status, reason=reason,
+            )
+            if outcome.get("outcome") == "updated":
+                outcome = {"outcome": status, **{
+                    key: value for key, value in outcome.items() if key != "outcome"
+                }}
+            return {"index": index, "kind": "internal", **outcome}
+        if status not in {"confirmed", "dismissed"}:
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "status must be confirmed|dismissed"}
+        group_token = raw.get("group_token")
+        if group_token and not raw.get("candidate_key_hash"):
+            return self._submit_group(index, str(group_token), status, reason, raw)
+        candidate_hash = str(raw.get("candidate_key_hash") or "")
+        if len(candidate_hash) != 64:
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "candidate_key_hash must be the 64-char hash from the queue page"}
+        return self._decide_row(index, candidate_hash, status, reason, raw)
+
+    def _submit_group(
+        self, index: int, group_token: str, status: str, reason: str,
+        raw: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Group-level dismissal (§6⑥): one entry suppresses every pair of
+        the group. Confirms stay per-pair (each pair's slot/values differ)."""
+        if status != "dismissed":
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "group decisions accept status=dismissed only; confirm per pair"}
+        rows = self._fetch_conflict_rows(0)
+        wanted = group_token.split(":", 1)[-1]
+        targets = None
+        for component in self._assemble_groups(rows):
+            if self._component_token(component["pairs"]) == wanted:
+                targets = component["pairs"]
+                break
+        if not targets:
+            return {"index": index, "outcome": "not_found", "group_token": group_token}
+        results = [
+            self._decide_row(f"{index}.{i}", row["candidate_key_hash"], "dismissed", reason, {})
+            for i, row in enumerate(targets)
+        ]
+        return {
+            "index": index, "outcome": "dismissed", "group_token": group_token,
+            "pairs": results,
+        }
+
+    def _decide_row(
+        self, index: Any, candidate_hash: str, status: str, reason: str,
+        raw: dict[str, Any],
+    ) -> dict[str, Any]:
+        row = self._queue_row(candidate_hash)
+        if row is None:
+            return {"index": index, "outcome": "not_found",
+                    "candidate_key_hash": candidate_hash}
+        if row["status"] not in {"pending", "in_review"}:
+            return {"index": index, "outcome": "already_terminal", "status": row["status"],
+                    "candidate_key_hash": candidate_hash}
+        members = row["member_versions"] or []
+        detail = row["detail"] if isinstance(row["detail"], dict) else {}
+        candidate_key = detail.get("candidate_key")
+        if status == "dismissed":
+            result = self.db.record_conflict_group(
+                workspace_canonical=row["workspace_canonical"],
+                slot_key=None,
+                members=members,
+                value_groups=[],
+                candidate_key=candidate_key,
+                status="not_a_conflict",
+                detector_version=self._detector_version(),
+                source="scan_queue",
+                detection_reason=reason or "dismissed from scan queue",
+            )
+            outcome = result.get("outcome")
+            if outcome in {"inserted", "deduped"}:
+                self._mark_decided(candidate_hash, "dismissed", decided_ref=result.get("conflict_id"), reason=reason)
+                return {"index": index, "outcome": "dismissed",
+                        "conflict_id": result.get("conflict_id")}
+            if outcome == "stale_snapshot":
+                # §6㉑④: version drift — expire and let the pipeline re-enqueue
+                # the current identity; never a silent drop.
+                self._expire_row(candidate_hash, "member versions drifted")
+                return {"index": index, "outcome": "stale_snapshot",
+                        "requeued": True, "detail": result}
+            return {"index": index, "outcome": "dismiss_failed", "detail": result}
+        # confirmed → open promotion: the agent supplies slot + per-member
+        # display values; the server enriches the frozen envelope (D1: the
+        # stored normalized_value is derived mechanically from value_raw).
+        slot_key = raw.get("slot_key")
+        value_groups = raw.get("value_groups")
+        if not isinstance(slot_key, dict) or not isinstance(value_groups, list):
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "confirm requires slot_key and value_groups"}
+        enriched, enrich_error = self._enrich_members(members, value_groups, slot_key)
+        if enrich_error:
+            return {"index": index, "outcome": "invalid_input", "error": enrich_error}
+        normalized_groups, groups_error = self._normalize_groups(value_groups)
+        if groups_error:
+            return {"index": index, "outcome": "invalid_input", "error": groups_error}
+        result = self.db.record_conflict_group(
+            workspace_canonical=row["workspace_canonical"],
+            slot_key=slot_key,
+            members=enriched,
+            value_groups=normalized_groups,
+            candidate_key=candidate_key,
+            status="open",
+            detector_version=self._detector_version(),
+            source="scan_queue",
+            detection_reason=reason or "confirmed from scan queue",
+        )
+        outcome = result.get("outcome")
+        if outcome in {"inserted", "deduped"}:
+            self._mark_decided(candidate_hash, "confirmed", decided_ref=result.get("conflict_id"), reason=reason)
+            return {"index": index, "outcome": "confirmed",
+                    "conflict_id": result.get("conflict_id"), "revision": result.get("revision")}
+        if outcome == "stale_snapshot":
+            self._expire_row(candidate_hash, "member versions drifted")
+            return {"index": index, "outcome": "stale_snapshot", "requeued": True, "detail": result}
+        if outcome == "workspace_mismatch":
+            # A member moved since enqueue: expire; the move voided nothing
+            # here because the queue row is not a conflicts ticket, but the
+            # pair can no longer land in one bucket.
+            self._expire_row(candidate_hash, "workspace mismatch after move")
+            return {"index": index, "outcome": "workspace_mismatch", "expired": True}
+        return {"index": index, "outcome": "confirm_failed", "detail": result}
+
+    @staticmethod
+    def _normalize_groups(
+        value_groups: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """Complete the agent's display-value groups into the storage contract:
+        normalized_value is mechanically derived (D1) — the agent never
+        supplies it."""
+        from .semantic_conflict import normalize_value
+
+        normalized: list[dict[str, Any]] = []
+        for group in value_groups:
+            display = str(group.get("display_value") or "")
+            refs = [str(ref) for ref in (group.get("members") or [])]
+            if not display or not refs:
+                return None, "each value_group needs display_value and members"
+            normalized.append({
+                "normalized_value": normalize_value(display),
+                "display_value": display,
+                "members": sorted(set(refs)),
+            })
+        return normalized, None
+
+    def _queue_row(self, candidate_hash: str) -> dict[str, Any] | None:
+        if not self.db.db_available:
+            return None
+        try:
+            with self.db.connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM scan_queue WHERE candidate_key_hash=?",
+                    (candidate_hash,),
+                ).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        item = dict(row)
+        for key in ("member_versions", "evidence", "detail"):
+            if isinstance(item.get(key), str):
+                try:
+                    item[key] = json.loads(item[key])
+                except (TypeError, json.JSONDecodeError):
+                    item[key] = None
+        return item
+
+    @staticmethod
+    def _enrich_members(
+        members: list[dict[str, Any]], value_groups: list[dict[str, Any]],
+        slot_key: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """Fill value/attribute fields from the agent's judgment (D1-safe).
+
+        The queue envelope carries value-less deterministic members; an open
+        promotion needs every member's normalized_value to match its group.
+        The agent's value_groups give display values per member ref — the
+        server derives value_raw/normalized_value mechanically so the D1
+        intake gate holds by construction.
+        """
+        from .semantic_conflict import normalize_value
+
+        by_ref = {str(g.get("members")): None for g in ()}  # noqa: F841 (shape doc)
+        ref_to_value: dict[str, str] = {}
+        for group in value_groups:
+            display = str(group.get("display_value") or "")
+            refs = group.get("members") or []
+            if not display or not refs:
+                return None, "each value_group needs display_value and members"
+            for ref in refs:
+                ref_to_value[str(ref)] = display
+        enriched: list[dict[str, Any]] = []
+        for member in members:
+            item = dict(member)
+            ref = f"{int(item['memory_id'])}@{int(item.get('version') or 1)}"
+            display = ref_to_value.get(ref)
+            if display is None:
+                return None, f"member {ref} is not covered by any value_group"
+            item["attribute_raw"] = str(slot_key.get("attribute") or "")
+            item["normalized_attribute"] = str(slot_key.get("attribute") or "")
+            item["value_raw"] = display
+            item["normalized_value"] = normalize_value(display)
+            enriched.append(item)
+        if len(enriched) != len(ref_to_value):
+            return None, "value_groups must cover exactly the pair members"
+        return enriched, None
+
+    def _mark_decided(
+        self, candidate_hash: str, status: str, *, decided_ref: Any, reason: str,
+    ) -> None:
+        now = utc_now_iso()
+        try:
+            with self.db.write_transaction() as conn:
+                conn.execute(
+                    "UPDATE scan_queue SET status=?, decided_ref=?, decided_reason=?, "
+                    "decided_at=?, updated_at=? WHERE candidate_key_hash=?",
+                    (status, str(decided_ref) if decided_ref is not None else None,
+                     reason, now, now, candidate_hash),
+                )
+        except Exception:
+            pass
+
+    def _expire_row(self, candidate_hash: str, why: str) -> None:
+        now = utc_now_iso()
+        try:
+            with self.db.write_transaction() as conn:
+                conn.execute(
+                    "UPDATE scan_queue SET status='expired', decided_reason=?, decided_at=?, "
+                    "updated_at=? WHERE candidate_key_hash=?",
+                    (why, now, now, candidate_hash),
+                )
+        except Exception:
+            pass

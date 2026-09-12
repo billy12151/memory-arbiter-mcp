@@ -201,7 +201,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
     },
     "memory_repair": {
         "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-        "tasks": ["rebuild_evidence", "scan_pipeline", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
+        "tasks": ["rebuild_evidence", "scan_pipeline", "scan_queue", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
         "examples": {
             "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
             "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
@@ -212,6 +212,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "normalize_workspaces_apply": {"task": "normalize_workspaces", "data": {"dry_run": False, "authorized": True}},
             "record_conflict": {"task": "record_conflict", "data": {"slot_key": {"entity": "project-x", "attribute": "database", "scope": "production"}, "members": [{"memory_id": 12, "version": 1, "attribute_raw": "database", "value_raw": "MySQL", "normalized_attribute": "database", "normalized_value": "mysql", "evidence_quote": "database is MySQL", "evidence_span": [0, 17], "content_hash": "0000000000000000000000000000000000000000000000000000000000000000", "direction": "a_to_b", "prompt_version": "p1", "detector_version": "d1"}, {"memory_id": 34, "version": 1, "attribute_raw": "database", "value_raw": "SQLite", "normalized_attribute": "database", "normalized_value": "sqlite", "evidence_quote": "database is SQLite", "evidence_span": [0, 18], "content_hash": "1111111111111111111111111111111111111111111111111111111111111111", "direction": "b_to_a", "prompt_version": "p1", "detector_version": "d1"}], "value_groups": [{"normalized_value": "mysql", "display_value": "MySQL", "members": ["12@1"]}, {"normalized_value": "sqlite", "display_value": "SQLite", "members": ["34@1"]}], "status": "open", "detector_version": "d1", "prompt_version": "p1", "source": "scheduled_scan", "reason": "Reviewed conflicting values."}},
             "scan_pipeline": {"task": "scan_pipeline", "data": {"action": "kick"}},
+            "scan_queue": {"task": "scan_queue", "data": {"action": "page"}},
             "scan_candidates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_check": False}},
             "scan_candidates_quotes": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True}},
             "scan_candidates_duplicates": {"task": "scan_candidates", "data": {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True}},
@@ -1221,6 +1222,32 @@ class ProductSurfaces:
                 # next judgment page is built (§6㉑④: refresh, never drop).
                 self.db.scan_queue_refresh_stale_pins()
             return self.db.state.response(result)
+        if task == "scan_queue":
+            # 0.16.0 §6㉑: agent-facing judgment queue. Page = "handle page 1,
+            # submit its dispositions with the next page fetch"; submit lands
+            # dispositions server-side (confirm → open, dismiss → suppression
+            # source). Queue contents never reach the user-facing surfaces.
+            caller = self._caller_workspace(payload.get("workspace"))
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+            action_value = str(payload.get("action") or "page").strip().lower()
+            if action_value == "status":
+                return self.db.state.response({
+                    "ok": True,
+                    "queue": self.db.scan_queue_counts(),
+                    "queue_backlog": self.db.scan_queue_backlog(),
+                    "internal_conflicts": self.db.internal_conflicts.counts(),
+                })
+            if action_value == "page":
+                result = self._tools.scan_queue_page(**payload)
+                return self.db.state.response(result, ok=result.get("ok", True))
+            if action_value == "submit":
+                result = self._tools.scan_queue_submit(**payload)
+                return self.db.state.response(result, ok=result.get("ok", True))
+            return self._invalid_product_call(
+                "memory_repair", f"unknown scan_queue action: {action_value} (page|submit|status)", task,
+            )
         if task == "scan_duplicates":
             return self._scan_duplicates_task(task, payload)
         if task == "cleanup_history":
