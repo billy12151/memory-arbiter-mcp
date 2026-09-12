@@ -367,6 +367,35 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
         "rollback via memory_govern(action='rollback_auto_move', data={audit_id, authorized=true})",
         evidence={"applied": applied, "rolled_back": rolled_back},
     ))
+    # 0.16.0 §6⑮: tag-discipline backlog — pre-0.16.0 rows over the total cap
+    # are NOT retro-truncated (reads unaffected); doctor lists them for a
+    # manual cleanup pass (remove_tags) instead.
+    from .constants import MAX_MEMORY_TOTAL_TAGS as _TAG_CAP
+
+    try:
+        over: list[dict[str, int]] = []
+        for row in conn.execute(
+            "SELECT id, tags FROM memories WHERE status!='deleted' AND tags != '[]'"
+        ).fetchall():
+            try:
+                parsed = json.loads(str(row["tags"]))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, list) and len(parsed) > _TAG_CAP:
+                over.append({"id": int(row["id"]), "count": len(parsed)})
+    except sqlite3.Error:
+        over = []
+    findings.append(_finding(
+        "tags.over_limit", not over,
+        (
+            f"{len(over)} memory(ies) exceed the {_TAG_CAP}-tag cap: "
+            + ", ".join(f"#{item['id']}({item['count']})" for item in over[:10])
+            + (" …" if len(over) > 10 else "")
+            + " — tags are a retrieval dimension, not an event log; trim with update remove_tags"
+            if over else f"all memories within the {_TAG_CAP}-tag cap"
+        ),
+        evidence={"over_limit": over, "cap": _TAG_CAP},
+    ))
     # v0.8.8 observability (restored): searches that ring conflict signals
     # append to attention_log.jsonl; surfacing the volume keeps advisory
     # flooding visible instead of growing an unread log forever.

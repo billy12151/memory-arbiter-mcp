@@ -2603,6 +2603,15 @@ class OperationsPipeline:
                     "memory_id": memory_id_int,
                     "tags": tag_result.get("tags"),
                 })
+            if outcome == "tags_over_limit":
+                # 0.16.0 §6⑮: the whole tags-only call is refused; the error
+                # carries the merged total and the remove-first hint.
+                return self.db.state.response({
+                    "error": tag_result.get("error"),
+                    "current_total": tag_result.get("current_total"),
+                    "cap": tag_result.get("cap"),
+                    "edited": False,
+                }, ok=False)
             if outcome == "forbidden":
                 return self.db.state.response({
                     "error": (
@@ -2676,6 +2685,14 @@ class OperationsPipeline:
                 error = "authorized=True is required to edit a locked/user_confirmed memory"
             elif outcome == "stale_edit":
                 error = edit_result.get("error") or f"stale_edit: {edit_result.get('reason') or 'current memory changed'}"
+            elif outcome == "tags_over_limit":
+                # 0.16.0 §6⑮: over-cap tag merges refuse the whole edit.
+                return self.db.state.response({
+                    "error": edit_result.get("error"),
+                    "current_total": edit_result.get("current_total"),
+                    "cap": edit_result.get("cap"),
+                    "edited": False,
+                }, ok=False, extra_warnings=list(caller.warnings))
             elif outcome == "unavailable":
                 error = "database not available"
             else:

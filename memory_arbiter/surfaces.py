@@ -79,6 +79,16 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
         },
         "source_of_truth_rule": "When a user says a new document replaces the current source of truth, find/read the existing current memory and update it; do not create a second active memory or retire the old one unless the user explicitly asks for whole-memory retirement.",
+        "tag_discipline": (
+            "Tags are a RETRIEVAL dimension, not an event log (0.16.0): one memory keeps at "
+            "most 32 tags in total. remember with >32 tags is refused; update/add_tags that "
+            "would push the persisted total over 32 is refused as a whole (error carries the "
+            "current total and a remove_tags-first hint; remove+add in ONE call is legal). "
+            "tags_filter and other query inputs stay capped per call (100), not per memory. "
+            "One-off status or timestamps belong in metadata, never in tags. Pre-0.16.0 rows "
+            "over the cap keep working (no retro truncation) — doctor tags.over_limit lists "
+            "them for a manual trim."
+        ),
         "write_duplicate_hint": (
             "remember/activation responses may carry a similar_active_memory notice when the "
             "new subject/tags closely match an existing active memory (subject ratio >=0.95 "

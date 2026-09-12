@@ -50,8 +50,8 @@ def make_tools(tmp_path: Path) -> MemoryTools:
     return tools
 
 
-def _write(tools: MemoryTools, subject: str, content: str, workspace: str = "ws") -> int:
-    res = tools.memory_write(content=content, subject=subject, workspace=workspace, tags=[])
+def _write(tools: MemoryTools, subject: str, content: str, workspace: str = "ws", tags: list | None = None) -> int:
+    res = tools.memory_write(content=content, subject=subject, workspace=workspace, tags=list(tags or []))
     assert res.get("ok"), res
     return int(res["data"]["id"])
 

@@ -15,7 +15,7 @@ from ..config import Settings
 from ..degrade import DegradeState
 
 from ..acl import WorkspaceScope, workspace_scope_sql
-from ..constants import DEFAULT_WORKSPACE_NAME
+from ..constants import DEFAULT_WORKSPACE_NAME, MAX_MEMORY_TOTAL_TAGS
 from ..models import MemoryRecord, utc_now_iso
 from ..text import (
     canon_entity as _canon_entity,
@@ -141,6 +141,13 @@ class MemoriesStore:
             raise ValueError("content is required")
         if not record.subject or not str(record.subject).strip():
             raise ValueError("subject is required")
+        # 0.16.0 §6⑮: remember persists the whole tag list — cap the total.
+        if len(record.tags or []) > MAX_MEMORY_TOTAL_TAGS:
+            raise ValueError(
+                f"tags total {len(record.tags)} exceeds the cap of {MAX_MEMORY_TOTAL_TAGS}; "
+                "tags are a retrieval dimension, not an event log "
+                "(one-off state belongs in metadata)"
+            )
         if not self._db_available or not self.state.sqlite_writable:
             self._append_backup(record, workspace_canonical)
             warnings.append("SQLite write unavailable; wrote append-only JSONL backup.")
@@ -1028,6 +1035,20 @@ class MemoriesStore:
                 new_tags_list.append(tag)
         if new_tags_list == old_tags:
             return {"outcome": "no_change", "memory_id": memory_id, "tags": old_tags}
+        # 0.16.0 §6⑮: persisted tag total cap (remove+add in one call is
+        # legal; the cap applies to the merged result).
+        if len(new_tags_list) > MAX_MEMORY_TOTAL_TAGS:
+            return {
+                "outcome": "tags_over_limit",
+                "memory_id": memory_id,
+                "error": (
+                    f"tags would total {len(new_tags_list)} (cap {MAX_MEMORY_TOTAL_TAGS}); "
+                    "remove_tags first — tags are a retrieval dimension, not an event log "
+                    "(one-off state belongs in metadata)"
+                ),
+                "current_total": len(new_tags_list),
+                "cap": MAX_MEMORY_TOTAL_TAGS,
+            }
         conn.execute(
             "UPDATE memories SET tags=? WHERE id=?",
             (json.dumps(new_tags_list, ensure_ascii=False), memory_id),
@@ -1499,6 +1520,22 @@ class MemoriesStore:
             if tag not in tag_set:
                 tag_set.add(tag)
                 resolved_tags.append(tag)
+        # 0.16.0 §6⑮: the PERSISTED tag total is capped — tags are a
+        # retrieval dimension, not an event log. remove-then-add in one call
+        # is legal (the cap applies to the merged result); over-limit rejects
+        # the WHOLE edit with the current count so the agent can remove first.
+        if len(resolved_tags) > MAX_MEMORY_TOTAL_TAGS:
+            return {
+                "outcome": "tags_over_limit",
+                "memory_id": int(memory_id),
+                "error": (
+                    f"tags would total {len(resolved_tags)} (cap {MAX_MEMORY_TOTAL_TAGS}); "
+                    "remove_tags first — tags are a retrieval dimension, not an event log "
+                    "(one-off state belongs in metadata)"
+                ),
+                "current_total": len(resolved_tags),
+                "cap": MAX_MEMORY_TOTAL_TAGS,
+            }
         history_cur = conn.execute(
             """
             INSERT INTO memory_history
