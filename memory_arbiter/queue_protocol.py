@@ -60,7 +60,10 @@ class QueueProtocol:
                 break
             items.append(self._workspace_item(row, meta_cache))
         if len(items) < page_size:
-            for row in self.db.internal_conflicts.list_pending(limit=page_size):
+            # Internal items are capped per page: a fragment-noise flood in
+            # the internal structure must never starve conflict judgment.
+            internal_cap = min(3, page_size)
+            for row in self.db.internal_conflicts.list_pending(limit=internal_cap):
                 if len(items) >= page_size:
                     break
                 items.append(self._internal_item(row, meta_cache))

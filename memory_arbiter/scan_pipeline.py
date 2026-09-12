@@ -194,6 +194,7 @@ class ScanPipeline:
             "queued_total": queued,
             "auto_rejected_total": auto_rejected,
             "internal_found_total": internal_found,
+            "normalize_suspects_total": state.get("normalize_suspects") or 0,
             "pending_memories": pending_left,
             "complete": complete,
             "duration_ms": int((time.monotonic() - started) * 1000),
