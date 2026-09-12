@@ -8,7 +8,10 @@ import signal
 import sys
 from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple
 
-from mcp.types import CallToolResult
+try:
+    from mcp.types import CallToolResult
+except Exception:  # fake-mcp test doubles have no types submodule
+    CallToolResult = None
 
 from . import __version__
 from .config import Settings
@@ -251,7 +254,13 @@ def _structured_only(result: dict[str, Any]) -> Any:
     functions — the output schema (and with it structured-output negotiation)
     is derived from the annotation, not the runtime type.
     """
-    return CallToolResult(content=[], structuredContent=result)
+    resolved = CallToolResult
+    if resolved is None:  # fake-mcp test double: keep the plain dict path
+        try:
+            from mcp.types import CallToolResult as resolved  # type: ignore[no-redef]
+        except Exception:
+            return result
+    return resolved(content=[], structuredContent=result)
 
 
 def _data_with_request_identity(

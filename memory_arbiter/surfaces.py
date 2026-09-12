@@ -162,7 +162,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
     },
     "memory_govern": {
         "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
-        "actions": ["retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help"],
+        "actions": ["retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "rollback_auto_move", "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help"],
         "examples": {
             "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
             "merge_memories": {"action": "merge_memories", "data": {"survivor_id": 456, "loser_ids": [123, 124], "reason": "Same fact recorded twice; keeping the newer record.", "authorized": True}},
@@ -173,6 +173,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "rename_workspace_canonical": {"action": "rename_workspace_canonical", "data": {"old": "旧项目名", "new": "新项目名", "reason": "User confirmed the rename.", "authorized": True}},
             "migrate_workspace": {"action": "migrate_workspace", "data": {"from": "金营二期", "to": "金营项目", "reason": "User confirmed the merge.", "authorized": True}},
             "move_memories_workspace": {"action": "move_memories_workspace", "data": {"memory_ids": [123, 124], "new_workspace": "金营项目", "reason": "User confirmed these memories belong to the project bucket.", "authorized": True}},
+            "rollback_auto_move": {"action": "rollback_auto_move", "data": {"audit_id": 1, "reason": "User says the auto-move was wrong.", "authorized": True}},
             "confirm_pending_workspace": {"action": "confirm_pending_workspace", "data": {"memory_id": 123, "canonical": "金营项目", "authorized": True}},
             "confirm_workspaces": {"action": "confirm_workspaces", "data": {"reason": "Reviewed the registry after renaming duplicates; snapshots the current registry.", "authorized": True}},
         },
@@ -268,6 +269,7 @@ class ProductSurfaces:
         "rename_workspace_canonical": "Renames a canonical workspace and reroutes all affected memories.",
         "migrate_workspace": "Bulk-moves memories to another canonical workspace and records the alias.",
         "move_memories_workspace": "Moves the selected memories by id to another workspace bucket (both workspace columns); alias and normalization rules are not changed. Rows whose canonical already diverges from their bucket (e.g. rows written through a confirmed alias) are re-anchored to the destination when authorized.",
+        "rollback_auto_move": "Reverses ONE autonomous normalization move by its normalize_audit id (0.16.0): restores both workspace columns, voids new-bucket conflict tickets, invalidates the scan watermark, and marks the audit row rolled_back. Manual moves are out of scope; protected-bucket moves never happened autonomously.",
         "confirm_pending_workspace": "Assigns the canonical workspace and activates the pending memory for recall.",
         "confirm_workspaces": "Records the reviewed workspace registry snapshot that doctor's workspace.review diffs against; unconfirmed new workspaces keep the check warning.",
         "record_conflict": "Records a not_a_conflict disposition that suppresses future detection of the same candidate; ordinary open conflict intake does not require authorization.",
@@ -1052,6 +1054,14 @@ class ProductSurfaces:
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self._tools.memory_move_memories_workspace, **payload)
+        if action == "rollback_auto_move":
+            invalid_id = self._coerce_product_id("memory_govern", payload, "audit_id", action)
+            if invalid_id is not None:
+                return invalid_id
+            auth_error = self._governance_authorization_error(action, payload)
+            if auth_error is not None:
+                return auth_error
+            return self._tools.memory_rollback_auto_move(**payload)
         if action == "confirm_pending_workspace":
             invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
             if invalid_id is not None:

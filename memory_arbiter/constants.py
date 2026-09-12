@@ -243,6 +243,16 @@ SCAN_PIPELINE_KICK_TIME_BUDGET_S = 45.0
 SCAN_PIPELINE_KICK_MAX_MEMORIES = 400
 SCAN_PIPELINE_NEIGHBOR_K = 10
 
+# 0.16.0 workspace-normalization gate (plan §6⑫, E7 gate spec — measured on
+# the real library: mis-moves 0 after the gate, residuals are true ambiguity).
+# Protected buckets (E6 + owner confirm): NO autonomous move in either
+# direction — persona isolation depends on it. Manual authorized moves are
+# unaffected; protected-involved suspects surface as user hints only.
+PROTECTED_WORKSPACES = frozenset({"mema-twin", "mema-twin-dev"})
+NORMALIZE_VOTE_NEIGHBORS = 10
+NORMALIZE_VOTE_SHARE_MIN = 8  # top bucket share >= 8/10
+NORMALIZE_MIN_CONF = 0.8
+
 # HTTP transport fixed surface
 MCP_HTTP_PATH = "/mcp"
 MCP_HTTP_BODY_LIMIT = 4 * 1024 * 1024

@@ -87,6 +87,18 @@ class ConsoleAPI:
                 ).fetchone()[0])
         except sqlite3.Error:
             counts["dismissed_conflicts"] = 0
+        # 0.16.0 §6㉑⑦: scan-queue backlog visible on the console metrics row
+        # (same source as doctor's conflicts.scan_queue_backlog finding —
+        # counts only, never the items; suspected items are mostly noise).
+        try:
+            with self.tools.db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT status, COUNT(*) AS c FROM scan_queue GROUP BY status"
+                ).fetchall()
+            q = {str(r["status"]): int(r["c"]) for r in rows}
+            counts["scan_queue_backlog"] = q.get("pending", 0) + q.get("in_review", 0)
+        except sqlite3.Error:
+            counts["scan_queue_backlog"] = 0
         return {
             "version": __version__,
             "brand": {"en": "mema", "zh": "迷码", "full": "Memory Arbiter"},

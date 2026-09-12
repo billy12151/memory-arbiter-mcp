@@ -36,11 +36,12 @@ from .constants import (
     WORKSPACE_RECALL_ADMISSION,
     WORKSPACE_RECALL_CUTOFF,
     strict_ws,
+    is_default_workspace_term,
 )
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
 from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
-from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext
+from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext, utc_now_iso
 from .search import search_memories, _linked_open_items_for_search
 from .semantic_conflict import (
     IsolatedGGUFSemanticBackend,
@@ -1805,6 +1806,71 @@ class MemoryTools:
 
     def scan_queue_submit(self, **payload: Any) -> dict[str, Any]:
         return self._queue_protocol.submit(payload.get("decisions") or [])
+
+    def memory_rollback_auto_move(self, audit_id: int = 0, reason: str = "", **_: Any) -> dict[str, Any]:
+        """0.16.0 §6⑫: reverse ONE autonomous normalization move by audit id.
+
+        Restores both workspace columns (default pool allowed as the restore
+        target — unlike a manual move), voids the new-bucket conflict tickets
+        (§6⑯), invalidates the scan watermark, and marks the audit row
+        rolled_back (审计反写). Manual moves are out of scope by design.
+        """
+        if not self.db.db_available or not self.db.state.sqlite_writable:
+            return self.db.state.response({"moved": False, "error": "database_not_writable"}, ok=False)
+        audit_id = int(audit_id or 0)
+        if audit_id <= 0:
+            return self.db.state.response(
+                {"moved": False, "error": "rollback_auto_move requires audit_id"}, ok=False)
+        try:
+            with self.db.write_transaction() as conn:
+                row = conn.execute(
+                    "SELECT * FROM normalize_audit WHERE id=? AND status='applied'",
+                    (audit_id,),
+                ).fetchone()
+                if row is None:
+                    return self.db.state.response(
+                        {"moved": False, "error": "audit entry not found or not applied"},
+                        ok=False,
+                    )
+                memory_id = int(row["memory_id"])
+                from_ws = str(row["from_workspace"])
+                to_ws = str(row["to_workspace"])
+                current = conn.execute(
+                    "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "
+                    "FROM memories WHERE id=? AND status='active'", (memory_id,),
+                ).fetchone()
+                if current is None or str(current["bucket"] or "") != to_ws:
+                    return self.db.state.response(
+                        {"moved": False,
+                         "error": f"memory no longer sits in {to_ws!r}; rollback refused",
+                         "current_bucket": str(current["bucket"]) if current else None},
+                        ok=False,
+                    )
+                # Same §6⑯ discipline as any move: old tickets die, watermark
+                # invalidates, the pipeline re-pairs in the restored bucket.
+                self.db.conflicts.void_conflicts_on_conn(
+                    conn, [memory_id], reason=f"rollback_auto_move #{audit_id}",
+                )
+                conn.execute(
+                    "UPDATE memories SET workspace=?, workspace_canonical=?, scan_watermark=NULL "
+                    "WHERE id=?",
+                    (from_ws, from_ws, memory_id),
+                )
+                if from_ws and not is_default_workspace_term(from_ws):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                        (from_ws, utc_now_iso()),
+                    )
+                conn.execute(
+                    "UPDATE normalize_audit SET status='rolled_back', rolled_back_at=? WHERE id=?",
+                    (utc_now_iso(), audit_id),
+                )
+            return self.db.state.response({
+                "moved": True, "audit_id": audit_id, "memory_id": memory_id,
+                "restored_to": from_ws, "reason": reason or None,
+            })
+        except Exception as exc:
+            return self.db.state.response({"moved": False, "error": str(exc)}, ok=False)
 
     def memory_scan_workspace_anomalies(self, **_: Any) -> dict[str, Any]:
         """C3a workspace anomaly check: single-pass matmul over all summary vectors.

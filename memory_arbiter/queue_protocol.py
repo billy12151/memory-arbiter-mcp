@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from typing import Any, TYPE_CHECKING
 
+from .constants import is_default_workspace_term
 from .models import utc_now_iso
 
 if TYPE_CHECKING:
@@ -48,25 +49,35 @@ class QueueProtocol:
     def page(self, *, page_size: int = DEFAULT_PAGE_SIZE, page_token: int = 0) -> dict[str, Any]:
         page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
         page_token = max(0, int(page_token or 0))
-        rows = self._fetch_conflict_rows(page_token)
         items: list[dict[str, Any]] = []
         meta_cache: dict[int, dict[str, Any]] = {}
         last_id = page_token
-        for group in self._assemble_groups(rows):
-            last_id = max(last_id, group["last_queue_id"])
-            if len(group["member_ids"]) > GROUP_MEMBER_CAP:
-                # §6⑬: oversize component → split back into edges.
-                for edge in group["pairs"]:
-                    items.append(self._pair_item(edge, meta_cache))
-            else:
-                items.append(self._group_item(group, meta_cache))
+        # Priority: workspace suspects first (rare, cheap to judge, gate
+        # autonomous moves), then internal contradictions, then conflict
+        # groups — a big conflict backlog must not starve the other kinds.
+        for row in self._fetch_workspace_rows():
             if len(items) >= page_size:
                 break
-        internal = self.db.internal_conflicts.list_pending(limit=page_size)
-        for row in internal:
-            items.append(self._internal_item(row, meta_cache))
-            if len(items) >= page_size:
-                break
+            items.append(self._workspace_item(row, meta_cache))
+        if len(items) < page_size:
+            for row in self.db.internal_conflicts.list_pending(limit=page_size):
+                if len(items) >= page_size:
+                    break
+                items.append(self._internal_item(row, meta_cache))
+        if len(items) < page_size:
+            rows = self._fetch_conflict_rows(page_token)
+            for group in self._assemble_groups(rows):
+                last_id = max(last_id, group["last_queue_id"])
+                if len(items) >= page_size:
+                    break
+                if len(group["member_ids"]) > GROUP_MEMBER_CAP:
+                    # §6⑬: oversize component → split back into edges.
+                    for edge in group["pairs"]:
+                        if len(items) >= page_size:
+                            break
+                        items.append(self._pair_item(edge, meta_cache))
+                else:
+                    items.append(self._group_item(group, meta_cache))
         remaining = self.db.scan_queue_backlog()
         response: dict[str, Any] = {
             "ok": True,
@@ -84,7 +95,10 @@ class QueueProtocol:
                 "that is noise can be dismissed in one entry with the group's group_token."
             ),
         }
-        has_more = remaining > 0 or len(internal) > page_size
+        # has_more: any backlog beyond what this page displayed — the queue
+        # backlog itself is authoritative (workspace/internal rows live in
+        # separate tables and may not all fit this page).
+        has_more = remaining > len(items[:page_size])
         if items and (last_id > page_token or remaining):
             response["next_page_token"] = last_id
         response["has_more"] = bool(has_more)
@@ -246,6 +260,67 @@ class QueueProtocol:
             ),
         }
 
+    def _fetch_workspace_rows(self) -> list[dict[str, Any]]:
+        if not self.db.db_available:
+            return []
+        try:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    """SELECT id,kind,workspace_canonical,status,candidate_key_hash,
+                              member_versions,evidence,reason,severity,source,detail
+                       FROM scan_queue WHERE status='pending' AND kind='workspace'
+                       ORDER BY id LIMIT ?""",
+                    (ASSEMBLY_WINDOW,),
+                ).fetchall()
+        except Exception:
+            return []
+        decoded: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for key in ("member_versions", "evidence", "detail"):
+                if isinstance(item.get(key), str):
+                    try:
+                        item[key] = json.loads(item[key])
+                    except (TypeError, json.JSONDecodeError):
+                        item[key] = None
+            decoded.append(item)
+        return decoded
+
+    def _workspace_item(self, row: dict[str, Any], cache: dict[int, dict[str, Any]]) -> dict[str, Any]:
+        member = (row.get("member_versions") or [{}])[0]
+        memory_id = int(member.get("memory_id") or 0)
+        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        outline: list[dict[str, Any]] = []
+        content_chars = 0
+        record = self.db.get_memory(memory_id)
+        if record:
+            from .pipeline.read import _content_outline
+
+            content = str(record.get("content") or "")
+            content_chars = len(content)
+            outline = _content_outline(str(record.get("subject") or ""), content)
+        return {
+            "kind": "workspace",
+            "queue_id": int(row["id"]),
+            "candidate_key_hash": row["candidate_key_hash"],
+            "memory_id": memory_id,
+            "memory_version": member.get("version"),
+            "current_workspace": detail.get("current_workspace") or row.get("workspace_canonical"),
+            "suspected_workspace": detail.get("suspected_workspace"),
+            "votes": detail.get("votes") or {},
+            "protected_involved": bool(detail.get("protected_involved")),
+            "member_meta": {str(memory_id): self._member_meta(memory_id, cache)},
+            "content_chars": content_chars,
+            "outline": outline,
+            "reason": row.get("reason"),
+            "instruction": (
+                "E5 summary input: judge placement from subject/tags/outline. Confirm with "
+                "{kind:'workspace', memory_id, status:'confirmed', target_workspace, conf} — "
+                "the server re-runs the vector vote and only moves when the two signals agree "
+                "(protected buckets are never moved autonomously)."
+            ),
+        }
+
     def _detector_version(self) -> str:
         from .db_generation import CONFLICT_DETECTOR_VERSION
 
@@ -261,7 +336,9 @@ class QueueProtocol:
         results: list[dict[str, Any]] = []
         for index, raw in enumerate(decisions):
             results.append(self._submit_one(index, raw))
-        ok = all(item.get("outcome") in {"confirmed", "dismissed", "resolved", "skipped"} for item in results)
+        handled = {"confirmed", "dismissed", "resolved", "skipped", "moved",
+                   "protected_bucket_hint", "multi_family_hint"}
+        ok = all(item.get("outcome") in handled for item in results)
         return {
             "ok": ok,
             "results": results,
@@ -274,6 +351,8 @@ class QueueProtocol:
         status = str(raw.get("status") or "").strip().lower()
         reason = str(raw.get("reason") or "")
         kind = str(raw.get("kind") or "conflict").strip().lower()
+        if kind == "workspace":
+            return self._submit_workspace(index, status, reason, raw)
         if kind == "internal":
             internal_id = raw.get("internal_id")
             if status not in {"dismissed", "resolved"}:
@@ -298,6 +377,172 @@ class QueueProtocol:
             return {"index": index, "outcome": "invalid_input",
                     "error": "candidate_key_hash must be the 64-char hash from the queue page"}
         return self._decide_row(index, candidate_hash, status, reason, raw)
+
+    def _submit_workspace(
+        self, index: int, status: str, reason: str, raw: dict[str, Any],
+    ) -> dict[str, Any]:
+        from .constants import (
+            NORMALIZE_MIN_CONF, NORMALIZE_VOTE_NEIGHBORS, NORMALIZE_VOTE_SHARE_MIN,
+            PROTECTED_WORKSPACES,
+        )
+        from .scan_pipeline import _workspace_identity
+
+        if status not in {"confirmed", "dismissed"}:
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "workspace decisions accept status confirmed|dismissed"}
+        memory_id = raw.get("memory_id")
+        if not isinstance(memory_id, int) or memory_id <= 0:
+            return {"index": index, "outcome": "invalid_input", "error": "memory_id required"}
+        record = self.db.get_memory(memory_id)
+        if not record or record.get("status") != "active":
+            return {"index": index, "outcome": "not_found", "memory_id": memory_id}
+        version = int(record.get("version") or 1)
+        current = str(record.get("workspace_canonical") or record.get("workspace") or "")
+        if status == "dismissed":
+            self._expire_workspace_rows(memory_id, version, "dismissed", reason)
+            return {"index": index, "outcome": "dismissed", "memory_id": memory_id}
+        # confirmed: the four-part gate (E7) re-runs at decision time.
+        target = str(raw.get("target_workspace") or "").strip()
+        try:
+            conf = float(raw.get("conf") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if not target:
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "confirmed workspace moves need target_workspace"}
+        if current in PROTECTED_WORKSPACES or target in PROTECTED_WORKSPACES:
+            # E6: protected buckets are never moved autonomously — user hint.
+            self._expire_workspace_rows(memory_id, version, "dismissed",
+                                        f"protected bucket involved: {current!r}->{target!r}")
+            return {
+                "index": index, "outcome": "protected_bucket_hint",
+                "memory_id": memory_id, "current": current, "target": target,
+                "hint": "受保护桶不自动搬——请向用户提示疑似写错桶，由用户自行处置",
+            }
+        if conf < NORMALIZE_MIN_CONF:
+            return {"index": index, "outcome": "gate_failed", "gate": "conf",
+                    "memory_id": memory_id, "conf": conf}
+        multi = self._multi_family_mentions(record, target)
+        if multi:
+            # E7-4: multi-family mentions downgrade to a user hint, no move.
+            self._expire_workspace_rows(memory_id, version, "dismissed",
+                                        f"multi-family mention: {multi}")
+            return {"index": index, "outcome": "multi_family_hint",
+                    "memory_id": memory_id, "families": multi}
+        vote = self._workspace_vote(memory_id)
+        if vote is None:
+            return {"index": index, "outcome": "gate_failed", "gate": "vote_unavailable",
+                    "memory_id": memory_id}
+        top_bucket, share, neighbours = vote
+        if top_bucket != target or share < NORMALIZE_VOTE_SHARE_MIN:
+            return {
+                "index": index, "outcome": "gate_failed", "gate": "vote",
+                "memory_id": memory_id, "top_bucket": top_bucket,
+                "share": share, "neighbours": neighbours,
+            }
+        moved, warnings = self._execute_auto_move(memory_id, current, target, vote, conf)
+        if not moved:
+            return {"index": index, "outcome": "move_failed", "warnings": warnings}
+        self._expire_workspace_rows(memory_id, version, "confirmed", reason)
+        return {
+            "index": index, "outcome": "moved", "memory_id": memory_id,
+            "from": current, "to": target, "vote": {"top": top_bucket, "share": share},
+            "warnings": warnings,
+        }
+
+    def _expire_workspace_rows(self, memory_id: int, version: int, status: str, why: str) -> None:
+        try:
+            with self.db.write_transaction() as conn:
+                conn.execute(
+                    """UPDATE scan_queue SET status=?, decided_reason=?, decided_at=CURRENT_TIMESTAMP,
+                       updated_at=CURRENT_TIMESTAMP
+                       WHERE kind='workspace' AND status='pending'
+                         AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
+                                    WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
+                    (status, why, int(memory_id)),
+                )
+        except Exception:
+            pass
+
+    def _multi_family_mentions(self, record: dict[str, Any], target: str) -> list[str]:
+        """E7-4: subject/tags mentioning >=2 registered project families
+        downgrades the case to a user hint (cross-project meta content)."""
+        tags = record.get("tags") if isinstance(record.get("tags"), list) else []
+        text = (str(record.get("subject") or "") + " " + " ".join(str(t) for t in tags)).casefold()
+        if not text.strip():
+            return []
+        try:
+            with self.db.connection() as conn:
+                names = [str(r["name"]) for r in conn.execute(
+                    "SELECT name FROM workspace_canonicals").fetchall()]
+        except Exception:
+            return []
+        mentioned = sorted({
+            name for name in names
+            if len(name) >= 4 and not is_default_workspace_term(name)
+            and name.casefold() in text
+        })
+        return mentioned if len(mentioned) >= 2 else []
+
+    def _workspace_vote(self, memory_id: int) -> "tuple[str, int, int] | None":
+        """Decision-time vector vote (E7①: 现算票). Returns (top_foreign_bucket,
+        its_share, neighbours_checked); None without vectors/numpy."""
+        try:
+            import numpy as np
+        except ImportError:
+            return None
+        from .constants import NORMALIZE_VOTE_NEIGHBORS
+
+        vectors = self.db.memories.all_summary_vectors()
+        if memory_id not in vectors:
+            return None
+        all_ids = sorted(vectors)
+        workspaces = {mid: str(vectors[mid][0] or "") for mid in all_ids}
+        own = workspaces[memory_id]
+        matrix = np.array([vectors[mid][1] for mid in all_ids], dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1)
+        norms[norms == 0] = 1.0
+        unit = matrix / norms[:, None]
+        row = all_ids.index(memory_id)
+        sims = unit @ unit[row]
+        sims[row] = -1.0
+        k = min(NORMALIZE_VOTE_NEIGHBORS, len(all_ids) - 1)
+        if k <= 0:
+            return None
+        order = np.argsort(-sims, kind="stable")[:k]
+        votes: dict[str, int] = {}
+        for col in order:
+            bucket = workspaces[all_ids[int(col)]]
+            votes[bucket] = votes.get(bucket, 0) + 1
+        top_bucket, top_votes = max(votes.items(), key=lambda item: item[1], default=("", 0))
+        return top_bucket, top_votes, k
+
+    def _execute_auto_move(
+        self, memory_id: int, current: str, target: str,
+        vote: "tuple[str, int, int]", conf: float,
+    ) -> "tuple[bool, list[str]]":
+        from .constants import NORMALIZE_VOTE_SHARE_MIN
+
+        try:
+            with self.db.write_transaction() as conn:
+                moved, move_warnings = self.db.workspaces.move_memory_workspace_on_conn(
+                    conn, memory_id, target,
+                )
+                if not moved:
+                    return False, move_warnings
+                cur = conn.execute(
+                    """INSERT INTO normalize_audit(
+                         memory_id, from_workspace, to_workspace, gate, status, created_at)
+                       VALUES(?,?,?,?, 'applied', ?)""",
+                    (int(memory_id), current, target,
+                     json.dumps({"vote_top": vote[0], "vote_share": f"{vote[1]}/{vote[2]}",
+                                 "share_min": NORMALIZE_VOTE_SHARE_MIN, "conf": conf},
+                                ensure_ascii=False),
+                     utc_now_iso()),
+                )
+            return True, move_warnings
+        except Exception as exc:
+            return False, [f"auto move failed: {exc}"]
 
     def _submit_group(
         self, index: int, group_token: str, status: str, reason: str,

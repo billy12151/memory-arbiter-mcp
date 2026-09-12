@@ -21,7 +21,7 @@ from memory_arbiter.tools import MemoryTools
 
 def _sc(result):
     """Unwrap the 0.16.0 single-copy FastMCP response (CallToolResult)."""
-    return result.structuredContent
+    return getattr(result, "structuredContent", result)
 
 
 
@@ -76,7 +76,7 @@ def clear_config_env(monkeypatch) -> None:
 
 def _sc(result):
     """Unwrap the 0.16.0 single-copy FastMCP response (CallToolResult)."""
-    return result.structuredContent
+    return getattr(result, "structuredContent", result)
 
 def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path, monkeypatch) -> None:
     """Regression: the MCP wrapper must pass new_tags=None through.
@@ -411,7 +411,7 @@ def test_product_judge_help_exposes_group_decision_constraints(tmp_path: Path) -
     assert gov_help["judge_constraints"] == constraints
     assert gov_help["actions"] == [
         "retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm",
-        "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace",
+        "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "rollback_auto_move",
         "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help",
     ]
     assert "accept_workspace_alias" not in gov_help["examples"]

@@ -36,7 +36,7 @@ class MultiHeaders(dict[str, str]):
 
 def _sc(result):
     """Unwrap the 0.16.0 single-copy FastMCP response (CallToolResult)."""
-    return result.structuredContent
+    return getattr(result, "structuredContent", result)
 
 def test_identity_header_parser_accepts_case_insensitive_valid_values() -> None:
     identity = parse_identity_headers({

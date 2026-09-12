@@ -297,6 +297,46 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
         evidence={"groups": applying_groups},
     ))
     findings.append(_finding("notices.backlog", open_notices < 100, f"{open_notices} open notices"))
+    # 0.16.0 §6㉑⑦: the scan judgment queue is agent-facing only — the user
+    # surface is this backlog COUNT plus a hint, never the items themselves
+    # (suspected items are mostly noise). Console overview reads the same
+    # numbers via doctor.
+    try:
+        queue_rows = conn.execute(
+            "SELECT status, COUNT(*) AS c FROM scan_queue GROUP BY status"
+        ).fetchall()
+        queue_counts = {str(row["status"]): int(row["c"]) for row in queue_rows}
+    except sqlite3.Error:
+        queue_counts = {}
+    queue_backlog = queue_counts.get("pending", 0) + queue_counts.get("in_review", 0)
+    findings.append(_finding(
+        "conflicts.scan_queue_backlog", queue_backlog < 100,
+        (
+            f"{queue_backlog} suspected item(s) awaiting agent judgment "
+            f"({queue_counts.get('pending', 0)} pending, {queue_counts.get('in_review', 0)} in review); "
+            "when convenient, let the agent read the queue "
+            "(memory_repair task='scan_queue', action='page')"
+        ),
+        evidence={**queue_counts, "backlog": queue_backlog},
+    ))
+    # 0.16.0 §6⑫: autonomous normalization audit board — applied auto-moves,
+    # rollbacks, and (never-moved) protected-bucket hints, so the owner sees
+    # what the pipeline did on its own and what needs a human instead.
+    try:
+        applied = int(conn.execute(
+            "SELECT COUNT(*) FROM normalize_audit WHERE status='applied'"
+        ).fetchone()[0])
+        rolled_back = int(conn.execute(
+            "SELECT COUNT(*) FROM normalize_audit WHERE status='rolled_back'"
+        ).fetchone()[0])
+    except sqlite3.Error:
+        applied = rolled_back = 0
+    findings.append(_finding(
+        "normalize.autonomy", True,
+        f"{applied} autonomous move(s) applied, {rolled_back} rolled back; "
+        "rollback via memory_govern(action='rollback_auto_move', data={audit_id, authorized=true})",
+        evidence={"applied": applied, "rolled_back": rolled_back},
+    ))
     # v0.8.8 observability (restored): searches that ring conflict signals
     # append to attention_log.jsonl; surfacing the volume keeps advisory
     # flooding visible instead of growing an unread log forever.

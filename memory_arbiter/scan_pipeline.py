@@ -29,6 +29,8 @@ from .semantic_conflict import decide_evidence
 if TYPE_CHECKING:
     from .tools import MemoryTools
 
+from .constants import PROTECTED_WORKSPACES as PROTECTED
+
 DEFAULT_TIME_BUDGET_S = 45.0
 DEFAULT_MAX_MEMORIES = 400
 DEFAULT_NEIGHBOR_K = 10
@@ -119,6 +121,7 @@ class ScanPipeline:
         internal_found = int(state.get("internal_found") or 0)
         auto_reject_remaining = max(0, SCAN_PIPELINE_AUTO_REJECT_CAP - auto_rejected)
         anchor_buckets: dict[str, int] = {}
+        processed_ids: list[int] = []
 
         batch = 50
         while processed < max_memories:
@@ -149,17 +152,20 @@ class ScanPipeline:
                 auto_reject_remaining = max(0, auto_reject_remaining - outcome["auto_rejected"])
                 internal_found += outcome["internal"]
                 last_id = max(last_id, memory_id)
+                processed_ids.append(memory_id)
                 processed += 1
             else:
                 continue
             break
 
+        normalized = self._enqueue_workspace_suspects(processed_ids)
         state.update({
             "last_id": last_id,
             "processed": processed,
             "queued": queued,
             "auto_rejected": auto_rejected,
             "internal_found": internal_found,
+            "normalize_suspects": normalized,
             "updated_at": self._now(),
         })
         pending_left = self.db.pending_scan_memory_count()
@@ -447,6 +453,89 @@ class ScanPipeline:
             recorded = "not_a_conflict"
         return recorded is not None
 
+    def _enqueue_workspace_suspects(self, processed_ids: list[int]) -> int:
+        """Vector-vote workspace suspects for THIS round's processed memories.
+
+        Same summary-vector vote as the C3a anomaly check (top-10 neighbours,
+        ≥8/10 in one foreign bucket → suspected), but scoped to memories the
+        pipeline just processed (incremental by watermark, E10) and landing in
+        the judgment queue (kind='workspace') instead of notices. The agent
+        second-judges (E5: preview/outline input suffices); only a confirmed
+        judgment that ALSO passes the server-side gate physically moves.
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            return 0
+        from .constants import (
+            NORMALIZE_VOTE_NEIGHBORS, NORMALIZE_VOTE_SHARE_MIN,
+        )
+
+        vectors = self.db.memories.all_summary_vectors()
+        if not vectors:
+            return 0
+        ids = [mid for mid in sorted(vectors) if mid in set(processed_ids)]
+        if not ids:
+            return 0
+        # The vote matrix still spans the WHOLE library: a mis-placed memory
+        # must be judged against its true neighbours, wherever they live.
+        all_ids = sorted(vectors)
+        workspaces = {mid: str(vectors[mid][0] or "") for mid in all_ids}
+        matrix = np.array([vectors[mid][1] for mid in all_ids], dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1)
+        norms[norms == 0] = 1.0
+        unit = matrix / norms[:, None]
+        index_of = {mid: i for i, mid in enumerate(all_ids)}
+        k = min(NORMALIZE_VOTE_NEIGHBORS, len(all_ids) - 1)
+        if k < NORMALIZE_VOTE_SHARE_MIN:
+            return 0
+        landed = 0
+        for mid in ids:
+            row = index_of[mid]
+            sims = unit @ unit[row]
+            sims[row] = -1.0
+            order = np.argsort(-sims, kind="stable")[:k]
+            votes: dict[str, int] = {}
+            for col in order:
+                bucket = workspaces[all_ids[int(col)]]
+                votes[bucket] = votes.get(bucket, 0) + 1
+            own = workspaces[mid]
+            best_bucket, best_votes = max(
+                ((b, c) for b, c in votes.items() if b != own),
+                key=lambda item: item[1],
+                default=("", 0),
+            )
+            if best_votes < NORMALIZE_VOTE_SHARE_MIN or not best_bucket:
+                continue
+            record = self.db.get_memory(mid)
+            if not record or record.get("status") != "active":
+                continue
+            version = int(record.get("version") or 1)
+            detail = {
+                "suspected_workspace": best_bucket,
+                "current_workspace": own,
+                "votes": votes,
+                "neighbours_checked": k,
+                "protected_involved": bool(
+                    own in PROTECTED or best_bucket in PROTECTED
+                ),
+            }
+            identity = _workspace_identity(mid, version, best_bucket)
+            outcome = self.db.scan_queue.enqueue(
+                kind="workspace",
+                workspace_canonical=own,
+                candidate_key_hash=identity,
+                member_versions=[{"memory_id": mid, "version": version}],
+                evidence=[],
+                reason=f"vector vote {best_votes}/{k} -> {best_bucket!r}",
+                severity="normal",
+                source="scan_pipeline",
+                detail=detail,
+            )
+            if outcome.get("outcome") == "queued":
+                landed += 1
+        return landed
+
     def _complete_round(self, state: dict[str, Any]) -> None:
         """Round completion bookkeeping: audit line + legacy-gate clearing.
 
@@ -474,3 +563,11 @@ class ScanPipeline:
         return utc_now_iso()
 
 
+
+
+def _workspace_identity(memory_id: int, version: int, suspected: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        f"workspace:{memory_id}@{version}:{suspected}".encode("utf-8")
+    ).hexdigest()
