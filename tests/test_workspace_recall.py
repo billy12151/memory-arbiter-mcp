@@ -1471,7 +1471,7 @@ def test_conflict_detail_visible_across_admitted_workspaces(tmp_path):
 
     judged = tools.memory("judge", {
         "workspace": "agent-lane", "conflict_id": conflict_id,
-        "expected_revision": 1, "chosen_value": "value_1",
+        "expected_revision": 1, "chosen_value": "value1",
         "decided_by": "user", "ref": "chat", "reason": "confirmed",
         "authorized": True,
         "apply_plan": [
