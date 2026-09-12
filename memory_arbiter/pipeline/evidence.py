@@ -229,12 +229,22 @@ class EvidencePipeline:
         internal_found = 0
         internal_version = int(record.get("version") or 1)
         text_units = [unit for unit, _embedding in unit_vectors]
+        from ..scan_pipeline import genuine_numeric_pair, spans_overlap
+
         for i in range(len(text_units)):
             for j in range(i + 1, len(text_units)):
                 unit_a, unit_b = text_units[i], text_units[j]
+                if spans_overlap((unit_a.start_offset, unit_a.end_offset),
+                                 (unit_b.start_offset, unit_b.end_offset)):
+                    continue
                 internal_decision = decide_evidence(unit_a.text, unit_b.text)
                 if internal_decision.action == "ignore":
                     continue
+                if internal_decision.action != "notify":
+                    if internal_decision.reason != "numeric_value_candidate":
+                        continue
+                    if not genuine_numeric_pair(unit_a.text, unit_b.text):
+                        continue
                 if self.db.internal_conflicts.exists(
                     int(memory_id), internal_version,
                     unit_a.unit_index, unit_b.unit_index,

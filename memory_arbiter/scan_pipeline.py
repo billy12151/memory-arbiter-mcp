@@ -158,7 +158,10 @@ class ScanPipeline:
         queued = int(state.get("queued") or 0)
         auto_rejected = int(state.get("auto_rejected") or 0)
         internal_found = int(state.get("internal_found") or 0)
-        auto_reject_remaining = max(0, SCAN_PIPELINE_AUTO_REJECT_CAP - auto_rejected)
+        # Cap is PER KICK: a resumed round must re-arm the machine-rejection
+        # budget, or the first round spends it in one batch and floods the
+        # queue with the very numeric noise E11③ set out to cut.
+        auto_reject_remaining = SCAN_PIPELINE_AUTO_REJECT_CAP
         anchor_buckets: dict[str, int] = {}
         processed_ids: list[int] = []
 
@@ -326,7 +329,14 @@ class ScanPipeline:
         self, memory_id: int, version: int, workspace: str,
         units: list[dict[str, Any]],
     ) -> int:
-        """Same-memory unit×unit contradictions (E10 ①, §6⑳)."""
+        """Same-memory unit×unit contradictions (E10 ①, §6⑳).
+
+        First-round gate (real-library calibration): overlapping/nested span
+        pairs are splitter artifacts; `check` pairs land only in the
+        genuine same-sentence-different-value shape — enumeration ordinals
+        ("1. 营销交付" vs "7. 复核终审") are series structure, not
+        contradictions. Deterministic notify pairs always land.
+        """
         landed = 0
         count = len(units)
         for i in range(count):
@@ -334,9 +344,19 @@ class ScanPipeline:
                 a, b = units[i], units[j]
                 if not a.get("text") or not b.get("text"):
                     continue
+                if spans_overlap(
+                    (int(a["start_offset"]), int(a["end_offset"])),
+                    (int(b["start_offset"]), int(b["end_offset"])),
+                ):
+                    continue
                 decision = decide_evidence(str(a["text"]), str(b["text"]))
                 if decision.action == "ignore":
                     continue
+                if decision.action != "notify":
+                    if decision.reason != "numeric_value_candidate":
+                        continue
+                    if not genuine_numeric_pair(str(a["text"]), str(b["text"])):
+                        continue
                 if self.db.internal_conflicts.exists(memory_id, version, int(a["unit_index"]), int(b["unit_index"])):
                     continue
                 created = self.db.internal_conflicts.create(
@@ -647,6 +667,39 @@ class ScanPipeline:
         return utc_now_iso()
 
 
+
+
+def spans_overlap(a: "tuple[int, int]", b: "tuple[int, int]") -> bool:
+    """True when two evidence spans intersect at all. The long-text fallback
+    splitter emits OVERLAPPING windows of one memory, and a unit pair that
+    shares source text is a splitter artifact, not a contradiction."""
+    a1, a2 = a
+    b1, b2 = b
+    return a1 < b2 and b1 < a2
+
+
+def genuine_numeric_pair(quote_a: str, quote_b: str) -> bool:
+    """Same-sentence-different-value shape test for internal numeric pairs.
+
+    decide_evidence flags ANY two numeric tokens as numeric_value_candidate;
+    on real libraries that fires on enumerated list items ("1. 营销交付" vs
+    "7. 复核终审") whose numbers are ordinals, not conflicting values. A
+    GENUINE internal numeric contradiction ("超时 30 秒" vs "超时 60 秒")
+    repeats the same non-numeric tokens around the differing value — the
+    non-digit token Jaccard separates the two shapes (first-round evidence:
+    11k enumeration misfires vs the intended handful)."""
+    import re
+
+    def tokens(text: str) -> set:
+        parts = re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z]+", str(text).casefold())
+        return {p for p in parts if p}
+
+    ta, tb = tokens(quote_a), tokens(quote_b)
+    if not ta or not tb:
+        return False
+    inter = ta & tb
+    union = ta | tb
+    return len(inter) / len(union) >= 0.4
 
 
 def _workspace_identity(memory_id: int, version: int, suspected: str) -> str:

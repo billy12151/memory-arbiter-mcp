@@ -162,8 +162,58 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     migrated = _migrate_legacy_candidates(conn)
     if migrated:
         applied.append(f"candidate_rows_migrated({migrated})")
+    cleaned = _cleanup_first_round_artifacts(conn)
+    if cleaned:
+        applied.append(cleaned)
     conn.commit()
     return applied
+
+
+_CLEANUP_KEY = "scan_pipeline_gate_v2_cleanup_v1"
+
+
+def _cleanup_first_round_artifacts(conn: sqlite3.Connection) -> str:
+    """One-shot reset of the first-round classification (gate change).
+
+    The first real kick ran before the internal precision gates (overlap
+    skip, genuine-numeric shape) and with the mis-scoped round-level
+    auto-reject cap: internal_conflicts flooded with splitter artifacts and
+    numeric noise pairs landed in the queue. This guarded cleanup purges the
+    internal table, voids queued numeric-route pairs (identity RELEASED so
+    re-detection re-classifies them), resets the round state and watermarks,
+    so the first full round re-runs under the corrected gates. Guarded by a
+    migration_state key — never runs twice.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_CLEANUP_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    from ..models import utc_now_iso as _now
+
+    now = _now()
+    conn.execute("DELETE FROM internal_conflicts")
+    rows = conn.execute(
+        "SELECT id, candidate_key_hash FROM scan_queue "
+        "WHERE kind='conflict' AND status='pending' AND reason LIKE '%numeric_value_candidate%'"
+    ).fetchall()
+    from .additive import voided_identity_hash as _vh  # module-local
+
+    for row in rows:
+        conn.execute(
+            "UPDATE scan_queue SET status='voided', candidate_key_hash=?, "
+            "decided_reason='gate v2: numeric route moved to auto-reject', decided_at=?, updated_at=? "
+            "WHERE id=?",
+            (_vh(str(row["candidate_key_hash"]), int(row["id"])), now, now, int(row["id"])),
+        )
+    conn.execute("DELETE FROM migration_state WHERE key='scan_pipeline_state'")
+    conn.execute("UPDATE memories SET scan_watermark=NULL WHERE status='active'")
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_CLEANUP_KEY, "done"),
+    )
+    return f"gate_v2_cleanup(internal_purged, queue_numeric_voided={len(rows)}, watermarks_reset)"
 
 
 def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:
