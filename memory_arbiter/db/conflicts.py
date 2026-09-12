@@ -541,8 +541,8 @@ class ConflictStore:
                     """INSERT INTO conflicts(
                        revision,workspace_canonical,slot_key,slot_key_hash,candidate_key,candidate_key_hash,
                        conflict_point,status,member_versions,member_fingerprint,value_groups,detection_reason,
-                       source,detector_version,prompt_version,created_at,refreshed_at)
-                       VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       source,detector_version,prompt_version,notice_delivery_status,created_at,refreshed_at)
+                       VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'not_applicable',?,?)""",
                     (workspace_canonical, _canonical_json(slot) if slot else None, slot_hash,
                      _canonical_json(candidate), candidate_hash, conflict_point, status, members_json,
                      fingerprint, groups_json, detection_reason, source, detector_version, prompt_version,

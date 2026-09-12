@@ -1752,17 +1752,31 @@ class WorkspaceStore:
             )
             # §6⑤ companion: pending JUDGMENT QUEUE rows that pair the moved
             # memory with its old-bucket peers describe a bucket identity that
-            # just died — expire them (the pipeline re-enqueues valid pairs in
-            # the new bucket); stale workspace suspects likewise.
+            # just died — void them (the pipeline re-enqueues valid pairs in
+            # the new bucket); stale workspace suspects likewise. The
+            # candidate identity is REWRITTEN, not kept: the UNIQUE hash spans
+            # all statuses, and a kept hash would burn the pair@version
+            # identity forever (a move-back could never re-enqueue it —
+            # adversarial review #4).
             try:
-                conn.execute(
-                    """UPDATE scan_queue SET status='voided',
-                       decided_reason='member moved to '||?, decided_at=?, updated_at=?
+                queue_rows = conn.execute(
+                    """SELECT id, candidate_key_hash FROM scan_queue
                        WHERE kind IN ('conflict','workspace') AND status IN ('pending','in_review')
                          AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
                                     WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
-                    (workspace, utc_now_iso(), utc_now_iso(), int(memory_id)),
-                )
+                    (int(memory_id),),
+                ).fetchall()
+                from .additive import voided_identity_hash
+
+                now_ts = utc_now_iso()
+                for queue_row in queue_rows:
+                    conn.execute(
+                        """UPDATE scan_queue SET status='voided',
+                           candidate_key_hash=?, decided_reason='member moved to '||?,
+                           decided_at=?, updated_at=? WHERE id=?""",
+                        (voided_identity_hash(str(queue_row["candidate_key_hash"]), int(queue_row["id"])),
+                         workspace, now_ts, now_ts, int(queue_row["id"])),
+                    )
             except sqlite3.Error:
                 pass
             if voided:

@@ -301,7 +301,8 @@ class SemanticNoticeStore:
         with self._db.write_transaction() as conn:
             while True:
                 rows = conn.execute(
-                    "SELECT * FROM conflicts WHERE notice_delivery_status='pending'" + workspace_sql +
+                    "SELECT * FROM conflicts WHERE notice_delivery_status='pending' "
+                    "AND notice_type IS NOT NULL" + workspace_sql +
                     " ORDER BY CASE lower(notice_severity) WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'warning' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,created_at,id LIMIT ?",
                     (*args, NOTICE_SCAN_LIMIT),
                 ).fetchall()

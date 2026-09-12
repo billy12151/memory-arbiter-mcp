@@ -1277,10 +1277,10 @@ class ProductSurfaces:
                     "internal_conflicts": self.db.internal_conflicts.counts(),
                 })
             if action_value == "page":
-                result = self._tools.scan_queue_page(**payload)
+                result = self._tools.scan_queue_page(caller=caller, **payload)
                 return self.db.state.response(result, ok=result.get("ok", True))
             if action_value == "submit":
-                result = self._tools.scan_queue_submit(**payload)
+                result = self._tools.scan_queue_submit(caller=caller, **payload)
                 return self.db.state.response(result, ok=result.get("ok", True))
             return self._invalid_product_call(
                 "memory_repair", f"unknown scan_queue action: {action_value} (page|submit|status)", task,

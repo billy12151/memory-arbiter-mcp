@@ -40,6 +40,7 @@ class ScanPipeline:
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
         self.db = tools.db
+        self._kick_lock = __import__("threading").Lock()
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -89,6 +90,26 @@ class ScanPipeline:
             return {"ok": False, "error": "database_unavailable"}
         if not self.db.state.sqlite_writable:
             return {"ok": False, "error": "database_not_writable"}
+        if not self._kick_lock.acquire(blocking=False):
+            # Re-entrancy guard (adversarial review P3): a concurrent kick
+            # would reprocess the same batch with last-writer-wins counters.
+            return {"ok": False, "error": "kick_in_progress"}
+        try:
+            return self._kick_locked(
+                max_memories=max_memories,
+                time_budget_s=time_budget_s,
+                neighbor_k=neighbor_k,
+            )
+        finally:
+            self._kick_lock.release()
+
+    def _kick_locked(
+        self,
+        *,
+        max_memories: int,
+        time_budget_s: float,
+        neighbor_k: int,
+    ) -> dict[str, Any]:
         vec_state = self.db.get_vec_index_state()
         if vec_state.get("state") in {"mismatch", "failed"}:
             return {"ok": False, "error": "embedding_space_rebuild_required"}
@@ -284,9 +305,13 @@ class ScanPipeline:
                         candidate_key=candidate_key,
                         detection_reason=f"numeric_value_candidate auto-rejected: {decision.reason}",
                     )
-                    if rejected:
+                    if rejected == "inserted":
                         outcome["auto_rejected"] += 1
                         auto_reject_remaining -= 1
+                        continue
+                    if rejected == "deduped":
+                        # Suppression already existed — the pair is handled
+                        # without consuming this round's cap budget.
                         continue
                 enqueued = self._enqueue_pair(
                     workspace, memory_id, version, unit, peer_id, hit,
@@ -415,9 +440,12 @@ class ScanPipeline:
     def _auto_reject_numeric(
         self, workspace: str, *, member_versions: list[dict[str, Any]],
         candidate_key: dict[str, Any], detection_reason: str,
-    ) -> bool:
+    ) -> str | None:
         """Machine-exercised not_a_conflict (E11 ③): audit row in ``conflicts``
-        doubles as the pair@version suppression source."""
+        doubles as the pair@version suppression source. Returns the outcome:
+        ``inserted`` consumes the per-round cap, ``deduped`` (suppression
+        already existed) skips the pair for free, None means the write failed
+        and the pair falls through to the judgment queue."""
         result = self.db.record_conflict_group(
             workspace_canonical=workspace,
             slot_key=None,
@@ -429,7 +457,8 @@ class ScanPipeline:
             source="scan_numeric_autoreject",
             detection_reason=detection_reason,
         )
-        return result.get("outcome") in {"inserted", "deduped"}
+        outcome = result.get("outcome")
+        return outcome if outcome in {"inserted", "deduped"} else None
 
     def _load_suppression(self) -> dict[str, Any]:
         """Round-level suppression maps (same contract as scan_rule_candidates)."""

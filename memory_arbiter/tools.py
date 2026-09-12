@@ -1894,14 +1894,15 @@ class MemoryTools:
     def scan_pipeline_status(self) -> dict[str, Any]:
         return self._scan_pipeline.status()
 
-    def scan_queue_page(self, **payload: Any) -> dict[str, Any]:
+    def scan_queue_page(self, caller: Any = None, **payload: Any) -> dict[str, Any]:
         return self._queue_protocol.page(
             page_size=payload.get("page_size") or 10,
             page_token=payload.get("page_token") or 0,
+            caller=caller,
         )
 
-    def scan_queue_submit(self, **payload: Any) -> dict[str, Any]:
-        return self._queue_protocol.submit(payload.get("decisions") or [])
+    def scan_queue_submit(self, caller: Any = None, **payload: Any) -> dict[str, Any]:
+        return self._queue_protocol.submit(payload.get("decisions") or [], caller=caller)
 
     def memory_rollback_auto_move(self, audit_id: int = 0, reason: str = "", **_: Any) -> dict[str, Any]:
         """0.16.0 §6⑫: reverse ONE autonomous normalization move by audit id.

@@ -44,10 +44,18 @@ class QueueProtocol:
         self._tools = tools
         self.db = tools.db
 
+    @staticmethod
+    def _scope_sql(workspace_canonical_column: str, scope) -> "tuple[str, list[Any]]":
+        from .acl import workspace_scope_sql
+
+        return workspace_scope_sql(workspace_canonical_column, scope)
+
     # ── page fetch ──────────────────────────────────────────────────────────
 
-    def page(self, *, page_size: int = DEFAULT_PAGE_SIZE, page_token: int = 0) -> dict[str, Any]:
+    def page(self, *, page_size: int = DEFAULT_PAGE_SIZE, page_token: int = 0, caller=None) -> dict[str, Any]:
         self.db.internal_conflicts.expire_stale()
+        self._caller = caller
+        scope = caller.scope_canonicals() if caller is not None and caller.isolation == "strict" else None
         page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
         page_token = max(0, int(page_token or 0))
         items: list[dict[str, Any]] = []
@@ -56,9 +64,11 @@ class QueueProtocol:
         # Priority: workspace suspects first (rare, cheap to judge, gate
         # autonomous moves), then internal contradictions, then conflict
         # groups — a big conflict backlog must not starve the other kinds.
-        for row in self._fetch_workspace_rows():
+        for row in self._fetch_workspace_rows(scope):
             if len(items) >= page_size:
                 break
+            if not self._row_visible(row):
+                continue
             items.append(self._workspace_item(row, meta_cache))
         if len(items) < page_size:
             # Internal items are capped per page: a fragment-noise flood in
@@ -67,21 +77,32 @@ class QueueProtocol:
             for row in self.db.internal_conflicts.list_pending(limit=internal_cap):
                 if len(items) >= page_size:
                     break
+                if not self._member_visible(int(row["memory_id"])):
+                    continue
                 items.append(self._internal_item(row, meta_cache))
         if len(items) < page_size:
-            rows = self._fetch_conflict_rows(page_token)
+            rows = self._fetch_conflict_rows(page_token, scope)
             for group in self._assemble_groups(rows):
-                last_id = max(last_id, group["last_queue_id"])
                 if len(items) >= page_size:
+                    # Page full: the cursor must stay on the last DISPLAYED
+                    # group — advancing past the boundary here would strand
+                    # the undisplayed group between pages forever (adversarial
+                    # review repro #3).
                     break
+                if not all(self._row_visible(edge) for edge in group["pairs"]):
+                    # Fail closed: hide the whole component from a caller who
+                    # cannot read every member (matches conflict_detail).
+                    continue
                 if len(group["member_ids"]) > GROUP_MEMBER_CAP:
                     # §6⑬: oversize component → split back into edges.
                     for edge in group["pairs"]:
                         if len(items) >= page_size:
                             break
                         items.append(self._pair_item(edge, meta_cache))
+                        last_id = max(last_id, int(edge["id"]))
                 else:
                     items.append(self._group_item(group, meta_cache))
+                    last_id = max(last_id, group["last_queue_id"])
         remaining = self.db.scan_queue_backlog() + len(
             self.db.internal_conflicts.list_pending(limit=10**6)
         )
@@ -98,14 +119,15 @@ class QueueProtocol:
                 "dispositions with memory_repair(task='scan_queue', action='submit'): per-pair "
                 "{candidate_key_hash, status: confirmed|dismissed, reason} + (confirms) "
                 "slot_key + value_groups with display_value per member group. A whole group "
-                "that is noise can be dismissed in one entry with the group's group_token."
+                "that is noise can be dismissed in one entry with the group's group_token "
+                "plus its pair_hashes."
             ),
         }
         # has_more: any backlog beyond what this page displayed — the queue
         # backlog itself is authoritative (workspace/internal rows live in
         # separate tables and may not all fit this page).
         has_more = remaining > len(items[:page_size])
-        if items and (last_id > page_token or remaining):
+        if has_more:
             response["next_page_token"] = last_id
         response["has_more"] = bool(has_more)
         if self.db.settings.include_size and items:
@@ -121,17 +143,20 @@ class QueueProtocol:
         joined = ":".join(sorted(str(pair["candidate_key_hash"]) for pair in pairs))
         return hashlib.sha256(joined.encode()).hexdigest()[:16]
 
-    def _fetch_conflict_rows(self, after_id: int) -> list[dict[str, Any]]:
+    def _fetch_conflict_rows(self, after_id: int, scope=None) -> list[dict[str, Any]]:
         if not self.db.db_available:
             return []
+        scope_sql, scope_params = self._scope_sql("workspace_canonical", scope)
+        if scope_sql:
+            scope_sql = " AND " + scope_sql
         try:
             with self.db.connection() as conn:
                 rows = conn.execute(
                     """SELECT id,kind,workspace_canonical,status,candidate_key_hash,
                               member_versions,evidence,reason,severity,source,detail
                        FROM scan_queue WHERE status='pending' AND kind='conflict' AND id>?
-                       ORDER BY id LIMIT ?""",
-                    (int(after_id), ASSEMBLY_WINDOW),
+                       """ + scope_sql + " ORDER BY id LIMIT ?",
+                    (int(after_id), *scope_params, ASSEMBLY_WINDOW),
                 ).fetchall()
         except Exception:
             return []
@@ -186,6 +211,21 @@ class QueueProtocol:
                 if member.get("memory_id") is not None:
                     component["member_ids"].add(int(member["memory_id"]))
         return sorted(components.values(), key=lambda c: c["last_queue_id"])
+
+    def _member_visible(self, memory_id: int) -> bool:
+        """Strict-isolation fail-closed check (adversarial review #2): a
+        member the caller cannot read takes its whole item off the page and
+        blocks its dispositions."""
+        if self._caller is None or self._caller.isolation != "strict":
+            return True
+        return self._tools._get_memory_visible(int(memory_id), self._caller) is not None
+
+    def _row_visible(self, row: dict[str, Any]) -> bool:
+        return all(
+            self._member_visible(int(member["memory_id"]))
+            for member in (row.get("member_versions") or [])
+            if member.get("memory_id") is not None
+        )
 
     def _member_meta(self, memory_id: int, cache: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
         if memory_id not in cache:
@@ -267,17 +307,20 @@ class QueueProtocol:
             ),
         }
 
-    def _fetch_workspace_rows(self) -> list[dict[str, Any]]:
+    def _fetch_workspace_rows(self, scope=None) -> list[dict[str, Any]]:
         if not self.db.db_available:
             return []
+        scope_sql, scope_params = self._scope_sql("workspace_canonical", scope)
+        if scope_sql:
+            scope_sql = " AND " + scope_sql
         try:
             with self.db.connection() as conn:
                 rows = conn.execute(
                     """SELECT id,kind,workspace_canonical,status,candidate_key_hash,
                               member_versions,evidence,reason,severity,source,detail
                        FROM scan_queue WHERE status='pending' AND kind='workspace'
-                       ORDER BY id LIMIT ?""",
-                    (ASSEMBLY_WINDOW,),
+                       """ + scope_sql + " ORDER BY id LIMIT ?",
+                    (*scope_params, ASSEMBLY_WINDOW),
                 ).fetchall()
         except Exception:
             return []
@@ -335,11 +378,12 @@ class QueueProtocol:
 
     # ── submission (server-side land-from-reference) ───────────────────────
 
-    def submit(self, decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    def submit(self, decisions: list[dict[str, Any]], caller=None) -> dict[str, Any]:
         if not isinstance(decisions, list) or not decisions:
             return {"ok": False, "error": "decisions must be a non-empty list"}
         if len(decisions) > 200:
             return {"ok": False, "error": "at most 200 decisions per submission"}
+        self._caller = caller
         results: list[dict[str, Any]] = []
         for index, raw in enumerate(decisions):
             results.append(self._submit_one(index, raw))
@@ -368,6 +412,9 @@ class QueueProtocol:
             return self._submit_workspace(index, status, reason, raw)
         if kind == "internal":
             internal_id = raw.get("internal_id")
+            if not isinstance(internal_id, int) or isinstance(internal_id, bool) or internal_id <= 0:
+                return {"index": index, "outcome": "invalid_input",
+                        "error": "internal decisions need a positive integer internal_id"}
             if status not in {"dismissed", "resolved"}:
                 return {"index": index, "outcome": "invalid_input",
                         "error": "internal decisions accept status dismissed|resolved"}
@@ -576,14 +623,37 @@ class QueueProtocol:
         explicit = raw.get("pair_hashes")
         targets = None
         if isinstance(explicit, list) and explicit:
-            wanted_hashes = {str(h) for h in explicit}
-            rows = self._fetch_conflict_rows(0)
-            targets = [row for row in rows if str(row["candidate_key_hash"]) in wanted_hashes]
+            # Primary path: resolve by the page-supplied pair hashes DIRECTLY
+            # (no id window, no re-assembly) — per-pair decisions earlier in
+            # the same batch or depth beyond the assembly window cannot
+            # strand the remaining pairs (adversarial review #5).
+            wanted_hashes = [str(h) for h in explicit]
+            placeholders = ",".join("?" for _ in wanted_hashes)
+            rows_by_hash: dict[str, dict[str, Any]] = {}
+            try:
+                with self.db.connection() as conn:
+                    db_rows = conn.execute(
+                        f"""SELECT id,kind,workspace_canonical,status,candidate_key_hash,
+                                   member_versions,evidence,reason,severity,source,detail
+                            FROM scan_queue WHERE candidate_key_hash IN ({placeholders})""",
+                        tuple(wanted_hashes),
+                    ).fetchall()
+                for db_row in db_rows:
+                    item = dict(db_row)
+                    for key in ("member_versions", "evidence", "detail"):
+                        if isinstance(item.get(key), str):
+                            try:
+                                item[key] = json.loads(item[key])
+                            except (TypeError, json.JSONDecodeError):
+                                item[key] = None
+                    rows_by_hash[str(item["candidate_key_hash"])] = item
+            except Exception:
+                rows_by_hash = {}
+            targets = [rows_by_hash[h] for h in wanted_hashes if h in rows_by_hash]
             missing = len(wanted_hashes) - len(targets)
             if missing:
-                # Some pairs were already decided in this same batch (per-pair
-                # entries first) or by an earlier run — dismissing what remains
-                # lands the same outcome; nothing is lost.
+                # Already terminal (decided earlier in this batch or a prior
+                # run): dismissing what remains lands the same outcome.
                 reason = f"{reason} (+{missing} already terminal)"
         if targets is None:
             rows = self._fetch_conflict_rows(0)
@@ -613,6 +683,13 @@ class QueueProtocol:
                     "candidate_key_hash": candidate_hash}
         if row["status"] not in {"pending", "in_review"}:
             return {"index": index, "outcome": "already_terminal", "status": row["status"],
+                    "candidate_key_hash": candidate_hash}
+        probe = dict(row)
+        probe["member_versions"] = row["member_versions"] or []
+        if not self._row_visible(probe):
+            # Fail closed under strict isolation: no dispositions on rows the
+            # caller cannot fully read.
+            return {"index": index, "outcome": "not_found",
                     "candidate_key_hash": candidate_hash}
         members = row["member_versions"] or []
         detail = row["detail"] if isinstance(row["detail"], dict) else {}
