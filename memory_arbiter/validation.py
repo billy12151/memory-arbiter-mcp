@@ -38,6 +38,9 @@ MAX_OFFSET = 10_000
 from .constants import (  # noqa: E402
     BATCH_FIND_MAX_LIMIT_PER_QUERY,
     BATCH_FIND_TOTAL_BYTES,
+    BATCH_READ_MAX_FULL,
+    BATCH_READ_MAX_HITS,
+    BATCH_READ_MAX_PREVIEW,
     MAX_BATCH_FIND_QUERIES,
 )
 
@@ -66,7 +69,8 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "queries", "workspace", "tags_filter", "after_time", "before_time",
         "source_type", "limit_per_query", "content_mode", "deduplicate",
     },
-    ("memory", "read"): {"id", "memory_id", "span", "workspace"},
+    ("memory", "read"): {"id", "memory_id", "span", "content_mode", "workspace"},
+    ("memory", "batch_read"): {"memory_ids", "content_mode", "spans", "workspace"},
     ("memory", "update"): {
         "id", "memory_id", "new_content", "old_text", "new_text", "patches",
         "new_subject", "new_tags", "reason", "authorized", "tags_only", "add_tags",
@@ -284,6 +288,48 @@ def validate_product_payload(surface: str, operation: str, payload: dict[str, An
             if key not in payload or not isinstance(payload.get(key), str) or not str(payload[key]).strip():
                 result.error = _error(key, "is required and must be a non-empty string")
                 return result
+
+    if (surface, operation) == ("memory", "batch_read"):
+        memory_ids = payload.get("memory_ids")
+        if not isinstance(memory_ids, list) or not memory_ids:
+            result.error = _error("memory_ids", "must be a non-empty list of positive integer ids")
+            return result
+        content_mode = payload.get("content_mode") or "preview"
+        if content_mode not in {"preview", "hits", "full"}:
+            result.error = _error(
+                "content_mode",
+                'must be one of "preview" | "hits" | "full" (default "preview")',
+            )
+            return result
+        cap = {"preview": BATCH_READ_MAX_PREVIEW, "hits": BATCH_READ_MAX_HITS, "full": BATCH_READ_MAX_FULL}[content_mode]
+        if len(memory_ids) > cap:
+            result.error = _error(
+                "memory_ids",
+                f'content_mode="{content_mode}" accepts at most {cap} ids per call',
+                cap=cap,
+            )
+            return result
+        spans = payload.get("spans")
+        if spans is not None:
+            if not isinstance(spans, dict):
+                result.error = _error("spans", "must be an object keyed by memory_id: {start, end}")
+                return result
+            for key, span in spans.items():
+                if _controlled_integer(key) is None:
+                    result.error = _error("spans", "keys must be integer memory ids")
+                    return result
+                if not isinstance(span, dict) or set(span) - {"start", "end"}:
+                    result.error = _error("spans", "each span must be an object with optional integer start/end")
+                    return result
+                raw_start = span.get("start", 0)
+                raw_end = span.get("end")
+                if isinstance(raw_start, bool) or not isinstance(raw_start, int) or raw_start < 0:
+                    result.error = _error("spans", "span start must be a non-negative integer")
+                    return result
+                if raw_end is not None and (isinstance(raw_end, bool) or not isinstance(raw_end, int) or raw_end <= raw_start):
+                    result.error = _error("spans", "span end must be an integer greater than start")
+                    return result
+        payload["content_mode"] = content_mode
 
     for key in ("id", "memory_id", "conflict_id", "notice_id", "superseded_by", "suggested_winner"):
         if key not in payload:

@@ -170,6 +170,43 @@ class EvidenceStore:
         except (sqlite3.Error, TypeError, ValueError, struct.error):
             return []
 
+    def text_unit_rows(
+        self,
+        memory_id: int,
+        memory_version: int,
+        *,
+        span_start: int | None = None,
+        span_end: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Current-version text units for id-driven reads (0.16.0 batch read).
+
+        Unit-aligned window selection: with a span, units OVERLAPPING
+        [span_start, span_end) are returned whole — mema's content atom is the
+        evidence unit, so returning complete units removes any half-sentence
+        truncation risk by construction (plan §6⑨ four-round final form). No
+        vector join: this is a text read, usable while the embedder is down.
+        """
+        try:
+            with self._db.connection() as conn:
+                if span_start is None or span_end is None:
+                    return [dict(row) for row in conn.execute(
+                        """SELECT unit_index,kind,text,start_offset,end_offset
+                           FROM memory_evidence
+                           WHERE memory_id=? AND memory_version=? AND kind='text'
+                           ORDER BY unit_index""",
+                        (int(memory_id), int(memory_version)),
+                    ).fetchall()]
+                return [dict(row) for row in conn.execute(
+                    """SELECT unit_index,kind,text,start_offset,end_offset
+                       FROM memory_evidence
+                       WHERE memory_id=? AND memory_version=? AND kind='text'
+                         AND start_offset < ? AND end_offset > ?
+                       ORDER BY unit_index""",
+                    (int(memory_id), int(memory_version), int(span_end), int(span_start)),
+                ).fetchall()]
+        except sqlite3.Error:
+            return []
+
     def knn(
         self,
         query_embedding: list[float],

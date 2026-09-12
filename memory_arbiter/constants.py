@@ -216,6 +216,22 @@ BATCH_FIND_TOTAL_BYTES = 64 * 1024
 SUPERSEDED_LIMIT = 20
 NOTICE_SYNC_WAIT_MS = 3000
 
+# 0.16.0 batch read caps (plan §1.5/§6⑭/§6⑰; owner-pinned numbers).
+# preview/hits items carry structurally bounded payloads so a per-call count
+# cap suffices; full content is bounded per memory at 2MB, so a byte budget is
+# the real gate: over-budget batches return a structured over-long prompt
+# (never a silent truncation) and the agent re-reads items individually.
+BATCH_READ_MAX_PREVIEW = 50
+BATCH_READ_MAX_HITS = 50
+BATCH_READ_MAX_FULL = 10
+BATCH_READ_FULL_BUDGET_BYTES = 80 * 1024
+BATCH_READ_FULL_BUDGET_MAX_BYTES = 100 * 1024
+
+# 0.16.0 tag discipline (plan §6⑮): a single memory's persisted tag total is
+# capped — tags are a retrieval dimension, not an event log. One-call inputs
+# keep the MAX_TAGS=100 bound; the total cap applies to the merged on-row set.
+MAX_MEMORY_TOTAL_TAGS = 32
+
 # HTTP transport fixed surface
 MCP_HTTP_PATH = "/mcp"
 MCP_HTTP_BODY_LIMIT = 4 * 1024 * 1024

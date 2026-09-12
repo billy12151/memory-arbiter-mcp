@@ -1637,6 +1637,9 @@ class MemoryTools:
     def memory_batch_find(self, **payload: Any) -> dict[str, Any]:
         return self._read_pipeline.memory_batch_find(**payload)
 
+    def memory_batch_read(self, **payload: Any) -> dict[str, Any]:
+        return self._read_pipeline.memory_batch_read(**payload)
+
     def memory_search_expired(
         self,
         query: str = "",

@@ -34,6 +34,58 @@ _HIT_SPANS_FULL_COVERAGE = 0.5
 
 _CONTENT_MODES = ("preview", "hits", "full")
 
+# 0.16.0 batch read (plan §1.5): the full-content byte budget. preview/hits
+# payloads are structurally bounded, so a count cap is enough; full content
+# needs the byte budget + a structured over-long response (never a silent
+# truncation — the agent re-reads items individually).
+from ..constants import (  # noqa: E402
+    BATCH_READ_FULL_BUDGET_BYTES,
+    BATCH_READ_FULL_BUDGET_MAX_BYTES,
+)
+
+
+def _unit_aligned_hits(
+    db: Any, memory: dict[str, Any], span: "dict[str, Any] | None",
+) -> "tuple[list[dict[str, Any]], str | None] | None":
+    """Unit-aligned hit spans for an id-driven hits read (plan §6⑨, four-round
+    final form): the ``hits`` unit selector on id-driven calls is the per-id
+    span coordinate, and mema's content atom is the evidence unit — returning
+    complete units removes any half-sentence truncation risk by construction.
+
+    Returns (hit_spans, upgraded_full_content). Each hit_spans entry carries
+    the complete unit text plus offsets in read's span coordinate system. When
+    covered units span >= 50% of the content the item upgrades to full text
+    (same rule as find/batch_find hits). Returns None when the memory has no
+    evidence rows for its current version (caller falls back to the char
+    window / plain preview).
+    """
+    try:
+        rows = db.evidence.text_unit_rows(
+            int(memory["id"]), int(memory.get("version") or 1),
+            span_start=(int(span["start"]) if span else None),
+            span_end=(int(span["end"]) if span else None),
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    content = str(memory.get("content") or "")
+    hit_spans = [
+        {
+            "text": str(row["text"]),
+            "start_offset": int(row["start_offset"]),
+            "end_offset": int(row["end_offset"]),
+            "unit_index": int(row["unit_index"]),
+        }
+        for row in rows
+    ]
+    upgraded: str | None = None
+    covered = sum(item["end_offset"] - item["start_offset"] for item in hit_spans)
+    if content and covered >= _HIT_SPANS_FULL_COVERAGE * len(content):
+        upgraded = content
+    return hit_spans, upgraded
+
+
 
 def _content_outline(subject: str, content: str) -> list[dict[str, Any]]:
     """Bounded table-of-contents for a find preview item.
@@ -1023,14 +1075,17 @@ class ReadPipeline:
         sections: str = "none",
         section_ids: list[int] | None = None,
         span: dict[str, Any] | None = None,
+        content_mode: str = "full",
         **_: Any,
     ) -> dict[str, Any]:
-        """Return one full memory by id, or a character window of it.
+        """Return one full memory by id, a unit-aligned window of it, or its preview.
 
-        ``span={"start": int, "end": int}`` returns the record with
-        ``content`` sliced to that window (plus span metadata) so triage
-        loops can deep-read only the region a clue pointed at instead of
-        paying for the full text. Omitting ``span`` keeps the full read.
+        0.16.0 four-call content_mode unification (plan §6⑨): find/batch_find/
+        read/batch_read share preview/hits/full semantics. ``read`` defaults to
+        full (backward compatible). ``span={"start", "end"}`` selects complete
+        evidence units overlapping the window — mema's content atom is the unit,
+        so windowed reads never slice a half sentence (the legacy char-slice
+        remains only as the fallback when no evidence rows exist yet).
         """
         try:
             memory_id_int = int(memory_id)
@@ -1039,6 +1094,11 @@ class ReadPipeline:
         if sections not in ("none", None) or section_ids:
             return self.db.state.response(
                 {"error": "section reads were removed; read the full memory content"},
+                ok=False,
+            )
+        if content_mode not in _CONTENT_MODES:
+            return self.db.state.response(
+                {"error": 'content_mode must be one of "preview" | "hits" | "full" (default "full")'},
                 ok=False,
             )
         span_start: int | None = None
@@ -1068,23 +1128,74 @@ class ReadPipeline:
                 error_data.update(caller.response_fields())
             return self.db.state.response(error_data, ok=False, extra_warnings=list(caller.warnings))
 
-        if span_start is not None and span_end is not None:
-            content = str(memory.get("content") or "")
-            if span_start >= len(content):
-                return self.db.state.response(
-                    {"error": "span start is past the end of the content",
-                     "total_chars": len(content)},
-                    ok=False,
-                )
-            clipped_end = min(span_end, len(content))
-            windowed = dict(memory)
-            windowed["content"] = content[span_start:clipped_end]
-            data: dict[str, Any] = {
-                "memory": windowed,
-                "span": {"start": span_start, "end": clipped_end, "total_chars": len(content)},
+        content = str(memory.get("content") or "")
+        data: dict[str, Any]
+        if content_mode == "preview" and span is None:
+            preview = {
+                key: value for key, value in memory.items() if key != "content"
             }
+            preview["content_chars"] = len(content)
+            preview["outline"] = _content_outline(str(memory.get("subject") or ""), content)
+            data = {"memory": preview}
+        elif content_mode == "hits":
+            unit_hits = _unit_aligned_hits(self.db, memory, span)
+            if unit_hits is not None:
+                hit_spans, upgraded = unit_hits
+                record = {
+                    key: value for key, value in memory.items() if key != "content"
+                }
+                record["content_chars"] = len(content)
+                record["outline"] = _content_outline(str(memory.get("subject") or ""), content)
+                record["hit_spans"] = hit_spans
+                if upgraded is not None:
+                    record["content"] = upgraded
+                data = {"memory": record}
+            else:
+                # No evidence rows for the current version (fresh write before
+                # the async index lands, or a down embedder): fall back to the
+                # full record — an honest answer beats an empty hits page.
+                data = {"memory": memory}
         else:
-            data = {"memory": memory}
+            if span_start is not None and span_end is not None:
+                if span_start >= len(content):
+                    return self.db.state.response(
+                        {"error": "span start is past the end of the content",
+                         "total_chars": len(content)},
+                        ok=False,
+                    )
+                clipped_end = min(span_end, len(content))
+                rows = self.db.evidence.text_unit_rows(
+                    memory_id_int, int(memory.get("version") or 1),
+                    span_start=span_start, span_end=clipped_end,
+                )
+                if rows:
+                    # Unit-aligned window: a contiguous slice of the source
+                    # content spanning from the first to the last covered
+                    # unit. Units may overlap (long-text fallback), so joining
+                    # unit texts would duplicate text — slice the original
+                    # instead and report the covered units in the metadata.
+                    first_start = min(int(row["start_offset"]) for row in rows)
+                    last_end = max(int(row["end_offset"]) for row in rows)
+                    windowed = dict(memory)
+                    windowed["content"] = content[first_start:last_end]
+                    data = {
+                        "memory": windowed,
+                        "span": {
+                            "start": span_start, "end": clipped_end,
+                            "total_chars": len(content),
+                            "unit_aligned": True, "units": len(rows),
+                        },
+                    }
+                else:
+                    # Legacy fallback while no evidence rows exist.
+                    windowed = dict(memory)
+                    windowed["content"] = content[span_start:clipped_end]
+                    data = {
+                        "memory": windowed,
+                        "span": {"start": span_start, "end": clipped_end, "total_chars": len(content)},
+                    }
+            else:
+                data = {"memory": memory}
         if self.settings.include_size:
             # v0.15.6: same size block as find, metering the record as
             # actually returned — a span read meters the windowed payload, so
@@ -1111,6 +1222,193 @@ class ReadPipeline:
         if caller.isolation == "strict":
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
+
+    def memory_batch_read(
+        self,
+        memory_ids: "list[int] | None" = None,
+        content_mode: str = "preview",
+        spans: "dict[str, Any] | None" = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """0.16.0 batch read: read = the single-item special case of this call.
+
+        Contract (plan §1.5, owner-pinned caps): memory_ids[] + content_mode in
+        {preview, hits, full}; caps preview 50 / hits 50 / full 10 ids; full
+        adds an 80KB byte budget (100KB hard ceiling) — an over-budget batch
+        returns a structured over-long prompt and the agent re-reads items
+        individually, never a silent truncation. ``spans`` maps memory_id to
+        {start, end} and is the ``hits`` unit selector for id-driven calls
+        (complete evidence units, zero half-sentence truncation by
+        construction). Every id passes the caller's ACL individually.
+        """
+        from ..constants import (
+            BATCH_READ_MAX_FULL, BATCH_READ_MAX_HITS, BATCH_READ_MAX_PREVIEW,
+        )
+
+        if content_mode not in _CONTENT_MODES:
+            return self.db.state.response(
+                {"error": 'content_mode must be one of "preview" | "hits" | "full" (default "preview")',
+                 "results": [], "count": 0},
+                ok=False,
+            )
+        cap = {"preview": BATCH_READ_MAX_PREVIEW, "hits": BATCH_READ_MAX_HITS, "full": BATCH_READ_MAX_FULL}[content_mode]
+        wanted: list[int] = []
+        seen: set[int] = set()
+        for raw in memory_ids or []:
+            try:
+                mid = int(raw)
+            except (TypeError, ValueError):
+                return self.db.state.response(
+                    {"error": "memory_ids must contain positive integer ids", "results": [], "count": 0},
+                    ok=False,
+                )
+            if mid <= 0:
+                return self.db.state.response(
+                    {"error": "memory_ids must contain positive integer ids", "results": [], "count": 0},
+                    ok=False,
+                )
+            if mid not in seen:
+                seen.add(mid)
+                wanted.append(mid)
+        if not wanted:
+            return self.db.state.response(
+                {"error": "memory_ids must be a non-empty list", "results": [], "count": 0},
+                ok=False,
+            )
+        if len(wanted) > cap:
+            return self.db.state.response(
+                {
+                    "error": f'content_mode="{content_mode}" accepts at most {cap} ids per call',
+                    "cap": cap, "results": [], "count": 0,
+                },
+                ok=False,
+            )
+        caller = self._caller_workspace(_.get("workspace"))
+        denied = self._strict_acl_unavailable(caller)
+        if denied is not None:
+            return denied
+
+        span_map: dict[int, dict[str, int]] = {}
+        for key, span in (spans or {}).items():
+            try:
+                mid = int(str(key))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(span, dict):
+                try:
+                    start = int(span.get("start", 0))
+                    end_raw = span.get("end")
+                    span_map[mid] = {"start": start, "end": int(end_raw) if end_raw is not None else 0}
+                except (TypeError, ValueError):
+                    continue
+
+        results: list[dict[str, Any]] = []
+        not_found: list[int] = []
+        for mid in wanted:
+            memory = self._get_memory_visible(mid, caller)
+            if not memory:
+                not_found.append(mid)
+                results.append({"memory_id": mid, "found": False, "error": "not_found"})
+                continue
+            content = str(memory.get("content") or "")
+            span = span_map.get(mid)
+            item: dict[str, Any] = {"memory_id": mid, "found": True}
+            if content_mode == "preview":
+                record = {key: value for key, value in memory.items() if key != "content"}
+                record["content_chars"] = len(content)
+                record["outline"] = _content_outline(str(memory.get("subject") or ""), content)
+                item["memory"] = record
+            elif content_mode == "hits":
+                unit_hits = _unit_aligned_hits(self.db, memory, span)
+                record = {key: value for key, value in memory.items() if key != "content"}
+                record["content_chars"] = len(content)
+                record["outline"] = _content_outline(str(memory.get("subject") or ""), content)
+                if unit_hits is not None:
+                    hit_spans, upgraded = unit_hits
+                    record["hit_spans"] = hit_spans
+                    if upgraded is not None:
+                        record["content"] = upgraded
+                item["memory"] = record
+            else:  # full
+                record = dict(memory)
+                if span is not None and span["end"] > span["start"]:
+                    if span["start"] < len(content):
+                        clipped_end = min(span["end"], len(content))
+                        rows = self.db.evidence.text_unit_rows(
+                            mid, int(memory.get("version") or 1),
+                            span_start=span["start"], span_end=clipped_end,
+                        )
+                        if rows:
+                            # Unit-aligned: contiguous slice from the first to
+                            # the last covered unit (units may overlap; joining
+                            # them would duplicate text).
+                            first_start = min(int(row["start_offset"]) for row in rows)
+                            last_end = max(int(row["end_offset"]) for row in rows)
+                            record["content"] = content[first_start:last_end]
+                        else:
+                            record["content"] = content[span["start"]:clipped_end]
+                    else:
+                        record["content"] = ""
+                        item["span_past_end"] = True
+                item["memory"] = record
+            results.append(item)
+
+        over_budget: list[dict[str, Any]] = []
+        if content_mode == "full":
+            def _content_bytes(entry: dict[str, Any]) -> int:
+                memory = entry.get("memory") or {}
+                return len(str(memory.get("content") or "").encode("utf-8"))
+
+            total_bytes = sum(_content_bytes(entry) for entry in results if entry.get("found"))
+            for entry in results:
+                if entry.get("found") and _content_bytes(entry) > BATCH_READ_FULL_BUDGET_MAX_BYTES:
+                    over_budget.append({"memory_id": entry["memory_id"], "bytes": _content_bytes(entry)})
+            if total_bytes > BATCH_READ_FULL_BUDGET_BYTES or over_budget:
+                # Structured over-long response — never a silent truncation
+                # (plan §6⑰). The page downgrades to metadata-only and tells
+                # the agent to read items individually.
+                slim_results: list[dict[str, Any]] = []
+                for entry in results:
+                    if not entry.get("found"):
+                        slim_results.append(entry)
+                        continue
+                    memory = entry.get("memory") or {}
+                    record = {key: value for key, value in memory.items() if key != "content"}
+                    record["content_chars"] = len(str(memory.get("content") or ""))
+                    slim_results.append({"memory_id": entry["memory_id"], "found": True, "memory": record})
+                data: dict[str, Any] = {
+                    "results": slim_results,
+                    "count": len(slim_results),
+                    "over_budget": True,
+                    "budget_bytes": BATCH_READ_FULL_BUDGET_BYTES,
+                    "total_bytes": total_bytes,
+                    "hint": (
+                        "batch read over the full-content budget; no contents were returned — "
+                        "read the items individually (memory action='read') or narrow the batch"
+                    ),
+                }
+                if self.settings.include_size:
+                    data["size"] = meter_payloads(slim_results)
+                if caller.isolation == "strict":
+                    data.update(caller.response_fields())
+                return self.db.state.response(data, extra_warnings=list(caller.warnings))
+
+        data = {"results": results, "count": len(results)}
+        if self.settings.include_size:
+            meter_items = [entry["memory"] for entry in results if entry.get("found")]
+            size_block = meter_payloads(meter_items)
+            data["size"] = {
+                **size_block,
+                "display_hint": (
+                    f"batch read (~{size_block['tokens_estimate']} tokens returned for "
+                    f"{len(meter_items)} record(s), content_mode={content_mode}): report this "
+                    "recall cost when citing it."
+                ),
+            }
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
+
 
     def memory_recent(self, workspace: str | None = None, limit: int = 20, **_: Any) -> dict[str, Any]:
         limit = max(1, min(int(limit), 100))

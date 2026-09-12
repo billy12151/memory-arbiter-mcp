@@ -2585,16 +2585,22 @@ def test_read_span_window_and_clue_deep_read(tmp_path: Path) -> None:
     b = tools.memory_write(content="第一段背景说明文字。\n重试次数为 5 次。\n第三段运维备注信息。", subject="span", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
 
-    # span read returns the sliced content plus window metadata.
+    # 0.16.0 unit-aligned span read (plan §3): the window returns the COMPLETE
+    # evidence units overlapping [start, end) — never a half-sentence slice.
     full = tools.memory("read", {"memory_id": a["id"]})["data"]["memory"]
     total = len(full["content"])
     windowed = tools.memory("read", {"memory_id": a["id"], "span": {"start": 0, "end": 12}})
     assert windowed["ok"] is True
-    assert windowed["data"]["memory"]["content"] == content[:12]
-    assert windowed["data"]["span"] == {"start": 0, "end": 12, "total_chars": total}
+    aligned = windowed["data"]["memory"]["content"]
+    # Unit-aligned: whole units only — every sentence survives intact even
+    # though the raw window ends mid-unit at char 12.
+    assert "重试次数为 3 次。" in aligned
+    assert windowed["data"]["span"]["unit_aligned"] is True
+    assert windowed["data"]["span"]["total_chars"] == total
+    assert windowed["data"]["span"]["end"] == 12
     clipped = tools.memory("read", {"memory_id": a["id"], "span": {"start": total - 3, "end": 10_000}})
     assert clipped["data"]["span"]["end"] == total
-    assert len(clipped["data"]["memory"]["content"]) == 3
+    assert clipped["data"]["memory"]["content"] in content
     for bad in ({"start": -1, "end": 5}, {"start": 5, "end": 5}, {"start": total + 5, "end": total + 9}):
         rejected = tools.memory("read", {"memory_id": a["id"], "span": bad})
         assert rejected["ok"] is False

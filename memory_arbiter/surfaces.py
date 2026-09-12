@@ -67,12 +67,13 @@ def _memory_value_reference() -> dict[str, Any]:
 _PRODUCT_HELPS: dict[str, Any] = {
     "memory": {
         "description": "Daily memory operations: remember, find, read, update, judge, status.",
-        "actions": ["remember", "find", "batch_find", "read", "update", "judge", "status", "help"],
+        "actions": ["remember", "find", "batch_find", "read", "batch_read", "update", "judge", "status", "help"],
         "examples": {
             "remember": {"action": "remember", "data": {"content": "Fact to remember", "subject": "Short subject", "tags": ["project"]}},
             "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
             "batch_find": {"action": "batch_find", "data": {"queries": [{"id": "collections", "query": "催收 辱骂 侮辱"}, {"id": "debt-transfer", "query": "债务转移 债权人同意"}], "limit_per_query": 3}},
             "read": {"action": "read", "data": {"memory_id": 123}},
+            "batch_read": {"action": "batch_read", "data": {"memory_ids": [12, 34], "content_mode": "full"}},
             "update": {"action": "update", "data": {"memory_id": 123, "new_content": "Updated current fact", "reason": "User provided a newer source-of-truth."}},
             "update_patches": {"action": "update", "data": {"memory_id": 123, "patches": [{"old_text": "MySQL 5.7", "new_text": "MySQL 8.0"}, {"old_text": "us-east-1", "new_text": "us-west-2"}], "reason": "Two spotted corrections in one edit."}},
             "judge": {"action": "judge", "data": {"conflict_id": 1, "expected_revision": 1, "chosen_value": "SQLite", "decided_by": "user", "ref": "chat", "reason": "User confirmed the current database.", "apply_plan": [{"memory_id": 12, "action": "update_current_claim"}, {"memory_id": 34, "action": "use_as_resolution"}], "resolution_memory_id": 34}},
@@ -752,6 +753,12 @@ class ProductSurfaces:
             if missing is not None:
                 return missing
             return self._forward("memory", action, self._tools.memory_get, **payload)
+        if action == "batch_read":
+            if not payload.get("memory_ids"):
+                return self._invalid_product_call(
+                    "memory", "batch_read requires memory_ids (non-empty list of ids)", action,
+                )
+            return self._forward("memory", action, self._tools.memory_batch_read, **payload)
         if action == "update":
             self._alias_id(payload, "memory_id")
             missing = self._require_id("memory", payload, "memory_id", action)
