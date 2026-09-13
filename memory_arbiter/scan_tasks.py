@@ -25,8 +25,12 @@ SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 # drift detection keys off this number (v1 = page-driven scan_candidates
 # triage, retired by the server-orchestrated pipeline; v2 → v3 = weekly
 # anomaly findings moved from workspace_review notices into the judgment
-# queue — "verify with the user" is gone, the agent judges via the gate).
-SCHEDULED_TASKS_SPEC_VERSION = 3
+# queue — "verify with the user" is gone, the agent judges via the gate;
+# v3 → v4 = 0.16.4 one-pass clearing — internal contradictions aggregate
+# per MEMORY with a memory-level batched submit (expanded guard for
+# beyond-preview dismissals), group-level dismissal preferred, and the
+# stop rule "one judgment pass after kick complete=true, then report").
+SCHEDULED_TASKS_SPEC_VERSION = 4
 
 AGENT_INSTRUCTION = (
     "Tell the user: mema needs three scheduled tasks (a conflict-scan pipeline "
@@ -62,37 +66,49 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                 },
                 {
                     "tool": "memory_repair", "task": "scan_queue",
-                    "data": {"action": "page"},
+                    "data": {"action": "page", "page_size": 30},
                     "note": (
-                        "After complete=true, drain pending queue items: judge each item "
-                        "from its evidence quotes (upgrade to batch_read hits windows or "
-                        "full reads when uncertain; read full texts before any "
-                        "confirm-driven edit). Submit dispositions with "
+                        "After complete=true, drain pending queue items (page_size=30: "
+                        "the one-pass clearing target is sized for large pages). Judge "
+                        "each item from its evidence quotes (upgrade to batch_read hits "
+                        "windows or full reads when uncertain; read full texts before "
+                        "any confirm-driven edit). Submit dispositions with "
                         "memory_repair(task='scan_queue', action='submit'): per-pair "
                         "{candidate_key_hash, status: confirmed|dismissed, reason} — "
                         "confirms add slot_key + value_groups (display values per member); "
-                        "a whole noise group can be dismissed with one group_token entry. "
-                        "Dispositions land server-side (pre-authorized by design: the "
-                        "queue row is the audit trail, the agent is the only semantic "
-                        "judge, and a dismissal lands the not_a_conflict suppression "
-                        "source). Workspace "
+                        "prefer dismissing a whole noise GROUP with one group_token entry "
+                        "(plus its pair_hashes). Internal contradictions arrive "
+                        "AGGREGATED per memory (kind='internal_memory', pairs preview + "
+                        "full pair_count): dismiss the whole memory with "
+                        "{kind:'internal_memory', memory_id, status:'dismissed', reason} — "
+                        "when pair_count exceeds the preview, read every pair first "
+                        "(batch_read content_mode='hits') and resubmit with expanded=true; "
+                        "resolve only for confirmed real contradictions. Dispositions land "
+                        "server-side (pre-authorized by design: the queue row is the audit "
+                        "trail, the agent is the only semantic judge, and a dismissal lands "
+                        "the not_a_conflict suppression source). Workspace "
                         "suspects: confirm with target_workspace + conf — the server "
                         "re-runs the vector vote and only moves when both signals agree "
-                        "(protected buckets are never moved autonomously). If the queue "
-                        "is large, keep paging in later runs — page boundaries are "
+                        "(protected buckets are never moved autonomously). STOP RULE: "
+                        "after the kick reported complete=true, run ONE judgment pass to "
+                        "backlog zero and report the counts — do not chase rows that "
+                        "trickle in during the pass; they are next round's work. If the "
+                        "queue is large, keep paging in later runs — page boundaries are "
                         "breakpoints and nothing is lost between runs."
                     ),
                 },
                 {
                     "note": (
-                        "v3 contract (spec_version=3): check-route noise pairs are "
-                        "machine-cleared by the difference-based classifier, so the "
-                        "queue only holds real signals (notify pairs, kept "
-                        "value-difference pairs, workspace suspects, internal "
-                        "contradictions via internal_conflicts). If your current task "
-                        "still expects scan_candidates pages or workspace_review "
-                        "notices, rebuild it from this spec (doctor's "
-                        "conflicts.spec_drift finding says so too)."
+                        "v4 contract (spec_version=4): check-route noise pairs are "
+                        "machine-cleared by the difference-based classifier, and "
+                        "cross-memory todo/polarity evolution pairs are excluded before "
+                        "any machine route (0.16.4) — the queue only holds real signals "
+                        "(kept value-difference pairs, workspace suspects, and per-memory "
+                        "aggregated internal contradictions via internal_conflicts). If "
+                        "your current task still expects scan_candidates pages, "
+                        "workspace_review notices, or per-row internal items, rebuild it "
+                        "from this spec (doctor's conflicts.spec_drift finding says so "
+                        "too)."
                     ),
                 },
             ],
