@@ -86,8 +86,14 @@ def test_scan_pipeline_e2e(tmp_path: Path) -> None:
 
 def _run_e2e(tools: MemoryTools) -> None:
     # ── seed the synthetic two-bucket library ────────────────────────────
-    a = _write(tools, "部署数据库", "生产环境数据库使用 MySQL 8.0 主库。", workspace="研发部")
-    b = _write(tools, "部署数据库对端", "生产环境数据库使用 PostgreSQL 集群。", workspace="研发部")
+    # 0.16.2 fixtures: a/b use the same-sentence numeric shape the
+    # difference classifier keeps. (The previous MySQL 8.0/PostgreSQL
+    # sentence carries 4 unique tokens of version noise per side and is
+    # cleared under the document-literal (2,2) rule — the plan §1.4.3
+    # residual-miss class; the tight value-difference shape is covered at
+    # unit level in test_difference_classifier.)
+    a = _write(tools, "部署数据库", "生产环境数据库端口设置为 5432。", workspace="研发部")
+    b = _write(tools, "部署数据库对端", "生产环境数据库端口设置为 5433。", workspace="研发部")
     n1 = _write(tools, "版本快照甲", "该功能上限为 100 QPS。", workspace="研发部")
     n2 = _write(tools, "版本快照乙", "该功能上限为 200 QPS。", workspace="研发部")
     internal_mid = _write(tools, "自相矛盾条目", "## 配置甲\n超时时间为 30 秒。\n## 配置乙\n超时时间为 60 秒。", workspace="研发部")
@@ -96,7 +102,16 @@ def _run_e2e(tools: MemoryTools) -> None:
         _write(tools, f"通行证主题{i}", f"园区车辆通行证办理流程第{i}条。", workspace="物流园区")
     serials = "甲乙丙丁戊己庚辛壬癸子丑"
     for idx, serial in enumerate(serials):
-        _write(tools, f"偏好素材{serial}", f"界面排版偏好：图表优先于表格，颜色克制。{serial}。", workspace="mema-twin")
+        # 0.16.2 §1.2: twin-bucket rows must be written AS the twin — a
+        # non-identity write would land in mema-twin-dev by the redirect.
+        from memory_arbiter.request_identity import RequestIdentity, request_identity_scope
+
+        with request_identity_scope(RequestIdentity(client="mema-twin", agent_id="mema-twin")):
+            res = tools.memory_write(
+                content=f"界面排版偏好：图表优先于表格，颜色克制。{serial}。",
+                subject=f"偏好素材{serial}", workspace="mema-twin", tags=[],
+            )
+            assert res.get("ok"), res
     assert tools.wait_evidence_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
 
@@ -116,15 +131,18 @@ def _run_e2e(tools: MemoryTools) -> None:
     kick = _kick(tools, max_memories=500, time_budget_s=180.0)
     assert kick["complete"] is True, kick
     assert kick["pending_memories"] == 0
+    assert "machine_cleared_total" in kick, "machine clearance must be visible"
+    # 0.16.2 §1.4/§6④: machine numeric rejection rows are retired — same-
+    # sentence numeric pairs enqueue for agent judgment, no new audit rows.
     rejects = tools.db.list_conflicts(status="not_a_conflict", source="scan_numeric_autoreject")
-    assert rejects, "numeric 噪声必须自动驳回且留审计行"
+    assert rejects == [], rejects
     with tools.db.connection() as conn:
         queued_sets = [
             {int(m["memory_id"]) for m in json.loads(r[0])}
             for r in conn.execute("SELECT member_versions FROM scan_queue WHERE kind='conflict'").fetchall()
         ]
-    assert {n1, n2} not in queued_sets, "numeric 对不得进判断队列"
-    assert {a, b} in queued_sets, "真冲突对必须入队"
+    assert {n1, n2} in queued_sets, "同句数值对（100/200 QPS）必须保留入队随组判"
+    assert {a, b} in queued_sets, "真冲突对（MySQL/PostgreSQL 值差异）必须入队"
 
     # judgment page: quote-first payload + byte budget
     page = _page(tools)
@@ -190,7 +208,7 @@ def _run_e2e(tools: MemoryTools) -> None:
     with tools.db.connection() as conn:
         after = conn.execute("SELECT COUNT(*) FROM scan_queue").fetchone()[0]
     assert after == before, "零变化第二轮不得新增队列项"
-    tools.memory("update", {"memory_id": a, "new_content": "生产环境数据库已切换为 MySQL 8.4 主库。", "reason": "e2e edit"})
+    tools.memory("update", {"memory_id": a, "new_content": "生产环境数据库端口设置为 5434。", "reason": "e2e edit"})
     assert tools.wait_evidence_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
     _kick(tools, max_memories=500, time_budget_s=180.0)

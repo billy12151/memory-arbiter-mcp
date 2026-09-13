@@ -225,8 +225,10 @@ def test_scan_capability_e2e_real_models(
     assert tools.db.missing_summary_vec_rows() == []
 
     # Step 1: anomaly check names the misplaced memory pointing at dbpgsql;
-    # the workspace_review notice lands. Then the FIRST scan page (spec
-    # sample call shape, real Qwen enhancement bounded for the test budget).
+    # 0.16.2 §1.3: the finding lands as a kind='workspace' judgment-queue row
+    # (the workspace_review notice channel no longer produces new findings).
+    # Then the FIRST scan page (spec sample call shape, real Qwen enhancement
+    # bounded for the test budget).
     anomaly = tools.memory_repair("scan_workspace_anomalies", {})
     assert anomaly["ok"] is True, anomaly["data"]
     findings = anomaly["data"]["findings"]
@@ -234,11 +236,13 @@ def test_scan_capability_e2e_real_models(
     assert hit is not None, f"misplaced memory must be flagged: {findings}"
     assert hit["suspected_workspace"] == "dbpgsql"
     with tools.db.connection() as conn:
-        notice_row = conn.execute(
-            "SELECT id FROM conflicts WHERE notice_type='workspace_review' "
-            "AND notice_dedupe_key=?", (f"workspace-anomaly:{misplaced_id}",),
+        suspect_row = conn.execute(
+            """SELECT id FROM scan_queue WHERE kind='workspace' AND status='pending'
+               AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
+                          WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
+            (misplaced_id,),
         ).fetchone()
-    assert notice_row is not None, "workspace_review notice must land"
+    assert suspect_row is not None, "workspace suspect must land in the judgment queue"
 
     monkeypatch.setattr("memory_arbiter.tools.SEMANTIC_SCAN_BUDGET_MS", 12_000)
     page1 = _scan_page(tools)
@@ -268,12 +272,16 @@ def test_scan_capability_e2e_real_models(
         for c in page3["candidates"]
     )
     assert page3["counts"]["filtered_open"] >= 1
+    rescan_anomaly_same_version = tools.memory_repair("scan_workspace_anomalies", {})
+    assert rescan_anomaly_same_version["ok"] is True
     with tools.db.connection() as conn:
-        duplicates = int(conn.execute(
-            "SELECT COUNT(*) FROM conflicts WHERE notice_type='workspace_review' "
-            "AND notice_dedupe_key=?", (f"workspace-anomaly:{misplaced_id}",),
+        suspect_rows = int(conn.execute(
+            """SELECT COUNT(*) FROM scan_queue WHERE kind='workspace'
+               AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
+                          WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
+            (misplaced_id,),
         ).fetchone()[0])
-    assert duplicates == 1, "anomaly notice must not duplicate on re-runs"
+    assert suspect_rows == 1, "the suspect row must not duplicate on re-runs"
 
     # Step 4: the suspected-bucket sweep surfaces the planted cross-bucket
     # conflict (misplaced x port_b, 5432 vs 5433) the same week.
@@ -285,15 +293,15 @@ def test_scan_capability_e2e_real_models(
     assert cross_key in refs, f"planted cross-bucket conflict must surface: {sorted(refs)}"
     assert "numeric_value_candidate" in refs[cross_key]["reasons"]
 
-    # Step 5: governance move, then rescan — notice stales, the memory
+    # Step 5: governance move, then rescan — the suspect row retires (the
+    # move's companion void + the sweep's lazy expire; the notice channel's
+    # read-time stale semantics carried over to the queue), the memory
     # participates in bucket B, and the anomaly check stays quiet about it.
     moved = tools.memory_govern("move_memories_workspace", {
         "memory_ids": [misplaced_id], "new_workspace": "dbpgsql",
         "reason": "confirmed placement", "authorized": True,
     })
     assert moved["ok"] is True, moved["data"]
-    read = tools.db.read_semantic_notice(int(notice_row["id"]))
-    assert read is not None and read["notice_delivery_status"] == "stale"
     page5 = _scan_page(tools)
     same_bucket_pair = tuple(sorted((misplaced_id, int(lib["port_b"]["id"]))))
     assert any(
@@ -304,6 +312,14 @@ def test_scan_capability_e2e_real_models(
     assert not any(
         f["memory_id"] == misplaced_id for f in rescan_anomaly["data"]["findings"]
     ), "moved memory must leave the anomaly findings"
+    with tools.db.connection() as conn:
+        pending_suspects = int(conn.execute(
+            """SELECT COUNT(*) FROM scan_queue WHERE kind='workspace' AND status='pending'
+               AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
+                          WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
+            (misplaced_id,),
+        ).fetchone()[0])
+    assert pending_suspects == 0, "moving the memory must retire its suspect row"
 
     # Step 6: page to null — scan_log completion line + page-progress kv.
     anchor = 0
