@@ -179,6 +179,25 @@ def test_pending_activation_into_twin_redirects(tmp_path: Path) -> None:
             assert result["ok"] is True, result
     record = tools.db.get_memory(written["id"])
     assert _bucket(record) == "mema-twin-dev", "activation cannot land in mema-twin for a non-twin caller"
+    # Adversarial regression (R1 review): the confirm path must NOT write a
+    # confirmed alias mema-twin→mema-twin-dev — that would reroute the twin's
+    # OWN future writes (alias resolution bypasses the identity-keyed
+    # redirect for everyone).
+    with tools.db.connection() as conn:
+        poison = conn.execute(
+            "SELECT COUNT(*) FROM workspace_aliases "
+            "WHERE alias_workspace='mema-twin' AND canonical='mema-twin-dev' "
+            "AND status='confirmed'"
+        ).fetchone()[0]
+    assert poison == 0, "confirm redirect poisoned the alias registry"
+    # The twin itself still writes its bucket directly after the redirect.
+    with request_identity_scope(RequestIdentity(client="mema-twin", agent_id="mema-twin")):
+        again = tools.memory_write(
+            content="本体后续写入", subject="twin-after", tags=[], workspace="mema-twin",
+        )["data"]
+    assert _response_bucket(again) == "mema-twin", (
+        "twin's own write must still land in mema-twin (no alias reroute)"
+    )
 
 
 # ── boot migration ──────────────────────────────────────────────────────────

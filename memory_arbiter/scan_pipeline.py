@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Any, TYPE_CHECKING
 
-from .constants import SCAN_MACHINE_ROUTE_TOP_K, SCAN_PIPELINE_AUTO_REJECT_CAP
+from .constants import SCAN_MACHINE_ROUTE_TOP_K
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .difference_classifier import classify_pair, is_garbage
 from .semantic_conflict import decide_evidence
@@ -162,10 +162,6 @@ class ScanPipeline:
         auto_rejected = int(state.get("auto_rejected") or 0)
         internal_found = int(state.get("internal_found") or 0)
         machine_cleared = int(state.get("machine_cleared") or 0)
-        # Cap is PER KICK: a resumed round must re-arm the machine-rejection
-        # budget, or the first round spends it in one batch and floods the
-        # queue with the very numeric noise E11③ set out to cut.
-        auto_reject_remaining = SCAN_PIPELINE_AUTO_REJECT_CAP
         anchor_buckets: dict[str, int] = {}
         processed_ids: list[int] = []
 
@@ -185,7 +181,6 @@ class ScanPipeline:
                     memory_id,
                     suppression=suppression,
                     neighbor_k=neighbor_k,
-                    auto_reject_remaining=auto_reject_remaining,
                 )
                 version = outcome["version"]
                 if version is not None:
@@ -195,7 +190,6 @@ class ScanPipeline:
                     anchor_buckets[bucket] = anchor_buckets.get(bucket, 0) + 1
                 queued += outcome["queued"]
                 auto_rejected += outcome["auto_rejected"]
-                auto_reject_remaining = max(0, auto_reject_remaining - outcome["auto_rejected"])
                 internal_found += outcome["internal"]
                 machine_cleared += int(outcome.get("machine_cleared") or 0)
                 last_id = max(last_id, memory_id)
@@ -258,7 +252,6 @@ class ScanPipeline:
         *,
         suppression: dict[str, Any],
         neighbor_k: int,
-        auto_reject_remaining: int,
     ) -> dict[str, Any]:
         outcome = {
             "version": None, "workspace": None,
@@ -293,12 +286,17 @@ class ScanPipeline:
                 workspace=workspace or None,
                 exclude_memory_id=memory_id,
             )
-            for rank, hit in enumerate(hits):
+            # Rank counts TEXT hits only — non-text units the KNN interleaves
+            # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
+            # not raw row positions).
+            text_rank = 0
+            for hit in hits:
                 if hit.get("kind") != "text":
                     continue
                 peer_id = int(hit["memory_id"])
                 if peer_id == memory_id:
                     continue
+                text_rank += 1
                 peer_bucket = str(
                     hit.get("workspace_canonical") or hit.get("workspace") or ""
                 ).strip()
@@ -309,7 +307,7 @@ class ScanPipeline:
                     continue
                 # 0.16.2 §1.5: machine-decidable check routes generate only
                 # within the top-3 neighbour ranks; notify keeps top-10.
-                if decision.action != "notify" and rank >= SCAN_MACHINE_ROUTE_TOP_K:
+                if decision.action != "notify" and text_rank > SCAN_MACHINE_ROUTE_TOP_K:
                     continue
                 if decision.action == "check":
                     # 0.16.2 §1.4: difference-based clearance — check-route
@@ -498,29 +496,6 @@ class ScanPipeline:
             },
         )
         return outcome.get("outcome") in {"queued"}
-
-    def _auto_reject_numeric(
-        self, workspace: str, *, member_versions: list[dict[str, Any]],
-        candidate_key: dict[str, Any], detection_reason: str,
-    ) -> str | None:
-        """RETIRED live call site (0.16.2 plan §6④/§7): the difference
-        classifier superseded E11③ — same-sentence numeric pairs enqueue for
-        agent judgment, cross-sentence noise is cleared without conflicts
-        rows. Kept as the audit-path reference for the 17.8k historical
-        rows; no new rows are written."""
-        result = self.db.record_conflict_group(
-            workspace_canonical=workspace,
-            slot_key=None,
-            members=member_versions,
-            value_groups=[],
-            candidate_key=candidate_key,
-            status="not_a_conflict",
-            detector_version=CONFLICT_DETECTOR_VERSION,
-            source="scan_numeric_autoreject",
-            detection_reason=detection_reason,
-        )
-        outcome = result.get("outcome")
-        return outcome if outcome in {"inserted", "deduped"} else None
 
     def _load_suppression(self) -> dict[str, Any]:
         """Round-level suppression maps (same contract as scan_rule_candidates)."""

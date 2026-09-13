@@ -351,20 +351,31 @@ def _clearance_migrate_check_route_pairs(conn: sqlite3.Connection) -> str:
     ).fetchall()
     cleared_sim = cleared_num = garbage_labeled = kept = 0
     for row in rows:
-        if str(row["severity"] or "") == "high":
+        route = str(row["reason"] or "")
+        # Notify protection keys on BOTH severity and the route reason —
+        # a severity-NULL legacy row that names a notify route must never
+        # fall through to the classifier (defense in depth; the live
+        # library has zero such rows, other deployments may not).
+        if str(row["severity"] or "") == "high" or route.startswith(
+            ("polarity_changed", "todo_resolved")
+        ):
             kept += 1  # notify route: real-signal recall has no threshold
             continue
         try:
             evidence = json.loads(str(row["evidence"] or "[]"))
         except (TypeError, ValueError):
             evidence = []
+        # Legacy candidate rows migrated from conflicts (0.16.0 §6⑲⑥) store
+        # an envelope object; the scan pipeline stores a bare array. Unwrap
+        # both — misreading the envelope would clear real evidence pairs.
+        if isinstance(evidence, dict):
+            evidence = evidence.get("evidence") or []
         quotes = [
             str(item.get("evidence_quote")) if isinstance(item, dict) and item.get("evidence_quote") else None
             for item in (evidence or [])
         ]
         while len(quotes) < 2:
             quotes.append(None)
-        route = str(row["reason"] or "")
         verdict = classify_pair(quotes[0], quotes[1], route=route)
         if verdict == "keep":
             kept += 1

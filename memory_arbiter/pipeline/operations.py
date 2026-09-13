@@ -1129,23 +1129,6 @@ class OperationsPipeline:
                         canonical = str(
                             resolved_canonical.get("canonical") or canonical
                         ).strip()
-                # 0.16.2 §1.2: pending activation honors the twin write
-                # routing — a non-twin caller cannot activate a row INTO
-                # mema-twin; the confirmed canonical lands in mema-twin-dev.
-                from ..twin_redirect import twin_redirect_target
-
-                redirect_target = twin_redirect_target(
-                    str(canonical or ""),
-                    client=self._tools.current_client(),
-                    agent_id=self._tools.current_agent_id(),
-                )
-                if redirect_target is not None:
-                    canonical = redirect_target
-                    warnings.append(
-                        "protected_bucket_redirect: canonical mema-twin is the "
-                        "twin agent's bucket; activated into mema-twin-dev "
-                        "instead (owner rule #976)."
-                    )
                 if caller is not None and caller.isolation == "strict":
                     memory_workspace = raw_workspace(memory)
                     if not memory_workspace or memory_workspace != caller.canonical:
@@ -1173,6 +1156,31 @@ class OperationsPipeline:
                 if not ok_alias:
                     raise ValueError("; ".join(alias_warnings) or "workspace redirect not written")
                 warnings.extend(alias_warnings)
+                # 0.16.2 §1.2: pending activation honors the twin write
+                # routing — a non-twin caller cannot activate a row INTO
+                # mema-twin; the confirmed canonical lands in mema-twin-dev.
+                # Deliberately AFTER the alias chain: recording the alias
+                # with the redirected canonical would write a confirmed
+                # mema-twin→mema-twin-dev reroute and silently break the
+                # twin's own future writes (the write-path redirect keys on
+                # caller identity, an alias would bypass it for everyone).
+                # With raw='mema-twin' the alias chain above already
+                # no-ops (raw == canonical); a differing raw keeps its own
+                # alias to the persona bucket untouched.
+                from ..twin_redirect import twin_redirect_target
+
+                redirect_target = twin_redirect_target(
+                    str(canonical or ""),
+                    client=self._tools.current_client(),
+                    agent_id=self._tools.current_agent_id(),
+                )
+                if redirect_target is not None:
+                    canonical = redirect_target
+                    warnings.append(
+                        "protected_bucket_redirect: canonical mema-twin is the "
+                        "twin agent's bucket; activated into mema-twin-dev "
+                        "instead (owner rule #976)."
+                    )
                 canonical_set, canonical_warnings = self.db.set_memory_workspace_canonical_on_conn(
                     conn, int(memory_id), canonical,
                 )

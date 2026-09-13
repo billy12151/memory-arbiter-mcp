@@ -26,38 +26,42 @@ def _conflict_member_sets(tools) -> list[set[int]]:
 
 
 def test_top3_rank_gate_skips_deep_check_pairs(tmp_path: Path) -> None:
-    """check-route pairs beyond rank 3 are not generated at all; notify
-    pairs queue from any rank (real-conflict recall has no threshold)."""
+    """check-route pairs beyond text-rank 3 are not generated at all; notify
+    pairs queue from any rank (real-conflict recall has no threshold).
+
+    Uses a NUMERIC check shape at BOTH positions so the negative assertion
+    discriminates the rank gate (not an `ignore` route): the rank-2 peer
+    would queue if generated, the rank-6 peer must be gate-blocked — and a
+    gate-blocked pair is SKIPPED, never counted as machine-cleared."""
     tools = make_tools(tmp_path)
-    a = _write(tools, "主题甲", "该功能包含缓存模块")
-    notify_peer = _write(tools, "主题乙", "该功能不包含缓存模块")
-    check_peer = _write(tools, "数值甲", "重试次数为 3 次")
-    _write(tools, "数值乙", "重试次数为 5 次")
+    a = _write(tools, "数值甲", "重试次数为 3 次")
+    check_peer_shallow = _write(tools, "数值乙", "重试次数为 5 次")
+    check_peer_deep = _write(tools, "数值丙", "重试次数为 7 次")
     assert tools.wait_evidence_worker_drained(timeout=10)
 
     pipeline = tools._scan_pipeline
 
     def _fake_knn(embedding, *, k, workspace=None, exclude_memory_id=None, **_):
-        # Both interesting peers sit at rank 5 (index 4) — beyond top-3.
         hits = []
-        filler = 0
-        for idx in range(4):
+        for idx in range(5):
             hits.append({
-                "kind": "text", "memory_id": 10 ** 6 + filler,
+                "kind": "text", "memory_id": 10 ** 6 + idx,
                 "memory_version": 1, "text": f"填充邻居句子内容{idx}",
                 "start_offset": 0, "end_offset": 10, "id": idx,
                 "content_hash": f"filler{idx}", "workspace": "ws",
             })
-            filler += 1
-        hits.append({
-            "kind": "text", "memory_id": notify_peer, "memory_version": 1,
-            "text": "该功能不包含缓存模块", "start_offset": 0, "end_offset": 10,
-            "id": 90, "content_hash": "notify-hash", "workspace": "ws",
+        # text-rank 6: a same-sentence numeric pair the classifier would
+        # KEEP — only the rank gate can be what stops it.
+        hits.insert(5, {
+            "kind": "text", "memory_id": check_peer_deep, "memory_version": 1,
+            "text": "重试次数为 7 次", "start_offset": 0, "end_offset": 9,
+            "id": 90, "content_hash": "deep-hash", "workspace": "ws",
         })
-        hits.append({
-            "kind": "text", "memory_id": check_peer, "memory_version": 1,
-            "text": "重试次数为 5 次", "start_offset": 0, "end_offset": 10,
-            "id": 91, "content_hash": "check-hash", "workspace": "ws",
+        # text-rank 2: same shape inside the gate — must queue.
+        hits.insert(1, {
+            "kind": "text", "memory_id": check_peer_shallow, "memory_version": 1,
+            "text": "重试次数为 5 次", "start_offset": 0, "end_offset": 9,
+            "id": 91, "content_hash": "shallow-hash", "workspace": "ws",
         })
         return hits
 
@@ -65,15 +69,53 @@ def test_top3_rank_gate_skips_deep_check_pairs(tmp_path: Path) -> None:
     pipeline.db.evidence.knn = _fake_knn
     try:
         outcome = pipeline._process_memory(
-            a, suppression=pipeline._load_suppression(),
-            neighbor_k=10, auto_reject_remaining=5000,
+            a, suppression=pipeline._load_suppression(), neighbor_k=10,
         )
     finally:
         pipeline.db.evidence.knn = original_knn
-    assert outcome["machine_cleared"] == 0, "deep check pairs are SKIPPED, not counted as cleared"
+    sets = _conflict_member_sets(tools)
+    assert {a, check_peer_shallow} in sets, "a keepable check pair INSIDE top-3 must queue"
+    assert {a, check_peer_deep} not in sets, "the identical shape BEYOND top-3 must be gate-blocked"
+    # The fillers are `ignore`-routed (no common tokens): they are neither
+    # queued nor counted; the deep pair is SKIPPED by the gate, not cleared.
+    assert outcome["machine_cleared"] == 0, outcome
+
+
+def test_notify_pairs_queue_from_deep_ranks(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = _write(tools, "主题甲", "该功能包含缓存模块")
+    notify_peer = _write(tools, "主题乙", "该功能不包含缓存模块")
+    assert tools.wait_evidence_worker_drained(timeout=10)
+
+    pipeline = tools._scan_pipeline
+
+    def _fake_knn(embedding, *, k, workspace=None, exclude_memory_id=None, **_):
+        hits = [
+            {
+                "kind": "text", "memory_id": 10 ** 6 + idx,
+                "memory_version": 1, "text": f"填充邻居句子内容{idx}",
+                "start_offset": 0, "end_offset": 10, "id": idx,
+                "content_hash": f"filler{idx}", "workspace": "ws",
+            }
+            for idx in range(4)
+        ]
+        hits.append({
+            "kind": "text", "memory_id": notify_peer, "memory_version": 1,
+            "text": "该功能不包含缓存模块", "start_offset": 0, "end_offset": 10,
+            "id": 90, "content_hash": "notify-hash", "workspace": "ws",
+        })
+        return hits
+
+    original_knn = pipeline.db.evidence.knn
+    pipeline.db.evidence.knn = _fake_knn
+    try:
+        pipeline._process_memory(
+            a, suppression=pipeline._load_suppression(), neighbor_k=10,
+        )
+    finally:
+        pipeline.db.evidence.knn = original_knn
     sets = _conflict_member_sets(tools)
     assert {a, notify_peer} in sets, "notify pairs queue from any rank"
-    assert {a, check_peer} not in sets, "check pairs beyond rank 3 must not generate"
 
 
 def test_notify_pairs_survive_numeric_autoreject_suppression(tmp_path: Path) -> None:
