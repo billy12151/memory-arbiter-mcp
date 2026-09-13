@@ -40,6 +40,7 @@ from .constants import (
 )
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
+from .normalize_gate import normalize_gate
 from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
 from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext, utc_now_iso
 from .search import search_memories, _linked_open_items_for_search
@@ -1974,12 +1975,13 @@ class MemoryTools:
 
         One SELECT reads every active memory's summary vector; numpy computes
         the N×N cosine in row-blocks (bounded memory); each row votes over its
-        top-10 neighbours. A memory whose neighbourhood is ≥8/10 in ONE other
-        bucket is a suspected misplacement: one workspace_review notice per
-        memory (pair-shaped with the bucket's best neighbour so move/supersede
-        auto-stales it), capped at 10 per run. Zero Qwen, milliseconds.
-        numpy absence degrades with a structured outcome (it is not a
-        declared dependency — llama-cpp-python normally brings it).
+        top-10 neighbours through the shared proportional normalize_gate. A
+        memory whose neighbourhood passes the gate is a suspected misplacement:
+        one kind='workspace' scan_queue row per memory (same queue, same gate
+        as the pipeline's incremental suspects), capped at 10 new rows per run.
+        Zero Qwen, milliseconds. numpy absence degrades with a structured
+        outcome (it is not a declared dependency — llama-cpp-python normally
+        brings it).
         """
         try:
             import numpy as np
@@ -2004,7 +2006,7 @@ class MemoryTools:
         vectors = self.db.all_summary_vectors()
         if not vectors:
             return self.db.state.response({
-                "status": "ok", "checked": 0, "suspected": 0, "notices": 0,
+                "status": "ok", "checked": 0, "suspected": 0, "queued": 0,
                 "note": "no summary vectors yet (backfill pending or empty library)",
             })
         ids = sorted(vectors)
@@ -2046,106 +2048,78 @@ class MemoryTools:
                         elif sim > foreign_best[0]:
                             foreign_best = (sim, ids[col])
                     own = workspaces[row]
-                    # ≥8/10 pointing at ONE foreign bucket → suspected.
-                    if neighbour_k >= 8:
-                        best_bucket, best_votes = max(
-                            ((b, c) for b, c in votes.items() if b != own),
-                            key=lambda item: item[1],
-                            default=("", 0),
-                        )
-                        if best_votes >= 8:
-                            suspected.append({
-                                "memory_id": ids[row],
-                                "workspace": own,
-                                "suspected_workspace": best_bucket,
-                                "foreign_votes": best_votes,
-                                "neighbours_checked": neighbour_k,
-                                "foreign_neighbour_id": foreign_best[1],
-                                "own_neighbour_id": own_best[1],
-                            })
+                    # Shared proportional gate (0.16.2 §1.1): the weekly
+                    # backstop judges by the SAME function as the pipeline's
+                    # suspect generation and the decision-time re-vote.
+                    passed, gate_evidence = normalize_gate(votes, own)
+                    if passed:
+                        suspected.append({
+                            "memory_id": ids[row],
+                            "workspace": own,
+                            "suspected_workspace": gate_evidence["top_bucket"],
+                            "foreign_votes": gate_evidence["top_votes"],
+                            "neighbours_checked": neighbour_k,
+                            "foreign_neighbour_id": foreign_best[1],
+                            "own_neighbour_id": own_best[1],
+                            "votes": dict(votes),
+                        })
         suspected.sort(key=lambda item: (-item["foreign_votes"], item["memory_id"]))
+        # Lazy staleness (the notice channel's heir), BEFORE selecting the
+        # cap: a pending suspect row whose subject already left its pinned
+        # bucket is resolved — retire it even when the memory no longer shows
+        # up in this sweep's findings (that is precisely why it is stale).
+        self._expire_relocated_workspace_rows()
         capped = suspected[:10]
-        noticed = 0
+        queued = 0
+        # 0.16.2 §1.3: findings land in the judgment queue (same queue, same
+        # gate as the pipeline's incremental suspects) — the workspace_review
+        # notice channel no longer produces new findings. Identity reuses
+        # _workspace_identity so a pipeline suspect and the weekly suspect
+        # for the same memory@version+suspicion share one row (INSERT OR
+        # IGNORE dedupes re-runs; dismissal keeps it dismissed).
+        from .constants import PROTECTED_WORKSPACES
+        from .scan_pipeline import _workspace_identity
+
         for item in capped:
             memory_id = int(item["memory_id"])
             record = self.db.get_memory(memory_id)
             if record is None or str(record.get("status") or "") != "active":
                 continue
-            # The notice is pair-shaped and its member workspace check is
-            # single-bucket (the 0.14 group identity model): the PEER must sit
-            # in the memory's CURRENT bucket. The cross-bucket evidence lives
-            # in the payload/message; the memory's own move/supersede still
-            # stales the notice through member freshness.
-            peer_id = item.get("own_neighbour_id")
-            peer_id = int(peer_id) if peer_id and int(peer_id) > 0 else None
-            peer_version: int | None = None
-            if peer_id is not None and peer_id != memory_id:
-                peer = self.db.get_memory(peer_id)
-                if peer is not None and str(peer.get("status") or "") == "active":
-                    peer_version = int(peer.get("version") or 1)
-                else:
-                    peer_id = None
-            if peer_id is None:
-                # A STRONGLY misplaced memory's top-10 may contain no
-                # same-bucket neighbour at all. Fall back to any other active
-                # row in the same bucket (the pair shape needs one); a true
-                # bucket-of-one has no peer and cannot host a notice.
-                with self.db.connection() as conn:
-                    row = conn.execute(
-                        "SELECT id, version FROM memories WHERE status='active' "
-                        "AND id != ? AND COALESCE(NULLIF(workspace_canonical,''),workspace)=? "
-                        "ORDER BY id LIMIT 1",
-                        (memory_id, item["workspace"]),
-                    ).fetchone()
-                if row is not None:
-                    peer_id = int(row["id"])
-                    peer_version = int(row["version"] or 1)
-            if peer_id is None or peer_version is None:
-                # Bucket of one: the vote evidence still goes out via the
-                # findings list; a notice without a pair member cannot
-                # satisfy the group identity model.
-                continue
-            foreign_id = item.get("foreign_neighbour_id")
-            foreign = (
-                self.db.get_memory(int(foreign_id)) if foreign_id and int(foreign_id) > 0 else None
-            )
-            result = self.db.record_semantic_notice(
-                memory_id=memory_id,
-                peer_id=peer_id,
-                severity="normal",
-                notice_type="workspace_review",
-                title=f"Memory {memory_id} looks misplaced in workspace {item['workspace']!r}",
-                message=(
-                    f"{item['foreign_votes']}/{item['neighbours_checked']} nearest summary "
-                    f"neighbours sit in {item['suspected_workspace']!r}"
-                    + (
-                        f" (closest: memory {foreign['id']} in {item['suspected_workspace']!r})"
-                        if foreign is not None else ""
-                    )
-                    + ". If confirmed, move it with memory_govern(action="
-                    "'move_memories_workspace'); if it belongs, dismiss this notice."
+            version = int(record.get("version") or 1)
+            own = str(item["workspace"])
+            best_bucket = str(item["suspected_workspace"])
+            detail = {
+                "suspected_workspace": best_bucket,
+                "current_workspace": own,
+                "votes": item.get("votes") or {},
+                "neighbours_checked": item["neighbours_checked"],
+                "protected_involved": bool(
+                    own in PROTECTED_WORKSPACES or best_bucket in PROTECTED_WORKSPACES
                 ),
-                payload={
-                    "reason": "workspace_anomaly_vote",
-                    "suspected_workspace": item["suspected_workspace"],
-                    "foreign_votes": item["foreign_votes"],
-                    "neighbours_checked": item["neighbours_checked"],
-                    "current_workspace": item["workspace"],
-                    **({"foreign_neighbour_id": int(foreign["id"])} if foreign is not None else {}),
-                },
-                dedupe_key=f"workspace-anomaly:{memory_id}",
-                left_version=int(record.get("version") or 1),
-                right_version=peer_version,
+                "channel": "weekly_backstop",
+            }
+            outcome = self.db.scan_queue.enqueue(
+                kind="workspace",
+                workspace_canonical=own,
+                candidate_key_hash=_workspace_identity(memory_id, version, best_bucket),
+                member_versions=[{"memory_id": memory_id, "version": version}],
+                evidence=[],
+                reason=(
+                    f"weekly vote {item['foreign_votes']}/{item['neighbours_checked']}"
+                    f" -> {best_bucket!r}"
+                ),
+                severity="normal",
                 source="workspace_anomaly_scan",
+                detail=detail,
             )
-            if str(result.get("outcome") or "") in {"created", "deduped"}:
-                noticed += 1
+            if str(outcome.get("outcome") or "") == "queued":
+                queued += 1
         return self.db.state.response({
             "status": "ok",
             "checked": n,
             "suspected": len(suspected),
             "returned": len(capped),
-            "notices": noticed,
+            "queued": queued,
             "cap": 10,
             **({"capped": True} if len(suspected) > len(capped) else {}),
             "findings": [
@@ -2158,6 +2132,54 @@ class MemoryTools:
                 for item in capped
             ],
         })
+
+    def _expire_relocated_workspace_rows(self) -> None:
+        """Retire every pending kind='workspace' row whose subject memory no
+        longer sits in the row's pinned current bucket — resolved by a move,
+        exactly the notice channel's lazy staleness, carried over for the
+        queue (0.16.2 §1.3)."""
+        import json as _json
+        from .models import utc_now_iso
+
+        try:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, member_versions, detail FROM scan_queue "
+                    "WHERE kind='workspace' AND status='pending'"
+                ).fetchall()
+                stale_ids: list[int] = []
+                for row in rows:
+                    try:
+                        memory_id = int(
+                            _json.loads(str(row["member_versions"] or "[]"))[0]["memory_id"]
+                        )
+                        pinned = str(
+                            _json.loads(str(row["detail"] or "{}")).get("current_workspace")
+                            or ""
+                        ).strip()
+                    except (IndexError, KeyError, TypeError, ValueError):
+                        continue
+                    if not pinned:
+                        continue
+                    current = conn.execute(
+                        "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS ws "
+                        "FROM memories WHERE id=? AND status='active'",
+                        (memory_id,),
+                    ).fetchone()
+                    if current is None or str(current["ws"] or "").strip() != pinned:
+                        stale_ids.append(int(row["id"]))
+            if not stale_ids:
+                return
+            now = utc_now_iso()
+            with self.db.write_transaction() as conn:
+                conn.executemany(
+                    "UPDATE scan_queue SET status='expired', "
+                    "decided_reason='resolved by move (subject left the pinned workspace)', "
+                    "decided_at=?, updated_at=? WHERE id=?",
+                    [(now, now, row_id) for row_id in stale_ids],
+                )
+        except Exception:
+            pass
 
     def memory_rebuild_evidence(
         self, memory_ids: list[int] | None = None, dry_run: bool = True,

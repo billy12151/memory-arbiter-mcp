@@ -23,8 +23,10 @@ SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 
 # 0.16.0 §6⑩: bump on any change to task responsibilities or call shapes;
 # drift detection keys off this number (v1 = page-driven scan_candidates
-# triage, retired by the server-orchestrated pipeline).
-SCHEDULED_TASKS_SPEC_VERSION = 2
+# triage, retired by the server-orchestrated pipeline; v2 → v3 = weekly
+# anomaly findings moved from workspace_review notices into the judgment
+# queue — "verify with the user" is gone, the agent judges via the gate).
+SCHEDULED_TASKS_SPEC_VERSION = 3
 
 AGENT_INSTRUCTION = (
     "Tell the user: mema needs three scheduled tasks (a conflict-scan pipeline "
@@ -83,14 +85,14 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                 },
                 {
                     "note": (
-                        "v2 contract (spec_version=2): the pipeline replaced the v1 "
-                        "page-driven scan_candidates triage loop — the server now walks "
-                        "the library itself, lands suspects in an independent judgment "
-                        "queue, and never surfaces them as notices or in user-facing "
-                        "conflict lists. scan_candidates remains as a manual/diagnostic "
-                        "channel only. If your current task still pages scan_candidates "
-                        "and triages record_conflict envelopes, rebuild it from this "
-                        "spec (doctor's conflicts.spec_drift finding says so too)."
+                        "v3 contract (spec_version=3): check-route noise pairs are "
+                        "machine-cleared by the difference-based classifier, so the "
+                        "queue only holds real signals (notify pairs, kept "
+                        "value-difference pairs, workspace suspects, internal "
+                        "contradictions via internal_conflicts). If your current task "
+                        "still expects scan_candidates pages or workspace_review "
+                        "notices, rebuild it from this spec (doctor's "
+                        "conflicts.spec_drift finding says so too)."
                     ),
                 },
             ],
@@ -109,13 +111,18 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                     "tool": "memory_repair", "task": "scan_workspace_anomalies",
                     "data": {},
                     "note": (
-                        "Each flagged memory gets one workspace_review notice (max 10 per "
-                        "run; the rest surface in later weeks). The 0.16.0 pipeline also "
-                        "lands its own vector-vote suspects in the judgment queue — this "
-                        "weekly sweep is the full-library backstop. Read each notice, "
-                        "verify with the user, then move confirmed memories via "
-                        "memory_govern(action='move_memories_workspace') or dismiss false "
-                        "alarms."
+                        "Each flagged memory becomes one kind='workspace' judgment-queue "
+                        "row (max 10 new rows per run; the rest surface in later weeks "
+                        "once earlier rows are judged). The 0.16.0 pipeline also lands "
+                        "its own vector-vote suspects in the same queue — this weekly "
+                        "sweep is the full-library backstop, sharing the identical "
+                        "proportional gate. Judge each queue row by its vote evidence "
+                        "and submit via memory_repair(task='scan_queue', "
+                        "action='submit'): confirmed with target_workspace + conf lets "
+                        "the server re-run the gate and move autonomously; dismissed "
+                        "retires the row. No user verification step — you are the "
+                        "semantic judge (protected buckets never move; they surface as "
+                        "a protected_bucket_hint for the user instead)."
                     ),
                 },
             ],

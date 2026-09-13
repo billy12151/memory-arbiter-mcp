@@ -99,17 +99,35 @@ def test_anomaly_scan_flags_misplaced_memory(vec_tools: MemoryTools) -> None:
     assert hit["workspace"] == "apisvc"
     assert hit["suspected_workspace"] == "dbpgsql"
 
+    # 0.16.2 channel switch: findings land in the judgment queue (same queue,
+    # same gate as the pipeline suspects), NOT as workspace_review notices.
+    assert data["queued"] >= 1, "suspect must land as a scan_queue row"
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT detail FROM scan_queue WHERE kind='workspace' AND status='pending' "
+            "AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m "
+            "           WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=12)"
+        ).fetchone()
+    assert row is not None, "kind='workspace' queue row must exist for the misplaced memory"
+    detail = json.loads(row["detail"])
+    assert detail["suspected_workspace"] == "dbpgsql"
+    assert detail["current_workspace"] == "apisvc"
+    assert detail["channel"] == "weekly_backstop"
     notices = tools.memory_repair("notice", {"action": "list", "status": "open", "limit": 20})
     rows = (notices.get("data") or {}).get("notices") or (notices.get("data") or {}).get("items") or []
-    assert any(
+    assert not any(
         (n.get("type") or n.get("notice_type")) == "workspace_review" for n in rows
-    ), f"workspace_review notice must land: {json.dumps(notices.get('data'), ensure_ascii=False)[:400]}"
+    ), "the notice channel no longer produces new findings"
 
 
 def test_anomaly_scan_clean_library_stays_quiet(vec_tools: MemoryTools) -> None:
     tools = vec_tools
-    _beta_clan(tools, 6)
-    _alpha_clan(tools, 6)
+    # Each clan must exceed the neighbour window (top-10): with clans of 6 a
+    # memory's neighbours split 5/5 across buckets and the proportional gate
+    # correctly flags everyone — a small-library fixture artifact, not gate
+    # behaviour. 12/12 keeps every neighbourhood own-bucket dominated.
+    _beta_clan(tools, 12)
+    _alpha_clan(tools, 12)
     assert tools.wait_evidence_worker_drained(timeout=10)
 
     result = tools.memory_repair("scan_workspace_anomalies", {})
@@ -117,6 +135,7 @@ def test_anomaly_scan_clean_library_stays_quiet(vec_tools: MemoryTools) -> None:
     assert data["status"] == "ok"
     assert data["suspected"] == 0
     assert data["findings"] == []
+    assert data["queued"] == 0
 
 
 def test_anomaly_scan_cap_ten(vec_tools: MemoryTools, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,6 +168,10 @@ def test_move_stales_the_notice(vec_tools: MemoryTools) -> None:
     assert tools.wait_evidence_worker_drained(timeout=10)
     result = tools.memory_repair("scan_workspace_anomalies", {})
     assert result["data"]["findings"]
+    with tools.db.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE kind='workspace' AND status='pending'"
+        ).fetchone()[0] >= 1
 
     moved = tools.memory_govern("move_memories_workspace", {
         "memory_ids": [12], "new_workspace": "dbpgsql",
@@ -156,19 +179,20 @@ def test_move_stales_the_notice(vec_tools: MemoryTools) -> None:
     })
     assert moved["ok"] is True, moved
 
+    # Lazy staleness (0.16.2 channel switch): the move's companion void
+    # (0.16.0 §6⑤) retires the suspect row immediately; the weekly sweep's
+    # lazy expire is the belt-and-braces for paths that bypass move. Either
+    # way the row must no longer be pending.
+    rerun = tools.memory_repair("scan_workspace_anomalies", {})
+    assert rerun["ok"] is True
     with tools.db.connection() as conn:
-        notice_row = conn.execute(
-            "SELECT id FROM conflicts WHERE notice_type='workspace_review' "
-            "AND notice_dedupe_key='workspace-anomaly:12' LIMIT 1"
-        ).fetchone()
-    assert notice_row is not None, "the notice must exist"
-    # Staleness is lazy: reading the notice after the move flips the frozen
-    # member's workspace check and marks it stale (the anomaly is resolved).
-    read = tools.db.read_semantic_notice(int(notice_row["id"]))
-    assert read is not None
-    assert read["freshness"]["fresh"] is False
-    assert read["notice_delivery_status"] == "stale", (
-        "moving the memory must stale its workspace_review notice (member freshness)"
+        rows = conn.execute(
+            """SELECT status FROM scan_queue WHERE kind='workspace'
+               AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
+                          WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=12)"""
+        ).fetchall()
+    assert rows and all(r[0] in {"voided", "expired"} for r in rows), (
+        "moving the memory must retire its workspace suspect row"
     )
 
 

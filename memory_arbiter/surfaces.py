@@ -315,12 +315,16 @@ class ProductSurfaces:
         return self._tools._strict_acl_unavailable(*args, **kwargs)
 
     def _active_workspace_anomalies(self) -> "dict[int, str]":
-        """C3b: {memory_id: suspected_bucket} from live workspace_review notices.
+        """C3b: {memory_id: suspected_bucket} from pending kind='workspace'
+        scan_queue rows.
 
-        The memory id is parsed from the dedupe key (workspace-anomaly:{id});
-        only notices whose subject memory STILL sits in the notice's pinned
-        workspace participate — a post-move notice that has not been lazily
-        staled yet must not re-inject a sweep against its old suspicion.
+        0.16.2 §1.3: the weekly anomaly check no longer produces
+        workspace_review notices — the pipeline's incremental suspects and the
+        weekly backstop's findings share the judgment queue, so the sweep
+        reads queue detail instead. Only rows whose subject memory STILL sits
+        in the row's pinned current_workspace participate — a post-move
+        suspect that has not been judged/expired yet must not re-inject a
+        sweep against its old suspicion.
         """
         import json as _json
 
@@ -328,27 +332,30 @@ class ProductSurfaces:
         try:
             with self.db.connection() as conn:
                 rows = conn.execute(
-                    "SELECT notice_dedupe_key, notice_payload, workspace_canonical "
-                    "FROM conflicts WHERE notice_type='workspace_review' "
-                    "AND notice_delivery_status IN ('pending','delivered') "
-                    "AND notice_dedupe_key LIKE 'workspace-anomaly:%'"
+                    "SELECT member_versions, detail, workspace_canonical "
+                    "FROM scan_queue WHERE kind='workspace' AND status='pending'"
                 ).fetchall()
                 if not rows:
                     return out
                 wanted: dict[int, tuple[str, str]] = {}
                 for row in rows:
-                    dedupe = str(row["notice_dedupe_key"] or "")
                     try:
-                        memory_id = int(dedupe.rsplit(":", 1)[1])
-                    except (IndexError, ValueError):
-                        continue
-                    try:
-                        payload = _json.loads(str(row["notice_payload"] or "{}"))
+                        detail = _json.loads(str(row["detail"] or "{}"))
                     except (TypeError, ValueError):
                         continue
-                    suspected = str(payload.get("suspected_workspace") or "").strip()
-                    if suspected:
-                        wanted[memory_id] = (suspected, str(row["workspace_canonical"] or ""))
+                    suspected = str(detail.get("suspected_workspace") or "").strip()
+                    pinned = (
+                        str(detail.get("current_workspace") or "").strip()
+                        or str(row["workspace_canonical"] or "")
+                    )
+                    if not suspected or not pinned:
+                        continue
+                    try:
+                        members = _json.loads(str(row["member_versions"] or "[]"))
+                        memory_id = int(members[0]["memory_id"])
+                    except (IndexError, KeyError, TypeError, ValueError):
+                        continue
+                    wanted[memory_id] = (suspected, pinned)
                 if not wanted:
                     return out
                 placeholders = ",".join("?" for _ in wanted)

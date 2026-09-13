@@ -526,7 +526,8 @@ class ScanPipeline:
         """Vector-vote workspace suspects for THIS round's processed memories.
 
         Same summary-vector vote as the C3a anomaly check (top-10 neighbours,
-        ≥8/10 in one foreign bucket → suspected), but scoped to memories the
+        proportional normalize_gate: top foreign bucket >=4 votes AND >=60% of
+        foreign votes → suspected), but scoped to memories the
         pipeline just processed (incremental by watermark, E10) and landing in
         the judgment queue (kind='workspace') instead of notices. The agent
         second-judges (E5: preview/outline input suffices); only a confirmed
@@ -536,9 +537,8 @@ class ScanPipeline:
             import numpy as np
         except ImportError:
             return 0
-        from .constants import (
-            NORMALIZE_VOTE_NEIGHBORS, NORMALIZE_VOTE_SHARE_MIN,
-        )
+        from .constants import NORMALIZE_VOTE_NEIGHBORS, NORMALIZE_VOTE_MIN_FOREIGN
+        from .normalize_gate import normalize_gate
 
         vectors = self.db.memories.all_summary_vectors()
         if not vectors:
@@ -556,7 +556,7 @@ class ScanPipeline:
         unit = matrix / norms[:, None]
         index_of = {mid: i for i, mid in enumerate(all_ids)}
         k = min(NORMALIZE_VOTE_NEIGHBORS, len(all_ids) - 1)
-        if k < NORMALIZE_VOTE_SHARE_MIN:
+        if k < NORMALIZE_VOTE_MIN_FOREIGN:
             return 0
         landed = 0
         for mid in ids:
@@ -569,13 +569,14 @@ class ScanPipeline:
                 bucket = workspaces[all_ids[int(col)]]
                 votes[bucket] = votes.get(bucket, 0) + 1
             own = workspaces[mid]
-            best_bucket, best_votes = max(
-                ((b, c) for b, c in votes.items() if b != own),
-                key=lambda item: item[1],
-                default=("", 0),
-            )
-            if best_votes < NORMALIZE_VOTE_SHARE_MIN or not best_bucket:
+            # One shared gate for every consumer (0.16.2 §1.1): generation
+            # here, decision-time re-vote, share check, audit payload, and
+            # the weekly backstop all judge through normalize_gate.
+            passed, evidence = normalize_gate(votes, own)
+            if not passed:
                 continue
+            best_bucket = str(evidence["top_bucket"])
+            best_votes = int(evidence["top_votes"])
             record = self.db.get_memory(mid)
             if not record or record.get("status") != "active":
                 continue

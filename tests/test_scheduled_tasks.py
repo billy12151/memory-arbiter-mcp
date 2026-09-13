@@ -282,8 +282,8 @@ def _conflict_scan_spec() -> dict:
     return next(t for t in SCHEDULED_TASKS_SPEC["tasks"] if t["name"] == "conflict_scan")
 
 
-def test_spec_v2_declares_version_and_pipeline_calls() -> None:
-    assert SCHEDULED_TASKS_SPEC["spec_version"] == 2
+def test_spec_v3_declares_version_and_pipeline_calls() -> None:
+    assert SCHEDULED_TASKS_SPEC["spec_version"] == 3
     calls = _conflict_scan_spec()["calls"]
     tools_entries = [call for call in calls if "tool" in call]
     assert [call["task"] for call in tools_entries] == ["scan_pipeline", "scan_queue"]
@@ -297,10 +297,16 @@ def test_spec_v2_declares_version_and_pipeline_calls() -> None:
 def test_spec_note_carries_kick_and_queue_semantics() -> None:
     notes = [call["note"] for call in _conflict_scan_spec()["calls"] if "note" in call]
     combined = " ".join(notes).lower()
-    assert "spec_version=2" in combined
-    assert "scan_queue" in combined
-    assert "judgment queue" in combined
+    assert "spec_version=3" in combined
+    assert "machine-cleared" in combined
     assert "rebuild" in combined
+    # v3: the weekly task's note carries the queue-judgment semantics.
+    weekly = next(t for t in SCHEDULED_TASKS_SPEC["tasks"] if t["name"] == "workspace_anomaly_check")
+    weekly_notes = " ".join(c["note"] for c in weekly["calls"] if "note" in c).lower()
+    assert "judgment-queue" in weekly_notes
+    assert "scan_queue" in weekly_notes
+    assert "no user verification step" in weekly_notes
+    assert "verify with the user" not in weekly_notes
 
 
 def test_spec_sample_calls_pass_validation_registry(tmp_path) -> None:
@@ -380,5 +386,5 @@ def test_scan_candidates_echoes_spec_drift_hint(tmp_path: Path) -> None:
     assert result["ok"] is True, result
     echo = result["data"].get("scheduled_tasks_spec")
     assert echo is not None
-    assert echo["spec_version"] == 2
+    assert echo["spec_version"] == 3
     assert "scan_pipeline" in echo["drift"]

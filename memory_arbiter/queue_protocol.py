@@ -442,9 +442,10 @@ class QueueProtocol:
         self, index: int, status: str, reason: str, raw: dict[str, Any],
     ) -> dict[str, Any]:
         from .constants import (
-            NORMALIZE_MIN_CONF, NORMALIZE_VOTE_NEIGHBORS, NORMALIZE_VOTE_SHARE_MIN,
+            NORMALIZE_MIN_CONF, NORMALIZE_VOTE_NEIGHBORS,
             PROTECTED_WORKSPACES,
         )
+        from .normalize_gate import normalize_gate
         from .scan_pipeline import _workspace_identity
 
         if status not in {"confirmed", "dismissed"}:
@@ -496,20 +497,22 @@ class QueueProtocol:
         if vote is None:
             return {"index": index, "outcome": "gate_failed", "gate": "vote_unavailable",
                     "memory_id": memory_id}
-        top_bucket, share, neighbours = vote
-        if top_bucket != target or share < NORMALIZE_VOTE_SHARE_MIN:
+        votes, own_bucket, neighbours = vote
+        passed, gate_evidence = normalize_gate(votes, own_bucket)
+        if gate_evidence["top_bucket"] != target or not passed:
             return {
                 "index": index, "outcome": "gate_failed", "gate": "vote",
-                "memory_id": memory_id, "top_bucket": top_bucket,
-                "share": share, "neighbours": neighbours,
+                "memory_id": memory_id, "top_bucket": gate_evidence["top_bucket"],
+                "share": gate_evidence["top_votes"], "neighbours": neighbours,
             }
-        moved, warnings = self._execute_auto_move(memory_id, current, target, vote, conf)
+        moved, warnings = self._execute_auto_move(memory_id, current, target, gate_evidence, conf)
         if not moved:
             return {"index": index, "outcome": "move_failed", "warnings": warnings}
         self._expire_workspace_rows(memory_id, "confirmed", reason)
         return {
             "index": index, "outcome": "moved", "memory_id": memory_id,
-            "from": current, "to": target, "vote": {"top": top_bucket, "share": share},
+            "from": current, "to": target,
+            "vote": {"top": gate_evidence["top_bucket"], "share": gate_evidence["top_votes"]},
             "warnings": warnings,
         }
 
@@ -547,9 +550,10 @@ class QueueProtocol:
         })
         return mentioned if len(mentioned) >= 2 else []
 
-    def _workspace_vote(self, memory_id: int) -> "tuple[str, int, int] | None":
-        """Decision-time vector vote (E7①: 现算票). Returns (top_foreign_bucket,
-        its_share, neighbours_checked); None without vectors/numpy."""
+    def _workspace_vote(self, memory_id: int) -> "tuple[dict[str, int], str, int] | None":
+        """Decision-time vector vote (E7①: 现算票). Returns (votes, own_bucket,
+        neighbours_checked); None without vectors/numpy. Judged by the shared
+        normalize_gate at the call site — this method only counts votes."""
         try:
             import numpy as np
         except ImportError:
@@ -577,19 +581,15 @@ class QueueProtocol:
         for col in order:
             bucket = workspaces[all_ids[int(col)]]
             votes[bucket] = votes.get(bucket, 0) + 1
-        # The gate vote mirrors the suspect vote: the memory's OWN bucket is
-        # not a move candidate — a top that is the current bucket means the
-        # content peers agree with the placement and the gate must fail.
-        votes.pop(own, None)
-        top_bucket, top_votes = max(votes.items(), key=lambda item: item[1], default=("", 0))
-        return top_bucket, top_votes, k
+        # The own bucket stays in the dict: normalize_gate excludes it before
+        # judging (a top that is the current bucket means the content peers
+        # agree with the placement and the gate must fail).
+        return votes, own, k
 
     def _execute_auto_move(
         self, memory_id: int, current: str, target: str,
-        vote: "tuple[str, int, int]", conf: float,
+        gate_evidence: dict[str, Any], conf: float,
     ) -> "tuple[bool, list[str]]":
-        from .constants import NORMALIZE_VOTE_SHARE_MIN
-
         try:
             with self.db.write_transaction() as conn:
                 moved, move_warnings = self.db.workspaces.move_memory_workspace_on_conn(
@@ -602,9 +602,7 @@ class QueueProtocol:
                          memory_id, from_workspace, to_workspace, gate, status, created_at)
                        VALUES(?,?,?,?, 'applied', ?)""",
                     (int(memory_id), current, target,
-                     json.dumps({"vote_top": vote[0], "vote_share": f"{vote[1]}/{vote[2]}",
-                                 "share_min": NORMALIZE_VOTE_SHARE_MIN, "conf": conf},
-                                ensure_ascii=False),
+                     json.dumps({**gate_evidence, "conf": conf}, ensure_ascii=False),
                      utc_now_iso()),
                 )
             return True, move_warnings

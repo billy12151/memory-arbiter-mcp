@@ -248,14 +248,17 @@ SCAN_PIPELINE_KICK_TIME_BUDGET_S = 45.0
 SCAN_PIPELINE_KICK_MAX_MEMORIES = 400
 SCAN_PIPELINE_NEIGHBOR_K = 10
 
-# 0.16.0 workspace-normalization gate (plan §6⑫, E7 gate spec — measured on
-# the real library: mis-moves 0 after the gate, residuals are true ambiguity).
+# 0.16.0 workspace-normalization gate (plan §6⑫); 0.16.2 recalibrates the
+# vote threshold from the absolute >=8/10 (based on the 930/950 cases owner
+# later re-adjudicated as true moves) to a proportional gate judged ONLY
+# through normalize_gate.normalize_gate — five consumers, one function.
 # Protected buckets (E6 + owner confirm): NO autonomous move in either
 # direction — persona isolation depends on it. Manual authorized moves are
 # unaffected; protected-involved suspects surface as user hints only.
 PROTECTED_WORKSPACES = frozenset({"mema-twin", "mema-twin-dev"})
 NORMALIZE_VOTE_NEIGHBORS = 10
-NORMALIZE_VOTE_SHARE_MIN = 8  # top bucket share >= 8/10
+NORMALIZE_VOTE_MIN_FOREIGN = 4  # top foreign bucket absolute floor
+NORMALIZE_FOREIGN_SHARE_MIN = 0.60  # top foreign votes / all foreign votes
 NORMALIZE_MIN_CONF = 0.8
 
 # HTTP transport fixed surface
