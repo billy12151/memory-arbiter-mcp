@@ -13,7 +13,7 @@ from ..constants import (
     SEMANTIC_MAX_EXAMINED_PAIRS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
-from ..difference_classifier import classify_pair
+from ..difference_classifier import classify_pair, internal_noise_pair
 from ..evidence import evidence_content_hash, local_text_units
 from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
@@ -253,6 +253,12 @@ class EvidencePipeline:
                     continue
                 internal_decision = decide_evidence(unit_a.text, unit_b.text)
                 if internal_decision.action == "ignore":
+                    continue
+                # 0.16.3 structural noise shapes (table slices, note-meta
+                # lines) never are contradictions — same gate as the scan
+                # side (live-library calibrated, 27/280 rows, zero false
+                # kills in sampling).
+                if internal_noise_pair(unit_a.text, unit_b.text):
                     continue
                 if internal_decision.action != "notify":
                     if internal_decision.reason != "numeric_value_candidate":

@@ -177,6 +177,9 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     purged = _purge_terminal_queue_rows(conn)
     if purged:
         applied.append(purged)
+    quieted = _dismiss_internal_noise_rows(conn)
+    if quieted:
+        applied.append(quieted)
     conn.commit()
     return applied
 
@@ -435,6 +438,43 @@ def _purge_terminal_queue_rows(conn: sqlite3.Connection) -> str:
         (_PURGE_QUEUE_KEY, json.dumps(counts, sort_keys=True)),
     )
     return f"queue_purge(total={total}, {counts})"
+
+
+_INTERNAL_NOISE_KEY = "internal_noise_rule_v1"
+
+
+def _dismiss_internal_noise_rows(conn: sqlite3.Connection) -> str:
+    """One-shot: dismiss pending internal rows matching the 0.16.3 structural
+    noise shapes (table slices, note-meta lines) so the agent never sees the
+    stock the new gate would not have produced. Guard-keyed, runs once; new
+    writes/scans are filtered upstream by internal_noise_pair.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_INTERNAL_NOISE_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    from ..difference_classifier import internal_noise_pair
+
+    rows = conn.execute(
+        "SELECT id, quote_a, quote_b FROM internal_conflicts WHERE status='pending'"
+    ).fetchall()
+    dismissed = 0
+    for row in rows:
+        if internal_noise_pair(str(row["quote_a"] or ""), str(row["quote_b"] or "")):
+            conn.execute(
+                "UPDATE internal_conflicts SET status='dismissed', "
+                "decided_reason='structural noise (table/meta-line rule v1)', "
+                "decided_at=?, updated_at=? WHERE id=?",
+                (utc_now_iso(), utc_now_iso(), int(row["id"])),
+            )
+            dismissed += 1
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_INTERNAL_NOISE_KEY, f"dismissed={dismissed}"),
+    )
+    return f"internal_noise_dismissal({dismissed})" if dismissed else ""
 
 
 def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:

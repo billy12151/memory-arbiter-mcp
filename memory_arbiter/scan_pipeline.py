@@ -24,7 +24,7 @@ from typing import Any, TYPE_CHECKING
 
 from .constants import SCAN_MACHINE_ROUTE_TOP_K
 from .db_generation import CONFLICT_DETECTOR_VERSION
-from .difference_classifier import classify_pair, is_garbage
+from .difference_classifier import classify_pair, internal_noise_pair, is_garbage
 from .semantic_conflict import decide_evidence
 
 if TYPE_CHECKING:
@@ -383,7 +383,7 @@ class ScanPipeline:
         duplicates/evolution and never become queue work. Without this the
         scan would resurrect what write-time cleared.
         """
-        from .difference_classifier import classify_pair
+        from .difference_classifier import classify_pair, internal_noise_pair
 
         landed = 0
         count = len(units)
@@ -399,6 +399,10 @@ class ScanPipeline:
                     continue
                 decision = decide_evidence(str(a["text"]), str(b["text"]))
                 if decision.action == "ignore":
+                    continue
+                # 0.16.3 structural noise shapes — same gate as the
+                # write-time internal examination.
+                if internal_noise_pair(str(a["text"]), str(b["text"])):
                     continue
                 if decision.action != "notify":
                     if decision.reason != "numeric_value_candidate":

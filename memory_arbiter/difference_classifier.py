@@ -50,6 +50,52 @@ _PUNCT_RE = re.compile(r"[\s\W_]+", re.UNICODE)
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]")
 
 
+# ── internal (same-memory) noise shapes (0.16.3, live-library calibrated) ──
+# Two structural shapes that rule-fire as contradictions but never are:
+#
+# 1. Markdown TABLE units: a status matrix re-sliced into several units makes
+#    its ENUM values (待受理/已受理/已完成) collide with the polarity/todo
+#    word lists — 26/280 live rows, sampled all false. Row-level table
+#    semantics are beyond the rules; a genuine in-table contradiction is
+#    agent work via other channels, not a unit-pair rule.
+# 2. Quote META lines ("> 更新：… | 来源：… | 对应文档：…"): evolution
+#    stamps of the note itself, not claims.
+#
+# Deliberately NOT added: a cosine gate for internal numeric pairs. The
+# cross-memorory calibration (low cos = coincidence) does NOT transfer —
+# inside ONE document, two sentences stating DIFFERENT values of the same
+# metric are exactly the low-cos shape (live row #34943: "0.29 人力" vs
+# "0.25 人力", cos 0.44, a TRUE conflict). The 0.16.0 genuine-shape gate
+# stays.
+_TABLE_SEPARATOR_RE = re.compile(r"\|-{2,}")
+_META_LINE_RE = re.compile(r"更新|来源|对应文档|原文|链接")
+_META_LINE_MAX_CHARS = 200
+
+
+def _is_table_unit(quote: str) -> bool:
+    return bool(_TABLE_SEPARATOR_RE.search(quote)) or quote.count("|") >= 5
+
+
+def _is_meta_line(quote: str) -> bool:
+    t = quote.strip()
+    return (
+        t.startswith(">")
+        and len(t) <= _META_LINE_MAX_CHARS
+        and bool(_META_LINE_RE.search(t[:40]))
+    )
+
+
+def internal_noise_pair(quote_a: "str | None", quote_b: "str | None") -> bool:
+    """True when a same-memory unit pair is structural noise, never a
+    contradiction (table slices, note-meta lines). Applied by BOTH the
+    write-time internal examination and the scan-side _examine_internal."""
+    a = quote_a or ""
+    b = quote_b or ""
+    if _is_table_unit(a) or _is_table_unit(b):
+        return True
+    return _is_meta_line(a) or _is_meta_line(b)
+
+
 def is_garbage(quote: "str | None") -> bool:
     """Counting label for cleared rows (plan §1.4.1): separator line, bare
     date, or <8 content chars after date/punctuation stripping."""
