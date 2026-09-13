@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # tests/test_golden_validation.py pins did_you_mean suggestions, which come
+  # from difflib.get_close_matches iterating a set. A randomised seed would
+  # exercise the gate against a different iteration order; the golden test
+  # fails loudly rather than skipping when this is unset.
+  PYTHONHASHSEED: "0"
+
 jobs:
   core:
     name: Core / Python ${{ matrix.python-version }}

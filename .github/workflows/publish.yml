@@ -14,6 +14,11 @@ on:
         type: boolean
         default: false
 
+env:
+  # Same reason as ci.yml: the validation golden gate pins set-iteration
+  # order via difflib.get_close_matches.
+  PYTHONHASHSEED: "0"
+
 permissions:
   contents: read
 
