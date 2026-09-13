@@ -197,16 +197,16 @@ def test_boot_clearance_migration_keeps_notify_and_value_shapes(tmp_path: Path) 
         applied = additive.ensure_additive_structures(conn)
     assert any("difference_clearance" in item for item in applied), applied
 
+    # 0.16.2 standing purge: cleared rows are VOIDED then DELETED by the
+    # boot hygiene in the same pass — only the keepers remain pending.
     with tools.db.connection() as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT candidate_key_hash,status,decided_reason FROM scan_queue WHERE kind='conflict'"
+            "SELECT candidate_key_hash,status FROM scan_queue WHERE kind='conflict'"
         ).fetchall()]
     by_hash = {r["candidate_key_hash"]: r["status"] for r in rows}
-    cleared = [r for r in rows if (r["decided_reason"] or "").startswith("difference clearance")]
     assert by_hash.get("b" * 64) == "pending", "notify must survive"
     assert by_hash.get("d" * 64) == "pending", "same-sentence numeric shape must survive"
-    assert len(cleared) == 2, "duplicate paraphrase and cross-sentence numeric must clear"
-    assert all(r["status"] == "voided" for r in cleared)
+    assert len(rows) == 2, "cleared rows must be gone (purged), only keepers remain"
     with tools.db.connection() as conn:
         summary = conn.execute(
             "SELECT value FROM migration_state WHERE key='scan_queue_difference_clearance_v1'"

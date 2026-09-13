@@ -88,8 +88,10 @@ def test_epoch_arm_expires_old_epoch_queue_rows() -> None:
             "SELECT COUNT(*) FROM scan_queue WHERE status='pending'"
         ).fetchone()[0]
     assert pending >= 1
-    # Re-boot with a bumped detector: pending rows expire (epoch mismatch),
-    # never silently carried into the new semantics.
+    # Re-boot with a bumped detector: the old epoch's queue rows are DELETED
+    # outright (owner standing rule — the full round re-judges the library,
+    # so every old-semantics row is residue; deletion also releases the
+    # candidate identities for the fresh re-enqueue).
     import tempfile as tf
     from memory_arbiter.db_generation import CONFLICT_DETECTOR_VERSION as _
     monkey = pytest.MonkeyPatch()
@@ -98,9 +100,8 @@ def test_epoch_arm_expires_old_epoch_queue_rows() -> None:
         db2 = MemoryDB(tools.settings)
         tools2 = MemoryTools(settings=tools.settings, db=db2)
         with tools2.db.connection() as conn:
-            statuses = [str(r[0]) for r in conn.execute(
-                "SELECT status FROM scan_queue WHERE kind='conflict'").fetchall()]
-        assert "pending" not in statuses
-        assert "expired" in statuses
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM scan_queue WHERE kind='conflict'").fetchone()[0]
+        assert remaining == 0, "old-epoch queue rows must be deleted, not carried over"
     finally:
         monkey.undo()
