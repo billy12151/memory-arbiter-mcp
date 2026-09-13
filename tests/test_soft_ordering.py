@@ -198,7 +198,13 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
 
     tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 
-    assert int(notify_peer["id"]) in backend.order[0], "notify pair must be evaluated first"
+    # 0.16.4 §1: cross-memory notify is the evolution domain — it dies at
+    # collection, never reaching the sort or the Qwen loop. The check pair
+    # (subject-overlap) is the only evaluated peer.
+    assert backend.order, "the check pair must still be evaluated"
+    assert all(
+        int(notify_peer["id"]) not in order for order in backend.order
+    ), "evolution-domain peer must not reach the Qwen loop"
 
 
 def test_missing_hint_vector_scores_zero_not_error(tmp_path: Path) -> None:

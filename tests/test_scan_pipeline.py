@@ -287,14 +287,15 @@ def test_legacy_candidate_rows_migrate_to_queue(tmp_path: Path) -> None:
 
 # ── kick engine (commit 4) ─────────────────────────────────────────────────
 
-def test_kick_queues_notify_pair_and_auto_rejects_numeric(tmp_path: Path) -> None:
+def test_kick_excludes_evolution_and_keeps_numeric(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # 0.16.2 fixtures: the notify pair uses the verified polarity shape
-    # ("支持X/不再支持X" does NOT trigger polarity — "该功能包含/不包含" does);
-    # the numeric pair uses the same-sentence two-values shape the difference
-    # classifier keeps for agent judgment (E11③ auto-reject retired).
-    a = _write(tools, "缓存甲", "该功能包含缓存模块")
-    b = _write(tools, "缓存乙", "该功能不包含缓存模块")
+    # 0.16.4 §1: the polarity pair is a cross-memory evolution-domain shape
+    # — is_cross_evolution excludes it BEFORE the rank gate (scan) and the
+    # provenance gate (write-time); it must never queue. The numeric pair
+    # (same-sentence two-values) is the shape the difference classifier
+    # keeps for agent judgment (E11③ auto-reject retired).
+    a = _write(tools, "演进排除甲", "该功能包含缓存模块")
+    b = _write(tools, "演进排除乙", "该功能不包含缓存模块")
     n1 = _write(tools, "版本快照甲", "重试次数为 3 次")
     n2 = _write(tools, "版本快照乙", "重试次数为 5 次")
     assert tools.wait_evidence_worker_drained(timeout=10)
@@ -305,20 +306,103 @@ def test_kick_queues_notify_pair_and_auto_rejects_numeric(tmp_path: Path) -> Non
     assert data["complete"] is True
     assert data["pending_memories"] == 0
 
-    counts = tools.db.scan_queue.counts()
     with tools.db.connection() as conn:
         rows = conn.execute("SELECT kind,member_versions FROM scan_queue").fetchall()
     queued_member_sets = [
         {int(m["memory_id"]) for m in json.loads(row["member_versions"])}
         for row in rows if row["kind"] == "conflict"
     ]
-    # the notify pair must be queued (real-signal recall has no threshold)
-    assert {a, b} in queued_member_sets, queued_member_sets
+    # evolution-domain pair: excluded on BOTH paths (write-time KNN + scan)
+    assert {a, b} not in queued_member_sets, queued_member_sets
     # the same-sentence numeric pair is kept by the classifier and enqueued
-    # for agent judgment — machine numeric rejection rows are retired
     assert {n1, n2} in queued_member_sets, queued_member_sets
     auto_reject_rows = tools.db.list_conflicts(status="not_a_conflict", source="scan_numeric_autoreject")
     assert auto_reject_rows == [], auto_reject_rows
+
+
+def test_evolution_excluded_write_time_no_notice(tmp_path: Path) -> None:
+    """Write-time path of the 0.16.4 exclusion: a polarity pair whose
+    entity/scope metadata is aligned (so the provenance gate would NOT kill
+    it — hit metadata is joined live from memories) still produces no
+    semantic notice and no queue row. The only remaining killer is the
+    evolution-domain exclusion: the earliest kill, ahead of provenance."""
+    tools = make_tools(tmp_path)
+    a = _write(tools, "写时演进甲", "该功能包含缓存模块", tags=["x"])
+    b = _write(tools, "写时演进乙", "该功能不包含缓存模块", tags=["x"])
+    assert tools.memory_set_entity(a, "网关", "路由")["data"]["updated"]
+    assert tools.memory_set_entity(b, "网关", "路由")["data"]["updated"]
+    # Version lift re-runs the write-time evidence loop with metadata live.
+    tools.memory("update", {"memory_id": b, "new_content": "该功能不包含缓存模块与限流", "reason": "evo"})
+    assert tools.wait_evidence_worker_drained(timeout=10)
+    with tools.db.connection() as conn:
+        notices = conn.execute(
+            "SELECT COUNT(*) FROM conflicts WHERE source='semantic_evidence'"
+        ).fetchone()[0]
+        queued = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE kind='conflict'"
+        ).fetchone()[0]
+    assert notices == 0, "跨记忆演进对写时不得产生 semantic notice"
+    assert queued == 0, "跨记忆演进对不得入队"
+
+
+def test_evolution_retroactive_migration_idempotent(tmp_path: Path) -> None:
+    """The additive one-shot voids pending notify stock exactly once."""
+    tools = make_tools(tmp_path)
+    a = _write(tools, "迁移甲", "重试次数为 3 次")
+    b = _write(tools, "迁移乙", "重试次数为 5 次")
+    assert tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT candidate_key_hash FROM scan_queue WHERE kind='conflict' AND status='pending'"
+        ).fetchone()
+    assert row is not None
+    # Forge two pending notify-shaped rows (the stock 0.16.4 clears) and
+    # reset the migration guard so this boot replays the "upgraded binary
+    # first meets the stocked library" moment (the make_tools boot above
+    # already wrote the guard against an empty queue).
+    now = "2026-09-13T00:00:00+00:00"
+    with tools.db.write_transaction() as conn:
+        conn.execute("DELETE FROM migration_state WHERE key='scan_pipeline_evolution_void_v1'")
+        for reason in ("polarity_changed", "todo_resolved"):
+            conn.execute(
+                """INSERT INTO scan_queue(kind,workspace_canonical,status,candidate_key_hash,
+                     member_versions,evidence,reason,severity,source,detail,created_at,updated_at)
+                   VALUES('conflict','ws','pending',?,'[]','[]',?,'normal','scan_pipeline',NULL,?,?)""",
+                (f"{'f' * 60}{reason[:4]}", reason, now, now),
+            )
+    # Re-boot triggers the additive completion (one-shot, guard-keyed).
+    from memory_arbiter.db import MemoryDB
+
+    db2 = MemoryDB(tools.settings)
+    with db2.connection() as conn:
+        pending_notify = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE status='pending' "
+            "AND (reason LIKE '%todo_resolved%' OR reason LIKE '%polarity_changed%')"
+        ).fetchone()[0]
+        voided = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE status='voided' "
+            "AND (reason LIKE '%todo_resolved%' OR reason LIKE '%polarity_changed%')"
+        ).fetchone()[0]
+        kept = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE status='pending' AND kind='conflict'"
+        ).fetchone()[0]
+    assert pending_notify == 0, "存量 notify 行必须全部 voided"
+    assert voided == 2
+    assert kept == 1, "numeric 行不受迁移影响"
+    # Idempotent: a third boot keeps the guard (no re-run) and — per the
+    # standing boot hygiene — the voided rows are DELETED outright, which is
+    # the designed terminal path, not a migration failure.
+    db3 = MemoryDB(tools.settings)
+    with db3.connection() as conn:
+        guard = conn.execute(
+            "SELECT value FROM migration_state WHERE key='scan_pipeline_evolution_void_v1'"
+        ).fetchone()
+        pending_after = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE status='pending' AND kind='conflict'"
+        ).fetchone()[0]
+    assert guard and guard[0] == "voided=2", "迁移守卫键保留（幂等）"
+    assert pending_after == 1, "numeric 行跨 boot 存活"
 
 
 def test_kick_idempotent_rescan_no_duplicate_queue_rows(tmp_path: Path) -> None:
@@ -341,10 +425,11 @@ def test_kick_idempotent_rescan_no_duplicate_queue_rows(tmp_path: Path) -> None:
 
 def test_edit_lifts_suppression_and_requeues_new_identity(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # 0.16.2: use the polarity-notify shape — it always queues (the old
-    # postgres similarity pair is now machine-cleared as a duplicate).
-    a = _write(tools, "编辑甲", "该功能包含缓存模块")
-    b = _write(tools, "编辑乙", "该功能不包含缓存模块")
+    # 0.16.4: the numeric shape (same-sentence two-values) is the reliable
+    # cross-memory fixture — the polarity shape is the excluded evolution
+    # domain now.
+    a = _write(tools, "编辑甲", "重试次数为 3 次")
+    b = _write(tools, "编辑乙", "重试次数为 5 次")
     assert tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
@@ -364,7 +449,9 @@ def test_edit_lifts_suppression_and_requeues_new_identity(tmp_path: Path) -> Non
     tools.db.mark_scanned(a, tools.db.get_memory(a)["version"])
     tools.db.mark_scanned(b, tools.db.get_memory(b)["version"])
     # Edit one memory → version lift → new identity → clean re-queue
-    tools.memory("update", {"memory_id": a, "new_content": "该功能包含缓存模块与限流", "reason": "edit"})
+    # (keep the pure numeric sentence shape — extra prose shifts the
+    # skeleton and the difference classifier clears the pair).
+    tools.memory("update", {"memory_id": a, "new_content": "重试次数为 7 次", "reason": "edit"})
     assert tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:

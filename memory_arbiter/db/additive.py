@@ -180,6 +180,9 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     quieted = _dismiss_internal_noise_rows(conn)
     if quieted:
         applied.append(quieted)
+    evolution_voided = _void_evolution_queue_rows(conn)
+    if evolution_voided:
+        applied.append(evolution_voided)
     conn.commit()
     return applied
 
@@ -475,6 +478,44 @@ def _dismiss_internal_noise_rows(conn: sqlite3.Connection) -> str:
         (_INTERNAL_NOISE_KEY, f"dismissed={dismissed}"),
     )
     return f"internal_noise_dismissal({dismissed})" if dismissed else ""
+
+
+_EVOLUTION_VOID_KEY = "scan_pipeline_evolution_void_v1"
+
+
+def _void_evolution_queue_rows(conn: sqlite3.Connection) -> str:
+    """One-shot (0.16.4 §1): pending cross-memory notify queue rows → voided.
+
+    The evolution-domain exclusion (is_cross_evolution) means the pipeline
+    no longer produces todo_resolved/polarity_changed rows at all — the
+    pending stock the old semantics queued is cleared so the agent never
+    judges it. ``voided`` (not not_a_conflict): the identity is RELEASED on
+    purpose — if the exclusion ever misses a path, the pair re-enqueues and
+    surfaces the gap instead of being suppressed silent. Guard-keyed, runs
+    once; the standing boot purge (_purge_terminal_queue_rows) deletes the
+    voided rows on a later boot.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_EVOLUTION_VOID_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    now = utc_now_iso()
+    cur = conn.execute(
+        "UPDATE scan_queue SET status='voided', "
+        "decided_reason='0.16.4 evolution-domain exclusion (retroactive clear)', "
+        "decided_at=?, updated_at=? "
+        "WHERE status='pending' AND kind='conflict' "
+        "AND (reason LIKE '%todo_resolved%' OR reason LIKE '%polarity_changed%')",
+        (now, now),
+    )
+    voided = int(cur.rowcount or 0)
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_EVOLUTION_VOID_KEY, f"voided={voided}"),
+    )
+    return f"evolution_void({voided})" if voided else ""
 
 
 def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:

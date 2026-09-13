@@ -121,8 +121,8 @@ def test_detector_bump_does_not_resurrect_dismissed_pairs(monkeypatch, tmp_path)
     from memory_arbiter.db import evidence_store as _es
 
     tools = make_tools(tmp_path)
-    a = _write(tools, "换代甲", "该功能包含缓存模块")
-    b = _write(tools, "换代乙", "该功能不包含缓存模块")
+    a = _write(tools, "换代甲", "重试次数为 3 次")
+    b = _write(tools, "换代乙", "重试次数为 5 次")
     assert tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
@@ -130,7 +130,7 @@ def test_detector_bump_does_not_resurrect_dismissed_pairs(monkeypatch, tmp_path)
             "SELECT candidate_key_hash FROM scan_queue "
             "WHERE kind='conflict' AND status='pending'"
         ).fetchone()
-    assert row is not None, "polarity notify 对必须入队"
+    assert row is not None, "numeric 对（同句双值）必须入队"
     dismissed_hash = row["candidate_key_hash"]
 
     # The agent dismisses through the REAL submit channel: the disposition

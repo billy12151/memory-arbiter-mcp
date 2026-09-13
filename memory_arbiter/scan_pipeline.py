@@ -25,7 +25,7 @@ from typing import Any, TYPE_CHECKING
 from .constants import SCAN_MACHINE_ROUTE_TOP_K
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .difference_classifier import classify_pair, internal_noise_pair, is_garbage
-from .semantic_conflict import decide_evidence
+from .semantic_conflict import decide_evidence, is_cross_evolution
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
@@ -305,30 +305,38 @@ class ScanPipeline:
                 decision = decide_evidence(str(unit["text"]), str(hit.get("text") or ""))
                 if decision.action == "ignore":
                     continue
-                # 0.16.2 §1.5: machine-decidable check routes generate only
-                # within the top-3 neighbour ranks; notify keeps top-10.
-                if decision.action != "notify" and text_rank > SCAN_MACHINE_ROUTE_TOP_K:
+                # 0.16.4 §1: cross-memory evolution domain (todo/polarity
+                # snapshots) is excluded BEFORE any machine route — it never
+                # reaches the rank gate, the classifier, or the queue. The
+                # todo-closure reminder keeps its dedicated channel
+                # (linked_open_items); the same predicate guards the
+                # write-time KNN loop (§0.5 single implementation).
+                if is_cross_evolution(decision):
                     continue
-                if decision.action == "check":
-                    # 0.16.2 §1.4: difference-based clearance — check-route
-                    # pairs must carry an extractable value difference or they
-                    # are duplicates/evolution noise. Cleared pairs are
-                    # counted, never enqueued, never landed in conflicts.
-                    if peer_id not in peer_entities:
-                        peer_record = self.db.get_memory(peer_id)
-                        peer_entities[peer_id] = (
-                            self._entity_of(peer_record) if peer_record else None
-                        )
-                    verdict = classify_pair(
-                        str(unit["text"]), str(hit.get("text") or ""),
-                        route=str(decision.reason or ""),
-                        entity_a=entity_a, entity_b=peer_entities[peer_id],
+                # 0.16.2 §1.5: machine-decidable check routes generate only
+                # within the top-3 neighbour ranks (notify kept top-10 until
+                # 0.16.4 excluded it here — only check shapes remain).
+                if text_rank > SCAN_MACHINE_ROUTE_TOP_K:
+                    continue
+                # 0.16.2 §1.4: difference-based clearance — check-route
+                # pairs must carry an extractable value difference or they
+                # are duplicates/evolution noise. Cleared pairs are
+                # counted, never enqueued, never landed in conflicts.
+                if peer_id not in peer_entities:
+                    peer_record = self.db.get_memory(peer_id)
+                    peer_entities[peer_id] = (
+                        self._entity_of(peer_record) if peer_record else None
                     )
-                    if verdict == "clear":
-                        outcome["machine_cleared"] += 1
-                        if is_garbage(str(unit["text"])) or is_garbage(str(hit.get("text") or "")):
-                            outcome["cleared_garbage"] += 1
-                        continue
+                verdict = classify_pair(
+                    str(unit["text"]), str(hit.get("text") or ""),
+                    route=str(decision.reason or ""),
+                    entity_a=entity_a, entity_b=peer_entities[peer_id],
+                )
+                if verdict == "clear":
+                    outcome["machine_cleared"] += 1
+                    if is_garbage(str(unit["text"])) or is_garbage(str(hit.get("text") or "")):
+                        outcome["cleared_garbage"] += 1
+                    continue
                 refs, candidate_key, candidate_hash = self._pair_identity(
                     memory_id, version, unit, peer_id, hit,
                 )
@@ -502,7 +510,9 @@ class ScanPipeline:
             member_versions=members,
             evidence=evidence,
             reason="; ".join([decision.reason]) if decision.reason else decision.action,
-            severity="high" if decision.action == "notify" else "normal",
+            # 0.16.4 §1: notify pairs no longer enqueue (evolution domain),
+            # so the severity split lost its high branch — one value.
+            severity="normal",
             source="scan_pipeline",
             detail={
                 "action": decision.action,

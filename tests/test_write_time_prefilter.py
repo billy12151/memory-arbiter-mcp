@@ -137,7 +137,7 @@ def test_keep_shape_check_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -
 def test_notify_pair_passes_both_gates(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    # Polarity shape WITH a number so the strict test backend can extract
+    # Polarity shape WITH a number so the strict test backend could extract
     # values (notify routing is decided by 包含/不包含, the number only
     # feeds the gate envelope).
     peer = tools.memory_write(
@@ -151,7 +151,11 @@ def test_notify_pair_passes_both_gates(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
-    assert backend.calls == 2, "notify pairs are never classifier-filtered (pass provenance only)"
+    # 0.16.4 §1: a cross-memory notify pair IS the evolution domain — the
+    # exclusion kills it BEFORE the provenance gate, so the backend never
+    # sees it (previously "notify pairs are never classifier-filtered",
+    # backend.calls == 2).
+    assert backend.calls == 0, "evolution-domain pairs must not reach Qwen"
 
 
 def test_clear_hit_does_not_burn_peer_slot(tmp_path: Path, monkeypatch) -> None:

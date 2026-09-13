@@ -22,6 +22,7 @@ from ..semantic_conflict import (
     SemanticBackend,
     decide_evidence,
     evaluate_pair_extractions,
+    is_cross_evolution,
     notice_dedupe_key,
     signal_extraction,
 )
@@ -296,18 +297,19 @@ class EvidencePipeline:
         # 0.16.2 write-time pre-gates (owner, data-driven): two deterministic
         # filters run in the KNN collection loop, BEFORE the per-peer dedup —
         # a cleared representative would otherwise burn a peer slot that a
-        # notify/keep hit of the same peer could have taken (live-library
+        # kept hit of the same peer could have taken (live-library
         # simulation: 86 slots recoverable).
+        # Gate 0 (0.16.4 §1, evolution domain): cross-memory notify shapes
+        # die above, before all of the following — timeline phenomena are
+        # not conflicts.
         # Gate 1 (provenance, zero loss): a notice needs BOTH sides' entity
         # AND scope metadata present and equal (the post-Qwen slot builder
         # drops anything else with slot_provenance_insufficient) — skipping
         # early saves the two Qwen inferences per pair. Cheapest and biggest
         # kill (~95% of representatives), so it runs FIRST.
-        # Gate 2 (difference classifier, check routes only): no extractable
-        # value difference means the pair can never satisfy Qwen's
-        # same-attribute-different-value gate. notify routes NEVER pass this
-        # gate — rule-confirmed real signals keep unbounded recall; they do
-        # pass gate 1 (it is lossless for them too).
+        # Gate 2 (difference classifier): no extractable value difference
+        # means the pair can never satisfy Qwen's same-attribute-different-
+        # value gate.
         provenance_filtered = 0
         no_difference_filtered = 0
         raw_own_meta = record.get("metadata")
@@ -340,6 +342,13 @@ class EvidencePipeline:
                 decision = decide_evidence(unit.text, str(hit.get("text") or ""))
                 if decision.action == "ignore":
                     continue
+                # 0.16.4 §1: cross-memory evolution domain — the earliest
+                # kill. It happens BEFORE the provenance gate, so a notify
+                # shape never consumes provenance/classifier work, a peer
+                # slot, a sort position, or Qwen budget. Same predicate as
+                # the scan side (§0.5 single implementation).
+                if is_cross_evolution(decision):
+                    continue
                 peer_id = int(hit["memory_id"])
                 raw_hit_meta = hit.get("metadata")
                 if isinstance(raw_hit_meta, str) and raw_hit_meta:
@@ -356,18 +365,17 @@ class EvidencePipeline:
                 ):
                     provenance_filtered += 1
                     continue
-                if decision.action == "check" and classify_pair(
+                if classify_pair(
                     unit.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
                 ) == "clear":
                     no_difference_filtered += 1
                     continue
                 existing = by_peer.get(peer_id)
-                priority = 2 if decision.action == "notify" else 1
-                existing_priority = 2 if existing and existing[2].action == "notify" else 1
                 closer = existing is not None and float(hit.get("distance") or 9) < float(existing[0].get("distance") or 9)
-                # A deterministic notify must never be demoted to a weaker
-                # check decision by a merely closer neighbour.
-                if existing is None or priority > existing_priority or (priority == existing_priority and closer):
+                # 0.16.4 §1: only check shapes reach here now, so the
+                # notify-priority protection lost its subject — the closer
+                # neighbour of the same peer wins outright.
+                if existing is None or closer:
                     by_peer[peer_id] = (hit, unit, decision)
         if truncation_reason:
             # E10① order guarantee: internal findings land BEFORE the cross
@@ -400,9 +408,9 @@ class EvidencePipeline:
         backend = self._ensure_semantic_backend()
         # C4 soft ordering (⑦ 定案): rank same-level pairs by subject+tags
         # overlap before distance — the Qwen budget should spend on pairs the
-        # owner's signals (subject/tag) already flag as related. Deterministic
-        # notify pairs stay first (never demoted by the score); zero-overlap
-        # pairs are only ordered later, never excluded.
+        # owner's signals (subject/tag) already flag as related. Zero-overlap
+        # pairs are only ordered later, never excluded. (0.16.4 §1: the
+        # notify-first key lost its subject — only check shapes remain.)
         from ..semantic_conflict import vector_cosine
 
         hint_vectors = self.db.memories.subject_tags_vectors(
@@ -419,7 +427,6 @@ class EvidencePipeline:
         ordered = sorted(
             by_peer.items(),
             key=lambda item: (
-                item[1][2].action != "notify",
                 -overlap_rank.get(item[0], 0.0),
                 float(item[1][0].get("distance") or 9),
             ),
@@ -673,7 +680,9 @@ class EvidencePipeline:
             ]
             outcome = self.db.record_semantic_notice(
                 memory_id=memory_id, peer_id=peer_id,
-                severity="high" if decision.action == "notify" else "normal",
+                # 0.16.4 §1: cross-memory notify is excluded at collection,
+                # so the write-time notice severity is uniformly normal.
+                severity="normal",
                 notice_type="semantic_evidence",
                 title=f"Possible memory change with #{peer_id}", message=decision.reason,
                 payload={

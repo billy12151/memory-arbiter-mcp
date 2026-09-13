@@ -115,15 +115,17 @@ def test_notify_pairs_queue_from_deep_ranks(tmp_path: Path) -> None:
     finally:
         pipeline.db.evidence.knn = original_knn
     sets = _conflict_member_sets(tools)
-    assert {a, notify_peer} in sets, "notify pairs queue from any rank"
+    # 0.16.4 §1: the evolution-domain exclusion runs BEFORE the rank gate —
+    # a notify peer at ANY rank (deep or shallow) never queues.
+    assert {a, notify_peer} not in sets, "evolution-domain pairs queue from no rank"
 
 
 def test_notify_pairs_survive_numeric_autoreject_suppression(tmp_path: Path) -> None:
     """Owner ⑩: scan_numeric_autoreject rows no longer suppress notify pairs
     (91/121 real notify pairs were refs-subset shadowed by them)."""
     tools = make_tools(tmp_path)
-    a = _write(tools, "解蔽甲", "该功能包含缓存模块")
-    b = _write(tools, "解蔽乙", "该功能不包含缓存模块")
+    a = _write(tools, "解蔽甲", "重试次数为 3 次")
+    b = _write(tools, "解蔽乙", "重试次数为 5 次")
     assert tools.wait_evidence_worker_drained(timeout=10)
     version_a = int(tools.db.get_memory(a)["version"] or 1)
     version_b = int(tools.db.get_memory(b)["version"] or 1)
@@ -133,7 +135,7 @@ def test_notify_pairs_survive_numeric_autoreject_suppression(tmp_path: Path) -> 
             "memory_id": a, "version": version_a,
             "attribute_raw": None, "value_raw": None,
             "normalized_attribute": None, "normalized_value": None,
-            "evidence_quote": "该功能包含缓存模块", "evidence_span": [0, 10],
+            "evidence_quote": "重试次数为 3 次", "evidence_span": [0, 10],
             "content_hash": "x" * 64, "evidence_unit": 1,
             "direction": "deterministic", "prompt_version": None,
             "detector_version": CONFLICT_DETECTOR_VERSION,
@@ -142,7 +144,7 @@ def test_notify_pairs_survive_numeric_autoreject_suppression(tmp_path: Path) -> 
             "memory_id": b, "version": version_b,
             "attribute_raw": None, "value_raw": None,
             "normalized_attribute": None, "normalized_value": None,
-            "evidence_quote": "该功能不包含缓存模块", "evidence_span": [0, 11],
+            "evidence_quote": "重试次数为 5 次", "evidence_span": [0, 11],
             "content_hash": "y" * 64, "evidence_unit": 1,
             "direction": "deterministic", "prompt_version": None,
             "detector_version": CONFLICT_DETECTOR_VERSION,
@@ -160,7 +162,10 @@ def test_notify_pairs_survive_numeric_autoreject_suppression(tmp_path: Path) -> 
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     assert kick["ok"], kick
     sets = _conflict_member_sets(tools)
-    assert {a, b} in sets, "the notify pair must NOT be silenced by the machine row"
+    # 0.16.4: the surviving cross-memory shape is the numeric check pair;
+    # the ⑩ semantic stands — a machine audit row is not a suppression
+    # source, so the live pair still queues.
+    assert {a, b} in sets, "the kept numeric pair must NOT be silenced by the machine row"
 
 
 def test_boot_clearance_migration_keeps_notify_and_value_shapes(tmp_path: Path) -> None:

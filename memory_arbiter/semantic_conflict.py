@@ -364,6 +364,20 @@ def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
     return EvidenceDecision("ignore", "insufficient_local_evidence")
 
 
+def is_cross_evolution(decision: EvidenceDecision) -> bool:
+    """0.16.4 §1/§0.5: cross-memory evolution-domain pairs.
+
+    ``notify`` shapes (todo state transitions, polarity snapshots) across
+    memories are a timeline phenomenon, not a semantic conflict ("v1 chose
+    A, later B looked better" is normal). Both producers — the scan pipeline
+    and the write-time KNN loop — exclude them through THIS single predicate
+    so the exclusion logic can never fork into two copies. Same-memory
+    internal pairs are NOT affected: the in-memory contradiction duty stays
+    (internal notify goes through the Qwen final review instead, §2).
+    """
+    return decision.action == "notify"
+
+
 def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
     left_tokens = _tokens(left_text)
     right_tokens = _tokens(right_text)

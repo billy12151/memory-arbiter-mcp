@@ -78,11 +78,13 @@ def test_judge_all_then_no_resurrection_e2e(tmp_path: Path) -> None:
 
 
 def _run(tools: MemoryTools) -> None:
-    # ── seed: polarity pair + numeric pair + self-contradiction + fillers ─
-    p1 = _write(tools, "演进甲", "该功能包含缓存模块。")
-    p2 = _write(tools, "演进乙", "该功能不包含缓存模块。")
-    _write(tools, "数值甲", "生产环境数据库端口设置为 5432。")
-    _write(tools, "数值乙", "生产环境数据库端口设置为 5433。")
+    # ── seed: numeric pair + self-contradiction + fillers + evolution pair ─
+    # 0.16.4: the polarity pair is the excluded evolution domain — it seeds
+    # the exclusion assertion, not the judgment workload.
+    e1 = _write(tools, "演进甲", "该功能包含缓存模块。")
+    e2 = _write(tools, "演进乙", "该功能不包含缓存模块。")
+    p1 = _write(tools, "数值甲", "生产环境数据库端口设置为 5432。")
+    p2 = _write(tools, "数值乙", "生产环境数据库端口设置为 5433。")
     _write(tools, "自相矛盾", "## 配置甲\n超时时间为 30 秒。\n## 配置乙\n超时时间为 60 秒。")
     for i in range(4):
         _write(tools, f"填充主题{i}", f"园区通行证流程第{i}条说明。")
@@ -93,6 +95,13 @@ def _run(tools: MemoryTools) -> None:
     kick = _kick(tools, max_memories=500, time_budget_s=180.0)
     assert kick["complete"] is True, kick
     assert _pending_conflicts(tools) > 0, "种子对必须入队"
+    with tools.db.connection() as conn:
+        queued_sets = [
+            {int(m["memory_id"]) for m in json.loads(r[0])}
+            for r in conn.execute(
+                "SELECT member_versions FROM scan_queue WHERE kind='conflict'").fetchall()
+        ]
+    assert {e1, e2} not in queued_sets, "演进域对真 embedder 下也不得入队"
     _drain(tools)
     page = _page(tools)
     assert page["items"] == [] and int(page.get("queue_backlog") or 0) == 0, "判完后队列必须清零"
@@ -143,7 +152,7 @@ def _run(tools: MemoryTools) -> None:
 
     # ── 4) escape hatch: an edit lifts suppression for THAT member only ──
     tools.memory("update", {
-        "memory_id": p2, "new_content": "该功能不包含缓存模块，改为包含 Redis 缓存。",
+        "memory_id": p2, "new_content": "生产环境数据库端口设置为 5434。",
         "reason": "e2e edit lift",
     })
     assert tools.wait_evidence_worker_drained(timeout=120)

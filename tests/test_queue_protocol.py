@@ -32,10 +32,11 @@ def _submit(tools: MemoryTools, decisions):
 
 def test_page_returns_pair_items_with_evidence_quotes(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # 0.16.2: polarity-notify shape — similarity-only pairs are machine-
-    # cleared now, so page-assembly fixtures must use a queued shape.
-    a = _write(tools, "协议甲", "该功能包含缓存模块")
-    b = _write(tools, "协议乙", "该功能不包含缓存模块")
+    # 0.16.4: numeric shape (same-sentence two-values) — the only reliable
+    # cross-memory fixture (similarity-only pairs machine-clear; polarity
+    # pairs are the excluded evolution domain).
+    a = _write(tools, "协议甲", "重试次数为 3 次")
+    b = _write(tools, "协议乙", "重试次数为 5 次")
     tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
@@ -51,9 +52,11 @@ def test_page_returns_pair_items_with_evidence_quotes(tmp_path: Path) -> None:
 
 def test_page_closure_merges_pairs_sharing_a_member(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = _write(tools, "闭包甲", "该功能包含缓存模块")
-    b = _write(tools, "闭包乙", "该功能不包含缓存模块")
-    c = _write(tools, "闭包丙", "该功能不包含缓存模块与限流")
+    # 0.16.4: three same-sentence numeric values → three pairwise suspects
+    # sharing members → closure into one group.
+    a = _write(tools, "闭包甲", "重试次数为 3 次")
+    b = _write(tools, "闭包乙", "重试次数为 5 次")
+    c = _write(tools, "闭包丙", "重试次数为 7 次")
     tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
@@ -80,11 +83,11 @@ def test_page_includes_internal_conflicts(tmp_path: Path) -> None:
 
 def test_submit_dismiss_lands_not_a_conflict_and_expires_queue_row(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # 0.16.2: notify-shaped fixture (similarity-only pairs never queue now);
-    # queue-source dismissal suppression is unaffected by the ⑩ exclusion,
-    # which filters only scan_numeric_autoreject rows.
-    a = _write(tools, "驳回甲", "该功能包含缓存模块")
-    b = _write(tools, "驳回乙", "该功能不包含缓存模块")
+    # 0.16.4: numeric shape — polarity fixtures no longer queue (evolution
+    # domain); queue-source dismissal suppression is unaffected by the ⑩
+    # exclusion, which filters only scan_numeric_autoreject rows.
+    a = _write(tools, "驳回甲", "重试次数为 3 次")
+    b = _write(tools, "驳回乙", "重试次数为 5 次")
     tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
