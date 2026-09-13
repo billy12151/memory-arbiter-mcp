@@ -49,7 +49,11 @@ SCHEMA_MIGRATIONS = {
 # with same-memory internal examination and queue-landed suspects (plan #971
 # E10/E11) — a real detection-semantic change, so the epoch re-arms a full
 # round (watermark-NULL arm + this stamped identity).
-CONFLICT_DETECTOR_VERSION = "attribute-value-v2"
+# v3 (0.16.2): difference-based clearance at enqueue time, top-3 rank gate for
+# machine-decidable routes, proportional normalize gate, and the write-time
+# pre-gates with unified internal Qwen slot extraction (plan #977 §1.1-§1.9)
+# — same treatment: the epoch re-arms one full round under the new semantics.
+CONFLICT_DETECTOR_VERSION = "difference-classifier-v3"
 LEGACY_DERIVED_TABLES = {
     "memory_claims", "memories_vec", "memory_sections_vec",
 }
