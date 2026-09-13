@@ -64,12 +64,22 @@ class QueueProtocol:
         # Priority: workspace suspects first (rare, cheap to judge, gate
         # autonomous moves), then internal contradictions, then conflict
         # groups — a big conflict backlog must not starve the other kinds.
-        for row in self._fetch_workspace_rows(scope):
+        for row in self._fetch_workspace_rows(page_token, scope):
             if len(items) >= page_size:
                 break
             if not self._row_visible(row):
                 continue
             items.append(self._workspace_item(row, meta_cache))
+            # The cursor advances through workspace rows too: a page whose
+            # items are all workspace/internal used to echo the caller's
+            # token back unchanged (0 on the first page), which a
+            # defensive agent reads as a pagination loop and stops early
+            # (live repro 2026-09-13: the weekly task judged 67 of 125
+            # suspects, never reached a single conflict pair, and exited
+            # believing it was done). Judgement-free rows no longer block
+            # the page either — the next page moves past them instead of
+            # re-serving the same head forever.
+            last_id = max(last_id, int(row["id"]))
         if len(items) < page_size:
             # Internal items are capped per page: a fragment-noise flood in
             # the internal structure must never starve conflict judgment.
@@ -106,6 +116,14 @@ class QueueProtocol:
         remaining = self.db.scan_queue_backlog() + len(
             self.db.internal_conflicts.list_pending(limit=10**6)
         )
+        if not items and page_token > 0 and remaining > 0:
+            # Cursor wrap-around: the pass advanced past every row but some
+            # backlog remains (rows the caller skipped or failed to judge).
+            # Returning an empty page with the echoed token would signal a
+            # pagination loop; restart from the head instead so the agent
+            # gets another pass over the survivors. Terminates: the wrapped
+            # call runs with page_token=0 and cannot re-enter this branch.
+            return self.page(page_size=page_size, page_token=0, caller=caller)
         response: dict[str, Any] = {
             "ok": True,
             "items": items[:page_size],
@@ -307,7 +325,7 @@ class QueueProtocol:
             ),
         }
 
-    def _fetch_workspace_rows(self, scope=None) -> list[dict[str, Any]]:
+    def _fetch_workspace_rows(self, after_id: int = 0, scope=None) -> list[dict[str, Any]]:
         if not self.db.db_available:
             return []
         scope_sql, scope_params = self._scope_sql("workspace_canonical", scope)
@@ -319,8 +337,8 @@ class QueueProtocol:
                     """SELECT id,kind,workspace_canonical,status,candidate_key_hash,
                               member_versions,evidence,reason,severity,source,detail
                        FROM scan_queue WHERE status='pending' AND kind='workspace'
-                       """ + scope_sql + " ORDER BY id LIMIT ?",
-                    (*scope_params, ASSEMBLY_WINDOW),
+                           AND id>? """ + scope_sql + " ORDER BY id LIMIT ?",
+                    (int(after_id), *scope_params, ASSEMBLY_WINDOW),
                 ).fetchall()
         except Exception:
             return []
