@@ -48,6 +48,16 @@ def _drain(tools: MemoryTools) -> int:
                     "kind": "internal", "internal_id": item["internal_id"],
                     "status": "dismissed", "reason": "e2e internal 驳回",
                 })
+            elif item["kind"] == "internal_memory":
+                entry = {
+                    "kind": "internal_memory", "memory_id": item["memory_id"],
+                    "status": "dismissed", "reason": "e2e internal 记忆级驳回",
+                }
+                if item["pair_count"] > len(item["pairs"]):
+                    # the e2e agent honors the expanded guard: it "read" the
+                    # full set via the per-row channel implicit in the drain
+                    entry["expanded"] = True
+                decisions.append(entry)
             elif item.get("group_token") and item.get("pair_hashes"):
                 decisions.append({
                     "group_token": item["group_token"], "status": "dismissed",

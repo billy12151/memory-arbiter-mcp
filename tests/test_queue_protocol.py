@@ -74,9 +74,15 @@ def test_page_includes_internal_conflicts(tmp_path: Path) -> None:
     tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
-    internals = [item for item in page["items"] if item["kind"] == "internal"]
+    # 0.16.4 §3: one aggregated item per MEMORY (kind internal_memory).
+    internals = [item for item in page["items"] if item["kind"] == "internal_memory"]
     assert internals, page
-    assert internals[0]["quote_a"] and internals[0]["quote_b"]
+    item = internals[0]
+    assert item["pair_count"] >= 1
+    assert item["pairs"], "聚合页必须带 pairs 预览"
+    assert item["pairs"][0]["quote_a"] and item["pairs"][0]["quote_b"]
+    assert item["pairs"][0]["internal_id"]
+    assert item["reasons_summary"], "聚合页必须带 reason 分布"
 
 
 # ── dismissal (suppression source) ─────────────────────────────────────────
@@ -231,20 +237,153 @@ def test_submit_confirm_with_stale_versions_expires_row(tmp_path: Path) -> None:
 # ── internal decisions ─────────────────────────────────────────────────────
 
 def test_submit_internal_dismiss(tmp_path: Path) -> None:
+    """Per-row channel (downward compatible): the aggregated page carries
+    internal_id per pair, the per-row submit stays operational."""
     tools = make_tools(tmp_path)
     _write(tools, "自相矛盾协议2", "## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。")
     tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
-    internals = [item for item in page["items"] if item["kind"] == "internal"]
+    internals = [item for item in page["items"] if item["kind"] == "internal_memory"]
     assert internals
     result = _submit(tools, [
-        {"kind": "internal", "internal_id": internals[0]["internal_id"],
+        {"kind": "internal", "internal_id": internals[0]["pairs"][0]["internal_id"],
          "status": "dismissed", "reason": "兼容配置"}
     ])
     assert result["ok"], result
     assert result["results"][0]["outcome"] == "dismissed"
     assert tools.db.internal_conflicts.counts().get("dismissed") == 1
+
+
+# ── 0.16.4 §3: memory-level aggregation + batched dispositions ─────────────
+
+_FIVE_VALUES = (
+    "## 配置一\n超时时间为 30 秒。\n## 配置二\n超时时间为 40 秒。\n"
+    "## 配置三\n超时时间为 50 秒。\n## 配置四\n超时时间为 60 秒。\n"
+    "## 配置五\n超时时间为 70 秒。"
+)
+
+
+def _internal_page_item(tools) -> dict:
+    page = _page(tools)
+    internals = [item for item in page["items"] if item["kind"] == "internal_memory"]
+    assert internals, page
+    return internals[0]
+
+
+def test_internal_memory_page_caps_pairs_preview(tmp_path: Path) -> None:
+    """Five value sections → 10 pairs; the page shows a preview of 8 with
+    the FULL pair_count and the reason distribution."""
+    tools = make_tools(tmp_path)
+    _write(tools, "五值矛盾", _FIVE_VALUES)
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    item = _internal_page_item(tools)
+    assert item["pair_count"] >= 10, item["pair_count"]
+    assert len(item["pairs"]) == 8, len(item["pairs"])
+    assert sum(item["reasons_summary"].values()) == item["pair_count"]
+
+
+def test_internal_memory_dismiss_clears_whole_memory_no_resurrect(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "五值清空", _FIVE_VALUES)
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    item = _internal_page_item(tools)
+    assert item["pair_count"] > 8  # guard applies; expanded=true passes below
+    result = _submit(tools, [{
+        "kind": "internal_memory", "memory_id": mid,
+        "status": "dismissed", "reason": "枚举值对照非矛盾", "expanded": True,
+    }])
+    assert result["ok"], result
+    entry = result["results"][0]
+    assert entry["outcome"] == "dismissed", entry
+    assert entry["updated"] == entry["pair_count"] > 0
+    assert tools.db.internal_conflicts.list_pending() == [], "整记忆清空"
+    with tools.db.connection() as conn:
+        dismissed = conn.execute(
+            "SELECT COUNT(*) FROM internal_conflicts WHERE memory_id=? AND status='dismissed'",
+            (mid,),
+        ).fetchone()[0]
+    assert dismissed == entry["pair_count"]
+    # exists() blocks the scan re-examination (no resurrection).
+    tools.db.clear_all_scan_watermarks()
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    assert kick["ok"], kick
+    assert not any(r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid)
+
+
+def test_internal_memory_expanded_guard(tmp_path: Path) -> None:
+    """pair_count beyond the preview cap: a memory-level dismissal without
+    expanded=true is rejected with the read-first instruction; the guard is
+    waived for resolved and for within-cap dismissals."""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "五值守卫", _FIVE_VALUES)
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    item = _internal_page_item(tools)
+    assert item["pair_count"] > 8
+    refused = _submit(tools, [{
+        "kind": "internal_memory", "memory_id": mid,
+        "status": "dismissed", "reason": "盲判尝试",
+    }])
+    assert refused["ok"] is False, refused
+    assert refused["results"][0]["outcome"] == "invalid_input"
+    assert "expanded=true" in refused["results"][0]["error"]
+    assert tools.db.internal_conflicts.list_pending(), "拒后行不得被翻"
+    # resolved carries no guard (misuse is auditable, not silent).
+    ok = _submit(tools, [{
+        "kind": "internal_memory", "memory_id": mid,
+        "status": "resolved", "reason": "确认真矛盾",
+    }])
+    assert ok["ok"], ok
+
+
+def test_internal_memory_version_guard_leaves_drifted_rows(tmp_path: Path) -> None:
+    """A version lift between page and submit (raw lift — no write-time
+    re-examination): drifted pending rows stay for expire_stale; the
+    memory-level UPDATE only touches current-version rows."""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "五值漂移", _FIVE_VALUES)
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    assert _internal_page_item(tools)
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET version=version+1 WHERE id=?", (mid,))
+    result = _submit(tools, [{
+        "kind": "internal_memory", "memory_id": mid,
+        "status": "dismissed", "reason": "迟到的判定",
+    }])
+    entry = result["results"][0]
+    assert entry["outcome"] == "stale_snapshot", entry
+    with tools.db.connection() as conn:
+        drifted = conn.execute(
+            "SELECT COUNT(*) FROM internal_conflicts WHERE memory_id=? AND status='pending'",
+            (mid,),
+        ).fetchone()[0]
+    assert drifted > 0, "漂移行留给 expire_stale，不混入 decided 口径"
+
+
+def test_internal_memory_not_found_and_mixed_batch(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    a = _write(tools, "混合甲", "重试次数为 3 次")
+    b = _write(tools, "混合乙", "重试次数为 5 次")
+    mid = _write(tools, "混合矛盾", "## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。")
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    page = _page(tools)
+    conflict_item = next(i for i in page["items"] if i["kind"] == "conflict")
+    result = _submit(tools, [
+        {"kind": "internal_memory", "memory_id": mid, "status": "dismissed", "reason": "批量"},
+        {"candidate_key_hash": conflict_item["pairs"][0]["candidate_key_hash"],
+         "status": "dismissed", "reason": "混合批"},
+        {"kind": "internal_memory", "memory_id": 999999, "status": "dismissed", "reason": "无此记忆"},
+    ])
+    assert result["ok"], result
+    outcomes = [r["outcome"] for r in result["results"]]
+    assert outcomes[0] == "dismissed"
+    assert outcomes[1] == "dismissed"
+    assert outcomes[2] == "not_found"
 
 
 # ── backlog visibility stays doctor-side only (§6㉑⑦) ──────────────────────

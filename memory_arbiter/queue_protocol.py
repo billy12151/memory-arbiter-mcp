@@ -37,6 +37,11 @@ MAX_PAGE_SIZE = 30
 GROUP_MEMBER_CAP = 10
 # Fetch window for group assembly per page call (rows, not groups).
 ASSEMBLY_WINDOW = 400
+# 0.16.4 §3: per-memory internal aggregation — pairs preview cap per page
+# item. The FULL count travels as pair_count; a memory-level dismissal of a
+# pair_count beyond this cap requires expanded=true (the agent read every
+# pair via batch_read hits or the per-row channel first).
+INTERNAL_PAIRS_CAP = 8
 
 
 class QueueProtocol:
@@ -81,15 +86,18 @@ class QueueProtocol:
             # re-serving the same head forever.
             last_id = max(last_id, int(row["id"]))
         if len(items) < page_size:
-            # Internal items are capped per page: a fragment-noise flood in
-            # the internal structure must never starve conflict judgment.
+            # Internal items are capped per page (0.16.4 §3: one aggregated
+            # row per MEMORY — information-dense items, and the cap keeps a
+            # fragment-noise flood from starving conflict judgment).
             internal_cap = min(3, page_size)
-            for row in self.db.internal_conflicts.list_pending(limit=internal_cap):
+            for group in self.db.internal_conflicts.list_pending_grouped(
+                limit_memories=internal_cap, pairs_cap=INTERNAL_PAIRS_CAP,
+            ):
                 if len(items) >= page_size:
                     break
-                if not self._member_visible(int(row["memory_id"])):
+                if not self._member_visible(int(group["memory_id"])):
                     continue
-                items.append(self._internal_item(row, meta_cache))
+                items.append(self._internal_memory_item(group, meta_cache))
         if len(items) < page_size:
             rows = self._fetch_conflict_rows(page_token, scope)
             for group in self._assemble_groups(rows):
@@ -310,21 +318,38 @@ class QueueProtocol:
             } for row in group["pairs"]],
         }
 
-    def _internal_item(self, row: dict[str, Any], cache: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    def _internal_memory_item(self, group: dict[str, Any], cache: dict[int, dict[str, Any]]) -> dict[str, Any]:
+        """0.16.4 §3: one judgment item per MEMORY — pairs cap 8 preview,
+        full pair_count, reason distribution. The judgment unit is the
+        memory, so no dedicated cursor: a disposition rolls the page."""
+        memory_id = int(group["memory_id"])
+        pairs = [
+            {
+                "internal_id": int(row["id"]),
+                "quote_a": row.get("quote_a"),
+                "quote_b": row.get("quote_b"),
+                "span_a": row.get("span_a"),
+                "span_b": row.get("span_b"),
+                "reason": row.get("reason"),
+            }
+            for row in group["pairs"]
+        ]
         return {
-            "kind": "internal",
-            "internal_id": int(row["id"]),
-            "memory_id": int(row["memory_id"]),
-            "memory_version": int(row["memory_version"]),
-            "member_meta": {str(row["memory_id"]): self._member_meta(int(row["memory_id"]), cache)},
-            "quote_a": row.get("quote_a"),
-            "quote_b": row.get("quote_b"),
-            "span_a": row.get("span_a"),
-            "span_b": row.get("span_b"),
-            "reason": row.get("reason"),
+            "kind": "internal_memory",
+            "memory_id": memory_id,
+            "pair_count": int(group["pair_count"]),
+            "pairs": pairs,
+            "reasons_summary": group.get("reasons_summary") or {},
+            "member_meta": {str(memory_id): self._member_meta(memory_id, cache)},
             "instruction": (
-                "One memory contradicting itself: dismiss if compatible, or fix the memory "
-                "(memory action='update') — the row auto-stales once the version lifts."
+                "One memory contradicting itself (aggregated: the pairs list is a "
+                f"preview of up to {INTERNAL_PAIRS_CAP}, pair_count is the full total). "
+                "Dismiss the whole memory with {kind:'internal_memory', memory_id, "
+                "status:'dismissed', reason} — if pair_count exceeds the preview, first "
+                "read EVERY pair (memory action='batch_read', content_mode='hits', spans "
+                "from the pairs' span_a/span_b) and resubmit with expanded=true. Resolve "
+                "only for confirmed real contradictions. Fixing the memory "
+                "(memory action='update') also works — rows auto-stale on version lift."
             ),
         }
 
@@ -447,6 +472,50 @@ class QueueProtocol:
                     key: value for key, value in outcome.items() if key != "outcome"
                 }}
             return {"index": index, "kind": "internal", **outcome}
+        if kind == "internal_memory":
+            # 0.16.4 §3: one disposition clears a memory's whole pending set.
+            memory_id = raw.get("memory_id")
+            if not isinstance(memory_id, int) or isinstance(memory_id, bool) or memory_id <= 0:
+                return {"index": index, "outcome": "invalid_input",
+                        "error": "internal_memory decisions need a positive integer memory_id"}
+            if status not in {"dismissed", "resolved"}:
+                return {"index": index, "outcome": "invalid_input",
+                        "error": "internal_memory decisions accept status dismissed|resolved"}
+            if not self._member_visible(memory_id):
+                # Same fail-closed rule as per-row dispositions.
+                return {"index": index, "outcome": "not_found", "memory_id": memory_id}
+            pair_count = self.db.internal_conflicts.pending_pair_count(memory_id)
+            if pair_count == 0:
+                # No current-version pending rows: already judged (idempotent
+                # green not_found) or version-drifted (stale_snapshot) —
+                # decide_memory tells them apart.
+                outcome = self.db.internal_conflicts.decide_memory(memory_id, status, reason=reason)
+                return {"index": index, "kind": "internal_memory", "memory_id": memory_id,
+                        "pair_count": 0, **outcome}
+            if (
+                status == "dismissed"
+                and pair_count > INTERNAL_PAIRS_CAP
+                and not bool(raw.get("expanded"))
+            ):
+                # 0.16.4 review P1: the preview showed only INTERNAL_PAIRS_CAP
+                # pairs — dismissing the whole memory sight-unseen is exactly
+                # the blind-judge hole 72% of the live stock sits behind.
+                # expanded=true is the explicit declaration that every pair
+                # was read (batch_read hits / per-row channel).
+                return {
+                    "index": index, "outcome": "invalid_input", "memory_id": memory_id,
+                    "error": (
+                        f"pair_count={pair_count} exceeds the preview cap "
+                        f"({INTERNAL_PAIRS_CAP}): read every pair first "
+                        "(batch_read content_mode='hits' on the pairs' spans, or the "
+                        "per-internal_id channel), then resubmit with expanded=true"
+                    ),
+                }
+            outcome = self.db.internal_conflicts.decide_memory(
+                memory_id, status, reason=reason,
+            )
+            return {"index": index, "kind": "internal_memory", "memory_id": memory_id,
+                    "pair_count": pair_count, **outcome}
         if status not in {"confirmed", "dismissed"}:
             return {"index": index, "outcome": "invalid_input",
                     "error": "status must be confirmed|dismissed"}

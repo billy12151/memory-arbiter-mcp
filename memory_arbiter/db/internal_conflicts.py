@@ -103,6 +103,110 @@ class InternalConflictStore:
         except sqlite3.Error:
             return []
 
+    def list_pending_grouped(
+        self, limit_memories: int = 3, pairs_cap: int = 8,
+    ) -> list[dict[str, Any]]:
+        """0.16.4 §3: per-memory aggregation for the judgment page.
+
+        The judgment unit is the MEMORY (one disposition clears a whole
+        memory), so the page shows one aggregated item per memory: a capped
+        pair preview, the FULL pair_count, and the reason distribution.
+        Current-version active memories only — the same JOIN predicate as
+        list_pending; drifted rows never render.
+        """
+        if not self._db._db_available:
+            return []
+        try:
+            with self._db.connection() as conn:
+                mem_rows = conn.execute(
+                    """SELECT i.memory_id, COUNT(*) AS pair_count, MIN(i.created_at) AS first_at
+                       FROM internal_conflicts i JOIN memories m ON m.id=i.memory_id
+                       WHERE i.status='pending' AND m.version=i.memory_version
+                         AND m.status='active'
+                       GROUP BY i.memory_id ORDER BY first_at, i.memory_id LIMIT ?""",
+                    (max(1, int(limit_memories)),),
+                ).fetchall()
+                groups: list[dict[str, Any]] = []
+                for mem in mem_rows:
+                    mid = int(mem["memory_id"])
+                    rows = conn.execute(
+                        """SELECT * FROM internal_conflicts
+                           WHERE memory_id=? AND status='pending'
+                             AND memory_version=(SELECT version FROM memories WHERE id=?)
+                           ORDER BY created_at, id LIMIT ?""",
+                        (mid, mid, max(1, int(pairs_cap))),
+                    ).fetchall()
+                    dist = conn.execute(
+                        """SELECT reason, COUNT(*) AS c FROM internal_conflicts
+                           WHERE memory_id=? AND status='pending'
+                             AND memory_version=(SELECT version FROM memories WHERE id=?)
+                           GROUP BY reason""",
+                        (mid, mid),
+                    ).fetchall()
+                    groups.append({
+                        "memory_id": mid,
+                        "pair_count": int(mem["pair_count"]),
+                        "pairs": [_decode_row(row) for row in rows],
+                        "reasons_summary": {str(r["reason"]): int(r["c"]) for r in dist},
+                    })
+            return groups
+        except sqlite3.Error:
+            return []
+
+    def pending_pair_count(self, memory_id: int) -> int:
+        """Current-version pending pair count for one memory (guard input)."""
+        if not self._db._db_available:
+            return 0
+        try:
+            with self._db.connection() as conn:
+                row = conn.execute(
+                    """SELECT COUNT(*) FROM internal_conflicts i
+                       JOIN memories m ON m.id=i.memory_id
+                       WHERE i.memory_id=? AND i.status='pending'
+                         AND m.version=i.memory_version AND m.status='active'""",
+                    (int(memory_id),),
+                ).fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.Error:
+            return 0
+
+    def decide_memory(self, memory_id: int, status: str, *, reason: str = "") -> dict[str, Any]:
+        """0.16.4 §3: judge one memory's WHOLE pending set in one call.
+
+        The version guard updates only current-version active rows — drifted
+        rows stay for expire_stale (decided vs stale audit separation). A
+        dismissed/resolved set then blocks scan re-examination via exists().
+        """
+        if status not in {"dismissed", "resolved"}:
+            return {"outcome": "invalid_status"}
+        if not self._db._db_available or not self._db.state.sqlite_writable:
+            return {"outcome": "unavailable"}
+        now = utc_now_iso()
+        with self._db.write_transaction() as conn:
+            cur = conn.execute(
+                """UPDATE internal_conflicts SET status=?, decided_reason=?, decided_at=?, updated_at=?
+                   WHERE memory_id=? AND status='pending'
+                     AND EXISTS(SELECT 1 FROM memories m
+                                WHERE m.id=internal_conflicts.memory_id
+                                  AND m.version=internal_conflicts.memory_version
+                                  AND m.status='active')""",
+                (status, reason, now, now, int(memory_id)),
+            )
+            updated = int(cur.rowcount or 0)
+        if not updated:
+            try:
+                with self._db.connection() as conn:
+                    drifted = conn.execute(
+                        "SELECT 1 FROM internal_conflicts WHERE memory_id=? AND status='pending' LIMIT 1",
+                        (int(memory_id),),
+                    ).fetchone()
+            except sqlite3.Error:
+                drifted = None
+            if drifted is not None:
+                return {"outcome": "stale_snapshot", "updated": 0}
+            return {"outcome": "not_found", "updated": 0}
+        return {"outcome": status, "updated": updated}
+
     def decide(self, internal_id: int, status: str, *, reason: str = "") -> dict[str, Any]:
         if status not in {"dismissed", "resolved", "stale"}:
             return {"outcome": "invalid_status"}

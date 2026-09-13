@@ -1127,7 +1127,8 @@ class ProductSurfaces:
         if data is not None and not isinstance(data, dict):
             return self._invalid_product_call("memory_repair", "data must be a JSON object", task)
         task = str(task or "help").strip().lower()
-        self._normalize_boolean_fields(payload, "authorized", "dry_run", "clear")
+        # "expanded" (0.16.4): the internal_memory blind-judge guard flag.
+        self._normalize_boolean_fields(payload, "authorized", "dry_run", "clear", "expanded")
         if task == "help":
             return self.db.state.response(self._product_help("memory_repair", self._help_topic(payload, "task")))
         if task == "rebuild_evidence":
