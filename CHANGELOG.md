@@ -3,6 +3,23 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.2] — 2026-09-13
+
+### Changed
+
+- **Difference-based conflict clearance (scan + write paths).** A conflict must carry an extractable value difference: check-route pairs are classified at enqueue time by the new `difference_classifier` (numeric route: character-bigram cosine ≥ 0.50 keeps same-sentence two-value shapes; similarity route: small token symmetric difference — common ≥ 2, unique ≤ 2 per side — keeps literal value-difference shapes); everything else is machine-cleared, counted in the kick response (`machine_cleared_total`), and never lands in `conflicts`. notify-route pairs (polarity/todo) are never classifier-filtered — real-signal recall has no threshold. The scan queue shrank from ~27.8k pending pairs to the keep set.
+- **Workspace normalization gate recalibrated** from the absolute ≥8/10 vote to a proportional gate (top foreign bucket ≥ 4 votes AND ≥ 60% of all foreign votes), judged through one shared `normalize_gate` helper by all five consumers (suspect generation, decision-time vote, share check, audit payload, weekly backstop). The old calibration was based on two cases the owner re-adjudicated as true moves.
+- **Write-time conflict check gains two pre-gates** (before Qwen): the slot-provenance requirement (both sides' entity+scope metadata present and equal) moved from post-Qwen to the KNN collection loop, and the difference classifier clears no-difference check pairs — Qwen now only sees provenance-viable keepers (typically zero to a few pairs per write instead of up to 10×2 inferences).
+- **Internal (same-memory) contradictions unified with the cross-memory flow**: check-route keepers go through the same Qwen slot extraction (shared pairs budget); a definitive semantic negative lands as a persistent `dismissed` veto the scan re-examination cannot resurrect; technical failure or missing backend falls open (unannotated pending, 0.16.0 behavior). scan-side `_examine_internal` applies the same classifier gate.
+- **Weekly workspace anomaly check lands findings in the judgment queue** (`kind='workspace'`) instead of workspace_review notices; `SCHEDULED_TASKS_SPEC_VERSION` bumped to 3 (rebuild host tasks on upgrade — the "verify with the user" wording is gone, the agent judges via the gate).
+
+### Fixed
+
+- **Numeric auto-reject rows no longer suppress pairs** (`scan_numeric_autoreject` excluded from the suppression loader): 91 of 121 real notify pairs were refs-shadowed by machine rows; the retired E11③ mechanism leaves only audit history (no new rows are written; same-sentence numeric pairs enqueue for agent judgment).
+- **Detector-epoch queue handover deletes instead of expires.** On a `CONFLICT_DETECTOR_VERSION` change the whole queue is cleared (work queue, not an archive — decision outcomes live in `conflicts`/memories) so the full round re-enqueues keepers under the new semantics without identity collisions; the 0.16.0 expiry kept the original hashes and would have blocked re-enqueue forever. Terminal queue rows (`voided/expired/dismissed/confirmed`) are also purged at every boot (pending/in_review untouched).
+- **mema-twin write routing**: writes/moves/pending activations resolving to `mema-twin` from any caller other than the twin itself land in `mema-twin-dev` with a redirect notice and a re-prepared canonical embedding (no name-vector poisoning); the twin's own writes are unaffected. Boot migration relocates existing non-twin residents.
+- confirm_pending_workspace redirect no longer writes a confirmed `mema-twin→mema-twin-dev` alias (which would have rerouted the twin's own future writes).
+
 ## [0.16.1] — 2026-09-13
 
 ### Fixed
