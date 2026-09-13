@@ -3,6 +3,13 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.3] — 2026-09-13
+
+### Fixed
+
+- **Queue pagination cursor covers workspace rows** (live repro: the weekly judgment task processed 67 of 125 workspace suspects, judged zero conflict pairs, and exited believing it was done). Two compounding protocol defects, both reasonable-agent traps: `next_page_token` was advanced only by conflict groups, so a workspace-only page echoed the caller's token back unchanged (0 on the first page) — a repeated token is the standard pagination-loop signal; and workspace rows had no cursor, so rows whose confirmation failed the gate (still pending) re-served as the same page head forever. Workspace rows now join the id cursor, and a pass that runs past every row with backlog remaining wraps to the head instead of returning an empty page with an echoed token.
+- **doctor's queue-backlog finding counts internal contradictions** (own table) alongside scan_queue rows, matching the authoritative `queue_backlog` the page protocol reports — a live 954-item workload read as 666.
+
 ## [0.16.2] — 2026-09-13
 
 ### Changed
