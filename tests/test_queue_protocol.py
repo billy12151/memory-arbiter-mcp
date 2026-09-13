@@ -411,3 +411,99 @@ def test_queue_backlog_not_in_user_conflicts_list(tmp_path: Path) -> None:
     assert backlog >= 1
     # User-facing conflict list (default status=open) must stay empty.
     assert tools.db.list_conflicts(status="open") == []
+
+
+# ── 0.16.4 live-judgment review: page byte budget + no-strand merge ─────────
+
+def test_page_caps_group_pair_hashes_preview(tmp_path: Path) -> None:
+    """The hash list is a byte-budget PREVIEW; pair_count stays full."""
+    from memory_arbiter.queue_protocol import GROUP_HASHES_CAP
+
+    tools = make_tools(tmp_path)
+    for i in range(7):
+        _write(tools, f"帽甲{i}", f"重试次数为 {3 + i} 次")
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    page = _page(tools)
+    groups = [i for i in page["items"] if i["kind"] == "conflict" and i["pair_count"] > GROUP_HASHES_CAP]
+    assert groups, "7 成员组必须闭包成 >5 对的组"
+    item = groups[0]
+    assert len(item["pair_hashes"]) == GROUP_HASHES_CAP
+    assert item["pair_count"] > GROUP_HASHES_CAP
+    assert "preview" in page["instruction"]
+
+
+def test_partial_hashes_plus_token_cannot_strand_group(tmp_path: Path) -> None:
+    """Caller holds only the capped preview hashes; token re-assembly merges
+    the rest of the group — zero stranding."""
+    tools = make_tools(tmp_path)
+    for i in range(6):
+        _write(tools, f"合甲{i}", f"超时时间为 {10 + i} 秒")
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    page = _page(tools)
+    group = next(i for i in page["items"] if i["kind"] == "conflict" and i["pair_count"] > 1)
+    result = _submit(tools, [{
+        "group_token": group["group_token"], "status": "dismissed",
+        "reason": "仅带预览 hash 的组级驳回", "pair_hashes": group["pair_hashes"][:1],
+    }])
+    assert result["ok"], result
+    entry = result["results"][0]
+    assert entry["outcome"] == "dismissed"
+    assert len(entry["pairs"]) == group["pair_count"], "必须清完整组（合并补齐）"
+    with tools.db.connection() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE status='pending' AND kind='conflict'"
+        ).fetchone()[0]
+    assert pending == 0, "组残余不得搁浅"
+
+
+def test_token_only_deep_group_full_retrieval(tmp_path: Path, monkeypatch) -> None:
+    """Depth beyond one assembly window: paged full retrieval still finds the
+    complete closure for a token-only disposition."""
+    import memory_arbiter.queue_protocol as qp
+
+    tools = make_tools(tmp_path)
+    for i in range(5):
+        _write(tools, f"深甲{i}", f"刷新次数为 {20 + i} 次")
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    page = _page(tools)
+    group = next(i for i in page["items"] if i["kind"] == "conflict" and i["pair_count"] > 1)
+    # Shrink the fetch window so the group's rows exceed one window: the
+    # paged full retrieval must still assemble the complete closure.
+    monkeypatch.setattr(qp, "ASSEMBLY_WINDOW", 1)
+    result = _submit(tools, [{
+        "group_token": group["group_token"], "status": "dismissed", "reason": "深组 token-only",
+    }])
+    assert result["ok"], result
+    entry = result["results"][0]
+    assert entry["outcome"] == "dismissed"
+    assert len(entry["pairs"]) == group["pair_count"], "窗口外仍须清完整组"
+    with tools.db.connection() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE status='pending' AND kind='conflict'"
+        ).fetchone()[0]
+    assert pending == 0
+
+
+def test_submit_backlog_counts_internal_rows(tmp_path: Path) -> None:
+    """submit()'s queue_backlog matches page()'s semantics (internal rows
+    included) — clearing internal rows must move the number."""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "口径矛盾", "## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。")
+    tools.wait_evidence_worker_drained(timeout=10)
+    tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    page = _page(tools)
+    page_backlog = int(page.get("queue_backlog") or 0)
+    assert page_backlog >= 1
+    internal_rows = tools.db.internal_conflicts.pending_pair_count(mid)
+    assert internal_rows >= 1
+    result = _submit(tools, [{
+        "kind": "internal_memory", "memory_id": mid, "status": "dismissed", "reason": "口径",
+    }])
+    assert result["ok"], result
+    # 与 page() 同口径：internal 清掉的行必须反映在 submit 返回的 backlog 里
+    assert int(result["queue_backlog"]) == page_backlog - internal_rows, (
+        result["queue_backlog"], page_backlog, internal_rows
+    )

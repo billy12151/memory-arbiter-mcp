@@ -42,6 +42,10 @@ ASSEMBLY_WINDOW = 400
 # pair_count beyond this cap requires expanded=true (the agent read every
 # pair via batch_read hits or the per-row channel first).
 INTERNAL_PAIRS_CAP = 8
+# 0.16.4 live-judgment review: group-level hash preview cap — full hash
+# lists dominated real page bytes; group_token dispositions re-assemble the
+# complete group server-side (see _submit_group), so the cap is display-only.
+GROUP_HASHES_CAP = 5
 
 
 def _decision_truthy(value: Any) -> bool:
@@ -156,8 +160,9 @@ class QueueProtocol:
                 "dispositions with memory_repair(task='scan_queue', action='submit'): per-pair "
                 "{candidate_key_hash, status: confirmed|dismissed, reason} + (confirms) "
                 "slot_key + value_groups with display_value per member group. A whole group "
-                "that is noise can be dismissed in one entry with the group's group_token "
-                "plus its pair_hashes. internal_memory items (aggregated per memory): one "
+                "that is noise can be dismissed in one entry with just the group's group_token "
+                "(pair_hashes are a preview; the server re-assembles the whole group). "
+                "internal_memory items (aggregated per memory): one "
                 "{kind:'internal_memory', memory_id, status: dismissed|resolved, reason} "
                 "clears the whole memory — pair_count beyond the pairs preview requires "
                 "reading every pair first and resubmitting with expanded=true. Workspace "
@@ -320,7 +325,11 @@ class QueueProtocol:
             "member_meta": {
                 str(mid): self._member_meta(mid, cache) for mid in sorted(group["member_ids"])
             },
-            "pair_hashes": [str(row["candidate_key_hash"]) for row in group["pairs"]],
+            "pair_hashes": [str(row["candidate_key_hash"]) for row in group["pairs"][:GROUP_HASHES_CAP]],
+            # 0.16.4 live-judgment review: the hash list is a PREVIEW (byte
+            # budget — full lists dominated real pages); pair_count stays the
+            # full total and a group_token disposition re-assembles the whole
+            # group server-side, so the cap cannot strand pairs.
             "pairs": [{
                 "queue_id": int(row["id"]),
                 "candidate_key_hash": row["candidate_key_hash"],
@@ -460,7 +469,12 @@ class QueueProtocol:
         return {
             "ok": ok,
             "results": results,
-            "queue_backlog": self.db.scan_queue_backlog(),
+            # 0.16.4 live-judgment review: same backlog semantics as page()
+            # (scan_queue rows + internal pending) — a mixed submission that
+            # just cleared internal rows must not report an unchanged number.
+            "queue_backlog": self.db.scan_queue_backlog() + len(
+                self.db.internal_conflicts.list_pending(limit=10**6)
+            ),
         }
 
     def _submit_one(self, index: int, raw: Any) -> dict[str, Any]:
@@ -758,6 +772,25 @@ class QueueProtocol:
         except Exception as exc:
             return False, [f"auto move failed: {exc}"]
 
+    def _fetch_all_conflict_rows(self, scope=None) -> list[dict[str, Any]]:
+        """Every pending conflict row, paged past the ASSEMBLY_WINDOW.
+
+        Group-level dispositions must re-assemble the COMPLETE closure even
+        on libraries deeper than one fetch window — a token-only submit on a
+        63-pair group in a large library must not strand the tail. Defensive
+        ceiling keeps a pathological queue bounded.
+        """
+        rows: list[dict[str, Any]] = []
+        cursor = 0
+        ceiling = 50  # 50 × ASSEMBLY_WINDOW(400) = 20k rows defensive cap
+        for _ in range(ceiling):
+            batch = self._fetch_conflict_rows(cursor, scope)
+            rows.extend(batch)
+            if len(batch) < ASSEMBLY_WINDOW:
+                return rows
+            cursor = int(batch[-1]["id"])
+        return rows
+
     def _submit_group(
         self, index: int, group_token: str, status: str, reason: str,
         raw: dict[str, Any],
@@ -768,9 +801,9 @@ class QueueProtocol:
             return {"index": index, "outcome": "invalid_input",
                     "error": "group decisions accept status=dismissed only; confirm per pair"}
         explicit = raw.get("pair_hashes")
-        targets = None
+        targets: list[dict[str, Any]] = []
         if isinstance(explicit, list) and explicit:
-            # Primary path: resolve by the page-supplied pair hashes DIRECTLY
+            # Primary path: resolve by the caller-supplied pair hashes DIRECTLY
             # (no id window, no re-assembly) — per-pair decisions earlier in
             # the same batch or depth beyond the assembly window cannot
             # strand the remaining pairs (adversarial review #5).
@@ -802,13 +835,23 @@ class QueueProtocol:
                 # Already terminal (decided earlier in this batch or a prior
                 # run): dismissing what remains lands the same outcome.
                 reason = f"{reason} (+{missing} already terminal)"
-        if targets is None:
-            rows = self._fetch_conflict_rows(0)
-            wanted = group_token.split(":", 1)[-1]
-            for component in self._assemble_groups(rows):
-                if self._component_token(component["pairs"]) == wanted:
-                    targets = component["pairs"]
-                    break
+        # 0.16.4 live-judgment review: the page now CAPS the displayed
+        # pair_hashes (byte budget — full hash lists dominated real pages),
+        # so a caller may legitimately hold only a subset of the group. The
+        # token re-assembly below runs in ADDITION to the explicit hashes
+        # and merges whatever same-group pending rows it finds — a partial
+        # hash list can never strand the rest of the group. If assembly
+        # cannot find the token (closure drift from same-batch per-pair
+        # decisions, or depth), the explicit hashes remain the fallback.
+        wanted = group_token.split(":", 1)[-1]
+        seen_hashes = {str(row["candidate_key_hash"]) for row in targets}
+        for component in self._assemble_groups(self._fetch_all_conflict_rows()):
+            if self._component_token(component["pairs"]) == wanted:
+                for row in component["pairs"]:
+                    if str(row["candidate_key_hash"]) not in seen_hashes:
+                        targets.append(row)
+                        seen_hashes.add(str(row["candidate_key_hash"]))
+                break
         if not targets:
             return {"index": index, "outcome": "not_found", "group_token": group_token}
         results = [
