@@ -174,6 +174,9 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     cleared = _clearance_migrate_check_route_pairs(conn)
     if cleared:
         applied.append(cleared)
+    purged = _purge_terminal_queue_rows(conn)
+    if purged:
+        applied.append(purged)
     conn.commit()
     return applied
 
@@ -403,6 +406,38 @@ def _clearance_migrate_check_route_pairs(conn: sqlite3.Connection) -> str:
         (_CLEARANCE_KEY, summary),
     )
     return f"difference_clearance({summary})"
+
+
+_PURGE_QUEUE_KEY = "scan_queue_terminal_purge_v1"
+
+
+def _purge_terminal_queue_rows(conn: sqlite3.Connection) -> str:
+    """One-shot (owner call, 0.16.2 live run): DELETE all terminal scan_queue
+    rows — voided/expired/dismissed keep no operational value (suppression
+    lives in ``conflicts``, not here) and ~52k dead rows bloat the table.
+
+    Deleting them also RELEASES their candidate_key_hash identities: the
+    full re-scan under the new detector semantics re-enqueues every pair the
+    difference classifier keeps as fresh pending rows (the pre-fix epoch
+    expiry had left expired rows holding their original hashes, which would
+    have blocked re-enqueue forever). Pending/in_review rows are untouched.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_PURGE_QUEUE_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    counts: dict[str, int] = {}
+    for status in ("voided", "expired", "dismissed"):
+        cur = conn.execute("DELETE FROM scan_queue WHERE status=?", (status,))
+        counts[status] = int(cur.rowcount or 0)
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_PURGE_QUEUE_KEY, json.dumps(counts, sort_keys=True)),
+    )
+    total = sum(counts.values())
+    return f"queue_purge(total={total}, {counts})" if total else ""
 
 
 def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:

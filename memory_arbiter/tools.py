@@ -415,12 +415,31 @@ class MemoryTools:
                 return
             cleared = self.db.clear_all_scan_watermarks()
             try:
+                from .db.additive import voided_identity_hash
+                from .models import utc_now_iso as _now
+
+                now = _now()
                 with self.db.write_transaction() as conn:
-                    conn.execute(
-                        "UPDATE scan_queue SET status='expired', decided_reason=?, "
-                        "updated_at=CURRENT_TIMESTAMP WHERE status IN ('pending','in_review')",
-                        (f"detector epoch change {current_to or 'none'} -> {CONFLICT_DETECTOR_VERSION}",),
-                    )
+                    # Identity MUST be released (hash rewritten) or the
+                    # re-detection under the new semantics computes the SAME
+                    # candidate hash and INSERT OR IGNORE silently swallows
+                    # the re-enqueue — every pending row would be lost for
+                    # good (0.16.2 live run: the plain-status expiry from
+                    # 0.16.0 was exercised for the first time by the v3 bump
+                    # and 248 real rows were unre-enqueueable until this
+                    # rewrite; same pattern as the numeric sweep).
+                    rows = conn.execute(
+                        "SELECT id, candidate_key_hash FROM scan_queue "
+                        "WHERE status IN ('pending','in_review')"
+                    ).fetchall()
+                    for row in rows:
+                        conn.execute(
+                            "UPDATE scan_queue SET status='expired', candidate_key_hash=?, "
+                            "decided_reason=?, updated_at=? WHERE id=?",
+                            (voided_identity_hash(str(row["candidate_key_hash"] or ""), int(row["id"])),
+                             f"detector epoch change {current_to or 'none'} -> {CONFLICT_DETECTOR_VERSION}",
+                             now, int(row["id"])),
+                        )
             except Exception:
                 pass
             self.db.meta.record_scan_epoch_arm(
