@@ -543,7 +543,7 @@ def test_vanish_then_abort_reconciles_without_duplicates(tmp_path: Path, monkeyp
             conn.execute("DELETE FROM memories WHERE id = ?", (doomed_id,))
         return original_prepare(canonical, embedder)
 
-    def flaky_move(conn, memory_id, workspace, *, precomputed_embedding=None):
+    def flaky_move(conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False):
         if int(memory_id) == other_id:
             raise sqlite3.OperationalError("disk I/O error")
         return original_move(
@@ -642,7 +642,7 @@ def test_abort_path_no_double_counting(tmp_path: Path, monkeypatch) -> None:
         assert ok_set, set_warnings
         return original_prepare(canonical, embedder)
 
-    def flaky_move(conn, memory_id, workspace, *, precomputed_embedding=None):
+    def flaky_move(conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False):
         if int(memory_id) == id_c:
             raise sqlite3.OperationalError("disk I/O error")
         return original_move(
@@ -682,7 +682,7 @@ def test_abort_path_drops_vec_publish_warning(tmp_path: Path, monkeypatch) -> No
     store = tools.db.workspaces
     calls: list[int] = []
 
-    def fake_move(conn, memory_id, workspace, *, precomputed_embedding=None):
+    def fake_move(conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False):
         calls.append(int(memory_id))
         if int(memory_id) == id_a:
             return True, [

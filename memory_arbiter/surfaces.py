@@ -282,7 +282,7 @@ class ProductSurfaces:
         "confirm": "Promotes the memory to user_confirmed and locks it against ordinary changes.",
         "rename_workspace_canonical": "Renames a canonical workspace and reroutes all affected memories.",
         "migrate_workspace": "Bulk-moves memories to another canonical workspace and records the alias.",
-        "move_memories_workspace": "Moves the selected memories by id to another workspace bucket (both workspace columns); alias and normalization rules are not changed. Rows whose canonical already diverges from their bucket (e.g. rows written through a confirmed alias) are re-anchored to the destination when authorized.",
+        "move_memories_workspace": "Moves the selected memories by id to another workspace bucket (both workspace columns); alias and normalization rules are not changed. Rows whose canonical already diverges from their bucket (e.g. rows written through a confirmed alias) are re-anchored to the destination when authorized. default_fallback=true + a reason moves memories BACK to the global default pool when no suitable bucket exists (audited + user-notified; use sparingly).",
         "rollback_auto_move": "Reverses ONE autonomous normalization move by its normalize_audit id (0.16.0): restores both workspace columns, voids new-bucket conflict tickets, invalidates the scan watermark, and marks the audit row rolled_back. Manual moves are out of scope; protected-bucket moves never happened autonomously.",
         "confirm_pending_workspace": "Assigns the canonical workspace and activates the pending memory for recall.",
         "confirm_workspaces": "Records the reviewed workspace registry snapshot that doctor's workspace.review diffs against; unconfirmed new workspaces keep the check warning.",
@@ -436,6 +436,12 @@ class ProductSurfaces:
             "confirm_new_workspace": (
                 "Explain the proposed canonical workspace and ask the user to authorize confirmation. After "
                 "approval call memory_govern(action='confirm_pending_workspace') with authorized=true."
+            ),
+            "review_default_fallback": (
+                "Memories were parked in the default pool because no suitable bucket was "
+                "found (default_fallback). Present the list to the user: re-home each via "
+                "authorized memory_govern(action='move_memories_workspace'), or confirm the "
+                "global placement is right. The count is on doctor's normalize board."
             ),
             "review_workspace_registry": (
                 "Run the notice's memory_review(view='doctor') call, inspect the complete workspace "

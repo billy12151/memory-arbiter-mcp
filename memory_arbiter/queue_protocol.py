@@ -138,7 +138,10 @@ class QueueProtocol:
                 "{candidate_key_hash, status: confirmed|dismissed, reason} + (confirms) "
                 "slot_key + value_groups with display_value per member group. A whole group "
                 "that is noise can be dismissed in one entry with the group's group_token "
-                "plus its pair_hashes."
+                "plus its pair_hashes. Workspace suspects: confirmed with target_workspace + "
+                "conf (server re-runs the vote gate); if NO suitable bucket exists, "
+                "confirmed with target_workspace='default' AND fallback=true + reason "
+                "(vote gate waived, audited, reported to the user — use sparingly)."
             ),
         }
         # has_more: any backlog beyond what this page displayed — the queue
@@ -504,6 +507,21 @@ class QueueProtocol:
         if conf < NORMALIZE_MIN_CONF:
             return {"index": index, "outcome": "gate_failed", "gate": "conf",
                     "memory_id": memory_id, "conf": conf}
+        # 0.16.3 default fallback (owner rule): an agent that genuinely
+        # cannot find a suitable bucket may confirm the suspect BACK into
+        # the global default pool — under strict isolation default is the
+        # only bucket outside the caller's own that still participates in
+        # recall. Explicit declaration required, the vector-vote gate is
+        # waived by definition (an unreliable vote IS the "no suitable
+        # bucket" finding), conf >= 0.8 still applies, and the audit trail
+        # plus response hint keep it user-visible.
+        fallback = bool(raw.get("fallback"))
+        if fallback and not is_default_workspace_term(target):
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "fallback=true is only valid with target_workspace=default"}
+        if fallback and not str(reason or "").strip():
+            return {"index": index, "outcome": "invalid_input",
+                    "error": "fallback=true requires a reason (why no suitable bucket exists)"}
         multi = self._multi_family_mentions(record, target)
         if multi:
             # E7-4: multi-family mentions downgrade to a user hint, no move.
@@ -511,28 +529,42 @@ class QueueProtocol:
                                         f"multi-family mention: {multi}")
             return {"index": index, "outcome": "multi_family_hint",
                     "memory_id": memory_id, "families": multi}
-        vote = self._workspace_vote(memory_id)
-        if vote is None:
-            return {"index": index, "outcome": "gate_failed", "gate": "vote_unavailable",
-                    "memory_id": memory_id}
-        votes, own_bucket, neighbours = vote
-        passed, gate_evidence = normalize_gate(votes, own_bucket)
-        if gate_evidence["top_bucket"] != target or not passed:
-            return {
-                "index": index, "outcome": "gate_failed", "gate": "vote",
-                "memory_id": memory_id, "top_bucket": gate_evidence["top_bucket"],
-                "share": gate_evidence["top_votes"], "neighbours": neighbours,
-            }
+        if fallback:
+            gate_evidence = {"default_fallback": True, "reason": reason}
+        else:
+            vote = self._workspace_vote(memory_id)
+            if vote is None:
+                return {"index": index, "outcome": "gate_failed", "gate": "vote_unavailable",
+                        "memory_id": memory_id}
+            votes, own_bucket, neighbours = vote
+            passed, gate_evidence = normalize_gate(votes, own_bucket)
+            if gate_evidence["top_bucket"] != target or not passed:
+                return {
+                    "index": index, "outcome": "gate_failed", "gate": "vote",
+                    "memory_id": memory_id, "top_bucket": gate_evidence["top_bucket"],
+                    "share": gate_evidence["top_votes"], "neighbours": neighbours,
+                }
         moved, warnings = self._execute_auto_move(memory_id, current, target, gate_evidence, conf)
         if not moved:
             return {"index": index, "outcome": "move_failed", "warnings": warnings}
         self._expire_workspace_rows(memory_id, "confirmed", reason)
-        return {
+        result = {
             "index": index, "outcome": "moved", "memory_id": memory_id,
             "from": current, "to": target,
-            "vote": {"top": gate_evidence["top_bucket"], "share": gate_evidence["top_votes"]},
+            "vote": {"top": gate_evidence.get("top_bucket", "default"),
+                     "share": gate_evidence.get("top_votes", "fallback")},
             "warnings": warnings,
         }
+        if fallback:
+            result["default_fallback"] = {
+                "note": (
+                    "Parked in the default pool (no suitable bucket found) — "
+                    "tell the user: re-home via memory_govern(action="
+                    "'move_memories_workspace') when a bucket is decided."
+                ),
+                "reason": reason,
+            }
+        return result
 
     def _expire_workspace_rows(self, memory_id: int, status: str, why: str) -> None:
         now = utc_now_iso()
@@ -612,6 +644,7 @@ class QueueProtocol:
             with self.db.write_transaction() as conn:
                 moved, move_warnings = self.db.workspaces.move_memory_workspace_on_conn(
                     conn, memory_id, target,
+                    allow_default=bool(gate_evidence.get("default_fallback")),
                 )
                 if not moved:
                     return False, move_warnings

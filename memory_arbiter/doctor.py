@@ -399,13 +399,28 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
         rolled_back = int(conn.execute(
             "SELECT COUNT(*) FROM normalize_audit WHERE status='rolled_back'"
         ).fetchone()[0])
+        # 0.16.3 default-fallback landings are audited per move; a growing
+        # count is the owner's signal that agents are leaning on the escape
+        # hatch instead of finding real buckets.
+        default_fallback = int(conn.execute(
+            "SELECT COUNT(*) FROM normalize_audit WHERE status='manual_move' "
+            "AND json_extract(gate, '$.default_fallback') = 1"
+        ).fetchone()[0])
     except sqlite3.Error:
-        applied = rolled_back = 0
+        applied = rolled_back = default_fallback = 0
+    fallback_note = (
+        f", {default_fallback} parked in default (fallback — re-home via "
+        "memory_govern(action='move_memories_workspace'))"
+        if default_fallback else ""
+    )
     findings.append(_finding(
         "normalize.autonomy", True,
-        f"{applied} autonomous move(s) applied, {rolled_back} rolled back; "
+        f"{applied} autonomous move(s) applied, {rolled_back} rolled back{fallback_note}; "
         "rollback via memory_govern(action='rollback_auto_move', data={audit_id, authorized=true})",
-        evidence={"applied": applied, "rolled_back": rolled_back},
+        evidence={
+            "applied": applied, "rolled_back": rolled_back,
+            "default_fallback": default_fallback,
+        },
     ))
     # 0.16.0 §6⑮: tag-discipline backlog — pre-0.16.0 rows over the total cap
     # are NOT retro-truncated (reads unaffected); doctor lists them for a

@@ -1721,6 +1721,7 @@ class WorkspaceStore:
         workspace: str,
         *,
         precomputed_embedding: list[float] | None = None,
+        allow_default: bool = False,
     ) -> tuple[bool, list[str]]:
         """Reassign one memory's workspace bucket and canonical together.
 
@@ -1729,10 +1730,12 @@ class WorkspaceStore:
         ``workspace_canonical`` are written so the moved memory stops
         resolving through its old bucket name. Default stays reserved —
         callers refuse a default destination before opening the transaction;
-        the guard here is defensive for direct callers.
+        the guard here is defensive for direct callers. ``allow_default``
+        opens the 0.16.3 explicitly-declared fallback (agent cannot find a
+        suitable bucket → park in the global pool with audit + notice).
         """
         workspace = _coerce_ws(workspace)
-        if not workspace or is_default_workspace_term(workspace):
+        if not workspace or (is_default_workspace_term(workspace) and not allow_default):
             return False, ["move destination must be a non-default workspace string."]
         current = conn.execute(
             "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "
@@ -1794,10 +1797,12 @@ class WorkspaceStore:
         )
         if (cur.rowcount or 0) == 0:
             return False, ["memory id not found."]
-        conn.execute(
-            "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
-            (workspace, utc_now_iso()),
-        )
+        if not is_default_workspace_term(workspace):
+            # The global pool is a reserved term, never a registry row.
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
+                (workspace, utc_now_iso()),
+            )
         if precomputed_embedding is not None:
             row = conn.execute(
                 "SELECT id FROM workspace_canonicals WHERE name = ?", (workspace,),

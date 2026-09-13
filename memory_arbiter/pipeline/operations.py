@@ -27,7 +27,7 @@ from ..embedder import ManagedEmbedder
 from ..db_generation import database_startup_lock
 from ..db.workspaces import _coerce_ws, _mechanical_ws_key
 from ..validation import MAX_BATCH_IDS, _controlled_integer
-from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext
+from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext, utc_now_iso
 from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
 
@@ -647,6 +647,36 @@ class OperationsPipeline:
         (reported via moved_non_active).
         """
         authorized = self._is_truthy(authorized)
+        # 0.16.3 default fallback (owner rule): when an agent genuinely
+        # cannot find a suitable bucket, moving the memories BACK to the
+        # global default pool is allowed as an explicitly declared escape
+        # hatch — under strict isolation default is the only bucket outside
+        # the caller's own that still participates in recall, so a memory
+        # parked in a wrong bucket is invisible to everyone who could fix it.
+        # Guard rails (all must hold): explicit default_fallback=true, a
+        # non-empty reason, and the audit trail + user-facing notice below —
+        # default must never become a dumping ground by accident.
+        default_fallback = self._is_truthy(_.get("default_fallback"))
+        fallback_notices: list[dict[str, Any]] = []
+        if default_fallback:
+            if not is_default_workspace_term(str(new_workspace or "")):
+                return self.db.state.response({
+                    "moved": False,
+                    "error": (
+                        "default_fallback=true requires new_workspace to be "
+                        "the default pool; for a project bucket drop the flag"
+                    ),
+                    "field": "new_workspace",
+                }, ok=False)
+            if not str(reason or "").strip():
+                return self.db.state.response({
+                    "moved": False,
+                    "error": (
+                        "default_fallback=true requires a non-empty reason "
+                        "(why no suitable bucket exists)"
+                    ),
+                    "field": "reason",
+                }, ok=False)
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
@@ -689,6 +719,14 @@ class OperationsPipeline:
 
         requested = str(new_workspace or "").strip()
         target = _coerce_ws(new_workspace)
+        if default_fallback:
+            # Fold any reserved default synonym to the one true spelling; no
+            # canonical registration and no name embedding for the global
+            # pool (it is not a project bucket). Both variables: the
+            # in-transaction re-fold re-derives from `requested` and would
+            # otherwise resurrect the synonym spelling.
+            requested = DEFAULT_WORKSPACE_NAME
+            target = DEFAULT_WORKSPACE_NAME
         if not target:
             return self.db.state.response(
                 {
@@ -722,15 +760,22 @@ class OperationsPipeline:
 
         def destination_error(name: str) -> dict[str, Any] | None:
             if is_default_workspace_term(name):
+                if default_fallback:
+                    # Explicitly declared escape hatch — see the guard rails
+                    # at the top of this method.
+                    return None
                 return {
                     "moved": False,
                     "error": (
                         "default is a reserved global pool and cannot be a move "
-                        "destination; choose a non-default workspace"
+                        "destination; pass default_fallback=true with a reason "
+                        "only when no suitable bucket exists"
                     ),
                     "field": "new_workspace",
                 }
             if caller.isolation == "strict" and name not in admitted:
+                if default_fallback and is_default_workspace_term(name):
+                    return None
                 return {
                     "moved": False,
                     "error": (
@@ -819,9 +864,11 @@ class OperationsPipeline:
         # every other canonical registration path.
         embedder, ensure_warnings = self._ensure_active_embedder()
         warnings.extend(ensure_warnings)
-        target_embedding = self.db.workspaces.prepare_missing_workspace_canonical_embedding(
-            target, embedder,
-        )
+        target_embedding = None
+        if not default_fallback:
+            target_embedding = self.db.workspaces.prepare_missing_workspace_canonical_embedding(
+                target, embedder,
+            )
 
         moved: list[int] = []
         forced: list[dict[str, Any]] = []
@@ -951,6 +998,7 @@ class OperationsPipeline:
                     ok_move, move_warnings = self.db.workspaces.move_memory_workspace_on_conn(
                         conn, memory_id, target,
                         precomputed_embedding=target_embedding,
+                        allow_default=default_fallback,
                     )
                     if not ok_move:
                         failures.append({
@@ -959,6 +1007,19 @@ class OperationsPipeline:
                         })
                         movable.remove(memory_id)
                         continue
+                    if default_fallback:
+                        # Every fallback landing is auditable (owner-visible
+                        # via doctor's normalize board) — default must never
+                        # become an untraceable dumping ground.
+                        conn.execute(
+                            """INSERT INTO normalize_audit(
+                                 memory_id, from_workspace, to_workspace, gate, status, created_at)
+                               VALUES(?,?,?,?, 'manual_move', ?)""",
+                            (int(memory_id), str(row["workspace"] or ""), "default",
+                             json.dumps({"default_fallback": True, "reason": reason},
+                                        ensure_ascii=False),
+                             utc_now_iso()),
+                        )
                     for warning in move_warnings:
                         if warning not in warnings:
                             warnings.append(warning)
@@ -1045,6 +1106,17 @@ class OperationsPipeline:
             }
         if non_active:
             data["moved_non_active"] = non_active
+        if default_fallback and moved:
+            data["default_fallback"] = {
+                "count": len(moved),
+                "reason": reason,
+                "note": (
+                    "These memories were parked in the global default pool "
+                    "because no suitable project bucket was found. Tell the "
+                    "user: they should re-home them via memory_govern("
+                    "action='move_memories_workspace') when a bucket is decided."
+                ),
+            }
         if any("workspace canonical vector publish failed" in warning for warning in warnings):
             data["workspace_vector_publish"] = {
                 "status": "pending_retry",
@@ -1056,6 +1128,21 @@ class OperationsPipeline:
                 "repair_task_available": False,
             }
         response = self.db.state.response(data, ok=not failures, extra_warnings=warnings)
+        if default_fallback and moved:
+            # The user-facing prompt the owner rule requires: a default
+            # fallback landing must never pass silently.
+            response.setdefault("notices", []).append({
+                "type": "default_fallback",
+                "severity": "info",
+                "workspace": "default",
+                "message": (
+                    f"{len(moved)} memorie(s) moved back to the default pool "
+                    "(no suitable bucket found). This needs the user's "
+                    "attention: re-home or confirm the placement."
+                ),
+                "action_required": "review_default_fallback",
+                "review_call": {"tool": "memory_review", "view": "doctor", "data": {}},
+            })
         if bucket_was_new and moved:
             # Deliberately delivered even on partial failure: the bucket row
             # IS committed in that case, and dropping the review notice would

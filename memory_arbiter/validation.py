@@ -113,7 +113,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_govern", "confirm"): {"id", "memory_id", "source_ref", "confidence", "authorized", "workspace"},
     ("memory_govern", "rename_workspace_canonical"): {"old", "new", "reason", "authorized"},
     ("memory_govern", "migrate_workspace"): {"from", "to", "reason", "authorized"},
-    ("memory_govern", "move_memories_workspace"): {"memory_ids", "new_workspace", "reason", "authorized", "workspace"},
+    ("memory_govern", "move_memories_workspace"): {"memory_ids", "new_workspace", "reason", "authorized", "workspace", "default_fallback"},
     ("memory_govern", "rollback_auto_move"): {"audit_id", "reason", "authorized", "workspace"},
     ("memory_govern", "confirm_pending_workspace"): {"id", "memory_id", "canonical", "reason", "authorized", "workspace"},
     ("memory_govern", "confirm_workspaces"): {"workspaces", "reason", "authorized"},

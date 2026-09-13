@@ -120,7 +120,12 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                         "and submit via memory_repair(task='scan_queue', "
                         "action='submit'): confirmed with target_workspace + conf lets "
                         "the server re-run the gate and move autonomously; dismissed "
-                        "retires the row. No user verification step — you are the "
+                        "retires the row. If NO suitable bucket exists (the vote names "
+                        "none, or the only candidate is out of scope), confirm with "
+                        "target_workspace='default' AND fallback=true plus a reason — "
+                        "the move is waived past the vote gate, audited, and reported "
+                        "to the user for re-homing; use it sparingly, default is not a "
+                        "dumping ground. No user verification step — you are the "
                         "semantic judge (protected buckets never move; they surface as "
                         "a protected_bucket_hint for the user instead)."
                     ),
