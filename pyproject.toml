@@ -19,6 +19,10 @@ dependencies = [
 vec = ["sqlite-vec>=0.1.6"]
 semantic-local = ["llama-cpp-python>=0.3.0"]
 test = ["pytest>=8.0.0"]
+# Refactor/maintenance tooling, never a runtime dependency. coverage backs the
+# golden-gate branch-coverage check; vulture only generates dead-code
+# candidates for manual triage and is deliberately not a CI gate.
+dev = ["pytest>=8.0.0", "coverage>=7.0", "vulture>=2.14"]
 
 [project.scripts]
 memory-arbiter-mcp = "memory_arbiter.server:main"

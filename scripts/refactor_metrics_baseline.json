@@ -1,0 +1,14 @@
+{
+  "backref_distinct_members": 72,
+  "backref_sites": 120,
+  "doctor_max_cc": 97,
+  "doctor_max_lines": 570,
+  "fns_over_150": 35,
+  "fns_over_80": 74,
+  "max_cc": 155,
+  "max_lines": 631,
+  "memorytools_solid_methods": 39,
+  "tools_py_lines": 2291,
+  "validation_max_cc": 154,
+  "validation_max_lines": 477
+}
