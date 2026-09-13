@@ -39,10 +39,21 @@ def make_tools(tmp_path: Path) -> MemoryTools:
 
 def _write(tools: MemoryTools, content: str, workspace: str, subject: str,
            tags: list[str] | None = None) -> None:
-    r = tools.memory_write(
-        content=content, workspace=workspace, tags=tags,
-        source_type="agent_generated", subject=subject,
-    )
+    # 0.16.2 twin write routing: mema-twin rows must be written AS the twin
+    # or the write-path redirect re-buckets them to mema-twin-dev.
+    from memory_arbiter.request_identity import RequestIdentity, request_identity_scope
+
+    if workspace == "mema-twin":
+        with request_identity_scope(RequestIdentity(client="mema-twin", agent_id="mema-twin")):
+            r = tools.memory_write(
+                content=content, workspace=workspace, tags=tags,
+                source_type="agent_generated", subject=subject,
+            )
+    else:
+        r = tools.memory_write(
+            content=content, workspace=workspace, tags=tags,
+            source_type="agent_generated", subject=subject,
+        )
     assert r.get("ok"), r
 
 

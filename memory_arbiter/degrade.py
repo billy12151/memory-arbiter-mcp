@@ -22,7 +22,11 @@ class DegradeState:
         if message not in self.warnings:
             self.warnings.append(message)
 
-    def response(self, data: Any, ok: bool = True, extra_warnings: list[str] | None = None) -> dict[str, Any]:
+    def response(
+        self, data: Any, ok: bool = True,
+        extra_warnings: list[str] | None = None,
+        extra_notices: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         warnings = list(self.warnings)
         for warning in extra_warnings or []:
             if warning not in warnings:
@@ -34,11 +38,12 @@ class DegradeState:
             "degraded": bool(warnings) or self.mode != "sqlite_vec",
             "data": data,
         }
+        notices = list(extra_notices or [])
         if ok and self.notice_provider is not None:
             try:
-                notices = self.notice_provider()
+                notices.extend(self.notice_provider())
             except Exception:
-                notices = []
-            if notices:
-                resp["notices"] = notices
+                pass
+        if notices:
+            resp["notices"] = notices
         return resp

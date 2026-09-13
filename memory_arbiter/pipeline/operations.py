@@ -698,6 +698,27 @@ class OperationsPipeline:
                 },
                 ok=False, extra_warnings=warnings,
             )
+        # 0.16.2 §1.2: the mema-twin bucket is the twin agent's write domain —
+        # a move by any other caller (governance moves included, no exception)
+        # lands in mema-twin-dev instead. Rewritten here on BOTH variables so
+        # the transaction's re-fold from the original request stays
+        # consistent; twin_redirect_from feeds the response report. Content
+        # stays reachable in the twin family; this is the default write
+        # destination, not an E6 change.
+        from ..twin_redirect import twin_redirect_target
+
+        twin_redirect_from = twin_redirect_target(
+            target,
+            client=self._tools.current_client(),
+            agent_id=self._tools.current_agent_id(),
+        )
+        if twin_redirect_from is not None:
+            requested = twin_redirect_from
+            target = twin_redirect_from
+            warnings.append(
+                "protected_bucket_redirect: destination mema-twin is the twin "
+                f"agent's bucket; moved to {twin_redirect_from} instead (owner rule #976)."
+            )
 
         def destination_error(name: str) -> dict[str, Any] | None:
             if is_default_workspace_term(name):
@@ -1001,6 +1022,8 @@ class OperationsPipeline:
             }
         if requested != target:
             data["requested_new_workspace"] = requested
+        elif twin_redirect_from is not None:
+            data["requested_new_workspace"] = "mema-twin"
         if forced:
             data["forced_reanchored"] = {
                 "memory_ids": [entry["memory_id"] for entry in forced],
@@ -1106,6 +1129,23 @@ class OperationsPipeline:
                         canonical = str(
                             resolved_canonical.get("canonical") or canonical
                         ).strip()
+                # 0.16.2 §1.2: pending activation honors the twin write
+                # routing — a non-twin caller cannot activate a row INTO
+                # mema-twin; the confirmed canonical lands in mema-twin-dev.
+                from ..twin_redirect import twin_redirect_target
+
+                redirect_target = twin_redirect_target(
+                    str(canonical or ""),
+                    client=self._tools.current_client(),
+                    agent_id=self._tools.current_agent_id(),
+                )
+                if redirect_target is not None:
+                    canonical = redirect_target
+                    warnings.append(
+                        "protected_bucket_redirect: canonical mema-twin is the "
+                        "twin agent's bucket; activated into mema-twin-dev "
+                        "instead (owner rule #976)."
+                    )
                 if caller is not None and caller.isolation == "strict":
                     memory_workspace = raw_workspace(memory)
                     if not memory_workspace or memory_workspace != caller.canonical:

@@ -345,6 +345,11 @@ class WritePipeline:
                 "workspace_matched_by": workspace["matched_by"],
             }
             self._apply_workspace_response(data, workspace)
+            redirect_notice = workspace.pop("redirect_notice", None)
+            if redirect_notice is not None:
+                response_extra = [redirect_notice]
+            else:
+                response_extra = []
             if memory_id is not None:
                 data["evidence_index"], data["semantic_conflict_check"] = (
                     self._post_commit(memory_id, data["record"], recheck_conflicts=True)
@@ -354,6 +359,7 @@ class WritePipeline:
                 extra_warnings=(
                     validation.warnings + write_warnings + workspace["warnings"]
                 ),
+                extra_notices=response_extra,
             )
             if data.get("evidence_index", {}).get("status") == "busy":
                 depth = int(data["evidence_index"].get("queue_depth") or 0)
@@ -530,7 +536,55 @@ class WritePipeline:
         if is_default_workspace_term(str(result["canonical"] or "")):
             result["placement_suggestion"] = self._suggest_placement_for_default(record)
         result["strict_block"] = isolation == "strict" and result["is_new"]
+        self._apply_twin_write_redirect(result)
         return result
+
+    def _apply_twin_write_redirect(self, result: dict[str, Any]) -> None:
+        """0.16.2 §1.2: a non-twin caller's write resolving to ``mema-twin``
+        lands in ``mema-twin-dev`` with a redirect notice.
+
+        Runs at the very end of resolution so every matched_by path (exact,
+        confirmed_alias, vector, rule_keep, strict_candidate) is covered.
+        Vector anti-poisoning: exact/alias resolution has already prepared the
+        canonical embedding under the ORIGINAL target ("mema-twin") — the
+        redirect re-prepares it under the destination, or the wrong name
+        vector would be published under mema-twin-dev. Response identity
+        fields are rewritten so the caller sees where the row actually went.
+        """
+        from ..twin_redirect import twin_redirect_target
+
+        target = twin_redirect_target(
+            str(result.get("canonical") or ""),
+            client=self._tools.current_client(),
+            agent_id=self.current_agent_id(),
+        )
+        if target is None:
+            return
+        result["canonical"] = target
+        result["is_new"] = False
+        result["matched_by"] = "twin_redirect"
+        embedder, _warnings = self._ensure_active_embedder()
+        if embedder is not None:
+            try:
+                result["canonical_embedding"] = (
+                    self.db.workspaces.prepare_missing_workspace_canonical_embedding(
+                        target, embedder,
+                    )
+                )
+            except Exception:
+                result["canonical_embedding"] = None
+        else:
+            result["canonical_embedding"] = None
+        result["redirect_notice"] = {
+            "type": "protected_bucket_redirect",
+            "severity": "info",
+            "requested_workspace": "mema-twin",
+            "workspace": target,
+            "message": (
+                "Only the mema-twin agent may write the mema-twin bucket; this "
+                "write was redirected to mema-twin-dev (0.16.2 owner rule)."
+            ),
+        }
 
     def _suggest_placement_for_default(self, record: MemoryRecord) -> dict[str, Any] | None:
         """Read-only subject-based placement hint for a default/empty workspace.

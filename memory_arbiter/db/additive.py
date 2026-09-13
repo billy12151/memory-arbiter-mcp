@@ -168,6 +168,9 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     swept = _sweep_queued_numeric_rows(conn)
     if swept:
         applied.append(swept)
+    rerouted = _migrate_twin_bucket_residents(conn)
+    if rerouted:
+        applied.append(rerouted)
     conn.commit()
     return applied
 
@@ -254,6 +257,65 @@ def _cleanup_first_round_artifacts(conn: sqlite3.Connection) -> str:
         (_CLEANUP_KEY, "done"),
     )
     return f"gate_v2_cleanup(internal_purged, queue_numeric_voided={len(rows)}, watermarks_reset)"
+
+
+_TWIN_REDIRECT_KEY = "twin_write_redirect_migration_v1"
+
+
+def _migrate_twin_bucket_residents(conn: sqlite3.Connection) -> str:
+    """One-shot: mema-twin rows written by non-twin agents move to
+    mema-twin-dev (0.16.2 §1.2 stock, owner rule #976).
+
+    The write-path redirect only covers new writes; this migrates existing
+    violations. Real library: exactly 1 row (jingleAI-default). The twin's
+    own rows (agent_id='mema-twin') are untouched. Rows moved here get their
+    scan watermark cleared (move-as-edit) so the pipeline re-pairs them in
+    the new bucket, and pending kind='workspace' suspects pinning the old
+    bucket are expired in the same transaction — the move companion void in
+    workspaces.move_memory_workspace_on_conn has no boot-time equivalent.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_TWIN_REDIRECT_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    now = utc_now_iso()
+    rows = conn.execute(
+        """SELECT id FROM memories
+           WHERE status='active'
+             AND COALESCE(NULLIF(workspace_canonical,''),workspace)='mema-twin'
+             AND COALESCE(agent_id,'') != 'mema-twin'"""
+    ).fetchall()
+    moved = 0
+    for row in rows:
+        memory_id = int(row["id"])
+        conn.execute(
+            """UPDATE memories SET workspace='mema-twin-dev',
+                 workspace_canonical='mema-twin-dev', scan_watermark=NULL
+               WHERE id=?""",
+            (memory_id,),
+        )
+        conn.execute(
+            """UPDATE scan_queue SET status='expired',
+                 decided_reason='redirect migration: subject moved to mema-twin-dev',
+                 decided_at=?, updated_at=?
+               WHERE kind='workspace' AND status='pending'
+                 AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
+                            WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
+            (now, now, memory_id),
+        )
+        moved += 1
+    if moved:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES ('mema-twin-dev', ?)",
+            (now,),
+        )
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_TWIN_REDIRECT_KEY, f"moved={moved}"),
+    )
+    return f"twin_redirect_migration(moved={moved})"
 
 
 def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:
