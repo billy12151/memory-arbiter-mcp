@@ -289,8 +289,12 @@ def test_legacy_candidate_rows_migrate_to_queue(tmp_path: Path) -> None:
 
 def test_kick_queues_notify_pair_and_auto_rejects_numeric(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = _write(tools, "库甲", "后端使用 postgres 数据库")
-    b = _write(tools, "库乙", "后端数据库是 postgres 集群")
+    # 0.16.2 fixtures: the notify pair uses the verified polarity shape
+    # ("支持X/不再支持X" does NOT trigger polarity — "该功能包含/不包含" does);
+    # the numeric pair uses the same-sentence two-values shape the difference
+    # classifier keeps for agent judgment (E11③ auto-reject retired).
+    a = _write(tools, "缓存甲", "该功能包含缓存模块")
+    b = _write(tools, "缓存乙", "该功能不包含缓存模块")
     n1 = _write(tools, "版本快照甲", "重试次数为 3 次")
     n2 = _write(tools, "版本快照乙", "重试次数为 5 次")
     assert tools.wait_evidence_worker_drained(timeout=10)
@@ -302,22 +306,19 @@ def test_kick_queues_notify_pair_and_auto_rejects_numeric(tmp_path: Path) -> Non
     assert data["pending_memories"] == 0
 
     counts = tools.db.scan_queue.counts()
-    auto_reject_rows = tools.db.list_conflicts(status="not_a_conflict", source="scan_numeric_autoreject")
-    # numeric pair auto-rejected with an audit row, not queued (cap allows)
-    assert len(auto_reject_rows) >= 1, auto_reject_rows
-    for row in auto_reject_rows:
-        members = {m["memory_id"] for m in row["member_versions"]}
-        assert members == {n1, n2}
-    # a non-numeric suspect pair must be in the queue
     with tools.db.connection() as conn:
         rows = conn.execute("SELECT kind,member_versions FROM scan_queue").fetchall()
     queued_member_sets = [
         {int(m["memory_id"]) for m in json.loads(row["member_versions"])}
         for row in rows if row["kind"] == "conflict"
     ]
+    # the notify pair must be queued (real-signal recall has no threshold)
     assert {a, b} in queued_member_sets, queued_member_sets
-    # numeric pair must NOT be queued (auto-rejected instead)
-    assert {n1, n2} not in queued_member_sets
+    # the same-sentence numeric pair is kept by the classifier and enqueued
+    # for agent judgment — machine numeric rejection rows are retired
+    assert {n1, n2} in queued_member_sets, queued_member_sets
+    auto_reject_rows = tools.db.list_conflicts(status="not_a_conflict", source="scan_numeric_autoreject")
+    assert auto_reject_rows == [], auto_reject_rows
 
 
 def test_kick_idempotent_rescan_no_duplicate_queue_rows(tmp_path: Path) -> None:
@@ -340,8 +341,10 @@ def test_kick_idempotent_rescan_no_duplicate_queue_rows(tmp_path: Path) -> None:
 
 def test_edit_lifts_suppression_and_requeues_new_identity(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = _write(tools, "编辑甲", "后端使用 postgres 数据库")
-    b = _write(tools, "编辑乙", "后端数据库是 postgres 集群")
+    # 0.16.2: use the polarity-notify shape — it always queues (the old
+    # postgres similarity pair is now machine-cleared as a duplicate).
+    a = _write(tools, "编辑甲", "该功能包含缓存模块")
+    b = _write(tools, "编辑乙", "该功能不包含缓存模块")
     assert tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
@@ -361,7 +364,7 @@ def test_edit_lifts_suppression_and_requeues_new_identity(tmp_path: Path) -> Non
     tools.db.mark_scanned(a, tools.db.get_memory(a)["version"])
     tools.db.mark_scanned(b, tools.db.get_memory(b)["version"])
     # Edit one memory → version lift → new identity → clean re-queue
-    tools.memory("update", {"memory_id": a, "new_content": "后端改用 postgres 数据库集群", "reason": "edit"})
+    tools.memory("update", {"memory_id": a, "new_content": "该功能包含缓存模块与限流", "reason": "edit"})
     assert tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:

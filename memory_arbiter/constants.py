@@ -247,6 +247,10 @@ SCAN_PIPELINE_AUTO_REJECT_CAP = 5000
 SCAN_PIPELINE_KICK_TIME_BUDGET_S = 45.0
 SCAN_PIPELINE_KICK_MAX_MEMORIES = 400
 SCAN_PIPELINE_NEIGHBOR_K = 10
+# 0.16.2 §1.5: machine-decidable check routes only generate within the top-3
+# neighbour ranks; notify routes keep the full top-10 (real-conflict recall
+# has no threshold). A rank tightening, not an absolute distance band.
+SCAN_MACHINE_ROUTE_TOP_K = 3
 
 # 0.16.0 workspace-normalization gate (plan §6⑫); 0.16.2 recalibrates the
 # vote threshold from the absolute >=8/10 (based on the 930/950 cases owner

@@ -32,8 +32,10 @@ def _submit(tools: MemoryTools, decisions):
 
 def test_page_returns_pair_items_with_evidence_quotes(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = _write(tools, "协议甲", "后端使用 postgres 数据库")
-    b = _write(tools, "协议乙", "后端数据库是 postgres 集群")
+    # 0.16.2: polarity-notify shape — similarity-only pairs are machine-
+    # cleared now, so page-assembly fixtures must use a queued shape.
+    a = _write(tools, "协议甲", "该功能包含缓存模块")
+    b = _write(tools, "协议乙", "该功能不包含缓存模块")
     tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
@@ -49,9 +51,9 @@ def test_page_returns_pair_items_with_evidence_quotes(tmp_path: Path) -> None:
 
 def test_page_closure_merges_pairs_sharing_a_member(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = _write(tools, "闭包甲", "后端使用 postgres 数据库")
-    b = _write(tools, "闭包乙", "后端数据库是 postgres 集群")
-    c = _write(tools, "闭包丙", "数据库选型是 postgres 主库")
+    a = _write(tools, "闭包甲", "该功能包含缓存模块")
+    b = _write(tools, "闭包乙", "该功能不包含缓存模块")
+    c = _write(tools, "闭包丙", "该功能不包含缓存模块与限流")
     tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
@@ -78,8 +80,11 @@ def test_page_includes_internal_conflicts(tmp_path: Path) -> None:
 
 def test_submit_dismiss_lands_not_a_conflict_and_expires_queue_row(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    a = _write(tools, "驳回甲", "后端使用 postgres 数据库")
-    b = _write(tools, "驳回乙", "后端数据库是 postgres 集群")
+    # 0.16.2: notify-shaped fixture (similarity-only pairs never queue now);
+    # queue-source dismissal suppression is unaffected by the ⑩ exclusion,
+    # which filters only scan_numeric_autoreject rows.
+    a = _write(tools, "驳回甲", "该功能包含缓存模块")
+    b = _write(tools, "驳回乙", "该功能不包含缓存模块")
     tools.wait_evidence_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)

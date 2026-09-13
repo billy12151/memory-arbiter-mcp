@@ -171,6 +171,9 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     rerouted = _migrate_twin_bucket_residents(conn)
     if rerouted:
         applied.append(rerouted)
+    cleared = _clearance_migrate_check_route_pairs(conn)
+    if cleared:
+        applied.append(cleared)
     conn.commit()
     return applied
 
@@ -316,6 +319,79 @@ def _migrate_twin_bucket_residents(conn: sqlite3.Connection) -> str:
         (_TWIN_REDIRECT_KEY, f"moved={moved}"),
     )
     return f"twin_redirect_migration(moved={moved})"
+
+
+_CLEARANCE_KEY = "scan_queue_difference_clearance_v1"
+
+
+def _clearance_migrate_check_route_pairs(conn: sqlite3.Connection) -> str:
+    """One-shot: difference-based clearance of queued check-route pairs
+    (0.16.2 §1.4, owner ④).
+
+    The first full round enqueued every suspicious pair; the difference
+    classifier now decides at enqueue time. This brings the STOCK to the
+    same standard with the SAME implementation: notify pairs
+    (severity='high') always survive, every check pair is classified from
+    its evidence quotes — keepers stay pending, the rest are voided
+    (identity released, so an edited pair can re-detect and re-classify).
+    Cleared rows never land in ``conflicts``; counts go to
+    ``migration_state`` as the audit trail.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_CLEARANCE_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    from ..difference_classifier import classify_pair, is_garbage
+
+    now = utc_now_iso()
+    rows = conn.execute(
+        "SELECT id,severity,reason,candidate_key_hash,evidence FROM scan_queue "
+        "WHERE kind='conflict' AND status='pending'"
+    ).fetchall()
+    cleared_sim = cleared_num = garbage_labeled = kept = 0
+    for row in rows:
+        if str(row["severity"] or "") == "high":
+            kept += 1  # notify route: real-signal recall has no threshold
+            continue
+        try:
+            evidence = json.loads(str(row["evidence"] or "[]"))
+        except (TypeError, ValueError):
+            evidence = []
+        quotes = [
+            str(item.get("evidence_quote")) if isinstance(item, dict) and item.get("evidence_quote") else None
+            for item in (evidence or [])
+        ]
+        while len(quotes) < 2:
+            quotes.append(None)
+        route = str(row["reason"] or "")
+        verdict = classify_pair(quotes[0], quotes[1], route=route)
+        if verdict == "keep":
+            kept += 1
+            continue
+        if is_garbage(quotes[0]) or is_garbage(quotes[1]):
+            garbage_labeled += 1
+        conn.execute(
+            "UPDATE scan_queue SET status='voided', candidate_key_hash=?, "
+            "decided_reason='difference clearance: no extractable value difference', "
+            "decided_at=?, updated_at=? WHERE id=?",
+            (voided_identity_hash(str(row["candidate_key_hash"] or ""), int(row["id"])),
+             now, now, int(row["id"])),
+        )
+        if "numeric_value_candidate" in route:
+            cleared_num += 1
+        else:
+            cleared_sim += 1
+    summary = (
+        f"cleared={cleared_sim + cleared_num} (sim={cleared_sim},numeric={cleared_num},"
+        f"garbage={garbage_labeled}), kept={kept}"
+    )
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_CLEARANCE_KEY, summary),
+    )
+    return f"difference_clearance({summary})"
 
 
 def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:

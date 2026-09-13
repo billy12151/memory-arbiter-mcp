@@ -22,8 +22,9 @@ import time
 import uuid
 from typing import Any, TYPE_CHECKING
 
-from .constants import SCAN_PIPELINE_AUTO_REJECT_CAP
+from .constants import SCAN_MACHINE_ROUTE_TOP_K, SCAN_PIPELINE_AUTO_REJECT_CAP
 from .db_generation import CONFLICT_DETECTOR_VERSION
+from .difference_classifier import classify_pair, is_garbage
 from .semantic_conflict import decide_evidence
 
 if TYPE_CHECKING:
@@ -73,6 +74,7 @@ class ScanPipeline:
                 "complete": bool(state.get("complete")),
                 "processed": int(state.get("processed") or 0),
                 "auto_rejected": int(state.get("auto_rejected") or 0),
+                "machine_cleared": int(state.get("machine_cleared") or 0),
                 "started_at": state.get("started_at"),
                 "updated_at": state.get("updated_at"),
             },
@@ -138,6 +140,7 @@ class ScanPipeline:
                 "queued": 0,
                 "auto_rejected": 0,
                 "internal_found": 0,
+                "machine_cleared": 0,
                 "complete": False,
                 "started_at": now,
                 "updated_at": now,
@@ -158,6 +161,7 @@ class ScanPipeline:
         queued = int(state.get("queued") or 0)
         auto_rejected = int(state.get("auto_rejected") or 0)
         internal_found = int(state.get("internal_found") or 0)
+        machine_cleared = int(state.get("machine_cleared") or 0)
         # Cap is PER KICK: a resumed round must re-arm the machine-rejection
         # budget, or the first round spends it in one batch and floods the
         # queue with the very numeric noise E11③ set out to cut.
@@ -193,6 +197,7 @@ class ScanPipeline:
                 auto_rejected += outcome["auto_rejected"]
                 auto_reject_remaining = max(0, auto_reject_remaining - outcome["auto_rejected"])
                 internal_found += outcome["internal"]
+                machine_cleared += int(outcome.get("machine_cleared") or 0)
                 last_id = max(last_id, memory_id)
                 processed_ids.append(memory_id)
                 processed += 1
@@ -207,6 +212,7 @@ class ScanPipeline:
             "queued": queued,
             "auto_rejected": auto_rejected,
             "internal_found": internal_found,
+            "machine_cleared": machine_cleared,
             "normalize_suspects": normalized,
             "updated_at": self._now(),
         })
@@ -236,6 +242,7 @@ class ScanPipeline:
             "processed_round_total": round_processed + processed,
             "queued_total": queued,
             "auto_rejected_total": auto_rejected,
+            "machine_cleared_total": machine_cleared,
             "internal_found_total": internal_found,
             "normalize_suspects_total": state.get("normalize_suspects") or 0,
             "pending_memories": pending_left,
@@ -256,6 +263,7 @@ class ScanPipeline:
         outcome = {
             "version": None, "workspace": None,
             "queued": 0, "auto_rejected": 0, "internal": 0,
+            "machine_cleared": 0, "cleared_garbage": 0,
         }
         record = self.db.get_memory(memory_id)
         if not record or record.get("status") != "active":
@@ -274,6 +282,8 @@ class ScanPipeline:
         # 1) same-memory internal examination (no KNN needed; rule-only).
         internal = self._examine_internal(memory_id, version, workspace, units)
         outcome["internal"] = internal
+        entity_a = self._entity_of(record)
+        peer_entities: dict[int, "str | None"] = {}
         # 2) cross-memory same-bucket rank pairing.
         for unit in units:
             if unit.get("embedding") is None:
@@ -283,7 +293,7 @@ class ScanPipeline:
                 workspace=workspace or None,
                 exclude_memory_id=memory_id,
             )
-            for hit in hits:
+            for rank, hit in enumerate(hits):
                 if hit.get("kind") != "text":
                     continue
                 peer_id = int(hit["memory_id"])
@@ -297,25 +307,42 @@ class ScanPipeline:
                 decision = decide_evidence(str(unit["text"]), str(hit.get("text") or ""))
                 if decision.action == "ignore":
                     continue
+                # 0.16.2 §1.5: machine-decidable check routes generate only
+                # within the top-3 neighbour ranks; notify keeps top-10.
+                if decision.action != "notify" and rank >= SCAN_MACHINE_ROUTE_TOP_K:
+                    continue
+                if decision.action == "check":
+                    # 0.16.2 §1.4: difference-based clearance — check-route
+                    # pairs must carry an extractable value difference or they
+                    # are duplicates/evolution noise. Cleared pairs are
+                    # counted, never enqueued, never landed in conflicts.
+                    if peer_id not in peer_entities:
+                        peer_record = self.db.get_memory(peer_id)
+                        peer_entities[peer_id] = (
+                            self._entity_of(peer_record) if peer_record else None
+                        )
+                    verdict = classify_pair(
+                        str(unit["text"]), str(hit.get("text") or ""),
+                        route=str(decision.reason or ""),
+                        entity_a=entity_a, entity_b=peer_entities[peer_id],
+                    )
+                    if verdict == "clear":
+                        outcome["machine_cleared"] += 1
+                        if is_garbage(str(unit["text"])) or is_garbage(str(hit.get("text") or "")):
+                            outcome["cleared_garbage"] += 1
+                        continue
                 refs, candidate_key, candidate_hash = self._pair_identity(
                     memory_id, version, unit, peer_id, hit,
                 )
                 if self._suppressed(refs, candidate_hash, suppression):
                     continue
-                if decision.reason == "numeric_value_candidate" and auto_reject_remaining > 0:
-                    rejected = self._auto_reject_numeric(
-                        workspace, member_versions=self._pair_members(memory_id, version, unit, peer_id, hit),
-                        candidate_key=candidate_key,
-                        detection_reason=f"numeric_value_candidate auto-rejected: {decision.reason}",
-                    )
-                    if rejected == "inserted":
-                        outcome["auto_rejected"] += 1
-                        auto_reject_remaining -= 1
-                        continue
-                    if rejected == "deduped":
-                        # Suppression already existed — the pair is handled
-                        # without consuming this round's cap budget.
-                        continue
+                # E11③ live retirement (0.16.2 plan §6④/§7): numeric pairs
+                # that survive the difference classifier are same-sentence
+                # two-value candidates — they enqueue for agent judgment;
+                # the noise the old auto-reject consumed is cleared above
+                # without conflicts rows. No new scan_numeric_autoreject
+                # rows are created (existing ones stay as audit history,
+                # excluded from suppression per §1.8).
                 enqueued = self._enqueue_pair(
                     workspace, memory_id, version, unit, peer_id, hit,
                     decision=decision, candidate_key=candidate_key,
@@ -324,6 +351,21 @@ class ScanPipeline:
                 if enqueued:
                     outcome["queued"] += 1
         return outcome
+
+    @staticmethod
+    def _entity_of(record: dict[str, Any]) -> "str | None":
+        """metadata.entity of a memory row (0.16.2 §1.6 subject layer)."""
+        raw = record.get("metadata")
+        if isinstance(raw, dict):
+            value = raw.get("entity")
+            return str(value).strip() or None if value is not None else None
+        if isinstance(raw, str) and raw:
+            try:
+                value = json.loads(raw).get("entity")
+            except (TypeError, ValueError):
+                return None
+            return str(value).strip() or None if value is not None else None
+        return None
 
     def _examine_internal(
         self, memory_id: int, version: int, workspace: str,
@@ -461,11 +503,11 @@ class ScanPipeline:
         self, workspace: str, *, member_versions: list[dict[str, Any]],
         candidate_key: dict[str, Any], detection_reason: str,
     ) -> str | None:
-        """Machine-exercised not_a_conflict (E11 ③): audit row in ``conflicts``
-        doubles as the pair@version suppression source. Returns the outcome:
-        ``inserted`` consumes the per-round cap, ``deduped`` (suppression
-        already existed) skips the pair for free, None means the write failed
-        and the pair falls through to the judgment queue."""
+        """RETIRED live call site (0.16.2 plan §6④/§7): the difference
+        classifier superseded E11③ — same-sentence numeric pairs enqueue for
+        agent judgment, cross-sentence noise is cleared without conflicts
+        rows. Kept as the audit-path reference for the 17.8k historical
+        rows; no new rows are written."""
         result = self.db.record_conflict_group(
             workspace_canonical=workspace,
             slot_key=None,
@@ -491,7 +533,12 @@ class ScanPipeline:
             with self.db.connection() as conn:
                 rows = conn.execute(
                     "SELECT status,candidate_key_hash,member_versions FROM conflicts "
-                    "WHERE status IN ('open','applying','not_a_conflict')"
+                    "WHERE status IN ('open','applying','not_a_conflict') "
+                    # 0.16.2 §1.8 (owner ⑩): machine-exercised numeric
+                    # auto-reject rows are audit history, NOT a suppression
+                    # source — their refs subset-matched 91/121 real notify
+                    # pairs into silence.
+                    "AND COALESCE(source,'') != 'scan_numeric_autoreject'"
                 ).fetchall()
         except Exception:
             rows = []
