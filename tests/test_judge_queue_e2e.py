@@ -96,12 +96,21 @@ def _run(tools: MemoryTools) -> None:
     p1 = _write(tools, "数值甲", "生产环境数据库端口设置为 5432。")
     p2 = _write(tools, "数值乙", "生产环境数据库端口设置为 5433。")
     _write(tools, "自相矛盾", "## 配置甲\n超时时间为 30 秒。\n## 配置乙\n超时时间为 60 秒。")
+    owner_example = _write(
+        tools, "教科书级自相矛盾", "## 方案甲\n冲突检测要用 Qwen。\n## 方案乙\n冲突检测不用 Qwen。",
+    )
     for i in range(4):
         _write(tools, f"填充主题{i}", f"园区通行证流程第{i}条说明。")
     assert tools.wait_evidence_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
 
     # ── 1) full scan, then judge EVERYTHING in batched passes ────────────
+    # 0.16.4 §2 write-time duty (no Qwen backend configured in this e2e →
+    # fail-open): the owner-example polarity pair lands internal pending.
+    assert any(
+        row["memory_id"] == owner_example
+        for row in tools.db.internal_conflicts.list_pending()
+    ), "owner 例句（记忆内极性对）写时必须落 internal（fail-open 无归因）"
     kick = _kick(tools, max_memories=500, time_budget_s=180.0)
     assert kick["complete"] is True, kick
     assert _pending_conflicts(tools) > 0, "种子对必须入队"
