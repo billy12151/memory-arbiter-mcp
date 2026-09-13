@@ -6,12 +6,12 @@ import json
 import os
 import signal
 import sys
-from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple
+from typing import Any, cast, Awaitable, Callable, MutableMapping, NamedTuple
 
 try:
     from mcp.types import CallToolResult
 except Exception:  # fake-mcp test doubles have no types submodule
-    CallToolResult = None
+    CallToolResult = None  # type: ignore[assignment,misc]
 
 from . import __version__
 from .config import Settings
@@ -257,7 +257,8 @@ def _structured_only(result: dict[str, Any]) -> Any:
     resolved = CallToolResult
     if resolved is None:  # fake-mcp test double: keep the plain dict path
         try:
-            from mcp.types import CallToolResult as resolved  # type: ignore[no-redef]
+            from mcp.types import CallToolResult as _ctr
+            resolved = _ctr
         except Exception:
             return result
     return resolved(content=[], structuredContent=result)
@@ -367,10 +368,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return _structured_only(error or _invoke_with_identity(
+        return cast(dict[str, Any], _structured_only(error or _invoke_with_identity(
             tools, identity, tools.memory,
             action=action, data=payload,
-        ))
+        )))
 
     @app.tool()
     def memory_review(view: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -384,10 +385,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return _structured_only(error or _invoke_with_identity(
+        return cast(dict[str, Any], _structured_only(error or _invoke_with_identity(
             tools, identity, tools.memory_review,
             view=view, data=payload,
-        ))
+        )))
 
     @app.tool()
     def memory_govern(action: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -401,10 +402,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return _structured_only(error or _invoke_with_identity(
+        return cast(dict[str, Any], _structured_only(error or _invoke_with_identity(
             tools, identity, tools.memory_govern,
             action=action, data=payload,
-        ))
+        )))
 
     @app.tool()
     def memory_repair(task: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -418,10 +419,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return _structured_only(error or _invoke_with_identity(
+        return cast(dict[str, Any], _structured_only(error or _invoke_with_identity(
             tools, identity, tools.memory_repair,
             task=task, data=payload,
-        ))
+        )))
 
     return ServerBundle(app, tools)
 

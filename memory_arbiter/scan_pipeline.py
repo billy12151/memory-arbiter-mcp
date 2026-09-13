@@ -253,7 +253,7 @@ class ScanPipeline:
         suppression: dict[str, Any],
         neighbor_k: int,
     ) -> dict[str, Any]:
-        outcome = {
+        outcome: dict[str, Any] = {
             "version": None, "workspace": None,
             "queued": 0, "auto_rejected": 0, "internal": 0,
             "machine_cleared": 0, "cleared_garbage": 0,
@@ -720,7 +720,7 @@ def genuine_numeric_pair(quote_a: str, quote_b: str) -> bool:
     11k enumeration misfires vs the intended handful)."""
     import re
 
-    def tokens(text: str) -> set:
+    def tokens(text: str) -> set[str]:
         parts = re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z]+", str(text).casefold())
         return {p for p in parts if p}
 

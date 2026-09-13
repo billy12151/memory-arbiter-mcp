@@ -70,7 +70,7 @@ def _unit_aligned_hits(
     if not rows:
         return None
     content = str(memory.get("content") or "")
-    hit_spans = [
+    hit_spans: list[dict[str, Any]] = [
         {
             "text": str(row["text"]),
             "start_offset": int(row["start_offset"]),

@@ -122,7 +122,7 @@ def name_cosine(a: str, b: str) -> float:
     set_a, set_b = _bigrams(a), _bigrams(b)
     if not set_a or not set_b:
         return 0.0
-    return len(set_a & set_b) / ((len(set_a) * len(set_b)) ** 0.5)
+    return float(len(set_a & set_b)) / float((len(set_a) * len(set_b)) ** 0.5)
 
 
 def _tokens(text: str) -> set[str]:

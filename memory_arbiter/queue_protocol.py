@@ -65,14 +65,14 @@ class QueueProtocol:
         self.db = tools.db
 
     @staticmethod
-    def _scope_sql(workspace_canonical_column: str, scope) -> "tuple[str, list[Any]]":
+    def _scope_sql(workspace_canonical_column: str, scope: Any) -> "tuple[str, list[Any]]":
         from .acl import workspace_scope_sql
 
         return workspace_scope_sql(workspace_canonical_column, scope)
 
     # ── page fetch ──────────────────────────────────────────────────────────
 
-    def page(self, *, page_size: int = DEFAULT_PAGE_SIZE, page_token: int = 0, caller=None) -> dict[str, Any]:
+    def page(self, *, page_size: int = DEFAULT_PAGE_SIZE, page_token: int = 0, caller: Any = None) -> dict[str, Any]:
         self.db.internal_conflicts.expire_stale()
         self._caller = caller
         scope = caller.scope_canonicals() if caller is not None and caller.isolation == "strict" else None
@@ -192,7 +192,7 @@ class QueueProtocol:
         joined = ":".join(sorted(str(pair["candidate_key_hash"]) for pair in pairs))
         return hashlib.sha256(joined.encode()).hexdigest()[:16]
 
-    def _fetch_conflict_rows(self, after_id: int, scope=None) -> list[dict[str, Any]]:
+    def _fetch_conflict_rows(self, after_id: int, scope: Any = None) -> list[dict[str, Any]]:
         if not self.db.db_available:
             return []
         scope_sql, scope_params = self._scope_sql("workspace_canonical", scope)
@@ -276,7 +276,7 @@ class QueueProtocol:
             if member.get("memory_id") is not None
         )
 
-    def _member_meta(self, memory_id: int, cache: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+    def _member_meta(self, memory_id: int, cache: dict[int, Any]) -> dict[str, Any] | None:
         if memory_id not in cache:
             record = self.db.get_memory(memory_id)
             if not record:
@@ -290,11 +290,13 @@ class QueueProtocol:
                     "workspace": record.get("workspace_canonical") or record.get("workspace"),
                     "version": int(record.get("version") or 1),
                 }
-        return cache[memory_id]
+        cached: dict[str, Any] | None = cache[memory_id]
+        return cached
 
     def _pair_item(self, row: dict[str, Any], cache: dict[int, dict[str, Any]]) -> dict[str, Any]:
         members = row.get("member_versions") or []
-        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        raw_detail = row.get("detail")
+        detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
         return {
             "kind": "conflict",
             "group_token": f"pair:{row['candidate_key_hash'][:16]}",
@@ -377,7 +379,7 @@ class QueueProtocol:
             ),
         }
 
-    def _fetch_workspace_rows(self, after_id: int = 0, scope=None) -> list[dict[str, Any]]:
+    def _fetch_workspace_rows(self, after_id: int = 0, scope: Any = None) -> list[dict[str, Any]]:
         if not self.db.db_available:
             return []
         scope_sql, scope_params = self._scope_sql("workspace_canonical", scope)
@@ -409,7 +411,8 @@ class QueueProtocol:
     def _workspace_item(self, row: dict[str, Any], cache: dict[int, dict[str, Any]]) -> dict[str, Any]:
         member = (row.get("member_versions") or [{}])[0]
         memory_id = int(member.get("memory_id") or 0)
-        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        raw_detail = row.get("detail")
+        detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
         outline: list[dict[str, Any]] = []
         content_chars = 0
         record = self.db.get_memory(memory_id)
@@ -448,7 +451,7 @@ class QueueProtocol:
 
     # ── submission (server-side land-from-reference) ───────────────────────
 
-    def submit(self, decisions: list[dict[str, Any]], caller=None) -> dict[str, Any]:
+    def submit(self, decisions: list[dict[str, Any]], caller: Any = None) -> dict[str, Any]:
         if not isinstance(decisions, list) or not decisions:
             return {"ok": False, "error": "decisions must be a non-empty list"}
         if len(decisions) > 200:
@@ -695,7 +698,8 @@ class QueueProtocol:
     def _multi_family_mentions(self, record: dict[str, Any], target: str) -> list[str]:
         """E7-4: subject/tags mentioning >=2 registered project families
         downgrades the case to a user hint (cross-project meta content)."""
-        tags = record.get("tags") if isinstance(record.get("tags"), list) else []
+        raw_tags = record.get("tags")
+        tags: list[Any] = raw_tags if isinstance(raw_tags, list) else []
         text = (str(record.get("subject") or "") + " " + " ".join(str(t) for t in tags)).casefold()
         if not text.strip():
             return []
@@ -772,7 +776,7 @@ class QueueProtocol:
         except Exception as exc:
             return False, [f"auto move failed: {exc}"]
 
-    def _fetch_all_conflict_rows(self, scope=None) -> list[dict[str, Any]]:
+    def _fetch_all_conflict_rows(self, scope: Any = None) -> list[dict[str, Any]]:
         """Every pending conflict row, paged past the ASSEMBLY_WINDOW.
 
         Group-level dispositions must re-assemble the COMPLETE closure even
@@ -1014,7 +1018,6 @@ class QueueProtocol:
         """
         from .semantic_conflict import normalize_value
 
-        by_ref = {str(g.get("members")): None for g in ()}  # noqa: F841 (shape doc)
         ref_to_value: dict[str, str] = {}
         for group in value_groups:
             display = str(group.get("display_value") or "")
@@ -1027,13 +1030,13 @@ class QueueProtocol:
         for member in members:
             item = dict(member)
             ref = f"{int(item['memory_id'])}@{int(item.get('version') or 1)}"
-            display = ref_to_value.get(ref)
-            if display is None:
+            member_display = ref_to_value.get(ref)
+            if member_display is None:
                 return None, f"member {ref} is not covered by any value_group"
             item["attribute_raw"] = str(slot_key.get("attribute") or "")
             item["normalized_attribute"] = str(slot_key.get("attribute") or "")
-            item["value_raw"] = display
-            item["normalized_value"] = normalize_value(display)
+            item["value_raw"] = member_display
+            item["normalized_value"] = normalize_value(member_display)
             enriched.append(item)
         if len(enriched) != len(ref_to_value):
             return None, "value_groups must cover exactly the pair members"

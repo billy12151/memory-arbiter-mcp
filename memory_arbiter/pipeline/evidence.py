@@ -367,13 +367,13 @@ class EvidencePipeline:
                 ):
                     internal_found += 1
             record_degradation(truncation_reason)
-            result: dict[str, Any] = {
+            early_result: dict[str, Any] = {
                 "status": "incomplete", "reason": truncation_reason,
                 "notices_created": 0, "reasons_seen": reasons_seen,
             }
             if internal_found:
-                result["internal_conflicts"] = internal_found
-            return result
+                early_result["internal_conflicts"] = internal_found
+            return early_result
 
         backend = self._ensure_semantic_backend()
         # C4 soft ordering (⑦ 定案): rank same-level pairs by subject+tags
