@@ -367,15 +367,27 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
     except sqlite3.Error:
         queue_counts = {}
     queue_backlog = queue_counts.get("pending", 0) + queue_counts.get("in_review", 0)
+    # 0.16.2: internal contradictions live in their OWN table but count
+    # toward the same agent workload — scan_queue page's queue_backlog merges
+    # both, doctor must too or it under-reports (a live 954-item workload
+    # read as 666).
+    try:
+        internal_pending = int(conn.execute(
+            "SELECT COUNT(*) FROM internal_conflicts WHERE status='pending'"
+        ).fetchone()[0])
+    except sqlite3.Error:
+        internal_pending = 0
+    queue_backlog += internal_pending
     findings.append(_finding(
         "conflicts.scan_queue_backlog", queue_backlog < 100,
         (
             f"{queue_backlog} suspected item(s) awaiting agent judgment "
-            f"({queue_counts.get('pending', 0)} pending, {queue_counts.get('in_review', 0)} in review); "
+            f"({queue_counts.get('pending', 0)} pending, {queue_counts.get('in_review', 0)} in review, "
+            f"{internal_pending} internal contradictions); "
             "when convenient, let the agent read the queue "
             "(memory_repair task='scan_queue', action='page')"
         ),
-        evidence={**queue_counts, "backlog": queue_backlog},
+        evidence={**queue_counts, "backlog": queue_backlog, "internal_pending": internal_pending},
     ))
     # 0.16.0 §6⑫: autonomous normalization audit board — applied auto-moves,
     # rollbacks, and (never-moved) protected-bucket hints, so the owner sees
