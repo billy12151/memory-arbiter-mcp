@@ -13,7 +13,7 @@ from ..constants import (
     SEMANTIC_MAX_EXAMINED_PAIRS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
-from ..difference_classifier import classify_pair, internal_noise_pair
+from ..difference_classifier import classify_pair
 from ..evidence import evidence_content_hash, local_text_units
 from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
@@ -231,68 +231,38 @@ class EvidencePipeline:
         # 0.16.2 (owner, unified flow): the internal check uses the SAME
         # filter-plus-slot-extraction logic as the cross-memory route. A
         # contradiction a reader would flag in one document must not become
-        # invisible just because it was written inside ONE memory: notify
-        # shapes land directly (rule-confirmed signals); check shapes pass
-        # the difference classifier and the keepers go through Qwen slot
-        # extraction — Qwen's definitive negative ("not the same attribute
-        # with different values") now also vets internal suspects, and its
-        # ready verdict annotates the reason with the extracted attribute
-        # and values. Without a backend (or on a technical failure) the
-        # keepers fall back to landing unannotated — the rule signal is
-        # advisory and must not be lost to an unavailable model.
+        # invisible just because it was written inside ONE memory.
+        # 0.16.4 §0.5/§2: the whole filter sequence is ONE shared gate —
+        # internal_pair_admission (scan_pipeline) — called identically by
+        # the scan side; the callers differ only in what an admitted pair
+        # means. Here: EVERY admitted shape (check AND notify) collects for
+        # the Qwen final review — a real in-memory self-contradiction has a
+        # recognition duty, and Qwen's verdict is the triple
+        # ready→pending+attribution / definitive negative→dismissed veto /
+        # technical failure→pending unannotated (fail-open).
         internal_found = 0
         internal_version = int(record.get("version") or 1)
         text_units = [unit for unit, _embedding in unit_vectors]
-        from ..scan_pipeline import genuine_numeric_pair, spans_overlap
+        from ..scan_pipeline import internal_pair_admission
 
         internal_qwen_pairs: list[tuple[Any, Any, Any]] = []
         for i in range(len(text_units)):
             for j in range(i + 1, len(text_units)):
                 unit_a, unit_b = text_units[i], text_units[j]
-                if spans_overlap((unit_a.start_offset, unit_a.end_offset),
-                                 (unit_b.start_offset, unit_b.end_offset)):
-                    continue
                 internal_decision = decide_evidence(unit_a.text, unit_b.text)
-                if internal_decision.action == "ignore":
-                    continue
-                # 0.16.3 structural noise shapes (table slices, note-meta
-                # lines) never are contradictions — same gate as the scan
-                # side (live-library calibrated, 27/280 rows, zero false
-                # kills in sampling).
-                if internal_noise_pair(unit_a.text, unit_b.text):
-                    continue
-                if internal_decision.action != "notify":
-                    if internal_decision.reason != "numeric_value_candidate":
-                        # similarity route: same difference-based clearance as
-                        # the cross-memory route — no extractable value
-                        # difference means duplicates/evolution, not conflict
-                        if classify_pair(unit_a.text, unit_b.text,
-                                         route=str(internal_decision.reason or "")) == "clear":
-                            continue
-                    elif not genuine_numeric_pair(unit_a.text, unit_b.text):
-                        continue
-                    if self.db.internal_conflicts.exists(
+                admitted = internal_pair_admission(
+                    unit_a.text, unit_b.text,
+                    (unit_a.start_offset, unit_a.end_offset),
+                    (unit_b.start_offset, unit_b.end_offset),
+                    internal_decision,
+                    exists_probe=lambda: self.db.internal_conflicts.exists(
                         int(memory_id), internal_version,
                         unit_a.unit_index, unit_b.unit_index,
-                    ):
-                        continue
-                    internal_qwen_pairs.append((unit_a, unit_b, internal_decision))
+                    ),
+                )
+                if not admitted:
                     continue
-                if self.db.internal_conflicts.exists(
-                    int(memory_id), internal_version,
-                    unit_a.unit_index, unit_b.unit_index,
-                ):
-                    continue
-                if self.db.internal_conflicts.create(
-                    memory_id=int(memory_id), memory_version=internal_version,
-                    unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
-                    quote_a=unit_a.text, quote_b=unit_b.text,
-                    span_a=[unit_a.start_offset, unit_a.end_offset],
-                    span_b=[unit_b.start_offset, unit_b.end_offset],
-                    reason=internal_decision.reason,
-                    detector_version=CONFLICT_DETECTOR_VERSION,
-                ):
-                    internal_found += 1
+                internal_qwen_pairs.append((unit_a, unit_b, internal_decision))
         units_examined = 0
         # 0.16.2 write-time pre-gates (owner, data-driven): two deterministic
         # filters run in the KNN collection loop, BEFORE the per-peer dedup —

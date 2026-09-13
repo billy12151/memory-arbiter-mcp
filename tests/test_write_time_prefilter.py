@@ -326,3 +326,153 @@ def test_internal_keepers_survive_collection_truncation(tmp_path: Path, monkeypa
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
     assert pending, "the internal keeper row exists"
     assert "qwen:" not in pending[0]["reason"], "truncated runs land unannotated (no backend pass)"
+
+
+# ── 0.16.4 §2: internal notify shapes go through the Qwen final review ─────
+
+_OWNER_EXAMPLE = "## 方案甲\n冲突检测要用 Qwen。\n## 方案乙\n冲突检测不用 Qwen。"
+
+
+def _oriented_polarity_backend():
+    """A gate-shaped backend extracting the owner-example attribute. The
+    extracted value follows each side's own quote, so the bidirectional
+    gate (forward AND reverse) stays consistent."""
+
+    class Backend:
+        @staticmethod
+        def classify_pair(left, right):
+            from memory_arbiter.semantic_conflict import ModelSignal
+
+            def _value(env):
+                # Grounding: the extracted value must be a literal substring
+                # of the side's quote (the real gate verifies this).
+                return "要用 Qwen" if "要用" in env["quote"] else "不用 Qwen"
+
+            parsed = {
+                "attribute_a": "冲突检测实现", "value_a": _value(left),
+                "attribute_b": "冲突检测实现", "value_b": _value(right),
+            }
+            return ModelSignal(True, "attribute_value", None, "", parsed, None)
+
+    return Backend()
+
+
+def test_internal_notify_ready_lands_pending_with_attribution(tmp_path: Path, monkeypatch) -> None:
+    """Owner example sentence (the recognition duty): an in-memory polarity
+    pair is a notify shape; since 0.16.4 §2 it is COLLECTED for the Qwen
+    final review instead of landing directly. A ready verdict lands pending
+    with the extracted attribute/values attribution."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    mid = tools.memory_write(content=_OWNER_EXAMPLE, subject="internal-ready", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    backend = _CountingBackend(_oriented_polarity_backend())
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
+    result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
+    assert backend.calls >= 2, "notify shapes must go through bidirectional extraction"
+    assert result["deterministic_filter"]["internal_qwen_confirmed"] >= 1
+    pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
+    assert pending, "the ready notify shape lands pending"
+    # the gate normalizes the extracted values (space folding, casing)
+    assert "qwen:冲突检测实现=要用qwen|不用qwen" in pending[0]["reason"], pending[0]["reason"]
+    assert pending[0]["reason"].startswith("polarity_changed"), pending[0]["reason"]
+
+
+def test_internal_notify_negative_veto_dismissed_no_resurrect(tmp_path: Path, monkeypatch) -> None:
+    """An evolution-style in-memory pair (v1 used it, v2 dropped it — the
+    same text, no real contradiction) gets Qwen's definitive negative:
+    dismissed with a persistent veto that a scan kick cannot resurrect."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    mid = tools.memory_write(content=_OWNER_EXAMPLE, subject="internal-veto-n", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+
+    class SameValue:
+        @staticmethod
+        def classify_pair(left, right, *args, **kwargs):
+            from memory_arbiter.semantic_conflict import ModelSignal
+
+            return ModelSignal(
+                True, "attribute_value_extraction", None, "",
+                {"attribute_a": "冲突检测实现", "value_a": "用Qwen",
+                 "attribute_b": "冲突检测实现", "value_b": "用Qwen"},
+                None,
+            )
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", SameValue)
+    result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
+    assert result["deterministic_filter"]["internal_qwen_vetoed"] >= 1
+    assert tools.db.internal_conflicts.list_pending() == []
+    with tools.db.connection() as conn:
+        dismissed = conn.execute(
+            "SELECT COUNT(*) FROM internal_conflicts WHERE memory_id=? AND status='dismissed'",
+            (mid["id"],),
+        ).fetchone()[0]
+    assert dismissed >= 1, "the notify-shape veto must persist as a decided row"
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
+    assert kick["ok"], kick
+    assert not any(
+        r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]
+    ), "scan re-examination must respect the notify-shape veto too"
+
+
+def test_internal_notify_fail_open_lands_unannotated(tmp_path: Path, monkeypatch) -> None:
+    """No backend → the notify shape still lands pending (fail-open: the
+    rule signal is advisory and must not be lost to an unavailable model)."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    mid = tools.memory_write(content=_OWNER_EXAMPLE, subject="internal-open-n", tags=[])["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
+    result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
+    pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
+    assert pending, "fail-open: the notify shape lands without a backend"
+    assert pending[0]["reason"] == "polarity_changed", pending[0]["reason"]
+
+
+# ── 0.16.4 §0.5: one shared admission gate, both callers ───────────────────
+
+def test_internal_admission_gate_single_source(tmp_path: Path) -> None:
+    """Equivalence pin: the gate decides identically for both callers —
+    scan lands admitted pairs pending; write-time collects them for Qwen.
+    Branch coverage of the shared sequence (overlap/ignore/noise/clear/
+    genuine/exists) so a future edit cannot fork the two paths silently."""
+    from memory_arbiter.difference_classifier import classify_pair
+    from memory_arbiter.scan_pipeline import (
+        decide_evidence as _decide, genuine_numeric_pair, internal_pair_admission,
+        spans_overlap,
+    )
+
+    d = lambda a, b: _decide(a, b)  # noqa: E731
+    cases = [
+        # (text_a, text_b, span overlap?, admitted?)
+        ("重试次数为 3 次。", "重试次数为 5 次。", False, True),          # genuine numeric
+        ("## 甲\n超时 30 秒", "## 乙\n超时 60 秒", False, True),
+        ("重试次数为 3 次。", "重试次数为 3 次。", False, False),        # ignore: equivalent
+        ("冲突检测要用 Qwen。", "冲突检测不用 Qwen。", False, True),     # notify shape admitted
+        ("该功能包含缓存模块。", "完全无关的另一段内容。", False, False),  # cleared by classifier
+        ("同一段重叠文本。", "同一段重叠文本。", True, False),            # splitter artifact
+    ]
+    for text_a, text_b, overlap, expected in cases:
+        span_a = (0, 10)
+        span_b = (10, 20) if not overlap else (5, 15)
+        decision = d(text_a, text_b)
+        got = internal_pair_admission(text_a, text_b, span_a, span_b, decision)
+        assert got == expected, (text_a, text_b, expected, got, decision.action, decision.reason)
+    # exists probe is lazy AND decisive: probed only after semantics pass.
+    probed = []
+    assert internal_pair_admission(
+        "重试次数为 3 次。", "重试次数为 5 次。", (0, 10), (10, 20),
+        d("重试次数为 3 次。", "重试次数为 5 次。"),
+        exists_probe=lambda: probed.append(1) or True,
+    ) is False
+    assert probed, "the identity probe must run for admitted semantics"
+    assert internal_pair_admission(
+        "重试次数为 3 次。", "重试次数为 3 次。", (0, 10), (10, 20),
+        d("重试次数为 3 次。", "重试次数为 3 次。"),
+        exists_probe=lambda: probed.append(1) or True,
+    ) is False
+    assert len(probed) == 1, "the identity probe must be lazy (skipped for dead pairs)"

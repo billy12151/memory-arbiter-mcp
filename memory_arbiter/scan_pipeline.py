@@ -379,20 +379,13 @@ class ScanPipeline:
     ) -> int:
         """Same-memory unit×unit contradictions (E10 ①, §6⑳).
 
-        First-round gate (real-library calibration): overlapping/nested span
-        pairs are splitter artifacts; `check` pairs land only in the
-        genuine same-sentence-different-value shape — enumeration ordinals
-        ("1. 营销交付" vs "7. 复核终审") are series structure, not
-        contradictions. Deterministic notify pairs always land.
-
-        0.16.2 unified flow (owner): the similarity route passes the SAME
-        difference classifier as the write-time path and the cross-memory
-        route — keepers land for agent judgment, no-difference pairs are
-        duplicates/evolution and never become queue work. Without this the
-        scan would resurrect what write-time cleared.
+        0.16.4 §0.5/§2: the whole filter sequence is ONE shared gate —
+        ``internal_pair_admission`` below — called identically by the
+        write-time side; the callers differ only in what an admitted pair
+        means. Here: admitted shapes (check AND notify) land pending for
+        agent judgment — no Qwen on the scan side (E11①); a write-time Qwen
+        veto row survives via exists() and is never resurrected.
         """
-        from .difference_classifier import classify_pair, internal_noise_pair
-
         landed = 0
         count = len(units)
         for i in range(count):
@@ -400,27 +393,16 @@ class ScanPipeline:
                 a, b = units[i], units[j]
                 if not a.get("text") or not b.get("text"):
                     continue
-                if spans_overlap(
+                decision = decide_evidence(str(a["text"]), str(b["text"]))
+                if not internal_pair_admission(
+                    str(a["text"]), str(b["text"]),
                     (int(a["start_offset"]), int(a["end_offset"])),
                     (int(b["start_offset"]), int(b["end_offset"])),
+                    decision,
+                    exists_probe=lambda: self.db.internal_conflicts.exists(
+                        memory_id, version, int(a["unit_index"]), int(b["unit_index"]),
+                    ),
                 ):
-                    continue
-                decision = decide_evidence(str(a["text"]), str(b["text"]))
-                if decision.action == "ignore":
-                    continue
-                # 0.16.3 structural noise shapes — same gate as the
-                # write-time internal examination.
-                if internal_noise_pair(str(a["text"]), str(b["text"])):
-                    continue
-                if decision.action != "notify":
-                    if decision.reason != "numeric_value_candidate":
-                        if classify_pair(
-                            str(a["text"]), str(b["text"]), route=str(decision.reason or ""),
-                        ) == "clear":
-                            continue
-                    elif not genuine_numeric_pair(str(a["text"]), str(b["text"])):
-                        continue
-                if self.db.internal_conflicts.exists(memory_id, version, int(a["unit_index"]), int(b["unit_index"])):
                     continue
                 created = self.db.internal_conflicts.create(
                     memory_id=memory_id, memory_version=version,
@@ -748,6 +730,52 @@ def genuine_numeric_pair(quote_a: str, quote_b: str) -> bool:
     inter = ta & tb
     union = ta | tb
     return len(inter) / len(union) >= 0.4
+
+
+def internal_pair_admission(
+    text_a: str, text_b: str,
+    span_a: "tuple[int, int]", span_b: "tuple[int, int]",
+    decision: Any,
+    exists_probe: "Any | None" = None,
+) -> bool:
+    """0.16.4 §0.5/§2: the SINGLE admission gate for same-memory internal
+    pairs, shared verbatim by the scan side (``_examine_internal``) and the
+    write-time side (``pipeline/evidence.py``).
+
+    The full filter sequence lives HERE and only here — splitter-artifact
+    overlap → ignore → structural noise (0.16.3) → difference clearance
+    (sim route) → genuine numeric shape → already-decided identity. The two
+    callers differ ONLY in what an admitted pair means downstream: scan
+    lands it pending directly (no Qwen, E11①); write-time collects it for
+    the Qwen final review — notify shapes INCLUDED since 0.16.4 §2 (an
+    in-memory real self-contradiction has a recognition duty, and Qwen's
+    verdict is the attribution/veto/fail-open triple). Editing the sequence
+    here edits both paths at once; that is the point.
+
+    ``exists_probe`` is a lazy callable (probed only after every semantic
+    filter passed) so ignore/noise pairs never pay the identity query.
+    """
+    if spans_overlap(span_a, span_b):
+        return False
+    if decision.action == "ignore":
+        return False
+    # 0.16.3 structural noise shapes (table slices, note-meta lines) never
+    # are contradictions — live-library calibrated, 27/280 rows, zero false
+    # kills in sampling.
+    if internal_noise_pair(text_a, text_b):
+        return False
+    if decision.action != "notify":
+        if decision.reason != "numeric_value_candidate":
+            # similarity route: same difference-based clearance as the
+            # cross-memory route — no extractable value difference means
+            # duplicates/evolution, not conflict
+            if classify_pair(text_a, text_b, route=str(decision.reason or "")) == "clear":
+                return False
+        elif not genuine_numeric_pair(text_a, text_b):
+            return False
+    if exists_probe is not None and exists_probe():
+        return False
+    return True
 
 
 def _workspace_identity(memory_id: int, version: int, suspected: str) -> str:
