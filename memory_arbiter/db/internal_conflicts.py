@@ -207,6 +207,20 @@ class InternalConflictStore:
             return {"outcome": "not_found", "updated": 0}
         return {"outcome": status, "updated": updated}
 
+    def memory_id_of(self, internal_id: int) -> "int | None":
+        """Owner memory of one row (visibility probe for per-row dispositions)."""
+        if not self._db._db_available:
+            return None
+        try:
+            with self._db.connection() as conn:
+                row = conn.execute(
+                    "SELECT memory_id FROM internal_conflicts WHERE id=?",
+                    (int(internal_id),),
+                ).fetchone()
+            return int(row["memory_id"]) if row else None
+        except sqlite3.Error:
+            return None
+
     def decide(self, internal_id: int, status: str, *, reason: str = "") -> dict[str, Any]:
         if status not in {"dismissed", "resolved", "stale"}:
             return {"outcome": "invalid_status"}

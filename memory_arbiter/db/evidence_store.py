@@ -398,7 +398,7 @@ class EvidenceStore:
         overlap notice pairs), so ranking + rules do the work and
         max_distance stays an optional extra gate.
         """
-        from ..semantic_conflict import decide_evidence
+        from ..semantic_conflict import decide_evidence, is_cross_evolution
 
         db = self._db
         if not db.state.sqlite_vec_available:
@@ -634,6 +634,14 @@ class EvidenceStore:
                         # the peer, or a later numeric-change unit on the
                         # same pair would be lost.
                         decision = decide_evidence(text, str(hit.get("text") or ""))
+                        # 0.16.4 §1/§0.5: the diagnostic channel routes
+                        # through the SAME shared predicate as the scan
+                        # pipeline and the write-time KNN loop — evolution-
+                        # domain pairs must not surface here either, or the
+                        # retroactive void's "re-enqueue and surface the gap"
+                        # design would leak them back as notice_ready.
+                        if is_cross_evolution(decision):
+                            continue
                         if decision.action == "ignore":
                             if include_duplicates and decision.reason in {"equivalent_value", "compatible_evidence"}:
                                 pair_key = (min(anchor_id, peer_id), max(anchor_id, peer_id))

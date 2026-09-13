@@ -521,3 +521,26 @@ def test_move_after_queue_requeues_in_new_bucket_only(tmp_path: Path) -> None:
             f"cross-bucket pair leaked: {members} buckets={member_buckets} "
             f"row_ws={row['workspace_canonical']}"
         )
+
+
+def test_scan_candidates_diagnostic_excludes_evolution(tmp_path: Path) -> None:
+    """0.16.4 review P2: the diagnostic channel (scan_candidates) routes
+    through the SAME shared predicate — evolution-domain pairs must not
+    surface as notice_ready candidates there either, or the retroactive
+    void's released identities would leak back first-class."""
+    tools = make_tools(tmp_path)
+    a = _write(tools, "诊断演进甲", "该功能包含缓存模块")
+    b = _write(tools, "诊断演进乙", "该功能不包含缓存模块")
+    n1 = _write(tools, "诊断数值甲", "重试次数为 3 次")
+    n2 = _write(tools, "诊断数值乙", "重试次数为 5 次")
+    assert tools.wait_evidence_worker_drained(timeout=10)
+    result = tools.memory_repair("scan_candidates", {
+        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True,
+    })
+    assert result["ok"], result
+    candidates = result["data"].get("candidates") or []
+    pairs = {
+        frozenset((int(c["left_id"]), int(c["right_id"]))) for c in candidates
+    }
+    assert frozenset((a, b)) not in pairs, "演进域对不得在诊断通道出现"
+    assert any(p == frozenset((n1, n2)) for p in pairs), "numeric 对照对应保留"

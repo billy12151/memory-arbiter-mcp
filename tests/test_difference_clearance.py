@@ -120,9 +120,11 @@ def test_notify_pairs_queue_from_deep_ranks(tmp_path: Path) -> None:
     assert {a, notify_peer} not in sets, "evolution-domain pairs queue from no rank"
 
 
-def test_notify_pairs_survive_numeric_autoreject_suppression(tmp_path: Path) -> None:
-    """Owner ⑩: scan_numeric_autoreject rows no longer suppress notify pairs
-    (91/121 real notify pairs were refs-subset shadowed by them)."""
+def test_kept_numeric_pair_survives_numeric_autoreject_suppression(tmp_path: Path) -> None:
+    """Owner ⑩: scan_numeric_autoreject rows no longer suppress live pairs
+    (the historical 91/121 shadowing). 0.16.4: the surviving cross-memory
+    shape is the numeric check pair (notify pairs are the excluded
+    evolution domain)."""
     tools = make_tools(tmp_path)
     a = _write(tools, "解蔽甲", "重试次数为 3 次")
     b = _write(tools, "解蔽乙", "重试次数为 5 次")

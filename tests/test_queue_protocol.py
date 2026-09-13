@@ -331,6 +331,19 @@ def test_internal_memory_expanded_guard(tmp_path: Path) -> None:
     assert refused["results"][0]["outcome"] == "invalid_input"
     assert "expanded=true" in refused["results"][0]["error"]
     assert tools.db.internal_conflicts.list_pending(), "拒后行不得被翻"
+    # 0.16.4 review P2: loosely-typed booleans cannot waive the guard — a
+    # "false" STRING is truthy under bool() but must not count as expanded.
+    string_false = _submit(tools, [{
+        "kind": "internal_memory", "memory_id": mid,
+        "status": "dismissed", "reason": "字符串假值", "expanded": "false",
+    }])
+    assert string_false["ok"] is False, string_false
+    assert string_false["results"][0]["outcome"] == "invalid_input"
+    string_true = _submit(tools, [{
+        "kind": "internal_memory", "memory_id": mid,
+        "status": "dismissed", "reason": "字符串真值", "expanded": "true",
+    }])
+    assert string_true["ok"], string_true
     # resolved carries no guard (misuse is auditable, not silent).
     ok = _submit(tools, [{
         "kind": "internal_memory", "memory_id": mid,

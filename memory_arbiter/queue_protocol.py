@@ -44,6 +44,17 @@ ASSEMBLY_WINDOW = 400
 INTERNAL_PAIRS_CAP = 8
 
 
+def _decision_truthy(value: Any) -> bool:
+    """Decision-item booleans arrive loosely typed from MCP clients
+    ("true"/"false" strings, 1/0, bools): only unambiguous true shapes
+    count, so a "false" string can never silently waive a guard."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"true", "1", "yes"}
+
+
 class QueueProtocol:
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
@@ -468,6 +479,12 @@ class QueueProtocol:
             if status not in {"dismissed", "resolved"}:
                 return {"index": index, "outcome": "invalid_input",
                         "error": "internal decisions accept status dismissed|resolved"}
+            # Same fail-closed visibility rule as the memory-level channel:
+            # no dispositions on rows whose memory the caller cannot read.
+            row_memory = self.db.internal_conflicts.memory_id_of(int(internal_id))
+            if row_memory is None or not self._member_visible(row_memory):
+                return {"index": index, "outcome": "not_found",
+                        "error": "internal row not visible to this caller"}
             outcome = self.db.internal_conflicts.decide(
                 int(internal_id), status, reason=reason,
             )
@@ -486,7 +503,7 @@ class QueueProtocol:
                 return {"index": index, "outcome": "invalid_input",
                         "error": "internal_memory decisions accept status dismissed|resolved"}
             if not self._member_visible(memory_id):
-                # Same fail-closed rule as per-row dispositions.
+                # Same fail-closed visibility rule as the per-row channel.
                 return {"index": index, "outcome": "not_found", "memory_id": memory_id}
             pair_count = self.db.internal_conflicts.pending_pair_count(memory_id)
             if pair_count == 0:
@@ -499,7 +516,7 @@ class QueueProtocol:
             if (
                 status == "dismissed"
                 and pair_count > INTERNAL_PAIRS_CAP
-                and not bool(raw.get("expanded"))
+                and not _decision_truthy(raw.get("expanded"))
             ):
                 # 0.16.4 review P1: the preview showed only INTERNAL_PAIRS_CAP
                 # pairs — dismissing the whole memory sight-unseen is exactly
@@ -588,10 +605,18 @@ class QueueProtocol:
         # waived by definition (an unreliable vote IS the "no suitable
         # bucket" finding), conf >= 0.8 still applies, and the audit trail
         # plus response hint keep it user-visible.
-        fallback = bool(raw.get("fallback"))
+        fallback = _decision_truthy(raw.get("fallback"))
         if fallback and not is_default_workspace_term(target):
             return {"index": index, "outcome": "invalid_input",
                     "error": "fallback=true is only valid with target_workspace=default"}
+        if fallback:
+            # Fold accepted synonyms (默认/none/…) onto the canonical name —
+            # a raw "默认" would otherwise land the memory in a phantom
+            # bucket, split off from the real default pool in recall
+            # scoping and pairing (same defence as the memory_govern path).
+            from .constants import DEFAULT_WORKSPACE_NAME
+
+            target = DEFAULT_WORKSPACE_NAME
         if fallback and not str(reason or "").strip():
             return {"index": index, "outcome": "invalid_input",
                     "error": "fallback=true requires a reason (why no suitable bucket exists)"}

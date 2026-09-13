@@ -184,3 +184,41 @@ def test_doctor_counts_default_fallback_landings(tmp_path: Path) -> None:
     assert finding is not None
     assert finding.evidence["default_fallback"] == 1
     assert "parked in default" in finding.detail
+
+
+def test_submit_fallback_synonym_folds_to_canonical_default(tmp_path: Path) -> None:
+    """0.16.4 review P2: an accepted synonym (默认) must FOLD onto the
+    canonical 'default' — a raw landing would create a phantom bucket split
+    off from the real default pool in recall scoping."""
+    tools = make_tools(tmp_path)
+    a = _write(tools, "同义词折叠", "正文内容", workspace="pgsqlproj")
+    _seed_suspect(tools, a)
+    result = _submit(tools, [{
+        "kind": "workspace", "memory_id": a, "status": "confirmed",
+        "target_workspace": "默认", "conf": 0.9, "fallback": True,
+        "reason": "无合适桶（同义词入口）",
+    }])
+    entry = result["results"][0]
+    assert entry["outcome"] == "moved", entry
+    record = tools.db.get_memory(a)
+    assert _bucket(record) == "default", _bucket(record)
+
+
+def test_doctor_counts_queue_channel_fallback(tmp_path: Path) -> None:
+    """0.16.4 review P2: the audit counter covers BOTH entrances — the
+    memory_govern manual_move path and the judgment-queue applied path."""
+    tools = make_tools(tmp_path)
+    a = _write(tools, "队列通道计数", "正文内容", workspace="pgsqlproj")
+    _seed_suspect(tools, a)
+    result = _submit(tools, [{
+        "kind": "workspace", "memory_id": a, "status": "confirmed",
+        "target_workspace": "default", "conf": 0.9, "fallback": True,
+        "reason": "队列通道",
+    }])
+    assert result["results"][0]["outcome"] == "moved"
+    report = tools.memory_doctor_overview(deep=False)
+    payload = report.get("data") or report
+    finding = next(
+        f for f in payload["findings"] if f["check_id"] == "normalize.autonomy"
+    )
+    assert finding["evidence"]["default_fallback"] >= 1, finding

@@ -401,10 +401,14 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
         ).fetchone()[0])
         # 0.16.3 default-fallback landings are audited per move; a growing
         # count is the owner's signal that agents are leaning on the escape
-        # hatch instead of finding real buckets.
+        # hatch instead of finding real buckets. 0.16.4: the count covers
+        # BOTH entrances — memory_govern (status manual_move) and the
+        # judgment-queue channel (status applied with the same gate flag),
+        # which is the channel the spec steers agents to.
         default_fallback = int(conn.execute(
-            "SELECT COUNT(*) FROM normalize_audit WHERE status='manual_move' "
-            "AND json_extract(gate, '$.default_fallback') = 1"
+            "SELECT COUNT(*) FROM normalize_audit "
+            "WHERE json_extract(gate, '$.default_fallback') = 1 "
+            "AND status IN ('manual_move', 'applied')"
         ).fetchone()[0])
     except sqlite3.Error:
         applied = rolled_back = default_fallback = 0
