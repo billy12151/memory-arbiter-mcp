@@ -99,6 +99,23 @@ def test_local_text_worker_has_single_definition() -> None:
     assert len(definitions) == 1
 
 
+def _hits_with_metadata(tools, hits):
+    """0.16.2 write-time provenance gate reads hit['metadata']; real knn rows
+    always carry it (from the peer memory row). Hand-built test hits borrow
+    their peer's metadata so the fixture keeps the old send-to-Qwen shape."""
+    import json as _json
+    for hit in hits:
+        if "metadata" in hit:
+            continue
+        record = tools.db.get_memory(int(hit["memory_id"]))
+        meta = (record or {}).get("metadata")
+        if isinstance(meta, (dict, list)):
+            meta = _json.dumps(meta, ensure_ascii=False)
+        hit["metadata"] = meta
+    return hits
+
+
+
 def test_decide_evidence_numeric_change_is_scan_candidate_not_direct_notice() -> None:
     assert decide_evidence("数据库使用 pgsql。", "数据库使用 PostgreSQL。").action == "ignore"
     changed = decide_evidence("接口超时为 5 秒。", "接口超时为 30 秒。")
@@ -555,8 +572,9 @@ def test_exact_subject_match_survives_evidence_fusion(tmp_path: Path, monkeypatc
 def test_numeric_candidate_fails_closed_without_qwen(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path, semantic_enabled=False)
     tools.settings.semantic_conflict_on_write = "off"
-    old = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=["api"])["data"]
-    new = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=["api"])["data"]
+    meta = {"entity": "checkout-api", "scope": "production"}
+    old = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=["api"], metadata=meta)["data"]
+    new = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=["api"], metadata=meta)["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -971,7 +989,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
          "start_offset": 0, "end_offset": 11, "distance": 0.10 + i * 0.05}
         for i, peer in enumerate(peers)
     ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -1006,7 +1024,7 @@ def test_unified_notice_dedupe_does_not_starve_fresh_pair(tmp_path: Path, monkey
          "start_offset": 0, "end_offset": 11, "distance": 0.10 + i * 0.05}
         for i, peer in enumerate(peers)
     ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -1026,12 +1044,13 @@ def test_search_surfaces_vector_lag(tmp_path: Path) -> None:
 def test_check_degradation_is_visible_in_semantic_status(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path, semantic_enabled=False)
     tools.settings.semantic_conflict_on_write = "off"
-    peer = tools.memory_write(content="database connection policy", subject="pool", tags=[])["data"]
-    new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[])["data"]
+    meta = {"entity": "checkout-api", "scope": "production"}
+    peer = tools.memory_write(content="database connection policy", subject="pool", tags=[], metadata=meta)["data"]
+    new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[], metadata=meta)["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
     assert tools._ensure_semantic_backend() is None
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     assert tools.db.list_semantic_notices(status="open") == []
     degradation = tools._semantic_status()["check_degradation"]
@@ -1221,11 +1240,12 @@ def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path,
 
     tools = make_tools(tmp_path, semantic_enabled=False)
     tools.settings.semantic_conflict_on_write = "off"
-    peer = tools.memory_write(content="database connection policy", subject="pool", tags=[])["data"]
-    new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[])["data"]
+    meta = {"entity": "checkout-api", "scope": "production"}
+    peer = tools.memory_write(content="database connection policy", subject="pool", tags=[], metadata=meta)["data"]
+    new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[], metadata=meta)["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
 
     truncated_raw = '{"attribute_a": "数据库选型", "value_a": "MySQL", "attribute_b":'
     cases = [
@@ -2824,7 +2844,7 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
     assert tools.wait_evidence_worker_drained(timeout=2)
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql here",
              "start_offset": 0, "end_offset": 22, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
 
     # Same normalized value on both sides → clean not_same_attribute_different_value.
     class SameValue:
@@ -2858,7 +2878,7 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     assert tools.wait_evidence_worker_drained(timeout=2)
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql",
              "start_offset": 0, "end_offset": 17, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
 
     deadlines = []
     base = _grounded_db_backend()
@@ -2898,7 +2918,7 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
          "start_offset": 0, "end_offset": len(f"database is {peer_values[index]}"), "distance": 0.1 + index * 0.01}
         for index, peer in enumerate(peers)
     ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     clock = {"now": 100.0}
     fairness_deadline = 100.04
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.time.monotonic", lambda: clock["now"])
@@ -3019,7 +3039,7 @@ def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkey
     updated = tools.db.get_memory(a["id"])
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
              "start_offset": 0, "end_offset": 18, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
     snapshot = {
         "memory_id": a["id"], "version": updated["version"],
         "content_hash": evidence_content_hash(updated["content"]),
@@ -3078,7 +3098,7 @@ def test_applying_reentry_does_not_suppress_different_slot(tmp_path: Path, monke
     updated = tools.db.get_memory(a["id"])
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "连接池上限为 10。",
              "start_offset": 0, "end_offset": 11, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
     snapshot = {
         "memory_id": a["id"], "version": updated["version"],
@@ -3144,7 +3164,7 @@ def test_applying_reentry_context_requires_revision_and_action(
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
              "start_offset": 0, "end_offset": 18, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: list(hits))
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
     context = {
         "conflict_id": conflict_id, "revision": 2, "memory_id": a["id"],
         "action": "update_current_claim", "chosen_value": "sqlite",

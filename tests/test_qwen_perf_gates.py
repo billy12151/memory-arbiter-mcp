@@ -62,19 +62,21 @@ def _write_check_scene(tools: MemoryTools, peers: int) -> dict[str, Any]:
     tools.settings.semantic_conflict_on_write = "off"
     peer_rows = [
         tools.memory_write(
-            content=f"取值为 {index + 10}。", subject=f"v{index}", tags=[], metadata=dict(_META),
+            content=f"连接池上限为 {index + 10}。", subject=f"v{index}", tags=[], metadata=dict(_META),
         )["data"]
         for index in range(peers)
     ]
     new = tools.memory_write(
-        content="取值为 99。", subject="new", tags=[], metadata=dict(_META),
+        content="连接池上限为 99。", subject="new", tags=[], metadata=dict(_META),
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     hits = [
         {
             "memory_id": peer["id"], "id": index, "kind": "text",
-            "text": f"取值为 {index + 10}。", "start_offset": 0, "end_offset": 9,
+            "text": f"连接池上限为 {index + 10}。", "start_offset": 0, "end_offset": 12,
             "distance": 0.10 + index * 0.01,
+            # 0.16.2 provenance gate reads hit['metadata'] like real knn rows.
+            "metadata": dict(_META),
         }
         for index, peer in enumerate(peer_rows)
     ]

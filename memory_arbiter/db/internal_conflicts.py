@@ -37,7 +37,17 @@ class InternalConflictStore:
         self, *, memory_id: int, memory_version: int, unit_a: int, unit_b: int,
         quote_a: str, quote_b: str, span_a: list[int], span_b: list[int],
         reason: str, detector_version: str,
+        status: str = "pending", decided_reason: "str | None" = None,
     ) -> bool:
+        """Insert one internal contradiction.
+
+        ``status`` defaults to ``pending``; the write-time Qwen veto uses
+        ``dismissed`` (0.16.2): a definitive semantic negative lands as a
+        decided row so the scan-side re-examination's ``exists()`` probe
+        cannot resurrect the pair — the veto must outlive the write.
+        """
+        if status not in {"pending", "dismissed"}:
+            status = "pending"
         if not self._db._db_available or not self._db.state.sqlite_writable:
             return False
         now = utc_now_iso()
@@ -47,13 +57,14 @@ class InternalConflictStore:
                     """INSERT OR IGNORE INTO internal_conflicts(
                          memory_id,memory_version,status,unit_a,unit_b,
                          quote_a,quote_b,span_a,span_b,reason,detector_version,
-                         created_at,updated_at)
-                       VALUES(?,?,'pending',?,?,?,?,?,?,?, ?,?,?)""",
+                         decided_reason,decided_at,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?, ?,?)""",
                     (
-                        int(memory_id), int(memory_version), int(unit_a), int(unit_b),
+                        int(memory_id), int(memory_version), status, int(unit_a), int(unit_b),
                         quote_a, quote_b,
                         json.dumps(span_a), json.dumps(span_b),
-                        reason, detector_version, now, now,
+                        reason, detector_version,
+                        decided_reason, (now if decided_reason else None), now, now,
                     ),
                 )
                 return bool(cur.rowcount)

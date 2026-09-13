@@ -880,10 +880,14 @@ def _write_pair(tools, meta: dict, left: str = "database is mysql",
     return peer, new
 
 
-def _hit(peer_id: int, text: str, *, row_id: int = 1, distance: float = 0.1) -> dict:
+def _hit(peer_id: int, text: str, *, row_id: int = 1, distance: float = 0.1,
+         metadata: dict | None = None) -> dict:
+    # 0.16.2 write-time provenance gate reads hit['metadata'] exactly like
+    # the real knn row does — hand-built hits carry it explicitly.
     return {
         "memory_id": peer_id, "id": row_id, "kind": "text", "text": text,
         "start_offset": 0, "end_offset": len(text), "distance": distance,
+        "metadata": metadata,
     }
 
 
@@ -893,7 +897,7 @@ def test_notice_value_groups_tolerate_missing_parsed_keys(tmp_path: Path, monkey
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "MyProject", "scope": "Production"}
     peer, new = _write_pair(tools, meta)
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [_hit(peer["id"], "database is mysql")])
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [_hit(peer["id"], "database is mysql", metadata=dict(meta))])
 
     class Backend:
         @staticmethod
@@ -935,8 +939,8 @@ def test_same_reason_degradation_counted_once_per_task(tmp_path: Path, monkeypat
     new = tools.memory_write(content="database is sqlite", subject="sqlite", tags=[], metadata=meta)["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
     hits = [
-        _hit(peers[0]["id"], "database is mysql", row_id=1, distance=0.1),
-        _hit(peers[1]["id"], "database is postgres", row_id=2, distance=0.2),
+        _hit(peers[0]["id"], "database is mysql", row_id=1, distance=0.1, metadata=dict(meta)),
+        _hit(peers[1]["id"], "database is postgres", row_id=2, distance=0.2, metadata=dict(meta)),
     ]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
 

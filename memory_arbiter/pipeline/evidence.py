@@ -13,6 +13,7 @@ from ..constants import (
     SEMANTIC_MAX_EXAMINED_PAIRS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
+from ..difference_classifier import classify_pair
 from ..evidence import evidence_content_hash, local_text_units
 from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
@@ -226,11 +227,24 @@ class EvidencePipeline:
         # twice). It consumes no Qwen budget; the cross-memory loop below is
         # untouched in shape, and a truncated cross loop still reports the
         # internal findings already landed this run.
+        # 0.16.2 (owner, unified flow): the internal check uses the SAME
+        # filter-plus-slot-extraction logic as the cross-memory route. A
+        # contradiction a reader would flag in one document must not become
+        # invisible just because it was written inside ONE memory: notify
+        # shapes land directly (rule-confirmed signals); check shapes pass
+        # the difference classifier and the keepers go through Qwen slot
+        # extraction — Qwen's definitive negative ("not the same attribute
+        # with different values") now also vets internal suspects, and its
+        # ready verdict annotates the reason with the extracted attribute
+        # and values. Without a backend (or on a technical failure) the
+        # keepers fall back to landing unannotated — the rule signal is
+        # advisory and must not be lost to an unavailable model.
         internal_found = 0
         internal_version = int(record.get("version") or 1)
         text_units = [unit for unit, _embedding in unit_vectors]
         from ..scan_pipeline import genuine_numeric_pair, spans_overlap
 
+        internal_qwen_pairs: list[tuple[Any, Any, Any]] = []
         for i in range(len(text_units)):
             for j in range(i + 1, len(text_units)):
                 unit_a, unit_b = text_units[i], text_units[j]
@@ -242,9 +256,21 @@ class EvidencePipeline:
                     continue
                 if internal_decision.action != "notify":
                     if internal_decision.reason != "numeric_value_candidate":
+                        # similarity route: same difference-based clearance as
+                        # the cross-memory route — no extractable value
+                        # difference means duplicates/evolution, not conflict
+                        if classify_pair(unit_a.text, unit_b.text,
+                                         route=str(internal_decision.reason or "")) == "clear":
+                            continue
+                    elif not genuine_numeric_pair(unit_a.text, unit_b.text):
                         continue
-                    if not genuine_numeric_pair(unit_a.text, unit_b.text):
+                    if self.db.internal_conflicts.exists(
+                        int(memory_id), internal_version,
+                        unit_a.unit_index, unit_b.unit_index,
+                    ):
                         continue
+                    internal_qwen_pairs.append((unit_a, unit_b, internal_decision))
+                    continue
                 if self.db.internal_conflicts.exists(
                     int(memory_id), internal_version,
                     unit_a.unit_index, unit_b.unit_index,
@@ -261,6 +287,27 @@ class EvidencePipeline:
                 ):
                     internal_found += 1
         units_examined = 0
+        # 0.16.2 write-time pre-gates (owner, data-driven): two deterministic
+        # filters run in the KNN collection loop, BEFORE the per-peer dedup —
+        # a cleared representative would otherwise burn a peer slot that a
+        # notify/keep hit of the same peer could have taken (live-library
+        # simulation: 86 slots recoverable).
+        # Gate 1 (provenance, zero loss): a notice needs BOTH sides' entity
+        # AND scope metadata present and equal (the post-Qwen slot builder
+        # drops anything else with slot_provenance_insufficient) — skipping
+        # early saves the two Qwen inferences per pair. Cheapest and biggest
+        # kill (~95% of representatives), so it runs FIRST.
+        # Gate 2 (difference classifier, check routes only): no extractable
+        # value difference means the pair can never satisfy Qwen's
+        # same-attribute-different-value gate. notify routes NEVER pass this
+        # gate — rule-confirmed real signals keep unbounded recall; they do
+        # pass gate 1 (it is lossless for them too).
+        provenance_filtered = 0
+        no_difference_filtered = 0
+        raw_own_meta = record.get("metadata")
+        own_metadata = raw_own_meta if isinstance(raw_own_meta, dict) else {}
+        own_entity = str(own_metadata.get("entity") or "").strip()
+        own_scope = str(own_metadata.get("scope") or "").strip()
         # Spec §15.5: a bounded check that ran out of budget must not later
         # claim checked_no_notice. The two truncation causes report
         # distinctly (2026-09-10 #957/#959 diagnosis: the shared string cost
@@ -288,6 +335,26 @@ class EvidencePipeline:
                 if decision.action == "ignore":
                     continue
                 peer_id = int(hit["memory_id"])
+                raw_hit_meta = hit.get("metadata")
+                if isinstance(raw_hit_meta, str) and raw_hit_meta:
+                    try:
+                        raw_hit_meta = json.loads(raw_hit_meta)
+                    except (TypeError, ValueError):
+                        raw_hit_meta = {}
+                hit_metadata = raw_hit_meta if isinstance(raw_hit_meta, dict) else {}
+                hit_entity = str(hit_metadata.get("entity") or "").strip()
+                hit_scope = str(hit_metadata.get("scope") or "").strip()
+                if not (
+                    own_entity and hit_entity and own_entity == hit_entity
+                    and own_scope and hit_scope and own_scope == hit_scope
+                ):
+                    provenance_filtered += 1
+                    continue
+                if decision.action == "check" and classify_pair(
+                    unit.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
+                ) == "clear":
+                    no_difference_filtered += 1
+                    continue
                 existing = by_peer.get(peer_id)
                 priority = 2 if decision.action == "notify" else 1
                 existing_priority = 2 if existing and existing[2].action == "notify" else 1
@@ -297,11 +364,32 @@ class EvidencePipeline:
                 if existing is None or priority > existing_priority or (priority == existing_priority and closer):
                     by_peer[peer_id] = (hit, unit, decision)
         if truncation_reason:
+            # E10① order guarantee: internal findings land BEFORE the cross
+            # loop and survive its truncation. The internal Qwen pass has not
+            # run yet at this point (it needs the backend fetched below), so
+            # the collected keepers land unannotated here — fail-open, never
+            # lost. (Adversarial self-review: without this, an evidence-unit
+            # cap or budget exhaustion mid-collection silently dropped every
+            # internal keep pair of this run.)
+            for unit_a, unit_b, internal_decision in internal_qwen_pairs:
+                if self.db.internal_conflicts.create(
+                    memory_id=int(memory_id), memory_version=internal_version,
+                    unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
+                    quote_a=unit_a.text, quote_b=unit_b.text,
+                    span_a=[unit_a.start_offset, unit_a.end_offset],
+                    span_b=[unit_b.start_offset, unit_b.end_offset],
+                    reason=str(internal_decision.reason or ""),
+                    detector_version=CONFLICT_DETECTOR_VERSION,
+                ):
+                    internal_found += 1
             record_degradation(truncation_reason)
-            return {
+            result: dict[str, Any] = {
                 "status": "incomplete", "reason": truncation_reason,
                 "notices_created": 0, "reasons_seen": reasons_seen,
             }
+            if internal_found:
+                result["internal_conflicts"] = internal_found
+            return result
 
         backend = self._ensure_semantic_backend()
         # C4 soft ordering (⑦ 定案): rank same-level pairs by subject+tags
@@ -372,6 +460,77 @@ class EvidencePipeline:
             except TypeError:
                 # Test/legacy backends implementing the original two-arg protocol.
                 return backend.classify_pair(left_env, right_env)
+
+        # 0.16.2 unified flow: internal check-keepers go through the SAME Qwen
+        # slot extraction as cross-memory pairs, BEFORE the cross loop (E10①
+        # order guarantee: internal findings land first and survive a
+        # truncated cross loop). Shared pairs_examined budget and deadline —
+        # internal keepers are naturally few (filter-calibrated). Verdicts:
+        #   notice_ready  → land pending, reason annotated with the extracted
+        #                    attribute/values
+        #   definitive negative (not the same attribute with different
+        #   values, unknown_field) → land DISMISSED — the veto must outlive
+        #   the write or the scan-side re-examination would resurrect the pair
+        #   (internal_conflicts.exists() blocks any-status-non-stale rows)
+        #   technical failure / no backend → land pending unannotated
+        #   (fail-open: an advisory rule signal must not be lost to an
+        #   unavailable model)
+        internal_qwen_confirmed = 0
+        internal_qwen_vetoed = 0
+        for unit_a, unit_b, internal_decision in internal_qwen_pairs:
+            reason_text = str(internal_decision.reason or "")
+            if backend is not None:
+                active_deadline = backlog_deadline()
+                budget_ok = not (
+                    active_deadline is not None
+                    and active_deadline - time.monotonic() < min_budget * 2
+                ) and pairs_examined < max_examined_pairs
+                if budget_ok:
+                    pairs_examined += 1
+                    env_a = envelope(record, unit_a.text)
+                    env_b = envelope(record, unit_b.text)
+                    forward = classify(env_a, env_b)
+                    reverse = classify(env_b, env_a)
+                    gate = evaluate_pair_extractions(
+                        signal_extraction(forward), signal_extraction(reverse),
+                        env_a, env_b, require_bidirectional=True,
+                    )
+                    if gate.state == "notice_ready":
+                        reason_text = (
+                            f"{reason_text} | qwen:{gate.attribute}="
+                            f"{gate.value_a}|{gate.value_b}"
+                        )
+                        internal_qwen_confirmed += 1
+                    else:
+                        signals = (forward, reverse)
+                        technical = (
+                            any(s.error and "timeout" in str(s.error).lower() for s in signals)
+                            or any(s.candidate_type == "backend_unavailable" for s in signals)
+                            or any(s.candidate_type == "backend_error" for s in signals)
+                            or any(s.candidate_type in {"invalid_json", "invalid_schema"} for s in signals)
+                        )
+                        if not technical and gate.reason != "qwen_unverified":
+                            internal_qwen_vetoed += 1
+                            self.db.internal_conflicts.create(
+                                memory_id=int(memory_id), memory_version=internal_version,
+                                unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
+                                quote_a=unit_a.text, quote_b=unit_b.text,
+                                span_a=[unit_a.start_offset, unit_a.end_offset],
+                                span_b=[unit_b.start_offset, unit_b.end_offset],
+                                reason=reason_text, detector_version=CONFLICT_DETECTOR_VERSION,
+                                status="dismissed",
+                                decided_reason=f"qwen veto: {gate.reason}",
+                            )
+                            continue
+            if self.db.internal_conflicts.create(
+                memory_id=int(memory_id), memory_version=internal_version,
+                unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
+                quote_a=unit_a.text, quote_b=unit_b.text,
+                span_a=[unit_a.start_offset, unit_a.end_offset],
+                span_b=[unit_b.start_offset, unit_b.end_offset],
+                reason=reason_text, detector_version=CONFLICT_DETECTOR_VERSION,
+            ):
+                internal_found += 1
 
         for peer_id, (hit, unit, decision) in ordered:
             peer = self.db.get_memory(peer_id)
@@ -574,6 +733,21 @@ class EvidencePipeline:
             # Internal findings survive a truncated cross-memory loop: they
             # were landed BEFORE the loop ran (E10① order guarantee).
             result["internal_conflicts"] = internal_found
+        # 0.16.2 write-time pre-gate visibility (conditional — the unfiltered
+        # zero case keeps the exact-shape response contract unchanged):
+        # what the deterministic filters killed this run, and what the
+        # unified internal Qwen flow confirmed/vetoed.
+        filter_summary: dict[str, int] = {}
+        if provenance_filtered:
+            filter_summary["provenance_skipped"] = provenance_filtered
+        if no_difference_filtered:
+            filter_summary["no_difference_skipped"] = no_difference_filtered
+        if internal_qwen_confirmed:
+            filter_summary["internal_qwen_confirmed"] = internal_qwen_confirmed
+        if internal_qwen_vetoed:
+            filter_summary["internal_qwen_vetoed"] = internal_qwen_vetoed
+        if filter_summary:
+            result["deterministic_filter"] = filter_summary
         if reasons_seen:
             # Degradations may also occur on pairs before a later pair surfaces
             # a notice, so the list is attached to completed outcomes too.

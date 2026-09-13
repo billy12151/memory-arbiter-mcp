@@ -376,7 +376,15 @@ class ScanPipeline:
         genuine same-sentence-different-value shape — enumeration ordinals
         ("1. 营销交付" vs "7. 复核终审") are series structure, not
         contradictions. Deterministic notify pairs always land.
+
+        0.16.2 unified flow (owner): the similarity route passes the SAME
+        difference classifier as the write-time path and the cross-memory
+        route — keepers land for agent judgment, no-difference pairs are
+        duplicates/evolution and never become queue work. Without this the
+        scan would resurrect what write-time cleared.
         """
+        from .difference_classifier import classify_pair
+
         landed = 0
         count = len(units)
         for i in range(count):
@@ -394,8 +402,11 @@ class ScanPipeline:
                     continue
                 if decision.action != "notify":
                     if decision.reason != "numeric_value_candidate":
-                        continue
-                    if not genuine_numeric_pair(str(a["text"]), str(b["text"])):
+                        if classify_pair(
+                            str(a["text"]), str(b["text"]), route=str(decision.reason or ""),
+                        ) == "clear":
+                            continue
+                    elif not genuine_numeric_pair(str(a["text"]), str(b["text"])):
                         continue
                 if self.db.internal_conflicts.exists(memory_id, version, int(a["unit_index"]), int(b["unit_index"])):
                     continue

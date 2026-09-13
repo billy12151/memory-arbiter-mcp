@@ -20,6 +20,7 @@ full suite always exercises them and CI stays green via skips, never misses them
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -111,9 +112,16 @@ def _write_pair(tools: MemoryTools, left: str, right: str) -> tuple[int, int]:
 
 
 def _stub_knn_peer(monkeypatch: pytest.MonkeyPatch, tools: MemoryTools, peer_id: int, text: str) -> None:
+    # 0.16.2 write-time provenance gate reads hit['metadata'] exactly like
+    # the real knn row does — the hand-built hit borrows the peer's own.
+    record = tools.db.get_memory(peer_id)
+    meta = (record or {}).get("metadata")
+    if isinstance(meta, (dict, list)):
+        meta = json.dumps(meta, ensure_ascii=False)
     hits = [{
         "memory_id": peer_id, "id": 1, "kind": "text", "text": text,
         "start_offset": 0, "end_offset": len(text), "distance": 0.1,
+        "metadata": meta,
     }]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
 

@@ -132,16 +132,16 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
 
     hits_by_peer = {
         int(near["id"]): {"memory_id": int(near["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green",
-                         "start_offset": 0, "end_offset": 23, "distance": 0.9},
+                         "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
         int(far["id"]): {"memory_id": int(far["id"]), "id": 2, "kind": "text", "text": "invoice process is manual",
-                         "start_offset": 0, "end_offset": 23, "distance": 0.1},
+                         "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
     }
 
     def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None) -> list[dict[str, Any]]:
         return [
             {"memory_id": pid, "id": hit["id"], "kind": "text", "text": hit["text"],
              "start_offset": hit["start_offset"], "end_offset": hit["end_offset"],
-             "distance": hit["distance"]}
+             "distance": hit["distance"], "metadata": hit.get("metadata")}
             for pid, hit in hits_by_peer.items()
         ]
 
@@ -189,9 +189,9 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
     def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None) -> list[dict[str, Any]]:
         return [
             {"memory_id": int(check_peer["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green",
-             "start_offset": 0, "end_offset": 23, "distance": 0.1},
+             "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
             {"memory_id": int(notify_peer["id"]), "id": 2, "kind": "text", "text": "invoice process is manual",
-             "start_offset": 0, "end_offset": 23, "distance": 0.9},
+             "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
         ]
 
     monkeypatch.setattr(tools.db, "evidence_knn", fake_knn)
