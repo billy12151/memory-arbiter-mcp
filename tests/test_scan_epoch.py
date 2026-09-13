@@ -14,6 +14,8 @@ from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
 
+from memory_arbiter.db_generation import CONFLICT_DETECTOR_VERSION as _CDV
+
 from test_scan_pipeline import make_tools, _write
 
 
@@ -30,7 +32,7 @@ def test_detector_bump_clears_watermarks(monkeypatch) -> None:
     tools2 = MemoryTools(settings=settings, db=db2)
     assert tools2.db.pending_scan_memory_ids() == [mid], "detector bump 必须清水位线布防全量"
     arm = tools2.db.meta.scan_epoch_arm()
-    assert arm["from"] == "attribute-value-v2"
+    assert arm["from"] == _CDV
     assert arm["to"] == "attribute-value-v3"
     assert "cleared 1 watermarks" in arm["reason"]
 
@@ -48,7 +50,7 @@ def test_same_detector_boot_does_not_rearm() -> None:
     arm2 = tools2.db.meta.scan_epoch_arm()
     # First boot records the arm (from=none → v2); the second boot with the
     # SAME detector must not re-arm it (same timestamp, watermarks intact).
-    assert arm1["to"] == "attribute-value-v2"
+    assert arm1["to"] == _CDV
     assert arm2["at"] == arm1["at"]
 
 
@@ -59,8 +61,8 @@ def test_doctor_reports_epoch_reason() -> None:
     findings = {f["check_id"]: f for f in payload["findings"]}
     finding = findings.get("conflicts.scan_epoch")
     assert finding is not None
-    assert "attribute-value-v2" in finding["detail"]
-    assert finding["evidence"]["to"] == "attribute-value-v2"
+    assert _CDV in finding["detail"]
+    assert finding["evidence"]["to"] == _CDV
 
 
 def test_side_channel_notice_one_shot_and_self_closing() -> None:
