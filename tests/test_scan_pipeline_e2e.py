@@ -236,20 +236,24 @@ def _run_e2e(tools: MemoryTools) -> None:
     finally:
         monkey.undo()
 
-    # ── 6) serialization: single-copy compact wire ──────────────────────
-    from memory_arbiter.server import _structured_only
+    # ── 6) serialization: single-copy compact wire, universal channel ──
+    # 0.16.5 flip: the one compact copy rides content[0].text (every MCP
+    # client reads it); structuredContent stays absent.
+    from memory_arbiter.server import _single_text_copy
 
     try:
         from mcp.types import CallToolResult
     except Exception:
         CallToolResult = None  # type: ignore[assignment,misc]
-    wrapped = _structured_only({"ok": True, "data": {"x": "字" * 100}})
+    wrapped = _single_text_copy({"ok": True, "data": {"x": "字" * 100}})
     if CallToolResult is not None:
         assert isinstance(wrapped, CallToolResult)
-        assert wrapped.content == []
-        payload = wrapped.structuredContent
+        assert wrapped.structuredContent is None
+        assert len(wrapped.content) == 1 and wrapped.content[0].type == "text"
+        payload = json.loads(wrapped.content[0].text)
     else:
         payload = wrapped
     assert payload["data"]["x"]
-    wire = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    assert ": " not in wire and ", " not in wire, "结构化段必须零空白"
+    wire = wrapped.content[0].text if CallToolResult is not None else json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"))
+    assert ": " not in wire and ", " not in wire, "单副本必须零空白"

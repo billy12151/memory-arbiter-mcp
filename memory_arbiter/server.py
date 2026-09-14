@@ -6,12 +6,13 @@ import json
 import os
 import signal
 import sys
-from typing import Any, cast, Awaitable, Callable, MutableMapping, NamedTuple
+from typing import Any, Awaitable, Callable, MutableMapping, NamedTuple
 
 try:
-    from mcp.types import CallToolResult
+    from mcp.types import CallToolResult, TextContent
 except Exception:  # fake-mcp test doubles have no types submodule
     CallToolResult = None  # type: ignore[assignment,misc]
+    TextContent = None  # type: ignore[assignment,misc]
 
 from . import __version__
 from .config import Settings
@@ -239,29 +240,35 @@ def _invoke_with_identity(
         return fn(**kwargs)
 
 
-def _structured_only(result: dict[str, Any]) -> Any:
-    """0.16.0 single-copy serialization (plan §6⑱).
+def _single_text_copy(result: dict[str, Any]) -> Any:
+    """Single-copy serialization, in the universal channel (0.16.5 flip of §6⑱).
 
-    The SDK's FastMCP serializes a plain dict return TWICE: once as
-    ``structuredContent`` (compact ``separators=(",", ":")``) and once as an
-    ``indent=2`` ``content[0].text`` copy — a measured 2-3x wire inflation.
-    Returning a ``CallToolResult`` makes ``func_metadata.convert_result``
-    pass the object through untouched (no ``_convert_to_content`` copy), so
-    the wire carries ONLY the compact structured copy. Breaking by design:
-    clients reading ``content[0].text`` must move to ``structuredContent``.
+    The SDK's FastMCP serializes a plain dict return TWICE: a compact
+    ``structuredContent`` plus an ``indent=2`` ``content[0].text`` copy — a
+    measured 2-3x wire inflation. 0.16.0 kept the structured copy only, which
+    turned out to pick the wrong survivor: ``content`` is the one channel
+    every MCP client reads (it predates and outlives the optional
+    ``structuredContent`` field), so pre-2025-06-18 clients saw empty
+    results (live case: WorkBuddy). The flip keeps the single compact copy —
+    the ~55% saving is intact, byte-for-byte the same JSON — but carries it
+    as ``content[0].text``. Clients that followed the 0.16.0 migration and
+    read ``structuredContent`` must read ``content[0].text`` (same compact
+    JSON, ``json.loads`` it).
 
-    The declared ``-> dict[str, Any]`` annotations stay untouched on the tool
-    functions — the output schema (and with it structured-output negotiation)
-    is derived from the annotation, not the runtime type.
+    The vacuous ``dict[str, Any]``-derived outputSchema is dropped along with
+    it: the spec pairs a declared output schema with structuredContent, and
+    ``{type: object, additionalProperties: true}`` carried no information.
     """
-    resolved = CallToolResult
-    if resolved is None:  # fake-mcp test double: keep the plain dict path
+    if CallToolResult is None or TextContent is None:  # fake-mcp double
         try:
             from mcp.types import CallToolResult as _ctr
-            resolved = _ctr
+            from mcp.types import TextContent as _tc
         except Exception:
             return result
-    return resolved(content=[], structuredContent=result)
+        return _ctr(content=[_tc(type="text", text=json.dumps(
+            result, ensure_ascii=False, separators=(",", ":")))])
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")))])
 
 
 def _data_with_request_identity(
@@ -340,7 +347,7 @@ def build_runtime() -> ServerBundle:
         )
 
     @app.tool()
-    def memory(action: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
+    def memory(action: str = "help", data: dict[str, Any] | None = None) -> Any:
         """Daily memory operations: remember, find, batch_find, read, update, judge, status, help.
 
         Call memory(action="help") to discover accepted fields, judge requirements,
@@ -368,13 +375,13 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return cast(dict[str, Any], _structured_only(error or _invoke_with_identity(
+        return _single_text_copy(error or _invoke_with_identity(
             tools, identity, tools.memory,
             action=action, data=payload,
-        )))
+        ))
 
     @app.tool()
-    def memory_review(view: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
+    def memory_review(view: str = "help", data: dict[str, Any] | None = None) -> Any:
         """Read-only inspection: overview, doctor, conflicts, conflict_detail, history, expired, audit, entities, help.
 
         Use memory_review(view="help") for accepted fields. Inspect conflict_detail
@@ -385,13 +392,13 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return cast(dict[str, Any], _structured_only(error or _invoke_with_identity(
+        return _single_text_copy(error or _invoke_with_identity(
             tools, identity, tools.memory_review,
             view=view, data=payload,
-        )))
+        ))
 
     @app.tool()
-    def memory_govern(action: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
+    def memory_govern(action: str = "help", data: dict[str, Any] | None = None) -> Any:
         """Authorized governance: retire, merge near-duplicates, apply/replan/resolve conflicts, confirm, and manage workspaces.
 
         Every state-changing action requires explicit user authorization for that
@@ -402,13 +409,13 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return cast(dict[str, Any], _structured_only(error or _invoke_with_identity(
+        return _single_text_copy(error or _invoke_with_identity(
             tools, identity, tools.memory_govern,
             action=action, data=payload,
-        )))
+        ))
 
     @app.tool()
-    def memory_repair(task: str = "help", data: dict[str, Any] | None = None) -> dict[str, Any]:
+    def memory_repair(task: str = "help", data: dict[str, Any] | None = None) -> Any:
         """Maintenance: evidence rebuild, conflict scans (scheduled-task spec under help topic scheduled_tasks), full-library duplicate sweeps (scan_duplicates), history cleanup, entity assignment, pending activation, backup replay, notices, and semantic runtime control.
 
         Use memory_repair(task="help") for notice handling and semantic_control
@@ -419,10 +426,10 @@ def build_runtime() -> ServerBundle:
         payload, error = _data_with_request_identity(
             tools, {} if data is None else data, identity,
         )
-        return cast(dict[str, Any], _structured_only(error or _invoke_with_identity(
+        return _single_text_copy(error or _invoke_with_identity(
             tools, identity, tools.memory_repair,
             task=task, data=payload,
-        )))
+        ))
 
     return ServerBundle(app, tools)
 

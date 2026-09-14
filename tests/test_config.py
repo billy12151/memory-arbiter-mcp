@@ -21,7 +21,10 @@ from memory_arbiter.tools import MemoryTools
 
 def _sc(result):
     """Unwrap the 0.16.0 single-copy FastMCP response (CallToolResult)."""
-    return getattr(result, "structuredContent", result)
+    # 0.16.5 single-copy envelope: the compact JSON rides content[0].text.
+    if hasattr(result, "content"):
+        return json.loads(result.content[0].text)
+    return result
 
 
 
@@ -76,7 +79,10 @@ def clear_config_env(monkeypatch) -> None:
 
 def _sc(result):
     """Unwrap the 0.16.0 single-copy FastMCP response (CallToolResult)."""
-    return getattr(result, "structuredContent", result)
+    # 0.16.5 single-copy envelope: the compact JSON rides content[0].text.
+    if hasattr(result, "content"):
+        return json.loads(result.content[0].text)
+    return result
 
 def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path, monkeypatch) -> None:
     """Regression: the MCP wrapper must pass new_tags=None through.

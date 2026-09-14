@@ -510,8 +510,9 @@ def test_product_server_exposes_linked_open_items_option(tmp_path: Path) -> None
     find = tools_reg["memory"].fn
     bundle.tools.memory_write(content="probe doc", subject="probe", tags=["solo"], workspace="ws")
     bundle.tools.memory_write(content="reminder", subject="td", tags=["todo", "solo"], workspace="ws")
-    disabled = find(action="find", data={"query": "probe", "include_linked_open_items": False}).structuredContent
-    enabled = find(action="find", data={"query": "probe", "include_linked_open_items": True}).structuredContent
+    import json as _json
+    disabled = _json.loads(find(action="find", data={"query": "probe", "include_linked_open_items": False}).content[0].text)
+    enabled = _json.loads(find(action="find", data={"query": "probe", "include_linked_open_items": True}).content[0].text)
     assert disabled["data"]["linked_open_items"] == []
     assert enabled["data"]["linked_open_items"]
     bundle.tools.shutdown(timeout=1)
