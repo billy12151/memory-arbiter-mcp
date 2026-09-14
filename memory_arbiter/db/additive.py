@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from typing import Any
 
 from ..models import utc_now_iso
 

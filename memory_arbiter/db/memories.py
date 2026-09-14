@@ -5,7 +5,6 @@ import hashlib
 import json
 import sqlite3
 import struct
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
@@ -20,7 +19,6 @@ from ..models import MemoryRecord, utc_now_iso
 from ..text import (
     canon_entity as _canon_entity,
     canon_scope as _canon_scope,
-    coerce_tags as _coerce_tags_db,
     subject_tokens as _subject_tokens,
 )
 from ..timeutil import parse_iso8601_utc

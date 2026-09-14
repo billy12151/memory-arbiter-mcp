@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator, TYPE_CHECKING
 from ..config import Settings

@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, cast, TYPE_CHECKING
 
 from .. import __version__
-from ..acl import CallerWorkspace, WorkspaceScope, scope_names, workspace_scope_sql, forbidden_payload, raw_workspace
-from ..arbitration import compare_memories
+from ..acl import CallerWorkspace, WorkspaceScope, workspace_scope_sql, forbidden_payload, raw_workspace
 from ..constants import (
     DEFAULT_WORKSPACE_NAME,
     WORKSPACE_MIN_NAME_LEN,
@@ -22,12 +21,12 @@ from ..constants import (
     WORKSPACE_WEAK_VECTOR_WEIGHT,
     is_default_workspace_term,
 )
-from ..db import MemoryDB, _normalize_alias_key
+from ..db import _normalize_alias_key
 from ..embedder import ManagedEmbedder
 from ..db_generation import database_startup_lock
 from ..db.workspaces import _coerce_ws, _mechanical_ws_key
 from ..validation import MAX_BATCH_IDS, _controlled_integer
-from ..models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext, utc_now_iso
+from ..models import MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext, utc_now_iso
 from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
 

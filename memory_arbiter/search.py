@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,17 +33,7 @@ RetrievalMode = Literal[
     "unavailable",       # SQLite not available
 ]
 
-from .constants import (
-    CONTENT_LIKE_CAP,
-    Isolation,
-    QUERY_RECALL_SCORE_FLOOR,
-    RECALL_POOL_CAP,
-    SURFACE_ADMISSION_QUOTA,
-    WORKSPACE_MIN_NAME_LEN,
-    WORKSPACE_WEAK_VECTOR_WEIGHT,
-    is_default_workspace_term,
-    strict_ws,
-)
+from .constants import CONTENT_LIKE_CAP, Isolation, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
 
 
 @dataclass
@@ -60,8 +49,6 @@ class SearchOutcome:
     total_estimate: int | None
     retrieval_mode: RetrievalMode
 
-
-import re
 
 # Single source: text.CJK_RE_SEARCH (Phase 1). Re-exported here for back-compat.
 from .text import CJK_RE_SEARCH as _CJK_RE

@@ -6,11 +6,8 @@ from typing import Any, TYPE_CHECKING
 from ..acl import CallerWorkspace
 from ..embedder import ManagedEmbedder
 
-from ..arbitration import compare_memories
-from ..constants import EMBEDDING_MAX_SECTION_CHARS, SUPERSEDED_LIMIT, strict_ws
+from ..constants import EMBEDDING_MAX_SECTION_CHARS, SUPERSEDED_LIMIT
 from ..evidence import local_text_units
-from ..models import MemoryStatus
-from ..search import search_memories
 from ..tokens import meter_payloads
 
 if TYPE_CHECKING:
@@ -84,7 +81,6 @@ def _unit_aligned_hits(
     if content and covered >= _HIT_SPANS_FULL_COVERAGE * len(content):
         upgraded = content
     return hit_spans, upgraded
-
 
 
 def _content_outline(subject: str, content: str) -> list[dict[str, Any]]:

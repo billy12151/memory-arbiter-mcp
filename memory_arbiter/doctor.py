@@ -22,7 +22,7 @@ from .constants import (
     is_default_workspace_term,
 )
 from .db.meta import active_dim_on_connection, vec_table_dimension
-from .db_generation import detect_database_generation, detect_upgrade_source_generation
+from .db_generation import detect_upgrade_source_generation
 from .degrade import DegradeState
 from .models import utc_now_iso
 from .timeutil import parse_iso8601_utc
@@ -994,7 +994,6 @@ def run_all_checks(conn: sqlite3.Connection, settings: Settings, deep: bool = Fa
                 findings.append(produced)
     overall = max((f.severity for f in findings), key=lambda s: {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}[s])
     return OverviewReport(utc_now_iso(), overall, findings, {"mode": runtime_state.mode if runtime_state else "sqlite", "total_memories": ctx.total, "evidence_indexed": ctx.indexed, "evidence_units": ctx.units})
-
 
 
 def report_to_dict(report: OverviewReport) -> dict[str, Any]:

@@ -569,12 +569,8 @@ class QueueProtocol:
     def _submit_workspace(
         self, index: int, status: str, reason: str, raw: dict[str, Any],
     ) -> dict[str, Any]:
-        from .constants import (
-            NORMALIZE_MIN_CONF, NORMALIZE_VOTE_NEIGHBORS,
-            PROTECTED_WORKSPACES,
-        )
+        from .constants import NORMALIZE_MIN_CONF, PROTECTED_WORKSPACES
         from .normalize_gate import normalize_gate
-        from .scan_pipeline import _workspace_identity
 
         if status not in {"confirmed", "dismissed"}:
             return {"index": index, "outcome": "invalid_input",

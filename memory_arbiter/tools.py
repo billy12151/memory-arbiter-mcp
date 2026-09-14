@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import threading
 import time
 from collections import deque
@@ -11,39 +10,13 @@ from contextvars import ContextVar
 from typing import Any, Callable, cast
 
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, visible_memory
-from .arbitration import compare_memories
+from .arbitration import compare_memories  # noqa: F401 (monkeypatch seam, see pipeline/read.py:226)
 from .config import Settings
-from .constants import (
-    EMBEDDING_MAX_SECTION_CHARS,
-    EMBEDDING_N_CTX,
-    EMBEDDING_RESERVED_TOKENS,
-    QWEN_BUDGET_MS,
-    QWEN_CANDIDATE_DISTANCE,
-    QWEN_CANDIDATE_TOP_K,
-    SCAN_TASK_RECHECK_SECONDS,
-    SCAN_TASK_STALE_DAYS,
-    SEMANTIC_INFERENCE_TIMEOUT_MS,
-    SEMANTIC_LOAD_TIMEOUT_MS,
-    SEMANTIC_N_BATCH,
-    SEMANTIC_N_CTX,
-    SEMANTIC_N_THREADS,
-    SEMANTIC_PAIR_LONG_DECODE_TOKENS,
-    SEMANTIC_PAIR_RING_SIZE,
-    SEMANTIC_SCAN_BUDGET_MS,
-    SEMANTIC_SCAN_ENHANCE,
-    SEMANTIC_SCAN_MAX_PAIRS,
-    WORKSPACE_MIN_NAME_LEN,
-    WORKSPACE_RECALL_ADMISSION,
-    WORKSPACE_RECALL_CUTOFF,
-    strict_ws,
-    is_default_workspace_term,
-)
+from .constants import EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, QWEN_BUDGET_MS, QWEN_CANDIDATE_DISTANCE, QWEN_CANDIDATE_TOP_K, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_BATCH, SEMANTIC_N_CTX, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
-from .normalize_gate import normalize_gate
-from .text import canon_entity as _canon_entity, canon_scope as _canon_scope
-from .models import MemoryRecord, MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext, utc_now_iso
-from .search import search_memories, _linked_open_items_for_search
+from .models import TrustedApplyingContext, utc_now_iso
+from .search import search_memories, _linked_open_items_for_search  # noqa: F401 (monkeypatch seam, see pipeline/read.py:226)
 from .semantic_conflict import (
     IsolatedGGUFSemanticBackend,
     SemanticBackend,
@@ -51,8 +24,6 @@ from .semantic_conflict import (
 from .update_monitor import UpdateMonitor
 from .request_identity import get_request_identity
 from .scan_tasks import AGENT_INSTRUCTION as _SCAN_AGENT_INSTRUCTION, SCHEDULED_TASKS_SPEC as _SCAN_TASKS_SPEC
-from . import __version__
-from . import workspace_rules
 from .workers import LocalTextIndexWorker, SemanticConflictWorker
 from .surfaces import ProductSurfaces
 from .pipeline.signals import ConflictSignalPipeline

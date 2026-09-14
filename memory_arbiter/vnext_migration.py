@@ -36,7 +36,7 @@ from .embedder import (
     compute_embedding_space_id,
     compute_model_digest,
 )
-from .evidence import evidence_content_hash, local_text_units
+from .evidence import local_text_units
 from .db.meta import active_scan_boundary_on_connection, canonical_scan_boundary
 from .tools import MemoryTools
 
