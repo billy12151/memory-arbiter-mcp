@@ -273,7 +273,7 @@ def test_scan_pool_small_budget_checks_overlap_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With a one-pair budget, the high-overlap pair gets the budget."""
-    from memory_arbiter import tools as tools_mod
+    from memory_arbiter import scan_pipeline as scan_pipeline_mod
 
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
@@ -285,8 +285,8 @@ def test_scan_pool_small_budget_checks_overlap_first(
 
     backend = _RecordingBackend()
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
-    monkeypatch.setattr(tools_mod, "SEMANTIC_SCAN_MAX_PAIRS", 1)
-    monkeypatch.setattr(tools_mod, "SEMANTIC_SCAN_BUDGET_MS", 60_000)
+    monkeypatch.setattr(scan_pipeline_mod, "SEMANTIC_SCAN_MAX_PAIRS", 1)
+    monkeypatch.setattr(scan_pipeline_mod, "SEMANTIC_SCAN_BUDGET_MS", 60_000)
 
     pool = [
         {"left_id": int(anchor["id"]), "right_id": int(low["id"]), "left_snippet": "deploy pipeline is blue",

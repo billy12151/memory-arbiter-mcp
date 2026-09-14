@@ -244,7 +244,7 @@ def test_scan_capability_e2e_real_models(
         ).fetchone()
     assert suspect_row is not None, "workspace suspect must land in the judgment queue"
 
-    monkeypatch.setattr("memory_arbiter.tools.SEMANTIC_SCAN_BUDGET_MS", 12_000)
+    monkeypatch.setattr("memory_arbiter.scan_pipeline.SEMANTIC_SCAN_BUDGET_MS", 12_000)
     page1 = _scan_page(tools)
     clue = next(
         (c for c in page1["candidates"]
