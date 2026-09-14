@@ -50,7 +50,17 @@ markers = [
 ]
 
 [tool.ruff.lint]
-select = ["E9", "F63", "F7", "F82", "UP006", "UP007", "UP045"]
+# F401 (unused import) enabled 2026-09-14 after the 0.16.5 dead-code sweep
+# zeroed memory_arbiter/ (38 offenders, three of them deliberate re-export
+# seams carrying noqa). Check-only discipline: never bulk `--fix` F401 -- it
+# would strip the seam imports (see the PR-6 UP-autofix lesson).
+select = ["E9", "F401", "F63", "F7", "F82", "UP006", "UP007", "UP045"]
+
+[tool.ruff.lint.per-file-ignores]
+# 67 pre-existing unused imports in tests/scripts; clear them before removing
+# these lines (tracked in the 0.16.5 plan, appendix A item 5).
+"tests/**" = ["F401"]
+"scripts/**" = ["F401"]
 
 [tool.mypy]
 strict = true
