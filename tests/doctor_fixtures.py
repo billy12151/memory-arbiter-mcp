@@ -218,6 +218,53 @@ def fx_spec_drift(root: Path) -> tuple[Settings, MemoryDB]:
     return settings, db
 
 
+def fx_scan_log_unparseable_time(root: Path) -> tuple[Settings, MemoryDB]:
+    """A completed scan whose timestamp will not parse: no staleness verdict."""
+    settings, db = fx_indexed(root)
+    log = Path(settings.db_path).parent / "scan_log.jsonl"
+    log.write_text(
+        json.dumps({"status": "completed", "scan_time": "not-a-timestamp"}) + "\n",
+        encoding="utf-8",
+    )
+    return settings, db
+
+
+def fx_scan_chain_recent(root: Path) -> tuple[Settings, MemoryDB]:
+    """An in-flight chain younger than the alarm threshold stays quiet."""
+    settings, db = fx_indexed(root)
+    payload = json.dumps(
+        {"complete": False, "after": 10, "next_anchor": 77,
+         "at": _iso(timedelta(minutes=-5)), "client": "golden", "groups": 1}
+    )
+    _exec(db, "INSERT OR REPLACE INTO migration_state(key,value) VALUES('scan_page_progress',?)", (payload,))
+    return settings, db
+
+
+def fx_scan_chain_unparseable_at(root: Path) -> tuple[Settings, MemoryDB]:
+    """Progress kv present but its timestamp is unreadable: no verdict."""
+    settings, db = fx_indexed(root)
+    payload = json.dumps({"complete": False, "next_anchor": 5, "at": "not-a-timestamp"})
+    _exec(db, "INSERT OR REPLACE INTO migration_state(key,value) VALUES('scan_page_progress',?)", (payload,))
+    return settings, db
+
+
+def fx_spec_stamp_current(root: Path) -> tuple[Settings, MemoryDB]:
+    """A task running the served spec produces no drift finding."""
+    settings, db = fx_indexed(root)
+    log = Path(settings.db_path).parent / "scan_log.jsonl"
+    log.write_text(
+        json.dumps({"status": "completed", "scan_time": _iso(timedelta(days=-1))}) + "\n",
+        encoding="utf-8",
+    )
+    _exec(
+        db,
+        "INSERT OR REPLACE INTO migration_state(key,value)"
+        " VALUES('scheduled_tasks_spec_confirmed',?)",
+        (str(SCHEDULED_TASKS_SPEC_VERSION),),
+    )
+    return settings, db
+
+
 def fx_hygiene_backlog(root: Path) -> tuple[Settings, MemoryDB]:
     from memory_arbiter.constants import MAX_MEMORY_TOTAL_TAGS
 
@@ -353,6 +400,10 @@ FIXTURES: list[tuple[str, Callable[[Path], tuple[Settings, MemoryDB]], tuple[boo
     ("applying_naive_timestamp", fx_applying_naive_timestamp, (False,)),
     ("side_tables_missing", fx_side_tables_missing, (False,)),
     ("default_fallback_audit", fx_default_fallback_audit, (False,)),
+    ("scan_log_unparseable_time", fx_scan_log_unparseable_time, (False,)),
+    ("scan_chain_recent", fx_scan_chain_recent, (False,)),
+    ("scan_chain_unparseable_at", fx_scan_chain_unparseable_at, (False,)),
+    ("spec_stamp_current", fx_spec_stamp_current, (False,)),
 ]
 
 

@@ -5922,6 +5922,816 @@
   }
  },
  {
+  "case_id": "scan_log_unparseable_time/deep=0",
+  "report": {
+   "snapshot_ts": "<TS>",
+   "overall": "warning",
+   "findings": [
+    {
+     "check_id": "config.writable",
+     "dimension": "config",
+     "severity": "info",
+     "status": "pass",
+     "title": "config.writable",
+     "detail": "SQLite writable",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.coverage",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.coverage",
+     "detail": "3/3 memories indexed",
+     "evidence": {
+      "indexed": 3,
+      "eligible": 3,
+      "non_indexable": 0,
+      "units": 3
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.freshness",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.freshness",
+     "detail": "0 stale evidence rows",
+     "evidence": {
+      "stale": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.orphans",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.orphans",
+     "detail": "0 orphan evidence rows",
+     "evidence": {
+      "orphan": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.backlog",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.backlog",
+     "detail": "0 unresolved conflicts (0 open, 0 applying); triage dismissed 0 total, 0 this week",
+     "evidence": {
+      "open": 0,
+      "applying": 0,
+      "not_a_conflict_total": 0,
+      "not_a_conflict_this_week": 0,
+      "latest_triage_at": null
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_required",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_required",
+     "detail": "conflict rebuild scan complete",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.spec_drift",
+     "dimension": "conflicts",
+     "severity": "warning",
+     "status": "warn",
+     "title": "conflicts.spec_drift",
+     "detail": "scheduled task appears to follow spec v1 while the server serves v<SPEC_VER>: rebuild the conflict_scan task from memory(action='help', data={'topic': 'scheduled_tasks'}) — v2 tasks kick memory_repair(task='scan_pipeline') and clear the scan_queue judgment queue instead of paging scan_candidates",
+     "evidence": {
+      "served_spec_version": "<SPEC_VER>",
+      "task_spec_version": null
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.applying",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.applying",
+     "detail": "0 applying conflict group(s) awaiting completion",
+     "evidence": {
+      "groups": []
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "notices.backlog",
+     "dimension": "notices",
+     "severity": "info",
+     "status": "pass",
+     "title": "notices.backlog",
+     "detail": "0 open notices",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_queue_backlog",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_queue_backlog",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "evidence": {
+      "backlog": 0,
+      "internal_pending": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "normalize.autonomy",
+     "dimension": "normalize",
+     "severity": "info",
+     "status": "pass",
+     "title": "normalize.autonomy",
+     "detail": "0 autonomous move(s) applied, 0 rolled back; rollback via memory_govern(action='rollback_auto_move', data={audit_id, authorized=true})",
+     "evidence": {
+      "applied": 0,
+      "rolled_back": 0,
+      "default_fallback": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "tags.over_limit",
+     "dimension": "tags",
+     "severity": "info",
+     "status": "pass",
+     "title": "tags.over_limit",
+     "detail": "all memories within the 32-tag cap",
+     "evidence": {
+      "over_limit": [],
+      "cap": 32
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "capacity.attention_volume",
+     "dimension": "capacity",
+     "severity": "info",
+     "status": "pass",
+     "title": "capacity.attention_volume",
+     "detail": "0 attention events in 7 days (0 total)",
+     "evidence": {
+      "recent_7d": 0,
+      "total_lines": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "recall.blacklist",
+     "dimension": "recall",
+     "severity": "info",
+     "status": "pass",
+     "title": "recall.blacklist",
+     "detail": "unscoped find excludes 1 workspace(s) via recall blacklist (default: mema-twin)",
+     "evidence": {
+      "source": "default",
+      "workspaces": [
+       "mema-twin"
+      ],
+      "warnings": []
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "workspace.review",
+     "dimension": "workspace",
+     "severity": "info",
+     "status": "pass",
+     "title": "workspace.review",
+     "detail": "0 workspace(s) confirmed (registry matches snapshot)",
+     "evidence": {
+      "confirmed": 0,
+      "current": [],
+      "new": [],
+      "sidecar": "<PATH>"
+     },
+     "fix_hint": null
+    }
+   ],
+   "summary": {
+    "mode": "sqlite",
+    "total_memories": 3,
+    "evidence_indexed": 3,
+    "evidence_units": 3
+   }
+  }
+ },
+ {
+  "case_id": "scan_chain_recent/deep=0",
+  "report": {
+   "snapshot_ts": "<TS>",
+   "overall": "info",
+   "findings": [
+    {
+     "check_id": "config.writable",
+     "dimension": "config",
+     "severity": "info",
+     "status": "pass",
+     "title": "config.writable",
+     "detail": "SQLite writable",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.coverage",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.coverage",
+     "detail": "3/3 memories indexed",
+     "evidence": {
+      "indexed": 3,
+      "eligible": 3,
+      "non_indexable": 0,
+      "units": 3
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.freshness",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.freshness",
+     "detail": "0 stale evidence rows",
+     "evidence": {
+      "stale": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.orphans",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.orphans",
+     "detail": "0 orphan evidence rows",
+     "evidence": {
+      "orphan": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.backlog",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.backlog",
+     "detail": "0 unresolved conflicts (0 open, 0 applying); triage dismissed 0 total, 0 this week",
+     "evidence": {
+      "open": 0,
+      "applying": 0,
+      "not_a_conflict_total": 0,
+      "not_a_conflict_this_week": 0,
+      "latest_triage_at": null
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_required",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_required",
+     "detail": "no completed conflict scan on record — scheduled scan tasks are not set up; see memory_repair help (topic: scheduled_tasks)",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.applying",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.applying",
+     "detail": "0 applying conflict group(s) awaiting completion",
+     "evidence": {
+      "groups": []
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "notices.backlog",
+     "dimension": "notices",
+     "severity": "info",
+     "status": "pass",
+     "title": "notices.backlog",
+     "detail": "0 open notices",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_queue_backlog",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_queue_backlog",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "evidence": {
+      "backlog": 0,
+      "internal_pending": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "normalize.autonomy",
+     "dimension": "normalize",
+     "severity": "info",
+     "status": "pass",
+     "title": "normalize.autonomy",
+     "detail": "0 autonomous move(s) applied, 0 rolled back; rollback via memory_govern(action='rollback_auto_move', data={audit_id, authorized=true})",
+     "evidence": {
+      "applied": 0,
+      "rolled_back": 0,
+      "default_fallback": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "tags.over_limit",
+     "dimension": "tags",
+     "severity": "info",
+     "status": "pass",
+     "title": "tags.over_limit",
+     "detail": "all memories within the 32-tag cap",
+     "evidence": {
+      "over_limit": [],
+      "cap": 32
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "capacity.attention_volume",
+     "dimension": "capacity",
+     "severity": "info",
+     "status": "pass",
+     "title": "capacity.attention_volume",
+     "detail": "0 attention events in 7 days (0 total)",
+     "evidence": {
+      "recent_7d": 0,
+      "total_lines": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "recall.blacklist",
+     "dimension": "recall",
+     "severity": "info",
+     "status": "pass",
+     "title": "recall.blacklist",
+     "detail": "unscoped find excludes 1 workspace(s) via recall blacklist (default: mema-twin)",
+     "evidence": {
+      "source": "default",
+      "workspaces": [
+       "mema-twin"
+      ],
+      "warnings": []
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "workspace.review",
+     "dimension": "workspace",
+     "severity": "info",
+     "status": "pass",
+     "title": "workspace.review",
+     "detail": "0 workspace(s) confirmed (registry matches snapshot)",
+     "evidence": {
+      "confirmed": 0,
+      "current": [],
+      "new": [],
+      "sidecar": "<PATH>"
+     },
+     "fix_hint": null
+    }
+   ],
+   "summary": {
+    "mode": "sqlite",
+    "total_memories": 3,
+    "evidence_indexed": 3,
+    "evidence_units": 3
+   }
+  }
+ },
+ {
+  "case_id": "scan_chain_unparseable_at/deep=0",
+  "report": {
+   "snapshot_ts": "<TS>",
+   "overall": "info",
+   "findings": [
+    {
+     "check_id": "config.writable",
+     "dimension": "config",
+     "severity": "info",
+     "status": "pass",
+     "title": "config.writable",
+     "detail": "SQLite writable",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.coverage",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.coverage",
+     "detail": "3/3 memories indexed",
+     "evidence": {
+      "indexed": 3,
+      "eligible": 3,
+      "non_indexable": 0,
+      "units": 3
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.freshness",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.freshness",
+     "detail": "0 stale evidence rows",
+     "evidence": {
+      "stale": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.orphans",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.orphans",
+     "detail": "0 orphan evidence rows",
+     "evidence": {
+      "orphan": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.backlog",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.backlog",
+     "detail": "0 unresolved conflicts (0 open, 0 applying); triage dismissed 0 total, 0 this week",
+     "evidence": {
+      "open": 0,
+      "applying": 0,
+      "not_a_conflict_total": 0,
+      "not_a_conflict_this_week": 0,
+      "latest_triage_at": null
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_required",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_required",
+     "detail": "no completed conflict scan on record — scheduled scan tasks are not set up; see memory_repair help (topic: scheduled_tasks)",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.applying",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.applying",
+     "detail": "0 applying conflict group(s) awaiting completion",
+     "evidence": {
+      "groups": []
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "notices.backlog",
+     "dimension": "notices",
+     "severity": "info",
+     "status": "pass",
+     "title": "notices.backlog",
+     "detail": "0 open notices",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_queue_backlog",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_queue_backlog",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "evidence": {
+      "backlog": 0,
+      "internal_pending": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "normalize.autonomy",
+     "dimension": "normalize",
+     "severity": "info",
+     "status": "pass",
+     "title": "normalize.autonomy",
+     "detail": "0 autonomous move(s) applied, 0 rolled back; rollback via memory_govern(action='rollback_auto_move', data={audit_id, authorized=true})",
+     "evidence": {
+      "applied": 0,
+      "rolled_back": 0,
+      "default_fallback": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "tags.over_limit",
+     "dimension": "tags",
+     "severity": "info",
+     "status": "pass",
+     "title": "tags.over_limit",
+     "detail": "all memories within the 32-tag cap",
+     "evidence": {
+      "over_limit": [],
+      "cap": 32
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "capacity.attention_volume",
+     "dimension": "capacity",
+     "severity": "info",
+     "status": "pass",
+     "title": "capacity.attention_volume",
+     "detail": "0 attention events in 7 days (0 total)",
+     "evidence": {
+      "recent_7d": 0,
+      "total_lines": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "recall.blacklist",
+     "dimension": "recall",
+     "severity": "info",
+     "status": "pass",
+     "title": "recall.blacklist",
+     "detail": "unscoped find excludes 1 workspace(s) via recall blacklist (default: mema-twin)",
+     "evidence": {
+      "source": "default",
+      "workspaces": [
+       "mema-twin"
+      ],
+      "warnings": []
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "workspace.review",
+     "dimension": "workspace",
+     "severity": "info",
+     "status": "pass",
+     "title": "workspace.review",
+     "detail": "0 workspace(s) confirmed (registry matches snapshot)",
+     "evidence": {
+      "confirmed": 0,
+      "current": [],
+      "new": [],
+      "sidecar": "<PATH>"
+     },
+     "fix_hint": null
+    }
+   ],
+   "summary": {
+    "mode": "sqlite",
+    "total_memories": 3,
+    "evidence_indexed": 3,
+    "evidence_units": 3
+   }
+  }
+ },
+ {
+  "case_id": "spec_stamp_current/deep=0",
+  "report": {
+   "snapshot_ts": "<TS>",
+   "overall": "info",
+   "findings": [
+    {
+     "check_id": "config.writable",
+     "dimension": "config",
+     "severity": "info",
+     "status": "pass",
+     "title": "config.writable",
+     "detail": "SQLite writable",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.coverage",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.coverage",
+     "detail": "3/3 memories indexed",
+     "evidence": {
+      "indexed": 3,
+      "eligible": 3,
+      "non_indexable": 0,
+      "units": 3
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.freshness",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.freshness",
+     "detail": "0 stale evidence rows",
+     "evidence": {
+      "stale": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "evidence.orphans",
+     "dimension": "evidence",
+     "severity": "info",
+     "status": "pass",
+     "title": "evidence.orphans",
+     "detail": "0 orphan evidence rows",
+     "evidence": {
+      "orphan": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.backlog",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.backlog",
+     "detail": "0 unresolved conflicts (0 open, 0 applying); triage dismissed 0 total, 0 this week",
+     "evidence": {
+      "open": 0,
+      "applying": 0,
+      "not_a_conflict_total": 0,
+      "not_a_conflict_this_week": 0,
+      "latest_triage_at": null
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_required",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_required",
+     "detail": "conflict rebuild scan complete",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_stale",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_stale",
+     "detail": "last completed conflict scan 1 day(s) ago; activity beyond 14 days means the scheduled task is not running",
+     "evidence": {
+      "last_scan_time": "<TS>",
+      "age_days": 1
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.applying",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.applying",
+     "detail": "0 applying conflict group(s) awaiting completion",
+     "evidence": {
+      "groups": []
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "notices.backlog",
+     "dimension": "notices",
+     "severity": "info",
+     "status": "pass",
+     "title": "notices.backlog",
+     "detail": "0 open notices",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "conflicts.scan_queue_backlog",
+     "dimension": "conflicts",
+     "severity": "info",
+     "status": "pass",
+     "title": "conflicts.scan_queue_backlog",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "evidence": {
+      "backlog": 0,
+      "internal_pending": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "normalize.autonomy",
+     "dimension": "normalize",
+     "severity": "info",
+     "status": "pass",
+     "title": "normalize.autonomy",
+     "detail": "0 autonomous move(s) applied, 0 rolled back; rollback via memory_govern(action='rollback_auto_move', data={audit_id, authorized=true})",
+     "evidence": {
+      "applied": 0,
+      "rolled_back": 0,
+      "default_fallback": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "tags.over_limit",
+     "dimension": "tags",
+     "severity": "info",
+     "status": "pass",
+     "title": "tags.over_limit",
+     "detail": "all memories within the 32-tag cap",
+     "evidence": {
+      "over_limit": [],
+      "cap": 32
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "capacity.attention_volume",
+     "dimension": "capacity",
+     "severity": "info",
+     "status": "pass",
+     "title": "capacity.attention_volume",
+     "detail": "0 attention events in 7 days (0 total)",
+     "evidence": {
+      "recent_7d": 0,
+      "total_lines": 0
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "recall.blacklist",
+     "dimension": "recall",
+     "severity": "info",
+     "status": "pass",
+     "title": "recall.blacklist",
+     "detail": "unscoped find excludes 1 workspace(s) via recall blacklist (default: mema-twin)",
+     "evidence": {
+      "source": "default",
+      "workspaces": [
+       "mema-twin"
+      ],
+      "warnings": []
+     },
+     "fix_hint": null
+    },
+    {
+     "check_id": "workspace.review",
+     "dimension": "workspace",
+     "severity": "info",
+     "status": "pass",
+     "title": "workspace.review",
+     "detail": "0 workspace(s) confirmed (registry matches snapshot)",
+     "evidence": {
+      "confirmed": 0,
+      "current": [],
+      "new": [],
+      "sidecar": "<PATH>"
+     },
+     "fix_hint": null
+    }
+   ],
+   "summary": {
+    "mode": "sqlite",
+    "total_memories": 3,
+    "evidence_indexed": 3,
+    "evidence_units": 3
+   }
+  }
+ },
+ {
   "case_id": "probe/probe_absent",
   "report": {
    "snapshot_ts": "<TS>",

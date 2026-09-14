@@ -57,7 +57,7 @@ def test_corpus_covers_every_check() -> None:
     # Only emitted when the probe hands back a usable embedder.
     for embedder_only in ("vector.device", "evidence.unit_budget"):
         assert embedder_only in seen, f"{embedder_only} lost its probe stub"
-    assert len(GOLDEN) == 41
+    assert len(GOLDEN) == 45
 
 
 @pytest.mark.parametrize(
