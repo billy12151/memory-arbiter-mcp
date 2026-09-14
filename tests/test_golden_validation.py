@@ -33,7 +33,7 @@ def _expand(obj: Any) -> Any:
     megabyte cases, so the slimming costs nothing at test time.
     """
     if isinstance(obj, dict):
-        if set(obj) == {"$rep", "$n"}:
+        if {"$rep", "$n"} <= set(obj):
             return obj["$rep"] * obj["$n"]
         return {key: _expand(value) for key, value in obj.items()}
     if isinstance(obj, list):
@@ -97,17 +97,37 @@ def test_unhashable_values_never_escape_the_boundary() -> None:
     """Direct, because JSON cannot carry these shapes -- only in-process
     callers (pipeline/write, backup replay) can. Before the boundary fix each
     of these escaped as TypeError/OverflowError through three call layers."""
+    surrogate = "a\ud800b"  # legal JSON string, unencodable as UTF-8
     probes = [
         ("memory", "batch_read", {"memory_ids": [1], "content_mode": {"preview"}}),
         ("memory", "remember", {"content": "a", "subject": "b", "status": {"a": 1}}),
         ("memory", "remember", {"content": "a", "subject": "b", "confidence": 10 ** 400}),
         ("memory_repair", "semantic_control", {"action": "status", "timeout": 10 ** 400}),
         ("memory", "find", {"query": "q", "query_embedding": [10 ** 400]}),
+        # Beyond Python 3.11's 4300-digit int(str) cap.
+        ("memory", "read", {"id": "9" * 5000}),
+        ("memory_review", "expired", {"limit": "9" * 5000}),
+        ("memory", "batch_read", {"memory_ids": ["9" * 5000], "content_mode": "preview"}),
+        # Lone surrogates: byte-check and every bounded/tag string now refuse
+        # them at the boundary instead of exploding at the sqlite bind.
+        ("memory", "remember", {"content": surrogate, "subject": "b"}),
+        ("memory", "remember", {"content": "a", "subject": "s\udfffubject"}),
+        ("memory", "remember", {"content": "a", "subject": "b", "tags": [surrogate]}),
+        ("memory", "update", {"id": 1, "old_text": surrogate, "new_text": "x"}),
+        # In-process-only shapes: JSON cannot express any of these keys/values.
+        ("memory", "remember", {"content": "a", "subject": "b", "source_type": 10 ** 5000}),
+        ("memory", "batch_find", {"queries": [{1: "x"}]}),
     ]
     for surface, operation, payload in probes:
         result = validate_product_payload(surface, operation, dict(payload))
         assert result.error is not None, f"{surface}/{operation} leaked {payload} through"
         assert result.error["error"] == "invalid_input"
+
+    # A non-string payload key beyond the int digit cap: str(key) itself raises,
+    # so the unknown-field gate reports it via repr (also asserted: no raise).
+    weird: dict[Any, Any] = {"query": "x", 10 ** 5000: "v"}
+    result = validate_product_payload("memory", "find", weird)
+    assert result.error is not None and result.error["reason"] == "field names must be strings"
 
 
 class _Unserialisable:

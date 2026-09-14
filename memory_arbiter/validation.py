@@ -171,8 +171,26 @@ def _controlled_integer(value: Any) -> int | None:
         digits = stripped[1:] if stripped[:1] in {"+", "-"} else stripped
         if not digits.isdigit():
             return None
-        return int(stripped)
+        try:
+            # Python 3.11+ caps int(str) at 4300 digits (CVE-2020-10735
+            # mitigation); a longer digit string raises ValueError here.
+            # Returning None reports it as the same unusable value the caller
+            # already reports for out-of-range integers.
+            return int(stripped)
+        except ValueError:
+            return None
     return None
+
+
+def _utf8_encodable(value: str) -> bool:
+    """Lone surrogates are legal JSON strings (json.loads yields them) but
+    cannot be encoded to UTF-8, so sqlite would reject them at bind time --
+    after the boundary. Reject them where the rest of the shape is checked."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _finite_float(value: Any) -> float | None:
@@ -221,7 +239,14 @@ def _v_unknown_fields(
     unknown_keys: list[str] = []
     for key in payload:
         if not isinstance(key, str):
-            return _error(str(key), "field names must be strings")
+            # str()/repr() of an int beyond the 4300-digit conversion cap both
+            # raise ValueError, so render defensively: ordinary keys keep their
+            # old rendering, pathological ones degrade to a marker.
+            try:
+                key_name = str(key)
+            except ValueError:
+                key_name = "<unrenderable key>"
+            return _error(key_name, "field names must be strings")
         if key in allowed:
             continue
         if (
@@ -284,6 +309,10 @@ def _v_batch_find_queries(
     for item in queries:
         if not isinstance(item, dict):
             return _error("queries", "every item must be a JSON object with a non-empty query")
+        # In-process callers can hand us non-string keys (JSON never can);
+        # sorted/join below would raise on them.
+        if any(not isinstance(key, str) for key in item):
+            return _error("queries", "item field names must be strings")
         unknown = set(item) - {"id", "query"}
         if unknown:
             return _error("queries", f"unknown item field(s): {', '.join(sorted(unknown))}")
@@ -416,6 +445,8 @@ def _v_content_bytes(
         if value is not None:
             if not isinstance(value, str):
                 return _error(key, "must be a string")
+            if not _utf8_encodable(value):
+                return _error(key, "must be valid UTF-8 text")
             actual = len(value.encode("utf-8"))
             if actual > MAX_CONTENT_BYTES:
                 return {"error": "resource_limit_exceeded", "field": key, "actual_bytes": actual, "max_bytes": MAX_CONTENT_BYTES}
@@ -465,7 +496,11 @@ def _v_bounded_strings(
 ) -> dict[str, Any] | None:
     for key, maximum in _BOUNDED_STRINGS.items():
         value = payload.get(key)
-        if value is not None and (not isinstance(value, str) or len(value) > maximum):
+        if value is not None and (
+            not isinstance(value, str)
+            or len(value) > maximum
+            or not _utf8_encodable(value)
+        ):
             return _error(key, f"must be a string of at most {maximum} characters")
     return None
 
@@ -477,7 +512,10 @@ def _v_tag_lists(
         value = payload.get(key)
         if value is None:
             continue
-        if not isinstance(value, list) or len(value) > MAX_TAGS or any(not isinstance(tag, str) or len(tag) > MAX_TAG_CHARS for tag in value):
+        if not isinstance(value, list) or len(value) > MAX_TAGS or any(
+            not isinstance(tag, str) or len(tag) > MAX_TAG_CHARS or not _utf8_encodable(tag)
+            for tag in value
+        ):
             return _error(key, f"must be a list of at most {MAX_TAGS} strings, each at most {MAX_TAG_CHARS} characters")
     return None
 
@@ -637,7 +675,12 @@ def _v_patches(
             return _error("patches.old_text", "must be a non-empty string")
         if not isinstance(new_text_value, str):
             return _error("patches.new_text", "must be a string (empty deletes the fragment)")
-        if len(old_text_value) > MAX_REPLACEMENT_TEXT_CHARS or len(new_text_value) > MAX_REPLACEMENT_TEXT_CHARS:
+        if (
+            len(old_text_value) > MAX_REPLACEMENT_TEXT_CHARS
+            or len(new_text_value) > MAX_REPLACEMENT_TEXT_CHARS
+            or not _utf8_encodable(old_text_value)
+            or not _utf8_encodable(new_text_value)
+        ):
             return _error(
                 "patches", f"old_text/new_text must each be at most {MAX_REPLACEMENT_TEXT_CHARS} characters",
             )
@@ -751,7 +794,7 @@ def _v_enums(
     }
     for key, choices in enums.items():
         value = payload.get(key)
-        if value is not None and str(value) not in choices:
+        if value is not None and (not isinstance(value, str) or value not in choices):
             return _error(key, "invalid enum value", allowed=sorted(choices))
     return None
 

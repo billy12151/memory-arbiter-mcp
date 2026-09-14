@@ -166,6 +166,7 @@ assert not _MISSING, f"kind/sample tables disagree on: {_MISSING}"
 PAD_THRESHOLD = 1000
 REP_KEY = "$rep"
 N_KEY = "$n"
+SENTINEL_KEY = "$pad"
 
 
 def _pad(value: Any) -> Any:
@@ -174,7 +175,10 @@ def _pad(value: Any) -> Any:
         and len(value) > PAD_THRESHOLD
         and value == value[0] * len(value)
     ):
-        return {REP_KEY: value[0], N_KEY: len(value)}
+        # The $pad sentinel keeps the marker shape distinct from a payload
+        # that legitimately consists of exactly these keys -- without it the
+        # encoding would not be injective and _expand could rewrite real data.
+        return {REP_KEY: value[0], N_KEY: len(value), SENTINEL_KEY: True}
     if isinstance(value, list):
         return [_pad(item) for item in value]
     if isinstance(value, dict):
@@ -219,15 +223,25 @@ def _injections(field: str) -> list[tuple[str, Any]]:
         return [("wrongtype", {"unexpected": "object"})]
     if kind == "str_len":
         cap = STR_LEN_CAP.get(field, MAX_TEXT_FIELD_CHARS)
-        return [("wrongtype", 123), ("over", "x" * (cap + 1)), ("atcap", "x" * cap)]
+        return [
+            ("wrongtype", 123), ("over", "x" * (cap + 1)), ("atcap", "x" * cap),
+            # A lone surrogate is legal JSON; it used to pass the char-count
+            # check and explode later at the sqlite bind.
+            ("surrogate", "a\ud800b"),
+        ]
     if kind == "bytes":
-        return [("wrongtype", 123), ("over", "\u4e00" * 800_000)]
+        return [
+            ("wrongtype", 123),
+            ("over", "\u4e00" * 800_000),
+            ("surrogate", "a\ud800b"),
+        ]
     if kind == "list_str":
         return [
             ("wrongtype", "notalist"),
             ("overcount", ["t"] * (MAX_TAGS + 1)),
             ("overitem", ["x" * (MAX_TAG_CHARS + 1)]),
             ("atcap", ["t"] * MAX_TAGS),
+            ("surrogateitem", ["a\ud800b"]),
         ]
     if kind == "list_obj":
         return [
@@ -236,19 +250,28 @@ def _injections(field: str) -> list[tuple[str, Any]]:
             ("overcount", [{"a": 1}] * (MAX_CONFLICT_MEMBERS + 1)),
         ]
     if kind == "int_id":
-        return [("wrongtype", "abc"), ("zero", 0), ("negative", -1), ("float", 1.5), ("bool", True)]
+        return [
+            ("wrongtype", "abc"), ("zero", 0), ("negative", -1), ("float", 1.5), ("bool", True),
+            # Over Python 3.11's 4300-digit int(str) cap: used to escape as
+            # ValueError from _controlled_integer.
+            ("hugedigits", "9" * 5000),
+        ]
     if kind == "int_range":
         low, high = INT_RANGE[field]
         return [
             ("wrongtype", "abc"), ("under", low - 1), ("over", high + 1),
             ("atmin", low), ("atmax", high),
+            ("hugedigits", "9" * 5000),
         ]
     if kind == "float_unit":
         return [("wrongtype", "abc"), ("over", 1.5), ("under", -0.1), ("atmax", 1.0), ("bool", True)]
     if kind == "float_timeout":
         return [("wrongtype", "abc"), ("over", 601.0), ("under", -1.0), ("atmax", 600.0)]
     if kind == "enum":
-        return [("badvalue", "definitely-not-valid")]
+        # The huge-int form (str() beyond the digit cap) is in-process only:
+        # json.loads itself refuses >4300-digit number literals, so the corpus
+        # cannot carry one -- asserted directly in the boundary test instead.
+        return [("badvalue", "definitely-not-valid"), ("hugedigits", "9" * 5000)]
     if kind == "shape":
         if field == "query_embedding":
             return [("wrongtype", "notalist"), ("empty", []), ("nonnumeric", ["a"]), ("nonfinite", [float("inf")])]
@@ -524,7 +547,10 @@ def main() -> int:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     # sort_keys must stay off: payload key order drives the order in which
     # unknown fields are warned about, and the corpus has to replay it exactly.
-    OUT.write_text(json.dumps(cases, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    # ensure_ascii must stay on: the corpus legitimately contains lone
+    # surrogates, and a raw \ud800 cannot be encoded to UTF-8 -- as an escape
+    # it round-trips losslessly through json.loads.
+    OUT.write_text(json.dumps(cases, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
     raising = sum(1 for c in cases if c["raises"])
     erroring = sum(1 for c in cases if c["error"])
     warning = sum(1 for c in cases if c["warnings"])
