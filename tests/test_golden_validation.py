@@ -40,7 +40,7 @@ def test_hash_randomization_disabled() -> None:
 
 def test_corpus_is_non_trivial() -> None:
     """Guard against an empty or truncated corpus silently disarming the gate."""
-    assert len(GOLDEN) > 700
+    assert len(GOLDEN) > 800
     assert sum(1 for case in GOLDEN if case["error"]) > 400
     assert sum(1 for case in GOLDEN if case["warnings"]) >= 5
     assert sum(1 for case in GOLDEN if case["raises"]) >= 5

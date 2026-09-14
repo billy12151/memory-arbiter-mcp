@@ -444,6 +444,28 @@ def build_combination_cases() -> list[dict[str, Any]]:
     add("D/superseded_by_null_allowed", "memory_govern", "retire",
         {"id": 1, "superseded_by": None, "authorized": True})
 
+    # Cross-block priority: when two ADJACENT validators would both fire on one
+    # payload, the earlier one wins. B-section injections change one field at a
+    # time and can never pin this, and an adjacent swap otherwise passes the
+    # whole corpus (found by adversarial review: 18 of 21 adjacent swaps were
+    # green before these cases existed). One dual-bad payload per pair.
+    add("D/order_xblock_bounded_vs_tags", "memory", "find",
+        {"query": 123, "tags_filter": "notalist"})
+    add("D/order_xblock_tags_vs_metadata", "memory", "remember",
+        {"content": "a", "subject": "b", "tags": "notalist", "metadata": "notadict"})
+    add("D/order_xblock_structured_vs_candidate", "memory_repair", "record_conflict",
+        {"members": "notalist", "candidate_key": "notadict", "authorized": True})
+    add("D/order_xblock_candidate_vs_slot", "memory_repair", "record_conflict",
+        {"candidate_key": "notadict", "slot_key": "notadict", "authorized": True})
+    add("D/order_xblock_patches_vs_intlimits", "memory", "update",
+        {"id": 1, "patches": "notalist", "expected_version": "abc"})
+    add("D/order_xblock_confidence_vs_time", "memory", "remember",
+        {"content": "a", "subject": "b", "confidence": "garbage", "event_time": "not-a-timestamp"})
+    add("D/order_xblock_time_vs_enums", "memory", "remember",
+        {"content": "a", "subject": "b", "event_time": "not-a-timestamp", "source_type": "bogus"})
+    add("D/order_xblock_enums_vs_status", "memory", "remember",
+        {"content": "a", "subject": "b", "source_type": "bogus", "status": "superseded"})
+
     # Idempotence: memory_write re-validates a payload surfaces already mutated.
     first_in = {"content": "a", "subject": "b", "confidence": "0.5", "bogus": 1,
                 "event_time": "2026-01-01T00:00:00+00:00"}

@@ -161,11 +161,14 @@ def _last_completed_scan(settings: Settings) -> dict[str, Any] | None:
 class _DoctorCtx:
     """Shared inputs plus the base metrics every run needs.
 
-    ``collect`` runs exactly the queries the pre-split implementation ran up
-    front, in the same order. Everything else stays inside the check that uses
-    it: hoisting a single-consumer query would change nothing except when it
-    executes, and the probe below is the standing proof that query timing here
-    is observable.
+    ``collect`` runs exactly the DB queries the pre-split implementation ran up
+    front, in the same order; the one deliberate reordering is that the
+    scan_log.jsonl file read now happens after the has_scan_progress query
+    instead of before it (both are pure reads, so nothing observable changes).
+    Everything else stays inside the check that uses it: hoisting a
+    single-consumer query would change nothing except when it executes, and
+    the probe below is the standing proof that query timing here is
+    observable.
     """
 
     conn: sqlite3.Connection

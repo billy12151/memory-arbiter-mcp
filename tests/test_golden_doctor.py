@@ -137,6 +137,20 @@ def test_probe_runs_after_the_vector_state_checks(tmp_path: Path) -> None:
                 "INSERT OR REPLACE INTO _vec_index_meta(key,value)"
                 " VALUES('active_space_id','probe-side-effect')"
             )
+            # The other half of _ensure_embedder's first-success footprint:
+            # vec0-shaped tables spring into existence with a row each. Both
+            # halves are needed -- the meta write alone only catches a probe
+            # hoisted ahead of the snapshot; the tables catch one hoisted
+            # anywhere ahead of the four vector checks.
+            raw.execute(
+                "CREATE TABLE memory_evidence_vec"
+                " (id INTEGER PRIMARY KEY, embedding float[8])"
+            )
+            raw.execute("INSERT INTO memory_evidence_vec(id, embedding) VALUES (1, 0.0)")
+            raw.execute(
+                "CREATE TABLE workspace_canonicals_vec"
+                " (id INTEGER PRIMARY KEY, embedding float[8])"
+            )
             raw.commit()
         finally:
             raw.close()
@@ -151,6 +165,21 @@ def test_probe_runs_after_the_vector_state_checks(tmp_path: Path) -> None:
         "vector state checks ran"
     )
     assert space.evidence["active_space_id"] is None
+    table_dim = next(f for f in report.findings if f.check_id == "vector.table_dimension")
+    evidence_rows = next(f for f in report.findings if f.check_id == "vector.evidence_rows")
+    workspace_rows = next(f for f in report.findings if f.check_id == "vector.workspace_rows")
+    assert table_dim.evidence is not None and table_dim.evidence["evidence"] is None, (
+        "vector.table_dimension saw the probe's tables: the embedder was resolved "
+        "too early"
+    )
+    assert evidence_rows.evidence is not None and evidence_rows.evidence["vectors"] is None, (
+        "vector.evidence_rows counted the probe's rows: the embedder was resolved "
+        "too early"
+    )
+    assert workspace_rows.evidence is not None and workspace_rows.evidence["vectors"] is None, (
+        "vector.workspace_rows counted the probe's rows: the embedder was resolved "
+        "too early"
+    )
 
 
 def test_deep_run_does_not_mutate_vector_state(tmp_path: Path) -> None:
