@@ -551,8 +551,6 @@ class MemoryDB:
     #  0.16.0 conflict-scan pipeline (watermarks + judgment queue)
     # ------------------------------------------------------------------
 
-    def scan_queue_enqueue(self, **kwargs: Any) -> dict[str, Any]:
-        return self.scan_queue.enqueue(**kwargs)
 
     def scan_queue_counts(self) -> dict[str, int]:
         return self.scan_queue.counts()
@@ -864,21 +862,6 @@ class MemoryDB:
     ) -> int | None:
         return self.memories.edit_memory(memory_id, new_content, new_subject, new_tags, reason)
 
-    def edit_memory_on_conn(
-        self,
-        conn: sqlite3.Connection,
-        memory_id: int,
-        new_content: str,
-        new_subject: str | None = None,
-        new_tags: list[str] | None = None,
-        reason: str | None = None,
-        *,
-        authorized: bool = True,
-    ) -> int | None:
-        return self.memories.edit_memory(
-            memory_id, new_content, new_subject, new_tags, reason,
-            conn=conn, authorized=authorized,
-        )
 
     def edit_memory_intent(
         self,

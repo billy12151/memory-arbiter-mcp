@@ -110,15 +110,6 @@ class EvidenceStore:
         except sqlite3.Error as exc:
             return {"outcome": "error", "published": False, "error": str(exc)}
 
-    def delete_for_memory(self, memory_id: int) -> None:
-        with self._db.write_transaction() as conn:
-            ids = [int(row["id"]) for row in conn.execute(
-                "SELECT id FROM memory_evidence WHERE memory_id=?", (int(memory_id),)
-            )]
-            if ids:
-                placeholders = ",".join("?" for _ in ids)
-                conn.execute(f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})", ids)
-            conn.execute("DELETE FROM memory_evidence WHERE memory_id=?", (int(memory_id),))
 
     def coverage(self) -> dict[str, int]:
         with self._db.connection() as conn:

@@ -980,33 +980,6 @@ class ConflictStore:
             ).fetchall()
         return [_decode_row(row) for row in rows]
 
-    def count_open_conflicts(
-        self, workspace: "WorkspaceScope" = None,
-    ) -> int:
-        """Count open+applying groups in the caller's admitted scope.
-
-        Retained as the scope-level counterpart to the per-page
-        list_open_conflicts_for_memory_ids: since v0.15.4 find reports
-        unresolved_conflict_count from page hits instead of this scope figure
-        (an admitted-scope count, deliberately not doctor's global
-        conflicts.backlog — a strict caller must not learn about out-of-scope
-        groups).
-        """
-        if not self._db_available:
-            raise RuntimeError("conflicts DB unavailable")
-        sql = "SELECT COUNT(*) FROM conflicts WHERE status IN ('open','applying')"
-        params: tuple[Any, ...] = ()
-        # conflicts has no raw `workspace` column (workspace_canonical is NOT
-        # NULL) — the memories-table COALESCE idiom raised OperationalError
-        # here whenever a non-empty scope was passed.
-        scope_sql, scope_params = workspace_scope_sql(
-            "workspace_canonical", workspace,
-        )
-        if scope_sql:
-            sql += f" AND {scope_sql}"
-            params = tuple(scope_params)
-        with self.connection() as conn:
-            return int(conn.execute(sql, params).fetchone()[0])
 
     def resolve_conflicts_for_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> int:
         # Generic memory mutation cannot complete a revisioned application plan.
@@ -1085,22 +1058,6 @@ class ConflictStore:
         memory = self._db.get_memory(int(memory_id))
         return int(memory["version"]) if memory else None
 
-    def dismissed_pairs_snapshot(self) -> set[tuple[int, int]]:
-        if not self._db_available:
-            return set()
-        with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT c.id,CAST(json_extract(member.value,'$.memory_id') AS INTEGER) AS memory_id "
-                "FROM conflicts AS c JOIN json_each(c.member_versions) AS member "
-                "WHERE c.status='not_a_conflict' ORDER BY c.id,memory_id"
-            ).fetchall()
-        by_conflict: dict[int, set[int]] = {}
-        for row in rows:
-            by_conflict.setdefault(int(row["id"]), set()).add(int(row["memory_id"]))
-        return {
-            tuple(sorted(ids))  # type: ignore[misc]
-            for ids in by_conflict.values() if len(ids) == 2
-        }
 
     def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
         pair = sorted({int(left_id), int(right_id)})
