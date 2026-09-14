@@ -9,7 +9,7 @@ from collections import deque
 from contextvars import ContextVar
 from typing import Any, Callable, cast
 
-from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, redacted_conflict_shell, visible_memory
+from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, visible_memory
 from .arbitration import compare_memories  # noqa: F401 (monkeypatch seam, see pipeline/read.py:226)
 from .config import Settings
 from .constants import EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, QWEN_BUDGET_MS, QWEN_CANDIDATE_DISTANCE, QWEN_CANDIDATE_TOP_K, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_BATCH, SEMANTIC_N_CTX, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term

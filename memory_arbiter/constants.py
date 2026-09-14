@@ -57,13 +57,6 @@ class Isolation:
     ALL = (NONE, WEAK, STRICT)
 
 
-def isolation_active(level: str) -> bool:
-    """True when isolation policy applies by default (weak or strict).
-
-    In ``none`` mode an explicitly supplied workspace can still scope one read;
-    this predicate only answers whether the configured mode itself is active.
-    """
-    return level != Isolation.NONE
 
 
 def strict_ws(level: str, ws_canonical: str | None) -> str | None:

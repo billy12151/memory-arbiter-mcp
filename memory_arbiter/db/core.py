@@ -933,18 +933,6 @@ class MemoryDB:
 
     # ---- _vec_index_meta CRUD ----
 
-    @staticmethod
-    def _get_meta(conn: sqlite3.Connection, key: str) -> str | None:
-        return MetaStore.get_meta(conn, key)
-
-    @staticmethod
-    def _set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
-        return MetaStore.set_meta(conn, key, value)
-
-    @staticmethod
-    def _delete_meta(conn: sqlite3.Connection, key: str) -> None:
-        return MetaStore.delete_meta(conn, key)
-
     def conflict_scan_state(self) -> dict[str, Any]:
         return self.meta.conflict_scan_state()
 

@@ -13,7 +13,6 @@ from .anchors import (
     score_anchor_overlap,
 )
 from .acl import (
-    WORKSPACE_EXPR,
     WorkspaceScope,
     scope_names,
     workspace_exclusion_sql,

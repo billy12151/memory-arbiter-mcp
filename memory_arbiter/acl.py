@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any, Sequence, Collection
 
 
-WORKSPACE_EXPR = "COALESCE(NULLIF(workspace_canonical, ''), workspace)"
 
 #: A workspace scope is either one canonical name or the admitted set.
 WorkspaceScope = str | Sequence[str] | None
@@ -174,33 +173,3 @@ def memory_public_stub(memory_id: Any, *, visible: bool, memory: dict[str, Any] 
     }
 
 
-def redacted_conflict_shell(conflict: dict[str, Any]) -> dict[str, Any]:
-    """Return a conflict-group shell safe when any member is hidden.
-
-    Group fields are correlated: slot, values, evidence, decisions, and apply
-    results can all reveal a hidden member.  Partial strict visibility therefore
-    exposes only lifecycle metadata and explicit redaction markers.
-    """
-    sensitive_fields = (
-        "slot_key", "candidate_key", "conflict_point", "member_versions",
-        "member_fingerprint", "value_groups", "detection_reason", "chosen_value",
-        "resolution_memory_id", "resolution_memory_version", "decided_by",
-        "decided_ref", "decision_reason", "decided_at", "apply_summary",
-    )
-    return {
-        "id": conflict.get("id"),
-        "revision": conflict.get("revision"),
-        "status": conflict.get("status"),
-        "source": conflict.get("source"),
-        "detector_version": conflict.get("detector_version"),
-        "prompt_version": conflict.get("prompt_version"),
-        "overflow": bool(conflict.get("overflow")),
-        "created_at": conflict.get("created_at"),
-        "refreshed_at": conflict.get("refreshed_at"),
-        "resolved_at": conflict.get("resolved_at"),
-        "public_conflict_summary": (
-            "Conflict group is linked to the caller workspace; fields correlated "
-            "with hidden members are redacted."
-        ),
-        "redacted_fields": [name for name in sensitive_fields if conflict.get(name) is not None],
-    }
