@@ -175,6 +175,20 @@ def _controlled_integer(value: Any) -> int | None:
     return None
 
 
+def _finite_float(value: Any) -> float | None:
+    """float() conversion that cannot raise on hostile input.
+
+    JSON admits integers beyond float range (10**400 is a legal literal and
+    MCP clients deliver it verbatim); float() raises OverflowError for those,
+    which is not in (TypeError, ValueError) and used to escape the validation
+    boundary. Every caller wants "not a usable number" for such input.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 # --------------------------------------------------------------------------
 # Ordered validators.
 #
@@ -331,7 +345,10 @@ def _v_batch_read(
     if not isinstance(memory_ids, list) or not memory_ids:
         return _error("memory_ids", "must be a non-empty list of positive integer ids")
     content_mode = payload.get("content_mode") or "preview"
-    if content_mode not in {"preview", "hits", "full"}:
+    # isinstance gate: dict/list are unhashable and `in` on a set literal would
+    # raise TypeError out of the validation boundary instead of reporting the
+    # field (a set slips through CPython's equality fallback, dict/list do not).
+    if not isinstance(content_mode, str) or content_mode not in {"preview", "hits", "full"}:
         return _error(
             "content_mode",
             'must be one of "preview" | "hits" | "full" (default "preview")',
@@ -671,11 +688,8 @@ def _v_timeout(
     if "timeout" not in payload:
         return None
     value = payload["timeout"]
-    try:
-        parsed_timeout = float(value)
-    except (TypeError, ValueError):
-        return _error("timeout", f"must be a finite number between 0 and {SEMANTIC_CONTROL_MAX_TIMEOUT:g}")
-    if isinstance(value, bool) or not math.isfinite(parsed_timeout) or not 0.0 <= parsed_timeout <= SEMANTIC_CONTROL_MAX_TIMEOUT:
+    parsed_timeout = _finite_float(value)
+    if parsed_timeout is None or isinstance(value, bool) or not math.isfinite(parsed_timeout) or not 0.0 <= parsed_timeout <= SEMANTIC_CONTROL_MAX_TIMEOUT:
         return _error("timeout", f"must be a finite number between 0 and {SEMANTIC_CONTROL_MAX_TIMEOUT:g}")
     payload["timeout"] = parsed_timeout
     return None
@@ -696,8 +710,10 @@ def _v_embedding(
     # library plus a non-default-dim model is never wrongly refused.
     if not isinstance(embedding, list) or not embedding:
         return _error("embedding", "must be a non-empty list of numbers")
-    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in embedding):
-        return _error("embedding", "all values must be finite numbers")
+    for element in embedding:
+        parsed = _finite_float(element)
+        if isinstance(element, bool) or not isinstance(element, (int, float)) or parsed is None or not math.isfinite(parsed):
+            return _error("embedding", "all values must be finite numbers")
     return None
 
 
@@ -707,11 +723,8 @@ def _v_confidence(
     if "confidence" not in payload:
         return None
     value = payload["confidence"]
-    try:
-        parsed_confidence = float(value)
-    except (TypeError, ValueError):
-        return _error("confidence", "must be a finite number between 0 and 1")
-    if isinstance(value, bool) or not math.isfinite(parsed_confidence) or not 0.0 <= parsed_confidence <= 1.0:
+    parsed_confidence = _finite_float(value)
+    if parsed_confidence is None or isinstance(value, bool) or not math.isfinite(parsed_confidence) or not 0.0 <= parsed_confidence <= 1.0:
         return _error("confidence", "must be a finite number between 0 and 1")
     payload["confidence"] = parsed_confidence
     return None
@@ -751,7 +764,7 @@ def _v_remember_status(
     # superseded/conflicted/deleted are lifecycle outcomes owned by
     # govern/repair operations; they are never caller-supplied write inputs.
     status_value = payload.get("status")
-    if status_value not in {MemoryStatus.ACTIVE.value, MemoryStatus.PENDING.value}:
+    if not isinstance(status_value, str) or status_value not in {MemoryStatus.ACTIVE.value, MemoryStatus.PENDING.value}:
         return _error(
             "status",
             "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs",

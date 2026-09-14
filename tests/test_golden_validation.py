@@ -26,6 +26,21 @@ GOLDEN_PATH = Path(__file__).parent / "golden" / "validation.json"
 GOLDEN: list[dict[str, Any]] = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 
 
+def _expand(obj: Any) -> Any:
+    """Undo the corpus' giant-literal placeholders (see gen_golden_validation).
+
+    Reconstruction is exact string multiplication -- microseconds even for the
+    megabyte cases, so the slimming costs nothing at test time.
+    """
+    if isinstance(obj, dict):
+        if set(obj) == {"$rep", "$n"}:
+            return obj["$rep"] * obj["$n"]
+        return {key: _expand(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_expand(item) for item in obj]
+    return obj
+
+
 def test_hash_randomization_disabled() -> None:
     """difflib.get_close_matches iterates a set, so did_you_mean is seed-bound.
 
@@ -43,12 +58,15 @@ def test_corpus_is_non_trivial() -> None:
     assert len(GOLDEN) > 800
     assert sum(1 for case in GOLDEN if case["error"]) > 400
     assert sum(1 for case in GOLDEN if case["warnings"]) >= 5
-    assert sum(1 for case in GOLDEN if case["raises"]) >= 5
+    # Invariant since the 0.16.6 boundary fix: the validator NEVER raises on
+    # hostile input. These cases used to escape as OverflowError/TypeError; a
+    # non-empty raises column means the boundary is leaking exceptions again.
+    assert sum(1 for case in GOLDEN if case["raises"]) == 0
 
 
 @pytest.mark.parametrize("case", GOLDEN, ids=lambda case: str(case["case_id"]))
 def test_validation_matches_golden(case: dict[str, Any]) -> None:
-    payload = copy.deepcopy(case["payload_in"])
+    payload = copy.deepcopy(_expand(case["payload_in"]))
     if case["raises"] is not None:
         with pytest.raises(BaseException) as exc_info:
             validate_product_payload(case["surface"], case["operation"], payload)
@@ -56,13 +74,13 @@ def test_validation_matches_golden(case: dict[str, Any]) -> None:
         assert str(exc_info.value)[:40] == case["raises"]["msg_prefix"]
         # Mutations applied before the raise are observable too: a validator
         # reordered ahead of the raising one would otherwise slip through.
-        assert payload == case["payload_out"]
+        assert payload == _expand(case["payload_out"])
         return
 
     result = validate_product_payload(case["surface"], case["operation"], payload)
     assert result.error == case["error"]
     assert list(result.warnings) == case["warnings"]  # order-sensitive, never sorted
-    assert payload == case["payload_out"]
+    assert payload == _expand(case["payload_out"])
 
 
 def test_non_string_field_name_is_rejected() -> None:
@@ -73,6 +91,23 @@ def test_non_string_field_name_is_rejected() -> None:
     assert result.error is not None
     assert result.error["error"] == "invalid_input"
     assert result.error["reason"] == "field names must be strings"
+
+
+def test_unhashable_values_never_escape_the_boundary() -> None:
+    """Direct, because JSON cannot carry these shapes -- only in-process
+    callers (pipeline/write, backup replay) can. Before the boundary fix each
+    of these escaped as TypeError/OverflowError through three call layers."""
+    probes = [
+        ("memory", "batch_read", {"memory_ids": [1], "content_mode": {"preview"}}),
+        ("memory", "remember", {"content": "a", "subject": "b", "status": {"a": 1}}),
+        ("memory", "remember", {"content": "a", "subject": "b", "confidence": 10 ** 400}),
+        ("memory_repair", "semantic_control", {"action": "status", "timeout": 10 ** 400}),
+        ("memory", "find", {"query": "q", "query_embedding": [10 ** 400]}),
+    ]
+    for surface, operation, payload in probes:
+        result = validate_product_payload(surface, operation, dict(payload))
+        assert result.error is not None, f"{surface}/{operation} leaked {payload} through"
+        assert result.error["error"] == "invalid_input"
 
 
 class _Unserialisable:

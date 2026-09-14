@@ -139,7 +139,7 @@ class BackupReplayStore:
                         "workspace_canonical": canonical,
                         "record": record,
                     })
-                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                except (json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
                     invalid.append({"line": line_number, "reason": str(exc)})
         finally:
             try:

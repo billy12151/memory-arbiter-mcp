@@ -155,6 +155,33 @@ _MISSING = sorted(set(FIELD_KIND) ^ set(LEGAL_SAMPLE))
 assert not _MISSING, f"kind/sample tables disagree on: {_MISSING}"
 
 
+# Giant literals are stored as a placeholder instead of verbatim: the corpus
+# is dominated by byte-ceiling cases whose payloads are megabyte strings, which
+# would make the committed JSON ~50MB and -- worse -- make every deliberate
+# regeneration produce a diff too big to review line by line. Encoding rule is
+# deliberately narrow and lossless: only strings over PAD_THRESHOLD chars that
+# are a pure repetition of one character become {"$rep": ch, "$n": len};
+# anything else is stored verbatim. tests/test_golden_validation.py expands
+# placeholders before comparing.
+PAD_THRESHOLD = 1000
+REP_KEY = "$rep"
+N_KEY = "$n"
+
+
+def _pad(value: Any) -> Any:
+    if (
+        isinstance(value, str)
+        and len(value) > PAD_THRESHOLD
+        and value == value[0] * len(value)
+    ):
+        return {REP_KEY: value[0], N_KEY: len(value)}
+    if isinstance(value, list):
+        return [_pad(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _pad(item) for key, item in value.items()}
+    return value
+
+
 def run_case(case_id: str, surface: str, operation: str, payload_in: dict[str, Any]) -> dict[str, Any]:
     payload = copy.deepcopy(payload_in)
     error: dict[str, Any] | None = None
@@ -167,8 +194,8 @@ def run_case(case_id: str, surface: str, operation: str, payload_in: dict[str, A
         raises = {"type": type(exc).__name__, "msg_prefix": str(exc)[:40]}
     return {
         "case_id": case_id, "surface": surface, "operation": operation,
-        "payload_in": payload_in, "error": error, "warnings": warnings,
-        "payload_out": payload, "raises": raises,
+        "payload_in": _pad(payload_in), "error": error, "warnings": warnings,
+        "payload_out": _pad(payload), "raises": raises,
     }
 
 
@@ -258,8 +285,10 @@ def build_cases() -> list[dict[str, Any]]:
                 payload[field] = value
                 cases.append(run_case(f"B/{surface}.{operation}/{field}/{suffix}", surface, operation, payload))
 
-    # --- C: boundary calls that raise instead of returning invalid_input ----
-    # Current behaviour, pinned deliberately (see the plan's appendix B).
+    # --- C: boundary calls that used to raise out of the boundary -----------
+    # Before the 0.16.6 fix these escaped as OverflowError/TypeError; they now
+    # return structured invalid_input, and the corpus pins the fixed form (the
+    # flip itself is the reviewable diff of the regen that followed the fix).
     # Where the operation has a field an earlier validator rewrites in place,
     # the case carries it so the golden test's payload_out assertion on the
     # raising branch is not a no-op. semantic_control has no such field --
@@ -443,6 +472,15 @@ def build_combination_cases() -> list[dict[str, Any]]:
     add("D/id_negative_string", "memory", "read", {"id": "-42"})
     add("D/superseded_by_null_allowed", "memory_govern", "retire",
         {"id": 1, "superseded_by": None, "authorized": True})
+
+    # The third unhashable-escape site, found while fixing the other two:
+    # remember's status check had the same `x not in {set literal}` shape.
+    add("D/status_unhashable_dict", "memory", "remember",
+        {"content": "a", "subject": "b", "status": {"a": 1}})
+    add("D/status_unhashable_list", "memory", "remember",
+        {"content": "a", "subject": "b", "status": ["active"]})
+    # (The set variant is not expressible in JSON -- asserted directly in
+    # tests/test_golden_validation.py alongside the non-string-key case.)
 
     # Cross-block priority: when two ADJACENT validators would both fire on one
     # payload, the earlier one wins. B-section injections change one field at a
