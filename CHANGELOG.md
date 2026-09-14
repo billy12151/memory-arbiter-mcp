@@ -3,6 +3,22 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.5] — 2026-09-14
+
+Maintainability refactor behind golden equivalence gates, plus two adversarially-reviewed boundary-hardening waves. No product-semantic changes except the serialization channel flip below.
+
+### Changed
+
+- **Serialization channel flip — §6⑱ un-done the right way (breaking for `structuredContent` readers).** Tool responses still carry exactly ONE compact copy (the ~55% wire saving is intact, byte-for-byte the same JSON), but it now rides `content[0].text` (compact `separators=(",", ":")` JSON) instead of `structuredContent`, and the vacuous `dict[str, Any]`-derived `outputSchema` is gone. `content` is the one channel every MCP client reads — pre-2025-06-18 clients saw empty results under the 0.16.0 form (live case: WorkBuddy read `content[0].text` and got nothing). Clients that followed the 0.16.0 migration must read `content[0].text` and `json.loads` it.
+- **`validate_product_payload` split into 22 ordered validators** (477 lines / CC154 → 57 / CC21) behind a golden corpus pinning error priority, warnings, in-place payload mutations, and exception shape per case; statement+branch coverage 100%.
+- **`doctor.run_all_checks` split into 19+9 checks + `DoctorContext`/`ProbeOutcome`** (new code max 52 lines / CC13) behind 45 ordered snapshots plus probe call-count/timing assertions — probe laziness is enforced by a test that fails on any eager resolution.
+- **Scan candidate members moved from `MemoryTools` to `ScanPipeline`** (tools.py 2291 → 1802 lines; pure cut-paste with four `self._tools.` rewrites, line-diff verified) with three delegating shims for existing callers.
+- **Dead-code sweep:** 33 unused imports + 11 zero-reference symbols deleted; three re-export seams (`tools.search_memories` / `compare_memories` / `_linked_open_items_for_search`) keep a permanent `# noqa: F401` — they are a runtime `getattr` monkeypatch seam, and deleting them breaks `memory find` with no static check noticing. F401 joined the ruff rule set (tests/scripts deferred with 67 known items). New `scripts/refactor_metrics.py` complexity gate; `PYTHONHASHSEED=0` pinned in both CI workflows (the golden corpus pins set-iteration order).
+
+### Fixed
+
+- **The validation boundary no longer raises on hostile input** (two waves, each adversarially reviewed — 20k+ differential cases per wave confirmed zero semantic drift beyond raise→`invalid_input`): three `float()` sites escaped `OverflowError` (`10**400` is a legal JSON integer and MCP clients deliver it verbatim); unhashable `content_mode`/`status` escaped `TypeError` on set membership; the second wave fixed >4300-digit integer strings (Python's `int()` conversion cap), lone surrogates (`UnicodeEncodeError`; bounded/tag/patch strings now refuse them at the boundary instead of failing later at the sqlite bind), backup replay's per-line guard missing `RecursionError` (one deeply-nested line aborted the whole inspection), and two in-process-only shapes. The golden corpus grew to 982 cases with `raises == 0` pinned as an invariant, and the corpus file itself slimmed ~98% (50.7MB → 815KB: giant literals stored as placeholders).
+
 ## [0.16.4] — 2026-09-13
 
 One-pass clearing: one task run = kick plus an empty judgment queue. The live library went 741 → 0 in a single judged pass (zero confirms — every surviving cross-memory pair was timeline/复述/reference noise, exactly the shape the plan predicted), and a follow-up kick reported zero new queue rows.

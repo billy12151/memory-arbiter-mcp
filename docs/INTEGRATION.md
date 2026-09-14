@@ -2,7 +2,7 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.16.4` contract.
+This guide describes the `0.16.5` contract.
 
 ## MCP Surface
 
@@ -77,7 +77,7 @@ With sqlite-vec and a local embedding model configured, writes asynchronously pu
 
 ``memory(action="batch_read", data={"memory_ids": [...], "content_mode": "preview|hits|full"})` is `read` in batch (0.16.0): caps preview 50 / hits 50 / full 10 ids, and `full` adds an 80KB byte budget (100KB ceiling) — an over-budget batch returns a structured over-long prompt with contents omitted, never a silent truncation. `spans` maps memory_id to `{start, end}` and is the `hits` unit selector for id-driven calls: the window returns COMPLETE evidence units (no half-sentence slices; the legacy character window remains only as the fallback when no evidence rows exist yet). `read` itself gains the same `content_mode` (default `full`, backward compatible).
 
-**0.16.0 serialization (breaking):** tool responses carry ONLY `structuredContent` — the duplicated `content[0].text` copy is gone (a measured ~55% wire reduction, and the copy was the only indented part). Clients reading `content[0].text` must switch to `structuredContent`.
+**0.16.5 serialization (breaking for 0.16.0–0.16.4 readers):** tool responses carry exactly ONE compact copy in `content[0].text` — compact JSON, `json.loads` it; `structuredContent` is absent and the vacuous output schema is gone (the ~55% wire saving is intact). `content` is the one channel every MCP client reads — the 0.16.0 form left pre-2025-06-18 clients with empty results. Clients that had migrated to `structuredContent` must move back to `content[0].text`.
 
 memory(action="read", data={"memory_id":42})` returns the complete source. Add `"span":{"start":120,"end":640}` to return only `data.memory.content[120:640]` plus `data.span.{start,end,total_chars}`. Bounds must be strict JSON integers with `0 <= start < end`; an oversized end clips to content length, while a start beyond content fails. `outline.offset` values from find and `scan_candidates.deep_read` provide ready-to-use spans (both share this coordinate system); semantic-notice read calls are full-memory reads by design, so omit the span parameter there whenever full context is needed.
 

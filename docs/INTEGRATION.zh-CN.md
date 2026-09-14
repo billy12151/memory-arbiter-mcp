@@ -2,7 +2,7 @@
 
 **[English](INTEGRATION.md) | 中文**
 
-本指南描述 `0.16.4` 的正式契约。
+本指南描述 `0.16.5` 的正式契约。
 
 ## MCP 接口面
 
@@ -77,7 +77,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 `memory(action="batch_read", data={"memory_ids": [...], "content_mode": "preview|hits|full"})` 是 `read` 的批量版（0.16.0）：帽 preview 50 / hits 50 / full 10 条，`full` 另加 80KB 字节预算（上限 100KB）——超预算整批返回结构化「超长」提示、不带正文，绝不静默截断。`spans` 按 memory_id 给 `{start, end}`，是 id 驱动调用 `hits` 档的单元选择器：窗口返回完整证据单元（零半句截断；无证据行时才回退旧字符窗口）。`read` 本身也加了同样的 `content_mode`（默认 `full`，向后兼容）。
 
-**0.16.0 序列化（破坏性）：** 工具响应只发 `structuredContent`——重复的 `content[0].text` 副本已删除（实测线上体积约省 55%，且那份带缩进的副本正是空白来源）。只读 `content[0].text` 的客户端必须改读 `structuredContent`。
+**0.16.5 序列化（对 0.16.0–0.16.4 的读者为破坏性）：** 工具响应只带一份紧凑副本，装在 `content[0].text`（紧凑 JSON，`json.loads` 即得）；不再发送 `structuredContent`，无信息量的 output schema 一并移除（约 55% 的线路节省原样保留）。`content` 是所有 MCP 客户端都会读的通用通道——0.16.0 的形态会让旧规范客户端拿到空结果。已迁移到 `structuredContent` 的客户端请改回 `content[0].text`。
 
 `memory(action="read", data={"memory_id":42})` 返回完整原文。加 `"span":{"start":120,"end":640}` 则只返回 `data.memory.content[120:640]` 外加 `data.span.{start,end,total_chars}`。边界必须是严格 JSON 整数且满足 `0 <= start < end`；超大的 end 裁剪到正文长度，而 start 超出正文会报错。find 的 `outline.offset` 与 `scan_candidates.deep_read` 都可直接用作 span（同一坐标系）；语义 notice 的 read call 按设计是整记忆读取，需要完整上下文时不要带 span 参数。
 

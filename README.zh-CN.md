@@ -3,7 +3,7 @@
 **[English](README.md) | 中文**
 
 > 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.16.4`（find/batch_find 新增 `content_mode` 三档内容形态与命中片段 `hit_spans`；移除旧参数 `include_content`，属破坏性变更）。
+> 当前正式版本 `0.16.5`（find/batch_find 新增 `content_mode` 三档内容形态与命中片段 `hit_spans`；移除旧参数 `include_content`，属破坏性变更）。
 
 ## 一句话说明白
 
