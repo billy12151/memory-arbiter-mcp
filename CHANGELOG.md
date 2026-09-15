@@ -3,6 +3,25 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.6] — 2026-09-14
+
+Write-time content dedup gate (born from the m986/m987 byte-identical incident) plus a reviewed dead-weight sweep. Design went through two audit/review rounds (functional impact + adversarial resurrection) before a line was written.
+
+### Added
+
+- **Write-time content dedup gate (owner decision: 只管活的).** `memories.content_sha` (sha256 over the raw UTF-8 bytes, never normalised) feeds a PARTIAL unique index `(workspace_canonical, content_sha) WHERE status='active'` — retired/pending rows exit the index on status change, so governance flows that legitimately produce an active + superseded same-content pair (merges, the m986/m987 shape) keep working. The normal write path pays nothing: there is no pre-check; the DB error IS the detector. On violation the write looks the twin up — an ACTIVE twin returns an idempotent success (`data.duplicate_replay=true`, same `id`, nothing written; transport retries absorb here automatically, old clients see a plain success), and the error-but-no-twin race retries the insert once. Four reachable hooks convert would-be constraint crashes into structured refusals: editing content into another active row's exact bytes (`outcome=duplicate_content`), activating a pending twin of a live row (`duplicate_active_content: …`), moving/renaming a workspace across an active same-content row (lists the colliding ids), and backup replay importing the same content under a different replay key (`outcome=duplicate_content` with the live id). The one-shot migration normalises NULL canonicals, backfills shas, self-checks for ACTIVE duplicate pairs BEFORE any write (aborting with a governance list — nothing half-applied), then creates the index.
+- **`is_semantic_pair_closed` resolves through `idx_conflicts_notice_dedupe`** (versioned pairs; the dismissed/resolved filter is kept — undecided notices must not suppress re-detection), with a one-shot backfill deriving keys for legacy decided notices. Malformed legacy rows are skipped, not fatal: such a pair re-surfaces ONCE on re-detection and heals on the next dismissal.
+
+### Changed
+
+- **Queue lifecycle narrowed to `pending → {confirmed, dismissed, voided, expired}`:** the `in_review` status had zero writers anywhere (production or tests) — a phantom state the backlog formulas, CHECK constraint and doctor copy were all paying for. Doctor's scan-queue backlog detail no longer reports an "in review" count (doctor golden regenerated).
+- **Entry validation is single-pass again.** `write.memory_write` kept a full `validate_product_payload` re-run as the ONLY line of defense for direct callers (tests, release smoke) but its two hand guards (subject-required, lifecycle-status whitelist) duplicated validator rules verbatim and were unreachable via every real path — deleted, along with the comment's fictional "console API" bypass caller. Surfaces no longer re-coerces id fields that validation already coerced in place (a `_bind_product_id` alias+presence helper replaces ~12 numeric double-passes; `survivor_id`/`audit_id` joined the validator's key list; the judge dispatcher keeps its own strict coerce by design — missing-receipt-fields-first ordering).
+- **`_mark_decided`/`_expire_row` gained a `AND status='pending'` CAS term:** the submit pre-check ran outside the transaction, so a concurrent expire could be silently overwritten (last-writer-wins). The scan-queue recall channels and `linked_open_items` narrowed their catch-all `except Exception` to `sqlite3.Error` (non-DB bugs now surface instead of silently degrading recall).
+
+### Removed
+
+- Dead weight from the 2026-09-14 complexity audit, each item verified against callers/tests/golden/console copy: the `maybe_unload_if_idle` Protocol method and both implementations (zero callers), `_replay_stage_done`/`_checkpoint_replay_stage` (zero callers), the `conflicts.overflow` column (write-only for years — the UPDATE keeps its revision CAS, the `outcome="overflow"` contract is unchanged), `_vec_index_meta`'s `migration_cursor`/`migration_lease_owner`/`migration_lease_expires_at` keys (never written) and `migration_epoch` (written, never compared; `vec_index_state` no longer echoes them), the duplicated catch-all handler in `_linked_open_items_for_search`, and the two non-string-key guards (0.16.5's "never raises" promise is hereby scoped to wire-expressible payloads — JSON cannot carry a non-string key, in-process callers own their key types).
+
 ## [0.16.5] — 2026-09-14
 
 Maintainability refactor behind golden equivalence gates, plus two adversarially-reviewed boundary-hardening waves. No product-semantic changes except the serialization channel flip below.
