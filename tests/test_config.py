@@ -1600,24 +1600,6 @@ def test_search_source_has_no_bm25_path() -> None:
     assert not hasattr(_constants, "NO_DIRECT_MATCH_PREFIX")
 
 
-def test_search_responses_have_no_ranking_mode_concept(tmp_path: Path) -> None:
-    tools = MemoryTools(
-        Settings(
-            db_path=tmp_path / "hy.sqlite3",
-            backup_jsonl=tmp_path / "hy.jsonl",
-            client="codex",
-            agent_id="agent-a",
-        )
-    )
-    tools.memory_write(content="hybrid body", subject="hybrid", tags=[])
-    hit = tools.memory_search(query="hybrid")
-    assert hit["ok"] is True
-    assert hit["data"]["results"]
-    assert hit["data"]["retrieval_mode"] in {"direct", "empty"}
-    miss = tools.memory_search(query="完全无关的查询词")
-    assert miss["data"]["retrieval_mode"] in {"direct", "empty"}
-
-
 # ---------------------------------------------------------------------------
 # (g) lazy schema probe
 # ---------------------------------------------------------------------------

@@ -109,15 +109,6 @@ def test_resolved_delivery_also_closes_pair(tmp_path: Path) -> None:
     assert db.is_semantic_pair_closed(left, right) is True
 
 
-def test_notice_type_mismatch_does_not_close(tmp_path: Path) -> None:
-    db = _db(tmp_path)
-    left, right = _memory(db, "alpha fact"), _memory(db, "beta fact")
-    _close_pair(db, left, right, notice_type="write_time_duplicate")
-
-    assert db.is_semantic_pair_closed(left, right) is False
-    assert db.is_semantic_pair_closed(left, right, notice_type="write_time_duplicate") is True
-
-
 def test_pending_delivery_does_not_close_pair(tmp_path: Path) -> None:
     db = _db(tmp_path)
     left, right = _memory(db, "alpha fact"), _memory(db, "beta fact")

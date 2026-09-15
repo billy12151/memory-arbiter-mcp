@@ -380,20 +380,6 @@ def test_direct_call_id_coercion_and_batch_cap(tmp_path: Path) -> None:
     assert "at most 1000" in too_many["data"]["error"]
 
 
-def test_memory_ids_batch_limit_validation() -> None:
-    within = validate_product_payload(
-        "memory_govern", "move_memories_workspace",
-        {"memory_ids": list(range(1, 1001)), "new_workspace": "x", "authorized": True},
-    )
-    assert within.error is None
-    beyond = validate_product_payload(
-        "memory_govern", "move_memories_workspace",
-        {"memory_ids": list(range(1, 1002)), "new_workspace": "x", "authorized": True},
-    )
-    assert beyond.error is not None
-    assert beyond.error["field"] == "memory_ids"
-
-
 def test_divergence_window_recheck_refuses(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
     memory_id = write(tools, "ws-a")

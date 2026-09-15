@@ -135,10 +135,19 @@ def test_status_unknown_field_is_warned_and_removed(tmp_path: Path) -> None:
 
 
 def test_controlled_numeric_string_coercion_matches_consumed_value() -> None:
-    payload = {"limit": "5", "offset": "2"}
+    payload = {"limit": "5"}
     result = validate_product_payload("memory", "find", payload)
     assert result.error is None
-    assert payload == {"limit": 5, "offset": 2}
+    assert payload == {"limit": 5}  # the coerced int IS the consumed value
+
+
+def test_offset_numeric_string_is_coerced_to_the_consumed_int() -> None:
+    # The golden corpus has no payload_out coverage for offset coercion — this
+    # is the only pin that "2" arrives at the search layer as int 2.
+    payload = {"offset": "2"}
+    result = validate_product_payload("memory", "find", payload)
+    assert result.error is None
+    assert payload == {"offset": 2}
 
 
 def test_integer_id_and_cas_fields_reject_floats_and_non_finite_values() -> None:
@@ -238,18 +247,8 @@ def test_conflict_slot_key_limit_matches_database_schema() -> None:
     )
     assert result.error is not None
     assert result.error["field"] == "slot_key"
-
-    for surface, operation, field in (
-        ("memory", "judge", "apply_plan"),
-        ("memory_govern", "replan_conflict", "apply_plan"),
-        ("memory_repair", "record_conflict", "members"),
-        ("memory_repair", "record_conflict", "value_groups"),
-    ):
-        result = validate_product_payload(
-            surface, operation, {field: ["not-an-object"]},
-        )
-        assert result.error is not None
-        assert result.error["field"] == field
+    # The four object-shape siblings of this check are pinned byte-for-byte in
+    # the golden corpus (B/*overcount / B/*nonobject) — no duplicate pinning.
 
 
 def test_notice_authorized_is_not_registered_and_notice_remains_unauthorized(tmp_path: Path) -> None:
