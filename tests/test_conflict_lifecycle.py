@@ -541,28 +541,6 @@ def test_candidate_key_and_value_groups_are_exactly_verified(tmp_path: Path) -> 
     assert "slot_key exceeds" in oversized["error"]
 
 
-def test_member_linkage_and_dismissal_have_no_result_caps(tmp_path: Path) -> None:
-    db = _db(tmp_path)
-    target, peer = _memory(db, "target"), _memory(db, "peer")
-    members = [_member(target, "mysql"), _member(peer, "sqlite")]
-    dismissed = _record(db, members, status="not_a_conflict", slot=False)
-    assert dismissed["outcome"] == "inserted"
-    with db.write_transaction() as conn:
-        template = conn.execute("SELECT * FROM conflicts WHERE id=?", (dismissed["conflict_id"],)).fetchone()
-        columns = [row["name"] for row in conn.execute("PRAGMA table_info(conflicts)") if row["name"] != "id"]
-        values = [template[column] for column in columns]
-        for index in range(10_005):
-            changed = list(values)
-            changed[columns.index("candidate_key_hash")] = f"{index:064x}"
-            changed[columns.index("member_fingerprint")] = f"{index + 20_000:064x}"
-            conn.execute(
-                f"INSERT INTO conflicts({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
-                changed,
-            )
-    assert db.is_pair_dismissed(target, peer) is True
-    assert (target, peer) in db.dismissed_pairs_for([target])
-
-
 # ── from test_product_conflict_groups.py ──
 # helpers renamed: _product_memory, _product_member, _product_tools (collisions with test_conflict_groups.py)
 

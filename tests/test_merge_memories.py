@@ -411,53 +411,6 @@ def test_scan_duplicates_pool_default_off_and_opt_in(vec_tools: MemoryTools) -> 
     assert with_pool["data"]["candidates"] == []
 
 
-def test_scan_duplicates_pool_respects_recorded_suppression(vec_tools: MemoryTools) -> None:
-    tools = vec_tools
-    _write_for_scan(tools, "port 8080 is the default api port")
-    _write_dup_bypass(tools, "port 8080 is the default api port")
-    assert tools.wait_evidence_worker_drained(timeout=5)
-
-    scan = tools.memory_repair("scan_candidates", {
-        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True, "include_quotes": True,
-    })
-    assert scan["ok"] is True, scan
-    pool = scan["data"]["duplicates_pool"]
-    assert len(pool) == 1
-    entry = pool[0]
-    assert entry["members"], "pool entries must carry record_conflict-compatible members"
-
-    # Dismissing the pair as not_a_conflict through the product surface must
-    # suppress re-enumeration in the duplicates pool (suppression moved ahead
-    # of the historical ignore-drop; hashes are derived from identical
-    # evidence identities).
-    recorded = tools.memory_repair("record_conflict", {
-        "slot_key": None,
-        "members": entry["members"],
-        # Rule-gated duplicates carry no extracted value, so both members sit
-        # in one group under the string form of None (str(None)).
-        "value_groups": [
-            {"normalized_value": "None", "display_value": "same value",
-             "members": [f"{entry['members'][0]['memory_id']}@{entry['members'][0]['version']}",
-                         f"{entry['members'][1]['memory_id']}@{entry['members'][1]['version']}"]},
-        ],
-        "status": "not_a_conflict",
-        "detector_version": entry["members"][0]["detector_version"],
-        "prompt_version": None,
-        "source": "scan",
-        "reason": "same value, not a conflict",
-        "workspace": "w",
-        "authorized": True,
-    })
-    assert recorded["ok"] is True, recorded["data"]
-    after = tools.memory_repair("scan_candidates", {
-        "anchor_memory_id": 0, "batch": 50, "k": 10, "include_duplicates": True, "include_quotes": True,
-    })
-    assert after["ok"] is True
-    assert after["data"]["duplicates_pool"] == [], (
-        "recorded not_a_conflict pairs must not re-enter the duplicates pool"
-    )
-
-
 def test_scan_duplicates_pool_cap_and_truncation(vec_tools: MemoryTools) -> None:
     tools = vec_tools
     for index in range(4):

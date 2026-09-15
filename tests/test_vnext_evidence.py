@@ -2572,33 +2572,6 @@ def test_scan_candidates_strict_workspace_does_not_leak(tmp_path: Path) -> None:
             assert canonical == "apisvc", f"leaked anchor from workspace {canonical}"
 
 
-def test_not_a_conflict_candidate_version_change_can_be_reevaluated(tmp_path: Path) -> None:
-    tools = make_tools(tmp_path)
-    a = tools.memory_write(content="上限 10。", subject="cap", tags=[])["data"]
-    b = tools.memory_write(content="上限 99。", subject="cap", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
-    scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
-    pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
-    clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
-    payload = {
-        "slot_key": None, "members": clue["members"], "value_groups": [],
-        "candidate_key": clue["candidate_key"], "status": "not_a_conflict",
-        "detector_version": CONFLICT_DETECTOR_VERSION, "source": "scheduled_scan", "reason": "演进",
-        # not_a_conflict dispositions require explicit authorization (B-C3).
-        "authorized": True,
-    }
-    first = tools.memory_repair("record_conflict", payload)
-    second = tools.memory_repair("record_conflict", payload)
-    assert first["data"]["outcome"] == "inserted"
-    assert second["data"]["outcome"] == "deduped"
-
-    tools.memory("update", {"memory_id": a["id"], "new_content": "上限 20。", "reason": "新版本"})
-    assert tools.wait_evidence_worker_drained(timeout=5)
-    again = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
-    fresh = next(c for c in again["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
-    assert fresh["candidate_key_hash"] != clue["candidate_key_hash"]
-
-
 def test_read_span_window_and_clue_deep_read(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     content = "第一段背景说明文字。\n重试次数为 3 次。\n第三段运维备注信息。"

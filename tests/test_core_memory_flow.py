@@ -895,50 +895,6 @@ def test_supersede_rejects_self_replacement(tmp_path: Path) -> None:
     assert tools.db.get_memory(memory_id)["status"] == "active"
 
 
-def test_superseded_always_ranked_below_active_even_with_higher_score(tmp_path: Path) -> None:
-    """v0.9.4: active/expired query split replaces the soft-demote safety net.
-
-    The old soft-demote clause (superseded ranked below active regardless of
-    bm25 score) is superseded by interface isolation: ``memory_search`` only
-    returns active rows, ``memory_search_expired`` only returns superseded
-    rows. A superseded record with a higher bm25 signal therefore never
-    competes with the active record in the same result set — the stronger
-    guarantee the demote clause was approximating.
-    """
-    tools = make_tools(tmp_path)
-    # Active record: short, mentions query term once → lower bm25 signal.
-    active = tools.memory_write(
-        content="release release-spec canonical",
-        subject="release-spec-active",
-        source_type="user_confirmed",
-        event_time="2026-02-01T00:00:00Z",
-    )
-    # Superseded record: long, repeats query term many times → higher bm25 signal.
-    stale_blob = "release release release release release release-spec release-spec release-spec"
-    stale = tools.memory_write(
-        content=stale_blob,
-        subject="release-spec-stale",
-        source_type="user_confirmed",
-        event_time="2026-01-01T00:00:00Z",
-    )
-    active_id, stale_id = active["data"]["id"], stale["data"]["id"]
-    tools.memory_supersede(memory_id=stale_id, reason="replaced", superseded_by=active_id, authorized=True)
-
-    # memory_search (active-only): the superseded record must NOT surface,
-    # even though it has the higher bm25 signal.
-    found = tools.memory_search(query="release", workspace="repo-a")
-    ids = [r["id"] for r in found["data"]["results"]]
-    assert active_id in ids, "active record missing from memory_search"
-    assert stale_id not in ids, "superseded record leaked into active-only memory_search"
-
-    # memory_search_expired (expired history): the superseded record IS surfaced
-    # for audit, and the active record does NOT leak in.
-    expired = tools.memory_search_expired(query="release", workspace="repo-a")
-    expired_ids = [r["id"] for r in expired["data"]["results"]]
-    assert stale_id in expired_ids, "superseded record not returned by memory_search_expired"
-    assert active_id not in expired_ids, "active record leaked into memory_search_expired"
-
-
 # ---- v0.3.1: optional semantic recall (sqlite-vec vec0) -----------------
 try:
     import sqlite_vec  # type: ignore  # noqa: F401

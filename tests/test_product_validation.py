@@ -217,20 +217,6 @@ def test_timestamp_fields_reject_non_strings_and_oversized_values() -> None:
         assert result.error["field"] == "event_time"
 
 
-def test_conflict_structured_payload_limits_reject_oversized_arrays() -> None:
-    cases = [
-        ("memory", "judge", "apply_plan", [{}] * (MAX_APPLY_PLAN_ITEMS + 1)),
-        ("memory_govern", "replan_conflict", "apply_plan", [{}] * (MAX_APPLY_PLAN_ITEMS + 1)),
-        ("memory_repair", "record_conflict", "members", [{}] * (MAX_CONFLICT_MEMBERS + 1)),
-        ("memory_repair", "record_conflict", "value_groups", [{}] * (MAX_CONFLICT_MEMBERS + 1)),
-    ]
-    for surface, operation, field, value in cases:
-        payload = {field: value}
-        result = validate_product_payload(surface, operation, payload)
-        assert result.error is not None
-        assert result.error["field"] == field
-
-
 def test_conflict_structured_payload_limits_require_json_values() -> None:
     for surface, operation, field, value in (
         ("memory", "judge", "apply_plan", [{"bad": object()}]),

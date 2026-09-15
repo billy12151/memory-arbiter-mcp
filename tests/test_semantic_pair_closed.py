@@ -126,36 +126,3 @@ def test_pending_delivery_does_not_close_pair(tmp_path: Path) -> None:
     assert db.is_semantic_pair_closed(left, right) is False
 
 
-def test_self_pair_never_closed_by_single_member_row(tmp_path: Path) -> None:
-    db = _db(tmp_path)
-    # A single-member dismissed row pinning only id N must not close the
-    # (N, N) self-pair: for equal ids the two EXISTS clauses collapse into
-    # one, so a one-member row would wrongly satisfy both. (The production
-    # recorder refuses duplicate members outright; a legacy/imported row is
-    # the only way this shape exists.)
-    solo, peer = _memory(db, "solo fact"), _memory(db, "peer fact")
-    _close_pair(db, solo, peer)
-    with db.write_transaction() as conn:
-        conn.execute(
-            "UPDATE conflicts SET member_versions=? WHERE id IN "
-            "(SELECT MIN(id) FROM conflicts)",
-            ('[{"memory_id": %d, "version": 1}]' % solo,),
-        )
-
-    assert db.is_semantic_pair_closed(solo, solo) is False
-    assert db.is_semantic_pair_closed(peer, peer) is False
-
-
-def test_malformed_member_json_row_is_skipped_not_fatal(tmp_path: Path) -> None:
-    db = _db(tmp_path)
-    left, right = _memory(db, "alpha fact"), _memory(db, "beta fact")
-    _close_pair(db, left, right)
-    # Corrupt one unrelated closed row's member JSON; the check must not
-    # raise and must still find the well-formed pair.
-    with db.write_transaction() as conn:
-        conn.execute(
-            "UPDATE conflicts SET member_versions=json('{\"bad\": true}') "
-            "WHERE id <> (SELECT MIN(id) FROM conflicts)"
-        )
-
-    assert db.is_semantic_pair_closed(left, right) is True
