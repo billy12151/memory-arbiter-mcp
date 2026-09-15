@@ -447,46 +447,46 @@ class SemanticNoticeStore:
     def is_semantic_pair_closed(self, left_id: int, right_id: int, left_version: int | None = None, right_version: int | None = None, notice_type: str = "semantic_evidence") -> bool:
         """True when a dismissed/resolved notice already covers this pair.
 
-        Direct query, not list_semantic_notices: the list path clamps ``limit``
-        to 100 (newest first), so a closed pair older than the newest 100
-        notices would wrongly look open and be re-detected. Querying by
-        member ids has no such window.
+        Versioned pairs (every production caller) resolve through the
+        idx_conflicts_notice_dedupe unique index: same key derivation as the
+        insert path, restricted to decided rows — the pending/delivered
+        notices must NOT suppress re-detection. Version-less calls (test
+        surface only) keep the legacy member-scan because no key can be
+        derived without pins. Legacy decided rows that predate the key were
+        backfilled one-shot at boot (additive._backfill_notice_dedupe_keys);
+        rows skipped there (malformed members) surface once more and heal on
+        the next dismissal.
         """
         left_id, right_id = int(left_id), int(right_id)
         if left_id == right_id:
-            # A self-pair cannot be covered by any two-member dismissal; the
-            # two EXISTS clauses below would otherwise collapse into one.
+            # A self-pair cannot be covered by any two-member dismissal.
             return False
-        # Malformed legacy JSON must not abort the check (mirrors the
-        # json_valid guard used in filter clauses).
+        if left_version is not None and right_version is not None:
+            from ..semantic_conflict import notice_dedupe_key
+
+            key = notice_dedupe_key(
+                left_id, right_id, int(left_version), int(right_version), notice_type,
+            )
+            with self._db.connection() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM conflicts WHERE notice_dedupe_key=? "
+                    "AND notice_delivery_status IN ('dismissed','resolved') LIMIT 1",
+                    (key,),
+                ).fetchone()
+            return row is not None
+        # Version-less fallback: same-notice proof by member id EXISTS.
         members_json = "CASE WHEN json_valid(member_versions) THEN member_versions ELSE '[]' END"
         with self._db.connection() as conn:
-            rows = conn.execute(
-                "SELECT member_versions FROM conflicts "
+            row = conn.execute(
+                "SELECT 1 FROM conflicts "
                 "WHERE notice_delivery_status IN ('dismissed','resolved') AND notice_type=? "
                 f"AND EXISTS (SELECT 1 FROM json_each({members_json}) "
                 "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?) "
                 f"AND EXISTS (SELECT 1 FROM json_each({members_json}) "
-                "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?)",
+                "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?) LIMIT 1",
                 (notice_type, left_id, right_id),
-            ).fetchall()
-        if left_version is None or right_version is None:
-            # The two EXISTS clauses already prove both ids share one notice.
-            return bool(rows)
-        pins: set[tuple[int, int]]
-        for row in rows:
-            try:
-                members = json.loads(row["member_versions"] or "[]")
-            except (TypeError, ValueError):
-                continue
-            pins = {
-                (int(member["memory_id"]), int(member["version"]))
-                for member in members
-                if member.get("memory_id") is not None and member.get("version") is not None
-            }
-            if {(left_id, int(left_version)), (right_id, int(right_version))} <= pins:
-                return True
-        return False
+            ).fetchone()
+        return row is not None
 
     def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "", workspace_canonical: "WorkspaceScope" = None, conflict_id: int | None = None) -> dict[str, Any]:
         status = str(status).lower()

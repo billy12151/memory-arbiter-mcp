@@ -58,7 +58,8 @@ class SchemaStore:
               subject TEXT,
               metadata TEXT NOT NULL DEFAULT '{}',
               version INTEGER NOT NULL DEFAULT 1,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              content_sha TEXT
             );
 
             CREATE TABLE IF NOT EXISTS memory_history (
@@ -91,7 +92,6 @@ class SchemaStore:
               source TEXT NOT NULL,
               detector_version TEXT NOT NULL,
               prompt_version TEXT,
-              overflow INTEGER NOT NULL DEFAULT 0 CHECK(overflow IN (0,1)),
               chosen_value TEXT,
               resolution_memory_id INTEGER,
               resolution_memory_version INTEGER,

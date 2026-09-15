@@ -404,7 +404,9 @@ def test_overflow_append_flags_manual_review(tmp_path: Path, monkeypatch) -> Non
     })
     assert overflowed["data"]["outcome"] == "overflow"
     after = db.get_conflict(conflict_id)
-    assert after["overflow"] is True
+    # 0.16.6: the overflow *column* is retired (write-only, audit A5); the
+    # revision CAS in the same statement must still fire.
+    assert after["revision"] == before["revision"] + 1
     assert after["member_versions"] == before["member_versions"]
     # No second open group was created to bypass the unique constraint.
     assert len(db.list_conflicts(status="open", limit=100)) == 1

@@ -182,6 +182,15 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     evolution_voided = _void_evolution_queue_rows(conn)
     if evolution_voided:
         applied.append(evolution_voided)
+    sha_dedupe = _add_content_sha_dedupe(conn)
+    if sha_dedupe:
+        applied.append(sha_dedupe)
+    overflow_retired = _retire_conflicts_overflow(conn)
+    if overflow_retired:
+        applied.append(overflow_retired)
+    notice_keys = _backfill_notice_dedupe_keys(conn)
+    if notice_keys:
+        applied.append(notice_keys)
     conn.commit()
     return applied
 
@@ -629,3 +638,166 @@ def _void_row(
          WHERE id=? AND status IN ('open','applying','candidate')""",
         (voided_hash, voided_fingerprint, f"voided: {reason}", now, now, now, row_id),
     )
+
+
+# ── 0.16.6 content dedup gate (owner spec 2026-09-14: partial unique over
+# ACTIVE rows only — "只管活的") ────────────────────────────────────────────
+_CONTENT_SHA_KEY = "content_sha_dedupe_v1"
+
+
+def _add_content_sha_dedupe(conn: sqlite3.Connection) -> str:
+    """One-shot: content_sha column + active-only unique index.
+
+    sha256 over the raw UTF-8 content bytes, never normalised (any
+    normalisation would fold distinct memories onto one hash). The unique
+    index is PARTIAL on status='active': retired/pending rows exit the
+    index on status change, so governance flows (merge, supersede) that
+    legitimately produce an active + superseded same-content pair keep
+    working (m986/m987 is exactly that shape). Non-active rows keep their
+    sha for observability but never hold a slot.
+
+    Idempotent: re-runs re-check the column, re-backfill NULL shas and
+    re-run the duplicate self-check before the index is (re-)created.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_CONTENT_SHA_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    if not has_column(conn, "memories", "content_sha"):
+        conn.execute("ALTER TABLE memories ADD COLUMN content_sha TEXT")
+    # NULL/'' canonical rows would sit outside the index (NULL never
+    # conflicts); normalise them to the workspace column first.
+    conn.execute(
+        "UPDATE memories SET workspace_canonical=workspace "
+        "WHERE workspace_canonical IS NULL OR workspace_canonical=''"
+    )
+    rows = conn.execute(
+        "SELECT id, content, status, workspace_canonical, content_sha FROM memories"
+    ).fetchall()
+    pending = [(_sha(row["content"] or ""), int(row["id"])) for row in rows
+               if row["content_sha"] is None]
+    # Self-check BEFORE any write: the effective sha of every active row
+    # (stored or about-to-be-backfilled) must already be unique per
+    # workspace — writing first would violate an existing index itself.
+    seen: dict[tuple[object, str], list[int]] = {}
+    for row in rows:
+        if row["status"] != "active":
+            continue
+        effective = row["content_sha"] if row["content_sha"] is not None else _sha(row["content"] or "")
+        seen.setdefault((row["workspace_canonical"], effective), []).append(int(row["id"]))
+    dupes = {key: ids for key, ids in seen.items() if len(ids) > 1}
+    if dupes:
+        # Nothing has been written and the guard stays unwritten: after
+        # governance retires one of each pair, the next boot retries whole.
+        detail = "; ".join(
+            f"ws={key[0]!r} sha={str(key[1])[:8]}… ids={ids}"
+            for key, ids in list(dupes.items())[:20]
+        )
+        raise RuntimeError(
+            "content_sha dedup migration aborted: active duplicate pairs exist. "
+            "Governance must retire/merge one row of each pair before the unique "
+            f"index can be created. Pairs: {detail}"
+        )
+    if pending:
+        conn.executemany(
+            "UPDATE memories SET content_sha=? WHERE id=? AND content_sha IS NULL",
+            pending,
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_sha "
+        "ON memories(workspace_canonical, content_sha) "
+        "WHERE status='active' AND content_sha IS NOT NULL"
+    )
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_CONTENT_SHA_KEY, f"backfilled={len(pending)}"),
+    )
+    return f"content_sha_dedupe(backfilled={len(pending)})"
+
+
+_OVERFLOW_RETIRED_KEY = "conflicts_overflow_retired_v1"
+
+
+def _retire_conflicts_overflow(conn: sqlite3.Connection) -> str:
+    """One-shot: drop the write-only conflicts.overflow column.
+
+    The column was a materialised flag for outcome="overflow"; every
+    consumer reads the outcome, nobody reads the column (0.16.6 audit A5).
+    Writers stopped setting it in the same release, keeping the revision
+    CAS in the same statement intact.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_OVERFLOW_RETIRED_KEY,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    note = "dropped"
+    if has_column(conn, "conflicts", "overflow"):
+        try:
+            conn.execute("ALTER TABLE conflicts DROP COLUMN overflow")
+        except sqlite3.OperationalError as exc:  # pre-3.35 SQLite
+            note = f"kept ({exc})"
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_OVERFLOW_RETIRED_KEY, note),
+    )
+    return f"conflicts_overflow_{note}"
+
+
+_NOTICE_KEY_BACKFILL = "semantic_notice_dedupe_backfill_v1"
+
+
+def _backfill_notice_dedupe_keys(conn: sqlite3.Connection) -> str:
+    """One-shot: derive notice_dedupe_key for legacy decided semantic notices.
+
+    is_semantic_pair_closed reads the idx_conflicts_notice_dedupe index
+    since 0.16.6; rows decided before the key existed would look open and
+    be re-detected (one extra notice per pair — self-healing on the next
+    dismissal). Malformed member JSON is skipped, not fatal.
+    """
+    guard = conn.execute(
+        "SELECT value FROM migration_state WHERE key=?", (_NOTICE_KEY_BACKFILL,)
+    ).fetchone()
+    if guard is not None:
+        return ""
+    import json as _json
+
+    from ..semantic_conflict import notice_dedupe_key
+
+    rows = conn.execute(
+        "SELECT id, member_versions, notice_type FROM conflicts "
+        "WHERE notice_dedupe_key IS NULL AND notice_type IS NOT NULL "
+        "AND notice_delivery_status IN ('dismissed','resolved')"
+    ).fetchall()
+    keyed = skipped = 0
+    for row in rows:
+        try:
+            members = _json.loads(row["member_versions"] or "[]")
+            left, right = members[0], members[1]
+            key = notice_dedupe_key(
+                int(left["memory_id"]), int(right["memory_id"]),
+                int(left["version"]), int(right["version"]),
+                str(row["notice_type"]),
+            )
+        except (ValueError, TypeError, KeyError, IndexError):
+            skipped += 1
+            continue
+        try:
+            conn.execute(
+                "UPDATE conflicts SET notice_dedupe_key=? WHERE id=? "
+                "AND notice_dedupe_key IS NULL",
+                (key, int(row["id"])),
+            )
+            keyed += 1
+        except sqlite3.IntegrityError:
+            # Another already-keyed row owns this pair; leave this one NULL.
+            skipped += 1
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_NOTICE_KEY_BACKFILL, f"keyed={keyed},skipped={skipped}"),
+    )
+    return f"notice_dedupe_backfill(keyed={keyed},skipped={skipped})"

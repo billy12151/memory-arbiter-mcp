@@ -50,7 +50,6 @@ def _decode_row(row: Any) -> dict[str, Any]:
     for key in ("slot_key", "candidate_key", "member_versions", "value_groups", "apply_summary"):
         if isinstance(data.get(key), str):
             data[key] = json.loads(data[key])
-    data["overflow"] = bool(data.get("overflow"))
     return data
 
 
@@ -390,7 +389,7 @@ class ConflictStore:
                 overflow = len(combined) > _MAX_MEMBERS or len(members_json) > _MAX_MEMBER_JSON or len(groups_json) > _MAX_VALUE_JSON
                 if overflow:
                     conn.execute(
-                        "UPDATE conflicts SET overflow=1,revision=revision+1,refreshed_at=? WHERE id=? AND revision=?",
+                        "UPDATE conflicts SET revision=revision+1,refreshed_at=? WHERE id=? AND revision=?",
                         (now, current["id"], current["revision"]),
                     )
                     return {"outcome": "overflow", "conflict_id": current["id"], "revision": current["revision"] + 1}
@@ -668,7 +667,7 @@ class ConflictStore:
                 members_json, groups_json = _canonical_json(combined), _canonical_json(merged_list)
                 if len(combined) > _MAX_MEMBERS or len(members_json) > _MAX_MEMBER_JSON or len(groups_json) > _MAX_VALUE_JSON:
                     conn.execute(
-                        "UPDATE conflicts SET overflow=1,revision=revision+1,refreshed_at=? WHERE id=? AND revision=?",
+                        "UPDATE conflicts SET revision=revision+1,refreshed_at=? WHERE id=? AND revision=?",
                         (now, group["id"], group["revision"]),
                     )
                     return {"outcome": "overflow", "conflict_id": group["id"], "revision": group["revision"] + 1}

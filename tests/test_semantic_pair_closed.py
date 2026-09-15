@@ -65,9 +65,17 @@ def _close_pair(db: MemoryDB, left: int, right: int, *, delivery: str = "dismiss
     assert outcome["outcome"] == "inserted", outcome
     conflict_id = int(outcome["conflict_id"])
     with db.write_transaction() as conn:
+        # 0.16.6: decided notices resolve through idx_conflicts_notice_dedupe,
+        # so the fixture mirrors the production shape (record_semantic_notice
+        # writes the key at creation; legacy rows get it from the boot
+        # backfill) instead of leaving a NULL-key simulation behind.
+        from memory_arbiter.semantic_conflict import notice_dedupe_key
+
+        key = notice_dedupe_key(left, right, 1, 1, notice_type)
         conn.execute(
-            "UPDATE conflicts SET notice_delivery_status=?, notice_type=? WHERE id=?",
-            (delivery, notice_type, conflict_id),
+            "UPDATE conflicts SET notice_delivery_status=?, notice_type=?, notice_dedupe_key=? "
+            "WHERE id=?",
+            (delivery, notice_type, key, conflict_id),
         )
     return conflict_id
 
