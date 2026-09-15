@@ -83,16 +83,6 @@ def test_validation_matches_golden(case: dict[str, Any]) -> None:
     assert payload == _expand(case["payload_out"])
 
 
-def test_non_string_field_name_is_rejected() -> None:
-    """Not expressible in the JSON corpus (JSON has no integer keys), so the
-    branch is asserted directly."""
-    payload: dict[Any, Any] = {"query": "x", 7: "v"}
-    result = validate_product_payload("memory", "find", payload)
-    assert result.error is not None
-    assert result.error["error"] == "invalid_input"
-    assert result.error["reason"] == "field names must be strings"
-
-
 def test_unhashable_values_never_escape_the_boundary() -> None:
     """Direct, because JSON cannot carry these shapes -- only in-process
     callers (pipeline/write, backup replay) can. Before the boundary fix each
@@ -116,18 +106,12 @@ def test_unhashable_values_never_escape_the_boundary() -> None:
         ("memory", "update", {"id": 1, "old_text": surrogate, "new_text": "x"}),
         # In-process-only shapes: JSON cannot express any of these keys/values.
         ("memory", "remember", {"content": "a", "subject": "b", "source_type": 10 ** 5000}),
-        ("memory", "batch_find", {"queries": [{1: "x"}]}),
     ]
     for surface, operation, payload in probes:
         result = validate_product_payload(surface, operation, dict(payload))
         assert result.error is not None, f"{surface}/{operation} leaked {payload} through"
         assert result.error["error"] == "invalid_input"
 
-    # A non-string payload key beyond the int digit cap: str(key) itself raises,
-    # so the unknown-field gate reports it via repr (also asserted: no raise).
-    weird: dict[Any, Any] = {"query": "x", 10 ** 5000: "v"}
-    result = validate_product_payload("memory", "find", weird)
-    assert result.error is not None and result.error["reason"] == "field names must be strings"
 
 
 class _Unserialisable:

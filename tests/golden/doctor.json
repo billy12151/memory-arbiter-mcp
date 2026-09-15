@@ -108,7 +108,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -304,7 +304,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -589,7 +589,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -785,7 +785,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -1070,7 +1070,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -1266,7 +1266,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -1557,7 +1557,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "2 suspected item(s) awaiting agent judgment (1 pending, 0 in review, 1 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "2 suspected item(s) awaiting agent judgment (1 pending, 1 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "pending": 1,
       "backlog": 2,
@@ -1760,7 +1760,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "2 suspected item(s) awaiting agent judgment (1 pending, 0 in review, 1 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "2 suspected item(s) awaiting agent judgment (1 pending, 1 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "pending": 1,
       "backlog": 2,
@@ -2061,7 +2061,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -2272,7 +2272,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -2572,7 +2572,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -2783,7 +2783,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -3084,7 +3084,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -3296,7 +3296,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -3607,7 +3607,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -3829,7 +3829,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -4114,7 +4114,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -4325,7 +4325,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -4625,7 +4625,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -4842,7 +4842,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -5038,7 +5038,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -5240,7 +5240,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -5442,7 +5442,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -5638,7 +5638,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -5834,7 +5834,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -6043,7 +6043,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -6239,7 +6239,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -6435,7 +6435,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -6644,7 +6644,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -6840,7 +6840,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -7125,7 +7125,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -7410,7 +7410,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -7695,7 +7695,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -7980,7 +7980,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -8290,7 +8290,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -8600,7 +8600,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -8905,7 +8905,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -9215,7 +9215,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -9525,7 +9525,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -9835,7 +9835,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -10145,7 +10145,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -10450,7 +10450,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -10760,7 +10760,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -11070,7 +11070,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0
@@ -11380,7 +11380,7 @@
      "severity": "info",
      "status": "pass",
      "title": "conflicts.scan_queue_backlog",
-     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 in review, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
+     "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
       "internal_pending": 0

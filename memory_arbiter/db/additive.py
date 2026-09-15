@@ -57,7 +57,7 @@ def scan_queue_ddl() -> str:
       kind TEXT NOT NULL DEFAULT 'conflict' CHECK(kind IN ('conflict','internal','workspace')),
       workspace_canonical TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending'
-        CHECK(status IN ('pending','in_review','confirmed','dismissed','voided','expired')),
+        CHECK(status IN ('pending','confirmed','dismissed','voided','expired')),
       candidate_key_hash TEXT NOT NULL UNIQUE CHECK(length(candidate_key_hash)=64),
       member_versions TEXT NOT NULL CHECK(json_valid(member_versions) AND json_type(member_versions)='array' AND length(member_versions) <= 262144),
       evidence TEXT CHECK(evidence IS NULL OR (json_valid(evidence) AND length(evidence) <= 131072)),
@@ -433,7 +433,7 @@ def _purge_terminal_queue_rows(conn: sqlite3.Connection) -> str:
     outcome lives elsewhere (dismissal suppression in ``conflicts``, confirms
     in conflicts/memories), so voided/expired/dismissed/confirmed rows carry
     no operational value and only bloat the table. Deleting them also
-    releases their candidate_key_hash identities. Pending/in_review rows are
+    releases their candidate_key_hash identities. Pending rows are
     untouched — that is unfinished work.
     """
     counts: dict[str, int] = {}

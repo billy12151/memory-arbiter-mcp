@@ -290,32 +290,16 @@ class WritePipeline:
             return self._tools.db.state.response(
                 {"written": False, **error}, ok=False,
             )
-        if not str(payload.get("subject") or "").strip():
-            return self._tools.db.state.response(
-                {"written": False, "error": "subject is required"},
-                ok=False,
-            )
         if self.settings.isolation == "strict" and not str(payload.get("workspace") or "").strip():
             return self._tools.db.state.response(
                 {"written": False, "error": "isolation=strict requires a workspace on every write"},
                 ok=False,
             )
-        # Authoritative guard for callers that bypass product-surface validation
-        # (console API, direct MemoryTools use): superseded/conflicted/deleted
-        # are lifecycle outcomes, never caller-supplied write inputs.
-        status_value = payload.get("status")
-        if status_value is not None and status_value not in (
-            MemoryStatus.ACTIVE.value, MemoryStatus.PENDING.value,
-        ):
-            return self._tools.db.state.response(
-                {
-                    "written": False,
-                    "error": "invalid_input",
-                    "field": "status",
-                    "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs",
-                },
-                ok=False,
-            )
+        # The validate_product_payload call above is the single validation
+        # funnel: the MCP surface runs it before dispatch, and direct
+        # memory_write callers (release smoke, tests) run it here — the
+        # remember field rules (subject required, lifecycle status refused)
+        # live only there. No re-checking afterwards.
 
         insert_done = False
         memory_id: int | None = None
@@ -447,10 +431,7 @@ class WritePipeline:
                 # C3a summary vector: publish on the write path so the
                 # anomaly index tracks new rows without waiting for a
                 # restart backfill. Best-effort, fail-open.
-                try:
-                    self.refresh_summary_vector(int(memory_id))
-                except Exception:
-                    pass
+                self.refresh_summary_vector(int(memory_id))
             return response
         except Exception as exc:
             if insert_done:

@@ -472,8 +472,6 @@ class MetaStore:
             "active_space_id": meta.get("active_space_id"),
             "target_space_id": meta.get("target_space_id"),
             "space_rebuild_active": "space_rebuild_evidence_id" in meta,
-            "migration_cursor": int(meta["migration_cursor"]) if "migration_cursor" in meta else None,
-            "migration_epoch": meta.get("migration_epoch"),
             "last_error": meta.get("last_error"),
             "active_dim": int(meta[ACTIVE_DIM_META_KEY]) if ACTIVE_DIM_META_KEY in meta else None,
         }
@@ -531,11 +529,9 @@ class MetaStore:
         with self._db.write_transaction() as conn:
             self.set_meta(conn, "state", "mismatch")
             self.set_meta(conn, "target_space_id", embedding_space_id)
-            self.set_meta(conn, "migration_epoch", uuid.uuid4().hex)
             self.set_meta(conn, "last_error", reason)
             for key in (
-                "space_rebuild_evidence_id", "migration_cursor",
-                "migration_lease_owner", "migration_lease_expires_at",
+                "space_rebuild_evidence_id",
                 "workspace_rebuild_space_id",
             ):
                 self.delete_meta(conn, key)
@@ -721,8 +717,6 @@ class MetaStore:
             self.set_meta(conn, "active_space_id", embedding_space_id)
             for key in (
                 "target_space_id", "space_rebuild_evidence_id",
-                "migration_cursor", "migration_epoch",
-                "migration_lease_owner", "migration_lease_expires_at",
                 "last_error", "workspace_rebuild_space_id",
             ):
                 self.delete_meta(conn, key)
@@ -819,10 +813,8 @@ class MetaStore:
                     # space instead of flipping ready.
                     self.set_meta(conn, "state", "mismatch")
                     self.set_meta(conn, "target_space_id", embedding_space_id)
-                    self.set_meta(conn, "migration_epoch", uuid.uuid4().hex)
                     for key in (
-                        "space_rebuild_evidence_id", "migration_cursor",
-                        "migration_lease_owner", "migration_lease_expires_at",
+                        "space_rebuild_evidence_id",
                         "workspace_rebuild_space_id",
                     ):
                         self.delete_meta(conn, key)
@@ -830,8 +822,6 @@ class MetaStore:
                 self.set_meta(conn, "state", "ready")
                 for key in (
                     "target_space_id", "space_rebuild_evidence_id",
-                    "migration_cursor", "migration_epoch",
-                    "migration_lease_owner", "migration_lease_expires_at",
                     "last_error", "workspace_rebuild_space_id",
                 ):
                     self.delete_meta(conn, key)
@@ -874,11 +864,9 @@ class MetaStore:
             else:
                 self.set_meta(conn, "state", "mismatch")
                 self.set_meta(conn, "target_space_id", embedding_space_id)
-                self.set_meta(conn, "migration_epoch", uuid.uuid4().hex)
                 for key in (
-                    "space_rebuild_evidence_id", "migration_cursor",
-                    "migration_lease_owner",
-                    "migration_lease_expires_at", "last_error",
+                    "space_rebuild_evidence_id",
+                    "last_error",
                     "workspace_rebuild_space_id",
                 ):
                     self.delete_meta(conn, key)

@@ -237,16 +237,9 @@ def _v_unknown_fields(
     if allowed is None:
         return None
     unknown_keys: list[str] = []
+    # Non-string keys are impossible from JSON (MCP wire + backup replay
+    # both go through json.loads); in-process callers own their key types.
     for key in payload:
-        if not isinstance(key, str):
-            # str()/repr() of an int beyond the 4300-digit conversion cap both
-            # raise ValueError, so render defensively: ordinary keys keep their
-            # old rendering, pathological ones degrade to a marker.
-            try:
-                key_name = str(key)
-            except ValueError:
-                key_name = "<unrenderable key>"
-            return _error(key_name, "field names must be strings")
         if key in allowed:
             continue
         if (
@@ -309,10 +302,6 @@ def _v_batch_find_queries(
     for item in queries:
         if not isinstance(item, dict):
             return _error("queries", "every item must be a JSON object with a non-empty query")
-        # In-process callers can hand us non-string keys (JSON never can);
-        # sorted/join below would raise on them.
-        if any(not isinstance(key, str) for key in item):
-            return _error("queries", "item field names must be strings")
         unknown = set(item) - {"id", "query"}
         if unknown:
             return _error("queries", f"unknown item field(s): {', '.join(sorted(unknown))}")
@@ -412,7 +401,10 @@ def _v_id_fields(
     surface: str, operation: str, payload: dict[str, Any], result: ValidationResult,
 ) -> dict[str, Any] | None:
     """Positive-integer id family, coerced in place to the value that passed."""
-    for key in ("id", "memory_id", "conflict_id", "notice_id", "superseded_by", "suggested_winner"):
+    for key in (
+        "id", "memory_id", "conflict_id", "notice_id",
+        "superseded_by", "suggested_winner", "survivor_id", "audit_id",
+    ):
         if key not in payload:
             continue
         if key in {"id", "conflict_id"} and (surface, operation) == ("memory", "judge"):

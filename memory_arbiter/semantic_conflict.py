@@ -205,9 +205,6 @@ class SemanticBackend(Protocol):
     def unload(self, timeout: float = 30.0, disable: bool = False) -> dict[str, Any]:
         ...
 
-    def maybe_unload_if_idle(self) -> dict[str, Any]:
-        ...
-
     def set_disabled(self, disabled: bool) -> None:
         ...
 
@@ -1410,29 +1407,6 @@ class LocalGGUFSemanticBackend:
                 "generation": self._generation,
             }
 
-    def maybe_unload_if_idle(self) -> dict[str, Any]:
-        with self._cond:
-            if self._inflight > 0 or self._unloading or self._loading:
-                return {
-                    "ok": False,
-                    "unloaded": False,
-                    "reason": "busy",
-                    "inflight": self._inflight,
-                    "generation": self._generation,
-                }
-            was_loaded = self._llm is not None
-            if was_loaded:
-                self._llm = None
-                self._loaded_at = None
-                self._generation += 1
-            return {
-                "ok": True,
-                "unloaded": was_loaded,
-                "reason": "idle" if was_loaded else "already_unloaded",
-                "inflight": 0,
-                "generation": self._generation,
-            }
-
     def set_disabled(self, disabled: bool) -> None:
         with self._cond:
             self._disabled = bool(disabled)
@@ -1894,17 +1868,6 @@ class IsolatedGGUFSemanticBackend:
             with self._state_lock:
                 self._terminate_locked(count_restart=False)
                 return {"ok": True, "unloaded": True, "timeout": False, "inflight": 0, "retry_hint": None, "generation": self._generation}
-        finally:
-            self._request_lock.release()
-
-    def maybe_unload_if_idle(self) -> dict[str, Any]:
-        if not self._request_lock.acquire(blocking=False):
-            return {"ok": False, "unloaded": False, "reason": "busy", "inflight": 1, "generation": self._generation}
-        try:
-            with self._state_lock:
-                was_loaded = self._process is not None
-                self._terminate_locked(count_restart=False)
-                return {"ok": True, "unloaded": was_loaded, "reason": "idle" if was_loaded else "already_unloaded", "inflight": 0, "generation": self._generation}
         finally:
             self._request_lock.release()
 

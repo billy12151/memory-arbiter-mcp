@@ -475,7 +475,7 @@ def _c_conflicts_scan_queue_backlog(ctx: _DoctorCtx) -> Finding:
         queue_counts = {str(row["status"]): int(row["c"]) for row in queue_rows}
     except sqlite3.Error:
         queue_counts = {}
-    queue_backlog = queue_counts.get("pending", 0) + queue_counts.get("in_review", 0)
+    queue_backlog = queue_counts.get("pending", 0)
     # 0.16.2: internal contradictions live in their OWN table but count
     # toward the same agent workload — scan_queue page's queue_backlog merges
     # both, doctor must too or it under-reports (a live 954-item workload
@@ -491,7 +491,7 @@ def _c_conflicts_scan_queue_backlog(ctx: _DoctorCtx) -> Finding:
         "conflicts.scan_queue_backlog", queue_backlog < 100,
         (
             f"{queue_backlog} suspected item(s) awaiting agent judgment "
-            f"({queue_counts.get('pending', 0)} pending, {queue_counts.get('in_review', 0)} in review, "
+            f"({queue_counts.get('pending', 0)} pending, "
             f"{internal_pending} internal contradictions); "
             "when convenient, let the agent read the queue "
             "(memory_repair task='scan_queue', action='page')"

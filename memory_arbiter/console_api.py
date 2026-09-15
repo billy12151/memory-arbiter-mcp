@@ -96,7 +96,7 @@ class ConsoleAPI:
                     "SELECT status, COUNT(*) AS c FROM scan_queue GROUP BY status"
                 ).fetchall()
             q = {str(r["status"]): int(r["c"]) for r in rows}
-            counts["scan_queue_backlog"] = q.get("pending", 0) + q.get("in_review", 0)
+            counts["scan_queue_backlog"] = q.get("pending", 0)
         except sqlite3.Error:
             counts["scan_queue_backlog"] = 0
         return {

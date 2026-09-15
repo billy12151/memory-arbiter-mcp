@@ -94,6 +94,12 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "them for a manual trim."
         ),
         "write_duplicate_hint": (
+            "Since 0.16.6 a DB-level dedup gate comes FIRST: byte-identical "
+            "content in the same workspace returns an idempotent success "
+            "(data.duplicate_replay=true with the existing id; nothing is "
+            "written) and never reaches this hint — only ACTIVE rows hold a "
+            "slot, so rewriting a retired memory's exact content lands "
+            "normally. The notice below is therefore near-duplicate territory. "
             "remember/activation responses may carry a similar_active_memory notice when the "
             "new subject/tags closely match an existing active memory (subject ratio >=0.95 "
             "AND tag Jaccard >=0.8; empty tag sets on both sides count as Jaccard 1.0, so the "
@@ -556,6 +562,23 @@ class ProductSurfaces:
             return self._invalid_product_call(surface, f"{name} must be an integer", topic)
         return parsed
 
+    def _bind_product_id(
+        self, surface: str, payload: dict[str, Any], name: str,
+        topic: str | None = None, *, required: bool = True,
+    ) -> dict[str, Any] | None:
+        """Alias ``id``→``name`` and guard presence ONLY.
+
+        Numeric coercion already happened in ``validate_product_payload``
+        (_v_id_fields coerces in place and runs for every product call), so a
+        second numeric pass here would be dead work — the 0.16.6 audit
+        removed exactly that double coercion. The judge dispatcher keeps its
+        own strict coerce by design (validation skips judge ids to preserve
+        missing-receipt-fields-first error ordering)."""
+        self._alias_id(payload, name)
+        if required and name not in payload:
+            return self._invalid_product_call(surface, f"{topic or surface} requires {name}", topic)
+        return None
+
     def _require_id(
         self, surface: str, payload: dict[str, Any], name: str, topic: str | None = None,
     ) -> dict[str, Any] | None:
@@ -844,9 +867,7 @@ class ProductSurfaces:
             conflict_id = payload.get("conflict_id") or payload.get("id")
             if conflict_id is None:
                 return self._invalid_product_call("memory_review", "conflict_detail requires conflict_id", view)
-            conflict_id_int = self._int_product_arg("memory_review", conflict_id, "conflict_id", view)
-            if isinstance(conflict_id_int, dict):
-                return conflict_id_int
+            conflict_id_int = int(conflict_id)  # already coerced by validation
             caller = self._caller_workspace(payload.get("workspace"))
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
@@ -862,9 +883,7 @@ class ProductSurfaces:
             memory_id = payload.get("memory_id") or payload.get("id")
             if memory_id is None:
                 return self._invalid_product_call("memory_review", "history requires memory_id", view)
-            memory_id_int = self._int_product_arg("memory_review", memory_id, "memory_id", view)
-            if isinstance(memory_id_int, dict):
-                return memory_id_int
+            memory_id_int = int(memory_id)  # already coerced by validation
             return self.memory_history(memory_id=memory_id_int, workspace=payload.get("workspace"))
         if view == "expired":
             return self._forward("memory_review", view, self._tools.memory_search_expired, **payload)
@@ -889,24 +908,21 @@ class ProductSurfaces:
         if action == "help":
             return self.db.state.response(self._product_help("memory_govern", self._help_topic(payload, "action")))
         if action == "retire":
-            invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_govern", payload, "memory_id", action)
+            if bad_id is not None:
+                return bad_id
             if not payload.get("reason"):
                 return self._invalid_product_call("memory_govern", "retire requires reason and authorized=true", action)
-            if payload.get("superseded_by") is not None:
-                superseded_by_int = self._int_product_arg("memory_govern", payload.get("superseded_by"), "superseded_by", action)
-                if isinstance(superseded_by_int, dict):
-                    return superseded_by_int
-                payload["superseded_by"] = superseded_by_int
+            # superseded_by arrives already int-coerced from validation
+            # (numeric-string compatible); None stays None there by design.
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self._tools.memory_supersede, **payload)
         if action in {"apply_conflict_action", "replan_conflict", "resolve_conflict"}:
-            invalid_id = self._coerce_product_id("memory_govern", payload, "conflict_id", action)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_govern", payload, "conflict_id", action)
+            if bad_id is not None:
+                return bad_id
             if payload.get("expected_revision") is None:
                 response = self._invalid_product_call(
                     "memory_govern", f"{action} requires expected_revision", action,
@@ -934,17 +950,17 @@ class ProductSurfaces:
                 self._tools._operations.memory_resolve_conflict, **payload,
             )
         if action == "confirm":
-            invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_govern", payload, "memory_id", action)
+            if bad_id is not None:
+                return bad_id
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
             return self._forward("memory_govern", action, self._tools.memory_confirm, **payload)
         if action == "merge_memories":
-            invalid_id = self._coerce_product_id("memory_govern", payload, "survivor_id", action)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_govern", payload, "survivor_id", action)
+            if bad_id is not None:
+                return bad_id
             raw_losers = payload.get("loser_ids")
             if not isinstance(raw_losers, list) or not raw_losers:
                 return self._invalid_product_call(
@@ -1082,17 +1098,17 @@ class ProductSurfaces:
                 return auth_error
             return self._forward("memory_govern", action, self._tools.memory_move_memories_workspace, **payload)
         if action == "rollback_auto_move":
-            invalid_id = self._coerce_product_id("memory_govern", payload, "audit_id", action)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_govern", payload, "audit_id", action)
+            if bad_id is not None:
+                return bad_id
             auth_error = self._governance_authorization_error(action, payload)
             if auth_error is not None:
                 return auth_error
             return self._tools.memory_rollback_auto_move(**payload)
         if action == "confirm_pending_workspace":
-            invalid_id = self._coerce_product_id("memory_govern", payload, "memory_id", action)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_govern", payload, "memory_id", action)
+            if bad_id is not None:
+                return bad_id
             if not payload.get("canonical"):
                 return self._invalid_product_call("memory_govern", "confirm_pending_workspace requires memory_id and canonical", action)
             bad = self._require_ws_strings(payload, ("canonical",), "memory_govern", action)
@@ -1303,19 +1319,19 @@ class ProductSurfaces:
             return self._scan_duplicates_task(task, payload)
         if task == "cleanup_history":
             if "id" in payload or "memory_id" in payload:
-                invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
-                if invalid_id is not None:
-                    return invalid_id
+                bad_id = self._bind_product_id("memory_repair", payload, "memory_id", task, required=False)
+                if bad_id is not None:
+                    return bad_id
             return self._forward("memory_repair", task, self._tools.memory_cleanup_history, **payload)
         if task == "set_entity":
-            invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_repair", payload, "memory_id", task)
+            if bad_id is not None:
+                return bad_id
             return self._forward("memory_repair", task, self._tools.memory_set_entity, **payload)
         if task == "activate_pending":
-            invalid_id = self._coerce_product_id("memory_repair", payload, "memory_id", task)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_repair", payload, "memory_id", task)
+            if bad_id is not None:
+                return bad_id
             return self._forward("memory_repair", task, self._tools.memory_activate, **payload)
         if task == "replay_backup":
             return self._forward("memory_repair", task, self._tools.memory_replay_backup, **payload)
@@ -1449,9 +1465,9 @@ class ProductSurfaces:
                     status=status, limit=notice_limit, workspace_canonical=workspace,
                 )
                 return self.db.state.response({"notices": notices}, extra_warnings=list(caller.warnings))
-            invalid_id = self._coerce_product_id("memory_repair", payload, "notice_id", task)
-            if invalid_id is not None:
-                return invalid_id
+            bad_id = self._bind_product_id("memory_repair", payload, "notice_id", task)
+            if bad_id is not None:
+                return bad_id
             if action == "read":
                 notice = self.db.read_semantic_notice(int(payload["notice_id"]), workspace)
                 if notice is None:

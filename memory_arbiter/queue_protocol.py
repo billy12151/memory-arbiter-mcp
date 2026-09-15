@@ -871,7 +871,7 @@ class QueueProtocol:
         if row is None:
             return {"index": index, "outcome": "not_found",
                     "candidate_key_hash": candidate_hash}
-        if row["status"] not in {"pending", "in_review"}:
+        if row["status"] != "pending":
             return {"index": index, "outcome": "already_terminal", "status": row["status"],
                     "candidate_key_hash": candidate_hash}
         probe = dict(row)
@@ -1046,12 +1046,19 @@ class QueueProtocol:
             with self.db.write_transaction() as conn:
                 conn.execute(
                     "UPDATE scan_queue SET status=?, decided_ref=?, decided_reason=?, "
-                    "decided_at=?, updated_at=? WHERE candidate_key_hash=?",
+                    "decided_at=?, updated_at=? WHERE candidate_key_hash=? AND status='pending'",
                     (status, str(decided_ref) if decided_ref is not None else None,
                      reason, now, now, candidate_hash),
                 )
         except Exception:
             pass
+        # The status='pending' term is a CAS guard (0.16.6 audit B10): the
+        # pre-check at the submit entry ran outside this transaction, so a
+        # concurrent expire/void can land in between — last-writer-wins would
+        # silently overwrite that terminal state. rowcount 0 = lost race,
+        # the conflicts-side record remains the source of truth either way.
+        # It does NOT deduplicate record_conflict_group calls; that is the
+        # conflicts table's own uniqueness bidding.
 
     def _expire_row(self, candidate_hash: str, why: str) -> None:
         now = utc_now_iso()
@@ -1059,8 +1066,10 @@ class QueueProtocol:
             with self.db.write_transaction() as conn:
                 conn.execute(
                     "UPDATE scan_queue SET status='expired', decided_reason=?, decided_at=?, "
-                    "updated_at=? WHERE candidate_key_hash=?",
+                    "updated_at=? WHERE candidate_key_hash=? AND status='pending'",
                     (why, now, now, candidate_hash),
                 )
         except Exception:
             pass
+        # Same CAS term as _mark_decided: expiring an already-decided row
+        # would only swap one terminal state for another — skip instead.

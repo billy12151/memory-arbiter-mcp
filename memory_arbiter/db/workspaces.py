@@ -1811,7 +1811,7 @@ class WorkspaceStore:
             try:
                 queue_rows = conn.execute(
                     """SELECT id, candidate_key_hash FROM scan_queue
-                       WHERE kind IN ('conflict','workspace') AND status IN ('pending','in_review')
+                       WHERE kind IN ('conflict','workspace') AND status = 'pending'
                          AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
                                     WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
                     (int(memory_id),),

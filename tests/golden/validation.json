@@ -22504,7 +22504,11 @@
    },
    "workspace": "ws"
   },
-  "error": null,
+  "error": {
+   "error": "invalid_input",
+   "field": "survivor_id",
+   "reason": "must be a positive integer"
+  },
   "warnings": [],
   "payload_out": {
    "authorized": true,
@@ -28284,7 +28288,11 @@
    "reason": "because",
    "workspace": "ws"
   },
-  "error": null,
+  "error": {
+   "error": "invalid_input",
+   "field": "audit_id",
+   "reason": "must be a positive integer"
+  },
   "warnings": [],
   "payload_out": {
    "audit_id": {

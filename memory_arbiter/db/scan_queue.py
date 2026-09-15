@@ -23,7 +23,7 @@ from ..models import utc_now_iso
 if TYPE_CHECKING:
     from .core import MemoryDB
 
-QUEUE_STATUSES = ("pending", "in_review", "confirmed", "dismissed", "voided", "expired")
+QUEUE_STATUSES = ("pending", "confirmed", "dismissed", "voided", "expired")
 QUEUE_KINDS = ("conflict", "internal", "workspace")
 
 
@@ -113,7 +113,7 @@ class ScanQueueStore:
 
     def backlog(self) -> int:
         counts = self.counts()
-        return counts.get("pending", 0) + counts.get("in_review", 0)
+        return counts.get("pending", 0)
 
     def refresh_stale_pins(self) -> int:
         """Expire rows whose pinned member versions no longer match reality.
@@ -130,7 +130,7 @@ class ScanQueueStore:
             with self._db.write_transaction() as conn:
                 cur = conn.execute(
                     """UPDATE scan_queue SET status='expired', updated_at=?, decided_at=?
-                       WHERE status IN ('pending','in_review')
+                       WHERE status = 'pending'
                          AND EXISTS (
                            SELECT 1 FROM json_each(scan_queue.member_versions) AS m
                            JOIN memories AS mem

@@ -627,7 +627,7 @@ def _wide_recall(
                     for row in conn.execute(sql, params).fetchall():
                         d = row_to_dict(row)
                         pool[d["id"]] = d
-                except Exception:
+                except sqlite3.Error:
                     pass
             # OR channel: only if main didn't fill the pool. This catches the
             # "query was overspecified" case where AND'd trigrams miss.
@@ -1466,9 +1466,6 @@ def _linked_open_items_for_search(
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        warnings.append(f"linked_open_items lookup failed: {exc}; returned [].")
-        return []
-    except Exception as exc:  # pragma: no cover - defensive
         warnings.append(f"linked_open_items lookup failed: {exc}; returned [].")
         return []
 

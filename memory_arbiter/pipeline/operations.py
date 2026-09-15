@@ -2719,10 +2719,7 @@ class OperationsPipeline:
                 # content (and version) is unchanged.
                 self._tools._write_pipeline.refresh_subject_tags_vector(memory_id_int)
                 # ...and the C3a summary vector likewise (tags are its input).
-                try:
-                    self._tools._write_pipeline.refresh_summary_vector(memory_id_int)
-                except Exception:
-                    pass
+                self._tools._write_pipeline.refresh_summary_vector(memory_id_int)
                 data = {
                     "edited": True,
                     "tags_only": True,
@@ -2853,10 +2850,7 @@ class OperationsPipeline:
         # C3a summary vector follows the same realignment (content edits
         # change its segment inputs; edits bump the version, which is the
         # anomaly vote's natural refresh point).
-        try:
-            self._tools._write_pipeline.refresh_summary_vector(memory_id_int)
-        except Exception:
-            pass
+        self._tools._write_pipeline.refresh_summary_vector(memory_id_int)
         unresolved = self.db.conflicts.list_open_conflicts_for_memory_ids(
             [memory_id_int], include_applying=True,
         )
@@ -3006,21 +3000,6 @@ class OperationsPipeline:
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     @staticmethod
-    def _replay_stage_done(value: Any) -> bool:
-        return str(value or "") in {"complete", "skipped", "warning", "queued"}
-
-    def _checkpoint_replay_stage(
-        self,
-        replay_key: str,
-        stages: dict[str, str],
-        stage: str,
-        outcome: str,
-        error_code: str | None = None,
-    ) -> None:
-        stages[stage] = outcome
-        self.db.backup_replay.set_postprocess_state(
-            replay_key, "pending", stages, error_code,
-        )
 
     def _postprocess_replayed_memory(
         self,
@@ -3040,10 +3019,7 @@ class OperationsPipeline:
         # write-time duplicate hint can recall them before the next restart.
         self._tools._write_pipeline.refresh_subject_tags_vector(memory_id)
         # Same for the C3a summary vector (anomaly voting index).
-        try:
-            self._tools._write_pipeline.refresh_summary_vector(memory_id)
-        except Exception:
-            pass
+        self._tools._write_pipeline.refresh_summary_vector(memory_id)
         outcome = str(result.get("status") or "unknown")
         if outcome == "queued":
             stages["evidence"] = "queued"
