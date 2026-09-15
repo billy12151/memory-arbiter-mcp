@@ -58,6 +58,10 @@ def scan_queue_ddl() -> str:
       workspace_canonical TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending','confirmed','dismissed','voided','expired')),
+      -- 0.16.6 dropped the phantom in_review state (zero writers ever).
+      -- Databases created before 0.16.6 keep their 6-state CHECK — harmless:
+      -- new code never writes in_review, and a legacy row in that state
+      -- would simply read as already_terminal at submit time.
       candidate_key_hash TEXT NOT NULL UNIQUE CHECK(length(candidate_key_hash)=64),
       member_versions TEXT NOT NULL CHECK(json_valid(member_versions) AND json_type(member_versions)='array' AND length(member_versions) <= 262144),
       evidence TEXT CHECK(evidence IS NULL OR (json_valid(evidence) AND length(evidence) <= 131072)),
@@ -694,10 +698,16 @@ def _add_content_sha_dedupe(conn: sqlite3.Connection) -> str:
             f"ws={key[0]!r} sha={str(key[1])[:8]}… ids={ids}"
             for key, ids in list(dupes.items())[:20]
         )
+        ids = sorted({i for pair_ids in dupes.values() for i in pair_ids})
         raise RuntimeError(
             "content_sha dedup migration aborted: active duplicate pairs exist. "
             "Governance must retire/merge one row of each pair before the unique "
-            f"index can be created. Pairs: {detail}"
+            f"index can be created. Pairs: {detail} "
+            f"Recovery (this error aborts service start by design): retire one row "
+            f"of each pair directly, e.g. "
+            f"sqlite3 <db> 'UPDATE memories SET status='superseded' WHERE id IN ({','.join(str(i) for i in ids)})' "
+            "then restart — or boot the previous release, govern via the product "
+            "tools, and upgrade again."
         )
     if pending:
         conn.executemany(
@@ -738,6 +748,8 @@ def _retire_conflicts_overflow(conn: sqlite3.Connection) -> str:
         try:
             conn.execute("ALTER TABLE conflicts DROP COLUMN overflow")
         except sqlite3.OperationalError as exc:  # pre-3.35 SQLite
+            if "drop" not in str(exc).lower():
+                raise  # transient (e.g. locked) — retry next boot, don't pin
             note = f"kept ({exc})"
     conn.execute(
         "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "

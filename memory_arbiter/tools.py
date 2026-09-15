@@ -1622,6 +1622,15 @@ class MemoryTools:
                          "current_bucket": str(current["bucket"]) if current else None},
                         ok=False,
                     )
+                # 0.16.6 dedup gate (before any ticket voiding, same ordering
+                # as move_memory_workspace_on_conn): restoring the memory into
+                # a bucket that now holds its byte-identical ACTIVE twin
+                # refuses with the colliding id instead of a bare constraint.
+                sha_collision = self.db.workspaces._content_sha_collision_warning_on_conn(
+                    conn, from_ws, only_id=memory_id,
+                )
+                if sha_collision is not None:
+                    return self.db.state.response({"moved": False, "error": sha_collision}, ok=False)
                 # Same §6⑯ discipline as any move: old tickets die, watermark
                 # invalidates, the pipeline re-pairs in the restored bucket.
                 self.db.conflicts.void_conflicts_on_conn(

@@ -3121,8 +3121,11 @@ class OperationsPipeline:
                     receipt_result["postprocess_stages"] = replayed.get("postprocess_stages") or {}
                     receipt_result["postprocess_error_code"] = "postprocess_exception"
                     warnings.append(f"replayed memory {memory_id} committed; derived post-processing failed and will retry: {exc}")
-            elif outcome == "already_replayed":
-                already_replayed.append({"replay_key": entry["replay_key"], "memory_id": replayed.get("memory_id"), "postprocess_status": "complete"})
+            elif outcome in {"already_replayed", "duplicate_content"}:
+                # duplicate_content (0.16.6 dedup gate) is the same idempotent
+                # family: the line imported nothing because the content
+                # already lives in an ACTIVE row — not a replay conflict.
+                already_replayed.append({"replay_key": entry["replay_key"], "memory_id": replayed.get("memory_id"), "postprocess_status": "complete", **({"outcome": outcome} if outcome != "already_replayed" else {})})
             else:
                 conflicts.append({"replay_key": entry["replay_key"], "outcome": outcome})
         # Drain the evidence worker before responding (B-D2): replay

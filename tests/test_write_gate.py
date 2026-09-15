@@ -159,9 +159,47 @@ def test_race_window_retries_once_and_commits(tmp_path: Path) -> None:
     finally:
         tools.db.insert_memory = real  # type: ignore[method-assign]
     assert res["ok"], res
+    assert calls["n"] == 2, "exactly one retry, never a loop"
     assert "duplicate_replay" not in res["data"]
     with tools.db.connection() as conn:
         count = conn.execute(
             "SELECT COUNT(*) FROM memories WHERE content=?", ("竞态重试正文",)
         ).fetchone()[0]
     assert count == 1
+
+
+def test_backup_replay_duplicate_returns_duplicate_content(tmp_path: Path) -> None:
+    """Round-1 review P0 pin: the backup-replay hook must actually reach its
+    duplicate_content outcome (a missing `as exc` used to NameError here), and
+    the outcome lands in the idempotent bucket, not a replay conflict."""
+    tools = make_tools(tmp_path)
+    _write(tools, "s", "备份里已有的正文", workspace="ws")
+    entry = {
+        "replay_key": "rk-dup-1",
+        "payload_hash": "h1",
+        "workspace_canonical": "ws",
+        "record": {
+            "content": "备份里已有的正文", "subject": "s", "agent_id": "a",
+            "workspace": "ws", "tags": [], "source_type": "agent_generated",
+            "source_ref": None, "event_time": "2026-01-01T00:00:00+00:00",
+            "ingest_time": "2026-01-01T00:00:00+00:00", "confidence": 0.5,
+            "protection_level": "normal", "status": "active",
+            "metadata": {}, "version": 1,
+        },
+    }
+    with open(tools.db.settings.backup_jsonl, "w", encoding="utf-8") as fh:
+        fh.write('{"backup_schema": 1, "replay_key": "rk-dup-1", "payload_hash": "h1", '
+                 '"backup_written_at": "2026-01-01T00:00:00+00:00", "workspace_canonical": "ws", '
+                 '"record": ' + __import__("json").dumps(entry["record"], ensure_ascii=False) + '}\n')
+    res = tools.memory_repair("replay_backup", {"dry_run": False, "authorized": True})
+    assert res["ok"], res
+    data = res["data"]
+    conflicts = [c for c in data.get("conflicts", []) if c.get("replay_key") == "rk-dup-1"]
+    assert not conflicts, f"duplicate_content must not be a replay conflict: {conflicts}"
+    idem = [r for r in data.get("already_replayed", []) if r.get("replay_key") == "rk-dup-1"]
+    assert idem and idem[0].get("outcome") == "duplicate_content", data
+    with tools.db.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE content=?", ("备份里已有的正文",)
+        ).fetchone()[0]
+    assert count == 1, "replay of a duplicate line must not insert"

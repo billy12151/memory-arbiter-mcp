@@ -290,7 +290,7 @@ class BackupReplayStore:
                 "postprocess_status": "pending", "postprocess_stages": {},
                 "postprocess_error_code": None,
             }
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as exc:
             with self._db.connection() as conn:
                 prior = conn.execute(
                     "SELECT memory_id, payload_hash, postprocess_status, postprocess_stages, "

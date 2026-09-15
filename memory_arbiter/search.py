@@ -648,7 +648,7 @@ def _wide_recall(
                             d = row_to_dict(row)
                             if d["id"] not in pool:
                                 pool[d["id"]] = d
-                    except Exception:
+                    except sqlite3.Error:
                         pass
 
         # Channel 3: subject/tags LIKE — precise surface recall. v0.15.9: this
@@ -695,7 +695,7 @@ def _wide_recall(
                         # exact matches are never starved by fusion order.
                         d["_surface_candidate"] = True
                         pool[d["id"]] = d
-            except Exception:
+            except sqlite3.Error:
                 pass
 
         # Channel 4: content LIKE — a limited gap-filler. Requires ≥2 query anchors hit
@@ -733,7 +733,7 @@ def _wide_recall(
                             added += 1
                             if added >= content_like_cap or len(pool) >= pool_cap:
                                 break
-                except Exception:
+                except sqlite3.Error:
                     pass
     finally:
         conn.close()

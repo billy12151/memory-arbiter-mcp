@@ -1717,6 +1717,13 @@ class WorkspaceStore:
             "FROM memories WHERE id = ?",
             (int(memory_id),),
         ).fetchone()
+        # 0.16.6 dedup gate BEFORE the void block (same ordering rationale as
+        # move_memory_workspace_on_conn — review round-1 P2-1).
+        sha_collision = self._content_sha_collision_warning_on_conn(
+            conn, canonical, only_id=int(memory_id),
+        )
+        if sha_collision is not None:
+            return False, [sha_collision]
         bucket_changed = bool(current and str(current["bucket"] or "") != canonical)
         if bucket_changed:
             # 0.16.0 §6⑤/§6⑯: a bucket reassignment is a move — void the
@@ -1726,11 +1733,6 @@ class WorkspaceStore:
                 conn, [int(memory_id)],
                 reason=f"canonical reassignment -> {canonical!r}",
             )
-        sha_collision = self._content_sha_collision_warning_on_conn(
-            conn, canonical, only_id=int(memory_id),
-        )
-        if sha_collision is not None:
-            return False, [sha_collision]
         cur = conn.execute(
             "UPDATE memories SET workspace_canonical = ?, "
             "scan_watermark = CASE WHEN "
@@ -1791,6 +1793,15 @@ class WorkspaceStore:
         ).fetchone()
         bucket_changed = bool(current and str(current["bucket"] or "") != workspace)
         move_warnings: list[str] = []
+        # 0.16.6 dedup gate runs BEFORE any ticket voiding: a bulk-move caller
+        # commits sibling successes in the same transaction, so a collision
+        # refusal after the void block would destroy pending judgment tickets
+        # for a row that never moved (review round-1 P2-1).
+        sha_collision = self._content_sha_collision_warning_on_conn(
+            conn, workspace, only_id=int(memory_id),
+        )
+        if sha_collision is not None:
+            return False, [sha_collision]
         if bucket_changed:
             # 0.16.0 §6⑤/§6⑯: move 视同编辑 — void old-bucket tickets
             # (releasing slot/candidate identities, suppressing nothing) and
@@ -1834,11 +1845,6 @@ class WorkspaceStore:
                 # "voided_conflict_tickets:<n>" is reported in the response,
                 # never shown as a raw warning.
                 move_warnings.append(f"voided_conflict_tickets:{voided}")
-        sha_collision = self._content_sha_collision_warning_on_conn(
-            conn, workspace, only_id=int(memory_id),
-        )
-        if sha_collision is not None:
-            return False, [sha_collision]
         cur = conn.execute(
             "UPDATE memories SET workspace = ?, workspace_canonical = ?, "
             "scan_watermark = CASE WHEN "

@@ -351,6 +351,7 @@ class WritePipeline:
                                 "ingest_time": dup.get("ingest_time"),
                             },
                         },
+                        extra_warnings=validation.warnings,
                         extra_notices=[{
                             "type": "duplicate_replay",
                             "severity": "info",
