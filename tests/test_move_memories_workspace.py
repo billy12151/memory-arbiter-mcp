@@ -31,7 +31,18 @@ def make_tools(
     return MemoryTools(settings=settings, db=MemoryDB(settings))
 
 
-def write(tools: MemoryTools, workspace: str, content: str = "bucket fact") -> int:
+_fact_serial = 0
+
+
+def write(tools: MemoryTools, workspace: str, content: str | None = None) -> int:
+    # 0.16.6 write gate: byte-identical ACTIVE content can no longer coexist
+    # in one workspace, so the default content is uniquified per call (the
+    # "bucket fact" prefix is load-bearing for startswith assertions).
+    # Callers that need an exact value still pass one.
+    global _fact_serial
+    if content is None:
+        content = f"bucket fact #{_fact_serial}"
+        _fact_serial += 1
     return int(tools.memory_write(
         content=content, subject="bucket", workspace=workspace,
         source_type="agent_generated",

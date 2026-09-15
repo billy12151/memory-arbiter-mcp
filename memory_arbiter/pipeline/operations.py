@@ -1000,10 +1000,10 @@ class OperationsPipeline:
                         allow_default=default_fallback,
                     )
                     if not ok_move:
-                        failures.append({
-                            "memory_id": memory_id,
-                            "reason": "not_found_or_forbidden",
-                        })
+                        reason = "; ".join(move_warnings) or "not_found_or_forbidden"
+                        if "memory id not found" in reason:
+                            reason = "not_found_or_forbidden"
+                        failures.append({"memory_id": memory_id, "reason": reason})
                         movable.remove(memory_id)
                         continue
                     if default_fallback:
@@ -1496,7 +1496,9 @@ class OperationsPipeline:
                             error = "failed to activate pending memory"
                         else:
                             updated = self.db.get_memory_on_conn(conn, int(memory_id))
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, ValueError) as exc:
+            # ValueError: 0.16.6 DuplicateActiveContentError from the
+            # pending->active flip (same-content twin) — same rollback story.
             error = f"activate pending failed; transaction rolled back: {exc}"
         if error is not None:
             data: dict[str, Any] = {"error": error, "activated": False}

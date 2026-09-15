@@ -68,7 +68,10 @@ def test_same_subject_disjoint_tags_does_not_fire(tmp_path: Path) -> None:
 def test_no_tags_on_either_side_subject_decides(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     first = _write(tools, "API token 轮换流程", [])
-    dup = _write(tools, "API token 轮换流程", [])
+    # 0.16.6: byte-identical content is replayed idempotently by the dedup
+    # gate and never reaches the hint; a near-duplicate body keeps the
+    # "subject decides" scenario intact.
+    dup = _write(tools, "API token 轮换流程", [], content="body, second entry")
     hints = _similar_notices(dup)
     assert len(hints) == 1
     assert hints[0]["matches"][0]["memory_id"] == first["data"]["id"]
@@ -112,7 +115,9 @@ def test_tag_jaccard_folds_internal_whitespace(tmp_path: Path) -> None:
     "金营 项目" and "金营  项目" are the same tag (Jaccard 1.0)."""
     tools = make_tools(tmp_path)
     first = _write(tools, "上线检查清单", ["金营 项目"])
-    dup = _write(tools, "上线检查清单", ["金营  项目"])
+    # Near-duplicate body: the 0.16.6 dedup gate replays byte-identical
+    # content before the hint can fire.
+    dup = _write(tools, "上线检查清单", ["金营  项目"], content="body, second entry")
     hints = _similar_notices(dup)
     assert len(hints) == 1
     match = hints[0]["matches"][0]

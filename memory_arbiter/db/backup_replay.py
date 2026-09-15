@@ -300,4 +300,18 @@ class BackupReplayStore:
             if prior is not None:
                 outcome = "already_replayed" if prior["payload_hash"] == payload_hash else "receipt_hash_conflict"
                 return {"outcome": outcome, "replay_key": replay_key, "memory_id": int(prior["memory_id"]), "postprocess_status": prior["postprocess_status"]}
+            if "content_sha" in str(exc):
+                # 0.16.6 dedup gate: the backup carries the same content twice
+                # under different replay keys (a real JSONL shape when the
+                # same record was backed up across restarts). Import nothing
+                # for this line and point at the live twin instead of
+                # aborting the whole replay run.
+                dup = self._db.memories.find_active_content_duplicate(canonical, record.content)
+                if dup is not None:
+                    return {
+                        "outcome": "duplicate_content", "replay_key": replay_key,
+                        "memory_id": int(dup["id"]), "record": record,
+                        "postprocess_status": "skipped", "postprocess_stages": {},
+                        "postprocess_error_code": None,
+                    }
             raise

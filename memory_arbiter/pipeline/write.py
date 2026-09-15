@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import sqlite3
 from typing import Any, Protocol, TYPE_CHECKING
 
 from ..embedder import ManagedEmbedder
@@ -268,11 +269,12 @@ class WritePipeline:
                 "severity": "info",
                 "matches": matches,
                 "agent_instruction": (
-                    "This write closely matches existing active memories. Triage silently: "
-                    "ignore it if this is a deliberate series entry or cross-reference. If it "
-                    "duplicates an existing memory, prefer updating that memory instead of "
-                    "keeping two active copies. If the fix needs retiring or merging (governance) "
-                    "or you are unsure, ask the user."
+                    "This write closely matches existing active memories (near-duplicate "
+                    "territory — byte-identical replays never reach this notice, the 0.16.6 "
+                    "dedup gate returns them idempotently). Triage silently: ignore deliberate "
+                    "series entries or cross-references. Prefer updating the original on true "
+                    "near-duplicates. If the fix needs retiring or merging (governance) or you "
+                    "are unsure, ask the user."
                 ),
             }
         except Exception:
@@ -328,10 +330,57 @@ class WritePipeline:
             if workspace["strict_block"]:
                 record.status = MemoryStatus.PENDING.value
 
-            memory_id, write_warnings = self.db.insert_memory(
-                record, workspace["canonical"], workspace.get("canonical_embedding"),
-                register_workspace_canonical=not workspace["strict_block"],
-            )
+            try:
+                memory_id, write_warnings = self.db.insert_memory(
+                    record, workspace["canonical"], workspace.get("canonical_embedding"),
+                    register_workspace_canonical=not workspace["strict_block"],
+                )
+            except sqlite3.IntegrityError as exc:
+                # 0.16.6 dedup gate: idx_memories_content_sha (ACTIVE-only,
+                # owner: 只管活的) is the sole detector — normal writes pay
+                # nothing. Only on violation do we look the twin up.
+                if "content_sha" not in str(exc):
+                    raise
+                dup = self.db.memories.find_active_content_duplicate(
+                    workspace["canonical"], record.content,
+                )
+                if dup is None:
+                    # The violating row left ACTIVE between the error and this
+                    # re-query (its own transaction superseded it). Nothing
+                    # holds the slot any more — one retry commits cleanly.
+                    memory_id, write_warnings = self.db.insert_memory(
+                        record, workspace["canonical"],
+                        workspace.get("canonical_embedding"),
+                        register_workspace_canonical=not workspace["strict_block"],
+                    )
+                else:
+                    return self._tools.db.state.response(
+                        {
+                            "id": int(dup["id"]),
+                            "duplicate_replay": True,
+                            "backup_only": False,
+                            "workspace_canonical": workspace["canonical"],
+                            "workspace_matched_by": workspace["matched_by"],
+                            "replay_of": {
+                                "memory_id": int(dup["id"]),
+                                "subject": dup.get("subject"),
+                                "ingest_time": dup.get("ingest_time"),
+                            },
+                        },
+                        extra_notices=[{
+                            "type": "duplicate_replay",
+                            "severity": "info",
+                            "message": (
+                                f"content is byte-identical to active memory #{int(dup['id'])} "
+                                "in this workspace; nothing new was written"
+                            ),
+                            "agent_instruction": (
+                                "This was a dedup-gate replay, not a new memory (transport "
+                                "retries absorb here automatically). Do not re-send the same "
+                                "content; cite the returned memory_id."
+                            ),
+                        }],
+                    )
             # From here the row (or its JSONL backup) is durable; nothing below
             # may turn this call into a failure response.
             insert_done = True

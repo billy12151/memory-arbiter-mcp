@@ -280,6 +280,8 @@ def test_replan_updates_chosen_value_and_recovers_grounding_failure(tmp_path: Pa
     assert "chosen_value" in failed["note"]
 
     # Recovery A: rewrite the content so the chosen value is grounded.
+    # (Near-duplicate wording: editing left into right's exact bytes is a
+    # 0.16.6 duplicate_content refusal; grounding only needs "sqlite".)
     recovered = db.conflicts.replan_conflict(
         created["conflict_id"], expected_revision=failed["revision"],
         apply_plan=[{"memory_id": left, "action": "update_current_claim"}],
@@ -288,7 +290,7 @@ def test_replan_updates_chosen_value_and_recovers_grounding_failure(tmp_path: Pa
     rewritten = tools.memory_govern("apply_conflict_action", {
         "conflict_id": created["conflict_id"], "expected_revision": recovered["revision"],
         "memory_id": left, "action": "update_current_claim", "authorized": True,
-        "content": "database is sqlite",
+        "content": "database is sqlite, confirmed choice",
     })["data"]
     assert rewritten["outcome"] == "completed"
     resolved = db.resolve_conflict(created["conflict_id"], expected_revision=rewritten["revision"])
@@ -635,11 +637,14 @@ def test_product_record_judge_apply_and_resolve(tmp_path: Path) -> None:
 
     applied = tools.memory_govern("apply_conflict_action", {
         "conflict_id": conflict_id, "expected_revision": 2, "memory_id": mysql,
-        "action": "update_current_claim", "content": "database is sqlite",
+        "action": "update_current_claim", "content": "database is sqlite, confirmed choice",
         "reason": "apply confirmed value", "authorized": True,
     })
     assert applied["ok"] is True
-    assert db.get_memory(mysql)["content"] == "database is sqlite"
+    # Near-duplicate wording: the 0.16.6 dedup gate refuses editing one
+    # active row into another's byte-identical content, so the claim update
+    # grounds "sqlite" without cloning the sqlite memory verbatim.
+    assert db.get_memory(mysql)["content"] == "database is sqlite, confirmed choice"
     assert db.get_conflict(conflict_id)["member_versions"][0]["version"] == 1
 
     preserved = tools.memory_govern("apply_conflict_action", {

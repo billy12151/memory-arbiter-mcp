@@ -534,9 +534,11 @@ def test_has_more_false_when_query_matches_few_no_filter(tmp_path: Path) -> None
     # v0.15.4：无过滤 query-recall 场景 total_estimate 报 None（len(pool) 只是
     # 召回数，不是总数）、has_more=False——top 页未命中应换词/加过滤而非深翻页。
     tools = make_tools(tmp_path)
-    _write_mem(tools, content="alpha beta", subject="alpha beta", tags=[])
-    _write_mem(tools, content="alpha beta", subject="alpha beta", tags=[])
-    _write_mem(tools, content="alpha beta", subject="alpha beta", tags=[])
+    # 0.16.6：同 workspace 逐字节相同 content 只留一条（写时防重门），
+    # 三条匹配记忆改用不同 content，全部命中 query。
+    _write_mem(tools, content="alpha beta one", subject="alpha beta", tags=[])
+    _write_mem(tools, content="alpha beta two", subject="alpha beta", tags=[])
+    _write_mem(tools, content="alpha beta three", subject="alpha beta", tags=[])
     # 写一堆不匹配 query 的记忆
     for i in range(20):
         _write_mem(tools, content=f"noise{i}", subject=f"noise{i}", tags=[])

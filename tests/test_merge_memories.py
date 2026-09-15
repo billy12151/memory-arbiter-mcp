@@ -44,6 +44,28 @@ def _memory(tools: MemoryTools, content: str, workspace: str = "w", **meta: obje
     return memory_id
 
 
+def _write_dup_bypass(
+    tools: MemoryTools, content: str, workspace: str = "w", metadata: str = "{}",
+) -> int:
+    """Second copy of an exact-duplicate pair the way PRE-gate libraries
+    looked: a direct row with NULL content_sha sits outside the 0.16.6
+    partial unique index. Scan/merge pool fixtures only — production writes
+    can no longer create this shape. The post-commit enqueue keeps the
+    scan-pool fixtures' evidence vectors on par with normal writes."""
+    from memory_arbiter.models import utc_now_iso
+    with tools.db.write_transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO memories(content, agent_id, workspace, workspace_canonical, tags, "
+            "source_type, event_time, ingest_time, status, subject, metadata, created_at) "
+            "VALUES(?,?,?,?,?,'agent_generated',?,?, 'active','scan',?,?)",
+            (content, "a", workspace, workspace, "[]",
+             utc_now_iso(), utc_now_iso(), metadata, utc_now_iso()),
+        )
+        memory_id = int(cur.lastrowid)
+    tools._post_commit(memory_id, recheck_conflicts=False)
+    return memory_id
+
+
 def _merge(tools: MemoryTools, survivor: int, losers: list[int], **extra: object) -> dict:
     return tools.memory_govern("merge_memories", {
         "survivor_id": survivor, "loser_ids": losers,
@@ -96,7 +118,13 @@ def test_merge_requires_authorization_with_impact(tmp_path: Path) -> None:
 def test_merge_supersedes_losers_with_pointer_and_keeps_metadata(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     survivor = _memory(tools, "canonical statement")
-    loser = _memory(tools, "canonical statement", origin_note="keep me")
+    # Byte-identical twin pair: post-0.16.6 writes can no longer create this
+    # shape (the gate replays them idempotently), but pre-gate libraries left
+    # exact-dup ACTIVE pairs behind (e.g. m986/m987) — governed merge must
+    # keep handling them. The loser is seeded via the direct-row bypass.
+    loser = _write_dup_bypass(
+        tools, "canonical statement", metadata='{"origin_note": "keep me"}',
+    )
     result = _merge(tools, survivor, [loser])
     assert result["ok"] is True, result
     data = result["data"]
@@ -118,7 +146,7 @@ def test_merge_supersedes_losers_with_pointer_and_keeps_metadata(tmp_path: Path)
 def test_merged_loser_leaves_active_search_and_stays_expired_visible(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     survivor = _memory(tools, "unique topic alpha")
-    loser = _memory(tools, "unique topic alpha")
+    loser = _memory(tools, "unique topic alpha (dup)")
     _merge(tools, survivor, [loser])
     found = tools.memory_search(query="unique topic alpha", limit=10)
     active_ids = [int(item.get("id") or item.get("memory_id")) for item in found["data"]["results"]]
@@ -201,7 +229,7 @@ def test_merge_partial_success_commits_good_losers_despite_per_id_failures(tmp_p
     in the same transaction, and the good losers must actually be superseded."""
     tools = make_tools(tmp_path)
     survivor = _memory(tools, "canonical statement")
-    good_loser = _memory(tools, "canonical statement")
+    good_loser = _memory(tools, "canonical statement (dup)")
     conflict_left, conflict_right = _memory(tools, "port is 8080"), _memory(tools, "port is 8081")
     _record_group(tools.db, conflict_left, conflict_right)
     cross_ws = _memory(tools, "canonical statement", workspace="other")
@@ -233,7 +261,7 @@ def test_merge_blank_merged_content_is_rejected_not_silently_skipped(tmp_path: P
 def test_merge_survivor_in_group_without_edit_passes(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     survivor = _memory(tools, "database is mysql")
-    loser = _memory(tools, "database is mysql")
+    loser = _memory(tools, "database is mysql (dup)")
     peer = _memory(tools, "database is sqlite")
     _record_group(tools.db, survivor, peer)
     result = _merge(tools, survivor, [loser])
@@ -244,7 +272,7 @@ def test_merge_survivor_in_group_without_edit_passes(tmp_path: Path) -> None:
 def test_merge_survivor_in_group_with_edit_flags_attention(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     survivor = _memory(tools, "database is mysql")
-    loser = _memory(tools, "database is mysql")
+    loser = _memory(tools, "database is mysql (dup)")
     peer = _memory(tools, "database is sqlite")
     conflict_id = _record_group(tools.db, survivor, peer)
     result = _merge(tools, survivor, [loser], merged_content="database is mysql, verified")
@@ -310,7 +338,7 @@ def test_merge_strict_hides_survivor_existence_and_loser_scope(tmp_path: Path) -
 
     strict_tools = _make_strict_tools(tmp_path)
     survivor = _memory(strict_tools, "canonical statement", workspace="projA")
-    in_scope_loser = _memory(strict_tools, "canonical statement", workspace="projA")
+    in_scope_loser = _memory(strict_tools, "canonical statement (dup)", workspace="projA")
     _confirm_pending(strict_tools, survivor)
     _confirm_pending(strict_tools, in_scope_loser)
 
@@ -359,7 +387,7 @@ def _write_for_scan(tools: MemoryTools, content: str) -> int:
 def test_scan_duplicates_pool_default_off_and_opt_in(vec_tools: MemoryTools) -> None:
     tools = vec_tools
     _write_for_scan(tools, "release version 1.2.3 is shipped")
-    _write_for_scan(tools, "release version 1.2.3 is shipped")
+    _write_dup_bypass(tools, "release version 1.2.3 is shipped")
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     baseline = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
@@ -386,7 +414,7 @@ def test_scan_duplicates_pool_default_off_and_opt_in(vec_tools: MemoryTools) -> 
 def test_scan_duplicates_pool_respects_recorded_suppression(vec_tools: MemoryTools) -> None:
     tools = vec_tools
     _write_for_scan(tools, "port 8080 is the default api port")
-    _write_for_scan(tools, "port 8080 is the default api port")
+    _write_dup_bypass(tools, "port 8080 is the default api port")
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     scan = tools.memory_repair("scan_candidates", {
@@ -433,7 +461,13 @@ def test_scan_duplicates_pool_respects_recorded_suppression(vec_tools: MemoryToo
 def test_scan_duplicates_pool_cap_and_truncation(vec_tools: MemoryTools) -> None:
     tools = vec_tools
     for index in range(4):
-        _write_for_scan(tools, f"cap probe identical statement number {index % 2}")
+        if index < 2:
+            _write_for_scan(tools, f"cap probe identical statement number {index % 2}")
+        else:
+            # Second copy of each identical pair must ride the bypass; the
+            # write gate would otherwise absorb it and shrink the pool below
+            # the cap the fixture exists to exercise.
+            _write_dup_bypass(tools, f"cap probe identical statement number {index % 2}")
     assert tools.wait_evidence_worker_drained(timeout=5)
     result = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True, "include_quotes": True,
@@ -466,7 +500,7 @@ def test_scan_duplicates_pool_full_rehit_does_not_flag_truncation(vec_tools: Mem
     # before the anchor's second unit re-hits both pairs.
     _write_for_scan(tools, "shared statement alpha\n\nshared statement alpha")
     _write_for_scan(tools, "shared statement alpha")
-    _write_for_scan(tools, "shared statement alpha")
+    _write_dup_bypass(tools, "shared statement alpha")
     assert tools.wait_evidence_worker_drained(timeout=5)
     result = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True, "include_quotes": True,

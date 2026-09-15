@@ -431,9 +431,12 @@ def test_post_resolution_new_value_creates_new_event(tmp_path: Path) -> None:
     assert _judge(tools, conflict_id, [{"memory_id": a, "action": "update_current_claim"},
                                        {"memory_id": b, "action": "use_as_resolution"}],
                   resolution=b)["ok"]
+    # 0.16.6 dedup gate: editing a's content into b's exact bytes is refused
+    # (duplicate_content) while both are active; the claim update uses a
+    # near-duplicate wording that still resolves a onto sqlite.
     tools.memory_govern("apply_conflict_action", {
         "conflict_id": conflict_id, "expected_revision": 2, "memory_id": a,
-        "action": "update_current_claim", "content": "database is sqlite",
+        "action": "update_current_claim", "content": "database is sqlite, agreed",
         "authorized": True,
     })
     tools.memory_govern("apply_conflict_action", {
@@ -484,14 +487,14 @@ def test_apply_rejects_wrong_target_duplicate_and_stale_member(tmp_path: Path) -
 
     applied = tools.memory_govern("apply_conflict_action", {
         "conflict_id": conflict_id, "expected_revision": 2, "memory_id": a,
-        "action": "update_current_claim", "content": "database is sqlite",
+        "action": "update_current_claim", "content": "database is sqlite, agreed",
         "authorized": True,
     })
     assert applied["ok"] is True
 
     duplicate = tools.memory_govern("apply_conflict_action", {
         "conflict_id": conflict_id, "expected_revision": 3, "memory_id": a,
-        "action": "update_current_claim", "content": "database is sqlite",
+        "action": "update_current_claim", "content": "database is sqlite, agreed",
         "authorized": True,
     })
     assert duplicate["ok"] is False and duplicate["data"]["outcome"] == "invalid_action"
@@ -516,8 +519,10 @@ def test_plain_update_cannot_forge_conflict_context(tmp_path: Path) -> None:
     summary_before = db.get_conflict(conflict_id)["apply_summary"]
     # An ordinary edit carrying a bogus conflict-context field: no such
     # parameter exists, so nothing can suppress or mutate the plan through it.
+    # (Content is a near-duplicate, not b's exact bytes: the 0.16.6 dedup gate
+    # refuses editing one active row into another's identical content.)
     edited = tools.memory("update", {
-        "memory_id": a, "new_content": "database is sqlite",
+        "memory_id": a, "new_content": "database is sqlite, honest edit",
         "reason": "honest edit", "applying_conflict_id": conflict_id,
     })
     assert edited["ok"] is True
@@ -535,7 +540,7 @@ def test_apply_result_version_and_hash_bookkeeping(tmp_path: Path) -> None:
     snapshot_before = db.get_conflict(conflict_id)["member_versions"]
     applied = tools.memory_govern("apply_conflict_action", {
         "conflict_id": conflict_id, "expected_revision": 2, "memory_id": a,
-        "action": "update_current_claim", "content": "database is sqlite",
+        "action": "update_current_claim", "content": "database is sqlite, agreed",
         "authorized": True,
     })
     assert applied["ok"] is True
@@ -582,7 +587,7 @@ def test_failed_step_suggests_replan_and_apply_keeps_history(tmp_path: Path) -> 
     assert history and history[0]["revision"] == 3
     re_applied = tools.memory_govern("apply_conflict_action", {
         "conflict_id": conflict_id, "expected_revision": 4, "memory_id": a,
-        "action": "update_current_claim", "content": "database is sqlite",
+        "action": "update_current_claim", "content": "database is sqlite, agreed",
         "authorized": True,
     })
     assert re_applied["ok"] is True

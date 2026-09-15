@@ -959,6 +959,41 @@ class WorkspaceStore:
             return None
 
     @staticmethod
+    def _content_sha_collision_warning_on_conn(
+        conn: sqlite3.Connection, to_ws: str, *,
+        from_ws: str | None = None, only_id: int | None = None,
+    ) -> str | None:
+        """0.16.6 dedup gate on workspace moves: moving an ACTIVE row into a
+        workspace that already holds the same content_sha ACTIVE row would
+        violate idx_memories_content_sha mid-bulk-UPDATE (aborting the whole
+        transaction). Refuse up front with the colliding ids, mirroring the
+        slot-collision pre-check pattern."""
+        canonical = "COALESCE(NULLIF(workspace_canonical, ''), workspace)"
+        target = "COALESCE(NULLIF(t.workspace_canonical, ''), t.workspace)"
+        if only_id is not None:
+            source = "m.id = ?"
+            params: tuple = (int(only_id), to_ws)
+        else:
+            source = f"{canonical} = ?"
+            params = (from_ws, to_ws)
+        rows = conn.execute(
+            f"SELECT m.id, m.subject FROM memories m "
+            f"WHERE {source} AND m.status='active' AND m.content_sha IS NOT NULL "
+            f"AND EXISTS (SELECT 1 FROM memories t WHERE {target} = ? "
+            "AND t.status='active' AND t.content_sha = m.content_sha AND t.id != m.id) "
+            "ORDER BY m.id LIMIT 5",
+            params,
+        ).fetchall()
+        if not rows:
+            return None
+        listed = ", ".join(f"#{int(r['id'])}" for r in rows)
+        return (
+            f"content duplicate collision: moving {listed} into {to_ws!r} would create "
+            "byte-identical ACTIVE memories in one workspace (dedup gate); "
+            "govern the duplicates first (merge/retire) and retry"
+        )
+
+    @staticmethod
     def _conflict_slot_collision_warning_on_conn(
         conn: sqlite3.Connection, source: str, destination: str,
     ) -> list[str] | None:
@@ -1090,6 +1125,9 @@ class WorkspaceStore:
                 collision = self._conflict_slot_collision_warning_on_conn(conn, old, new)
                 if collision is not None:
                     return 0, collision
+                sha_collision = self._content_sha_collision_warning_on_conn(conn, new, from_ws=old)
+                if sha_collision is not None:
+                    return 0, sha_collision
                 cur = conn.execute(
                     "UPDATE memories SET workspace_canonical = ? "
                     "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
@@ -1187,6 +1225,11 @@ class WorkspaceStore:
         collision = WorkspaceStore._conflict_slot_collision_warning_on_conn(conn, from_ws, to_ws)
         if collision is not None:
             return 0, collision
+        sha_collision = WorkspaceStore._content_sha_collision_warning_on_conn(
+            conn, to_ws, from_ws=from_ws,
+        )
+        if sha_collision is not None:
+            return 0, sha_collision
         alias_key = _normalize_alias_key(from_ws)
         to_key = _normalize_alias_key(to_ws)
         cur = conn.execute(
@@ -1683,6 +1726,11 @@ class WorkspaceStore:
                 conn, [int(memory_id)],
                 reason=f"canonical reassignment -> {canonical!r}",
             )
+        sha_collision = self._content_sha_collision_warning_on_conn(
+            conn, canonical, only_id=int(memory_id),
+        )
+        if sha_collision is not None:
+            return False, [sha_collision]
         cur = conn.execute(
             "UPDATE memories SET workspace_canonical = ?, "
             "scan_watermark = CASE WHEN "
@@ -1786,6 +1834,11 @@ class WorkspaceStore:
                 # "voided_conflict_tickets:<n>" is reported in the response,
                 # never shown as a raw warning.
                 move_warnings.append(f"voided_conflict_tickets:{voided}")
+        sha_collision = self._content_sha_collision_warning_on_conn(
+            conn, workspace, only_id=int(memory_id),
+        )
+        if sha_collision is not None:
+            return False, [sha_collision]
         cur = conn.execute(
             "UPDATE memories SET workspace = ?, workspace_canonical = ?, "
             "scan_watermark = CASE WHEN "

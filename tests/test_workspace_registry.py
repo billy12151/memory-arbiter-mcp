@@ -109,7 +109,17 @@ def alias_rows(tools: MemoryTools) -> list[tuple[str, str, str]]:
         ]
 
 
-def write(tools: MemoryTools, workspace: str, content: str = "workspace fact") -> int:
+_fact_serial = 0
+
+
+def write(tools: MemoryTools, workspace: str, content: str | None = None) -> int:
+    # 0.16.6 write gate: byte-identical ACTIVE content can no longer coexist
+    # in one workspace, so the default content is uniquified per call. Callers
+    # that need an exact value still pass one.
+    global _fact_serial
+    if content is None:
+        content = f"workspace fact #{_fact_serial}"
+        _fact_serial += 1
     return int(tools.memory_write(
         content=content, subject="workspace", workspace=workspace,
         source_type="agent_generated",

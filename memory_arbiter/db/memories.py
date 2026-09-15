@@ -100,6 +100,19 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return data
 
 
+class DuplicateActiveContentError(ValueError):
+    """Raising this BEFORE a pending->active flip keeps the caller's rollback
+    contract while naming the dedup-gate cause (0.16.6)."""
+
+
+def content_sha(text: str) -> str:
+    """sha256 over the raw UTF-8 content bytes — the dedup identity.
+
+    Never normalised: any normalisation folds distinct memories onto one
+    hash. Mirrors additive._add_content_sha_dedupe's backfill."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
 class MemoriesStore:
     def __init__(self, db: "MemoryDB"):
         self._db = db
@@ -173,6 +186,36 @@ class MemoriesStore:
             )
         return memory_id, warnings
 
+    def active_content_twin_on_conn(
+        self, conn: sqlite3.Connection, workspace_canonical: str | None,
+        sha: str | None, *, exclude_id: int,
+    ) -> Any:
+        """The ACTIVE row already holding ``sha`` in this workspace, if any.
+
+        NULL/empty sha or canonical never matches (legacy rows stay outside
+        the gate by design). ``exclude_id`` keeps a row from colliding with
+        itself on no-op edits."""
+        if not sha or not workspace_canonical:
+            return None
+        return conn.execute(
+            "SELECT id, subject, ingest_time FROM memories "
+            "WHERE workspace_canonical=? AND content_sha=? AND status='active' "
+            "AND id != ? LIMIT 1",
+            (workspace_canonical, sha, int(exclude_id)),
+        ).fetchone()
+
+    def find_active_content_duplicate(
+        self, workspace_canonical: str | None, content: str,
+    ) -> dict[str, Any] | None:
+        """Post-violation lookup: which ACTIVE row owns this content."""
+        if not workspace_canonical:
+            return None
+        with self.connection() as conn:
+            row = self.active_content_twin_on_conn(
+                conn, workspace_canonical, content_sha(content), exclude_id=-1,
+            )
+            return dict(row) if row is not None else None
+
     def insert_memory_on_conn(
         self, conn: sqlite3.Connection, record: MemoryRecord,
         workspace_canonical: str | None = None,
@@ -182,8 +225,9 @@ class MemoriesStore:
                 """
                 INSERT INTO memories
                 (content, agent_id, workspace, workspace_canonical, tags, source_type, source_ref,
-                 event_time, ingest_time, confidence, protection_level, status, subject, metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 event_time, ingest_time, confidence, protection_level, status, subject, metadata, created_at,
+                 content_sha)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.content,
@@ -201,6 +245,7 @@ class MemoriesStore:
                     record.subject,
                     json.dumps(record.metadata, ensure_ascii=False),
                     utc_now_iso(),
+                    content_sha(record.content),
                 ),
             )
         if cur.lastrowid is None:
@@ -346,6 +391,24 @@ class MemoriesStore:
                 _canon_entity(current_md.get("entity")) != _canon_entity(metadata_update.get("entity"))
                 or _canon_scope(current_md.get("scope")) != _canon_scope(metadata_update.get("scope"))
             )
+        if status_changed and str(new_status) == "active":
+            # 0.16.6 dedup gate (owner: 只管活的): the pending row itself sat
+            # outside the partial index, so the flip INTO active is the one
+            # moment a same-content twin can collide. Check before the UPDATE
+            # so the caller's rollback contract sees a named cause instead
+            # of a raw constraint failure.
+            twin = self.active_content_twin_on_conn(
+                conn,
+                current.get("workspace_canonical") or current.get("workspace"),
+                current.get("content_sha"),
+                exclude_id=int(memory_id),
+            )
+            if twin is not None:
+                raise DuplicateActiveContentError(
+                    f"duplicate_active_content: active memory #{int(twin['id'])} already holds "
+                    "byte-identical content in this workspace; govern it (merge/retire) "
+                    "before activating this one"
+                )
         sql = ", ".join(f"{key} = ?" for key, _ in pairs)
         if snapshot_semantics_changed:
             sql += ", version = version + 1"
@@ -1537,6 +1600,27 @@ class MemoriesStore:
                 "current_total": len(resolved_tags),
                 "cap": MAX_MEMORY_TOTAL_TAGS,
             }
+        # 0.16.6 dedup gate: editing content INTO another active row's exact
+        # bytes is a duplicate by definition — refuse before any write so the
+        # caller's transaction never sees a partial history archive.
+        new_sha = content_sha(resolved_content)
+        edit_twin = self.active_content_twin_on_conn(
+            conn,
+            current.get("workspace_canonical") or current.get("workspace"),
+            new_sha,
+            exclude_id=int(memory_id),
+        )
+        if edit_twin is not None:
+            return {
+                "outcome": "duplicate_content",
+                "memory_id": int(memory_id),
+                "existing_memory_id": int(edit_twin["id"]),
+                "existing_subject": edit_twin["subject"],
+                "error": (
+                    f"new content is byte-identical to active memory #{int(edit_twin['id'])}; "
+                    "merge or retire one of the two instead of keeping duplicates"
+                ),
+            }
         history_cur = conn.execute(
             """
             INSERT INTO memory_history
@@ -1557,12 +1641,13 @@ class MemoriesStore:
             raise sqlite3.Error("memory_history insert did not return an id")
         history_id = int(history_cur.lastrowid)
         conn.execute(
-            "UPDATE memories SET content=?, subject=?, tags=?, version=? WHERE id=?",
+            "UPDATE memories SET content=?, subject=?, tags=?, version=?, content_sha=? WHERE id=?",
             (
                 resolved_content,
                 subject_value,
                 json.dumps(resolved_tags, ensure_ascii=False),
                 old_version + 1,
+                new_sha,
                 int(memory_id),
             ),
         )

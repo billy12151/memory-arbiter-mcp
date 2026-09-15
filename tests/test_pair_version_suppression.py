@@ -33,6 +33,26 @@ def _scan(tools: MemoryTools) -> dict:
     return result["data"]
 
 
+def _write_dup_bypass(tools: MemoryTools, content: str, workspace: str = "w") -> int:
+    """Second copy of an exact-duplicate pair the way PRE-gate libraries
+    looked: a direct row with NULL content_sha sits outside the 0.16.6
+    partial unique index. Scan/merge pool fixtures only — production writes
+    can no longer create this shape. The post-commit enqueue keeps the
+    fixture's evidence vectors on par with normal writes."""
+    from memory_arbiter.models import utc_now_iso
+    with tools.db.write_transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO memories(content, agent_id, workspace, workspace_canonical, tags, "
+            "source_type, event_time, ingest_time, status, subject, metadata, created_at) "
+            "VALUES(?,?,?,?,?,'agent_generated',?,?, 'active','d','{}',?)",
+            (content, "a", workspace, workspace, "[]",
+             utc_now_iso(), utc_now_iso(), utc_now_iso()),
+        )
+        memory_id = int(cur.lastrowid)
+    tools._post_commit(memory_id, recheck_conflicts=False)
+    return memory_id
+
+
 def _pair_ids(a: dict, b: dict) -> tuple[int, int]:
     return (min(a["id"], b["id"]), max(a["id"], b["id"]))
 
@@ -200,7 +220,7 @@ def test_duplicates_pool_respects_pair_version_suppression(vec_tools: MemoryTool
     with an edited unit combination stays out of the pool."""
     tools = vec_tools
     tools.memory_write(content="gamma duplicate fact statement", subject="d", tags=[], workspace="w")
-    tools.memory_write(content="gamma duplicate fact statement", subject="d", tags=[], workspace="w")
+    _write_dup_bypass(tools, "gamma duplicate fact statement")
     assert tools.wait_evidence_worker_drained(timeout=5)
 
     scan = tools.memory_repair("scan_candidates", {

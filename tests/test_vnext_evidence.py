@@ -3035,7 +3035,9 @@ def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkey
     })
     # Now run the post-apply semantic job for a's new version against b: the
     # re-entry rule must suppress a fresh notice for the same conflict.
-    tools.db.edit_memory_intent(a["id"], new_content="database is sqlite", reason="apply")
+    # (Near-duplicate wording: the 0.16.6 dedup gate refuses editing a into
+    # b's exact bytes while both are active; grounding only needs "sqlite".)
+    tools.db.edit_memory_intent(a["id"], new_content="database is sqlite, applied", reason="apply")
     updated = tools.db.get_memory(a["id"])
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
              "start_offset": 0, "end_offset": 18, "distance": 0.1}]
