@@ -111,3 +111,45 @@ def test_similarity_corpus_shape_and_naturalness() -> None:
     for case in cases:
         if case["label"] == "clearly_different":
             assert set(case["anchor"]["tags"]).isdisjoint(case["variant"]["tags"])
+
+
+CONFLICT_FIXTURES = REPO / "eval" / "fixtures" / "conflict"
+CONFLICT_LABELS = {"true_conflict", "coexist", "noise"}
+CONFLICT_SHAPES = {"scan_evolution", "governed_negative", "write_opposition"}
+
+
+def _conflict_pairs() -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (CONFLICT_FIXTURES / "pairs.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_conflict_pairs_composition_and_integrity() -> None:
+    pairs = _conflict_pairs()
+    assert len(pairs) == 66
+    for pair in pairs:
+        assert pair["label"] in CONFLICT_LABELS, pair["pair_id"]
+        assert pair["shape"] in CONFLICT_SHAPES, pair["pair_id"]
+        left, right = pair["left"], pair["right"]
+        # 成组硬约束：对内成员同 workspace（semantic notice 拒绝混合 workspace 快照）
+        assert left["workspace"] == right["workspace"], pair["pair_id"]
+        # 重放保真：成员正文非空且互不字节相同（防重门会拦截）
+        assert left["content"] and right["content"], pair["pair_id"]
+        assert left["content"] != right["content"], pair["pair_id"]
+    labels = {p["label"] for p in pairs}
+    assert labels == CONFLICT_LABELS
+    # owner 判定来源的对不得为空（ground truth 主体）
+    owner_sourced = [p for p in pairs if p["label_source"].startswith("owner_")]
+    assert len(owner_sourced) >= 30
+
+
+def test_conflict_overrides_audit_trail_exists() -> None:
+    overrides = json.loads(
+        (CONFLICT_FIXTURES / "label_overrides.json").read_text(encoding="utf-8"),
+    )
+    assert "cf-coexist-796-797" in overrides  # 改判 true_conflict（演进取代未标注）
+    pair_ids = {p["pair_id"] for p in _conflict_pairs()}
+    dropped = {pid for pid, (label, _) in overrides.items() if label is None}
+    assert not (dropped & pair_ids), "剔除对不得留在正式对集"

@@ -76,7 +76,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_settings(workdir: Path, embed_model: Path | None) -> Settings:
+def build_settings(workdir: Path, embed_model: Path | None, qwen_model: Path | None = None) -> Settings:
     return Settings(
         db_path=workdir / "harness.sqlite3",
         backup_jsonl=workdir / "backup.jsonl",
@@ -85,20 +85,24 @@ def build_settings(workdir: Path, embed_model: Path | None) -> Settings:
         workspace="default",
         isolation="none",  # 当年标定口径（eval_relevance_floor.py 同款默认）
         embedding_model_path=embed_model,
-        # recall 套件不起 Qwen；conflict 套件（c4）另行构建开启
-        semantic_conflict_enabled=False,
+        # recall/similarity 套件不起 Qwen；conflict 套件（c4）开启
+        semantic_conflict_enabled=qwen_model is not None,
+        semantic_conflict_model_path=qwen_model,
     )
 
 
 @contextmanager
-def temp_library(embed_model: Path | None, keep_db: Path | None = None) -> Iterator[MemoryTools]:
+def temp_library(
+    embed_model: Path | None, keep_db: Path | None = None, qwen_model: Path | None = None,
+) -> Iterator[MemoryTools]:
     """临时库生命周期：建库 → 起 workers → yield → drain + shutdown → 销毁."""
     import tempfile
 
     workdir = Path(tempfile.mkdtemp(prefix="mema-eval-"))
-    settings = build_settings(workdir, embed_model)
+    settings = build_settings(workdir, embed_model, qwen_model)
     tools = MemoryTools(settings, MemoryDB(settings))
     tools.start_evidence_worker()
+    tools.start_semantic_worker()
     try:
         yield tools
     finally:
@@ -274,11 +278,151 @@ def run_similarity_suite(tools: MemoryTools, cases: list[dict]) -> dict[str, Any
     return {"anchor_ids": anchor_ids, "cases": results}
 
 
+def _remember_envelope(tools: MemoryTools, envelope: dict, pair_entity: str | None = None) -> tuple[int | None, bool, dict]:
+    """按冲突对成员 envelope 写入，返回 (新库 id, 是否幂等重放, 完整响应).
+
+    pair_entity：写时语义检测的配对前提是两成员 metadata.entity/scope 完全
+    相同（pipeline/evidence.py provenance 门）。真库历史快照大多未填这两
+    字段，直接重放会全数被滤。注入「对内唯一、对间互斥」的 entity/scope
+    既满足配对前提，又防止跨对互相配对产生噪音 notice。
+    """
+    metadata = dict(envelope.get("metadata") or {})
+    if pair_entity is not None:
+        metadata["entity"] = pair_entity
+        metadata["scope"] = f"{pair_entity}-scope"
+    data: dict[str, Any] = {
+        "content": envelope["content"],
+        "subject": envelope["subject"],
+        "tags": envelope.get("tags") or [],
+        "workspace": envelope.get("workspace") or "default",
+        "event_time": envelope.get("event_time"),
+        "source_type": envelope.get("source_type") if envelope.get("source_type") in VALID_SOURCE_TYPES else "unknown",
+        "metadata": metadata,
+        "agent_id": EVAL_AGENT,
+    }
+    result = tools.memory("remember", data)
+    payload = result.get("data") or {}
+    if payload.get("duplicate_replay"):
+        replay_of = payload.get("replay_of") or {}
+        return int(replay_of["memory_id"]), True, result
+    if result.get("ok"):
+        record = payload.get("record") or {}
+        return int(record["id"]), False, result
+    raise RuntimeError(f"pair member replay failed: {json.dumps(payload, ensure_ascii=False)[:300]}")
+
+
+def _pair_notice_row(tools: MemoryTools, left_id: int, right_id: int) -> dict | None:
+    """查临时库 conflicts 表：成员同时含 left/right 的 candidate 语义 notice 行."""
+    import sqlite3 as _sq
+
+    conn = _sq.connect(tools.settings.db_path)
+    conn.row_factory = _sq.Row
+    try:
+        rows = conn.execute(
+            "SELECT id, conflict_point, notice_type, notice_message, created_at "
+            "FROM conflicts WHERE status='candidate' ORDER BY id",
+        ).fetchall()
+        for row in rows:
+            members = conn.execute(
+                "SELECT member_versions FROM conflicts WHERE id=?", (row["id"],),
+            ).fetchone()
+            ids = {int(m["memory_id"]) for m in json.loads(members["member_versions"])}
+            if left_id in ids and right_id in ids:
+                return dict(row)
+        return None
+    finally:
+        conn.close()
+
+
+def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, Any]]:
+    """冲突套件（方案 §2.4）：写左→写右，三结局采集（同步窗/异步 job/漏检）.
+
+    同步结局：写右响应 data.semantic_conflict_check 为完成态（status 非
+    async/deferred 且带 job 结论）。异步结局：drain worker 后 conflicts 表
+    出现含两成员的 candidate notice。notice 未产出按 FAILED 语义记录
+    (notice_missing=True)——不静默跳过（owner D2 硬要求）。
+    成员在先前对中已写入（幂等重放、无 post-commit check）的对标记
+    skipped_member_replay，不计入指标。
+    """
+    results: list[dict[str, Any]] = []
+    seen_shas: set[str] = set()
+
+    def _sha_of(envelope: dict) -> str:
+        import hashlib
+
+        return hashlib.sha256(
+            ((envelope.get("workspace") or "") + "\x00" + envelope["content"]).encode("utf-8"),
+        ).hexdigest()
+
+    for index, pair in enumerate(pairs, 1):
+        left, right = pair["left"], pair["right"]
+        # 对内唯一、对间互斥的 entity（provenance 配对前提 + 防跨对互配）
+        pair_entity = f"eval-pair-{index:03d}"
+        left_sha, right_sha = _sha_of(left), _sha_of(right)
+        left_id = right_id = None
+        right_result: dict = {}
+        if left_sha not in seen_shas:
+            left_id, _, _ = _remember_envelope(tools, left, pair_entity)
+            seen_shas.add(left_sha)
+        if right_sha not in seen_shas:
+            right_id, _, right_result = _remember_envelope(tools, right, pair_entity)
+            seen_shas.add(right_sha)
+            if right_id is None:
+                pass
+        results.append({
+            "pair_id": pair["pair_id"],
+            "label": pair["label"],
+            "skipped_member_replay": left_id is None or right_id is None,
+            "sync": None, "async": None, "notice_missing": None,
+            "_left_id": left_id, "_right_id": right_id,
+            "_right_result": right_result.get("data") if right_result else None,
+        })
+        row = results[-1]
+        if row["skipped_member_replay"]:
+            print(f"[conflict] {index}/{len(pairs)} {pair['pair_id']} SKIP(member replay)")
+            continue
+        check = ((right_result.get("data") or {}).get("semantic_conflict_check")) or {}
+        task_id = str(check.get("task_id") or "")
+        notice_row = _pair_notice_row(tools, int(left_id), int(right_id))
+        if task_id:
+            tools._semantic_worker.wait_task(task_id, timeout=180.0)
+        notice_final = _pair_notice_row(tools, int(left_id), int(right_id)) or notice_row
+        # 三结局：识别以「conflicts 表出现该对 candidate notice」为准；
+        # sync=同步窗内已完成且当场创建了 notice（notices_created>0）。
+        identified = notice_final is not None or int(check.get("notices_created") or 0) > 0
+        row["sync"] = bool(
+            identified
+            and check.get("status") == "completed"
+            and int(check.get("notices_created") or 0) > 0,
+        )
+        row["async"] = bool(identified and not row["sync"])
+        row["notice_missing"] = not identified
+        outcome = "sync" if row["sync"] else ("async" if row["async"] else "MISS")
+        print(f"[conflict] {index}/{len(pairs)} {pair['pair_id']} {pair['label']:14s} {outcome}")
+    return results
+
+
+def default_qwen_model() -> Path | None:
+    """Convenience default: the local install's semantic_conflict.model_path."""
+    import json as _json
+
+    cfg = Path.home() / ".config/memory-arbiter/config.json"
+    if not cfg.exists():
+        return None
+    try:
+        raw = _json.loads(cfg.read_text(encoding="utf-8"))
+        value = (raw.get("semantic_conflict") or {}).get("model_path")
+        return Path(value).expanduser() if value else None
+    except Exception:
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", default="recall", choices=["recall", "similarity", "all"],
-                        help="c2=recall，c3=similarity；conflict 套件 c4 扩展")
+    parser.add_argument("--suite", default="recall", choices=["recall", "similarity", "conflict", "all"],
+                        help="recall/similarity 共库无 Qwen；conflict 独立库开 Qwen；all=两者依次")
     parser.add_argument("--embed-model", type=Path, default=None, help="embedder GGUF 路径")
+    parser.add_argument("--qwen-model", type=Path, default=None, help="语义冲突 Qwen GGUF（conflict 套件）")
     parser.add_argument("--out", type=Path, default=REPO / "eval" / "results")
     parser.add_argument("--label", default="run", help="产物文件名标签")
     parser.add_argument("--keep-db", type=Path, default=None, help="调试：保留临时库副本到该目录")
@@ -288,6 +432,12 @@ def main() -> int:
     if embed_model is None or not Path(embed_model).exists():
         print("error: embedder model required (--embed-model 或本机 config 配置)", file=sys.stderr)
         return 2
+    qwen_model = args.qwen_model or default_qwen_model()
+    want_conflict = args.suite in {"conflict", "all"}
+    if want_conflict and (qwen_model is None or not Path(qwen_model).exists()):
+        print("error: conflict 套件需要 Qwen 模型（--qwen-model 或本机 config semantic_conflict.model_path）",
+              file=sys.stderr)
+        return 2
 
     recall_dir = FIXTURES / "recall"
     queries = json.loads((recall_dir / "queries.json").read_text(encoding="utf-8"))["queries"]
@@ -296,21 +446,28 @@ def main() -> int:
     manifest = json.loads((recall_dir / "manifest.json").read_text(encoding="utf-8"))
 
     print(f"[harness] mema={MEMA_VERSION} corpus={manifest['corpus_version']} "
-          f"embedder={Path(embed_model).name} suite={args.suite}")
+          f"embedder={Path(embed_model).name} suite={args.suite}"
+          + (f" qwen={Path(qwen_model).name}" if want_conflict else ""))
     want_recall = args.suite in {"recall", "all"}
     want_similarity = args.suite in {"similarity", "all"}
-    with temp_library(embed_model, keep_db=args.keep_db) as tools:
-        recall: list[dict[str, Any]] | None = None
-        self_recall: list[dict[str, Any]] | None = None
-        if want_recall:
-            id_map = replay_fixtures(tools, targets + distractors)
-            print(f"[replay] library size={len(set(id_map.values()))}")
-            recall = run_recall_queries(tools, queries, id_map)
-            self_recall = run_self_recall(tools, targets, id_map)
-        similarity: dict[str, Any] | None = None
-        if want_similarity:
-            sim_cases = _load_jsonl(FIXTURES / "similarity" / "cases.jsonl")
-            similarity = run_similarity_suite(tools, sim_cases)
+    recall: list[dict[str, Any]] | None = None
+    self_recall: list[dict[str, Any]] | None = None
+    similarity: dict[str, Any] | None = None
+    if want_recall or want_similarity:
+        with temp_library(embed_model, keep_db=args.keep_db) as tools:
+            if want_recall:
+                id_map = replay_fixtures(tools, targets + distractors)
+                print(f"[replay] library size={len(set(id_map.values()))}")
+                recall = run_recall_queries(tools, queries, id_map)
+                self_recall = run_self_recall(tools, targets, id_map)
+            if want_similarity:
+                sim_cases = _load_jsonl(FIXTURES / "similarity" / "cases.jsonl")
+                similarity = run_similarity_suite(tools, sim_cases)
+    conflict: list[dict[str, Any]] | None = None
+    if want_conflict:
+        conflict_pairs = _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
+        with temp_library(embed_model, qwen_model=qwen_model) as tools:
+            conflict = run_conflict_suite(tools, conflict_pairs)
 
     raw = {
         "suite": args.suite,
@@ -319,14 +476,18 @@ def main() -> int:
         "env": {
             "embed_model": str(embed_model),
             "embed_model_sha256": _sha256(Path(embed_model)),
+            "qwen_model": str(qwen_model) if want_conflict else None,
+            "qwen_model_sha256": _sha256(Path(qwen_model)) if want_conflict else None,
             "isolation": "none",
             "targets": len(targets),
             "distractors": len(distractors),
-            "semantic_conflict_enabled": False,
+            "semantic_conflict_enabled": want_conflict,
+            "conflict_sync_wait_ms": 3000,
         },
         "queries": recall,
         "self_recall": self_recall,
         "similarity": similarity,
+        "conflict": conflict,
     }
     args.out.mkdir(parents=True, exist_ok=True)
     out_path = args.out / f"{args.suite}-{args.label}.json"
@@ -338,6 +499,11 @@ def main() -> int:
         fired = sum(1 for row in similarity["cases"] if row["fired"])
         hit_anchor = sum(1 for row in similarity["cases"] if row["hit_anchor"])
         print(f"[similarity] fired={fired}/48 hit_anchor={hit_anchor}/48")
+    if conflict:
+        valid = [row for row in conflict if not row["skipped_member_replay"]]
+        miss = sum(1 for row in valid if row["notice_missing"])
+        print(f"[conflict] valid={len(valid)}/{len(conflict)} notice_missing={miss}"
+              f"（missing=FAIL 语义，非 skip）")
     print(f"[done] -> {out_path}")
     return 0
 

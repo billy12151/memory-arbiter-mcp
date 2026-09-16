@@ -1,0 +1,10 @@
+{
+ "cf-coexist-796-797": [
+  "true_conflict",
+  "manual_review: v1/v2 演进取代未标注，同 owner resolved#9 判定形态"
+ ],
+ "cf-coexist-629-630": [
+  null,
+  "manual_review: 同事件近重复记录，剔除（similarity 范畴）"
+ ]
+}
