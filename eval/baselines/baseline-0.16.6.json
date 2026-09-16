@@ -326,9 +326,9 @@
  },
  "similarity": {
   "hint_total": {
-   "count": 4,
+   "count": 2,
    "total": 48,
-   "rate": 0.0833
+   "rate": 0.0417
   },
   "by_label": {
    "clearly_different": {
@@ -369,14 +369,14 @@
    },
    "true_near_dup": {
     "fired": {
-     "count": 4,
+     "count": 2,
      "total": 12,
-     "rate": 0.3333
+     "rate": 0.1667
     },
     "hit_anchor": {
-     "count": 4,
+     "count": 2,
      "total": 12,
-     "rate": 0.3333
+     "rate": 0.1667
     }
    }
   }
