@@ -1,0 +1,10 @@
+{
+  "corpus_version": "recall-v1",
+  "exported_at": "2026-09-16T03:16:54+00:00",
+  "source_db": "/Users/zhangzhiwei17/.local/share/memory-arbiter/memory.sqlite3",
+  "labels_source": "/Users/zhangzhiwei17/BillyProject/memory-arbiter-mcp/docs/eval/labels.jsonl",
+  "targets": 98,
+  "distractors": 200,
+  "labeled_qids": 22,
+  "unlabeled_qids_default_irrelevant": "C01-C08,D01-D04"
+}
