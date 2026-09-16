@@ -53,6 +53,41 @@ def test_demo_tag_and_purpose_conventions_pinned() -> None:
     assert "不代表" in text
 
 
+def test_prompt_once_marker_pinned() -> None:
+    """§0 全局一次原则（owner 2026-09-16）：标记查询门/拒绝写标记/完成写标记
+    三面必须留在规程里；README 安装节同样先查标记。标记面在产品侧可用：
+    写一条该标签记忆后 find(tags_filter) 必须命中（跨 Agent 共享状态载体）。"""
+    import tempfile
+
+    from memory_arbiter.config import Settings
+    from memory_arbiter.db import MemoryDB
+    from memory_arbiter.tools import MemoryTools
+
+    text = DOC.read_text(encoding="utf-8")
+    assert "mema-first-run-demo-status" in text
+    assert "全局最多提示一次" in text
+    assert "已拒绝" in text and "已完成" in text
+    readme = (REPO / "README.zh-CN.md").read_text(encoding="utf-8")
+    assert "mema-first-run-demo-status" in readme
+
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = Settings(
+            db_path=Path(tmp) / "t.sqlite3", backup_jsonl=Path(tmp) / "b.jsonl",
+            client="t", agent_id="t",
+        )
+        tools = MemoryTools(settings, MemoryDB(settings))
+        written = tools.memory(
+            "remember",
+            {"content": "首次功能演示已完成（钉子测试）。",
+             "subject": "mema 首次演示状态：已完成", "tags": ["mema-first-run-demo-status"]},
+        )
+        assert written["ok"] is True
+        found = tools.memory("find", {"query": "", "tags_filter": ["mema-first-run-demo-status"]})
+        assert found["ok"] is True
+        results = (found.get("data") or {}).get("results") or []
+        assert any(item.get("id") == written["data"]["id"] for item in results)
+
+
 def test_referenced_readback_surfaces_exist() -> None:
     """§2/§3①/§3③ 实操引用的面：subject 必填、按 ID read、notice list。"""
     import tempfile
