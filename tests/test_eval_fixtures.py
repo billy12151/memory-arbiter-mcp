@@ -69,3 +69,45 @@ def test_manifest_matches_files() -> None:
     assert manifest["targets"] == len(_load("targets.jsonl"))
     assert manifest["distractors"] == len(_load("distractors.jsonl"))
     assert manifest["labeled_qids"] == 22
+
+
+SIM_FIXTURES = REPO / "eval" / "fixtures" / "similarity"
+SIM_LABELS = {"true_near_dup", "clearly_different", "same_entity_diff_attr", "opposite_semantics"}
+
+
+def _sim_cases() -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (SIM_FIXTURES / "cases.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_similarity_corpus_shape_and_naturalness() -> None:
+    cases = _sim_cases()
+    counts: dict[str, int] = {}
+    for case in cases:
+        counts[case["label"]] = counts.get(case["label"], 0) + 1
+    assert counts == {label: 12 for label in SIM_LABELS}
+    assert len({case["group"] for case in cases}) == 12
+    # 考题必须进得了考场：near 变体与锚 content 不得字节相同（防重门会拦截，
+    # 那测的是 dedup gate 不是相似提示）。语料不凑门——subject 相似度保持
+    # 自然梯度，触不触发由机制表现（首跑实证：提示率 4/12，0.95 门漏掉
+    # 0.83-0.93 自然后缀档，为阈值调优供数据）。
+    import difflib
+
+    ratios = []
+    for case in cases:
+        if case["label"] == "true_near_dup":
+            assert case["anchor"]["content"] != case["variant"]["content"]
+            assert case["anchor"]["tags"] == case["variant"]["tags"]
+            ratios.append(
+                difflib.SequenceMatcher(
+                    None, case["anchor"]["subject"], case["variant"]["subject"],
+                ).ratio()
+            )
+    assert any(r >= 0.95 for r in ratios), "梯度缺高相似档"
+    assert any(r < 0.8 for r in ratios), "梯度缺自由改述档（凑门回归哨兵）"
+    for case in cases:
+        if case["label"] == "clearly_different":
+            assert set(case["anchor"]["tags"]).isdisjoint(case["variant"]["tags"])

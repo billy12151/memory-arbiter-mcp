@@ -51,3 +51,6 @@ htmlcov/
 .cursor/
 .windsurf/
 *.sqlite3.startup.lock
+
+# harness per-run raw output (baselines under eval/baselines/ DO go to git)
+eval/results/

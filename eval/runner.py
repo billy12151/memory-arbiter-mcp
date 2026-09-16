@@ -223,9 +223,61 @@ def run_self_recall(
     return collected
 
 
+def run_similarity_suite(tools: MemoryTools, cases: list[dict]) -> dict[str, Any]:
+    """近似提示套件（方案 §2.5）：按组写锚→逐变体写入，采集 similar_active_memory.
+
+    判定口径：变体写响应 notices 中 type=similar_active_memory 视为 fired；
+    matches 命中本组锚 id=hit_anchor（正确触发）；仅命中他组=hit_other
+    （跨组噪音，单独计数，不算误报也不算正确）。opposite_semantics 类
+    按机制先验可能触发（subject 一词之差 ratio≈0.96 + tags 相同）——
+    该类触发即「被误当重复」的事实计量，不是套件缺陷。
+    """
+    grouped: dict[str, list[dict]] = {}
+    for row in cases:
+        grouped.setdefault(row["group"], []).append(row)
+    results: list[dict[str, Any]] = []
+    anchor_ids: dict[str, int] = {}
+    for group, group_cases in grouped.items():
+        anchor = group_cases[0]["anchor"]
+        anchor_result = tools.memory("remember", {
+            "content": anchor["content"], "subject": anchor["subject"],
+            "tags": anchor["tags"], "workspace": "eval-sim",
+            "source_type": "agent_generated", "agent_id": EVAL_AGENT,
+        })
+        record = (anchor_result.get("data") or {}).get("record") or {}
+        anchor_ids[group] = int(record["id"])
+        for case in group_cases:
+            variant = case["variant"]
+            write = tools.memory("remember", {
+                "content": variant["content"], "subject": variant["subject"],
+                "tags": variant["tags"], "workspace": "eval-sim",
+                "source_type": "agent_generated", "agent_id": EVAL_AGENT,
+            })
+            notices = [
+                notice for notice in (write.get("notices") or [])
+                if notice.get("type") == "similar_active_memory"
+            ]
+            matches = [m for notice in notices for m in (notice.get("matches") or [])]
+            anchor_id = anchor_ids[group]
+            hit_anchor = any(int(m.get("memory_id") or 0) == anchor_id for m in matches)
+            results.append({
+                "case_id": case["case_id"],
+                "label": case["label"],
+                "theme": case["theme"],
+                "fired": bool(notices),
+                "hit_anchor": hit_anchor,
+                "hit_other_only": bool(matches) and not hit_anchor,
+                "match_ids": [int(m.get("memory_id") or 0) for m in matches],
+                "subject_similarity": [m.get("subject_similarity") for m in matches],
+                "tag_jaccard": [m.get("tag_jaccard") for m in matches],
+            })
+    return {"anchor_ids": anchor_ids, "cases": results}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", default="recall", choices=["recall"], help="c2 起步，c3/c4 扩展")
+    parser.add_argument("--suite", default="recall", choices=["recall", "similarity", "all"],
+                        help="c2=recall，c3=similarity；conflict 套件 c4 扩展")
     parser.add_argument("--embed-model", type=Path, default=None, help="embedder GGUF 路径")
     parser.add_argument("--out", type=Path, default=REPO / "eval" / "results")
     parser.add_argument("--label", default="run", help="产物文件名标签")
@@ -244,15 +296,24 @@ def main() -> int:
     manifest = json.loads((recall_dir / "manifest.json").read_text(encoding="utf-8"))
 
     print(f"[harness] mema={MEMA_VERSION} corpus={manifest['corpus_version']} "
-          f"embedder={Path(embed_model).name}")
+          f"embedder={Path(embed_model).name} suite={args.suite}")
+    want_recall = args.suite in {"recall", "all"}
+    want_similarity = args.suite in {"similarity", "all"}
     with temp_library(embed_model, keep_db=args.keep_db) as tools:
-        id_map = replay_fixtures(tools, targets + distractors)
-        print(f"[replay] library size={len(set(id_map.values()))}")
-        recall = run_recall_queries(tools, queries, id_map)
-        self_recall = run_self_recall(tools, targets, id_map)
+        recall: list[dict[str, Any]] | None = None
+        self_recall: list[dict[str, Any]] | None = None
+        if want_recall:
+            id_map = replay_fixtures(tools, targets + distractors)
+            print(f"[replay] library size={len(set(id_map.values()))}")
+            recall = run_recall_queries(tools, queries, id_map)
+            self_recall = run_self_recall(tools, targets, id_map)
+        similarity: dict[str, Any] | None = None
+        if want_similarity:
+            sim_cases = _load_jsonl(FIXTURES / "similarity" / "cases.jsonl")
+            similarity = run_similarity_suite(tools, sim_cases)
 
     raw = {
-        "suite": "recall",
+        "suite": args.suite,
         "mema_version": MEMA_VERSION,
         "corpus_version": manifest["corpus_version"],
         "env": {
@@ -265,12 +326,19 @@ def main() -> int:
         },
         "queries": recall,
         "self_recall": self_recall,
+        "similarity": similarity,
     }
     args.out.mkdir(parents=True, exist_ok=True)
-    out_path = args.out / f"recall-{args.label}.json"
+    out_path = args.out / f"{args.suite}-{args.label}.json"
     out_path.write_text(json.dumps(raw, ensure_ascii=False, indent=1), encoding="utf-8")
-    top10_self = sum(1 for row in self_recall if row["in_top10"])
-    print(f"[done] queries={len(recall)} self_recall_top10={top10_self}/{len(self_recall)} -> {out_path}")
+    if self_recall:
+        top10_self = sum(1 for row in self_recall if row["in_top10"])
+        print(f"[recall] self_recall_top10={top10_self}/{len(self_recall)}")
+    if similarity:
+        fired = sum(1 for row in similarity["cases"] if row["fired"])
+        hit_anchor = sum(1 for row in similarity["cases"] if row["hit_anchor"])
+        print(f"[similarity] fired={fired}/48 hit_anchor={hit_anchor}/48")
+    print(f"[done] -> {out_path}")
     return 0
 
 
