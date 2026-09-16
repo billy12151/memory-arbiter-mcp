@@ -11,13 +11,15 @@ from ..embedder import ManagedEmbedder
 from .. import workspace_rules
 from ..constants import (
     WRITE_DUPLICATE_VEC_TOP_K,
+    WRITE_SIMILAR_CONTENT_COSINE,
     WRITE_SIMILAR_FALLBACK_SCAN_LIMIT,
     WRITE_SIMILAR_MAX_HINTS,
+    WRITE_SIMILAR_MIN_CONTENT_CHARS,
     WRITE_SIMILAR_SUBJECT_RATIO,
-    WRITE_SIMILAR_TAG_JACCARD,
     is_default_workspace_term,
 )
 from ..models import MemoryRecord, MemoryStatus
+from ..semantic_conflict import _char_ngrams, _cosine
 from ..validation import validate_product_payload
 
 if TYPE_CHECKING:
@@ -25,10 +27,12 @@ if TYPE_CHECKING:
 
 
 class _SubjectTagRecord(Protocol):
-    """Structural requirement for ``_similar_active_notice``: subject + tags."""
+    """Structural requirement for ``_similar_active_notice``: subject + tags
+    + content (the content-confirmation gate since 2026-09-16)."""
 
     subject: str | None
     tags: list[str]
+    content: str | None
 
 
 class WritePipeline:
@@ -57,26 +61,6 @@ class WritePipeline:
     @classmethod
     def _normalized_subject(cls, subject: str) -> str:
         return cls._SIMILARITY_SPACE.sub(" ", str(subject or "").casefold().strip())
-
-    @classmethod
-    def _tag_jaccard(cls, left: list[str], right: list[str]) -> float:
-        # Tags normalize with the same whitespace folding as subjects, so
-        # "金营 项目" and "金营  项目" are the same tag.
-        left_set = {
-            cls._SIMILARITY_SPACE.sub(" ", str(tag).casefold().strip())
-            for tag in left if str(tag).strip()
-        }
-        right_set = {
-            cls._SIMILARITY_SPACE.sub(" ", str(tag).casefold().strip())
-            for tag in right if str(tag).strip()
-        }
-        if not left_set and not right_set:
-            # Neither side carries tags: the subject bar alone decides (a
-            # shared empty vocabulary is trivially full overlap).
-            return 1.0
-        if not left_set or not right_set:
-            return 0.0
-        return len(left_set & right_set) / len(left_set | right_set)
 
     @classmethod
     def _subject_tags_embed_text(cls, subject: Any, tags: Any) -> str:
@@ -201,20 +185,27 @@ class WritePipeline:
     def _similar_active_notice(
         self, memory_id: int, record: _SubjectTagRecord, workspace_canonical: str | None,
     ) -> dict[str, Any] | None:
-        """Write-time duplicate hint over subject/tags similarity (owner spec).
+        """Write-time duplicate hint: subject gate + content gate (2026-09-16).
 
         Recall is vector-based since 0.15.3: the hint KNN-recalls the top-k
         same-workspace active rows over subject_tags_vec (fallback: capped
-        legacy scan when no embedder/index is available) and then applies the
-        deterministic model-free fine-ranking. Long documents rarely compare
-        equal on content, but a forgotten near-duplicate keeps a
-        near-identical subject and tag set. Fires only when BOTH bars clear.
-        Subjects identical modulo digit runs (release/checklist series such
-        as "0.15.1 发版清单" vs "0.15.2 发版清单") are suppressed outright;
-        other deliberate series entries (tier-1 vs tier-2 plans sharing most
-        tags) stay quiet unless the subjects are near-identical.
-        Same-workspace active rows only (no cross-workspace leakage);
-        fail-open on any error.
+        legacy scan when no embedder/index is available). The fine-ranking
+        then applies TWO gates, both deterministic and model-free:
+          1. normalized-subject ratio ≥ WRITE_SIMILAR_SUBJECT_RATIO;
+          2. content confirmation — full-body char-trigram cosine
+             (semantic_conflict's own _char_ngrams/_cosine) ≥
+             WRITE_SIMILAR_CONTENT_COSINE. This replaced the tag-Jaccard
+             gate, which on the real library blocked cross-habit duplicate
+             rewrites while waving through same-subject serials.
+        The old "near-identical subject ⇒ duplicate" assumption is dead:
+        98% of subject-similar pairs on the production library are
+        same-topic continuations with dissimilar bodies. Bodies under
+        WRITE_SIMILAR_MIN_CONTENT_CHARS skip the confirmation and hint
+        anyway, flagged low_confidence (short-text set variance is too
+        high; recall is preferred — the hint is advisory).
+        Subjects identical modulo digit runs (release/checklist series
+        such as "0.15.1 发版清单" vs "0.15.2 发版清单") are suppressed
+        outright. Same-workspace active rows only; fail-open on any error.
         """
         if not workspace_canonical:
             return None
@@ -227,9 +218,13 @@ class WritePipeline:
             )
             if not rows:
                 return None
-            record_tags = list(record.tags or [])
+            own_content = str(getattr(record, "content", None) or "")
+            own_grams = (
+                _char_ngrams(own_content)
+                if len(own_content) >= WRITE_SIMILAR_MIN_CONTENT_CHARS else None
+            )
             subject_series = self._DIGIT_RUN.sub("#", subject)
-            scored: list[tuple[float, float, dict[str, Any]]] = []
+            scored: list[tuple[float, float, bool, dict[str, Any]]] = []
             for row in rows:
                 row_subject = self._normalized_subject(str(row["subject"] or ""))
                 if not row_subject:
@@ -247,33 +242,42 @@ class WritePipeline:
                 ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
                 if ratio < WRITE_SIMILAR_SUBJECT_RATIO:
                     continue
-                jaccard = self._tag_jaccard(record_tags, row["tags"])
-                if jaccard < WRITE_SIMILAR_TAG_JACCARD:
-                    continue
-                scored.append((ratio, jaccard, row))
+                row_content = str(row.get("content") or "")
+                if own_grams is None or len(row_content) < WRITE_SIMILAR_MIN_CONTENT_CHARS:
+                    content_cos = -1.0
+                    low_confidence = True
+                else:
+                    content_cos = _cosine(own_grams, _char_ngrams(row_content))
+                    if content_cos < WRITE_SIMILAR_CONTENT_COSINE:
+                        continue
+                    low_confidence = False
+                scored.append((ratio, content_cos, low_confidence, row))
             if not scored:
                 return None
-            scored.sort(key=lambda item: (-item[0], -item[1]))
+            scored.sort(key=lambda item: (-item[0], item[2], -item[1]))
             matches = [
                 {
                     "memory_id": row["id"],
                     "subject": row["subject"],
                     "event_time": row.get("event_time"),
                     "subject_similarity": round(ratio, 4),
-                    "tag_jaccard": round(jaccard, 4),
+                    "content_cosine": round(content_cos, 4) if content_cos >= 0 else None,
+                    "low_confidence": low_confidence,
                 }
-                for ratio, jaccard, row in scored[:WRITE_SIMILAR_MAX_HINTS]
+                for ratio, content_cos, low_confidence, row in scored[:WRITE_SIMILAR_MAX_HINTS]
             ]
             return {
                 "type": "similar_active_memory",
                 "severity": "info",
                 "matches": matches,
                 "agent_instruction": (
-                    "This write closely matches existing active memories (near-duplicate "
-                    "territory — byte-identical replays never reach this notice, the 0.16.6 "
-                    "dedup gate returns them idempotently). Triage silently: ignore deliberate "
-                    "series entries or cross-references. Prefer updating the original on true "
-                    "near-duplicates. If the fix needs retiring or merging (governance) or you "
+                    "This write closely matches existing active memories on subject AND body "
+                    "wording (near-duplicate territory — byte-identical replays never reach "
+                    "this notice, the 0.16.6 dedup gate returns them idempotently; low_confidence "
+                    "entries skipped body confirmation because one side was too short). Triage "
+                    "silently: ignore deliberate series entries or cross-references. Prefer "
+                    "updating the original on true near-duplicates. If the fix needs retiring "
+                    "or merging (governance) or you "
                     "are unsure, ask the user."
                 ),
             }

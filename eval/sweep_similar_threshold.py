@@ -29,33 +29,44 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from memory_arbiter.constants import WRITE_SIMILAR_TAG_JACCARD  # noqa: E402
+from memory_arbiter.constants import (  # noqa: E402
+    WRITE_SIMILAR_MIN_CONTENT_CHARS,
+)
 from memory_arbiter.pipeline.write import WritePipeline  # noqa: E402
+from memory_arbiter.semantic_conflict import _char_ngrams, _cosine  # noqa: E402
 
 DEFAULT_SOURCE = Path.home() / ".local/share/memory-arbiter/memory.sqlite3"
 CORPUS = REPO / "eval" / "fixtures" / "similarity" / "cases.jsonl"
+CONTENT_COSINE = 0.4  # 与产品 WRITE_SIMILAR_CONTENT_COSINE 同步（sweep 可扫）
 
 
-def _pair_verdict(anchor_subject: str, anchor_tags: list[str],
-                  variant_subject: str, variant_tags: list[str],
-                  threshold: float) -> tuple[bool, float, float]:
-    """复刻 _similar_active_notice 的双门+预检+系列抑制，返回 (过门, ratio, jaccard)."""
+def _pair_verdict(anchor_subject: str, anchor_content: str,
+                  variant_subject: str, variant_content: str,
+                  threshold: float, content_gate: float = CONTENT_COSINE,
+                  ) -> tuple[bool, float, float | None]:
+    """复刻 _similar_active_notice 的 subject 门+内容确认门+系列抑制.
+
+    返回 (过门, ratio, content_cosine)；任一侧正文短于下限 → low_confidence
+    语义（跳过内容确认，保守过门，与产品行为一致）。
+    """
     subject = WritePipeline._normalized_subject(anchor_subject)
     row_subject = WritePipeline._normalized_subject(variant_subject)
     if not subject or not row_subject:
-        return False, 0.0, 0.0
+        return False, 0.0, None
     shorter = min(len(subject), len(row_subject))
     if 2.0 * shorter < threshold * (len(subject) + len(row_subject)):
-        return False, 0.0, 0.0
+        return False, 0.0, None
     if row_subject != subject and WritePipeline._DIGIT_RUN.sub("#", row_subject) == WritePipeline._DIGIT_RUN.sub("#", subject):
-        return False, 0.0, 0.0  # 数字系列抑制
+        return False, 0.0, None  # 数字系列抑制
     ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
     if ratio < threshold:
-        return False, ratio, 0.0
-    jaccard = WritePipeline._tag_jaccard(anchor_tags, variant_tags)
-    if jaccard < WRITE_SIMILAR_TAG_JACCARD:
-        return False, ratio, jaccard
-    return True, ratio, jaccard
+        return False, ratio, None
+    if len(anchor_content) < WRITE_SIMILAR_MIN_CONTENT_CHARS or len(variant_content) < WRITE_SIMILAR_MIN_CONTENT_CHARS:
+        return True, ratio, None  # low_confidence：短文跳过确认
+    content_cos = _cosine(_char_ngrams(anchor_content), _char_ngrams(variant_content))
+    if content_cos < content_gate:
+        return False, ratio, content_cos
+    return True, ratio, content_cos
 
 
 def sweep_corpus(thresholds: list[float]) -> list[dict]:
@@ -68,7 +79,8 @@ def sweep_corpus(thresholds: list[float]) -> list[dict]:
             anchor, variant = case["anchor"], case["variant"]
             label_totals[case["label"]] += 1
             passed, _, _ = _pair_verdict(
-                anchor["subject"], anchor["tags"], variant["subject"], variant["tags"], threshold,
+                anchor["subject"], anchor["content"],
+                variant["subject"], variant["content"], threshold,
             )
             label_hits[case["label"]] += int(passed)
         rows.append({
@@ -86,7 +98,7 @@ def sweep_production(thresholds: list[float]) -> list[dict]:
     conn = sqlite3.connect(f"file:{DEFAULT_SOURCE}?immutable=1", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT subject, tags, COALESCE(NULLIF(workspace_canonical,''),workspace) AS ws "
+        "SELECT subject, content, COALESCE(NULLIF(workspace_canonical,''),workspace) AS ws "
         "FROM memories WHERE status='active' AND subject IS NOT NULL AND TRIM(subject)<>'' "
         "AND COALESCE(NULLIF(workspace_canonical,''),workspace) != 'mema-twin'",
     ).fetchall()
@@ -95,8 +107,19 @@ def sweep_production(thresholds: list[float]) -> list[dict]:
     for row in rows:
         by_ws.setdefault(row["ws"], []).append(row)
 
-    # 对的 (ratio, jaccard, suppressed, len_gate_ratio) 一次算完，阈值档只做过滤
-    pair_stats: list[tuple[float, float, bool, float]] = []
+    # 对的 (ratio, content_cos, short_body, suppressed, len_gate) 一次算完，阈值档只做过滤
+    pair_stats: list[tuple[float, float | None, bool, bool, float]] = []
+    gram_cache: dict[int, set[str] | None] = {}
+
+    def _grams(row: sqlite3.Row) -> set[str] | None:
+        key = id(row)
+        if key not in gram_cache:
+            body = str(row["content"] or "")
+            gram_cache[key] = (
+                _char_ngrams(body) if len(body) >= WRITE_SIMILAR_MIN_CONTENT_CHARS else None
+            )
+        return gram_cache[key]
+
     for ws_rows in by_ws.values():
         for a, b in itertools.combinations(ws_rows, 2):
             subject = WritePipeline._normalized_subject(a["subject"])
@@ -109,20 +132,21 @@ def sweep_production(thresholds: list[float]) -> list[dict]:
             )
             len_gate = (2.0 * min(len(subject), len(row_subject))) / (len(subject) + len(row_subject))
             ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
-            try:
-                tags_a = json.loads(a["tags"]) if a["tags"] else []
-                tags_b = json.loads(b["tags"]) if b["tags"] else []
-            except ValueError:
-                tags_a, tags_b = [], []
-            jaccard = WritePipeline._tag_jaccard(tags_a, tags_b)
-            pair_stats.append((ratio, jaccard, suppressed, len_gate))
+            ga, gb = _grams(a), _grams(b)
+            if ga is None or gb is None:
+                content_cos: float | None = None
+                short_body = True
+            else:
+                content_cos = _cosine(ga, gb)
+                short_body = False
+            pair_stats.append((ratio, content_cos, short_body, suppressed, len_gate))
     total_pairs = len(pair_stats)
     out = []
     for threshold in thresholds:
         passed = sum(
-            1 for ratio, jaccard, suppressed, len_gate in pair_stats
+            1 for ratio, content_cos, short_body, suppressed, len_gate in pair_stats
             if not suppressed and len_gate >= threshold and ratio >= threshold
-            and jaccard >= WRITE_SIMILAR_TAG_JACCARD
+            and (short_body or (content_cos is not None and content_cos >= CONTENT_COSINE))
         )
         out.append({"threshold": threshold, "active_pairs": passed, "total_pairs": total_pairs})
     return out
@@ -182,7 +206,7 @@ def main() -> int:
     corpus_rows = sweep_corpus(thresholds)
     prod_rows = sweep_production(thresholds) if DEFAULT_SOURCE.exists() else []
 
-    print(f"subject 阈值 │ 真近似命中 │ 明显不同 │ 同实体异属性 │ 相反语义 │ 真库存量双门全过对")
+    print(f"subject 阈值 │ 真近似命中 │ 明显不同 │ 同实体异属性 │ 相反语义 │ 真库存量提示对（内容门 {CONTENT_COSINE}）")
     print("---|---|---|---|---|---")
     for corpus_row in corpus_rows:
         threshold = corpus_row["threshold"]
@@ -197,7 +221,7 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps({"corpus": corpus_rows, "production": prod_rows,
-                    "tag_jaccard": WRITE_SIMILAR_TAG_JACCARD}, ensure_ascii=False, indent=1),
+                    "content_cosine": CONTENT_COSINE}, ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
     print(f"\n[sweep] -> {out_path}")

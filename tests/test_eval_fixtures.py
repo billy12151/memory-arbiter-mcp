@@ -114,9 +114,12 @@ def test_similarity_corpus_shape_and_naturalness() -> None:
         if case["label"] == "same_entity_diff_attr":
             # 形态哨兵（sweep 对抗出的污染教训）：同实体异属性类的变体
             # 不得是 near 形态（subject 高相似 + tags 全同）——标签必须与形态一致
-            from memory_arbiter.pipeline.write import WritePipeline
+            def _tag_jac(a: list[str], b: list[str]) -> float:
+                sa = {t.casefold().strip() for t in a if t.strip()}
+                sb = {t.casefold().strip() for t in b if t.strip()}
+                return len(sa & sb) / len(sa | sb) if sa | sb else 0.0
 
-            jac = WritePipeline._tag_jaccard(case["anchor"]["tags"], case["variant"]["tags"])
+            jac = _tag_jac(case["anchor"]["tags"], case["variant"]["tags"])
             assert jac <= 0.6, (case["case_id"], jac)
 
 

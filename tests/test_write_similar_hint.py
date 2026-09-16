@@ -1,7 +1,7 @@
-"""Write-time duplicate hint: subject/tags similarity over same-workspace
-active memories (owner spec 2026-09-02). Deterministic, model-free, info
-notice with an agent-first triage instruction; deliberate series entries
-must stay quiet.
+"""Write-time duplicate hint: subject gate + content-confirmation gate
+(owner redesign 2026-09-16; supersedes the 2026-09-02 subject+tags double
+gate). Deterministic, model-free, info notice with an agent-first triage
+instruction; deliberate series entries must stay quiet.
 """
 from __future__ import annotations
 
@@ -17,6 +17,20 @@ def make_tools(tmp_path: Path) -> MemoryTools:
     return MemoryTools(settings, MemoryDB(settings))
 
 
+BODY_A = (
+    "金营平台生产部署采用双可用区架构，发布走灰度批次，先切百分之五流量观察"
+    "三十分钟再全量。回滚保留上一版本镜像，由值班工程师执行。"
+)
+BODY_A_REWRITE = (
+    "金营平台生产部署采用双可用区架构，发布走灰度批次，先切百分之五流量观察"
+    "三十分钟再全量推进。回滚时保留上一版本的镜像，由值班工程师负责执行。"
+)
+BODY_SERIAL = (
+    "第三轮决策记录：用户确认归一策略改为保守档，高风险候选一律转人工复核，"
+    "本周内完成灰度验证后同步到配置模板。"
+)
+
+
 def _write(tools: MemoryTools, subject: str, tags: list[str], workspace: str = "w", content: str = "body"):
     return tools.memory_write(content=content, subject=subject, tags=tags, workspace=workspace)
 
@@ -25,19 +39,56 @@ def _similar_notices(result: dict) -> list[dict]:
     return [n for n in result.get("notices") or [] if n.get("type") == "similar_active_memory"]
 
 
-def test_exact_duplicate_subject_and_tags_fires_hint(tmp_path: Path) -> None:
+def test_duplicate_subject_and_body_fires_hint_with_content_cosine(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    first = _write(tools, "部署方案：金营项目上线流程", ["deployment", "金营"])
+    first = _write(tools, "部署方案：金营项目上线流程", ["deployment", "金营"], content=BODY_A)
     assert _similar_notices(first) == []
-    second = _write(tools, "部署方案：金营项目上线流程", ["deployment", "金营"], content="rewrite of the same fact")
+    second = _write(
+        tools, "部署方案：金营项目上线流程（终版）", ["deployment", "金营"], content=BODY_A_REWRITE,
+    )
     hints = _similar_notices(second)
     assert len(hints) == 1
     match = hints[0]["matches"][0]
     assert match["memory_id"] == first["data"]["id"]
-    assert match["subject_similarity"] >= 0.95
-    assert match["tag_jaccard"] == 1.0
+    assert match["subject_similarity"] >= 0.8
+    assert match["content_cosine"] is not None and match["content_cosine"] >= 0.4
+    assert match["low_confidence"] is False
     assert "Triage silently" in hints[0]["agent_instruction"]
     assert second["ok"] is True
+
+
+def test_same_subject_dissimilar_body_stays_quiet(tmp_path: Path) -> None:
+    """Same-subject serials (successive decision records) are the real
+    library's dominant subject-similar shape — the content gate keeps
+    them quiet even with identical tags."""
+    tools = make_tools(tmp_path)
+    _write(tools, "金营平台部署纪要", ["deployment", "金营"], content=BODY_A)
+    serial = _write(tools, "金营平台部署纪要", ["deployment", "金营"], content=BODY_SERIAL)
+    assert _similar_notices(serial) == []
+
+
+def test_disjoint_tags_similar_body_fires(tmp_path: Path) -> None:
+    """Tags no longer gate the hint (2026-09-16): cross-habit duplicate
+    rewrites whose tags drifted must fire on subject + body alone."""
+    tools = make_tools(tmp_path)
+    first = _write(tools, "金营平台部署方案", ["deployment", "金营"], content=BODY_A)
+    dup = _write(tools, "金营平台部署方案", ["ops", "上线"], content=BODY_A_REWRITE)
+    hints = _similar_notices(dup)
+    assert len(hints) == 1
+    assert hints[0]["matches"][0]["memory_id"] == first["data"]["id"]
+
+
+def test_short_body_skips_confirmation_as_low_confidence(tmp_path: Path) -> None:
+    """Bodies under WRITE_SIMILAR_MIN_CONTENT_CHARS skip the content gate
+    and hint anyway, flagged low_confidence."""
+    tools = make_tools(tmp_path)
+    first = _write(tools, "API token 轮换流程", [], content="rotate quarterly")
+    dup = _write(tools, "API token 轮换流程", [], content="rotate every quarter")
+    hints = _similar_notices(dup)
+    assert len(hints) == 1
+    match = hints[0]["matches"][0]
+    assert match["low_confidence"] is True
+    assert match["content_cosine"] is None
 
 
 def test_series_entries_stay_quiet(tmp_path: Path) -> None:
@@ -55,13 +106,6 @@ def test_tag_overlap_alone_does_not_fire(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _write(tools, "数据库选型记录", ["mema", "infra"])
     other = _write(tools, "完全不同主题的会议纪要", ["mema", "infra"])
-    assert _similar_notices(other) == []
-
-
-def test_same_subject_disjoint_tags_does_not_fire(tmp_path: Path) -> None:
-    tools = make_tools(tmp_path)
-    _write(tools, "季度目标", ["team-a"])
-    other = _write(tools, "季度目标", ["team-b"])
     assert _similar_notices(other) == []
 
 
@@ -108,21 +152,6 @@ def test_exact_digit_subject_duplicate_still_fires(tmp_path: Path) -> None:
     hints = _similar_notices(dup)
     assert len(hints) == 1
     assert hints[0]["matches"][0]["memory_id"] == first["data"]["id"]
-
-
-def test_tag_jaccard_folds_internal_whitespace(tmp_path: Path) -> None:
-    """Tag normalization folds internal whitespace like subjects do:
-    "金营 项目" and "金营  项目" are the same tag (Jaccard 1.0)."""
-    tools = make_tools(tmp_path)
-    first = _write(tools, "上线检查清单", ["金营 项目"])
-    # Near-duplicate body: the 0.16.6 dedup gate replays byte-identical
-    # content before the hint can fire.
-    dup = _write(tools, "上线检查清单", ["金营  项目"], content="body, second entry")
-    hints = _similar_notices(dup)
-    assert len(hints) == 1
-    match = hints[0]["matches"][0]
-    assert match["memory_id"] == first["data"]["id"]
-    assert match["tag_jaccard"] == 1.0
 
 
 def _make_strict_tools(tmp_path: Path) -> MemoryTools:

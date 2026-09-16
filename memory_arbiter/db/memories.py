@@ -505,7 +505,7 @@ class MemoriesStore:
             # the OR lets SQLite serve the canonical branch from
             # idx_memories_canonical instead of scanning the whole table.
             rows = conn.execute(
-                "SELECT id, subject, tags, event_time, ingest_time FROM memories "
+                "SELECT id, subject, tags, event_time, ingest_time, content FROM memories "
                 "WHERE status = 'active' AND id != ? "
                 "AND (workspace_canonical = ? "
                 "OR ((workspace_canonical IS NULL OR workspace_canonical = '') AND workspace = ?))"
@@ -523,6 +523,7 @@ class MemoriesStore:
                 "subject": str(row["subject"] or ""),
                 "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
                 "event_time": row["event_time"],
+                "content": str(row["content"] or ""),
             })
         return out
 
@@ -578,7 +579,7 @@ class MemoriesStore:
                 while fetch_k > 0:
                     rows = conn.execute(
                         f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
-                                   m.event_time AS event_time
+                                   m.event_time AS event_time, m.content AS content
                             FROM subject_tags_vec v
                             JOIN memories m ON m.id=v.id
                             WHERE v.embedding MATCH ? AND k=?
@@ -603,6 +604,7 @@ class MemoriesStore:
                 "subject": str(row["subject"] or ""),
                 "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
                 "event_time": row["event_time"],
+                "content": str(row["content"] or ""),
             })
         return out
 

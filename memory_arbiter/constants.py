@@ -147,23 +147,37 @@ SCAN_CHAIN_STALE_HOURS = 1
 # would re-read scan_log.jsonl end to end.
 SCAN_TASK_RECHECK_SECONDS = 3600
 
-# Write-time duplicate hint (subject/tags similarity over active memories):
-# fires only when BOTH the normalized-subject ratio and the tag Jaccard clear
-# their bars, so deliberate series entries (tier-1 vs tier-2 plans sharing
-# most tags) stay quiet unless the subjects are near-identical. Subject bar
-# 0.95→0.80 (owner 2026-09-16): at 0.95 the gate only fired at ratio ≥0.968
-# and missed the natural-suffix rewrites entirely (eval harness: 2/12 on the
-# natural-gradient corpus; 0.80 recovers 8/12 with 0/36 false positives, and
-# the tag-Jaccard 0.8 gate keeps real-library write noise unchanged at 5
-# pairs — see eval/sweep_similar_threshold.py and baselines). The hint is
-# advisory — the agent/user triages, so recall is preferred over silence.
+# Write-time duplicate hint: subject gate over candidate recall, then a
+# content-confirmation gate (owner 2026-09-16 redesign, three-measurement
+# evidence from the eval harness). The old tag-Jaccard second gate is GONE:
+# on the real library it blocked true cross-habit rewrites (duplicate writes
+# whose tags drifted, Jaccard 0.29–0.70) while waving through same-subject
+# serials (98% of subject-similar pairs are same-topic continuations, not
+# duplicates — content-similarity median 0.15). The subject bar 0.95→0.80
+# same day (gate only fired at ratio ≥0.968, missing natural-suffix
+# rewrites; 0.80 recovers 8/12 on the natural-gradient corpus, 0/36 false
+# positives — see eval/sweep_similar_threshold.py).
+# Content gate: full-body char-trigram cosine (semantic_conflict._char_ngrams
+# + _cosine, the deterministic pre-filter's own implementation) ≥ 0.40.
+# Calibration on 14 positives / 154 negatives (real library + corpus):
+# negatives top out at 0.374, positives ≥0.427 → 0.40 sits mid-band with
+# recall 11/14 and 0 false positives. Bodies under the char floor skip the
+# confirmation and hint anyway flagged low_confidence (set variance is too
+# high on short texts; prefer recall). Vector confirmation was measured and
+# REJECTED: paraphrase-type near-dups (0.87–0.92) and serials (0.81–0.93)
+# are inseparable at 0.5B-embedding resolution — that split belongs to the
+# Qwen scan line, not this millisecond sync channel.
 WRITE_SIMILAR_SUBJECT_RATIO = 0.8
-WRITE_SIMILAR_TAG_JACCARD = 0.8
+WRITE_SIMILAR_CONTENT_COSINE = 0.4
+WRITE_SIMILAR_MIN_CONTENT_CHARS = 40
 WRITE_SIMILAR_MAX_HINTS = 2
 # Recall channel (0.15.3): with a loaded embedder the hint recalls candidates
 # by subject+tags KNN over subject_tags_vec instead of scanning every
 # same-workspace active row; without one the legacy scan keeps a hard row cap.
-WRITE_DUPLICATE_VEC_TOP_K = 20
+# 20→10 (2026-09-16): one index query either way — the wider window bought
+# nothing (true duplicates rank at the top) and only fattened the candidate
+# pool the content gate then has to chew.
+WRITE_DUPLICATE_VEC_TOP_K = 10
 WRITE_SIMILAR_FALLBACK_SCAN_LIMIT = 500
 
 # memory_repair(task="scan_duplicates") — full-library near-duplicate sweep.
