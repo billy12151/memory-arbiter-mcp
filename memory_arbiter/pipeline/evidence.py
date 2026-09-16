@@ -19,8 +19,10 @@ from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
 from ..semantic_conflict import (
     PAIR_PROMPT_VERSION,
+    PairGateResult,
     SemanticBackend,
     decide_evidence,
+    direct_value_verdict,
     evaluate_pair_extractions,
     is_cross_evolution,
     notice_dedupe_key,
@@ -472,6 +474,9 @@ class EvidencePipeline:
                     pairs_examined += 1
                     env_a = envelope(record, unit_a.text)
                     env_b = envelope(record, unit_b.text)
+                    if internal_decision.left_value and internal_decision.right_value:
+                        env_a["rule_value"] = internal_decision.left_value
+                        env_b["rule_value"] = internal_decision.right_value
                     forward = classify(env_a, env_b)
                     reverse = classify(env_b, env_a)
                     gate = evaluate_pair_extractions(
@@ -525,41 +530,67 @@ class EvidencePipeline:
             right_version = int(peer.get("version") or 1)
             if self.db.is_semantic_pair_closed(memory_id, peer_id, left_version, right_version):
                 continue
-            if backend is None:
-                record_degradation("qwen_unavailable")
-                incomplete_reason = "qwen_unavailable"
-                continue
-            active_deadline = backlog_deadline()
-            if active_deadline is not None and active_deadline - time.monotonic() < min_budget * 2:
-                record_degradation("qwen_budget_exhausted")
-                incomplete_reason = "qwen_budget_exhausted"
-                continue
-            # A5 deterministic cap: only pairs that actually reach Qwen count;
-            # skipped (closed/inactive) pairs never consume the budget.
-            if pairs_examined >= max_examined_pairs:
-                record_degradation("pairs_examined_capped")
-                incomplete_reason = "pairs_examined_capped"
-                break
-            pairs_examined += 1
-            left_env = envelope(record_row, unit.text)
-            right_env = envelope(peer_row, str(hit.get("text") or ""))
-            started = time.monotonic()
-            forward_signal = classify(left_env, right_env)
-            reverse_signal = classify(right_env, left_env)
-            self._tools._record_pair_sample(
-                pair_ms=int((time.monotonic() - started) * 1000),
-                forward=forward_signal,
-                reverse=reverse_signal,
+            # Deterministic direct path (2026-09-16, owner-approved): same
+            # value-stripped key + canonical value difference IS the
+            # same-attribute-different-value shape — land the notice without
+            # spending Qwen, whose budget is reserved for pairs only
+            # judgment can settle. Runs BEFORE the backend/budget checks:
+            # a direct pair consumes no Qwen budget and works even while the
+            # backend is unavailable.
+            direct = direct_value_verdict(
+                unit.text, str(hit.get("text") or ""), decision, embedder=embedder,
             )
-            gate = evaluate_pair_extractions(
-                signal_extraction(forward_signal), signal_extraction(reverse_signal), left_env, right_env,
-                require_bidirectional=True,
-            )
-            qwen = {
-                "status": gate.state, "reason": gate.reason,
-                "forward_type": forward_signal.candidate_type,
-                "reverse_type": reverse_signal.candidate_type,
-            }
+            if direct is not None:
+                gate = PairGateResult(
+                    "notice_ready", "deterministic_same_key_value_diff",
+                    direct[0], direct[1], direct[2], True,
+                )
+                qwen = {
+                    "status": "bypassed", "reason": gate.reason,
+                    "forward_type": "deterministic", "reverse_type": "deterministic",
+                }
+                forward_signal = None
+            else:
+                if backend is None:
+                    record_degradation("qwen_unavailable")
+                    incomplete_reason = "qwen_unavailable"
+                    continue
+                active_deadline = backlog_deadline()
+                if active_deadline is not None and active_deadline - time.monotonic() < min_budget * 2:
+                    record_degradation("qwen_budget_exhausted")
+                    incomplete_reason = "qwen_budget_exhausted"
+                    continue
+                # A5 deterministic cap: only pairs that actually reach Qwen count;
+                # skipped (closed/inactive) pairs never consume the budget.
+                if pairs_examined >= max_examined_pairs:
+                    record_degradation("pairs_examined_capped")
+                    incomplete_reason = "pairs_examined_capped"
+                    break
+                pairs_examined += 1
+                left_env = envelope(record_row, unit.text)
+                right_env = envelope(peer_row, str(hit.get("text") or ""))
+                # pair-v7: hand Qwen the rule layer's extracted value difference
+                # (numeric check route only) as a locating hint — see _pair_text.
+                if decision.left_value and decision.right_value:
+                    left_env["rule_value"] = decision.left_value
+                    right_env["rule_value"] = decision.right_value
+                started = time.monotonic()
+                forward_signal = classify(left_env, right_env)
+                reverse_signal = classify(right_env, left_env)
+                self._tools._record_pair_sample(
+                    pair_ms=int((time.monotonic() - started) * 1000),
+                    forward=forward_signal,
+                    reverse=reverse_signal,
+                )
+                gate = evaluate_pair_extractions(
+                    signal_extraction(forward_signal), signal_extraction(reverse_signal), left_env, right_env,
+                    require_bidirectional=True,
+                )
+                qwen = {
+                    "status": gate.state, "reason": gate.reason,
+                    "forward_type": forward_signal.candidate_type,
+                    "reverse_type": reverse_signal.candidate_type,
+                }
             if gate.state != "notice_ready":
                 signals = (forward_signal, reverse_signal)
                 if any(signal.error and "timeout" in str(signal.error).lower() for signal in signals):
@@ -641,7 +672,11 @@ class EvidencePipeline:
             # Model output may omit keys (or parsed may not be a dict at all):
             # fall back to the gate's normalised value instead of raising
             # KeyError (mirrors the scan-path defence in tools.py).
-            forward_parsed = forward_signal.parsed if isinstance(forward_signal.parsed, dict) else {}
+            forward_parsed = (
+                forward_signal.parsed
+                if forward_signal is not None and isinstance(forward_signal.parsed, dict)
+                else {}
+            )
             value_groups = [
                 {"normalized_value": gate.value_a, "display_value": forward_parsed.get("value_a") or gate.value_a,
                  "members": [f"{memory_id}@{left_version}"]},
@@ -660,7 +695,13 @@ class EvidencePipeline:
                     "prompt_version": PAIR_PROMPT_VERSION,
                     "anchors": decision.anchors,
                     "slot_key": slot_key,
-                    "slot_provenance": {"entity": "metadata", "scope": "metadata", "attribute": "bidirectional_extraction"},
+                    "slot_provenance": {
+                        "entity": "metadata", "scope": "metadata",
+                        "attribute": (
+                            "deterministic_skeleton" if direct is not None
+                            else "bidirectional_extraction"
+                        ),
+                    },
                     "member_versions": member_versions,
                     "value_groups": value_groups,
                     "candidate_key": {

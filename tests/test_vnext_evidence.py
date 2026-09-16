@@ -190,18 +190,64 @@ def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> 
     assert text.index("B metadata:") < text.index("B证据原文=数据库为 SQLite。")
     assert "entity=checkout" in text and "scope=global" in text
     assert "不应使用的全文" not in text
-    assert PAIR_PROMPT_VERSION == "pair-v6"
+    assert PAIR_PROMPT_VERSION == "pair-v8"
     assert "以 { 开头" in _PAIR_PROMPT
     assert "必须输出全部四个字符串字段" in _PAIR_PROMPT
     assert '"__unknown__"' in _PAIR_PROMPT
     assert "设为 null" not in _PAIR_PROMPT
     # pair-v6: prompt text stays byte-identical to pair-v5 (few-shot variants
     # regressed side attribution on the calibration pair and were rejected).
+    # pair-v7 keeps the system prompt untouched; the only change is the
+    # optional rule-candidate-values line in the user turn (see below).
     assert "例2" not in _PAIR_PROMPT
     # 0.15.14 (A2 + round-3): the whole pair path is grammar-free — caps are
     # post-hoc (L3 truncation + grounding) and the retry is a targeted text
     # turn, so no response_format schema exists any more.
     assert not hasattr(sc, "_PAIR_RESPONSE_FORMAT")
+
+
+def test_pair_prompt_follows_evidence_language() -> None:
+    """pair-v8: non-CJK evidence gets the English prompt mirror (same field
+    schema, English few-shot); CJK or mixed evidence keeps the calibrated
+    Chinese prompt."""
+    from memory_arbiter.semantic_conflict import (
+        LocalGGUFSemanticBackend, _PAIR_PROMPT_EN, evidence_is_cjk,
+    )
+
+    assert evidence_is_cjk({"quote": "生产库用 MySQL"}, {"quote": "生产库用 SQLite"})
+    assert evidence_is_cjk({"quote": "db is MySQL"}, {"quote": "数据库是 SQLite"})
+    assert not evidence_is_cjk({"quote": "db is MySQL"}, {"quote": "db is SQLite"})
+    assert '"__unknown__"' in _PAIR_PROMPT_EN
+    assert '"attribute_a"' in _PAIR_PROMPT_EN
+    assert "attribute_b" in _PAIR_PROMPT_EN and "value_b" in _PAIR_PROMPT_EN
+    en_text = LocalGGUFSemanticBackend._pair_text(
+        {"subject": "db", "quote": "The production database uses MySQL."},
+        {"subject": "db", "quote": "The production database uses PostgreSQL."},
+    )
+    assert "A evidence=The production database uses MySQL." in en_text
+    assert "证据原文" not in en_text
+
+
+def test_pair_text_rule_value_hint() -> None:
+    """pair-v7: rule-layer candidate values appear as a locating hint, placed
+    BEFORE the evidence quotes (quotes stay nearest the output), and absent
+    when either side lacks an extracted value."""
+    from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
+
+    hinted = LocalGGUFSemanticBackend._pair_text(
+        {"subject": "退款", "quote": "单笔退款超过 5000 元需要财务复核。",
+         "rule_value": "5000"},
+        {"subject": "退款", "quote": "单笔退款超过 500 元就需要财务复核。",
+         "rule_value": "500"},
+    )
+    assert "A候选值=5000" in hinted and "B候选值=500" in hinted
+    assert hinted.index("A候选值=5000") < hinted.index("A证据原文=")
+    plain = LocalGGUFSemanticBackend._pair_text(
+        {"subject": "退款", "quote": "单笔退款超过 5000 元需要财务复核。"},
+        {"subject": "退款", "quote": "单笔退款超过 500 元就需要财务复核。",
+         "rule_value": "500"},
+    )
+    assert "候选值" not in plain
 
 
 # The two live qwen_invalid_output samples (2026-09-08 17:31 / 2026-09-09
@@ -570,11 +616,15 @@ def test_exact_subject_match_survives_evidence_fusion(tmp_path: Path, monkeypatc
 
 
 def test_numeric_candidate_fails_closed_without_qwen(tmp_path: Path, monkeypatch) -> None:
+    """Non-direct-eligible numeric candidates (multi-value, ambiguous
+    pairwise) still fail closed without Qwen and stay scan review
+    candidates. Direct-eligible pairs landing without a backend are covered
+    by test_direct_path_works_without_qwen."""
     tools = make_tools(tmp_path, semantic_enabled=False)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "checkout-api", "scope": "production"}
-    old = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=["api"], metadata=meta)["data"]
-    new = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=["api"], metadata=meta)["data"]
+    old = tools.memory_write(content="接口超时为 5 秒，队列长度为 3。", subject="timeout", tags=["api"], metadata=meta)["data"]
+    new = tools.memory_write(content="接口超时为 30 秒，队列长度为 5。", subject="timeout", tags=["api"], metadata=meta)["data"]
     assert tools.wait_evidence_worker_drained(timeout=2)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -587,6 +637,29 @@ def test_numeric_candidate_fails_closed_without_qwen(tmp_path: Path, monkeypatch
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
     assert clue["route"] == "review_candidate"
     assert "numeric_value_candidate" in clue["reasons"]
+
+
+def test_direct_path_works_without_qwen(tmp_path: Path, monkeypatch) -> None:
+    """The deterministic direct path needs no backend: same key + canonical
+    value difference lands the notice while Qwen is unavailable (owner
+    2026-09-16 — the pair carries its own mechanical proof)."""
+    tools = make_tools(tmp_path, semantic_enabled=False)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "checkout-api", "scope": "production"}
+    tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=["api"], metadata=meta)
+    new = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=["api"], metadata=meta)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=2)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
+    result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    assert result["status"] == "completed"
+    assert result["outcome"] == "notices_created"
+    notices = tools.db.list_semantic_notices(status="open")
+    assert len(notices) == 1
+    payload = notices[0]["payload"]
+    if isinstance(payload, str):
+        import json as _json
+        payload = _json.loads(payload)
+    assert payload["reason"] == "deterministic_same_key_value_diff"
 
 
 def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, monkeypatch) -> None:
@@ -1858,8 +1931,8 @@ def _structured_conflict_payload(left_id: int, right_id: int, *, left_version: i
             _conflict_member(right_id, "30秒", right_quote, version=right_version),
         ],
         "value_groups": [
-            ConflictValueGroup("5s", "5 秒", (f"{left_id}@{left_version}",)).to_dict(),
-            ConflictValueGroup("30s", "30 秒", (f"{right_id}@{right_version}",)).to_dict(),
+            ConflictValueGroup(normalize_value("5 秒"), "5 秒", (f"{left_id}@{left_version}",)).to_dict(),
+            ConflictValueGroup(normalize_value("30 秒"), "30 秒", (f"{right_id}@{right_version}",)).to_dict(),
         ],
         "detector_version": CONFLICT_DETECTOR_VERSION,
         "prompt_version": "pair-v1",
@@ -1969,7 +2042,9 @@ def test_notice_escalation_requires_structured_slot_snapshot(tmp_path: Path) -> 
     assert detail["source"] == "semantic_notice"
     assert detail["notice_delivery_status"] == "resolved"
     assert detail["slot_key"]["entity"] == "checkout-api"
-    assert {group["normalized_value"] for group in detail["value_groups"]} == {"5s", "30s"}
+    assert {group["normalized_value"] for group in detail["value_groups"]} == {
+        normalize_value("5 秒"), normalize_value("30 秒"),
+    }
 
 
 def test_notice_freshness_and_terminal_lifecycle_use_api(tmp_path: Path) -> None:
@@ -2025,7 +2100,7 @@ def test_structured_record_conflict_validates_slot_members_and_revision(tmp_path
         **payload,
         "members": payload["members"] + [third_member],
         "value_groups": payload["value_groups"] + [
-            ConflictValueGroup("60s", "60 秒", (f"{third['id']}@1",)).to_dict(),
+            ConflictValueGroup(normalize_value("60 秒"), "60 秒", (f"{third['id']}@1",)).to_dict(),
         ],
         "expected_revision": 1,
     }
@@ -2045,7 +2120,7 @@ def test_judge_uses_group_revision_and_apply_plan(tmp_path: Path) -> None:
     judged = tools.memory("judge", {
         "conflict_id": conflict_id,
         "expected_revision": 1,
-        "chosen_value": "30s",
+        "chosen_value": normalize_value("30 秒"),
         "decided_by": "user",
         "ref": "test",
         "reason": "用户确认生产超时",

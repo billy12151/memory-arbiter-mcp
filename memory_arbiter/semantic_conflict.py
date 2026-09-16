@@ -16,6 +16,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -55,7 +56,7 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
-PAIR_PROMPT_VERSION = "pair-v6"
+PAIR_PROMPT_VERSION = "pair-v8"
 
 _PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
@@ -63,12 +64,43 @@ attribute 是两侧正在回答的最小可比较问题，不包含具体值、�
 无论是否能可靠抽取，都必须输出全部四个字符串字段，不得省略字段。无法可靠抽取时将对应字段写成字符串 "__unknown__"；不要输出 null、conflict、coexistence、winner、confidence 或额外字段。
 例：A=生产数据库使用 MySQL。B=生产数据库使用 SQLite。
 输出：{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}"""
+
+# pair-v8 (2026-09-16): English mirror of the protocol for non-CJK evidence.
+# Field names stay identical (downstream parsing is schema-fixed); only the
+# instructions and the few-shot change language. Chinese instructions on
+# English evidence made the 0.5B bleed the threshold into the attribute
+# (eval: "Refund requests over 5000/500 CNY" pair, job completed, zero
+# notice). The retry feedback turn stays Chinese (schema-level, measured
+# wording — changing it is a separate calibration).
+_PAIR_PROMPT_EN = """You only do conditional slot extraction. Output a single JSON object starting with { — no explanation, no restating the input, no verdicts.
+The object must contain exactly four string fields: attribute_a, value_a, attribute_b, value_b.
+attribute is the minimal comparable question both sides answer; it must not contain concrete values, times, environments, or versions. value is that attribute's concrete value in the evidence: a contiguous fragment copied from the source, at most 64 chars and 12 words; for long sentences copy the shortest fragment that carries the value difference; never copy a whole sentence; a value must not end with sentence punctuation.
+Always output all four string fields, even when extraction is unreliable; write the string "__unknown__" for fields you cannot reliably extract. Do not output null, conflict, coexistence, winner, confidence, or extra fields.
+Example: A=The production database uses MySQL. B=The production database uses SQLite.
+Output: {"attribute_a":"database engine","value_a":"MySQL","attribute_b":"database engine","value_b":"SQLite"}"""
+
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+def evidence_is_cjk(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """True when either side's evidence/metadata carries CJK — the pair
+    prompt follows the evidence language (pair-v8); mixed pairs stay
+    Chinese (the Chinese prompt is the calibrated default)."""
+    for env in (left, right):
+        for key in ("quote", "content", "subject"):
+            if _CJK_RE.search(str(env.get(key) or "")):
+                return True
+    return False
 # pair-v6 note: the prompt text is deliberately identical to pair-v5. Two
 # few-shot variants teaching long-evidence fragment selection were tried and
 # rejected by experiment (2026-09-09 calibration matrix): any added example
 # broke side attribution on the Tier1 calibration pair (the 0.5B adopted
 # positional heuristics from the example, e.g. copying the B-side opening into
 # value_a) — same lesson as the rejected "compress to the core value" wording.
+# pair-v7 (2026-09-16): system prompt still untouched (the v6 lesson stands);
+# the only change is an optional rule-candidate-values line in the USER turn
+# (_pair_text), present only when decide_evidence extracted values on both
+# sides.
 # Since 0.15.14 (A2) decoding is grammar-free: no response_format anywhere on
 # this path (its per-token grammar evaluation halved decode throughput, and
 # even on the retry it cost 3-5x the alternative — see _pair_retry_feedback);
@@ -304,7 +336,10 @@ def _normalized_values(text: str) -> list[str]:
         value = re.sub(r"\s+", "", match.group(0)).replace("秒", "s")
         if value.startswith("v") and len(value) > 1 and value[1].isdigit():
             value = value[1:]
-        values.append(value)
+        # Canonical unit conversion (2026-09-16): "500ms" vs "0.5s" is a
+        # duplicate, not a conflict — the candidate trigger must compare
+        # canonical forms, or equivalent values burn a Qwen pair.
+        values.append(canonical_unit_value(value))
     return values
 
 
@@ -361,7 +396,65 @@ def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
     return EvidenceDecision("ignore", "insufficient_local_evidence")
 
 
+# Direct deterministic conflict path (2026-09-16, owner-directed): when the
+# rule layer has already extracted exactly one canonical value per side and
+# the value-stripped keys are near-identical, the pair IS the
+# same-attribute-different-value shape — no Qwen inference needed. The
+# notice stays advisory (the agent triages it), so the threshold errs
+# toward missing (falls through to Qwen), never toward noise.
+DIRECT_VALUE_KEY_COSINE = 0.96
+_VERSION_TOKEN_RE = re.compile(r"v\d", re.IGNORECASE)
+
+
+def direct_value_verdict(
+    unit_text: str, hit_text: str, decision: EvidenceDecision, *,
+    embedder: Any = None, key_cosine: float | None = None,
+) -> "tuple[str, str, str] | None":
+    """Return (attribute, value_a, value_b) for a deterministic conflict, or
+    None to leave the pair on the Qwen path.
+
+    Guards, in order: the numeric channel must hold exactly one value per
+    side (multi-value sentences are pairwise-ambiguous); the coexistence
+    veto (dimension/evolution markers) still applies; version-bearing
+    quotes (v1/v2) skip — a version ordinal reads as a bare value and would
+    turn evolution into a false direct conflict; the value-stripped key
+    cosine must clear DIRECT_VALUE_KEY_COSINE (identical skeletons shortcut
+    at 1.0 without an embed call).
+    """
+    if decision.reason != "numeric_value_candidate":
+        return None
+    if not decision.left_value or not decision.right_value:
+        return None
+    if ", " in decision.left_value or ", " in decision.right_value:
+        return None
+    if _VERSION_TOKEN_RE.search(unit_text) or _VERSION_TOKEN_RE.search(hit_text):
+        return None
+    if coexistence_veto({"quote": unit_text}, {"quote": hit_text}) is not None:
+        return None
+    key_a = _numeric_stripped_skeleton(unit_text)
+    key_b = _numeric_stripped_skeleton(hit_text)
+    if not key_a or not key_b:
+        return None
+    if key_a == key_b:
+        cosine = 1.0
+    elif key_cosine is not None:
+        cosine = key_cosine
+    elif embedder is not None:
+        vec_a = embedder.embed_text(prefix="", body=key_a)
+        vec_b = embedder.embed_text(prefix="", body=key_b)
+        cosine = vector_cosine(list(vec_a.embedding), list(vec_b.embedding))
+    else:
+        return None
+    if cosine < DIRECT_VALUE_KEY_COSINE:
+        return None
+    attribute = normalize_attribute(key_a).rstrip("为的是")[:_MAX_ATTRIBUTE_CHARS]
+    if not attribute:
+        return None
+    return attribute, str(decision.left_value), str(decision.right_value)
+
+
 def is_cross_evolution(decision: EvidenceDecision) -> bool:
+
     """0.16.4 §1/§0.5: cross-memory evolution-domain pairs.
 
     ``notify`` shapes (todo state transitions, polarity snapshots) across
@@ -420,7 +513,9 @@ def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
         values = set(re.findall(r"\d+(?:\.\d+)?\s*(?:mb|gb|kb|%|ms|s|秒|核|g)?", text.lower()))
         normalized = set()
         for value in values:
-            normalized.add(re.sub(r"\s+", "", value).replace("gb", "g"))
+            # Same canonicalisation as the candidate channel: equal values
+            # in different exact units ("500ms" vs "0.5s") are duplicates.
+            normalized.add(canonical_unit_value(re.sub(r"\s+", "", value).replace("gb", "g")))
         return normalized
 
     # Same concrete values + high lexical overlap is a duplicate, not a conflict.
@@ -593,14 +688,82 @@ def _mechanical_normalize(value: str) -> str:
     return normalized
 
 
+_ATTRIBUTE_VALUE_RUN_RE = re.compile(r"\d+(?:\.\d+)*")
+
+
 def normalize_attribute(value: str) -> str:
     normalized = _mechanical_normalize(value)
+    # The prompt contract forbids values inside attributes ("不包含具体值"),
+    # but the 0.5B bleeds the threshold in ("单笔退款超过 500 元" vs "…5000
+    # 元") and the strict bidirectional mirror then reads the two directions
+    # as different attributes (eval cf-oppo-05, 2026-09-16). Strip numeric
+    # runs so one attribute with different embedded values canonicalises
+    # together; the VALUE fields still carry the actual difference.
+    normalized = _ATTRIBUTE_VALUE_RUN_RE.sub("", normalized)
     return _ATTRIBUTE_ALIASES.get(normalized, normalized)
+
+
+_VALUE_APPROX_PREFIX_RE = re.compile(r"^(?:大约|大概|约|近)")
+_VALUE_MEASURE_GE_RE = re.compile(r"(?<=\d)个")
+
+# Exact physical unit conversion (2026-09-16, owner-directed): time → ms,
+# size → kb, Chinese magnitude suffixes fold into the number, 块 is a
+# colloquial 元. Only EXACT relations convert — 月/年 (variable length) and
+# 工作日 (domain assumption, not a physical fact) deliberately stay
+# unconverted, so "72小时 vs 5个工作日" keeps differing. Covers both the
+# raw spellings (gb) and the _mechanical_normalize compacted forms (g).
+_UNIT_TO_CANONICAL: dict[str, "tuple[Decimal, str]"] = {
+    "ms": (Decimal(1), "ms"),
+    "s": (Decimal(1000), "ms"), "秒": (Decimal(1000), "ms"),
+    "sec": (Decimal(1000), "ms"), "secs": (Decimal(1000), "ms"),
+    "second": (Decimal(1000), "ms"), "seconds": (Decimal(1000), "ms"),
+    "分钟": (Decimal(60_000), "ms"), "min": (Decimal(60_000), "ms"),
+    "mins": (Decimal(60_000), "ms"), "minute": (Decimal(60_000), "ms"),
+    "minutes": (Decimal(60_000), "ms"),
+    "小时": (Decimal(3_600_000), "ms"), "h": (Decimal(3_600_000), "ms"),
+    "hr": (Decimal(3_600_000), "ms"), "hrs": (Decimal(3_600_000), "ms"),
+    "hour": (Decimal(3_600_000), "ms"), "hours": (Decimal(3_600_000), "ms"),
+    "天": (Decimal(86_400_000), "ms"), "日": (Decimal(86_400_000), "ms"),
+    "day": (Decimal(86_400_000), "ms"), "days": (Decimal(86_400_000), "ms"),
+    "周": (Decimal(604_800_000), "ms"), "week": (Decimal(604_800_000), "ms"),
+    "weeks": (Decimal(604_800_000), "ms"),
+    "kb": (Decimal(1), "kb"), "k": (Decimal(1), "kb"),
+    "mb": (Decimal(1024), "kb"), "m": (Decimal(1024), "kb"),
+    "gb": (Decimal(1024 ** 2), "kb"), "g": (Decimal(1024 ** 2), "kb"),
+    "tb": (Decimal(1024 ** 3), "kb"), "t": (Decimal(1024 ** 3), "kb"),
+    "元": (Decimal(1), "元"), "块": (Decimal(1), "元"), "块钱": (Decimal(1), "元"),
+    "千": (Decimal(1000), ""), "万": (Decimal(10_000), ""),
+}
+_VALUE_NUM_UNIT_RE = re.compile(r"^(\d+(?:\.\d+)?)([a-z]+|[一-鿿]+)?$")
+
+
+def canonical_unit_value(normalized: str) -> str:
+    """Canonicalise a normalized "number+unit" value; non-matching shapes
+    and unconvertible units pass through unchanged (identity by default —
+    the persistence-boundary rule from _VALUE_ALIASES)."""
+    match = _VALUE_NUM_UNIT_RE.match(normalized)
+    if not match or not match.group(2):
+        return normalized
+    conversion = _UNIT_TO_CANONICAL.get(match.group(2))
+    if conversion is None:
+        return normalized
+    factor, base = conversion
+    value = Decimal(match.group(1)) * factor
+    number = format(value.normalize(), "f")
+    return f"{number}{base}"
 
 
 def normalize_value(value: str) -> str:
     normalized = _mechanical_normalize(value)
-    return _VALUE_ALIASES.get(normalized, normalized)
+    normalized = _VALUE_ALIASES.get(normalized, normalized)
+    # Direction-dependent fillers the 0.5B attaches to an otherwise identical
+    # value ("近 90 天" vs "90 天", "5个工作日" vs "5工作日") used to fail the
+    # strict bidirectional mirror as bidirectional_mapping_mismatch even
+    # though both directions agreed (eval cf-oppo-10/12, 2026-09-16).
+    # Approximator prefixes and the measure word 个 carry no value semantics.
+    normalized = _VALUE_APPROX_PREFIX_RE.sub("", normalized)
+    normalized = _VALUE_MEASURE_GE_RE.sub("", normalized)
+    return canonical_unit_value(normalized)
 
 
 def _bounded_short_value(value: str, quote: str) -> bool:
@@ -653,7 +816,15 @@ def value_is_grounded(value: str, quote: str) -> bool:
         return False
     # Compare against bounded quote tokens/phrases; this permits case, spacing,
     # punctuation, numeric formatting, units and explicit aliases, not paraphrase.
-    pieces = re.findall(r"[A-Za-z][A-Za-z0-9_.-]*|\d[\d,_.]*\s*(?:ms|s|秒|毫秒|%|mb|gb|kb)?|[\u4e00-\u9fff]{1,24}", quote)
+    # The numeric branch carries common CJK units so "90天" grounds in
+    # "近 90 天" (eval cf-oppo-10/12, 2026-09-16): Qwen's spacing varies with
+    # direction, and without the unit the piece degrades to a bare "90".
+    pieces = re.findall(
+        r"[A-Za-z][A-Za-z0-9_.-]*"
+        r"|\d[\d,_.]*\s*个?\s*(?:ms|s|毫秒|秒|分钟|小时|工作日|天|日|周|月|年|%|mb|gb|kb|元|次|条|倍|人|台|核)?"
+        r"|[\u4e00-\u9fff]{1,24}",
+        quote,
+    )
     return any(normalize_value(piece) == target for piece in pieces)
 
 
@@ -1199,11 +1370,41 @@ class LocalGGUFSemanticBackend:
         # funds a larger max_tokens for the retry.
         left_quote = str(left.get("quote") or left.get("content") or "")[:quote_cap]
         right_quote = str(right.get("quote") or right.get("content") or "")[:quote_cap]
+        cjk = evidence_is_cjk(left, right)
+        # pair-v7: when the rule layer already extracted a value difference
+        # (decide_evidence's numeric channel), name it as a locating hint.
+        # The 0.5B then confirms an attribute around known values instead of
+        # re-deriving them — free-running extraction swallowed the threshold
+        # into the attribute and vetoed real conflicts (eval cf-oppo-04/05,
+        # 2026-09-16). The hint sits BEFORE the quotes: the bounded quotes
+        # stay nearest the output (see docstring), and values must still be
+        # copied from the evidence text, never from the hint.
+        hint = ""
+        left_value = str(left.get("rule_value") or "").strip()
+        right_value = str(right.get("rule_value") or "").strip()
+        if left_value and right_value:
+            hint = (
+                f"规则层候选值差（仅供定位属性，value 必须取自证据原文）："
+                f"A候选值={left_value} B候选值={right_value}\n"
+                if cjk else
+                f"Rule-layer candidate value difference (locating hint only; "
+                f"values must be copied from the evidence text): "
+                f"A candidate={left_value} B candidate={right_value}\n"
+            )
+        if cjk:
+            return (
+                f"A metadata: {cls._memory_text(left)}\n"
+                f"B metadata: {cls._memory_text(right)}\n"
+                f"{hint}"
+                "只根据以下证据原文抽取 attribute/value：\n"
+                f"A证据原文={left_quote}\nB证据原文={right_quote}"
+            )
         return (
             f"A metadata: {cls._memory_text(left)}\n"
             f"B metadata: {cls._memory_text(right)}\n"
-            "只根据以下证据原文抽取 attribute/value：\n"
-            f"A证据原文={left_quote}\nB证据原文={right_quote}"
+            f"{hint}"
+            "Extract attribute/value from the evidence text only:\n"
+            f"A evidence={left_quote}\nB evidence={right_quote}"
         )
 
     def _acquire_llm_for_call(self) -> Any | None:
@@ -1274,9 +1475,14 @@ class LocalGGUFSemanticBackend:
             # tokens); "</s>" was a dead stop: Qwen2.5's EOS (<|im_end|>)
             # comes from the chat template.
             max_tokens = 384
+            cjk = evidence_is_cjk(left, right)
             messages: list[dict[str, str]] = [
-                {"role": "system", "content": _PAIR_PROMPT},
-                {"role": "user", "content": f"输入: {self._pair_text(left, right)}\n输出:"},
+                {"role": "system", "content": _PAIR_PROMPT if cjk else _PAIR_PROMPT_EN},
+                {"role": "user", "content": (
+                    f"输入: {self._pair_text(left, right)}\n输出:"
+                    if cjk else
+                    f"Input: {self._pair_text(left, right)}\nOutput:"
+                )},
             ]
             # A6 queue gate: with other requests waiting, one attempt only —
             # an invalid output then fails fast instead of doubling the wait
@@ -1327,7 +1533,11 @@ class LocalGGUFSemanticBackend:
                     retry_max_tokens = SEMANTIC_PAIR_RETRY_MAX_TOKENS
                     retry_messages = [
                         messages[0],
-                        {"role": "user", "content": f"输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"},
+                        {"role": "user", "content": (
+                            f"输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"
+                            if cjk else
+                            f"Input: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\nOutput:"
+                        )},
                         {"role": "user", "content": feedback},
                     ]
                 else:

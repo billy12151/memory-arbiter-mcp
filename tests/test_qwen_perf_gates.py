@@ -58,22 +58,27 @@ def make_tools(tmp_path: Path, *, semantic_enabled: bool = False) -> MemoryTools
 
 
 def _write_check_scene(tools: MemoryTools, peers: int) -> dict[str, Any]:
-    """One new memory whose knn surface returns `peers` candidate pairs."""
+    """One new memory whose knn surface returns `peers` candidate pairs.
+
+    Multi-value contents: the 2026-09-16 deterministic direct path bypasses
+    Qwen for single-value same-skeleton pairs, which would leave these
+    Qwen-budget gates with nothing to measure."""
     tools.settings.semantic_conflict_on_write = "off"
     peer_rows = [
         tools.memory_write(
-            content=f"连接池上限为 {index + 10}。", subject=f"v{index}", tags=[], metadata=dict(_META),
+            content=f"连接池上限为 {index + 10}，队列长度为 {index + 3}。",
+            subject=f"v{index}", tags=[], metadata=dict(_META),
         )["data"]
         for index in range(peers)
     ]
     new = tools.memory_write(
-        content="连接池上限为 99。", subject="new", tags=[], metadata=dict(_META),
+        content="连接池上限为 99，队列长度为 99。", subject="new", tags=[], metadata=dict(_META),
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     hits = [
         {
             "memory_id": peer["id"], "id": index, "kind": "text",
-            "text": f"连接池上限为 {index + 10}。", "start_offset": 0, "end_offset": 12,
+            "text": f"连接池上限为 {index + 10}，队列长度为 {index + 3}。", "start_offset": 0, "end_offset": 12,
             "distance": 0.10 + index * 0.01,
             # 0.16.2 provenance gate reads hit['metadata'] like real knn rows.
             "metadata": dict(_META),

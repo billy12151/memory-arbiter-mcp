@@ -64,6 +64,11 @@ class _CountingBackend:
             return self._inner.classify_pair(left, right)
 
 
+def _payload(notice: dict) -> dict:
+    payload = notice["payload"]
+    return json.loads(payload) if isinstance(payload, str) else payload
+
+
 # ── gate 1: provenance ──────────────────────────────────────────────────────
 
 def test_provenance_gate_skips_qwen_and_reports(tmp_path: Path, monkeypatch) -> None:
@@ -120,7 +125,9 @@ def test_no_difference_check_pair_skipped_before_qwen(tmp_path: Path, monkeypatc
     assert backend.calls == 0
 
 
-def test_keep_shape_check_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -> None:
+def test_direct_path_lands_notice_without_qwen(tmp_path: Path, monkeypatch) -> None:
+    """2026-09-16 (owner): same value-stripped key + single canonical value
+    difference IS the conflict — lands the notice with ZERO Qwen calls."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     peer = tools.memory_write(content="连接池上限为 10。", subject="pool", tags=[], metadata=META)["data"]
@@ -131,7 +138,71 @@ def test_keep_shape_check_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["outcome"] == "notices_created"
-    assert backend.calls == 2, "bidirectional extraction still runs for keepers"
+    assert backend.calls == 0, "direct-path pairs never spend Qwen budget"
+    notices = tools.db.list_semantic_notices(status="open")
+    assert len(notices) == 1
+    payload = notices[0]["payload"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    assert payload["reason"] == "deterministic_same_key_value_diff"
+    assert payload["slot_provenance"]["attribute"] == "deterministic_skeleton"
+    assert payload["qwen_signal"]["status"] == "bypassed"
+    groups = {group["normalized_value"] for group in payload["value_groups"]}
+    assert groups == {"10", "99"}
+
+
+def test_multi_value_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -> None:
+    """Multi-value sentences are pairwise-ambiguous — the direct path skips
+    them and bidirectional extraction still runs."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer = tools.memory_write(content="连接池上限为 10，队列长度为 3。", subject="pool", tags=[], metadata=META)["data"]
+    new = tools.memory_write(content="连接池上限为 99，队列长度为 5。", subject="poolx", tags=[], metadata=META)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    backend = _CountingBackend(_strict_pair_backend())
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
+    result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
+    assert result["outcome"] == "notices_created"
+    assert backend.calls == 2, "bidirectional extraction still runs for non-direct keepers"
+
+
+def test_direct_path_dimension_veto_falls_back_to_qwen(tmp_path: Path, monkeypatch) -> None:
+    """生产/测试环境 dimension markers veto the direct path too — the pair
+    goes back to Qwen (whose mock backend vetoes nothing here, but the call
+    count proves the route)."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer = tools.memory_write(content="测试环境连接池上限为 10。", subject="pool", tags=[], metadata=META)["data"]
+    new = tools.memory_write(content="生产环境连接池上限为 99。", subject="poolx", tags=[], metadata=META)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    backend = _CountingBackend(_strict_pair_backend())
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
+    tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
+    # decide_evidence kills explicit scope mismatches at ignore; the point
+    # here is the direct path must NOT fire — whatever the route, no
+    # deterministic notice may land for a dimension-marked pair.
+    notices = tools.db.list_semantic_notices(status="open")
+    direct = [n for n in notices if _payload(n).get("reason") == "deterministic_same_key_value_diff"]
+    assert not direct
+
+
+def test_direct_path_version_token_guard(tmp_path: Path, monkeypatch) -> None:
+    """v1/v2 version ordinals read as bare values — evolution must not
+    become a direct conflict."""
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer = tools.memory_write(content="方案 v1 超时上限为 500ms。", subject="plan", tags=[], metadata=META)["data"]
+    new = tools.memory_write(content="方案 v2 超时上限为 200ms。", subject="plan2", tags=[], metadata=META)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    backend = _CountingBackend(_strict_pair_backend())
+    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
+    tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
+    notices = tools.db.list_semantic_notices(status="open")
+    direct = [n for n in notices if _payload(n).get("reason") == "deterministic_same_key_value_diff"]
+    assert not direct
 
 
 def test_notify_pair_passes_both_gates(tmp_path: Path, monkeypatch) -> None:

@@ -1240,6 +1240,215 @@ def test_decimal_point_preserved_in_normalization() -> None:
     assert normalize_value("1.5") != normalize_value("15")
 
 
+# ── 2026-09-16 (eval cf-oppo-10/12): direction-dependent fillers ──────────
+
+def test_normalize_value_strips_approximator_prefix_and_measure_ge() -> None:
+    from memory_arbiter.semantic_conflict import normalize_value
+    assert normalize_value("近 90 天") == normalize_value("90天")
+    assert normalize_value("约 500 元") == normalize_value("500元")
+    assert normalize_value("大约 3 小时") == normalize_value("3小时")
+    assert normalize_value("5个工作日") == normalize_value("5工作日")
+    # Real value differences survive the filler stripping.
+    assert normalize_value("近 90 天") != normalize_value("180天")
+    assert normalize_value("5个工作日") != normalize_value("72小时")
+
+
+def test_bidirectional_mirror_tolerates_direction_fillers() -> None:
+    """cf-oppo-10/12: both directions extract the same conflict with
+    direction-dependent surface forms ("90天" vs "近 90 天"); the strict
+    mirror must now read them as consistent, and the CJK-unit grounding must
+    ground "90天" in "近 90 天" — reaching notice_ready."""
+    forward = AttributeValueExtraction("无下单记录", "90天", "无下单记录", "180天")
+    reverse = AttributeValueExtraction("无下单记录", "近 180 天", "无下单记录", "近 90 天")
+    result = evaluate_pair_extractions(
+        forward, reverse,
+        {"quote": "新客定义为近 90 天无下单记录的账户。"},
+        {"quote": "新客定义为近 180 天无下单记录的账户。"},
+        require_bidirectional=True,
+    )
+    assert result.state == "notice_ready"
+    forward = AttributeValueExtraction("承诺时效", "5个工作日", "承诺时效", "72小时")
+    reverse = AttributeValueExtraction("承诺时效", "72小时", "承诺时效", "5工作日")
+    result = evaluate_pair_extractions(
+        forward, reverse,
+        {"quote": "对美专线清关承诺 5 个工作日内完成。"},
+        {"quote": "对美专线清关承诺 72 小时内完成。"},
+        require_bidirectional=True,
+    )
+    assert result.state == "notice_ready"
+
+
+# ── strict mirror boundary cases (2026-09-16) ─────────────────────────────
+# owner ruling: the bidirectional mirror stays STRICT (4-field cross equality
+# after normalization) — relaxing it to value-only consistency was tried and
+# reverted the same day: it rescued drift cases but also admits direction-
+# dependent attribute changes, which are exactly the coexistence shape the
+# gate exists to veto. Write-time compute and notice noise are bounded by
+# design; recall gaps from attribute-granularity drift (cf-oppo-01/12) are
+# accepted until an owner-approved, noise-calibrated proposal lands.
+
+# ── 2026-09-16 (owner): exact unit conversion ─────────────────────────────
+
+def test_unit_canonical_conversion() -> None:
+    from memory_arbiter.semantic_conflict import canonical_unit_value, normalize_value
+    # Exact physical relations convert to the canonical base (ms / kb / 元).
+    assert normalize_value("0.5s") == normalize_value("500ms")
+    assert normalize_value("72小时") == normalize_value("3天")
+    assert normalize_value("1GB") == normalize_value("1024mb")
+    assert normalize_value("90秒") == normalize_value("1.5分钟")
+    assert normalize_value("1.5 hours") == normalize_value("90 minutes")
+    assert normalize_value("5万") == "50000"
+    assert normalize_value("500块") == normalize_value("500元")
+    # Deliberately NOT converted: 工作日 (domain assumption), 月/年
+    # (variable length). % carries no physical conversion — and note the
+    # pre-existing _mechanical_normalize drops the sign, so "0.3%" reads as
+    # the bare number (unchanged by this change).
+    assert normalize_value("5个工作日") != normalize_value("40小时")
+    assert normalize_value("3个月") != normalize_value("90天")
+    assert normalize_value("0.3%") == "0.3"
+    # Non-numeric shapes are identity.
+    assert normalize_value("mysql") == "mysql"
+    assert canonical_unit_value("") == ""
+
+
+def test_numeric_channel_unit_equivalence_is_duplicate() -> None:
+    """"500ms" vs "0.5s" canonicalises equal — a duplicate, never a conflict
+    candidate; "500ms" vs "5s" stays a candidate."""
+    from memory_arbiter.semantic_conflict import decide_evidence
+    decision = decide_evidence("接口超时时间为 500ms。", "接口超时时间为 0.5s。")
+    assert decision.action == "ignore"
+    decision = decide_evidence("接口超时时间为 500ms。", "接口超时时间为 5s。")
+    assert decision.action == "check" and decision.reason == "numeric_value_candidate"
+
+
+# ── 2026-09-16 (owner): deterministic direct path ─────────────────────────
+
+def test_direct_value_verdict_threshold_and_guards() -> None:
+    from memory_arbiter.semantic_conflict import (
+        EvidenceDecision, decide_evidence, direct_value_verdict,
+    )
+    # Same skeleton + single canonical value difference → verdict.
+    decision = decide_evidence("接口超时时间为 500ms。", "接口超时时间为 200ms。")
+    verdict = direct_value_verdict(
+        "接口超时时间为 500ms。", "接口超时时间为 200ms。", decision, key_cosine=1.0,
+    )
+    assert verdict is not None and verdict[1] == "500ms" and verdict[2] == "200ms"
+    assert verdict[0]  # non-empty attribute from the skeleton
+    # Below the key threshold → back to Qwen (tested with DIFFERING
+    # skeletons; identical skeletons shortcut at cosine 1.0 by design).
+    differing = EvidenceDecision("check", "numeric_value_candidate", [], "500ms", "200ms")
+    assert direct_value_verdict(
+        "接口超时时间为 500ms。", "接口超时上限为 200ms。", differing, key_cosine=0.90,
+    ) is None
+    assert direct_value_verdict(
+        "接口超时时间为 500ms。", "接口超时上限为 200ms。", differing, key_cosine=0.97,
+    ) is not None
+    # Canonically EQUAL values never reach the direct path (not a candidate).
+    equal = decide_evidence("接口超时时间为 500ms。", "接口超时时间为 0.5s。")
+    assert direct_value_verdict(
+        "接口超时时间为 500ms。", "接口超时时间为 0.5s。", equal, key_cosine=1.0,
+    ) is None
+    # Version ordinals: evolution must not become a direct conflict.
+    versioned = EvidenceDecision("check", "numeric_value_candidate", [], "500ms", "200ms")
+    assert direct_value_verdict(
+        "方案 v1 超时上限为 500ms。", "方案 v2 超时上限为 200ms。", versioned, key_cosine=1.0,
+    ) is None
+    # Evolution wording veto still applies on the direct path.
+    evolving = decide_evidence("超时配置不再采用 500ms。", "超时配置改为 200ms。")
+    if evolving.action == "check":
+        assert direct_value_verdict(
+            "超时配置不再采用 500ms。", "超时配置改为 200ms。", evolving, key_cosine=1.0,
+        ) is None
+    # Multi-value sentences are pairwise-ambiguous.
+    multi = decide_evidence("连接池上限为 10，队列长度为 3。", "连接池上限为 99，队列长度为 5。")
+    assert multi.left_value and ", " in multi.left_value
+    assert direct_value_verdict(
+        "连接池上限为 10，队列长度为 3。", "连接池上限为 99，队列长度为 5。", multi, key_cosine=1.0,
+    ) is None
+
+
+def test_english_pairs_rule_layer() -> None:
+    """English evidence: numeric channel, identifier value-opposition, and
+    the direct path all work language-agnostically."""
+    from memory_arbiter.difference_classifier import classify_pair
+    from memory_arbiter.semantic_conflict import decide_evidence, direct_value_verdict
+    # Numeric channel with English units.
+    decision = decide_evidence(
+        "Refund requests over 5000 CNY require finance review.",
+        "Refund requests over 500 CNY require finance review.",
+    )
+    assert decision.action == "check" and decision.reason == "numeric_value_candidate"
+    assert classify_pair(
+        "Refund requests over 5000 CNY require finance review.",
+        "Refund requests over 500 CNY require finance review.",
+        route=decision.reason,
+    ) == "keep"
+    # Identifier opposition (MySQL/PostgreSQL) via the value-opposition keep.
+    left = "The production database uses MySQL with a dual-primary setup."
+    right = "The production database uses PostgreSQL with a single primary."
+    decision = decide_evidence(left, right)
+    assert decision.action == "check"
+    assert classify_pair(left, right, route=decision.reason) == "keep"
+    # English numeric pair with identical skeleton → direct verdict.
+    decision = decide_evidence(
+        "The connection pool limit is 10.", "The connection pool limit is 99.",
+    )
+    verdict = direct_value_verdict(
+        "The connection pool limit is 10.", "The connection pool limit is 99.",
+        decision, key_cosine=1.0,
+    )
+    assert verdict is not None and verdict[1] == "10" and verdict[2] == "99"
+
+
+def test_mirror_attribute_granularity_drift_stays_vetoed() -> None:
+    """cf-oppo-01 shape: both directions find a conflict at DIFFERENT
+    attribute granularity ("数据库选型" vs "库使用架构") — under the strict
+    mirror this is bidirectional_mapping_mismatch. Documented accepted miss.
+    """
+    forward = AttributeValueExtraction(
+        "数据库选型", "PostgreSQL 单主架构", "数据库选型", "MySQL 双主架构")
+    reverse = AttributeValueExtraction(
+        "库使用架构", "MySQL双主", "库使用架构", "PostgreSQL单主")
+    result = evaluate_pair_extractions(
+        forward, reverse,
+        {"quote": "金营平台生产库使用 PostgreSQL 单主架构，只读副本两个。"},
+        {"quote": "金营平台生产库使用 MySQL 双主架构，主从延迟容忍 500ms。"},
+        require_bidirectional=True,
+    )
+    assert result.state == "review_candidate"
+    assert result.reason == "bidirectional_mapping_mismatch"
+
+
+def test_mirror_dropped_unit_stays_vetoed() -> None:
+    """cf-oppo-12 shape: one direction drops the unit ("5个工作日" vs "5") —
+    strict normalized equality vetoes it. Accepted miss (owner ruling)."""
+    forward = AttributeValueExtraction("承诺时效", "5个工作日", "承诺时效", "72小时")
+    reverse = AttributeValueExtraction("承诺时效", "72小时", "承诺时效", "5")
+    result = evaluate_pair_extractions(
+        forward, reverse,
+        {"quote": "对美专线清关承诺 5 个工作日内完成。"},
+        {"quote": "对美专线清关承诺 72 小时内完成。"},
+        require_bidirectional=True,
+    )
+    assert result.state == "review_candidate"
+    assert result.reason == "bidirectional_mapping_mismatch"
+
+
+def test_mirror_still_catches_hallucination() -> None:
+    """A direction that changes the VALUE is a hallucination, not drift:
+    90/180 forward but 90/120 reverse must stay vetoed."""
+    forward = AttributeValueExtraction("无下单记录", "90天", "无下单记录", "180天")
+    reverse = AttributeValueExtraction("无下单记录", "90天", "无下单记录", "120天")
+    result = evaluate_pair_extractions(
+        forward, reverse,
+        {"quote": "新客定义为近 90 天无下单记录的账户。"},
+        {"quote": "新客定义为近 180 天无下单记录的账户。"},
+        require_bidirectional=True,
+    )
+    assert result.state == "review_candidate"
+    assert result.reason == "bidirectional_mapping_mismatch"
+
+
 def test_unknown_sentinel_rejection_is_case_insensitive() -> None:
     raw = '{"attribute_a":"db","value_a":"__UNKNOWN__","attribute_b":"db","value_b":"SQLite"}'
     extraction, error = extraction_from_text(raw)

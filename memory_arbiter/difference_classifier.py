@@ -17,6 +17,16 @@ library (27,832 pending pairs, 2026-09-13):
   engine cannot parse (MySQL/PostgreSQL class). Anything else has no
   extractable difference → clear.
 
+2026-09-16 (eval cf-oppo): the (2, 2) budget only fits near-identical
+sentences — a real same-skeleton value opposition in CJK prose blows past it
+on ordinary wording (MySQL vs PostgreSQL died at 8/8 unique tokens). A third
+keep shape therefore asks the owner question directly: does each side carry
+a VALUE-shaped token the other side lacks, under a shared-token anchor
+(has_value_opposition). Dotted versions (V1.1/V1.2) and bare years are
+deliberately NOT values — version/date fragments are evolution noise the
+calibration cleared on purpose; Chinese numerals canonicalise to Arabic so
+"12 个" vs "十二个" still reads as a duplicate, not an opposition.
+
 notify-route pairs (polarity_changed / todo_resolved) NEVER pass through
 here — real-conflict recall has no threshold; the routing layer protects
 them, not similarity.
@@ -39,6 +49,12 @@ SYMDIFF_MAX_UNIQUE = 2
 # garbage label (counting only — never flips a keep verdict): separator
 # lines, bare dates, or <8 content characters after stripping.
 GARBAGE_MIN_CONTENT_CHARS = 8
+# value-opposition keep (2026-09-16, eval cf-oppo): minimum shared-token
+# anchor for the two-sided shape (each side has a value the other lacks) and
+# the stricter anchor for the one-sided shape (only one side carries a value
+# — "必须持有 ISO9001" vs "无需任何认证").
+VALUE_OPPOSITION_MIN_COMMON = 4
+VALUE_OPPOSITION_ONE_SIDED_MIN_COMMON = 8
 
 _DATE_RE = re.compile(
     r"\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}日?"
@@ -140,6 +156,92 @@ def has_small_symmetric_difference(a: str, b: str) -> bool:
     )
 
 
+# ── value-opposition keep (2026-09-16, eval cf-oppo-01/06/07/11) ──
+# "Value-shaped" tokens, two grades: STRONG = digit-bearing tokens (p6,
+# iso9001, 500ms, 24) and Chinese numerals before a measure/unit char
+# (两个 → 2, 四倍 → 4) canonicalised to Arabic; LATIN = bare identifiers
+# (mysql, postgresql, lpr). Dotted versions and dates are scrubbed BEFORE
+# tokenising — "0.16.0" shatters into digit tokens (0, 16, 0) that are
+# evolution noise, never values (the V1.1/V1.2 calibration pair must stay
+# cleared); bare years are excluded at the token level.
+_DOTTED_VERSION_SPAN_RE = re.compile(r"v?\d+(?:\.\d+)+")
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_LATIN_VALUE_RE = re.compile(r"[a-z][a-z0-9]+")
+_LATIN_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "this", "that", "http", "https",
+    "www", "com", "org", "net", "io",
+})
+_CN_NUM_VALUE_RE = re.compile(r"[零一二三四五六七八九十百千万两]+(?=[个倍天次条人台轮])")
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+
+
+def _cn_to_int(text: str) -> "int | None":
+    """Minimal Chinese-numeral parser (digits + 十百千万); None on non-numeral."""
+    total = section = number = 0
+    for ch in text:
+        if ch in _CN_DIGITS:
+            number = _CN_DIGITS[ch]
+        elif ch in _CN_UNITS:
+            unit = _CN_UNITS[ch]
+            if unit == 10000:
+                total += (section + number) * unit
+                section = 0
+            else:
+                section += (number or 1) * unit
+            number = 0
+        else:
+            return None
+    return total + section + number
+
+
+def _value_tokens(text: str) -> "tuple[set[str], set[str]]":
+    """Return (strong, latin) value-token sets; see the block comment above."""
+    scrubbed = _DOTTED_VERSION_SPAN_RE.sub(" ", _DATE_RE.sub(" ", text.casefold()))
+    strong: set[str] = set()
+    latin: set[str] = set()
+    for token in _tokens(scrubbed):
+        if _YEAR_RE.fullmatch(token):
+            continue
+        if any(ch.isdigit() for ch in token):
+            strong.add(token)
+        elif _LATIN_VALUE_RE.fullmatch(token) and token not in _LATIN_STOPWORDS:
+            latin.add(token)
+    for match in _CN_NUM_VALUE_RE.finditer(scrubbed):
+        number = _cn_to_int(match.group(0))
+        if number is not None:
+            strong.add(str(number))
+    return strong, latin
+
+
+def has_value_opposition(a: str, b: str) -> bool:
+    """Each side carries a value the other lacks, under a shared-token anchor.
+
+    Two-sided (both have exclusive values → MySQL vs PostgreSQL) needs the
+    loose anchor and admits latin identifiers. One-sided (only one side
+    carries a value → 必须持有 ISO9001 vs 无需任何认证) counts STRONG values
+    only and needs the strict anchor — a bare one-sided latin word ("main")
+    is topic noise, and "same topic, one side mentions a number" is common
+    enough to demand a strong shared skeleton. Chinese numerals canonicalise
+    through the value-set subtraction: "12 个" vs "十二个" cancels and stays
+    a duplicate.
+    """
+    tokens_a, tokens_b = _tokens(a), _tokens(b)
+    common = len(tokens_a & tokens_b)
+    strong_a, latin_a = _value_tokens(a)
+    strong_b, latin_b = _value_tokens(b)
+    values_a, values_b = strong_a | latin_a, strong_b | latin_b
+    only_a = values_a - tokens_b - values_b
+    only_b = values_b - tokens_a - values_a
+    if only_a and only_b:
+        return common >= VALUE_OPPOSITION_MIN_COMMON
+    if (only_a & strong_a) or (only_b & strong_b):
+        return common >= VALUE_OPPOSITION_ONE_SIDED_MIN_COMMON
+    return False
+
+
+
 def classify_pair(
     quote_a: "str | None", quote_b: "str | None", *, route: str,
     entity_a: "str | None" = None, entity_b: "str | None" = None,
@@ -159,4 +261,7 @@ def classify_pair(
         return "clear"
     if "numeric_value_candidate" in route:
         return "keep" if name_cosine(quote_a, quote_b) >= DIFFERENCE_COSINE_KEEP else "clear"
-    return "keep" if has_small_symmetric_difference(quote_a, quote_b) else "clear"
+    return "keep" if (
+        has_small_symmetric_difference(quote_a, quote_b)
+        or has_value_opposition(quote_a, quote_b)
+    ) else "clear"
