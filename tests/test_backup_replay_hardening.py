@@ -43,3 +43,27 @@ def test_deeply_nested_line_is_invalid_not_fatal(tmp_path: Path) -> None:
     assert report["invalid_entries"][0]["line"] == 2
     assert "maximum recursion depth" in report["invalid_entries"][0]["reason"]
     assert report["entries"], "the well-formed line must still be readable"
+
+
+def test_replay_postprocess_is_instance_bound(tmp_path: Path) -> None:
+    """Adversarial-review pin (0.16.6 release round): a dangling @staticmethod
+    over ``_postprocess_replayed_memory`` shifted every argument one slot at
+    the only call site — an instance call would have passed the replay key as
+    ``self`` and blown up with AttributeError. No test reached that branch, so
+    pytest was green while the path was broken. This pin calls the method
+    through the product pipeline and asserts the four-tuple contract."""
+    from memory_arbiter.tools import MemoryTools
+
+    settings = Settings(
+        db_path=tmp_path / "memory.db",
+        backup_jsonl=tmp_path / "backup.jsonl",
+        client="t",
+        agent_id="t",
+    )
+    tools = MemoryTools(settings, MemoryDB(settings))
+    written = tools.memory_write(content="正文内容", subject="标题", tags=[])
+    status, stages, error_code, warnings = tools._operations._postprocess_replayed_memory(
+        "rk-pin-1", int(written["data"]["id"]),
+    )
+    assert isinstance(status, str) and isinstance(stages, dict)
+    assert error_code is None and warnings == []

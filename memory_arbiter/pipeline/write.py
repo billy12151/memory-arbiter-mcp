@@ -32,7 +32,10 @@ class _SubjectTagRecord(Protocol):
 
     subject: str | None
     tags: list[str]
-    content: str | None
+    # Invariant with the real record fields (MemoryRecord.content is str;
+    # _SubjectTagView coerces to str) — a ``str | None`` member here would
+    # reject MemoryRecord under mypy's mutable-protocol variance.
+    content: str
 
 
 class WritePipeline:

@@ -38,16 +38,21 @@ if TYPE_CHECKING:
 class _SubjectTagView:
     """Minimal read-only view for write-time duplicate-hint checks.
 
-    ``_similar_active_notice`` only reads ``.subject`` and ``.tags``; this
+    ``_similar_active_notice`` reads ``.subject``/``.tags``/``.content``; this
     lightweight view lets status-change paths (confirm/activate) reuse the
-    same check without building a full ``MemoryRecord``.
+    same check without building a full ``MemoryRecord``. Content is coerced
+    to str so the content-confirmation gate sees a real body (a missing
+    content would silently degrade the hint to low_confidence-only).
     """
 
-    __slots__ = ("subject", "tags")
+    __slots__ = ("subject", "tags", "content")
 
-    def __init__(self, subject: str | None, tags: list[str] | None) -> None:
+    def __init__(
+        self, subject: str | None, tags: list[str] | None, content: str | None = None,
+    ) -> None:
         self.subject = subject
         self.tags = tags or []
+        self.content = str(content or "")
 
 
 class OperationsPipeline:
@@ -1332,7 +1337,7 @@ class OperationsPipeline:
             )
             similar_notice = self._tools._write_pipeline._similar_active_notice(
                 int(memory_id),
-                _SubjectTagView(record.get("subject"), record.get("tags")),
+                _SubjectTagView(record.get("subject"), record.get("tags"), record.get("content")),
                 raw_workspace(record),
             )
             if similar_notice is not None:
@@ -1537,7 +1542,7 @@ class OperationsPipeline:
             )
             similar_notice = self._tools._write_pipeline._similar_active_notice(
                 int(memory_id),
-                _SubjectTagView(record.get("subject"), record.get("tags")),
+                _SubjectTagView(record.get("subject"), record.get("tags"), record.get("content")),
                 raw_workspace(record),
             )
             if similar_notice is not None:
@@ -2998,8 +3003,6 @@ class OperationsPipeline:
         if caller.isolation == "strict":
             data.update(caller.response_fields())
         return self.db.state.response(data, extra_warnings=list(caller.warnings))
-
-    @staticmethod
 
     def _postprocess_replayed_memory(
         self,

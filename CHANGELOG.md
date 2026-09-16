@@ -3,6 +3,14 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.6.post1] — 2026-09-16
+
+Three defects shipped in the 0.16.6 wheel, caught by the release round's CI (mypy --strict; local pytest was green because no test reached the affected branches):
+
+- **`_postprocess_replayed_memory` was instance-called under a dangling `@staticmethod`** — every argument shifted one slot at the only call site (backup replay's already-replayed branch), so the replay key landed in `self` and the branch would have raised AttributeError the moment it ran. The decorator is gone and a pin test now calls the method through the product pipeline.
+- **`_SubjectTagView` (status-change paths: confirm/activate) lacked the `content` member** the 0.16.6 content-confirmation gate reads — `getattr(record, "content", None)` silently returned None and every similar-memory hint on those paths degraded to `low_confidence`-only (body confirmation never ran). The view now carries a coerced `str` content; the `_SubjectTagRecord` protocol member is `str` to match `MemoryRecord` under mypy's mutable-protocol variance.
+- **Workspace-move sha-collision warnings returned a bare `str` where the contract is `list[str]`** (the slot-collision helper returns a list; the sha one returns a single string) — both refusal paths now hand back a one-item list, and the `params` annotation in the sha pre-check is parameterised.
+
 ## [0.16.6] — 2026-09-16
 
 Write-time content dedup gate (born from the m986/m987 byte-identical incident) plus a reviewed dead-weight sweep, now joined by the internal eval harness, the first-run demo protocol (mema #999 P0-1/P0-2), the similarity-hint redesign, and a harness-driven write-time conflict-detection repair wave. Design went through two audit/review rounds (functional impact + adversarial resurrection) before a line was written.

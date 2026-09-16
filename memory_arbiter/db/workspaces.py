@@ -972,7 +972,7 @@ class WorkspaceStore:
         target = "COALESCE(NULLIF(t.workspace_canonical, ''), t.workspace)"
         if only_id is not None:
             source = "m.id = ?"
-            params: tuple = (int(only_id), to_ws)
+            params: "tuple[int | str | None, str]" = (int(only_id), to_ws)
         else:
             source = f"{canonical} = ?"
             params = (from_ws, to_ws)
@@ -1127,7 +1127,7 @@ class WorkspaceStore:
                     return 0, collision
                 sha_collision = self._content_sha_collision_warning_on_conn(conn, new, from_ws=old)
                 if sha_collision is not None:
-                    return 0, sha_collision
+                    return 0, [sha_collision]
                 cur = conn.execute(
                     "UPDATE memories SET workspace_canonical = ? "
                     "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
@@ -1229,7 +1229,7 @@ class WorkspaceStore:
             conn, to_ws, from_ws=from_ws,
         )
         if sha_collision is not None:
-            return 0, sha_collision
+            return 0, [sha_collision]
         alias_key = _normalize_alias_key(from_ws)
         to_key = _normalize_alias_key(to_ws)
         cur = conn.execute(
