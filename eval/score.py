@@ -196,6 +196,23 @@ def _flatten(metrics: dict, prefix: str = "") -> dict[str, float]:
     return flat
 
 
+# Gate 方向语义（0.16.6 发版轮修正）：这些指标越低越好——漏检率/误召回/共存
+# 误报下降是改善，原先把任何下降都当回归拦，把冲突修复线的进步判成了 FAILED
+# （miss.rate 0.86→0.68 触发 10% 相对下降门，实际是召回翻倍）。语料元数据
+# （skip 数、返回条数）不是产品指标，不进门。
+_LOWER_IS_BETTER_SUBSTR = (
+    ".miss.", "irrelevant_false_pulls", "coexist_false_positive",
+)
+_SIM_FALSE_LABELS = ("clearly_different", "opposite_semantics", "same_entity_diff_attr")
+_GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target")
+
+
+def _lower_is_better(key: str) -> bool:
+    if any(s in key for s in _LOWER_IS_BETTER_SUBSTR):
+        return True
+    return any(f".{label}." in key for label in _SIM_FALSE_LABELS)
+
+
 def gate(current: dict, baseline: dict, rel_drop: float = DEFAULT_REL_DROP) -> dict[str, Any]:
     cur = _flatten(current)
     base = _flatten(baseline)
@@ -203,13 +220,27 @@ def gate(current: dict, baseline: dict, rel_drop: float = DEFAULT_REL_DROP) -> d
     for key, base_value in sorted(base.items()):
         if key not in cur or key.endswith((".count", ".total", ".n", "first_relevant_rank")):
             continue
+        if any(key.endswith(meta) for meta in _GATE_META_KEYS):
+            continue
         cur_value = cur[key]
+        if _lower_is_better(key):
+            if base_value <= 0 or cur_value <= base_value:
+                continue
+            rise = (cur_value - base_value) / base_value
+            if rise > rel_drop:
+                failures.append({
+                    "metric": key, "direction": "lower_is_better",
+                    "baseline": base_value, "current": cur_value,
+                    "relative_rise": round(rise, 4), "threshold": rel_drop,
+                })
+            continue
         if base_value <= 0 or cur_value >= base_value:
             continue
         drop = (base_value - cur_value) / base_value
         if drop > rel_drop:
             failures.append({
-                "metric": key, "baseline": base_value, "current": cur_value,
+                "metric": key, "direction": "higher_is_better",
+                "baseline": base_value, "current": cur_value,
                 "relative_drop": round(drop, 4), "threshold": rel_drop,
             })
     return {"gate": "FAILED" if failures else "PASSED", "rel_drop_threshold": rel_drop,
@@ -272,10 +303,16 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
             f"- {gate_result['gate']}（相对下降阈值 {gate_result['rel_drop_threshold']:.0%}）",
         ]
         for failure in gate_result["failures"]:
-            lines.append(
-                f"  - {failure['metric']}: {failure['baseline']} → {failure['current']}"
-                f"（降 {failure['relative_drop']:.1%}）"
-            )
+            if failure.get("direction") == "lower_is_better":
+                lines.append(
+                    f"  - {failure['metric']}（越低越好）: {failure['baseline']} → {failure['current']}"
+                    f"（升 {failure['relative_rise']:.1%}）"
+                )
+            else:
+                lines.append(
+                    f"  - {failure['metric']}: {failure['baseline']} → {failure['current']}"
+                    f"（降 {failure['relative_drop']:.1%}）"
+                )
         lines.append("")
     return "\n".join(lines)
 
