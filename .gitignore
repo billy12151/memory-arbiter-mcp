@@ -19,6 +19,8 @@ env/
 *.sqlite3-shm
 *.sqlite3-wal
 *.jsonl
+# eval fixtures are the harness exam papers — they must ship with the repo
+!eval/fixtures/**/*.jsonl
 
 # Environment files
 .env
