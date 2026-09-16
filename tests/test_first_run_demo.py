@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-DOC = REPO / "docs" / "FIRST_RUN_DEMO.zh-CN.md"
+DOC = REPO / "memory_arbiter" / "FIRST_RUN_DEMO.zh-CN.md"
 
 
 def test_demo_doc_exists_with_core_sections() -> None:
@@ -51,3 +51,32 @@ def test_demo_tag_and_purpose_conventions_pinned() -> None:
     assert "entity" in text and "scope" in text
     # 诚实口径：不得宣称演示命中率=全库准确率
     assert "不代表" in text
+
+
+def test_referenced_readback_surfaces_exist() -> None:
+    """§2/§3①/§3③ 实操引用的面：subject 必填、按 ID read、notice list。"""
+    import tempfile
+
+    from memory_arbiter.config import Settings
+    from memory_arbiter.db import MemoryDB
+    from memory_arbiter.tools import MemoryTools
+
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = Settings(
+            db_path=Path(tmp) / "t.sqlite3", backup_jsonl=Path(tmp) / "b.jsonl",
+            client="t", agent_id="t",
+        )
+        tools = MemoryTools(settings, MemoryDB(settings))
+        # §2 统一规范：subject 缺失被 remember 拒绝
+        rejected = tools.memory("remember", {"content": "x", "workspace": "default"})
+        assert rejected["data"]["field"] == "subject"
+        written = tools.memory(
+            "remember", {"content": "正文", "subject": "标题", "workspace": "default"},
+        )
+        # §3① 按 ID read 回全文
+        readback = tools.memory("read", {"memory_id": written["data"]["id"]})
+        assert (readback.get("data") or {}).get("memory", {}).get("content") == "正文"
+        # §3③ 冲突 notice 的主动查询面
+        listing = tools.memory_repair("notice", {"action": "list"})
+        assert listing.get("ok") is True
+        assert isinstance((listing.get("data") or {}).get("notices"), list)
