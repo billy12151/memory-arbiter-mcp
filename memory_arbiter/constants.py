@@ -150,9 +150,14 @@ SCAN_TASK_RECHECK_SECONDS = 3600
 # Write-time duplicate hint (subject/tags similarity over active memories):
 # fires only when BOTH the normalized-subject ratio and the tag Jaccard clear
 # their bars, so deliberate series entries (tier-1 vs tier-2 plans sharing
-# most tags) stay quiet unless the subjects are near-identical. Conservative
-# start; loosen by editing constants after real-library feedback.
-WRITE_SIMILAR_SUBJECT_RATIO = 0.95
+# most tags) stay quiet unless the subjects are near-identical. Subject bar
+# 0.95→0.80 (owner 2026-09-16): at 0.95 the gate only fired at ratio ≥0.968
+# and missed the natural-suffix rewrites entirely (eval harness: 2/12 on the
+# natural-gradient corpus; 0.80 recovers 8/12 with 0/36 false positives, and
+# the tag-Jaccard 0.8 gate keeps real-library write noise unchanged at 5
+# pairs — see eval/sweep_similar_threshold.py and baselines). The hint is
+# advisory — the agent/user triages, so recall is preferred over silence.
+WRITE_SIMILAR_SUBJECT_RATIO = 0.8
 WRITE_SIMILAR_TAG_JACCARD = 0.8
 WRITE_SIMILAR_MAX_HINTS = 2
 # Recall channel (0.15.3): with a loaded embedder the hint recalls candidates
