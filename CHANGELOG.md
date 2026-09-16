@@ -3,7 +3,7 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
-## [0.16.6.post1] — 2026-09-16
+## [0.16.7] — 2026-09-16
 
 Three defects shipped in the 0.16.6 wheel, caught by the release round's CI (mypy --strict; local pytest was green because no test reached the affected branches):
 
