@@ -3,6 +3,22 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.8] — 2026-09-17
+
+Judge-model upgrade plus two pre-Qwen vetoes, driven by the model-evaluation line (mema #1012) and owner adjudications through the day.
+
+### Added
+
+- **Decode-family routing for the pair judge (Qwen3 support).** The backend reads the GGUF `general.architecture` field on load: `qwen3`-family models drop the `"\n\n"` stop sequence (their empty `<think>` shell emits it at the second token, truncating the whole output to `<think>`) and carry a `/no_think\n` prefix in the user turn (default thinking burns the entire 384-token budget). **Qwen2.5 paths keep their legacy decode parameters byte-for-byte** (owner compatibility constraint) — existing installs are unaffected. A behavioural self-heal (same policy as the embedder's GPU fallback) covers a failed probe: two consecutive `<think`-prefixed invalid outputs flip the backend to Qwen3 params and rerun the pair; `model_family`/`family_autodetected` surface in backend status.
+- **Two pre-Qwen vetoes in `decide_evidence`** (owner principle: filter design-evolution / ops noise BEFORE spending Qwen). `ignore/ops_marker` — timestamp-suffixed slugs (`-1783837684`) and test-marker wording; deliberately does NOT match "conflict-test" (that baseline pair is a true conflict per owner ruling). `ignore/decision_vs_observation` — a decision wording on one side (用户确认/修正/拍板/裁定/要求/提出/原则/决定/共识) against an evaluation wording on the other (测试/评测/实测/样本/tuning/…): evidence-versus-verdict is not two claims fighting. Calibration on the governed negatives: 12 positives zero false-veto, 17/43 negatives captured (42% of the owner's own dismissal record), known boundary (owner-accepted): implementation drift ("用户要求 3 秒" vs "实测配置 5 秒") is filtered too.
+- **Unit table extended with workday/calendar-day units** (owner-directed, cf-oppo-12): 工作日/自然日 convert as natural 24-hour days, Chinese and English both (个工作日/日/business day(s)/workday(s)/working day(s)/calendar day(s)/days), value/skeleton/duplicate regexes kept in one canonical place. "72 小时 vs 5 个工作日" now lands through the deterministic direct path (previously the unrecognised unit degraded the value to a bare 5 and left "个工作日" in the skeleton).
+- **Version-ordinal value veto** (`coexist_version_value_evolution`): both sides extracting version-shaped values (v-prefixed with any dotted tail, or a 3+ segment ordinal; a single dotted number like 2.5 does not count) is release-to-release evolution, never a conflict. Zero false-veto on rates/grades/amounts/percentages.
+
+### Changed
+
+- **Default judge model for fresh installs is the official Qwen3-0.6B-Q8_0** (610MB; the official repo ships small sizes only as Q8_0), HF + ModelScope dual-source. Evidence line: on the Qwen-layer target set the incumbent 0.5B scored 0/10 (side-attribution copies and threshold-bleed), Q4_K_M 1/10, Q8_0 4/10, and 1.7B 2/10 (stronger models extract MORE specifically, so the two directions drift apart more — plus one unstable output and +40% latency). Existing installs keep their configured model; switching is a one-line `semantic_conflict.model_path` change, both generations run under the family routing.
+- `PAIR_PROMPT_VERSION` stays `pair-v8` and `CONFLICT_DETECTOR_VERSION` stays v3: the prompt text is unchanged and the difference gate is untouched (the dedupe key carries neither — the model executor is visible through backend status instead).
+
 ## [0.16.7] — 2026-09-16
 
 Three defects shipped in the 0.16.6 wheel, caught by the release round's CI (mypy --strict; local pytest was green because no test reached the affected branches):
