@@ -314,6 +314,26 @@ _EVALUATION_RE = re.compile(
     r"测试|评测|实测|样本|tuning|跑了|实验|测得|结论是|verify|verified|measured",
     re.IGNORECASE,
 )
+# Process-record veto (2026-09-17, owner principle extended): review rounds,
+# design→release progression and re-verification notes are workflow records,
+# not competing claims — the bidirectional gate only stopped them by luck
+# (inconsistent extractions), and single-direction let three through. A
+# same-object-id rule was measured and DROPPED: "任务 id=123 预算 5000 vs
+# 500" is exactly the real conflict this product exists to catch.
+_PROCESS_REVIEW_RE = re.compile(
+    r"review findings|follow[- ]?up review|adversarial review|复审|审查结论|review for id",
+    re.IGNORECASE,
+)
+_PROCESS_REVERIFY_RE = re.compile(
+    r"重启后.{0,8}再次?验证|复验|re[- ]?verif|verify again",
+    re.IGNORECASE,
+)
+_PROCESS_DESIGN_RE = re.compile(
+    r"设计文档|最终设计|design[_ -]?v\d|方案[_ -]?v\d", re.IGNORECASE,
+)
+_PROCESS_RELEASE_RE = re.compile(
+    r"发版完成|已发布|已上线|released|deployment complete", re.IGNORECASE,
+)
 _VALUE_RE = re.compile(
     r"(?<![\w.])v?\d+(?:\.\d+){0,2}\s*"
     r"(?:ms|s|秒|分钟|小时|个工作日|工作日|个自然日|自然日|日|天|%|mb|gb|kb|条|次|核|g"
@@ -405,6 +425,20 @@ def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
         or (_DECISION_RE.search(right_text or "") and _EVALUATION_RE.search(left_text or ""))
     ):
         return EvidenceDecision("ignore", "decision_vs_observation")
+    # Process records: one side being workflow prose (review findings /
+    # follow-up review / re-verification after restart) or a design↔release
+    # pair marks the pair as iterations of one effort. Calibration: the
+    # three single-direction false positives (review rounds, design→release,
+    # re-verify) all captured, 12 positives zero false-veto.
+    if _PROCESS_REVIEW_RE.search(left_text or "") or _PROCESS_REVIEW_RE.search(right_text or ""):
+        return EvidenceDecision("ignore", "process_record")
+    if _PROCESS_REVERIFY_RE.search(left_text or "") or _PROCESS_REVERIFY_RE.search(right_text or ""):
+        return EvidenceDecision("ignore", "process_record")
+    if (
+        (_PROCESS_DESIGN_RE.search(left_text or "") and _PROCESS_RELEASE_RE.search(right_text or ""))
+        or (_PROCESS_DESIGN_RE.search(right_text or "") and _PROCESS_RELEASE_RE.search(left_text or ""))
+    ):
+        return EvidenceDecision("ignore", "process_record")
 
     left_values = _normalized_values(left_text)
     right_values = _normalized_values(right_text)

@@ -2642,3 +2642,27 @@ def test_pre_qwen_vetoes_ops_marker_and_decision_vs_observation() -> None:
     # 保活：数值正样本不受 veto 影响
     assert decide_evidence("单笔退款超过 5000 元需要财务复核。",
                            "单笔退款超过 500 元就需要财务复核。").reason == "numeric_value_candidate"
+
+
+def test_pre_qwen_veto_process_records() -> None:
+    """2026-09-17（owner 原则延伸）：过程记录（review 轮次/设计→发版/
+    重启复验）在 Qwen 之前过滤——单向实测三个穿透形态的收口。业务
+    对象 id 的值对立（任务 id=123 预算 5000 vs 500）必须保活。"""
+    from memory_arbiter.semantic_conflict import decide_evidence
+    assert decide_evidence(
+        "id=609 adversarial review findings after implementation: backend import",
+        "Follow-up review for id=609 after attempted fixes: environment confirmed",
+    ).reason == "process_record"
+    assert decide_evidence(
+        "## 设计文档\n最终设计：v0.7.3_design_v3_final.md，审核已经过 8 轮。",
+        "# memory-arbiter v0.8.0 发版完成\n分支已合并到 main。",
+    ).reason == "process_record"
+    assert decide_evidence(
+        "JingleAI 使用 OpenClaw venv 验证 sqlite_vec 与 GGUF embedding 链路。",
+        "JingleAI 重启后再次验证 memory-arbiter：sqlite_vec、embedding、检索链路正常。",
+    ).reason == "process_record"
+    # 保活：业务对象 id 的真值对立（same-object-id 规则被刻意砍掉的原因）
+    d = decide_evidence("任务 id=123 的预算上限 5000 元。", "任务 id=123 的预算上限 500 元。")
+    assert d.reason == "numeric_value_candidate"
+    assert decide_evidence("单笔退款超过 5000 元需要财务复核。",
+                           "单笔退款超过 500 元就需要财务复核。").reason == "numeric_value_candidate"
