@@ -3,6 +3,15 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.9] — 2026-09-17
+
+Docs-only release: the first-run demo protocol gets its first post-freeze wording revision plus a corpus-pinning fix — both owner-directed after the v3 freeze turned out to speak engineer to non-developers and to leave the calibration numbers hostage to agent-improvised titles.
+
+### Changed
+
+- **First-run demo scripts rewritten in plain language (`memory_arbiter/FIRST_RUN_DEMO.zh-CN.md` v4).** §0 gains a four-rule presentation discipline (hard requirement): plain wording only, with tool/field/tag names confined to the agent-facing 实操 steps and never read to the user; tool responses are translated by the agent, never pasted — duplicate/conflict hints are shown as the two original sentences side by side plus one plain-language sentence; simple text diagrams where they help; numbers reported exactly as measured, misses stated as misses. Every user-facing script (§1/§3①②③/§4/§5/§6/§7/§8) is rewritten for a non-developer audience, §5 gains a "shared ledger" text diagram, and the workspace concept is reworded as 抽屉 (drawers, matching README.zh-CN's metaphor). Operation steps, tool interfaces, and `tests/test_first_run_demo.py` pins are untouched.
+- **§2 demo-corpus subjects pinned to a verbatim table (v4.1).** v3 said "示例内容可直接使用" (contents may be used verbatim) but never pinned the `subject`, while §4's script hard-codes "similarity hint should fire 2×" — and that hint rides the subject-similarity gate (`WRITE_SIMILAR_SUBJECT_RATIO = 0.8`). A cross-model rehearsal exposed the gap: an agent that naturally stripped the 「演示记忆：」 prefix from its improvised titles dropped the conflict pair to 0.7692 and the hint silently fired 1/2; even the full-sentence reading only reaches 0.8163, a 1.6-point margin. The 8 subjects are now a copy-verbatim table with an explicit "do not rewrite, shorten, or improve" pin, and the near-duplicate/conflict pairs deliberately share identical subjects (similarity 1.0 — no margin to lose). `content` strings are unchanged; the v3 maintenance note's implicit "彩排数字依赖原 subject 长度" dependency is now explicit in the doc.
+
 ## [0.16.8] — 2026-09-17
 
 Judge-model upgrade plus two pre-Qwen vetoes, driven by the model-evaluation line (mema #1012) and owner adjudications through the day.
