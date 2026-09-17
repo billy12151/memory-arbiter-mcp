@@ -1345,6 +1345,14 @@ class LocalGGUFSemanticBackend:
         self._pair_retry_recovered = 0
         self._pair_l3_truncated = 0
         self._gpu_fallback = False
+        # 2026-09-17 (0.16.8): decode-parameter family routing. Qwen3-style
+        # models must drop the "\n\n" stop (their <think>\n\n shell would be
+        # cut at the second token) and carry a /no_think prefix. Detected from
+        # the GGUF architecture field on load; a legacy-parametered Qwen3
+        # self-heals behaviourally (see classify_pair).
+        self._qwen3_style = False
+        self._think_strikes = 0
+        self._family_autodetected = 0
 
     def _build_llm(self) -> Any:
         if not self.model_path.exists():
@@ -1360,7 +1368,14 @@ class LocalGGUFSemanticBackend:
         if self.n_batch > 0:
             kwargs["n_batch"] = self.n_batch
         try:
-            return Llama(**kwargs)
+            llm = Llama(**kwargs)
+            # Family routing (0.16.8): general.architecture is a mandatory
+            # GGUF field (qwen3 / qwen2 / …) — safer than general.name.
+            # Probe failures keep the conservative legacy decode params; the
+            # behavioural self-heal in classify_pair is the backstop.
+            architecture = str((getattr(llm, "metadata", None) or {}).get("general.architecture") or "")
+            self._qwen3_style = "qwen3" in architecture.lower()
+            return llm
         except Exception:
             # A3 fallback (second-round review L3): with the offload default
             # flipped on, a host whose Metal/GPU init fails would otherwise
@@ -1542,14 +1557,21 @@ class LocalGGUFSemanticBackend:
             # comes from the chat template.
             max_tokens = 384
             cjk = evidence_is_cjk(left, right)
+            # 0.16.8: Qwen3-style models need the /no_think soft switch in
+            # the user turn (default thinking burns the whole 384 budget and
+            # answers nothing) and must NOT stop on "\n\n" (the empty think
+            # shell emits it at token two). Qwen2.5 keeps both legacy params
+            # byte-for-byte — owner compatibility constraint.
+            nothink = "/no_think\n" if self._qwen3_style else ""
             messages: list[dict[str, str]] = [
                 {"role": "system", "content": _PAIR_PROMPT if cjk else _PAIR_PROMPT_EN},
                 {"role": "user", "content": (
-                    f"输入: {self._pair_text(left, right)}\n输出:"
+                    f"{nothink}输入: {self._pair_text(left, right)}\n输出:"
                     if cjk else
-                    f"Input: {self._pair_text(left, right)}\nOutput:"
+                    f"{nothink}Input: {self._pair_text(left, right)}\nOutput:"
                 )},
             ]
+            decode_stop = None if self._qwen3_style else ["\n\n"]
             # A6 queue gate: with other requests waiting, one attempt only —
             # an invalid output then fails fast instead of doubling the wait
             # of everything behind it.
@@ -1564,13 +1586,47 @@ class LocalGGUFSemanticBackend:
                         max_tokens=max_tokens,
                         temperature=0.0,
                         top_p=0.9,
-                        stop=["\n\n"],
+                        stop=decode_stop,
                     )
                 usage = out.get("usage") or {}
                 prompt_tokens_total += int(usage.get("prompt_tokens") or 0)
                 generated_tokens_total += int(usage.get("completion_tokens") or 0)
                 raw = str(out["choices"][0]["message"]["content"] or "")
                 signal = model_signal_from_text(raw)
+                # Behavioural family self-heal (0.16.8): a Qwen3-style model
+                # loaded under legacy params emits exactly "<think" and dies
+                # at the "\n\n" stop. Two CONSECUTIVE strikes (a single one
+                # could be a legacy model echoing think-tag prose) flip this
+                # backend to Qwen3 params and rerun the pair once; a clean
+                # output resets the streak.
+                if not self._qwen3_style:
+                    if signal.parsed is None and raw.lstrip().startswith("<think"):
+                        with self._cond:
+                            self._think_strikes += 1
+                            if self._think_strikes >= 2:
+                                self._qwen3_style = True
+                                self._family_autodetected += 1
+                        if self._qwen3_style:
+                            messages = [
+                                messages[0],
+                                {"role": "user", "content": f"/no_think\n{messages[1]['content']}"},
+                            ]
+                            decode_stop = None
+                            with self._infer_lock:
+                                out = llm.create_chat_completion(
+                                    messages=messages,
+                                    max_tokens=max_tokens,
+                                    temperature=0.0,
+                                    top_p=0.9,
+                                )
+                            usage = out.get("usage") or {}
+                            prompt_tokens_total += int(usage.get("prompt_tokens") or 0)
+                            generated_tokens_total += int(usage.get("completion_tokens") or 0)
+                            raw = str(out["choices"][0]["message"]["content"] or "")
+                            signal = model_signal_from_text(raw)
+                    elif signal.parsed is not None:
+                        with self._cond:
+                            self._think_strikes = 0
                 strategy = None
                 if signal.candidate_type in {"invalid_json", "invalid_schema"}:
                     l3_signal = _l3_truncated_signal(raw)
@@ -1597,12 +1653,15 @@ class LocalGGUFSemanticBackend:
                 feedback = _pair_retry_feedback(strategy, signal.error or "", raw)
                 if strategy == "truncated":
                     retry_max_tokens = SEMANTIC_PAIR_RETRY_MAX_TOKENS
+                    # Re-read the family flag: the self-heal above may have
+                    # flipped it mid-call.
+                    retry_nothink = "/no_think\n" if self._qwen3_style else ""
                     retry_messages = [
                         messages[0],
                         {"role": "user", "content": (
-                            f"输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"
+                            f"{retry_nothink}输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"
                             if cjk else
-                            f"Input: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\nOutput:"
+                            f"{retry_nothink}Input: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\nOutput:"
                         )},
                         {"role": "user", "content": feedback},
                     ]
@@ -1746,6 +1805,8 @@ class LocalGGUFSemanticBackend:
                 "pair_retry_recovered": self._pair_retry_recovered,
                 "pair_l3_truncated": self._pair_l3_truncated,
                 "gpu_fallback": self._gpu_fallback,
+                "model_family": "qwen3" if self._qwen3_style else "legacy",
+                "family_autodetected": self._family_autodetected,
             }
 
     def status(self) -> dict[str, Any]:
@@ -1769,6 +1830,8 @@ class LocalGGUFSemanticBackend:
                 "pair_retried": self._pair_retried,
                 "pair_retry_recovered": self._pair_retry_recovered,
                 "pair_l3_truncated": self._pair_l3_truncated,
+                "model_family": "qwen3" if self._qwen3_style else "legacy",
+                "family_autodetected": self._family_autodetected,
             }
 
 
@@ -2191,6 +2254,11 @@ class IsolatedGGUFSemanticBackend:
                 "pair_retried": child_status.get("pair_retried"),
                 "pair_retry_recovered": child_status.get("pair_retry_recovered"),
                 "pair_l3_truncated": child_status.get("pair_l3_truncated"),
+                # Decode-family routing (0.16.8): which parameter set the child
+                # actually runs, and whether it had to self-heal from legacy
+                # params (metadata probe missed).
+                "model_family": child_status.get("model_family"),
+                "family_autodetected": child_status.get("family_autodetected"),
                 # True once the child's GPU offload failed and it fell back to
                 # CPU (A3 self-healing; visible only after a classify_pair).
                 "gpu_fallback": child_status.get("gpu_fallback"),
