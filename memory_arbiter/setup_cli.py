@@ -53,16 +53,19 @@ LLAMA_CPP_CPU_EXTRA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 # Semantic-conflict (Qwen) model — the second half of a "full" install. URLs
 # verified 2026-09-09: HF honours Range (206), ModelScope answers 200 to a
 # ranged probe (the downloader treats an ignored Range as restart-from-zero).
-QWEN_MODEL_FILENAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
-QWEN_MODEL_DIRNAME = "Qwen2.5-0.5B-Instruct"
-EXPECTED_QWEN_BYTES = 491_400_032  # q4_k_m; exact (production model on disk)
+# 0.16.8: default judge model is the official Qwen3-0.6B Q8_0 (the official
+# repo ships small sizes only as Q8_0). Existing installs keep whatever their
+# config points at — the decode-family routing accepts both generations.
+QWEN_MODEL_FILENAME = "Qwen3-0.6B-Q8_0.gguf"
+QWEN_MODEL_DIRNAME = "Qwen3-0.6B"
+EXPECTED_QWEN_BYTES = 639_446_688  # Q8_0; exact (production model on disk)
 QWEN_HF_URL = (
-    "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
-    "/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF"
+    "/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 )
 QWEN_MODELSCOPE_URL = (
-    "https://modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
-    "/resolve/master/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    "https://modelscope.cn/models/Qwen/Qwen3-0.6B-GGUF"
+    "/resolve/master/Qwen3-0.6B-Q8_0.gguf"
 )
 
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
