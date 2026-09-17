@@ -292,6 +292,29 @@ def _c_conflicts_backlog(ctx: _DoctorCtx) -> Finding:
     )
 
 
+def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
+    """0.16.8: the legacy Qwen2.5-0.5B judge is in maintenance mode (owner
+    2026-09-17, real users in single digits — soft-push, never refuse): the
+    decoder still runs it byte-for-byte, but doctor nudges the upgrade.
+    Path-string based (the piggybacked model_family only exists after the
+    first judged pair); an unset path means the user opted out of semantic
+    conflict entirely, which is not this check's business."""
+    path = ctx.settings.semantic_conflict_model_path
+    if path is None:
+        return None
+    lowered = str(path).lower()
+    if "qwen2.5" not in lowered or "0.5b" not in lowered:
+        return None
+    return _finding(
+        "semantic.judge_model", False,
+        "conflict judge model is the legacy Qwen2.5-0.5B (maintenance mode since 0.16.8); "
+        "the recommended judge is Qwen3-0.6B-Q8_0 (write-time conflict recall materially "
+        "higher, single-direction 0.45s/pair on GPU) — update semantic_conflict.model_path "
+        "in config.json and restart to switch",
+        evidence={"model_path": str(path)},
+    )
+
+
 def _c_conflicts_scan_required(ctx: _DoctorCtx) -> Finding:
     return _finding(
         "conflicts.scan_required", not ctx.conflict_scan_required,
@@ -652,6 +675,7 @@ _CHECKS: tuple[_Check, ...] = (
     _c_capacity_attention_volume,
     _c_recall_blacklist,
     _c_workspace_review,
+    _c_semantic_judge_model,
     _c_config_warnings,
 )
 

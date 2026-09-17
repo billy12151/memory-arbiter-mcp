@@ -19,7 +19,7 @@ from memory_arbiter.semantic_conflict import (
     AttributeValueExtraction,
     ModelSignal,
     decide_evidence,
-    evaluate_pair_extractions,
+    evaluate_single_direction_extraction,
     normalize_value,
 )
 from memory_arbiter.tools import MemoryTools
@@ -156,23 +156,21 @@ def test_decide_evidence_date_hyphens_are_not_signs() -> None:
     assert decision.reason != "equivalent_value"
 
 
-def test_write_notice_requires_consistent_bidirectional_qwen_mapping() -> None:
+def test_write_notice_single_direction_mirror_required() -> None:
+    """Single-direction era (owner 2026-09-17): one clean extraction lands;
+    a non-mirroring extraction (different attributes inside it) is vetoed —
+    the cross-direction consistency check is retired with the mirror."""
     forward = AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒")
-    reverse = AttributeValueExtraction("接口超时", "30 秒", "接口超时", "5 秒")
-    ready = evaluate_pair_extractions(
-        forward, reverse,
-        {"quote": "接口超时为 5 秒。"}, {"quote": "接口超时为 30 秒。"},
-        require_bidirectional=True,
+    ready = evaluate_single_direction_extraction(forward,
+        {"quote": "接口超时为 5 秒。"}, {"quote": "接口超时为 30 秒。"}
     )
     assert ready.state == "notice_ready"
-    inconsistent = AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒")
-    rejected = evaluate_pair_extractions(
-        forward, inconsistent,
-        {"quote": "接口超时为 5 秒。"}, {"quote": "接口超时为 30 秒。"},
-        require_bidirectional=True,
+    drifting = AttributeValueExtraction("接口超时", "5 秒", "部署架构", "30 秒")
+    rejected = evaluate_single_direction_extraction(drifting,
+        {"quote": "接口超时为 5 秒。"}, {"quote": "接口超时为 30 秒。"}
     )
     assert rejected.state == "review_candidate"
-    assert rejected.reason == "bidirectional_mapping_mismatch"
+    assert rejected.reason == "not_same_attribute_different_value"
 
 
 def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> None:
@@ -472,11 +470,8 @@ def test_guillotine_pair_yields_review_candidate_not_notice() -> None:
         "（owner 拍板：服务端不替 Agent 挑重要命中，"
     )
     beheaded_b = "透出前过滤：kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计"
-    gate = evaluate_pair_extractions(
-        AttributeValueExtraction("命中透出策略", beheaded_a, "命中透出策略", beheaded_b),
-        AttributeValueExtraction("命中透出策略", beheaded_b, "命中透出策略", beheaded_a),
-        {"quote": _GUILOTINE_QUOTE_A}, {"quote": _GUILOTINE_QUOTE_B},
-        require_bidirectional=True,
+    gate = evaluate_single_direction_extraction(AttributeValueExtraction("命中透出策略", beheaded_a, "命中透出策略", beheaded_b),
+        {"quote": _GUILOTINE_QUOTE_A}, {"quote": _GUILOTINE_QUOTE_B}
     )
     assert gate.state == "review_candidate", gate
     assert gate.reason == "qwen_unverified"
@@ -485,18 +480,14 @@ def test_guillotine_pair_yields_review_candidate_not_notice() -> None:
 def test_write_notice_rejects_whole_quote_values_but_accepts_short_values() -> None:
     left_quote = "生产环境的接口超时策略明确设置为 5 秒。"
     right_quote = "生产环境的接口超时策略明确设置为 30 秒。"
-    copied = evaluate_pair_extractions(
-        AttributeValueExtraction("接口超时", left_quote, "接口超时", right_quote),
-        AttributeValueExtraction("接口超时", right_quote, "接口超时", left_quote),
-        {"quote": left_quote}, {"quote": right_quote}, require_bidirectional=True,
+    copied = evaluate_single_direction_extraction(AttributeValueExtraction("接口超时", left_quote, "接口超时", right_quote),
+        {"quote": left_quote}, {"quote": right_quote}
     )
     assert copied.state == "review_candidate"
     assert copied.reason == "qwen_unverified"
 
-    short = evaluate_pair_extractions(
-        AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒"),
-        AttributeValueExtraction("接口超时", "30 秒", "接口超时", "5 秒"),
-        {"quote": left_quote}, {"quote": right_quote}, require_bidirectional=True,
+    short = evaluate_single_direction_extraction(AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒"),
+        {"quote": left_quote}, {"quote": right_quote}
     )
     assert short.state == "notice_ready"
 
@@ -3227,44 +3218,6 @@ def test_applying_reentry_context_requires_revision_and_action(
 
     assert result["outcome"] == "notices_created"
     assert result["notices_created"] == 1
-
-
-def test_scan_candidates_qwen_enhancement_populates_value_groups(tmp_path: Path, monkeypatch) -> None:
-    """Spec §7.1: bounded Qwen enhancement enriches rule candidates in-place."""
-    tools = make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    meta = {"entity": "svc", "scope": "production"}
-    a = tools.memory_write(content="生产数据库使用 mysql 方案", subject="a", tags=[], metadata=meta)["data"]
-    b = tools.memory_write(content="生产数据库使用 sqlite 方案", subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
-
-    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10, "include_quotes": True})
-    assert result["ok"] is True
-    enhancement = result["data"].get("qwen_enhancement") or {}
-    assert enhancement.get("status") == "ok"
-    # At least one candidate now carries extracted value_groups.
-    enriched = [c for c in result["data"]["candidates"] if c.get("value_groups")]
-    assert enriched, result["data"]
-    groups = enriched[0]["value_groups"]
-    assert {g["normalized_value"] for g in groups} == {"mysql", "sqlite"}
-    # Matching entity/scope aggregates into a slot group.
-    assert result["data"].get("slot_groups")
-
-
-def test_scan_enhancement_fails_open_without_backend(tmp_path: Path, monkeypatch) -> None:
-    tools = make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    meta = {"entity": "svc", "scope": "production"}
-    tools.memory_write(content="生产数据库使用 mysql 方案", subject="a", tags=[], metadata=meta)
-    tools.memory_write(content="生产数据库使用 sqlite 方案", subject="b", tags=[], metadata=meta)
-    assert tools.wait_evidence_worker_drained(timeout=2)
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
-
-    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10, "include_quotes": True})
-    assert result["ok"] is True
-    # Deterministic baseline is preserved; enhancement reports it was skipped.
-    assert result["data"]["qwen_enhancement"]["status"] == "skipped_unavailable"
 
 
 def test_exact_match_write_repairs_missing_canonical_vector(tmp_path: Path) -> None:

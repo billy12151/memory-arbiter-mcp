@@ -416,7 +416,7 @@ def real_backend() -> "Any":
 
 
 def _real_gate(backend: Any, left: str, right: str):
-    from memory_arbiter.semantic_conflict import evaluate_pair_extractions, signal_extraction
+    from memory_arbiter.semantic_conflict import evaluate_single_direction_extraction, signal_extraction
 
     def env(text: str) -> dict[str, Any]:
         return {"quote": text[:400], "subject": "slow", "tags": ["slow"],
@@ -425,9 +425,7 @@ def _real_gate(backend: Any, left: str, right: str):
 
     forward = backend.classify_pair(env(left), env(right), deadline_monotonic=None)
     reverse = backend.classify_pair(env(right), env(left), deadline_monotonic=None)
-    gate = evaluate_pair_extractions(
-        signal_extraction(forward), signal_extraction(reverse), env(left), env(right),
-        require_bidirectional=True,
+    gate = evaluate_single_direction_extraction(signal_extraction(forward), env(left), env(right)
     )
     return gate, forward, reverse
 

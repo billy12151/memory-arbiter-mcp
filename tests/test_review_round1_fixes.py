@@ -596,37 +596,6 @@ def test_failed_step_suggests_replan_and_apply_keeps_history(tmp_path: Path) -> 
 
 # ── 2026-08-21 review round 2: blocker + regression fixes ───────────────────
 
-def test_scan_reverse_only_extraction_grounds_each_member_to_own_value(tmp_path: Path) -> None:
-    """Round-2 blocker: a reverse-only (B->A) extraction must stamp each member
-    with its OWN value, not its peer's."""
-    import tests.test_vnext_evidence as tv
-    from memory_arbiter.semantic_conflict import ModelSignal
-
-    tools = tv.make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    meta = {"entity": "svc", "scope": "production"}
-    a = tools.memory_write(content="生产数据库使用 mysql 方案", subject="a", tags=[], metadata=meta)["data"]
-    b = tools.memory_write(content="生产数据库使用 sqlite 方案", subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
-
-    class RevOnly:
-        @staticmethod
-        def classify_pair(left, right, *, deadline_monotonic=None):
-            if "mysql" in str(left["quote"]).casefold():  # forward A->B: invalid
-                return ModelSignal(False, "invalid_schema", None, "", None, "bad")
-            parsed = {"attribute_a": "数据库选型", "value_a": "sqlite",
-                      "attribute_b": "数据库选型", "value_b": "mysql"}
-            return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
-    tools._ensure_semantic_backend = lambda: RevOnly()
-
-    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10, "include_quotes": True})
-    enriched = [c for c in result["data"]["candidates"] if c.get("value_groups")]
-    assert enriched
-    by_mid = {m["memory_id"]: m["normalized_value"] for m in enriched[0]["members"]}
-    assert by_mid[a["id"]] == "mysql"
-    assert by_mid[b["id"]] == "sqlite"
-
-
 def test_detector_version_wedge_is_recoverable_by_rearm(tmp_path: Path) -> None:
     """Round-2 blocker: a database carrying the old persisted detector string
     (pre-rename) must not wedge conflict_scan_required forever."""

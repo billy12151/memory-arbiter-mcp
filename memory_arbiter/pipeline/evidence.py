@@ -23,7 +23,6 @@ from ..semantic_conflict import (
     SemanticBackend,
     decide_evidence,
     direct_value_verdict,
-    evaluate_pair_extractions,
     evaluate_single_direction_extraction,
     is_cross_evolution,
     notice_dedupe_key,
@@ -478,11 +477,12 @@ class EvidencePipeline:
                     if internal_decision.left_value and internal_decision.right_value:
                         env_a["rule_value"] = internal_decision.left_value
                         env_b["rule_value"] = internal_decision.right_value
+                    # Single-direction judging (owner 2026-09-17): all three
+                    # paths share the one-forward-extraction gate — the
+                    # bidirectional mirror was falsified on the eval line.
                     forward = classify(env_a, env_b)
-                    reverse = classify(env_b, env_a)
-                    gate = evaluate_pair_extractions(
-                        signal_extraction(forward), signal_extraction(reverse),
-                        env_a, env_b, require_bidirectional=True,
+                    gate = evaluate_single_direction_extraction(
+                        signal_extraction(forward), env_a, env_b,
                     )
                     if gate.state == "notice_ready":
                         reason_text = (
@@ -491,12 +491,11 @@ class EvidencePipeline:
                         )
                         internal_qwen_confirmed += 1
                     else:
-                        signals = (forward, reverse)
                         technical = (
-                            any(s.error and "timeout" in str(s.error).lower() for s in signals)
-                            or any(s.candidate_type == "backend_unavailable" for s in signals)
-                            or any(s.candidate_type == "backend_error" for s in signals)
-                            or any(s.candidate_type in {"invalid_json", "invalid_schema"} for s in signals)
+                            (forward.error and "timeout" in str(forward.error).lower())
+                            or forward.candidate_type == "backend_unavailable"
+                            or forward.candidate_type == "backend_error"
+                            or forward.candidate_type in {"invalid_json", "invalid_schema"}
                         )
                         if not technical and gate.reason != "qwen_unverified":
                             internal_qwen_vetoed += 1

@@ -327,7 +327,7 @@ import pytest
 from memory_arbiter.semantic_conflict import (
     AttributeValueExtraction,
     coexistence_veto,
-    evaluate_pair_extractions,
+    evaluate_single_direction_extraction,
 )
 
 
@@ -419,11 +419,9 @@ def test_real_conflict_with_metric_words_in_quote_still_notices() -> None:
     # so the pair is a genuine same-attribute conflict, not a dimension split.
     forward = AttributeValueExtraction("响应时间", "5s", "响应时间", "10s")
     reverse = AttributeValueExtraction("响应时间", "10s", "响应时间", "5s")
-    result = evaluate_pair_extractions(
-        forward, reverse,
+    result = evaluate_single_direction_extraction(forward,
         {"quote": "平均响应时间为 5s。"},
-        {"quote": "峰值响应时间为 10s。"},
-        require_bidirectional=True,
+        {"quote": "峰值响应时间为 10s。"}
     )
     assert result.state == "notice_ready"
     assert result.reason == "same_attribute_different_grounded_value"
@@ -435,11 +433,9 @@ def test_gate_still_vetoes_when_attribute_carries_the_markers() -> None:
     attribute = "移动端与管理后台响应时间"
     forward = AttributeValueExtraction(attribute, "5s", attribute, "10s")
     reverse = AttributeValueExtraction(attribute, "10s", attribute, "5s")
-    result = evaluate_pair_extractions(
-        forward, reverse,
+    result = evaluate_single_direction_extraction(forward,
         {"quote": "移动端与管理后台响应时间为 5s。"},
-        {"quote": "移动端与管理后台响应时间为 10s。"},
-        require_bidirectional=True,
+        {"quote": "移动端与管理后台响应时间为 10s。"}
     )
     assert result.state == "review_candidate"
     assert result.reason == "coexist_object_mismatch"

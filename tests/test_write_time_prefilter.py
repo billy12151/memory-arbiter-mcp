@@ -441,7 +441,7 @@ def test_internal_notify_ready_lands_pending_with_attribution(tmp_path: Path, mo
     backend = _CountingBackend(_oriented_polarity_backend())
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
-    assert backend.calls >= 2, "notify shapes must go through bidirectional extraction"
+    assert backend.calls >= 1, "notify shapes reach the single-direction Qwen final check"
     assert result["deterministic_filter"]["internal_qwen_confirmed"] >= 1
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
     assert pending, "the ready notify shape lands pending"

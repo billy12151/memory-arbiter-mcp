@@ -231,7 +231,7 @@ mema doctor --json
 | `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
 | `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径——**填了就是"我要用按意思搜"**，不用再开别的开关；向量维度自动跟着模型走，换不同维度的模型会在启动时自动按新维度重建向量表 | 无 |
 | `embedding.auto_query` / `embedding.auto_write` | 查询/写入时自动算向量 | `true` |
-| `semantic_conflict.model_path` | 本地 Qwen 小模型路径，用于写入时的冲突核对——填了就自动启用，并且启动时加载、常驻内存 | 无 |
+| `semantic_conflict.model_path` | 本地 Qwen 小模型路径，用于写入时的冲突判定——0.16.8 起推荐（且为新装默认）官方 **Qwen3-0.6B-Q8_0**；旧版 Qwen2.5-0.5B 仍可运行但已进入维护模式（doctor 会提示升级）。填了就自动启用、启动时加载、常驻内存；两代模型按 GGUF architecture 字段自动分流 | 无 |
 | `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
 | `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
 | `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |

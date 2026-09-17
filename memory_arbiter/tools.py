@@ -1240,9 +1240,6 @@ class MemoryTools:
             return None
         return self._caller_workspace(workspace).scope_canonicals()
 
-    def _enhance_scan_candidates(self, result: dict[str, Any]) -> dict[str, Any]:
-        return self._scan_pipeline._enhance_scan_candidates(result)
-
     def _lightweight_scan_candidates(self, result: dict[str, Any]) -> dict[str, Any]:
         return self._scan_pipeline._lightweight_scan_candidates(result)
 

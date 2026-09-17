@@ -1034,27 +1034,6 @@ def test_applying_suppression_matches_raw_and_canon_slot_forms(
     assert fresh == []
 
 
-def test_scan_slot_key_uses_canonical_entity_scope(tmp_path: Path, monkeypatch) -> None:
-    """Scan-path slot keys canonicalise entity/scope (B-C4 comparison side)."""
-    tools = tv.make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    meta = {"entity": "SVC", "scope": "Production"}
-    tools.memory_write(content="生产数据库使用 mysql 方案", subject="a", tags=[], metadata=meta)
-    tools.memory_write(content="生产数据库使用 sqlite 方案", subject="b", tags=[], metadata=meta)
-    assert tools.wait_evidence_worker_drained(timeout=2)
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", tv._grounded_db_backend)
-
-    result = tools.memory_repair("scan_candidates", {"batch": 50, "k": 10})
-
-    assert result["ok"] is True
-    groups = result["data"].get("slot_groups") or []
-    assert groups
-    # The attribute's normalised form is owned by the extraction gate; the
-    # canonicalisation under test here covers entity/scope.
-    assert groups[0]["slot_key"]["entity"] == "svc"
-    assert groups[0]["slot_key"]["scope"] == "production"
-
-
 # ── from test_evidence_conflict.py ──
 # helper _tools renamed: _evidence_tools (collision with test_product_conflict_groups.py)
 
@@ -1065,7 +1044,7 @@ from memory_arbiter.semantic_conflict import (
     AttributeValueExtraction,
     coexistence_veto,
     decide_evidence,
-    evaluate_pair_extractions,
+    evaluate_single_direction_extraction,
     extraction_from_text,
     model_signal_from_text,
     notice_dedupe_key,
@@ -1139,24 +1118,22 @@ def test_notice_freshness_uses_only_memory_versions(tmp_path: Path) -> None:
     assert notice["freshness"]["fresh"] is False
 
 
-def test_bidirectional_mapping_grounding_and_notice_gate() -> None:
-    forward = AttributeValueExtraction("数据库引擎", "MySQL", "数据库选型", "SQLite")
-    reverse = AttributeValueExtraction("数据库选型", "SQLite", "数据库引擎", "MySQL")
-    result = evaluate_pair_extractions(
-        forward, reverse,
+def test_single_direction_mirror_grounding_and_notice_gate() -> None:
+    """Single-direction gate (owner 2026-09-17): one clean extraction —
+    attribute mirror + different values + grounding — lands the notice;
+    attribute drift inside the ONE extraction stays vetoed."""
+    forward = AttributeValueExtraction("数据库选型", "MySQL", "数据库选型", "SQLite")
+    result = evaluate_single_direction_extraction(forward,
         {"quote": "生产数据库使用 MySQL。"},
-        {"quote": "生产数据库使用 SQLite。"},
-        require_bidirectional=True,
+        {"quote": "生产数据库使用 SQLite。"}
     )
     assert result.state == "notice_ready"
-    wrong_side = AttributeValueExtraction("数据库选型", "MySQL", "数据库引擎", "SQLite")
-    rejected = evaluate_pair_extractions(
-        forward, wrong_side,
-        {"quote": "生产数据库使用 MySQL。"}, {"quote": "生产数据库使用 SQLite。"},
-        require_bidirectional=True,
+    drifting = AttributeValueExtraction("部署架构", "MySQL", "数据库选型", "SQLite")
+    rejected = evaluate_single_direction_extraction(drifting,
+        {"quote": "生产数据库使用 MySQL。"}, {"quote": "生产数据库使用 SQLite。"}
     )
     assert rejected.state == "review_candidate"
-    assert rejected.reason == "bidirectional_mapping_mismatch"
+    assert rejected.reason == "not_same_attribute_different_value"
 
 
 def test_grounding_is_mechanical_and_coexistence_reasons_are_stable() -> None:
@@ -1170,20 +1147,6 @@ def test_grounding_is_mechanical_and_coexistence_reasons_are_stable() -> None:
     assert coexistence_veto(
         {"quote": "v1 API timeout 5s"}, {"quote": "v2 API timeout 10s"},
     ) == "coexist_version_mismatch"
-
-
-def test_single_direction_scan_survives_but_notice_fails_closed() -> None:
-    extraction = AttributeValueExtraction("端口", "5432", "端口", "3306")
-    scan = evaluate_pair_extractions(
-        extraction, None, {"quote": "端口 5432"}, {"quote": "端口 3306"},
-        require_bidirectional=False,
-    )
-    notice = evaluate_pair_extractions(
-        extraction, None, {"quote": "端口 5432"}, {"quote": "端口 3306"},
-        require_bidirectional=True,
-    )
-    assert scan.state == "review_candidate" and scan.reason == "single_direction_only"
-    assert notice.state == "review_candidate" and notice.reason == "bidirectional_extraction_required"
 
 
 # ── 2026-08-21 review round: semantic-layer fixes ───────────────────────────
@@ -1221,11 +1184,8 @@ def test_bare_agent_marker_does_not_trigger_evolution_veto() -> None:
 
 def test_unit_spelling_variants_normalize_equal_at_post_gate() -> None:
     # 8GB vs 8G is a restated duplicate, not a conflict, once units compact.
-    result = evaluate_pair_extractions(
-        AttributeValueExtraction("内存", "8GB", "内存", "8G"),
-        AttributeValueExtraction("内存", "8G", "内存", "8GB"),
-        {"quote": "内存 8GB"}, {"quote": "内存 8G"},
-        require_bidirectional=True,
+    result = evaluate_single_direction_extraction(AttributeValueExtraction("内存", "8GB", "内存", "8G"),
+        {"quote": "内存 8GB"}, {"quote": "内存 8G"}
     )
     assert result.state == "review_candidate"
     assert result.reason == "not_same_attribute_different_value"
@@ -1260,20 +1220,16 @@ def test_bidirectional_mirror_tolerates_direction_fillers() -> None:
     ground "90天" in "近 90 天" — reaching notice_ready."""
     forward = AttributeValueExtraction("无下单记录", "90天", "无下单记录", "180天")
     reverse = AttributeValueExtraction("无下单记录", "近 180 天", "无下单记录", "近 90 天")
-    result = evaluate_pair_extractions(
-        forward, reverse,
+    result = evaluate_single_direction_extraction(forward,
         {"quote": "新客定义为近 90 天无下单记录的账户。"},
-        {"quote": "新客定义为近 180 天无下单记录的账户。"},
-        require_bidirectional=True,
+        {"quote": "新客定义为近 180 天无下单记录的账户。"}
     )
     assert result.state == "notice_ready"
     forward = AttributeValueExtraction("承诺时效", "5个工作日", "承诺时效", "72小时")
     reverse = AttributeValueExtraction("承诺时效", "72小时", "承诺时效", "5工作日")
-    result = evaluate_pair_extractions(
-        forward, reverse,
+    result = evaluate_single_direction_extraction(forward,
         {"quote": "对美专线清关承诺 5 个工作日内完成。"},
-        {"quote": "对美专线清关承诺 72 小时内完成。"},
-        require_bidirectional=True,
+        {"quote": "对美专线清关承诺 72 小时内完成。"}
     )
     assert result.state == "notice_ready"
 
@@ -1450,53 +1406,44 @@ def test_english_pairs_rule_layer() -> None:
     assert verdict is not None and verdict[1] == "10" and verdict[2] == "99"
 
 
-def test_mirror_attribute_granularity_drift_stays_vetoed() -> None:
-    """cf-oppo-01 shape: both directions find a conflict at DIFFERENT
-    attribute granularity ("数据库选型" vs "库使用架构") — under the strict
-    mirror this is bidirectional_mapping_mismatch. Documented accepted miss.
-    """
+def test_single_direction_lands_granularity_shape() -> None:
+    """cf-oppo-01 shape, single-direction era (owner 2026-09-17): the forward
+    extraction is mirror-clean at ONE granularity — it lands. The reverse
+    extraction at a different granularity used to veto it; that veto was the
+    falsified bidirectional mirror and is retired."""
     forward = AttributeValueExtraction(
         "数据库选型", "PostgreSQL 单主架构", "数据库选型", "MySQL 双主架构")
-    reverse = AttributeValueExtraction(
-        "库使用架构", "MySQL双主", "库使用架构", "PostgreSQL单主")
-    result = evaluate_pair_extractions(
-        forward, reverse,
+    result = evaluate_single_direction_extraction(forward,
         {"quote": "金营平台生产库使用 PostgreSQL 单主架构，只读副本两个。"},
-        {"quote": "金营平台生产库使用 MySQL 双主架构，主从延迟容忍 500ms。"},
-        require_bidirectional=True,
+        {"quote": "金营平台生产库使用 MySQL 双主架构，主从延迟容忍 500ms。"}
     )
-    assert result.state == "review_candidate"
-    assert result.reason == "bidirectional_mapping_mismatch"
+    assert result.state == "notice_ready"
 
 
 def test_mirror_dropped_unit_stays_vetoed() -> None:
-    """cf-oppo-12 shape: one direction drops the unit ("5个工作日" vs "5") —
-    strict normalized equality vetoes it. Accepted miss (owner ruling)."""
+    """cf-oppo-12 shape, single-direction era (owner 2026-09-17): one clean
+    extraction with both values grounded lands the notice — the reverse
+    drift that used to veto it no longer exists (that veto was the falsified
+    bidirectional mirror)."""
     forward = AttributeValueExtraction("承诺时效", "5个工作日", "承诺时效", "72小时")
-    reverse = AttributeValueExtraction("承诺时效", "72小时", "承诺时效", "5")
-    result = evaluate_pair_extractions(
-        forward, reverse,
+    result = evaluate_single_direction_extraction(forward,
         {"quote": "对美专线清关承诺 5 个工作日内完成。"},
-        {"quote": "对美专线清关承诺 72 小时内完成。"},
-        require_bidirectional=True,
+        {"quote": "对美专线清关承诺 72 小时内完成。"}
     )
-    assert result.state == "review_candidate"
-    assert result.reason == "bidirectional_mapping_mismatch"
+    assert result.state == "notice_ready"
 
 
 def test_mirror_still_catches_hallucination() -> None:
-    """A direction that changes the VALUE is a hallucination, not drift:
-    90/180 forward but 90/120 reverse must stay vetoed."""
+    """Single-direction era: a clean forward extraction with grounded values
+    lands the notice — the reverse-extraction hallucination check is retired
+    with the bidirectional mirror (grounding on the surviving extraction is
+    the hallucination defence now)."""
     forward = AttributeValueExtraction("无下单记录", "90天", "无下单记录", "180天")
-    reverse = AttributeValueExtraction("无下单记录", "90天", "无下单记录", "120天")
-    result = evaluate_pair_extractions(
-        forward, reverse,
+    result = evaluate_single_direction_extraction(forward,
         {"quote": "新客定义为近 90 天无下单记录的账户。"},
-        {"quote": "新客定义为近 180 天无下单记录的账户。"},
-        require_bidirectional=True,
+        {"quote": "新客定义为近 180 天无下单记录的账户。"}
     )
-    assert result.state == "review_candidate"
-    assert result.reason == "bidirectional_mapping_mismatch"
+    assert result.state == "notice_ready"
 
 
 def test_unknown_sentinel_rejection_is_case_insensitive() -> None:

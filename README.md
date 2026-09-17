@@ -197,7 +197,7 @@ The complete user surface is 19 keys (0.15.14: added `semantic_conflict.n_gpu_la
 | `include_size` | Global switch for the recall size block (v0.15.6): on = `find`/`read`/`expired`/`history` all attach `{returned_chars, returned_count, tokens_estimate}`; off = none of them do |
 | `embedding.model_path` | Local GGUF embedding model — pointing at it is the sole intent to enable sqlite-vec evidence recall |
 | `embedding.auto_query` / `auto_write` | Auto-embed at query/write time (default `true`) |
-| `semantic_conflict.model_path` | Optional local Qwen2.5-0.5B GGUF for bidirectional four-field extraction; configured → auto-enabled, loaded at startup, and kept resident |
+| `semantic_conflict.model_path` | Local Qwen GGUF for write-time conflict judging — recommended (and the fresh-install default since 0.16.8) is the official **Qwen3-0.6B-Q8_0**; the legacy Qwen2.5-0.5B still runs but is in maintenance mode (doctor will nudge the switch). Configured → auto-enabled, loaded at startup, kept resident; both generations are auto-routed by the GGUF architecture field |
 | `semantic_conflict.enabled` | Explicit off-switch; unset + `model_path` means enabled, explicit `false` wins |
 | `semantic_conflict.on_write` | Write-time detection: `async` (default) or `off` |
 | `semantic_conflict.notice_sync_wait_ms` | How long the write response waits for the post-commit check so its result rides along (v0.15.8, default `3000`, clamp `0–5000`); `0` = never block the write response — batch ingestion still gets the check run asynchronously and notices deliver on a later response |

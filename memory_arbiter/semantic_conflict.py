@@ -989,59 +989,6 @@ def coexistence_veto(
     return None
 
 
-def evaluate_pair_extractions(
-    forward: AttributeValueExtraction | None,
-    reverse: AttributeValueExtraction | None,
-    left: dict[str, Any],
-    right: dict[str, Any],
-    *,
-    require_bidirectional: bool,
-) -> PairGateResult:
-    """Apply scan/notice gates; reverse is extracted from input order B→A."""
-    valid = [item for item in (forward, reverse) if item is not None]
-    if not valid:
-        return PairGateResult("review_candidate", "qwen_unverified")
-    if require_bidirectional and (forward is None or reverse is None):
-        return PairGateResult("review_candidate", "bidirectional_extraction_required")
-
-    def one_direction(item: AttributeValueExtraction) -> bool:
-        return (
-            normalize_attribute(item.attribute_a) == normalize_attribute(item.attribute_b)
-            and normalize_value(item.value_a) != normalize_value(item.value_b)
-        )
-
-    if not any(one_direction(item) for item in valid):
-        return PairGateResult("review_candidate", "not_same_attribute_different_value")
-    if forward is None or reverse is None:
-        item = valid[0]
-        return PairGateResult(
-            "review_candidate", "single_direction_only", normalize_attribute(item.attribute_a),
-            normalize_value(item.value_a), normalize_value(item.value_b), False,
-        )
-    if not (one_direction(forward) and one_direction(reverse)):
-        return PairGateResult("review_candidate", "direction_invalid")
-    if not (
-        normalize_attribute(forward.attribute_a) == normalize_attribute(reverse.attribute_b)
-        and normalize_attribute(forward.attribute_b) == normalize_attribute(reverse.attribute_a)
-        and normalize_value(forward.value_a) == normalize_value(reverse.value_b)
-        and normalize_value(forward.value_b) == normalize_value(reverse.value_a)
-    ):
-        return PairGateResult("review_candidate", "bidirectional_mapping_mismatch")
-    quote_a = str(left.get("quote") or left.get("content") or "")
-    quote_b = str(right.get("quote") or right.get("content") or "")
-    grounded = value_is_grounded(forward.value_a, quote_a) and value_is_grounded(forward.value_b, quote_b)
-    if not grounded:
-        return PairGateResult("review_candidate", "qwen_unverified")
-    veto = coexistence_veto(left, right, forward, reverse)
-    if veto:
-        return PairGateResult("review_candidate", veto, grounded=True)
-    return PairGateResult(
-        "notice_ready", "same_attribute_different_grounded_value",
-        normalize_attribute(forward.attribute_a), normalize_value(forward.value_a),
-        normalize_value(forward.value_b), True,
-    )
-
-
 def evaluate_single_direction_extraction(
     forward: AttributeValueExtraction | None,
     left: dict[str, Any],

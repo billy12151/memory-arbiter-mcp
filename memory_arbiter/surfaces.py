@@ -10,8 +10,6 @@ from .constants import (
     SCAN_DUPLICATES_BATCH,
     SCAN_DUPLICATES_MAX_PAGES,
     SCAN_DUPLICATES_MAX_RESULTS,
-    SEMANTIC_SCAN_ENHANCE,
-    SEMANTIC_SCAN_MAX_PAIRS,
 )
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .models import MemoryStatus, ProtectionLevel, SourceType
@@ -1176,7 +1174,6 @@ class ProductSurfaces:
             suspected_anomalies = (
                 self._active_workspace_anomalies() if scan_workspace is None else None
             )
-            scan_enhance = SEMANTIC_SCAN_ENHANCE
             scan_started = time.perf_counter()
             result = self.db.scan_rule_candidates(
                 after_memory_id=anchor_value,
@@ -1185,13 +1182,9 @@ class ProductSurfaces:
                 include_check=self._is_truthy(payload.get("include_check")),
                 max_distance=distance_value,
                 workspace=scan_workspace,
-                similarity_pool_limit=(max(0, SEMANTIC_SCAN_MAX_PAIRS) if scan_enhance else 0),
                 include_duplicates=self._is_truthy(payload.get("include_duplicates")),
                 suspected_anomalies=suspected_anomalies,
             )
-            if "error" not in result:
-                # Spec §7.1 wide gate: bounded Qwen enhancement over the page.
-                result = self._tools._enhance_scan_candidates(result)
             if "error" not in result and not self._is_truthy(payload.get("include_quotes")):
                 # C1 response slimming: the default page carries only the
                 # lightweight triage identity; include_quotes=true restores
