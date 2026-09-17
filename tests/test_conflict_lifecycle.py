@@ -894,7 +894,7 @@ def test_notice_value_groups_tolerate_missing_parsed_keys(tmp_path: Path, monkey
         attribute="数据库选型", value_a="sqlite", value_b="mysql",
     )
     monkeypatch.setattr(
-        "memory_arbiter.pipeline.evidence.evaluate_pair_extractions", lambda *a, **k: gate,
+        "memory_arbiter.pipeline.evidence.evaluate_single_direction_extraction", lambda *a, **k: gate,
     )
 
     result = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))

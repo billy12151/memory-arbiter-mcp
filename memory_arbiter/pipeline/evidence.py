@@ -24,6 +24,7 @@ from ..semantic_conflict import (
     decide_evidence,
     direct_value_verdict,
     evaluate_pair_extractions,
+    evaluate_single_direction_extraction,
     is_cross_evolution,
     notice_dedupe_key,
     signal_extraction,
@@ -575,24 +576,33 @@ class EvidencePipeline:
                     left_env["rule_value"] = decision.left_value
                     right_env["rule_value"] = decision.right_value
                 started = time.monotonic()
+                # Single-direction gate (owner 2026-09-17): the reverse
+                # extraction was the side-attribution hedge the 0.5B needed;
+                # Qwen3-0.6B doesn't commit that error and the bidirectional
+                # cross-mapping kept killing real conflicts at reverse
+                # attribute drift (eval: 9/12 bidirectional vs 11/12 single,
+                # hard false positives 0/43 on the product chain). One clean
+                # extraction + grounding + veto lands the notice; scan and
+                # internal-conflict paths keep the bidirectional gate.
                 forward_signal = classify(left_env, right_env)
-                reverse_signal = classify(right_env, left_env)
+                reverse_signal = None
                 self._tools._record_pair_sample(
                     pair_ms=int((time.monotonic() - started) * 1000),
                     forward=forward_signal,
-                    reverse=reverse_signal,
+                    reverse=None,
                 )
-                gate = evaluate_pair_extractions(
-                    signal_extraction(forward_signal), signal_extraction(reverse_signal), left_env, right_env,
-                    require_bidirectional=True,
+                gate = evaluate_single_direction_extraction(
+                    signal_extraction(forward_signal), left_env, right_env,
                 )
                 qwen = {
                     "status": gate.state, "reason": gate.reason,
                     "forward_type": forward_signal.candidate_type,
-                    "reverse_type": reverse_signal.candidate_type,
+                    "reverse_type": "single_direction",
                 }
             if gate.state != "notice_ready":
-                signals = (forward_signal, reverse_signal)
+                signals = tuple(
+                    signal for signal in (forward_signal, reverse_signal) if signal is not None
+                )
                 if any(signal.error and "timeout" in str(signal.error).lower() for signal in signals):
                     reason = "qwen_timeout"
                 elif any(signal.candidate_type == "backend_unavailable" for signal in signals):
@@ -699,7 +709,7 @@ class EvidencePipeline:
                         "entity": "metadata", "scope": "metadata",
                         "attribute": (
                             "deterministic_skeleton" if direct is not None
-                            else "bidirectional_extraction"
+                            else "single_direction_extraction"
                         ),
                     },
                     "member_versions": member_versions,

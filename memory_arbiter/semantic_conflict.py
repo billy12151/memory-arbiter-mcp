@@ -1008,6 +1008,43 @@ def evaluate_pair_extractions(
     )
 
 
+def evaluate_single_direction_extraction(
+    forward: AttributeValueExtraction | None,
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> PairGateResult:
+    """Single-direction notice gate (owner 2026-09-17, write-time peer path).
+
+    The reverse extraction existed as a side-attribution hedge for the
+    Qwen2.5-0.5B, which copied one side's value into both slots; Qwen3-0.6B
+    does not commit that error (eval), while the bidirectional mirror's
+    cross-mapping kept killing real conflicts at reverse attribute drift.
+    One clean extraction — attribute mirror + different values + grounding
+    + coexistence veto — lands the notice. Scan and internal-conflict paths
+    keep the bidirectional gate (offline, no latency constraint).
+    """
+    if forward is None:
+        return PairGateResult("review_candidate", "qwen_unverified")
+    if not (
+        normalize_attribute(forward.attribute_a) == normalize_attribute(forward.attribute_b)
+        and normalize_value(forward.value_a) != normalize_value(forward.value_b)
+    ):
+        return PairGateResult("review_candidate", "not_same_attribute_different_value")
+    quote_a = str(left.get("quote") or left.get("content") or "")
+    quote_b = str(right.get("quote") or right.get("content") or "")
+    grounded = value_is_grounded(forward.value_a, quote_a) and value_is_grounded(forward.value_b, quote_b)
+    if not grounded:
+        return PairGateResult("review_candidate", "qwen_unverified")
+    veto = coexistence_veto(left, right, forward)
+    if veto:
+        return PairGateResult("review_candidate", veto, grounded=True)
+    return PairGateResult(
+        "notice_ready", "same_attribute_different_grounded_value",
+        normalize_attribute(forward.attribute_a), normalize_value(forward.value_a),
+        normalize_value(forward.value_b), True,
+    )
+
+
 def signal_extraction(signal: Any) -> AttributeValueExtraction | None:
     """Pull the validated four-field extraction out of a ModelSignal, if any."""
     parsed = getattr(signal, "parsed", None)

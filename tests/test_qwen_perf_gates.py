@@ -141,7 +141,7 @@ def test_pairs_cap_reports_incomplete_when_no_notice(tmp_path: Path, monkeypatch
     assert result["status"] == "incomplete"
     assert result["reason"] == "pairs_examined_capped"
     assert result["notices_created"] == 0
-    assert NegativeBackend.calls == SEMANTIC_MAX_EXAMINED_PAIRS * 2  # fwd+rev
+    assert NegativeBackend.calls == SEMANTIC_MAX_EXAMINED_PAIRS  # single-direction (0.16.8): one extraction per pair
     degradation = tools._check_degradation_status()
     assert degradation["last_reason"] == "pairs_examined_capped"
     # A1 wiring: one ring sample per examined pair, cap-bounded.

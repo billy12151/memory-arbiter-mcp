@@ -2944,7 +2944,7 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
 
     assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1}
-    assert deadlines == [None, None]
+    assert deadlines == [None]  # single-direction: one extraction per pair
 
 
 def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path: Path, monkeypatch) -> None:
@@ -2981,7 +2981,7 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
         @staticmethod
         def classify_pair(left, right, *, deadline_monotonic=None):
             deadlines.append(deadline_monotonic)
-            clock["now"] += 0.02
+            clock["now"] += 0.04  # single-direction: one call per pair carries the old two-call wall time
             return base.classify_pair(left, right, deadline_monotonic=deadline_monotonic)
 
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: SlowBackend())
@@ -2996,7 +2996,7 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
         "status": "completed", "outcome": "notices_created", "notices_created": 1,
         "truncated": True, "reasons_seen": ["qwen_budget_exhausted"],
     }
-    assert deadlines == [None, None]
+    assert deadlines == [None]  # single-direction: one extraction per pair
     assert len(tools.db.list_semantic_notices(status="open", limit=10)) == 1
 
 

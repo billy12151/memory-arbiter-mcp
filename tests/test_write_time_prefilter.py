@@ -153,7 +153,7 @@ def test_direct_path_lands_notice_without_qwen(tmp_path: Path, monkeypatch) -> N
 
 def test_multi_value_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -> None:
     """Multi-value sentences are pairwise-ambiguous — the direct path skips
-    them and bidirectional extraction still runs."""
+    them and the single-direction extraction still runs."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     peer = tools.memory_write(content="连接池上限为 10，队列长度为 3。", subject="pool", tags=[], metadata=META)["data"]
@@ -164,7 +164,7 @@ def test_multi_value_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["outcome"] == "notices_created"
-    assert backend.calls == 2, "bidirectional extraction still runs for non-direct keepers"
+    assert backend.calls == 1, "single-direction extraction runs once for non-direct keepers"
 
 
 def test_direct_path_dimension_veto_falls_back_to_qwen(tmp_path: Path, monkeypatch) -> None:
