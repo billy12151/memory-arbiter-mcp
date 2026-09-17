@@ -454,6 +454,7 @@ def main() -> int:
     self_recall: list[dict[str, Any]] | None = None
     similarity: dict[str, Any] | None = None
     if want_recall or want_similarity:
+        suite_start = time.monotonic()
         with temp_library(embed_model, keep_db=args.keep_db) as tools:
             if want_recall:
                 id_map = replay_fixtures(tools, targets + distractors)
@@ -463,11 +464,14 @@ def main() -> int:
             if want_similarity:
                 sim_cases = _load_jsonl(FIXTURES / "similarity" / "cases.jsonl")
                 similarity = run_similarity_suite(tools, sim_cases)
+        print(f"[timer] recall+similarity suite {time.monotonic() - suite_start:.0f}s total (replay+index+queries inside)")
     conflict: list[dict[str, Any]] | None = None
     if want_conflict:
+        suite_start = time.monotonic()
         conflict_pairs = _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
         with temp_library(embed_model, qwen_model=qwen_model) as tools:
             conflict = run_conflict_suite(tools, conflict_pairs)
+        print(f"[timer] conflict suite {time.monotonic() - suite_start:.0f}s (66 pairs, 3s sync window + Qwen)")
 
     raw = {
         "suite": args.suite,
