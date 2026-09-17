@@ -11,6 +11,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+pytest.importorskip("llama_cpp")  # the core/vec CI segments run without the semantic extra
+
 from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
 
 MODEL = Path("/nonexistent/qwen3.gguf")
