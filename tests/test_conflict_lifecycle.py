@@ -2614,3 +2614,31 @@ def test_bare_candidate_promoted_when_rerecorded_as_open(tmp_path: Path) -> None
         row2 = conn.execute("SELECT status, slot_key FROM conflicts WHERE id=?", (cid,)).fetchone()
     assert row2["status"] == "open", f"candidate row was not promoted: {dict(row2)}"
     assert row2["slot_key"] is not None
+
+
+def test_pre_qwen_vetoes_ops_marker_and_decision_vs_observation() -> None:
+    """2026-09-17 (owner): 进 Qwen 前的两个 ignore veto。
+    ops_marker 拦运维标记（时间戳尾 slug / test marker 措辞）；
+    decision_vs_observation 拦决策措辞×实测措辞的来源不对称
+    （owner 原则：证据 vs 裁决不构成对立）。正样本与 owner 裁定为真
+    冲突的 conflict-test 基准对必须保活。"""
+    from memory_arbiter.semantic_conflict import decide_evidence
+    # 目标命中
+    assert decide_evidence(
+        "JingleAI global bridge self-test marker jingleai-global-bridge-self-test-1783837684.",
+        "JingleAI global bridge full-test marker jingleai-global-bridge-fulltest-1783837846.",
+    ).reason == "ops_marker"
+    assert decide_evidence(
+        "用户进一步修正 weak 归一策略：Qwen 高置信的直接静默处理。",
+        "2026-08-08 按用户最新原则测试 weak/strict 策略：样本扩展到 54 条。",
+    ).reason == "decision_vs_observation"
+    # owner 示例：实测结论 vs 用户确认
+    assert decide_evidence("用户确认上限 5000 元。", "实测结论上限 500 元。").reason \
+        == "decision_vs_observation"
+    # 保活：conflict-test 基准对（owner 裁定为真冲突，marker 词面刻意不匹配）
+    d = decide_evidence("conflict-test 的 export-format 取值为 json。",
+                        "conflict-test 的 export-format 取值为 csv。")
+    assert d.action == "check"
+    # 保活：数值正样本不受 veto 影响
+    assert decide_evidence("单笔退款超过 5000 元需要财务复核。",
+                           "单笔退款超过 500 元就需要财务复核。").reason == "numeric_value_candidate"

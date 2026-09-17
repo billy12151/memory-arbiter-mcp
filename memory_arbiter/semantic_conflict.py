@@ -296,6 +296,24 @@ _EXPLICIT_SCOPES = (
     ("公开api", "内部api"),
     ("中国区", "海外区"),
 )
+# Pre-Qwen vetoes (2026-09-17, owner-directed; see decide_evidence):
+# ops markers (timestamp-suffixed slugs / test-marker wording) and
+# decision-vs-observation asymmetry. Calibration: governed-negative corpus —
+# 12 positives zero false-veto, 17/43 negatives hit (42% of owner's own
+# dismissal intuitions), targets 17918 (ops marker) and 633/625 (decision vs
+# evaluation) all captured. The marker pattern deliberately excludes the
+# "conflict-test" wording — that baseline pair is a true conflict per owner.
+_OPS_MARKER_RE = re.compile(
+    r"-\d{10,}|self[- ]?test.{0,40}marker|test[- ]?marker|测试标记",
+    re.IGNORECASE,
+)
+_DECISION_RE = re.compile(
+    r"用户.{0,4}(?:确认|修正|拍板|裁定|要求|提出|原则|决定|共识)"
+)
+_EVALUATION_RE = re.compile(
+    r"测试|评测|实测|样本|tuning|跑了|实验|测得|结论是|verify|verified|measured",
+    re.IGNORECASE,
+)
 _VALUE_RE = re.compile(
     r"(?<![\w.])v?\d+(?:\.\d+){0,2}\s*"
     r"(?:ms|s|秒|分钟|小时|个工作日|工作日|个自然日|自然日|日|天|%|mb|gb|kb|条|次|核|g"
@@ -364,6 +382,29 @@ def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
             or (right_scope in left_lower and left_scope in right_lower)
         ):
             return EvidenceDecision("ignore", "explicit_scope_mismatch")
+
+    # 2026-09-17 (owner): two pre-Qwen vetoes over the content texts — the
+    # real-library governed negatives showed both shapes slipping through to
+    # the judge and being dismissed by hand every time.
+    # Ops markers: timestamp-suffixed slugs (jingleai-bridge-self-test-
+    # 1783837684) and test-marker wording are operational data, never
+    # business claims. Deliberately NOT matching "conflict-test" — the
+    # conflict-test baseline pair (export-format json vs csv) is a true
+    # same-attribute difference per owner ruling.
+    if _OPS_MARKER_RE.search(left_text or "") or _OPS_MARKER_RE.search(right_text or ""):
+        return EvidenceDecision("ignore", "ops_marker")
+    # Decision vs observation: an owner ruling on one side ("用户确认/修正/
+    # 拍板/要求…") against an evaluation on the other ("测试/实测/样本/
+    # tuning…") is evidence-versus-verdict, not two claims fighting —
+    # "用户确认 5000 元" vs "实测结论上限 500 元" must not read as a
+    # conflict. Known boundary (owner-accepted): implementation drift
+    # ("用户要求 3 秒" vs "实测配置 5 秒") is filtered too; catching drift
+    # would need its own channel.
+    if (
+        (_DECISION_RE.search(left_text or "") and _EVALUATION_RE.search(right_text or ""))
+        or (_DECISION_RE.search(right_text or "") and _EVALUATION_RE.search(left_text or ""))
+    ):
+        return EvidenceDecision("ignore", "decision_vs_observation")
 
     left_values = _normalized_values(left_text)
     right_values = _normalized_values(right_text)
