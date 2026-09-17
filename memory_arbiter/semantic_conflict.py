@@ -1618,6 +1618,7 @@ class LocalGGUFSemanticBackend:
                                     max_tokens=max_tokens,
                                     temperature=0.0,
                                     top_p=0.9,
+                                    stop=None,
                                 )
                             usage = out.get("usage") or {}
                             prompt_tokens_total += int(usage.get("prompt_tokens") or 0)
