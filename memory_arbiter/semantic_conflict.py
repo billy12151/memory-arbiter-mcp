@@ -297,7 +297,9 @@ _EXPLICIT_SCOPES = (
     ("中国区", "海外区"),
 )
 _VALUE_RE = re.compile(
-    r"(?<![\w.])v?\d+(?:\.\d+){0,2}\s*(?:ms|s|秒|分钟|小时|天|%|mb|gb|kb|条|次|核|g)?",
+    r"(?<![\w.])v?\d+(?:\.\d+){0,2}\s*"
+    r"(?:ms|s|秒|分钟|小时|个工作日|工作日|个自然日|自然日|日|天|%|mb|gb|kb|条|次|核|g"
+    r"|(?:business|working|calendar)?\s*days?|workdays?)?",
     re.IGNORECASE,
 )
 
@@ -510,7 +512,7 @@ def pair_text_evidence(left_text: str, right_text: str) -> PairEvidence:
     duplicate_guard = False
 
     def numeric_values(text: str) -> set[str]:
-        values = set(re.findall(r"\d+(?:\.\d+)?\s*(?:mb|gb|kb|%|ms|s|秒|核|g)?", text.lower()))
+        values = set(re.findall(r"\d+(?:\.\d+)?\s*(?:mb|gb|kb|%|ms|s|秒|分钟|小时|个工作日|工作日|个自然日|自然日|日|天|周|(?:business|working|calendar)?\s*days?|workdays?|核|g)?", text.lower()))
         normalized = set()
         for value in values:
             # Same canonicalisation as the candidate channel: equal values
@@ -708,10 +710,15 @@ _VALUE_MEASURE_GE_RE = re.compile(r"(?<=\d)个")
 
 # Exact physical unit conversion (2026-09-16, owner-directed): time → ms,
 # size → kb, Chinese magnitude suffixes fold into the number, 块 is a
-# colloquial 元. Only EXACT relations convert — 月/年 (variable length) and
-# 工作日 (domain assumption, not a physical fact) deliberately stay
-# unconverted, so "72小时 vs 5个工作日" keeps differing. Covers both the
-# raw spellings (gb) and the _mechanical_normalize compacted forms (g).
+# colloquial 元. Only EXACT relations convert — 月/年 (variable length)
+# deliberately stay unconverted. 工作日/自然日 convert as natural 24h days
+# (owner 2026-09-17, cf-oppo-12): in the OPPOSITION direction either reading
+# (natural day vs 8h workday) keeps the values unequal, so identification is
+# unaffected by the ambiguity; the only behavioural change is that
+# "3 个工作日 vs 72 小时" now reads as the same value on the duplicate side.
+# Covers both the raw spellings (gb) and the _mechanical_normalize compacted
+# forms (g); English business/working/calendar days normalize with spaces
+# stripped, so the keys are the concatenated spellings.
 _UNIT_TO_CANONICAL: dict[str, "tuple[Decimal, str]"] = {
     "ms": (Decimal(1), "ms"),
     "s": (Decimal(1000), "ms"), "秒": (Decimal(1000), "ms"),
@@ -724,7 +731,13 @@ _UNIT_TO_CANONICAL: dict[str, "tuple[Decimal, str]"] = {
     "hr": (Decimal(3_600_000), "ms"), "hrs": (Decimal(3_600_000), "ms"),
     "hour": (Decimal(3_600_000), "ms"), "hours": (Decimal(3_600_000), "ms"),
     "天": (Decimal(86_400_000), "ms"), "日": (Decimal(86_400_000), "ms"),
+    "工作日": (Decimal(86_400_000), "ms"), "个工作日": (Decimal(86_400_000), "ms"),
+    "自然日": (Decimal(86_400_000), "ms"), "个自然日": (Decimal(86_400_000), "ms"),
     "day": (Decimal(86_400_000), "ms"), "days": (Decimal(86_400_000), "ms"),
+    "businessday": (Decimal(86_400_000), "ms"), "businessdays": (Decimal(86_400_000), "ms"),
+    "workday": (Decimal(86_400_000), "ms"), "workdays": (Decimal(86_400_000), "ms"),
+    "workingday": (Decimal(86_400_000), "ms"), "workingdays": (Decimal(86_400_000), "ms"),
+    "calendarday": (Decimal(86_400_000), "ms"), "calendardays": (Decimal(86_400_000), "ms"),
     "周": (Decimal(604_800_000), "ms"), "week": (Decimal(604_800_000), "ms"),
     "weeks": (Decimal(604_800_000), "ms"),
     "kb": (Decimal(1), "kb"), "k": (Decimal(1), "kb"),
@@ -874,6 +887,18 @@ def coexistence_veto(
             for a, b in pairs
         ):
             return code
+    # 2026-09-17 (owner): a value pair that is BOTH version ordinals is
+    # release-to-release evolution, never a conflict — "v0.2.1 vs v0.2.2
+    # 发版记录" pairs read as a 版本号 difference and slip past the literal
+    # v1/v2 marker pair. Version shape = v-prefixed with any dotted tail
+    # (v2, v0.2, v0.2.1) or an unprefixed 3+ segment ordinal (0.2.1,
+    # 0.16.7); a SINGLE dotted number (2.5) is an ordinary rate/quantity
+    # value and must not be vetoed. Both sides must be version-shaped.
+    if forward is not None:
+        va, vb = normalize_value(forward.value_a), normalize_value(forward.value_b)
+        version_shape = re.compile(r"^(?:v\d+(?:\.\d+)*|\d+\.\d+\.\d+(?:\.\d+)*)$", re.IGNORECASE)
+        if version_shape.match(va) and version_shape.match(vb):
+            return "coexist_version_value_evolution"
     evolution = (
         "替换为", "替换成", "升级为", "升级到", "迁移到", "迁移至", "不再采用",
         "改为", "改成", "切换到", "切换为", "换成", "变为", "变更为", "调整为",

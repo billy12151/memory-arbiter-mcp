@@ -1278,6 +1278,56 @@ def test_bidirectional_mirror_tolerates_direction_fillers() -> None:
     assert result.state == "notice_ready"
 
 
+# ── 2026-09-17 (owner): 工作日/自然日/英文天单位进换算表（cf-oppo-12） ──────
+# 死因曾为：单位正则不认「个工作日」→ B 值退化裸 5、骨架残留「个工作日」→
+# 骨架字面不同 → 短句余弦卡 0.96 门下 → 直判 None。单位进表后值/骨架双修复。
+
+def test_workday_calendar_day_units_convert() -> None:
+    from memory_arbiter.semantic_conflict import canonical_unit_value as cuv
+    assert cuv("5个工作日") == cuv("5days") == "432000000ms"
+    assert cuv("3自然日") == cuv("3日") == "259200000ms"
+    assert cuv("5businessdays") == cuv("5calendardays") == "432000000ms"
+    assert cuv("5workdays") == cuv("5workingdays") == "432000000ms"
+    # 同值方向的行为变化是拍板口径：工作日按自然天 24h，3 工作日 = 72 小时。
+    assert cuv("3个工作日") == cuv("72小时") == "259200000ms"
+
+
+def test_cf_oppo_12_direct_path_lands_after_workday_unit() -> None:
+    from memory_arbiter.semantic_conflict import (
+        decide_evidence, direct_value_verdict, _normalized_values, _numeric_stripped_skeleton,
+    )
+    left, right = "对美专线清关承诺 72 小时内完成。", "对美专线清关承诺 5 个工作日内完成。"
+    decision = decide_evidence(left, right)
+    assert decision.reason == "numeric_value_candidate"
+    assert decision.left_value == "259200000ms" and decision.right_value == "432000000ms"
+    assert _numeric_stripped_skeleton(left) == _numeric_stripped_skeleton(right)
+    hit = direct_value_verdict(left, right, decision)
+    assert hit is not None and hit[1] == "259200000ms" and hit[2] == "432000000ms"
+
+
+def test_version_value_pair_vetoes_as_release_evolution() -> None:
+    """2026-09-17 (owner): 双侧值均为版本号形态 = 版本演进，过滤门否决
+    （cf-coexist-27-29「v0.2.1 vs v0.2.2 发版记录」单向误报的修复）。
+    单点数值（2.5 速率类）、职级、金额、百分比、单侧版本不得误伤。"""
+    from memory_arbiter.semantic_conflict import coexistence_veto
+    fwd = AttributeValueExtraction("版本号", "v0.2.1", "版本号", "v0.2.2")
+    assert coexistence_veto({"quote": "v0.2.1 发版"}, {"quote": "v0.2.2 发版"}, fwd, None) \
+        == "coexist_version_value_evolution"
+    unprefixed = AttributeValueExtraction("版本", "0.16.6", "版本", "0.16.7")
+    assert coexistence_veto({"quote": "a"}, {"quote": "b"}, unprefixed, None) \
+        == "coexist_version_value_evolution"
+    for ext in (
+        AttributeValueExtraction("速率", "2.5", "速率", "3.0"),
+        AttributeValueExtraction("定级", "P6", "定级", "P5"),
+        AttributeValueExtraction("上限", "600元", "上限", "400元"),
+        AttributeValueExtraction("阈值", "0.3%", "阈值", "1.5%"),
+        AttributeValueExtraction("版本", "0.2.1", "版本", "MySQL"),
+    ):
+        assert coexistence_veto({"quote": "x"}, {"quote": "y"}, ext, None) is None
+    # 无抽取的两参调用（直判路径）不受影响
+    assert coexistence_veto({"quote": "v0.2.1"}, {"quote": "v0.2.2"}) is None
+
+
 # ── strict mirror boundary cases (2026-09-16) ─────────────────────────────
 # owner ruling: the bidirectional mirror stays STRICT (4-field cross equality
 # after normalization) — relaxing it to value-only consistency was tried and
