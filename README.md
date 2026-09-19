@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.16.9` (0.16.6-line repair release: write-time content dedup gate, internal eval harness, first-run demo protocol, similarity-hint redesign, conflict-detection repair wave).
+> Current release: `0.16.10` (0.16.6-line repair release: write-time content dedup gate, internal eval harness, first-run demo protocol, similarity-hint redesign, conflict-detection repair wave).
 
 ## Why trust it
 
@@ -80,7 +80,7 @@ Every product call returns the envelope `{ok, mode, warnings, degraded, data}`. 
 
 Lexical and evidence channels recall independently and merge per memory with reciprocal-rank fusion, then trust, recency, filter, and workspace adjustments.
 
-- **Lexical**: FTS5 over content plus subject/tags LIKE and a bounded content-LIKE anchor channel.
+- **Lexical**: FTS5 over content plus subject/tags LIKE; the bounded content-LIKE anchor channel runs only when vectors are unavailable (degradation path since 0.16.10).
 - **Evidence**: a background worker derives local-text evidence units from the `subject`, Markdown headings, sentence/paragraph groups, and overlapping windows for long text. The indexer never extracts facts, infers entities, or calls a model — it only slices the stored source. Evidence hits carry source offsets. `memory(action="read", data={"memory_id": 42, "span":{"start":120,"end":640}})` returns only that clipped source window plus `data.span.{start,end,total_chars}`; omit `span` to read the complete source. Span bounds are strict integers with `0 <= start < end`, and `end` clips at content length.
 
 ## Conflict groups and notices

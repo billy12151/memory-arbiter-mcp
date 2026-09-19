@@ -30,7 +30,10 @@ SCHEDULED_TASKS_TOPIC = "scheduled_tasks"
 # per MEMORY with a memory-level batched submit (expanded guard for
 # beyond-preview dismissals), group-level dismissal preferred, and the
 # stop rule "one judgment pass after kick complete=true, then report").
-SCHEDULED_TASKS_SPEC_VERSION = 4
+# v4 → v5 = 0.16.10: conflict_scan gains a hard prerequisite — the workspace
+# judgment queue must be drained before kicking (kick returns
+# workspace_backlog_pending otherwise; owner 2026-09-19 拍板).
+SCHEDULED_TASKS_SPEC_VERSION = 5
 
 AGENT_INSTRUCTION = (
     "Tell the user: mema needs three scheduled tasks (a conflict-scan pipeline "
@@ -47,9 +50,13 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
         {
             "name": "conflict_scan",
             "purpose": (
-                "Kick the server-orchestrated conflict-scan pipeline until it reports "
-                "complete=true, then clear the judgment queue page by page. The server "
-                "decides full-vs-incremental and resumes from breakpoints on its own."
+                "Prerequisite (v5): drain the workspace-normalization queue first — "
+                "kick refuses to run while any kind='workspace' row is still pending "
+                "(workspace_backlog_pending), because conflict pairing is same-bucket "
+                "only. Then kick the server-orchestrated conflict-scan pipeline until "
+                "it reports complete=true, and clear the judgment queue page by page. "
+                "The server decides full-vs-incremental and resumes from breakpoints "
+                "on its own."
             ),
             "cadence": "hourly",
             "calls": [
@@ -99,7 +106,7 @@ SCHEDULED_TASKS_SPEC: dict[str, Any] = {
                 },
                 {
                     "note": (
-                        "v4 contract (spec_version=4): check-route noise pairs are "
+                        "v5 contract (spec_version=5): check-route noise pairs are "
                         "machine-cleared by the difference-based classifier, and "
                         "cross-memory todo/polarity evolution pairs are excluded before "
                         "any machine route (0.16.4) — the queue only holds real signals "

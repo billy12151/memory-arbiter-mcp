@@ -13,6 +13,8 @@ from pathlib import Path
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
+from memory_arbiter.embedder import EmbedResult
+from memory_arbiter.models import MemoryRecord
 from memory_arbiter.pipeline.read import _preview_item
 from memory_arbiter.tokens import TOKEN_ESTIMATE_BASIS, estimate_tokens
 from memory_arbiter.tools import MemoryTools
@@ -536,3 +538,77 @@ def test_batch_find_content_mode_full_and_hits(tmp_path: Path) -> None:
     )
     assert hits["ok"] is True, hits["data"]
     assert "vector-hit spans" in str(hits["data"]["size"]["display_hint"])
+
+
+# ── 0.16.10 wide-recall channel split ────────────────────────────────────────
+
+class _FakeEmbedder:
+    """sqlite-vec-capable stand-in (pattern: tests/test_scan_pipeline.py).
+    dim 2 so the all-zero query vector matches the vec table dimension."""
+
+    embedding_space_id = "fake-find-recall-space"
+    dim = 2
+    last_encode_error = None
+
+    @staticmethod
+    def embed_text(prefix: str, body: str, max_body_chars: "int | None" = None) -> EmbedResult:
+        return EmbedResult([0.0, 1.0], False, 1, 1)
+
+
+def _make_vec_tools(tmp_path: Path) -> MemoryTools:
+    pytest.importorskip("sqlite_vec")
+    model = tmp_path / "fake-find.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=tmp_path / "vec.sqlite3",
+        backup_jsonl=tmp_path / "vec-backup.jsonl",
+        embedding_model_path=model,
+        # The query_embedding=None branch of the regression test must stay on
+        # the vectorless degradation path — auto-embedding would silently arm
+        # the semantic channel and defeat the comparison.
+        embedding_auto_query=False,
+        client="c", agent_id="a",
+    )
+    db = MemoryDB(settings)
+    tools = MemoryTools(settings=settings, db=db)
+    tools._embedder = _FakeEmbedder()
+    tools._embedder_loaded = True
+    assert db.ensure_vec_tables(_FakeEmbedder.dim) == []
+    db.init_vec_index_state(_FakeEmbedder.embedding_space_id, True, _FakeEmbedder.dim)
+    return tools
+
+
+def test_wide_recall_content_like_channel_skipped_when_vector_available(tmp_path: Path) -> None:
+    """0.16.10: the content-LIKE wide-recall channel is a no-vector
+    degradation channel only (`... and not vector_available`). A memory
+    reachable ONLY through a content substring (subject/tags clean of the
+    query words) stays out of the recalled page when a query embedding is
+    supplied; the same call without the embedding recalls it via LIKE.
+
+    Fixture constraints that keep this a pure channel test:
+    - the query is two 2-char words — the FTS5 trigram tokenizer cannot form
+      a trigram from them, so the FTS channels cannot smuggle the memory into
+      the pool (a ≥3-char word would FTS-match the content and mask the gate);
+    - the memory is inserted directly (no evidence worker), so the
+      zero-vector evidence KNN scans an empty vec table — an empty result
+      there is expected and deliberately not relied on;
+    - the relevance floor stays disabled via this file's autouse fixture, or
+      the content-only match (~1.0) would be dropped from the page either way.
+    """
+    tools = _make_vec_tools(tmp_path)
+    mid, _warnings = tools.db.insert_memory(MemoryRecord(
+        content="流水线用 ci cd 做发布",
+        agent_id="a",
+        workspace="ws",
+        subject="发布说明",
+        tags=["deploy"],
+    ))
+    assert mid is not None
+
+    with_vec = tools.memory_search(query="ci cd", limit=10, query_embedding=[0.0, 0.0])
+    assert with_vec["ok"] is True
+    assert mid not in [item["id"] for item in with_vec["data"]["results"]]
+
+    without_vec = tools.memory_search(query="ci cd", limit=10, query_embedding=None)
+    assert without_vec["ok"] is True
+    assert mid in [item["id"] for item in without_vec["data"]["results"]]

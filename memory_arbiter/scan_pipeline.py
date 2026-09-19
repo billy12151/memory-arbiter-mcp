@@ -11,13 +11,18 @@ Per-memory processing (E10 final form):
 1. same-memory internal unit×unit examination (deterministic rule only);
 2. cross-memory same-bucket KNN pairing by RELATIVE RANK (absolute distance
    bands are falsified on production data — #971 E10), rule-routed;
-3. ``numeric_value_candidate`` pairs are auto-rejected with an audit trail
-   and a per-round cap (E11 ③: machine-exercised not_a_conflict);
-4. everything else suspicious lands in ``scan_queue`` as a pair row.
+3. check-route noise pairs are machine-cleared by the difference classifier
+   (counted as machine_cleared, never landed) since 0.16.2; value-difference
+   pairs and everything else suspicious land in ``scan_queue`` for agent
+   judgment (the numeric auto-reject cap died with that route);
+4. a kick refuses to run while the workspace-normalization queue holds
+   pending rows (0.16.10: C3b pairs within one bucket, so scanning before
+   moves settle would pair on the wrong base — owner 2026-09-19).
 """
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 import uuid
 from typing import Any, TYPE_CHECKING
@@ -118,6 +123,20 @@ class ScanPipeline:
         vec_state = self.db.get_vec_index_state()
         if vec_state.get("state") in {"mismatch", "failed"}:
             return {"ok": False, "error": "embedding_space_rebuild_required"}
+        pending_ws = self._pending_workspace_items()
+        if pending_ws:
+            # 0.16.10 §九 (owner 2026-09-19): workspace 归一判定清完才扫冲突——
+            # C3b 同桶配对，桶归属未治理完时扫描基数是错的。门禁放在 round
+            # 状态读写之前：被挡时零副作用（不建 round、不动水位、不写日志）。
+            return {
+                "ok": False,
+                "error": "workspace_backlog_pending",
+                "pending_workspace_items": pending_ws,
+                "hint": (
+                    "workspace 归一判定未清完：先经 memory_repair(task='scan_queue', "
+                    "action='page'/'submit') 处理完 kind='workspace' 的 pending 行再 kick"
+                ),
+            }
         max_memories = max(1, min(int(max_memories), 2000))
         time_budget_s = max(1.0, min(float(time_budget_s), 300.0))
         neighbor_k = max(1, min(int(neighbor_k), 20))
@@ -246,6 +265,22 @@ class ScanPipeline:
             "complete": complete,
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
+
+    def _pending_workspace_items(self) -> int:
+        """0.16.10 §九: conflict scan requires the workspace-normalization
+        judgment queue drained first — C3b pairs only within one bucket, so
+        scanning before moves settle would pair on the wrong base. Read-only
+        count; fails open so a broken queue read never stalls the scan
+        safety net (the rest of the pipeline degrades the same way)."""
+        try:
+            with self.db.connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM scan_queue "
+                    "WHERE kind='workspace' AND status='pending'"
+                ).fetchone()
+            return int(row["c"]) if row is not None else 0
+        except sqlite3.Error:
+            return 0
 
     # ── internals ───────────────────────────────────────────────────────────
 

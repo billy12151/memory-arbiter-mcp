@@ -3,6 +3,7 @@ watermarks, void-and-reestablish, historical candidate migration, the kick
 engine (rank pairing → auto-reject / queue), and idempotent re-enumeration."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -544,3 +545,79 @@ def test_scan_candidates_diagnostic_excludes_evolution(tmp_path: Path) -> None:
     }
     assert frozenset((a, b)) not in pairs, "演进域对不得在诊断通道出现"
     assert any(p == frozenset((n1, n2)) for p in pairs), "numeric 对照对应保留"
+
+
+# ── 0.16.10 §九 workspace backlog gate (owner 2026-09-19) ────────────────────
+
+def _enqueue_workspace_item(tools: MemoryTools, mid: int, tag: str) -> None:
+    outcome = tools.db.scan_queue.enqueue(
+        kind="workspace",
+        workspace_canonical="ws",
+        candidate_key_hash=hashlib.sha256(f"ws-gate:{tag}".encode("utf-8")).hexdigest(),
+        member_versions=[{"memory_id": mid, "version": 1}],
+        evidence=[],
+        reason="t",
+        severity="normal",
+        source="test",
+        detail={},
+    )
+    assert outcome.get("outcome") == "queued", outcome
+
+
+def _set_pending_workspace_item_status(tools: MemoryTools, status: str) -> None:
+    with tools.db.write_transaction() as conn:
+        row = conn.execute(
+            "SELECT id FROM scan_queue WHERE kind='workspace' AND status='pending'"
+        ).fetchone()
+        assert row is not None
+        conn.execute("UPDATE scan_queue SET status=? WHERE id=?", (status, row["id"]))
+
+
+def test_kick_blocked_by_pending_workspace_backlog(tmp_path: Path) -> None:
+    """0.16.10 §九: a pending kind='workspace' row gates the conflict-scan kick
+    (C3b pairs within one bucket — scanning before moves settle would pair on
+    the wrong base). The gate sits BEFORE the round state write: a blocked
+    kick is fully side-effect-free (no round, no watermark moves, no log)."""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "门禁主题", "门禁正文 postgres")
+    _enqueue_workspace_item(tools, mid, "block")
+
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    data = kick["data"]
+    assert data["ok"] is False
+    assert data["error"] == "workspace_backlog_pending"
+    assert data["pending_workspace_items"] == 1
+    assert data.get("hint")
+    assert tools.db.meta.scan_pipeline_state() is None, "门禁被挡时不得写 round 状态"
+
+
+def test_kick_resumes_after_workspace_suspect_dismissed(tmp_path: Path) -> None:
+    """Once the workspace judgment leaves 'pending' (dismissed here), the gate
+    count is zero and the kick runs its round normally."""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "门禁主题", "门禁正文 postgres")
+    _enqueue_workspace_item(tools, mid, "dismiss")
+    _set_pending_workspace_item_status(tools, "dismissed")
+    assert tools.wait_evidence_worker_drained(timeout=10)
+
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    assert kick["ok"], kick
+    data = kick["data"]
+    assert data["ok"] is True
+    assert data["complete"] is True
+
+
+def test_kick_not_blocked_by_confirmed_workspace_row(tmp_path: Path) -> None:
+    """A CONFIRMED workspace row is a finished judgment, not pending work — the
+    gate counts status='pending' rows only, so it must not stall the scan."""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "门禁主题", "门禁正文 postgres")
+    _enqueue_workspace_item(tools, mid, "confirm")
+    _set_pending_workspace_item_status(tools, "confirmed")
+    assert tools.wait_evidence_worker_drained(timeout=10)
+
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    assert kick["ok"], kick
+    data = kick["data"]
+    assert data["ok"] is True
+    assert data["complete"] is True

@@ -2,7 +2,7 @@
 
 **[English](INTEGRATION.md) | 中文**
 
-本指南描述 `0.16.9` 的正式契约。
+本指南描述 `0.16.10` 的正式契约。
 
 ## MCP 接口面
 
@@ -112,7 +112,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 `scan_candidates(include_duplicates=true)` 是单页抽查：只返回该页的有界 `duplicates_pool`（上限 2×batch），携带完整的 record_conflict 兼容成员。要做全库近重复清扫，用独立的 `memory_repair(task="scan_duplicates")`（0.15.3）：服务端把所有页聚合到一个 200 对的全局上限下，一次有界响应替代整个分页循环。默认条目是轻量的（`left_id`/`right_id`、双方主题、workspace、`reason`、`distance`、`candidate_key_hash`）；`include_quotes=true` 才附上触发证据引文。抑制沿用同一 candidate-hash 契约——已记录 `not_a_conflict` 或已被 open/applying 组持有的 pair 不会重新出现。该任务不推进 conflict-scan 进度、不写 `scan_log.jsonl`；分诊路径：真重复走 `merge_memories`，误报走 `record_conflict` 压制。
 
-**0.16.0 服务端自主扫描管线（规格 v2）。** 定时任务反复踢 `memory_repair(task="scan_pipeline", data={"action": "kick"})` 直到 `complete=true`；每次 kick 是一段有界的同步批次（默认 45 秒 / 400 条记忆），全量还是增量、断点在哪由逐记忆水位线（`memories.scan_watermark`；编辑和搬动都会使其失效）由服务端自判。管线按同桶向量相对排名配对（绝对距离带已被生产数据证伪），先查每条记忆的内部矛盾，对 `numeric_value_candidate` 类做带审计行和每轮上限的自动驳回，其余疑似对全部落进独立的 `scan_queue` 判断队列——不进 `conflicts`、不进通知、不进用户面列表（doctor 只报积压计数）。agent 按页判流：`action="page"` 返回传递闭包成组的判断单元（只作判断单元，落表逐对下沉）加引句载荷；`action="submit"` 由服务端代行落库——驳回落 `not_a_conflict` 抑制源，确证晋升 `open` 时 agent 只需给 slot_key 和各组显示值（机器归一形式由服务端派生）。workspace 归一疑点走同一队列（`kind="workspace"`）：只有决策时点现算的向量票与 agent 目标同向（首桶==目标 ∧ 份额≥8/10）且 conf≥0.8 才物理搬动；受保护桶（`mema-twin`、`mema-twin-dev`）永不被自主搬动，多家族提及类降级为用户提示。每次自主搬动都写 `normalize_audit` 审计，可用 `memory_govern(action="rollback_auto_move")` 回滚。检测器变更在启动时布防全量（清水位线）并发一次性 `full_scan_required` 通知；doctor 的 `conflicts.scan_epoch` / `conflicts.spec_drift` 体检项解释原因并点名 v1 旧任务。
+**0.16.0 服务端自主扫描管线（定时任务规格 v5 起自 0.16.10）。** 定时任务反复踢 `memory_repair(task="scan_pipeline", data={"action": "kick"})` 直到 `complete=true`；每次 kick 是一段有界的同步批次（默认 45 秒 / 400 条记忆），全量还是增量、断点在哪由逐记忆水位线（`memories.scan_watermark`；编辑和搬动都会使其失效）由服务端自判。管线按同桶向量相对排名配对（绝对距离带已被生产数据证伪），先查每条记忆的内部矛盾，对 check 路线噪声对由差异分类器机器清理（只计数不落表——数值自动驳回及其每轮上限已于 0.16.2 退役），其余疑似对全部落进独立的 `scan_queue` 判断队列——不进 `conflicts`、不进通知、不进用户面列表（doctor 只报积压计数）。agent 按页判流：`action="page"` 返回传递闭包成组的判断单元（只作判断单元，落表逐对下沉）加引句载荷；`action="submit"` 由服务端代行落库——驳回落 `not_a_conflict` 抑制源，确证晋升 `open` 时 agent 只需给 slot_key 和各组显示值（机器归一形式由服务端派生）。workspace 归一疑点走同一队列（`kind="workspace"`）：只有决策时点现算的向量票与 agent 目标同向（首桶==目标 ∧ 份额≥8/10）且 conf≥0.8 才物理搬动；受保护桶（`mema-twin`、`mema-twin-dev`）永不被自主搬动，多家族提及类降级为用户提示。每次自主搬动都写 `normalize_audit` 审计，可用 `memory_govern(action="rollback_auto_move")` 回滚。检测器变更在启动时布防全量（清水位线）并发一次性 `full_scan_required` 通知；doctor 的 `conflicts.scan_epoch` / `conflicts.spec_drift` 体检项解释原因并点名 v1 旧任务。0.16.10 起，只要还有 `kind='workspace'` 判断行未判定，kick 会被拒绝（`workspace_backlog_pending`，零副作用）——workspace 归一必须先判完再扫冲突，因为配对只在同桶内进行（owner 2026-09-19 拍板）。
 
 只有完整的扫描边界——某页 `scan_candidates` 返回 `next_anchor_memory_id=null` 且确实扫过 anchor——才向 `scan_log.jsonl` 追加一行轻量审计记录（`scan_time`、`duration_sec`、`status=completed`、调用方身份、所配置的模型名）。中间页保持静默，逐页计数已移除：这个文件是审计证据，不是扫描结果日志。这个文件就是「定时任务存在」的机器可查证据：没有完成记录且无冲突扫描进度时，agent 会收到 `scan_never_run` 引导提示（info）；重建要求未满足升级为 `scan_required`（warning）；最新记录超过 14 天触发 `scan_stale`（info）。提示载荷带平台无关的 `setup.tasks` 规格（每小时冲突扫描 + 每日治理提醒），任务跑起来后自动消失；同一份证据也驱动 doctor 的 `conflicts.scan_required` / `conflicts.scan_stale` 体检项。完整规格随时可取：`memory(action="help", data={"topic": "scheduled_tasks"})`。
 

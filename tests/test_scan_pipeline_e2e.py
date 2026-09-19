@@ -200,6 +200,18 @@ def _run_e2e(tools: MemoryTools) -> None:
     assert mis in tools.db.pending_scan_memory_ids()
 
     # ── 4) incremental watermarks ───────────────────────────────────────
+    # 0.16.10 §九: workspace 归一判定清零是 kick 的前置条件——先把剩余疑点驳回。
+    while True:
+        page = _page(tools, page_size=30)
+        ws_items = [i for i in page["items"] if i["kind"] == "workspace"]
+        if not ws_items:
+            break
+        submit = tools.memory_repair("scan_queue", {"action": "submit", "decisions": [
+            {"kind": "workspace", "memory_id": i["memory_id"], "status": "dismissed",
+             "reason": "e2e 清场（0.16.10 门禁前置）"}
+            for i in ws_items
+        ]})
+        assert submit["ok"], submit
     _kick(tools, max_memories=500, time_budget_s=180.0)
     with tools.db.connection() as conn:
         before = conn.execute("SELECT COUNT(*) FROM scan_queue").fetchone()[0]

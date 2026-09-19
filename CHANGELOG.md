@@ -3,6 +3,21 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.10] — 2026-09-19
+
+### Added
+
+- **feat(scan): 定时冲突扫描新增 workspace 归一前置门禁。** `_kick_locked` 在向量状态检查之后先查 workspace 归一判定队列——存在 pending 的 `kind='workspace'` 行时不 kick，返回 `workspace_backlog_pending` 且零副作用（不写任务行、不动队列）；队列清零才放行扫描。scheduled_tasks 规格 v4→v5（owner 2026-09-19 拍板：先归一再扫冲突）。
+- **feat(search): find 宽召回按向量可用性分两档。** 向量可用时跳过正文 LIKE 通道（证据通道的条件判断复用同一 `vector_available` 变量）；向量不可用时维持全五路召回。消融 recall-v1 实测砍④（正文 LIKE 通道）零代价；expired 审计路径同规则。
+
+### Changed
+
+- **chore: 无消费者清理。** 删除常量 `SCAN_PIPELINE_AUTO_REJECT_CAP`（无调用方）、移除从未启用的 `memory_arbiter/doctor_checks` 空占位目录（未入库）、`scan_pipeline.py` 文件头 docstring 与现行行为对齐。
+
+### Docs
+
+- **docs(eval): `eval/README.md` 补记已知发现 #5。**
+
 ## [0.16.9] — 2026-09-17
 
 Docs-only release: the first-run demo protocol gets its first post-freeze wording revision plus a corpus-pinning fix — both owner-directed after the v3 freeze turned out to speak engineer to non-developers and to leave the calibration numbers hostage to agent-improvised titles.

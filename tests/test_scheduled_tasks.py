@@ -12,7 +12,7 @@ import pytest
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
-from memory_arbiter.scan_tasks import SCHEDULED_TASKS_SPEC
+from memory_arbiter.scan_tasks import SCHEDULED_TASKS_SPEC, SCHEDULED_TASKS_SPEC_VERSION
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.update_monitor import UpdateMonitor
 
@@ -283,7 +283,7 @@ def _conflict_scan_spec() -> dict:
 
 
 def test_spec_v4_declares_version_and_pipeline_calls() -> None:
-    assert SCHEDULED_TASKS_SPEC["spec_version"] == 4
+    assert SCHEDULED_TASKS_SPEC["spec_version"] == SCHEDULED_TASKS_SPEC_VERSION
     calls = _conflict_scan_spec()["calls"]
     tools_entries = [call for call in calls if "tool" in call]
     assert [call["task"] for call in tools_entries] == ["scan_pipeline", "scan_queue"]
@@ -301,7 +301,7 @@ def test_spec_v4_declares_version_and_pipeline_calls() -> None:
 def test_spec_note_carries_kick_and_queue_semantics() -> None:
     notes = [call["note"] for call in _conflict_scan_spec()["calls"] if "note" in call]
     combined = " ".join(notes).lower()
-    assert "spec_version=4" in combined
+    assert f"spec_version={SCHEDULED_TASKS_SPEC_VERSION}" in combined
     assert "machine-cleared" in combined
     assert "evolution" in combined, "v4: the evolution-domain exclusion is documented"
     assert "rebuild" in combined
@@ -391,5 +391,5 @@ def test_scan_candidates_echoes_spec_drift_hint(tmp_path: Path) -> None:
     assert result["ok"] is True, result
     echo = result["data"].get("scheduled_tasks_spec")
     assert echo is not None
-    assert echo["spec_version"] == 4
+    assert echo["spec_version"] == SCHEDULED_TASKS_SPEC_VERSION
     assert "scan_pipeline" in echo["drift"]

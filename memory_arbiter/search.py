@@ -573,13 +573,16 @@ def _wide_recall(
 ) -> list[dict[str, Any]]:
     """v0.3.0 wide recall: merge multiple retrieval channels into a candidate pool.
 
-    Channels (per r4 §6):
-      1. FTS top N (main)
-      2. FTS OR-query top N (loosened — query tokens OR'd rather than AND'd)
-      3. subject/tags LIKE (precise surface recall)
-      4. content LIKE — only if pool not yet full, with ≥2 anchor hits, capped
-      5. vec0 KNN — optional (v0.3.1), only when query_embedding provided and
-         sqlite-vec available. Catches semantically similar but lexically
+    Channels (per r4 §6, revised 0.16.10 by vector availability):
+      1. FTS top N (main, tokens AND'd)
+      2. FTS OR-query top N (loosened — tokens OR'd; only if pool not yet full)
+      3. subject/tags LIKE (precise surface recall; always runs)
+      4. content LIKE — DEGRADED-ONLY since 0.16.10: runs only when vectors are
+         unavailable (no query_embedding or no sqlite-vec), pool not yet full,
+         with ≥2 anchor hits, capped. Ablated 2026-09-19 (recall-ch1235): zero
+         relevant-target contribution on corpus recall-v1 while vectors work.
+      5. evidence-vector KNN over `memory_evidence_vec` — optional, only when
+         query_embedding provided and sqlite-vec available. Catches semantically similar but lexically
          dissimilar memories. Candidates are flagged so soft-rerank can give
          them a floor score (the query text didn't literally match anything).
 
@@ -594,6 +597,7 @@ def _wide_recall(
     """
     if not db.db_available or not query:
         return []
+    vector_available = bool(query_embedding) and bool(db.state.sqlite_vec_available)
     pool: dict[int, dict[str, Any]] = {}
     scope_m_sql, scope_params = workspace_scope_sql("COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", ws_canonical)
     scope_plain_sql, scope_plain_params = workspace_scope_sql("COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical)
@@ -699,8 +703,10 @@ def _wide_recall(
                 pass
 
         # Channel 4: content LIKE — a limited gap-filler. Requires ≥2 query anchors hit
-        # (r4 §6.1) and is capped at 5-10 to avoid noise explosion.
-        if content_like_fallback and len(pool) < pool_cap:
+        # (r4 §6.1) and is capped at 5-10 to avoid noise explosion. 0.16.10: only a
+        # no-vector degradation channel — with vectors up it contributed zero
+        # relevant-target recall on corpus recall-v1 (recall-ch1235 ablation).
+        if content_like_fallback and len(pool) < pool_cap and not vector_available:
             # Only run if query has at least 2 anchors — otherwise the ≥2-anchor
             # gate can never be satisfied and we save the scan.
             q_anchors = extract_anchors(query)
@@ -743,11 +749,11 @@ def _wide_recall(
     lexical_rank = {int(memory_id): rank for rank, memory_id in enumerate(pool, 1)}
 
     # Local-text evidence KNN aggregates multiple evidence hits into one memory
-    # candidate so long documents cannot occupy many result slots.
-    if (
-        query_embedding
-        and db.state.sqlite_vec_available
-    ):
+    # candidate so long documents cannot occupy many result slots. The
+    # ``query_embedding is not None`` conjunct looks redundant after
+    # vector_available but is what lets mypy narrow the Optional here (a bare
+    # bool alias carries no narrowing).
+    if vector_available and query_embedding is not None:
         evidence_memory_cap = max(pool_cap, 10)
         evidence_rows = db.evidence_knn(
             query_embedding,
