@@ -12,6 +12,7 @@ from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..evidence import EvidenceUnit, has_indexable_text, INDEXABLE_PREFILTER_SQL
 from ..models import utc_now_iso
+from ._knn import knn_window_loop
 
 if TYPE_CHECKING:
     from .core import MemoryDB
@@ -260,27 +261,16 @@ class EvidenceStore:
         try:
             with self._db.connection() as conn:
                 # Workspace/exclusion predicates are evaluated after vec0 picks
-                # its global KNN window. Grow that window until recall is
-                # satisfied or every bounded candidate has been considered.
-                candidate_count = int(
-                    conn.execute(
-                        f"""SELECT COUNT(*) FROM memory_evidence_vec v
-                            JOIN memory_evidence e ON e.id=v.id
-                            JOIN memories m ON m.id=e.memory_id
-                            WHERE {status_sql} AND {memory_status_sql}"""
-                    ).fetchone()[0]
-                )
-                # Grow to the complete candidate domain if necessary. A fixed
-                # global cap can permanently starve a sparse admitted workspace
-                # when closer rows belong to other workspaces. The loop still
-                # stops as soon as requested_k scoped rows are found.
-                max_fetch = max(1, candidate_count)
-                fetch_k = min(max_fetch, requested_k * 4) if filtered else requested_k
-                rows: list[Any] = []
-                while fetch_k > 0:
-                    params: list[Any] = [json.dumps(query_embedding), fetch_k, *filter_params]
-                    rows = conn.execute(
-                        f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
+                # its global KNN window — the shared loop grows that window.
+                rows = knn_window_loop(
+                    conn,
+                    count_sql=(
+                        "SELECT COUNT(*) FROM memory_evidence_vec v "
+                        "JOIN memory_evidence e ON e.id=v.id "
+                        "JOIN memories m ON m.id=e.memory_id "
+                        f"WHERE {status_sql} AND {memory_status_sql}"
+                    ),
+                    query_sql=f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
                                    m.workspace, m.workspace_canonical, m.source_type,
                                    m.confidence, m.protection_level, m.event_time,
                                    m.ingest_time, m.metadata, m.content,
@@ -291,12 +281,12 @@ class EvidenceStore:
                             JOIN memories m ON m.id=e.memory_id
                             WHERE v.embedding MATCH ? AND k=? AND {' AND '.join(clauses)}
                             ORDER BY v.distance""",
-                        params,
-                    ).fetchall()
-                    if not filtered or len(rows) >= requested_k or fetch_k >= max_fetch:
-                        break
-                    fetch_k = min(max_fetch, fetch_k * 2)
-            return [dict(row) for row in rows[:requested_k]]
+                    query_json=json.dumps(query_embedding),
+                    requested_k=requested_k,
+                    params=filter_params,
+                    filtered=filtered,
+                )
+            return [dict(row) for row in rows]
         except sqlite3.Error:
             return []
 

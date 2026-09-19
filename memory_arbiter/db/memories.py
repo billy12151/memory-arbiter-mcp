@@ -22,6 +22,7 @@ from ..text import (
     subject_tokens as _subject_tokens,
 )
 from ..timeutil import parse_iso8601_utc
+from ._knn import knn_window_loop
 
 if TYPE_CHECKING:
     from .core import MemoryDB
@@ -562,23 +563,16 @@ class MemoriesStore:
         try:
             with self.connection() as conn:
                 # The k=? window vec0 picks is GLOBAL over the table: rows from
-                # other workspaces crowd it until fetch_k grows past them.
-                # Like evidence knn, the growth ceiling must therefore be the
-                # unscoped active-domain count — a scoped count would cap the
-                # window below the foreign rows and silently starve recall.
-                candidate_count = int(
-                    conn.execute(
+                # other workspaces crowd it until fetch_k grows past them — the
+                # shared loop (same evidence-knn growth contract) handles it.
+                rows = knn_window_loop(
+                    conn,
+                    count_sql=(
                         "SELECT COUNT(*) FROM subject_tags_vec v "
                         "JOIN memories m ON m.id=v.id "
                         "WHERE m.status='active'"
-                    ).fetchone()[0]
-                )
-                max_fetch = max(1, candidate_count)
-                fetch_k = min(max_fetch, requested_k * 4)
-                rows: list[Any] = []
-                while fetch_k > 0:
-                    rows = conn.execute(
-                        f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
+                    ),
+                    query_sql=f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
                                    m.event_time AS event_time, m.content AS content
                             FROM subject_tags_vec v
                             JOIN memories m ON m.id=v.id
@@ -586,11 +580,11 @@ class MemoriesStore:
                               AND m.status='active' AND v.id != ?
                               AND {self._SUBJECT_TAGS_WS_CLAUSE}
                             ORDER BY v.distance""",
-                        [json.dumps(query_embedding), fetch_k, *filter_params],
-                    ).fetchall()
-                    if len(rows) >= requested_k or fetch_k >= max_fetch:
-                        break
-                    fetch_k = min(max_fetch, fetch_k * 2)
+                    query_json=json.dumps(query_embedding),
+                    requested_k=requested_k,
+                    params=filter_params,
+                    filtered=True,
+                )
         except sqlite3.Error:
             return []
         out: list[dict[str, Any]] = []
