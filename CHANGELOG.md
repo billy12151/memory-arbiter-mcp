@@ -3,6 +3,16 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.11] — 2026-09-20
+
+### Changed
+
+- **feat(search): 相关性下限 8.1 → 8.25（owner 拍板，评测先行）。** 2026-09-20 细扫：runner 采集 `_final_score` 后离线推导全曲线（8.1/8.6 实测双向校验一致）。5 条弱档误捞（纯向量擦边候选：2.5 地板 + 融合 ≈4.9 + 零头）全部挤在 8.212–8.218，最近的 paraphrase 真召回在 8.278——分离窗 (8.218, 8.278] 内零召回损失砍掉 5/7 法律类误捞（7/21 → 2/8，Recall@10 保持 43/45）。窗宽仅 ~0.06 属语料特性：换 embedder 或动任何打分维度需重评（mema id=1029）；结构化正解（vec-only 候选单独门槛）记为后续。`QUERY_RECALL_SCORE_FLOOR = 8.25`（constants.py 注释含完整证据链）。
+
+### Chore
+
+- **chore(eval): `eval/runner.py` 采集 `_final_score`（debug_ranking）。** floor 敏感性曲线可离线推导，一次存分跑替代每档全量重跑（0e17456 已先行合入）。
+
 ## [0.16.10] — 2026-09-19
 
 ### Added

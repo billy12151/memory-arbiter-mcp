@@ -206,12 +206,22 @@ RECALL_POOL_CAP = 50
 CONTENT_LIKE_CAP = 30
 # v0.15.9 relevance floor (docs/eval-relevance-floor-2026-09-08.md): reranked
 # candidates below this final_score never enter a find query-recall result
-# page. Calibrated on the live library (340 labeled candidates): the 7.6-8.1
-# band measured 94% irrelevant; F=8.1 keeps 41/45 relevant (every affected
-# query keeps a stronger partner hit), cuts 73% of irrelevant candidates and
-# clears 91% of legal-form noise. Scope: active query-recall direct path only
-# (browse / filter-driven recall / expired audit are exempt).
-QUERY_RECALL_SCORE_FLOOR = 8.1
+# page. Originally calibrated on the live library (340 labeled candidates):
+# the 7.6-8.1 band measured 94% irrelevant; F=8.1 kept 41/45 relevant, cut 73%
+# of irrelevant candidates and cleared 91% of legal-form noise.
+# 0.16.11 recalibration (2026-09-20, owner): fine floor sweep on corpus
+# recall-v1 with _final_score instrumented runs (eval/results/
+# recall-floorcurve81.json; offline curve double-validated against measured
+# 8.1/8.6 runs). The weak false-pull engine (vec-only fringe candidates,
+# 2.5 vec floor + ~4.9 fusion + bonuses) clusters at 8.212-8.218 while the
+# nearest paraphrase true-positive sits at 8.278 — the gap (8.218, 8.278]
+# kills 5/7 legal-form false pulls at ZERO recall cost (7/21 -> 2/8,
+# Recall@10 unchanged at 43/45). The window is corpus-narrow (~0.06): any
+# embedder swap or scoring-dimension change reopens the question (mema
+# id=1029); the structural fix (a separate bar for vec-only candidates) is
+# the recorded follow-up. Scope unchanged: active query-recall direct path
+# only (browse / filter-driven recall / expired audit are exempt).
+QUERY_RECALL_SCORE_FLOOR = 8.25
 # v0.15.9: bounded reserved pool seats for channel-3 surface hits (exact
 # subject/tags token matches). Without them the fusion-order trim starves
 # surface rows — they enter the pool last (worst lexical ranks) and get cut.
