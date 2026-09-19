@@ -601,7 +601,6 @@ class ScanPipeline:
         judgment that ALSO passes the server-side gate physically moves.
         """
         from .constants import NORMALIZE_VOTE_MIN_FOREIGN
-        from .normalize_gate import compute_summary_votes
 
         vectors = self.db.memories.all_summary_vectors()
         if not vectors:
@@ -612,10 +611,17 @@ class ScanPipeline:
         # The vote matrix still spans the WHOLE library: a mis-placed memory
         # must be judged against its true neighbours, wherever they live.
         # Early-out equivalent to the old k<MIN_FOREIGN check (k is
-        # min(NEIGHBORS, n-1), so k<MIN_FOREIGN iff n-1<MIN_FOREIGN).
+        # min(NEIGHBORS, n-1), so k<MIN_FOREIGN iff n-1<MIN_FOREIGN — holds
+        # while NORMALIZE_VOTE_NEIGHBORS >= NORMALIZE_VOTE_MIN_FOREIGN, the
+        # current 10>=4; lowering NEIGHBORS below MIN_FOREIGN breaks the
+        # equivalence and must revisit this gate).
         if len(vectors) - 1 < NORMALIZE_VOTE_MIN_FOREIGN:
             return 0
-        votes_by_id = compute_summary_votes(vectors, ids)
+        # path="single": this caller counted votes by gemv before the
+        # extraction; gemv and the block gemm are not bitwise-identical, so
+        # the stable-sort tie discipline demands the formula never changes
+        # for a given consumer (0.16.10 review finding).
+        votes_by_id = compute_summary_votes(vectors, ids, path="single")
         landed = 0
         for mid in ids:
             vote = votes_by_id.get(mid)

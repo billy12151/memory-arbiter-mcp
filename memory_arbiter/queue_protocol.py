@@ -721,7 +721,10 @@ class QueueProtocol:
         from .normalize_gate import compute_summary_votes
 
         vectors = self.db.memories.all_summary_vectors()
-        vote = compute_summary_votes(vectors, [memory_id]).get(memory_id)
+        # path="single": decision-time votes were counted by gemv before the
+        # extraction; keep the exact old formula (see scan_pipeline's caller
+        # note on gemv/gemm tie stability).
+        vote = compute_summary_votes(vectors, [memory_id], path="single").get(memory_id)
         if vote is None:
             return None
         return vote["votes"], vote["own"], vote["k"]

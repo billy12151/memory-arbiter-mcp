@@ -621,3 +621,31 @@ def test_kick_not_blocked_by_confirmed_workspace_row(tmp_path: Path) -> None:
     data = kick["data"]
     assert data["ok"] is True
     assert data["complete"] is True
+
+
+def test_workspace_suspect_vote_pinned_to_single_row_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.16.10 review finding: gemv (row-by-row) and gemm (block matmul) are
+    NOT bitwise-identical, and the stable-sort tie discipline only fixes
+    ordering within one sims array — the suspects consumer counted votes by
+    gemv before the compute_summary_votes extraction and must keep that
+    formula forever. This test pins the path kwarg so a future "optimization"
+    cannot silently switch it back."""
+    import memory_arbiter.normalize_gate as normalize_gate_module
+    import memory_arbiter.scan_pipeline as scan_pipeline_module
+
+    tools = make_tools(tmp_path)
+    for i in range(5):
+        _write(tools, f"主题{i}", f"正文{i}", workspace="ws")
+    seen_paths: list[str] = []
+    real = normalize_gate_module.compute_summary_votes
+
+    def _spy(vectors, target_ids, *, path: str = "auto"):  # type: ignore[no-untyped-def]
+        seen_paths.append(path)
+        return real(vectors, target_ids, path=path)
+
+    monkeypatch.setattr(scan_pipeline_module, "compute_summary_votes", _spy)
+    tools.scan_pipeline_kick()
+    assert seen_paths, "kick must consult the vote layer (library >= MIN_FOREIGN+1)"
+    assert set(seen_paths) == {"single"}, seen_paths

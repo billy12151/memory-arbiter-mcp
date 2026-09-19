@@ -51,6 +51,8 @@ def normalize_gate(votes: dict[str, int], own: str) -> "tuple[bool, dict[str, An
 def compute_summary_votes(
     vectors: "dict[int, tuple[str, list[float]]]",
     target_ids: Iterable[int],
+    *,
+    path: str = "auto",
 ) -> "dict[int, dict[str, Any]]":
     """Shared summary-vector vote computation (0.16.10 shared-recall layer).
 
@@ -61,6 +63,14 @@ def compute_summary_votes(
     target it returns ``votes`` (bucket -> neighbour count, own bucket
     included), ``own``, ``k``, and the ``own_best``/``foreign_best``
     (sim, id) neighbour probes the weekly audit payload needs.
+
+    ``path``: ``"auto"`` picks the blocked matmul when targets cover most of
+    the library (the weekly backstop's shape), ``"single"`` forces the
+    row-by-row gemv every produce/decision-time caller used before this
+    extraction. The two formulas are NOT bitwise-identical (1-48 ulp on
+    gemv vs gemm), and the stable-sort tie discipline only fixes ordering
+    WITHIN one sims array — so a caller that used to see gemv must keep
+    gemv or ties can flip at the rank boundary (0.16.10 review finding).
 
     numpy absent -> {} (every caller already degrades to its no-vote path);
     ``k <= 0`` or no target in the library -> {} too.
@@ -110,7 +120,7 @@ def compute_summary_votes(
         }
 
     out: dict[int, dict[str, Any]] = {}
-    if len(wanted) * 4 >= n:
+    if path == "block" or (path == "auto" and len(wanted) * 4 >= n):
         # Majority-target path: one blocked matmul over the whole library,
         # self-exclusion on the diagonal before the sort — the weekly
         # backstop's shape, reused whenever targets cover most rows anyway.

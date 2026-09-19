@@ -265,10 +265,10 @@ class EvidenceStore:
                 rows = knn_window_loop(
                     conn,
                     count_sql=(
-                        "SELECT COUNT(*) FROM memory_evidence_vec v "
-                        "JOIN memory_evidence e ON e.id=v.id "
-                        "JOIN memories m ON m.id=e.memory_id "
-                        f"WHERE {status_sql} AND {memory_status_sql}"
+                        f"""SELECT COUNT(*) FROM memory_evidence_vec v
+                            JOIN memory_evidence e ON e.id=v.id
+                            JOIN memories m ON m.id=e.memory_id
+                            WHERE {status_sql} AND {memory_status_sql}"""
                     ),
                     query_sql=f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
                                    m.workspace, m.workspace_canonical, m.source_type,
