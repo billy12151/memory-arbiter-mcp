@@ -165,7 +165,10 @@ def replay_fixtures(tools: MemoryTools, envelopes: list[dict], progress_every: i
 
 def _run_find(tools: MemoryTools, query: str, limit: int = 10) -> dict[str, Any]:
     started = time.perf_counter()
-    result = tools.memory("find", {"query": query, "limit": limit})
+    # debug_ranking keeps _final_score on the wire so floor-threshold sweeps
+    # can be re-derived offline from one run (floor only filters the ranked
+    # list; it never changes scores). score.py/gate.py read fixture keys only.
+    result = tools.memory("find", {"query": query, "limit": limit, "debug_ranking": True})
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     payload = result.get("data") or {}
     return {"elapsed_ms": elapsed_ms, "payload": payload, "ok": bool(result.get("ok"))}
@@ -188,6 +191,7 @@ def run_recall_queries(
                 "fixture_key": reverse_map.get(mid, f"id:{mid}"),
                 "subject": row.get("subject"),
                 "score": row.get("score") if row.get("score") is not None else row.get("final_score"),
+                "final_score": row.get("_final_score"),
                 "workspace": row.get("workspace"),
             })
         collected.append({
