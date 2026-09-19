@@ -16,7 +16,7 @@ the floor.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 
 def normalize_gate(votes: dict[str, int], own: str) -> "tuple[bool, dict[str, Any]]":
@@ -46,3 +46,86 @@ def normalize_gate(votes: dict[str, int], own: str) -> "tuple[bool, dict[str, An
     }
     passed = bool(top_bucket) and top_votes >= NORMALIZE_VOTE_MIN_FOREIGN and share >= NORMALIZE_FOREIGN_SHARE_MIN
     return passed, evidence
+
+
+def compute_summary_votes(
+    vectors: "dict[int, tuple[str, list[float]]]",
+    target_ids: Iterable[int],
+) -> "dict[int, dict[str, Any]]":
+    """Shared summary-vector vote computation (0.16.10 shared-recall layer).
+
+    Suspect generation (pipeline incremental), the weekly full-library
+    backstop, and the decision-time re-vote ALL count votes through this one
+    function, so the three can never drift apart — the 0.16.2 §1.1 "same
+    queue, same gate" principle extended from the gate to the counting. Per
+    target it returns ``votes`` (bucket -> neighbour count, own bucket
+    included), ``own``, ``k``, and the ``own_best``/``foreign_best``
+    (sim, id) neighbour probes the weekly audit payload needs.
+
+    numpy absent -> {} (every caller already degrades to its no-vote path);
+    ``k <= 0`` or no target in the library -> {} too.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return {}
+    from .constants import NORMALIZE_VOTE_NEIGHBORS
+
+    ids = sorted(vectors)
+    n = len(ids)
+    k = min(NORMALIZE_VOTE_NEIGHBORS, n - 1)
+    if k <= 0:
+        return {}
+    wanted = set(target_ids) & set(ids)
+    if not wanted:
+        return {}
+    workspaces = {mid: str(vectors[mid][0] or "") for mid in ids}
+    matrix = np.array([vectors[mid][1] for mid in ids], dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1)
+    norms[norms == 0] = 1.0
+    unit = matrix / norms[:, None]
+
+    def _vote_from_sims(sims: Any, row_mid: int) -> dict[str, Any]:
+        order = np.argsort(-sims, kind="stable")[:k]
+        votes: dict[str, int] = {}
+        own_best = (-2.0, -1)
+        foreign_best = (-2.0, -1)
+        own = workspaces[row_mid]
+        for col in order:
+            col = int(col)
+            sim = float(sims[col])
+            bucket = workspaces[ids[col]]
+            votes[bucket] = votes.get(bucket, 0) + 1
+            if bucket == own:
+                if sim > own_best[0]:
+                    own_best = (sim, ids[col])
+            elif sim > foreign_best[0]:
+                foreign_best = (sim, ids[col])
+        return {
+            "votes": votes,
+            "own": own,
+            "k": k,
+            "own_best": own_best,
+            "foreign_best": foreign_best,
+        }
+
+    out: dict[int, dict[str, Any]] = {}
+    if len(wanted) * 4 >= n:
+        # Majority-target path: one blocked matmul over the whole library,
+        # self-exclusion on the diagonal before the sort — the weekly
+        # backstop's shape, reused whenever targets cover most rows anyway.
+        block = 512
+        for start in range(0, n, block):
+            sims = unit[start:start + block] @ unit.T
+            sims[np.arange(sims.shape[0]), np.arange(start, start + sims.shape[0])] = -1.0
+            for local_row in range(sims.shape[0]):
+                row_mid = ids[start + local_row]
+                if row_mid in wanted:
+                    out[row_mid] = _vote_from_sims(sims[local_row], row_mid)
+    else:
+        index_of = {mid: i for i, mid in enumerate(ids)}
+        for mid in sorted(wanted):
+            sims = unit @ unit[index_of[mid]]
+            sims[index_of[mid]] = -1.0
+            out[mid] = _vote_from_sims(sims, mid)
+    return out

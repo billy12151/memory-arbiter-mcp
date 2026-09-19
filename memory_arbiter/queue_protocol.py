@@ -715,38 +715,16 @@ class QueueProtocol:
     def _workspace_vote(self, memory_id: int) -> "tuple[dict[str, int], str, int] | None":
         """Decision-time vector vote (E7①: 现算票). Returns (votes, own_bucket,
         neighbours_checked); None without vectors/numpy. Judged by the shared
-        normalize_gate at the call site — this method only counts votes."""
-        try:
-            import numpy as np
-        except ImportError:
-            return None
-        from .constants import NORMALIZE_VOTE_NEIGHBORS
+        normalize_gate at the call site — this method only counts votes, and
+        the counting itself is the shared compute_summary_votes so the
+        decision-time tally can never drift from the generation-time one."""
+        from .normalize_gate import compute_summary_votes
 
         vectors = self.db.memories.all_summary_vectors()
-        if memory_id not in vectors:
+        vote = compute_summary_votes(vectors, [memory_id]).get(memory_id)
+        if vote is None:
             return None
-        all_ids = sorted(vectors)
-        workspaces = {mid: str(vectors[mid][0] or "") for mid in all_ids}
-        own = workspaces[memory_id]
-        matrix = np.array([vectors[mid][1] for mid in all_ids], dtype=np.float32)
-        norms = np.linalg.norm(matrix, axis=1)
-        norms[norms == 0] = 1.0
-        unit = matrix / norms[:, None]
-        row = all_ids.index(memory_id)
-        sims = unit @ unit[row]
-        sims[row] = -1.0
-        k = min(NORMALIZE_VOTE_NEIGHBORS, len(all_ids) - 1)
-        if k <= 0:
-            return None
-        order = np.argsort(-sims, kind="stable")[:k]
-        votes: dict[str, int] = {}
-        for col in order:
-            bucket = workspaces[all_ids[int(col)]]
-            votes[bucket] = votes.get(bucket, 0) + 1
-        # The own bucket stays in the dict: normalize_gate excludes it before
-        # judging (a top that is the current bucket means the content peers
-        # agree with the placement and the gate must fail).
-        return votes, own, k
+        return vote["votes"], vote["own"], vote["k"]
 
     def _execute_auto_move(
         self, memory_id: int, current: str, target: str,

@@ -33,7 +33,7 @@ from .constants import (
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .difference_classifier import classify_pair, internal_noise_pair, is_garbage
 from .semantic_conflict import decide_evidence, is_cross_evolution
-from .normalize_gate import normalize_gate
+from .normalize_gate import compute_summary_votes, normalize_gate
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
@@ -600,12 +600,8 @@ class ScanPipeline:
         second-judges (E5: preview/outline input suffices); only a confirmed
         judgment that ALSO passes the server-side gate physically moves.
         """
-        try:
-            import numpy as np
-        except ImportError:
-            return 0
-        from .constants import NORMALIZE_VOTE_NEIGHBORS, NORMALIZE_VOTE_MIN_FOREIGN
-        from .normalize_gate import normalize_gate
+        from .constants import NORMALIZE_VOTE_MIN_FOREIGN
+        from .normalize_gate import compute_summary_votes
 
         vectors = self.db.memories.all_summary_vectors()
         if not vectors:
@@ -615,27 +611,19 @@ class ScanPipeline:
             return 0
         # The vote matrix still spans the WHOLE library: a mis-placed memory
         # must be judged against its true neighbours, wherever they live.
-        all_ids = sorted(vectors)
-        workspaces = {mid: str(vectors[mid][0] or "") for mid in all_ids}
-        matrix = np.array([vectors[mid][1] for mid in all_ids], dtype=np.float32)
-        norms = np.linalg.norm(matrix, axis=1)
-        norms[norms == 0] = 1.0
-        unit = matrix / norms[:, None]
-        index_of = {mid: i for i, mid in enumerate(all_ids)}
-        k = min(NORMALIZE_VOTE_NEIGHBORS, len(all_ids) - 1)
-        if k < NORMALIZE_VOTE_MIN_FOREIGN:
+        # Early-out equivalent to the old k<MIN_FOREIGN check (k is
+        # min(NEIGHBORS, n-1), so k<MIN_FOREIGN iff n-1<MIN_FOREIGN).
+        if len(vectors) - 1 < NORMALIZE_VOTE_MIN_FOREIGN:
             return 0
+        votes_by_id = compute_summary_votes(vectors, ids)
         landed = 0
         for mid in ids:
-            row = index_of[mid]
-            sims = unit @ unit[row]
-            sims[row] = -1.0
-            order = np.argsort(-sims, kind="stable")[:k]
-            votes: dict[str, int] = {}
-            for col in order:
-                bucket = workspaces[all_ids[int(col)]]
-                votes[bucket] = votes.get(bucket, 0) + 1
-            own = workspaces[mid]
+            vote = votes_by_id.get(mid)
+            if vote is None:
+                continue
+            votes = vote["votes"]
+            own = vote["own"]
+            k = vote["k"]
             # One shared gate for every consumer (0.16.2 §1.1): generation
             # here, decision-time re-vote, share check, audit payload, and
             # the weekly backstop all judge through normalize_gate.
@@ -834,7 +822,7 @@ class ScanPipeline:
         brings it).
         """
         try:
-            import numpy as np
+            import numpy  # noqa: F401  # presence probe only: the structured error below must distinguish numpy-missing from an empty library
         except ImportError:
             return self.db.state.response({
                 "error": "numpy_unavailable", "detail": (
@@ -860,59 +848,37 @@ class ScanPipeline:
                 "note": "no summary vectors yet (backfill pending or empty library)",
             })
         ids = sorted(vectors)
-        workspaces = [vectors[mid][0] for mid in ids]
-        matrix = np.array([vectors[mid][1] for mid in ids], dtype=np.float32)
-        norms = np.linalg.norm(matrix, axis=1)
-        norms[norms == 0] = 1.0
-        unit = matrix / norms[:, None]
         n = len(ids)
-        neighbour_k = min(10, n - 1) if n > 1 else 0
+        # The STABLE-sorting discipline lives in compute_summary_votes: equal
+        # similarities (FakeEmbedder's binary vectors, duplicated content)
+        # must pick the same neighbours on every machine/numpy version —
+        # np.argpartition left ties arbitrary and CI once selected one beta
+        # neighbour where the local run selected nine.
+        votes_by_id = compute_summary_votes(vectors, ids)
         suspected: list[dict[str, Any]] = []
-        if neighbour_k > 0:
-            block = 512
-            for start in range(0, n, block):
-                sims = unit[start:start + block] @ unit.T  # (rows, n)
-                # Self-exclusion before the sort (the diagonal is this block's
-                # own rows), then a STABLE descending sort with the column
-                # index as the tie-break: equal similarities (FakeEmbedder's
-                # binary vectors, duplicated content) must pick the same
-                # neighbours on every machine/numpy version. np.argpartition
-                # leaves tied entries in arbitrary order — CI selected one
-                # beta neighbour where the local run selected nine, and the
-                # same library produced 9 vs 12 suspected memories.
-                sims[np.arange(sims.shape[0]), np.arange(start, start + sims.shape[0])] = -1.0
-                for local_row in range(sims.shape[0]):
-                    row = start + local_row
-                    order = np.argsort(-sims[local_row], kind="stable")[:neighbour_k]
-                    votes: dict[str, int] = {}
-                    foreign_best: tuple[float, int] = (-2.0, -1)  # (sim, id)
-                    own_best: tuple[float, int] = (-2.0, -1)
-                    for col in order:
-                        col = int(col)
-                        bucket = workspaces[col]
-                        votes[bucket] = votes.get(bucket, 0) + 1
-                        sim = float(sims[local_row, col])
-                        if bucket == workspaces[row]:
-                            if sim > own_best[0]:
-                                own_best = (sim, ids[col])
-                        elif sim > foreign_best[0]:
-                            foreign_best = (sim, ids[col])
-                    own = workspaces[row]
-                    # Shared proportional gate (0.16.2 §1.1): the weekly
-                    # backstop judges by the SAME function as the pipeline's
-                    # suspect generation and the decision-time re-vote.
-                    passed, gate_evidence = normalize_gate(votes, own)
-                    if passed:
-                        suspected.append({
-                            "memory_id": ids[row],
-                            "workspace": own,
-                            "suspected_workspace": gate_evidence["top_bucket"],
-                            "foreign_votes": gate_evidence["top_votes"],
-                            "neighbours_checked": neighbour_k,
-                            "foreign_neighbour_id": foreign_best[1],
-                            "own_neighbour_id": own_best[1],
-                            "votes": dict(votes),
-                        })
+        for row_mid in ids:
+            vote = votes_by_id.get(row_mid)
+            if vote is None:
+                continue
+            votes = vote["votes"]
+            own = vote["own"]
+            own_best = vote["own_best"]
+            foreign_best = vote["foreign_best"]
+            # Shared proportional gate (0.16.2 §1.1): the weekly
+            # backstop judges by the SAME function as the pipeline's
+            # suspect generation and the decision-time re-vote.
+            passed, gate_evidence = normalize_gate(votes, own)
+            if passed:
+                suspected.append({
+                    "memory_id": row_mid,
+                    "workspace": own,
+                    "suspected_workspace": gate_evidence["top_bucket"],
+                    "foreign_votes": gate_evidence["top_votes"],
+                    "neighbours_checked": vote["k"],
+                    "foreign_neighbour_id": foreign_best[1],
+                    "own_neighbour_id": own_best[1],
+                    "votes": dict(votes),
+                })
         suspected.sort(key=lambda item: (-item["foreign_votes"], item["memory_id"]))
         # Lazy staleness (the notice channel's heir), BEFORE selecting the
         # cap: a pending suspect row whose subject already left its pinned
