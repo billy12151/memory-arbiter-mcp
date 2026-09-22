@@ -1308,6 +1308,10 @@ class ProductSurfaces:
             return self._invalid_product_call(
                 "memory_repair", f"unknown scan_queue action: {action_value} (page|submit|status)", task,
             )
+        if task == "claims_backfill":
+            # 0.17.0 P2-5.4: bounded claims backfill (owner designates a cheap
+            # model via data.model_path; cursor via data.after_id).
+            return self._tools._claims_backfill_task(data if isinstance(data, dict) else {})
         if task == "scan_duplicates":
             return self._scan_duplicates_task(task, payload)
         if task == "cleanup_history":
