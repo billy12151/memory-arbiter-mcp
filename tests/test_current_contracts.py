@@ -417,3 +417,25 @@ def test_backup_replay_preserves_original_agent_id(tmp_path: Path) -> None:
             "SELECT agent_id FROM memories WHERE id=?", (memory_id,),
         ).fetchone()
     assert row["agent_id"] == "original-agent"
+
+
+def test_claim_precheck_skips_write_lock_on_empty_pending(tmp_path: Path) -> None:
+    """0.16.12 P1-T2：零 pending 时 claim 走只读预检，不抢写锁。
+
+    另一连接预持有 BEGIN IMMEDIATE 写事务（WAL 下读不受影响、写必阻塞）。
+    预检正确时 claim 立即返回 None；若误走写路径会在 busy_timeout 上
+    阻塞（默认数秒），elapsed 断言即失败。
+    """
+    import sqlite3
+    import time
+
+    tool = tools(tmp_path)
+    lock_conn = sqlite3.connect(tool.settings.db_path)
+    lock_conn.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        assert tool.db.claim_next_semantic_notice() is None
+        assert time.monotonic() - started < 2.0
+    finally:
+        lock_conn.rollback()
+        lock_conn.close()

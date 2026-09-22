@@ -298,6 +298,20 @@ class SemanticNoticeStore:
 
     def claim_next_semantic_notice(self, workspace_canonical: "WorkspaceScope" = None) -> dict[str, Any] | None:
         workspace_sql, args = self._workspace_clause(workspace_canonical)
+        # 0.16.12 P1-T2 read-only precheck: with zero pending notices the
+        # write transaction below could only ever return None, but still paid
+        # a fresh connection + BEGIN IMMEDIATE + empty COMMIT on EVERY product
+        # call. The partial index idx_conflicts_notice_delivery serves this
+        # SELECT; only a live pending row enters the original write path
+        # (byte-for-byte unchanged — stale marking still happens only there).
+        with self._db.connection() as probe:
+            hit = probe.execute(
+                "SELECT 1 FROM conflicts WHERE notice_delivery_status='pending' "
+                "AND notice_type IS NOT NULL" + workspace_sql + " LIMIT 1",
+                args,
+            ).fetchone()
+        if hit is None:
+            return None
         with self._db.write_transaction() as conn:
             while True:
                 rows = conn.execute(
