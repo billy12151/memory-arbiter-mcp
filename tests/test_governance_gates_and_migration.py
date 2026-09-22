@@ -374,3 +374,24 @@ def test_post_commit_recheck_switch(tmp_path: Path) -> None:
     index, check = tools._post_commit(memory_id, db.get_memory(memory_id), recheck_conflicts=True)
     assert index.get("semantic_task_id")
     assert check.get("status") in {"completed", "incomplete", "skipped", "deferred"}
+
+
+def test_memories_status_ingest_index_serves_recent_count(tmp_path: Path) -> None:
+    """0.16.12 P1-T7：新库经 additive 迁移建 (status, ingest_time) 索引，
+    _recent_fallback 的 COUNT 走索引（EXPLAIN 无全表 SCAN）。"""
+    import sqlite3
+
+    settings = Settings(db_path=tmp_path / "m.sqlite3", backup_jsonl=tmp_path / "b.jsonl")
+    db = MemoryDB(settings)
+    conn = sqlite3.connect(db.settings.db_path)
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_memories_status_ingest'",
+    ).fetchone()
+    assert exists, "additive 迁移应已建索引"
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM memories WHERE status='active'",
+    ).fetchall()
+    detail = " ".join(str(row[3]) for row in plan)
+    assert "SCAN memories" not in detail, f"COUNT 应走索引: {detail}"
+    assert "idx_memories_status_ingest" in detail, f"应使用新索引: {detail}"
+    conn.close()

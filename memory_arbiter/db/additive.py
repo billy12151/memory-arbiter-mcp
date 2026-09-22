@@ -189,6 +189,9 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     sha_dedupe = _add_content_sha_dedupe(conn)
     if sha_dedupe:
         applied.append(sha_dedupe)
+    status_ingest_idx = _add_memories_status_ingest_index(conn)
+    if status_ingest_idx:
+        applied.append(status_ingest_idx)
     overflow_retired = _retire_conflicts_overflow(conn)
     if overflow_retired:
         applied.append(overflow_retired)
@@ -725,6 +728,31 @@ def _add_content_sha_dedupe(conn: sqlite3.Connection) -> str:
         (_CONTENT_SHA_KEY, f"backfilled={len(pending)}"),
     )
     return f"content_sha_dedupe(backfilled={len(pending)})"
+
+
+_STATUS_INGEST_IDX_KEY = "memories_status_ingest_idx_v1"
+
+
+def _add_memories_status_ingest_index(conn: sqlite3.Connection) -> str | None:
+    """0.16.12 P1-T7: (status, ingest_time) index for the browse/recent paths
+    (_recent_fallback's COUNT and recall_by_filters' ORDER BY ingest_time
+    DESC). Pure index addition — no query logic changes. Idempotent: the
+    migration_state key only records that the statement ran."""
+    done = conn.execute(
+        "SELECT 1 FROM migration_state WHERE key=?", (_STATUS_INGEST_IDX_KEY,),
+    ).fetchone()
+    if done:
+        return None
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_status_ingest "
+        "ON memories(status, ingest_time)"
+    )
+    conn.execute(
+        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        (_STATUS_INGEST_IDX_KEY, "created"),
+    )
+    return "memories_status_ingest_idx(created)"
 
 
 _OVERFLOW_RETIRED_KEY = "conflicts_overflow_retired_v1"
