@@ -199,6 +199,42 @@ class EvidenceStore:
         except sqlite3.Error:
             return []
 
+    def text_unit_rows_for_ids(
+        self, entries: "list[tuple[int, int]]",
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Batch text-unit fetch for id-driven reads (0.16.12 P1-T4): one
+        connection (row-value IN, chunked) for the whole page instead of one
+        per id. Span overlap is NOT applied here — callers filter per id in
+        Python with the same predicate text_unit_rows uses in SQL. Rows come
+        back per memory ordered by unit_index; ids with no current-version
+        text units are simply absent from the map."""
+        if not entries:
+            return {}
+        pairs = sorted({(int(mid), int(version)) for mid, version in entries})
+        out: dict[int, list[dict[str, Any]]] = {}
+        try:
+            with self._db.connection() as conn:
+                for start in range(0, len(pairs), 200):
+                    chunk = pairs[start:start + 200]
+                    placeholders = ",".join("(?,?)" for _ in chunk)
+                    params = [value for pair in chunk for value in pair]
+                    rows = conn.execute(
+                        f"""SELECT memory_id, unit_index, kind, text, start_offset, end_offset
+                            FROM memory_evidence
+                            WHERE (memory_id, memory_version) IN ({placeholders})
+                              AND kind='text'
+                            ORDER BY memory_id, unit_index""",
+                        params,
+                    ).fetchall()
+                    for row in rows:
+                        out.setdefault(int(row["memory_id"]), []).append(
+                            {key: row[key] for key in
+                             ("unit_index", "kind", "text", "start_offset", "end_offset")}
+                        )
+            return out
+        except sqlite3.Error:
+            return {}
+
     def knn(
         self,
         query_embedding: list[float],

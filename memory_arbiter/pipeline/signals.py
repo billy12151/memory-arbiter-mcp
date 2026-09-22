@@ -26,14 +26,23 @@ class ConflictSignalPipeline:
 
     def _attach_conflict_signals(
         self, results: list[dict[str, Any]], warnings: list[str],
+        precomputed_groups: "list[dict[str, Any]] | None" = None,
     ) -> list[dict[str, Any]]:
         if not results:
             return results
         try:
             ids = [int(row["id"]) for row in results if row.get("id") is not None]
             wanted = set(ids)
-            conflicts = self.db.conflicts.list_open_conflicts_for_memory_ids(
-                ids, include_applying=True,
+            # 0.16.12 P1-T3: the caller may hand in the page's open-conflict
+            # groups (same ids, include_applying=True) so memory_search's
+            # unresolved_conflict_count segment and this attachment share ONE
+            # query; None keeps this site's own query (batch_find etc.).
+            conflicts = (
+                precomputed_groups
+                if precomputed_groups is not None
+                else self.db.conflicts.list_open_conflicts_for_memory_ids(
+                    ids, include_applying=True,
+                )
             )
             by_memory: dict[int, list[dict[str, Any]]] = {}
             all_ids: set[int] = set(ids)

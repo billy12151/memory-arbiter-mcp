@@ -451,6 +451,9 @@ class MemoryDB:
     def get_memory(self, memory_id: int) -> dict[str, Any] | None:
         return self.memories.get_memory(memory_id)
 
+    def get_memories_by_ids(self, ids: list[int]) -> dict[int, dict[str, Any]]:
+        return self.memories.get_memories_by_ids(ids)
+
     def get_memory_for_workspace(
         self, memory_id: int, ws_canonical: str, admitted: "WorkspaceScope" = None,
     ) -> dict[str, Any] | None:

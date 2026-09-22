@@ -266,3 +266,26 @@ def test_batch_read_validation_registry_accepts_fields(tmp_path: Path) -> None:
     # unknown fields are stripped with a warning, not fatal
     res = _batch_read(tools, memory_ids=[mid], not_a_field=1)
     assert res.get("ok"), res
+
+
+def test_batch_read_batches_connections(tmp_path: Path, monkeypatch) -> None:
+    """0.16.12 P1-T4：批量预取后连接数与 id 数解耦（20 id preview 模式 ≤3 连接）。"""
+    tools = make_tools(tmp_path)
+    ids = [_write(tools, f"subject-{i}", f"content number {i} about batching") for i in range(20)]
+    _drain_evidence(tools)
+    calls = []
+    original = tools.db._new_connection
+
+    def counted():
+        calls.append(1)
+        return original()
+
+    monkeypatch.setattr(tools.db, "_new_connection", counted)
+    result = _batch_read(
+        tools, memory_ids=ids, content_mode="preview",
+    )
+    assert result.get("ok"), result
+    assert sum(1 for r in result["data"]["results"] if r.get("found")) == 20
+    # 无批量预取时 ≥20（每 id 一连接）；预取后与 id 数无关（上限容忍 state
+    # 响应封装等杂项连接）。
+    assert len(calls) <= 3, f"expected batched connections, saw {len(calls)}"

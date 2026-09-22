@@ -1067,15 +1067,25 @@ class MemoryTools:
             )
         return None
 
+    @staticmethod
+    def _memory_visible(record: dict[str, Any] | None, caller: CallerWorkspace) -> bool:
+        """Shared id-driven visibility predicate (0.16.12 P1-T4).
+
+        The single-id path and the batch_read prefetch MUST apply the same
+        rule: strict callers see only rows inside their admitted canonical set
+        (mirrors get_memory_for_workspace's SQL scope); non-strict callers see
+        any existing row; a strict caller without a canonical sees nothing.
+        """
+        if caller.isolation != "strict":
+            return record is not None
+        if not caller.canonical:
+            return False
+        return visible_memory(record, caller.canonical, caller.scope_canonicals())
+
     def _get_memory_visible(self, memory_id: int, caller: CallerWorkspace | None = None) -> dict[str, Any] | None:
         caller = caller or self._caller_workspace(None)
-        if caller.isolation == "strict":
-            if not caller.canonical:
-                return None
-            return self.db.get_memory_for_workspace(
-                int(memory_id), caller.canonical, caller.scope_canonicals(),
-            )
-        return self.db.get_memory(int(memory_id))
+        record = self.db.get_memory(int(memory_id))
+        return record if self._memory_visible(record, caller) else None
 
     def _memory_acl_response_fields(self, caller: CallerWorkspace) -> dict[str, Any]:
         return caller.response_fields() if caller.isolation == "strict" else {}
@@ -1836,8 +1846,9 @@ class MemoryTools:
         self,
         results: list[dict[str, Any]],
         warnings: list[str],
+        precomputed_groups: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        return self._signals._attach_conflict_signals(results, warnings)
+        return self._signals._attach_conflict_signals(results, warnings, precomputed_groups)
 
     def _build_open_table_signal(
         self,

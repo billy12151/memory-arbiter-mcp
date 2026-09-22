@@ -612,3 +612,33 @@ def test_wide_recall_content_like_channel_skipped_when_vector_available(tmp_path
     without_vec = tools.memory_search(query="ci cd", limit=10, query_embedding=None)
     assert without_vec["ok"] is True
     assert mid in [item["id"] for item in without_vec["data"]["results"]]
+
+
+def test_find_conflict_group_query_runs_once_per_search(tmp_path: Path, monkeypatch) -> None:
+    """0.16.12 P1-T3：signal 挂接与 unresolved_conflict_count 共享同一次组查询。"""
+    tools = make_tools(tmp_path)
+    left = tools.memory_write(content="database is mysql", subject="s", tags=[])["data"]["id"]
+    right = tools.memory_write(content="database is sqlite", subject="s2", tags=[])["data"]["id"]
+    tools.memory_repair("record_conflict", {
+        "slot_key": {"entity": "p", "attribute": "db", "scope": "g"},
+        "members": [_member(left, 1, "mysql"), _member(right, 1, "sqlite")],
+        "value_groups": [
+            {"normalized_value": "mysql", "display_value": "mysql", "members": [f"{left}@1"]},
+            {"normalized_value": "sqlite", "display_value": "sqlite", "members": [f"{right}@1"]},
+        ],
+        "status": "open", "detector_version": "d1", "prompt_version": "p1",
+        "source": "scan", "reason": "diff", "authorized": True,
+    })
+    calls = []
+    original = tools.db.conflicts.list_open_conflicts_for_memory_ids
+
+    def counted(ids, *, include_applying=False):
+        calls.append(list(ids))
+        return original(ids, include_applying=include_applying)
+
+    monkeypatch.setattr(tools.db.conflicts, "list_open_conflicts_for_memory_ids", counted)
+    result = tools.memory_search(query="database", limit=10)
+    assert result["data"]["unresolved_conflict_count"] == 2
+    assert result["data"]["results"]
+    assert any(r.get("conflict_signal") for r in result["data"]["results"])
+    assert len(calls) == 1  # 两个消费点共享一次查询

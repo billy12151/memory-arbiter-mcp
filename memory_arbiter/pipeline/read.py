@@ -43,6 +43,7 @@ from ..constants import (  # noqa: E402
 
 def _unit_aligned_hits(
     db: Any, memory: dict[str, Any], span: "dict[str, Any] | None",
+    rows: "list[dict[str, Any]] | None" = None,
 ) -> "tuple[list[dict[str, Any]], str | None] | None":
     """Unit-aligned hit spans for an id-driven hits read (plan §6⑨, four-round
     final form): the ``hits`` unit selector on id-driven calls is the per-id
@@ -55,15 +56,29 @@ def _unit_aligned_hits(
     (same rule as find/batch_find hits). Returns None when the memory has no
     evidence rows for its current version (caller falls back to the char
     window / plain preview).
+
+    ``rows`` (0.16.12 P1-T4): batch_read passes the page-prefetched unfiltered
+    unit rows for THIS memory (empty list = prefetched and known empty); None
+    keeps the per-id query. Span overlap is applied here in Python with the
+    same predicate text_unit_rows applies in SQL.
     """
-    try:
-        rows = db.evidence.text_unit_rows(
-            int(memory["id"]), int(memory.get("version") or 1),
-            span_start=(int(span["start"]) if span else None),
-            span_end=(int(span["end"]) if span else None),
-        )
-    except Exception:
-        return None
+    if rows is None:
+        try:
+            rows = db.evidence.text_unit_rows(
+                int(memory["id"]), int(memory.get("version") or 1),
+                span_start=(int(span["start"]) if span else None),
+                span_end=(int(span["end"]) if span else None),
+            )
+        except Exception:
+            return None
+    else:
+        if span is not None:
+            start = int(span["start"])
+            end = int(span["end"])
+            rows = [
+                row for row in rows
+                if int(row["start_offset"]) < end and int(row["end_offset"]) > start
+            ]
     if not rows:
         return None
     content = str(memory.get("content") or "")
@@ -328,11 +343,31 @@ class ReadPipeline:
         has_more = outcome.has_more
         total_estimate = outcome.total_estimate
         retrieval_mode = outcome.retrieval_mode
+        # 0.16.12 P1-T3: ONE open-conflict-group query for the page feeds both
+        # the signal attachment below and the unresolved_conflict_count segment
+        # further down (previously two identical calls). Computed only on a
+        # healthy DB so the down-DB warning semantics of each consumer stay
+        # byte-identical (both fall back to their own query on None).
+        shared_groups: "list[dict[str, Any]] | None" = None
+        if results and self.db.db_available:
+            _page_ids = sorted({int(r["id"]) for r in results if r.get("id") is not None})
+            if _page_ids:
+                try:
+                    shared_groups = self.db.conflicts.list_open_conflicts_for_memory_ids(
+                        _page_ids, include_applying=True,
+                    )
+                except Exception:
+                    # Both consumers re-query inside their own try/except when
+                    # handed None, so their per-site failure warnings stay
+                    # byte-identical to the pre-dedup behaviour.
+                    shared_groups = None
         # v0.7.6: attach conflict signals (open_table / conflict_guidance
         # sources), only on genuine query hits (direct mode). Failures degrade
         # silently.
         if include_conflict_signal and retrieval_mode == "direct" and results:
-            results = self._attach_conflict_signals(results, extra_warnings)
+            results = self._attach_conflict_signals(
+                results, extra_warnings, precomputed_groups=shared_groups,
+            )
         # v0.8.7: promote conflict_signal to a loud top-level flag (mirrors the
         # write path's attention_required). If any direct hit carries a
         # conflict_signal, surface a one-line summary at data top level so the
@@ -489,9 +524,14 @@ class ReadPipeline:
             page_ids = {int(r["id"]) for r in results if r.get("id") is not None}
             hit_ids: set[int] = set()
             if page_ids:
-                for group in self.db.conflicts.list_open_conflicts_for_memory_ids(
-                    sorted(page_ids), include_applying=True,
-                ):
+                groups = (
+                    shared_groups
+                    if shared_groups is not None
+                    else self.db.conflicts.list_open_conflicts_for_memory_ids(
+                        sorted(page_ids), include_applying=True,
+                    )
+                )
+                for group in groups:
                     for member in group.get("member_versions") or []:
                         member_id = member.get("memory_id") if isinstance(member, dict) else None
                         if member_id is not None and int(member_id) in page_ids:
@@ -1309,10 +1349,36 @@ class ReadPipeline:
                 except (TypeError, ValueError):
                     continue
 
+        # 0.16.12 P1-T4: batch prefetch — ONE connection for the page's memory
+        # rows (plus one for the evidence units hits/full need) replaces the
+        # per-id get_memory/text_unit_rows connections. The per-id visibility
+        # rule is the shared MemoryTools._memory_visible predicate (identical
+        # to _get_memory_visible's), applied in Python on the prefetched rows.
+        prefetched = self.db.get_memories_by_ids(wanted)
+        visible_records: dict[int, dict[str, Any]] = {}
+        unit_needed: list[tuple[int, int]] = []
+        for mid in wanted:
+            record = prefetched.get(mid)
+            if record is None or not self._tools._memory_visible(record, caller):
+                continue
+            visible_records[mid] = record
+            if content_mode == "hits":
+                unit_needed.append((mid, int(record.get("version") or 1)))
+            elif content_mode == "full":
+                span = span_map.get(mid)
+                if (
+                    span is not None and span["end"] > span["start"]
+                    and span["start"] < len(str(record.get("content") or ""))
+                ):
+                    unit_needed.append((mid, int(record.get("version") or 1)))
+        unit_rows_map: dict[int, list[dict[str, Any]]] = (
+            self.db.evidence.text_unit_rows_for_ids(unit_needed) if unit_needed else {}
+        )
+
         results: list[dict[str, Any]] = []
         not_found: list[int] = []
         for mid in wanted:
-            memory = self._get_memory_visible(mid, caller)
+            memory = visible_records.get(mid)
             if not memory:
                 not_found.append(mid)
                 results.append({"memory_id": mid, "found": False, "error": "not_found"})
@@ -1326,7 +1392,9 @@ class ReadPipeline:
                 record["outline"] = _content_outline(str(memory.get("subject") or ""), content)
                 item["memory"] = record
             elif content_mode == "hits":
-                unit_hits = _unit_aligned_hits(self.db, memory, span)
+                unit_hits = _unit_aligned_hits(
+                    self.db, memory, span, rows=unit_rows_map.get(mid, []),
+                )
                 record = {key: value for key, value in memory.items() if key != "content"}
                 record["content_chars"] = len(content)
                 record["outline"] = _content_outline(str(memory.get("subject") or ""), content)
@@ -1341,10 +1409,11 @@ class ReadPipeline:
                 if span is not None and span["end"] > span["start"]:
                     if span["start"] < len(content):
                         clipped_end = min(span["end"], len(content))
-                        rows = self.db.evidence.text_unit_rows(
-                            mid, int(memory.get("version") or 1),
-                            span_start=span["start"], span_end=clipped_end,
-                        )
+                        rows = [
+                            row for row in unit_rows_map.get(mid, [])
+                            if int(row["start_offset"]) < clipped_end
+                            and int(row["end_offset"]) > span["start"]
+                        ]
                         if rows:
                             # Unit-aligned: contiguous slice from the first to
                             # the last covered unit (units may overlap; joining

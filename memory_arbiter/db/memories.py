@@ -312,6 +312,27 @@ class MemoriesStore:
         with self.connection() as conn:
             return self._fetch_memory(conn, memory_id)
 
+    def get_memories_by_ids(self, ids: "list[int]") -> dict[int, dict[str, Any]]:
+        """Batch row fetch for id-driven reads (0.16.12 P1-T4): ONE connection
+        (chunked IN) instead of one get_memory connection per id. Visibility
+        is NOT applied here — callers run the shared caller predicate."""
+        if not self._db_available or not ids:
+            return {}
+        unique = sorted({int(i) for i in ids})
+        out: dict[int, dict[str, Any]] = {}
+        with self.connection() as conn:
+            for start in range(0, len(unique), 500):
+                chunk = unique[start:start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT * FROM memories WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    record = _row_to_dict(row)
+                    out[int(record["id"])] = record
+        return out
+
     def get_memory_for_workspace(
         self, memory_id: int, ws_canonical: str,
         admitted: WorkspaceScope = None,
