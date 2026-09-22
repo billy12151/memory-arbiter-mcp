@@ -212,7 +212,7 @@ def test_retry_allowed_default_keeps_retry(monkeypatch: pytest.MonkeyPatch) -> N
     backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
     llm = _ScriptedLLM([_TRUNCATED, _VALID])
     monkeypatch.setattr(backend, "_build_llm", lambda: llm)
-    signal = backend.classify_pair({"quote": "A"}, {"quote": "B"})
+    signal = backend.classify_pair({"quote": "A 侧用 MySQL"}, {"quote": "B 侧用 SQLite"})
     assert signal.candidate_type == "attribute_value_extraction"
     assert len(llm.calls) == 2
     assert backend._pair_retried == 1
@@ -474,7 +474,7 @@ def test_retry_is_targeted_text_without_echo_or_grammar(monkeypatch: pytest.Monk
     backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
     llm = _ScriptedLLM([_TRUNCATED, _VALID])
     backend._llm = llm
-    signal = backend.classify_pair({"quote": "A"}, {"quote": "B"})
+    signal = backend.classify_pair({"quote": "A 侧用 MySQL"}, {"quote": "B 侧用 SQLite"})
     assert signal.candidate_type == "attribute_value_extraction"
     assert "response_format" not in llm.calls[0]
     retry = llm.calls[1]
@@ -485,7 +485,7 @@ def test_retry_is_targeted_text_without_echo_or_grammar(monkeypatch: pytest.Monk
     # gated single-attempt path: same shape, one call
     llm2 = _ScriptedLLM([_TRUNCATED, _VALID])
     backend._llm = llm2
-    backend.classify_pair({"quote": "A"}, {"quote": "B"}, retry_allowed=False)
+    backend.classify_pair({"quote": "A 侧用 MySQL"}, {"quote": "B 侧用 SQLite"}, retry_allowed=False)
     assert len(llm2.calls) == 1 and "response_format" not in llm2.calls[0]
 
 

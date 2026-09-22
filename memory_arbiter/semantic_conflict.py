@@ -20,6 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+from .difference_classifier import _cn_to_int
 from .constants import (
     SEMANTIC_N_CTX,
     SEMANTIC_PAIR_MAX_ATTEMPTS,
@@ -78,6 +79,42 @@ attribute is the minimal comparable question both sides answer; it must not cont
 Always output all four string fields, even when extraction is unreliable; write the string "__unknown__" for fields you cannot reliably extract. Do not output null, conflict, coexistence, winner, confidence, or extra fields.
 Example: A=The production database uses MySQL. B=The production database uses SQLite.
 Output: {"attribute_a":"database engine","value_a":"MySQL","attribute_b":"database engine","value_b":"SQLite"}"""
+
+# 0.17.0 P2-1.4: long/messy inputs make the 0.5B parrot the few-shot example
+# verbatim (10th/11th round, 3/20) — the parse then SUCCEEDS with example
+# values the evidence never contained. Detection is word-level: a fabricated
+# MySQL/SQLite that neither quote carries → parrot_invalid → one retry whose
+# SYSTEM prompt drops the example lines (the user turn stays byte-identical:
+# the 11th-round lesson — rebuilding the user turn reset the model, only the
+# system swaps). The token list must stay in sync with the example lines
+# above (guarded by test).
+_PAIR_PARROT_VALUE_TOKENS = ("mysql", "sqlite")
+
+
+def _strip_pair_example(prompt: str) -> str:
+    """Example-free variant of a pair prompt (P2-1.4 parrot retry system)."""
+    marker = "例：" if "例：" in prompt else "Example:"
+    head, _, _ = prompt.partition(marker)
+    return head.rstrip() + "\n"
+
+
+def _is_parrot_extraction(parsed: dict[str, Any], left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """True when the extraction carries few-shot vocabulary absent from both
+    quotes — the model answered the EXAMPLE, not the evidence.
+
+    Value-level only (a fabricated MySQL/SQLite neither quote contains). The
+    example ATTRIBUTE name alone is NOT flagged: "数据库选型" is a legitimate
+    name for any storage-topic pair whose values are grounded — attribute-word
+    overlap without a fabricated value is naming, not parroting (adversarial
+    self-check on the storage-selection negative)."""
+    fields = " ".join(
+        str(parsed.get(key) or "")
+        for key in ("value_a", "value_b")
+    ).casefold()
+    quotes = "\n".join(
+        str(env.get("quote") or env.get("content") or "") for env in (left, right)
+    ).casefold()
+    return any(token in fields and token not in quotes for token in _PAIR_PARROT_VALUE_TOKENS)
 
 _CJK_RE = re.compile(r"[一-鿿]")
 
@@ -320,12 +357,19 @@ _EVALUATION_RE = re.compile(
 # (inconsistent extractions), and single-direction let three through. A
 # same-object-id rule was measured and DROPPED: "任务 id=123 预算 5000 vs
 # 500" is exactly the real conflict this product exists to catch.
+# 0.17.0 P2-1.1: bare 「复审」 killed real config pairs ("每半年复审/每季度
+# 复审" is a POLICY statement, not a review record — 11th-round live kill);
+# it now requires an artefact context. 「复验」 same shape; re-verif gains a
+# left boundary so "pre-verify" no longer matches.
 _PROCESS_REVIEW_RE = re.compile(
-    r"review findings|follow[- ]?up review|adversarial review|复审|审查结论|review for id",
+    r"review findings|follow[- ]?up review|adversarial review|review for id"
+    r"|评审结论|评审意见|评审记录|审查结论"
+    r"|(?:文档|方案|设计|配置|规则)复审|复审(?:结论|记录)",
     re.IGNORECASE,
 )
 _PROCESS_REVERIFY_RE = re.compile(
-    r"重启后.{0,8}再次?验证|复验|re[- ]?verif|verify again",
+    r"重启后.{0,8}再次?验证|(?:文档|方案|设计|配置)复验|复验(?:结论|记录)"
+    r"|(?<![a-z])re[- ]?verif|verify again",
     re.IGNORECASE,
 )
 _PROCESS_DESIGN_RE = re.compile(
@@ -824,6 +868,33 @@ _UNIT_TO_CANONICAL: dict[str, "tuple[Decimal, str]"] = {
 }
 _VALUE_NUM_UNIT_RE = re.compile(r"^(\d+(?:\.\d+)?)([a-z]+|[一-鿿]+)?$")
 
+# 0.17.0 P2-1.2: Chinese duration words never match _VALUE_NUM_UNIT_RE (they
+# start with a numeral character, not a digit), so "半秒 vs 500毫秒" failed
+# normalization and surfaced as a FALSE conflict (baseline ny-neg-samevalue,
+# live evidence). The fold runs on the whole anchored value only — prose is
+# never rewritten here. 刻钟 folds through minutes; 点 stays a bare suffix
+# (clock time compares fine as "2点"/"10点" strings once numerals fold).
+_CN_DURATION_VALUE_RE = re.compile(
+    r"^(半|[零一二三四五六七八九十百千万两]+)(毫秒|秒|分钟|小时|天|周|点|刻钟)$"
+)
+
+
+def _fold_chinese_duration(normalized: str) -> str:
+    match = _CN_DURATION_VALUE_RE.match(normalized)
+    if not match:
+        return normalized
+    numeral, unit = match.group(1), match.group(2)
+    if numeral == "半":
+        count = "0.5"
+    else:
+        parsed = _cn_to_int(numeral)
+        if parsed is None:
+            return normalized
+        count = str(parsed)
+    if unit == "刻钟":
+        return f"{int(count) * 15}分钟"
+    return f"{count}{unit}"
+
 
 def canonical_unit_value(normalized: str) -> str:
     """Canonicalise a normalized "number+unit" value; non-matching shapes
@@ -843,6 +914,7 @@ def canonical_unit_value(normalized: str) -> str:
 
 def normalize_value(value: str) -> str:
     normalized = _mechanical_normalize(value)
+    normalized = _fold_chinese_duration(normalized)
     normalized = _VALUE_ALIASES.get(normalized, normalized)
     # Direction-dependent fillers the 0.5B attaches to an otherwise identical
     # value ("近 90 天" vs "90 天", "5个工作日" vs "5工作日") used to fail the
@@ -1183,6 +1255,12 @@ def _pair_retry_feedback(strategy: str, error: str, raw: str = "") -> str:
     "compress the value" phrasing was tried and rejected: it flattened
     opposing values into equality).
     """
+    if strategy == "parrot":
+        return (
+            "上一次输出复述了系统提示里的示例词，而两侧证据中并不存在相关内容。"
+            "请只依据输入中的证据重新抽取；无法可靠抽取的字段写 \"__unknown__\"，"
+            "直接以 { 开头输出完整 JSON。"
+        )
     if strategy == "over_limit":
         field_name = error.removeprefix("invalid_")
         state = _field_state(raw, error)
@@ -1362,6 +1440,8 @@ class LocalGGUFSemanticBackend:
         self._pair_retried = 0
         self._pair_retry_recovered = 0
         self._pair_l3_truncated = 0
+        self._pair_parrot_detected = 0
+        self._pair_parrot_retry = 0
         self._gpu_fallback = False
         # 2026-09-17 (0.16.8): decode-parameter family routing. Qwen3-style
         # models must drop the "\n\n" stop (their <think>\n\n shell would be
@@ -1647,7 +1727,21 @@ class LocalGGUFSemanticBackend:
                         with self._cond:
                             self._think_strikes = 0
                 strategy = None
-                if signal.candidate_type in {"invalid_json", "invalid_schema"}:
+                # 0.17.0 P2-1.4: a parse that carries few-shot vocabulary the
+                # quotes never contained is a parrot, not an extraction — one
+                # retry on the example-free system prompt (user turn intact).
+                if (
+                    signal.candidate_type == "attribute_value_extraction"
+                    and signal.parsed
+                    and _is_parrot_extraction(signal.parsed, left, right)
+                ):
+                    with self._cond:
+                        self._pair_parrot_detected += 1
+                    signal = ModelSignal(
+                        False, "parrot_invalid", None, raw or "", None, "parrot_invalid",
+                    )
+                    strategy = "parrot"
+                elif signal.candidate_type in {"invalid_json", "invalid_schema"}:
                     l3_signal = _l3_truncated_signal(raw)
                     if l3_signal is not None:
                         with self._cond:
@@ -1682,6 +1776,18 @@ class LocalGGUFSemanticBackend:
                             if cjk else
                             f"{retry_nothink}Input: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\nOutput:"
                         )},
+                        {"role": "user", "content": feedback},
+                    ]
+                elif strategy == "parrot":
+                    # Only the SYSTEM loses its example lines; the user turn
+                    # stays byte-identical (11th-round lesson: rebuilding the
+                    # user turn reset the model into another copy loop).
+                    retry_max_tokens = max_tokens
+                    with self._cond:
+                        self._pair_parrot_retry += 1
+                    retry_messages = [
+                        {"role": "system", "content": _strip_pair_example(messages[0]["content"])},
+                        {"role": "user", "content": messages[1]["content"]},
                         {"role": "user", "content": feedback},
                     ]
                 else:
@@ -1823,6 +1929,8 @@ class LocalGGUFSemanticBackend:
                 "pair_retried": self._pair_retried,
                 "pair_retry_recovered": self._pair_retry_recovered,
                 "pair_l3_truncated": self._pair_l3_truncated,
+                "pair_parrot_detected": self._pair_parrot_detected,
+                "pair_parrot_retry": self._pair_parrot_retry,
                 "gpu_fallback": self._gpu_fallback,
                 "model_family": "qwen3" if self._qwen3_style else "legacy",
                 "family_autodetected": self._family_autodetected,
@@ -1849,6 +1957,8 @@ class LocalGGUFSemanticBackend:
                 "pair_retried": self._pair_retried,
                 "pair_retry_recovered": self._pair_retry_recovered,
                 "pair_l3_truncated": self._pair_l3_truncated,
+                "pair_parrot_detected": self._pair_parrot_detected,
+                "pair_parrot_retry": self._pair_parrot_retry,
                 "model_family": "qwen3" if self._qwen3_style else "legacy",
                 "family_autodetected": self._family_autodetected,
             }

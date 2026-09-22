@@ -2591,11 +2591,74 @@ def test_pre_qwen_vetoes_ops_marker_and_decision_vs_observation() -> None:
                            "单笔退款超过 500 元就需要财务复核。").reason == "numeric_value_candidate"
 
 
+def test_chinese_duration_folds_to_same_value() -> None:
+    """0.17.0 P2-1.2：中文时长词预折——「半秒 vs 500毫秒」曾因归一化失败
+    误报为冲突（基线 ny-neg-samevalue 活体证据）；第 1-5 轮 spike 铁证
+    D1 型（值都抽对、全死在归一化）。"""
+    from memory_arbiter.semantic_conflict import normalize_value
+    for left, right in [
+        ("半秒", "500毫秒"), ("半秒", "0.5s"), ("半秒", "500ms"),
+        ("一刻钟", "15分钟"), ("一刻钟", "900000ms"), ("半小时", "30分钟"),
+        ("两秒", "2秒"), ("两秒", "2000ms"), ("十点", "10点"),
+        ("三小时", "180分钟"),
+    ]:
+        assert normalize_value(left) == normalize_value(right), (left, right)
+    # 不等仍是冲突：十点 vs 两点
+    assert normalize_value("十点") != normalize_value("两点")
+    assert normalize_value("半秒") != normalize_value("三秒")
+    # 散文不折：折算只作用于整值锚定形态
+    from memory_arbiter.semantic_conflict import _fold_chinese_duration
+    assert _fold_chinese_duration("大约半秒的延迟") == "大约半秒的延迟"
+
+
+def test_parrot_detection_and_example_free_retry_prompt() -> None:
+    """0.17.0 P2-1.4：长/乱输入下 0.6B 复读 few-shot 例句（第 10/11 轮 3/20）——
+    词级判定（例句词在抽取字段、不在两侧 quote）+ 重试 system 去例句、user 原样。"""
+    from memory_arbiter.semantic_conflict import (
+        _PAIR_PROMPT,
+        _PAIR_PROMPT_EN,
+        _is_parrot_extraction,
+        _pair_retry_feedback,
+        _strip_pair_example,
+    )
+    left = {"quote": "网关的读超时统一为 500 毫秒，快速失败。"}
+    right = {"quote": "网关读超时设定为 3 秒，走变更单。"}
+    parrot_parsed = {
+        "attribute_a": "数据库选型", "value_a": "MySQL",
+        "attribute_b": "数据库选型", "value_b": "SQLite",
+    }
+    assert _is_parrot_extraction(parrot_parsed, left, right) is True
+    # 证据真在谈数据库：不是复读
+    db_left = {"quote": "主存储最终选了 MySQL，否掉了别的方案。"}
+    db_right = {"quote": "主存储确定为 SQLite，评审通过。"}
+    assert _is_parrot_extraction(parrot_parsed, db_left, db_right) is False
+    # 一侧真有 mysql、另一侧编造 sqlite：编造侧仍判复读
+    mixed_right = {"quote": "主存储确定为 PostgreSQL。"}
+    assert _is_parrot_extraction(parrot_parsed, db_left, mixed_right) is True
+    # 与例句无关的抽取：不判
+    plain = {"attribute_a": "超时", "value_a": "500 毫秒",
+             "attribute_b": "超时", "value_b": "3 秒"}
+    assert _is_parrot_extraction(plain, left, right) is False
+    # 去例句 system：协议行保留、例句行消失
+    stripped = _strip_pair_example(_PAIR_PROMPT)
+    assert "MySQL" not in stripped and "例：" not in stripped
+    assert "四个字符串字段" in stripped
+    assert "MySQL" not in _strip_pair_example(_PAIR_PROMPT_EN)
+    # 同步守卫（A11）：例句词表必须真实出现在 prompt 例句行里
+    for token in ("MySQL", "SQLite", "数据库选型"):
+        assert token in _PAIR_PROMPT
+    for token in ("MySQL", "SQLite", "database engine"):
+        assert token in _PAIR_PROMPT_EN
+    # parrot 反馈词：不回显原输出（既有纪律）
+    feedback = _pair_retry_feedback("parrot", "parrot_invalid", "raw-junk")
+    assert "raw-junk" not in feedback and "示例" in feedback
+
+
 def test_pre_qwen_veto_process_records() -> None:
     """2026-09-17（owner 原则延伸）：过程记录（review 轮次/设计→发版/
     重启复验）在 Qwen 之前过滤——单向实测三个穿透形态的收口。业务
     对象 id 的值对立（任务 id=123 预算 5000 vs 500）必须保活。"""
-    from memory_arbiter.semantic_conflict import decide_evidence
+    from memory_arbiter.semantic_conflict import _PROCESS_REVERIFY_RE, decide_evidence
     assert decide_evidence(
         "id=609 adversarial review findings after implementation: backend import",
         "Follow-up review for id=609 after attempted fixes: environment confirmed",
@@ -2613,3 +2676,20 @@ def test_pre_qwen_veto_process_records() -> None:
     assert d.reason == "numeric_value_candidate"
     assert decide_evidence("单笔退款超过 5000 元需要财务复核。",
                            "单笔退款超过 500 元就需要财务复核。").reason == "numeric_value_candidate"
+    # 0.17.0 P2-1.1：裸「复审」是政策语句不是评审记录——第 11 轮生产误杀
+    # （"每半年复审"配置对永远到不了 Qwen）；带语境的评审记录仍 veto。
+    assert decide_evidence(
+        "网关证书每半年复审一次，由安全组执行。",
+        "网关证书每季度复审一次，由安全组执行。",
+    ).reason != "process_record"
+    assert decide_evidence(
+        "方案复审结论：通过，可进入实施。",
+        "方案复审记录归档于 id=77。",
+    ).reason == "process_record"
+    # 同组排查：裸「复验」与 "pre-verify" 不再误杀
+    assert decide_evidence(
+        "灰度复验通过后全量放开。",
+        "灰度复验通过后按计划推进。",
+    ).reason != "process_record"
+    assert "pre-verify" not in _PROCESS_REVERIFY_RE.pattern  # 边界在位
+    assert not _PROCESS_REVERIFY_RE.search("we pre-verify the checksum")

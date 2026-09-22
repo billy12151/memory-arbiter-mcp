@@ -85,7 +85,7 @@ def test_classify_pair_reports_usage_and_retry(monkeypatch: pytest.MonkeyPatch) 
     backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
     llm = _UsageLLM([_TRUNCATED, _VALID])
     monkeypatch.setattr(backend, "_build_llm", lambda: llm)
-    signal = backend.classify_pair({"quote": "A"}, {"quote": "B"})
+    signal = backend.classify_pair({"quote": "A 侧用 MySQL"}, {"quote": "B 侧用 SQLite"})
     assert signal.candidate_type == "attribute_value_extraction"
     assert signal.retried is True
     assert signal.prompt_tokens == (700 + 1) + (700 + 2)
@@ -98,7 +98,7 @@ def test_classify_pair_usage_without_retry(monkeypatch: pytest.MonkeyPatch) -> N
     backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
     llm = _UsageLLM([_VALID])
     monkeypatch.setattr(backend, "_build_llm", lambda: llm)
-    signal = backend.classify_pair({"quote": "A"}, {"quote": "B"})
+    signal = backend.classify_pair({"quote": "A 侧用 MySQL"}, {"quote": "B 侧用 SQLite"})
     assert signal.candidate_type == "attribute_value_extraction"
     assert signal.retried is False
     assert signal.prompt_tokens == 701
