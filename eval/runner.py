@@ -123,7 +123,13 @@ def temp_library(
             if keep_db is not None:
                 keep_db.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(workdir, keep_db, dirs_exist_ok=True)
-            shutil.rmtree(workdir, ignore_errors=True)
+            # 0.17.0：worker 关停与瞬态 sqlite 句柄释放存在毫秒级竞态
+            # （macOS ignore_errors 会静默漏删）——短暂重试兜底。
+            for _attempt in range(6):
+                shutil.rmtree(workdir, ignore_errors=True)
+                if not workdir.exists():
+                    break
+                time.sleep(0.05)
 
 
 def _remember(tools: MemoryTools, envelope: dict) -> tuple[int | None, bool, float]:

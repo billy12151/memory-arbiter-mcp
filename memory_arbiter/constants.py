@@ -186,6 +186,10 @@ SCAN_TASK_RECHECK_SECONDS = 3600
 # Qwen scan line, not this millisecond sync channel.
 WRITE_SIMILAR_SUBJECT_RATIO = 0.8
 WRITE_SIMILAR_CONTENT_COSINE = 0.4
+# 0.17.0 P2-7: subject-gate exemption line — content trigram overlap at or
+# above this passes WITHOUT the subject ratio (retitled near-duplicates).
+# Below it the subject gate still applies (two-axis confirmation).
+WRITE_SIMILAR_CONTENT_EXEMPT = 0.60
 WRITE_SIMILAR_MIN_CONTENT_CHARS = 40
 WRITE_SIMILAR_MAX_HINTS = 2
 # Recall channel (0.15.3): with a loaded embedder the hint recalls candidates

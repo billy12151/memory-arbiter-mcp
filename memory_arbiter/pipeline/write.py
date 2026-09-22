@@ -12,6 +12,7 @@ from .. import workspace_rules
 from ..constants import (
     WRITE_DUPLICATE_VEC_TOP_K,
     WRITE_SIMILAR_CONTENT_COSINE,
+    WRITE_SIMILAR_CONTENT_EXEMPT,
     WRITE_SIMILAR_FALLBACK_SCAN_LIMIT,
     WRITE_SIMILAR_MAX_HINTS,
     WRITE_SIMILAR_MIN_CONTENT_CHARS,
@@ -88,21 +89,38 @@ class WritePipeline:
         degrades to the fallback scan.
         """
         subject = str(getattr(record, "subject", None) or "").strip()
-        if not subject:
-            return []
+        # 0.17.0 P2-7: an EMPTY subject no longer disqualifies — the summary
+        # vector carries the body signal the subject gate never could.
+        from ..tools import MemoryTools
+
         embedder, _ = self._ensure_active_embedder()
         if embedder is not None and self.db.state.sqlite_vec_available:
             try:
-                er = embedder.embed_text(
+                # Keep the subject_tags_vec publish (C4 conflict ordering and
+                # the fallback scan read it) — one extra embed per write.
+                er_subject = embedder.embed_text(
                     prefix="",
                     body=self._subject_tags_embed_text(
                         subject, getattr(record, "tags", None),
                     ),
                 )
+                if er_subject is not None and er_subject.embedding:
+                    self.db.upsert_subject_tags_vector(
+                        memory_id, [float(x) for x in er_subject.embedding],
+                    )
+                # P2-7: candidates recall on the SUMMARY vector — retitled
+                # near-duplicates stay reachable; content trigram owns the
+                # fine gate (the old subject-first recall killed them).
+                er = embedder.embed_text(
+                    prefix="",
+                    body=MemoryTools._summary_embed_text(
+                        subject, getattr(record, "tags", None),
+                        str(getattr(record, "content", None) or ""),
+                    ),
+                )
                 if er is not None and er.embedding:
                     vector = [float(x) for x in er.embedding]
-                    self.db.upsert_subject_tags_vector(memory_id, vector)
-                    rows = self.db.subject_tags_knn(
+                    rows = self.db.memory_summary_knn(
                         vector,
                         k=WRITE_DUPLICATE_VEC_TOP_K,
                         exclude_memory_id=memory_id,
@@ -214,8 +232,6 @@ class WritePipeline:
             return None
         try:
             subject = self._normalized_subject(str(record.subject or ""))
-            if not subject:
-                return None
             rows = self._duplicate_hint_candidate_rows(
                 int(memory_id), record, workspace_canonical,
             )
@@ -230,22 +246,12 @@ class WritePipeline:
             scored: list[tuple[float, float, bool, dict[str, Any]]] = []
             for row in rows:
                 row_subject = self._normalized_subject(str(row["subject"] or ""))
-                if not row_subject:
-                    continue
-                # Length gate: ratio() = 2*M/(len_a+len_b) with M bounded by
-                # the shorter subject, so when even a full subsequence match
-                # cannot clear the bar the SequenceMatcher run is skipped.
-                shorter = min(len(subject), len(row_subject))
-                if 2.0 * shorter < WRITE_SIMILAR_SUBJECT_RATIO * (len(subject) + len(row_subject)):
-                    continue
-                if row_subject != subject and self._DIGIT_RUN.sub("#", row_subject) == subject_series:
-                    # Series entries: identical modulo digit runs but not
-                    # exact duplicates — stay quiet.
-                    continue
-                ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
-                if ratio < WRITE_SIMILAR_SUBJECT_RATIO:
-                    continue
                 row_content = str(row.get("content") or "")
+                # 0.17.0 P2-7: content trigram is the PRIMARY gate; the
+                # subject ratio only runs when BOTH subjects exist and the
+                # content overlap is below the high-similarity exemption
+                # (WRITE_SIMILAR_CONTENT_EXEMPT) — retitled/subject-less
+                # near-duplicates pass on body evidence alone.
                 if own_grams is None or len(row_content) < WRITE_SIMILAR_MIN_CONTENT_CHARS:
                     content_cos = -1.0
                     low_confidence = True
@@ -254,6 +260,18 @@ class WritePipeline:
                     if content_cos < WRITE_SIMILAR_CONTENT_COSINE:
                         continue
                     low_confidence = False
+                ratio = -1.0
+                if subject and row_subject:
+                    # Series suppression keeps its meaning: identical modulo
+                    # digit runs but not exact — release/checklist series.
+                    if row_subject != subject and self._DIGIT_RUN.sub("#", row_subject) == subject_series:
+                        continue
+                    ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
+                    if (
+                        ratio < WRITE_SIMILAR_SUBJECT_RATIO
+                        and content_cos < WRITE_SIMILAR_CONTENT_EXEMPT
+                    ):
+                        continue
                 scored.append((ratio, content_cos, low_confidence, row))
             if not scored:
                 return None

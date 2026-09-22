@@ -574,6 +574,55 @@ class MemoriesStore:
             })
         return out
 
+    def memory_summary_knn(
+        self,
+        query_embedding: list[float],
+        *,
+        k: int,
+        exclude_memory_id: int,
+        workspace_canonical: str | None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        """0.17.0 P2-7: write-time duplicate-hint recall over memory_summary_vec.
+
+        Same rowid-IN pre-filter contract as subject_tags_knn; rows exist
+        only for ACTIVE memories (the summary index tracks the active set,
+        refresh_summary_vector deletes on exit). One extra embed per write
+        versus the subject-tags query it accompanies — retitle-tolerant
+        recall is the point (the subject gate alone killed retitle
+        near-duplicates).
+        """
+        if (
+            not self._db_available or not self.state.sqlite_vec_available
+            or not query_embedding or not str(workspace_canonical or "").strip()
+        ):
+            return []
+        requested_k = max(1, int(k))
+        eligible_params: list[Any] = [
+            int(exclude_memory_id), workspace_canonical, workspace_canonical,
+        ]
+        try:
+            query = """SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
+                               m.event_time AS event_time, m.content AS content
+                        FROM memory_summary_vec v
+                        JOIN memories m ON m.id=v.id
+                        WHERE v.embedding MATCH ? AND k=?
+                          AND v.id IN (
+                            SELECT m2.id FROM memories m2
+                            WHERE m2.status='active' AND m2.id != ?
+                              AND COALESCE(NULLIF(m2.workspace_canonical,''),m2.workspace) = ?
+                          )
+                        ORDER BY v.distance"""
+            params = [json.dumps(query_embedding), requested_k, *eligible_params]
+            if conn is not None:
+                rows = conn.execute(query, params).fetchall()
+            else:
+                with self._db.connection() as owned:
+                    rows = owned.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
+
     def subject_tags_knn(
         self,
         query_embedding: list[float],

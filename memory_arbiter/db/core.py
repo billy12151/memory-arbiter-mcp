@@ -515,6 +515,16 @@ class MemoryDB:
             exclude_memory_id, workspace_canonical, limit=limit,
         )
 
+    def memory_summary_knn(
+        self, query_embedding: list[float], *, k: int, exclude_memory_id: int,
+        workspace_canonical: str | None,
+    ) -> list[dict[str, Any]]:
+        """0.17.0 P2-7 convenience."""
+        return self.memories.memory_summary_knn(
+            query_embedding, k=k, exclude_memory_id=exclude_memory_id,
+            workspace_canonical=workspace_canonical,
+        )
+
     def subject_tags_knn(
         self,
         query_embedding: list[float],
