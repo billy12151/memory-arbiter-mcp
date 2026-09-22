@@ -550,3 +550,34 @@ def test_df_cache_invalidates_on_tag_edit(tmp_path: Path) -> None:
     assert not any("todo-x" in subj for subj in linked_second), (
         f"tags-only 编辑后 df 必须立即失效（alpha 已进 stoplist）: {linked_second}"
     )
+
+
+def test_df_cache_invalidates_on_workspace_migration(tmp_path: Path) -> None:
+    """0.16.12 第二轮对抗 review 实证场景：migrate/rename/回滚 auto-move
+    迁移不动 (COUNT, SUM(version)) 指纹——必须显式失效，否则 scoped find
+    命中脏 df。用 stoplist 阈值制造可判别跳变。"""
+    tools = _tools(tmp_path)
+    _write(tools, content="结果条正文", subject="result", tags=["proj"], workspace="dest")
+    _write(tools, content="todo 候选条目", subject="todo-x", tags=["todo", "proj"], workspace="dest")
+    for i in range(5):
+        _write(tools, content=f"来源填充 {i}", subject=f"src-{i}", tags=["fill"], workspace="src")
+    first = tools.memory("find", {"query": "结果条正文", "limit": 10})
+    linked_first = {str(i.get("subject")) for i in (first["data"].get("linked_open_items") or [])}
+    assert any("todo-x" in s for s in linked_first), linked_first
+    assert tools.db._linked_df_cache, "缓存应已回填"
+    # 迁移 src→dest：版本/计数不动（7 active 不变），df[proj] 不变，但
+    # scope 成员变了——若未失效，dest 的缓存条目仍被认为新鲜
+    moved = tools.memory_govern("migrate_workspace", {
+        "from": "src", "to": "dest", "authorized": True,
+    })
+    assert moved.get("ok"), moved
+    second = tools.memory("find", {"query": "结果条正文", "limit": 10})
+    # 清缓存重算（=新进程真值）对照：迁移后 active=7、df[proj]=2/7≈0.29≥0.20
+    # → proj 进 stoplist → todo-x 不再出现在 linked；脏缓存则会沿用旧判据
+    tools.db.invalidate_linked_df_cache()
+    third = tools.memory("find", {"query": "结果条正文", "limit": 10})
+    linked_second = {str(i.get("subject")) for i in (second["data"].get("linked_open_items") or [])}
+    linked_third = {str(i.get("subject")) for i in (third["data"].get("linked_open_items") or [])}
+    assert linked_second == linked_third, (
+        f"迁移后缓存必须已失效（两次结果应一致）: {linked_second} vs {linked_third}"
+    )

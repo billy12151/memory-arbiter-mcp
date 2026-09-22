@@ -325,6 +325,22 @@ def _lower_is_better(key: str) -> bool:
 
 
 def gate(current: dict, baseline: dict, rel_drop: float = DEFAULT_REL_DROP) -> dict[str, Any]:
+    # 0.16.12 第二轮对抗 review：跨语料对比会把不同分母的 rate 直接比较，
+    # 既不报错也不可解释——两侧 env.conflict_corpus_version 必须都在位且一致。
+    cur_corpus = ((current.get("env") or {}).get("conflict_corpus_version"))
+    base_corpus = ((baseline.get("env") or {}).get("conflict_corpus_version"))
+    if cur_corpus != base_corpus:
+        return {
+            "gate": "FAILED",
+            "rel_drop_threshold": rel_drop,
+            "failures": [{
+                "metric": "env.conflict_corpus_version",
+                "direction": "corpus_mismatch",
+                "baseline": base_corpus,
+                "current": cur_corpus,
+                "note": "conflict 对集语料版本不一致，拒绝跨语料对比；重建基线后重试",
+            }],
+        }
     cur = _flatten(current)
     base = _flatten(baseline)
     failures: list[dict[str, Any]] = []

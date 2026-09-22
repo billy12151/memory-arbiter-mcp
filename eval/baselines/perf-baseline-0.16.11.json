@@ -10,8 +10,7 @@
   "targets": 98,
   "distractors": 200,
   "semantic_conflict_enabled": true,
-  "conflict_sync_wait_ms": 3000,
-  "conflict_corpus_version": "conflict-v2-large"
+  "conflict_sync_wait_ms": 3000
  },
  "recall": {
   "recall_at_5": {

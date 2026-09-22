@@ -23,7 +23,13 @@ from eval.runner import (  # noqa: E402
 from memory_arbiter import semantic_conflict as sc  # noqa: E402
 from memory_arbiter.db import MemoryDB  # noqa: E402
 
-PAIR_IDS = [f"cf-oppo-{i:02d}" for i in range(1, 13)]
+PAIR_IDS = [f"cf-oppo-{i:02d}" for i in range(1, 13)] + [
+    # 负样本（此前正确不判冲突）：噪音 + 共存，查直判/归一化是否引入新噪音
+    "cf-noise-18018-496-497", "cf-noise-18038-677-679", "cf-noise-18098-52-106",
+    "cf-noise-18138-211-310", "cf-noise-18198-383-389", "cf-noise-18238-415-419",
+    "cf-noise-18278-654-685", "cf-noise-18338-757-758",
+    "cf-coexist-377-382", "cf-coexist-66-67", "cf-coexist-143-144", "cf-coexist-558-559",
+]
 
 # DIAG_FORCE_EN=1：强制英文 prompt 跑中文证据（验证「英文 prompt 对中文输入
 # 持平或更好则只维护一套英文」的假设）
@@ -100,7 +106,12 @@ def main() -> None:
             "SELECT id, status, notice_type, conflict_point, member_versions FROM conflicts ORDER BY id"
         ).fetchall()
         for r in rows:
-            print("[conflicts]", json.dumps(dict(r), ensure_ascii=False)[:300])
+            members = [
+                f"{m['memory_id']}@{m.get('version')}"
+                for m in json.loads(r["member_versions"] or "[]")
+            ]
+            print(f"[conflicts] id={r['id']} status={r['status']} members={members} "
+                  f"point={str(r['conflict_point'])[:80]}")
         conn.close()
 
     for pid, (lid, rid) in id_map.items():

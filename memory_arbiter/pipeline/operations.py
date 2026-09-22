@@ -50,10 +50,13 @@ def _embed_input_profile(record: dict[str, Any] | None) -> tuple[str, str, str]:
         tags = list(raw_tags)
     else:
         tags = []
-    tag_profile = " ".join(sorted(str(t) for t in tags if str(t).strip()))
+    # Mirror _subject_tags_embed_text/_summary_embed_text exactly:
+    # strip each tag, drop empties, THEN sort — an unstripped join would let
+    # distinct embed inputs share a profile (second-round adversarial finding).
+    cleaned = sorted(str(t).strip() for t in tags if str(t).strip())
     return (
         str(record.get("subject") or ""),
-        tag_profile,
+        " ".join(cleaned),
         str(record.get("content") or ""),
     )
 

@@ -317,7 +317,9 @@ class MemoriesStore:
         """Batch row fetch for id-driven reads (0.16.12 P1-T4): ONE connection
         (chunked IN) instead of one get_memory connection per id. Visibility
         is NOT applied here — callers run the shared caller predicate.
-        ``conn`` (P2-T6): optional caller-owned connection to reuse."""
+        ``conn`` (P2-T6): optional caller-owned connection to reuse.
+        Errors propagate like get_memory's (no swallow): a mid-call failure
+        must surface, not degrade the whole page to not_found."""
         if (conn is None and not self._db_available) or not ids:
             return {}
         unique = sorted({int(i) for i in ids})
@@ -588,21 +590,21 @@ class MemoriesStore:
         eligible_params: list[Any] = [
             int(exclude_memory_id), workspace_canonical, workspace_canonical,
         ]
-        query = f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
-                           m.event_time AS event_time, m.content AS content
-                    FROM subject_tags_vec v
-                    JOIN memories m ON m.id=v.id
-                    WHERE v.embedding MATCH ? AND k=?
-                      AND m.status='active'
-                      AND v.id IN (SELECT m2.id FROM memories m2
-                                   WHERE m2.status='active' AND m2.id != ?
-                                   AND (m2.workspace_canonical = ?
-                                        OR ((m2.workspace_canonical IS NULL
-                                             OR m2.workspace_canonical = '')
-                                            AND m2.workspace = ?)))
-                    ORDER BY v.distance"""
-        params = [json.dumps(query_embedding), requested_k, *eligible_params]
         try:
+            query = f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
+                               m.event_time AS event_time, m.content AS content
+                        FROM subject_tags_vec v
+                        JOIN memories m ON m.id=v.id
+                        WHERE v.embedding MATCH ? AND k=?
+                          AND m.status='active'
+                          AND v.id IN (SELECT m2.id FROM memories m2
+                                       WHERE m2.status='active' AND m2.id != ?
+                                       AND (m2.workspace_canonical = ?
+                                            OR ((m2.workspace_canonical IS NULL
+                                                 OR m2.workspace_canonical = '')
+                                                AND m2.workspace = ?)))
+                        ORDER BY v.distance"""
+            params = [json.dumps(query_embedding), requested_k, *eligible_params]
             if conn is not None:
                 rows = conn.execute(query, params).fetchall()
             else:

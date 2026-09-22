@@ -1134,6 +1134,10 @@ class WorkspaceStore:
                     (new, old),
                 )
                 updated = cur.rowcount or 0
+                if updated:
+                    # Scope membership changed without COUNT/version movement
+                    # — the linked-df fingerprint cannot see a rename.
+                    self._db.invalidate_linked_df_cache()
                 conn.execute(
                     "UPDATE conflicts SET workspace_canonical=? WHERE workspace_canonical=?",
                     (new, old),
@@ -1205,6 +1209,7 @@ class WorkspaceStore:
         to_ws: str,
         *,
         to_embedding: list[float] | None = None,
+        db: "MemoryDB | None" = None,
     ) -> tuple[int, list[str]]:
         """Merge canonical ``from_ws`` into ``to_ws`` on an open write connection.
 
@@ -1238,6 +1243,10 @@ class WorkspaceStore:
             (to_ws, from_ws),
         )
         updated = cur.rowcount or 0
+        if updated and db is not None:
+            # Same linked-df fingerprint blind spot as rename/move (staticmethod:
+            # the caller passes the store's db handle).
+            db.invalidate_linked_df_cache()
         conn.execute(
             "UPDATE conflicts SET workspace_canonical=? WHERE workspace_canonical=?",
             (to_ws, from_ws),
@@ -1362,7 +1371,7 @@ class WorkspaceStore:
                 if competing is not None:
                     return 0, competing
                 updated, publish_warnings = self._merge_workspace_core_on_conn(
-                    conn, from_ws, to_ws, to_embedding=to_embedding,
+                    conn, from_ws, to_ws, to_embedding=to_embedding, db=self._db,
                 )
             return updated, publish_warnings
         except OSError as exc:
@@ -1597,7 +1606,7 @@ class WorkspaceStore:
             for loser in losers:
                 if execute:
                     updated, merge_warnings = self._merge_workspace_core_on_conn(
-                        conn, loser, winner,
+                        conn, loser, winner, db=self._db,
                     )
                     result["warnings"].extend(merge_warnings)
                     if merge_warnings:

@@ -647,6 +647,12 @@ class MemoryTools:
             self._shutdown_started = True
         timeout = max(0.0, float(timeout))
         deadline = time.monotonic() + timeout
+        # 0.16.12 P2-T4: give the boot-backfill daemon a bounded chance to
+        # leave its current encode before the process tears down the embedder
+        # (llama-cpp Metal teardown mid-inference is the known exit-crash
+        # path; bounded wait keeps shutdown latency predictable).
+        if self._backfill_thread is not None and self._backfill_thread.is_alive():
+            self._backfill_done.wait(timeout=min(30.0, timeout))
         worker_shutdown = self._semantic_worker.shutdown(discard_pending=True)
         evidence_shutdown = self._evidence_worker.shutdown(discard_pending=False)
         # Shutdown also closes synchronous workspace-suggestion admission before
@@ -944,6 +950,7 @@ class MemoryTools:
             # (mirroring _backfill_subject_tags_vectors) — the embed above ran
             # outside the transaction; status/inputs re-check under the lock.
             try:
+                chunk_written = 0
                 with self.db.write_transaction() as conn:
                     for memory_id, vector, profile in prepared:
                         fresh = conn.execute(
@@ -966,7 +973,8 @@ class MemoryTools:
                             "INSERT INTO memory_summary_vec(id, embedding) VALUES (?, ?)",
                             (memory_id, json.dumps(vector)),
                         )
-                        written += 1
+                        chunk_written += 1
+                written += chunk_written  # count only what committed
             except Exception:
                 continue
         return written
@@ -1761,6 +1769,9 @@ class MemoryTools:
                     "WHERE id=?",
                     (from_ws, from_ws, memory_id),
                 )
+                # Rollback moves a row across scopes without COUNT/version
+                # movement — the linked-df fingerprint cannot see it.
+                self.db.invalidate_linked_df_cache()
                 if from_ws and not is_default_workspace_term(from_ws):
                     conn.execute(
                         "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
