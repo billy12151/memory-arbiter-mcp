@@ -360,3 +360,54 @@ def test_boot_backfill_backgrounded_and_reads_degrade(tmp_path: Path, monkeypatc
         st = conn.execute("SELECT COUNT(*) FROM subject_tags_vec").fetchone()[0]
         sm = conn.execute("SELECT COUNT(*) FROM memory_summary_vec").fetchone()[0]
     assert st == 3 and sm == 3
+
+
+def test_knn_rowid_in_matches_bruteforce_topk(tmp_path: Path) -> None:
+    """P3-T1 暴力对拍：strict 库 + 手工发布受控向量（跨工作区更近干扰行 +
+    tie 距离 + exclude），rowid-IN KNN 的 top-k 集合与 Python 参考一致。
+    非 strict 库所有 workspace 共享首个 canonical（单桶模型），跨工作区
+    判别只能在 strict 下钉。"""
+    import tests.test_workspace_recall as twr
+    from memory_arbiter.evidence import EvidenceUnit, evidence_content_hash
+
+    tools = twr.make_tools(tmp_path, "strict", vec=True)
+    db = tools.db
+    a1 = twr._write(tools, "alpha one", "projA")["data"]["id"]
+    a2 = twr._write(tools, "alpha two", "projA")["data"]["id"]
+    b1 = twr._write(tools, "beta closer", "projB")["data"]["id"]
+    assert twr._confirm_pending(tools, a1)["ok"] is True
+    assert twr._confirm_pending(tools, a2)["ok"] is True
+    assert twr._confirm_pending(tools, b1)["ok"] is True
+    # 受控向量：b1 全局最近（L2=0.0）；a1 两单元 0.1/0.2；a2 两单元近 tie。
+    # publish 的 content_hash 必须等于记忆全文的 hash（否则 stale_snapshot）。
+    content_of = {a1: "alpha one", a2: "alpha two", b1: "beta closer"}
+    published = [
+        (a1, "alpha one u0", 0, [1.0, 0.1], 0.1),
+        (a1, "alpha one u1", 1, [1.0, 0.2], 0.2),
+        (a2, "alpha two u0", 0, [1.0, 0.3], 0.3),
+        (a2, "alpha two u1", 1, [1.0, 0.3001], 0.3),  # 近似 tie
+        (b1, "beta closer u0", 0, [1.0, 0.0], 0.0),
+    ]
+    # publish 整体重建该记忆的单元集：每个记忆一次调用带全部单元
+    by_memory: dict[int, list] = {}
+    for mid, text, uidx, vec, _dist in published:
+        by_memory.setdefault(mid, []).append((text, uidx, vec))
+    for mid, entries in by_memory.items():
+        outcome = db.evidence.publish(
+            mid, 2, evidence_content_hash(content_of[mid]),
+            [EvidenceUnit("text", text, 0, len(text), uidx) for text, uidx, _ in entries],
+            [vec for _, _, vec in entries],
+        )
+        assert outcome.get("published"), outcome
+    query = [1.0, 0.0]
+    for k in (1, 2, 3, 4):
+        for exclude in (None, a1):
+            got = db.evidence_knn(list(query), k=k, workspace="projA", exclude_memory_id=exclude)
+            got_set = {(int(r["memory_id"]), int(r["unit_index"])) for r in got}
+            eligible = sorted(
+                ((dist, mid, uidx) for mid, _t, uidx, _v, dist in published
+                 if mid != exclude and mid != b1),
+            )[:k]
+            ref_set = {(mid, uidx) for _d, mid, uidx in eligible}
+            assert got_set == ref_set, f"k={k} exclude={exclude}: {got_set} != {ref_set}"
+            assert all(mid != b1 for mid, _ in got_set)

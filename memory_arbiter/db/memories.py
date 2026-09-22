@@ -22,7 +22,6 @@ from ..text import (
     subject_tokens as _subject_tokens,
 )
 from ..timeutil import parse_iso8601_utc
-from ._knn import knn_window_loop
 
 if TYPE_CHECKING:
     from .core import MemoryDB
@@ -549,11 +548,6 @@ class MemoriesStore:
             })
         return out
 
-    _SUBJECT_TAGS_WS_CLAUSE = (
-        "(m.workspace_canonical = ? "
-        "OR ((m.workspace_canonical IS NULL OR m.workspace_canonical = '') AND m.workspace = ?))"
-    )
-
     def subject_tags_knn(
         self,
         query_embedding: list[float],
@@ -561,16 +555,19 @@ class MemoriesStore:
         k: int,
         exclude_memory_id: int,
         workspace_canonical: str | None,
+        conn: sqlite3.Connection | None = None,
     ) -> list[dict[str, Any]]:
         """KNN recall of same-workspace active rows over subject_tags_vec.
 
         Returns the id/subject/tags/event_time fields the duplicate-hint
         fine-ranking consumes (unlike active_subject_tag_rows it carries no
-        ingest_time). sqlite-vec applies the workspace/exclusion
-        predicates after it picks its global KNN window, so the window grows
-        (evidence-knn pattern) until enough scoped rows are found or the whole
-        eligible domain was considered. Returns [] whenever the index or the
-        extension is unavailable — callers fall back to the capped scan.
+        ingest_time). 0.16.12 P3-T2 rowid-IN rewrite: the workspace/exclusion
+        predicates live in an ``v.id IN (SELECT m.id FROM memories ...)``
+        subquery that sqlite-vec pushes into the KNN scan as a true pre-filter
+        (spike-verified), so ``k = requested_k`` with no window loop — foreign
+        workspaces can no longer crowd the window. Returns [] whenever the
+        index or the extension is unavailable — callers fall back to the
+        capped scan. ``conn``: optional caller-owned read connection.
         """
         if (
             not self._db_available or not self.state.sqlite_vec_available
@@ -578,34 +575,29 @@ class MemoriesStore:
         ):
             return []
         requested_k = max(1, int(k))
-        filter_params: list[Any] = [
+        eligible_params: list[Any] = [
             int(exclude_memory_id), workspace_canonical, workspace_canonical,
         ]
+        query = f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
+                           m.event_time AS event_time, m.content AS content
+                    FROM subject_tags_vec v
+                    JOIN memories m ON m.id=v.id
+                    WHERE v.embedding MATCH ? AND k=?
+                      AND m.status='active'
+                      AND v.id IN (SELECT m2.id FROM memories m2
+                                   WHERE m2.status='active' AND m2.id != ?
+                                   AND (m2.workspace_canonical = ?
+                                        OR ((m2.workspace_canonical IS NULL
+                                             OR m2.workspace_canonical = '')
+                                            AND m2.workspace = ?)))
+                    ORDER BY v.distance"""
+        params = [json.dumps(query_embedding), requested_k, *eligible_params]
         try:
-            with self.connection() as conn:
-                # The k=? window vec0 picks is GLOBAL over the table: rows from
-                # other workspaces crowd it until fetch_k grows past them — the
-                # shared loop (same evidence-knn growth contract) handles it.
-                rows = knn_window_loop(
-                    conn,
-                    count_sql=(
-                        "SELECT COUNT(*) FROM subject_tags_vec v "
-                        "JOIN memories m ON m.id=v.id "
-                        "WHERE m.status='active'"
-                    ),
-                    query_sql=f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
-                                   m.event_time AS event_time, m.content AS content
-                            FROM subject_tags_vec v
-                            JOIN memories m ON m.id=v.id
-                            WHERE v.embedding MATCH ? AND k=?
-                              AND m.status='active' AND v.id != ?
-                              AND {self._SUBJECT_TAGS_WS_CLAUSE}
-                            ORDER BY v.distance""",
-                    query_json=json.dumps(query_embedding),
-                    requested_k=requested_k,
-                    params=filter_params,
-                    filtered=True,
-                )
+            if conn is not None:
+                rows = conn.execute(query, params).fetchall()
+            else:
+                with self.connection() as owned:
+                    rows = owned.execute(query, params).fetchall()
         except sqlite3.Error:
             return []
         out: list[dict[str, Any]] = []

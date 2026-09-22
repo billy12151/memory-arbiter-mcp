@@ -12,7 +12,6 @@ from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..evidence import EvidenceUnit, has_indexable_text, INDEXABLE_PREFILTER_SQL
 from ..models import utc_now_iso
-from ._knn import knn_window_loop
 
 if TYPE_CHECKING:
     from .core import MemoryDB
@@ -312,21 +311,24 @@ class EvidenceStore:
         workspace: "WorkspaceScope" = None,
         exclude_memory_id: int | None = None,
         exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
+        conn: "sqlite3.Connection | None" = None,
     ) -> list[dict[str, Any]]:
         """KNN over evidence vectors, filtered by parent lifecycle state.
 
-        sqlite-vec pushes only the vec0 auxiliary column (``parent_status``)
-        into the KNN itself; the workspace and exclude predicates filter
-        joined tables *after* the global top-k. To keep per-workspace recall
-        from collapsing when other workspaces own the globally nearest rows,
-        callers with those filters grow the global KNN window until enough
-        scoped rows are found or the complete lifecycle-eligible vector domain
-        has been considered. A true pre-filter would need a workspace partition
-        key on the vec0 table (deferred, spec §19).
+        0.16.12 P3-T1 rowid-IN rewrite: the workspace/exclusion/exclude
+        predicates move into an ``v.id IN (SELECT e.id ... JOIN memories m)``
+        subquery, which sqlite-vec pushes into the vec0 KNN scan as a true
+        PRE-filter (spike-verified on SQLite 3.53.4 + sqlite-vec: k applies to
+        the filtered set, so ``k = requested_k`` needs no window loop and no
+        COUNT). The previous global-top-k-then-filter loop could starve
+        per-workspace recall when other workspaces owned the nearest rows —
+        that starvation mode is structurally gone. vec0's ``parent_status``
+        auxiliary column stays as an in-engine pre-prune, with the
+        authoritative ``memories.status`` still enforced in both the subquery
+        and the main WHERE (best-effort double insurance, unchanged).
 
-        ``workspace`` may be an admitted canonical set (one name or the
-        strict in-radius neighbourhood); the same over-fetch loop compensates
-        for the post-KNN membership filter.
+        ``conn`` (0.16.12 P2-T6): optional caller-supplied read connection —
+        process_conflicts threads ONE connection through its whole job.
         """
         if not self._db.state.sqlite_vec_available or not query_embedding:
             return []
@@ -339,57 +341,67 @@ class EvidenceStore:
         else:
             status_sql = "v.parent_status='active'"
             memory_status_sql = "m.status='active'"
-        # parent_status is best-effort (a vec-disabled process can skip its
-        # update), so the authoritative memories.status is enforced too.
-        clauses = [status_sql, memory_status_sql]
         requested_k = max(1, int(k))
         workspace_sql, workspace_params = workspace_scope_sql(
             "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)", workspace,
         )
-        # v0.15.5 recall blacklist: same post-KNN membership filter slot as the
-        # positive scope (canonical-with-raw-fallback AND raw workspace).
-        # Append AFTER the positive scope so clause order matches param order.
         from ..acl import workspace_exclusion_sql
         excl_sql, _, excl_params = workspace_exclusion_sql(exclude_workspaces)
-        filtered = bool(workspace_sql or exclude_memory_id is not None or excl_sql)
-        filter_params: list[Any] = []
+        # Eligible-set subquery: every predicate that used to filter AFTER the
+        # global top-k now defines the id set vec0 scans. Parameter order here
+        # is the bind order: workspace scope params first, then exclusion
+        # (names*2), then exclude_memory_id — appended in exactly that order.
+        eligible_clauses = [memory_status_sql]
+        eligible_params: list[Any] = []
         if workspace_sql:
-            clauses.append(workspace_sql)
-            filter_params.extend(workspace_params)
+            eligible_clauses.append(workspace_sql)
+            eligible_params.extend(workspace_params)
         if excl_sql:
-            clauses.append(excl_sql)
-            filter_params.extend(excl_params)
+            eligible_clauses.append(excl_sql)
+            eligible_params.extend(excl_params)
         if exclude_memory_id is not None:
-            clauses.append("e.memory_id!=?")
-            filter_params.append(int(exclude_memory_id))
+            eligible_clauses.append("e.memory_id != ?")
+            eligible_params.append(int(exclude_memory_id))
+        filtered = bool(eligible_clauses[1:])
+        id_constraint = (
+            f" AND v.id IN (SELECT e.id FROM memory_evidence e "
+            f"JOIN memories m ON m.id=e.memory_id WHERE {' AND '.join(eligible_clauses)})"
+            if filtered else ""
+        )
         try:
-            with self._db.connection() as conn:
-                # Workspace/exclusion predicates are evaluated after vec0 picks
-                # its global KNN window — the shared loop grows that window.
-                rows = knn_window_loop(
-                    conn,
-                    count_sql=(
-                        f"""SELECT COUNT(*) FROM memory_evidence_vec v
-                            JOIN memory_evidence e ON e.id=v.id
-                            JOIN memories m ON m.id=e.memory_id
-                            WHERE {status_sql} AND {memory_status_sql}"""
-                    ),
-                    query_sql=f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
-                                   m.workspace, m.workspace_canonical, m.source_type,
-                                   m.confidence, m.protection_level, m.event_time,
-                                   m.ingest_time, m.metadata, m.content,
-                                   m.version AS memory_row_version, m.agent_id,
-                                   m.source_ref, m.created_at AS memory_created_at
+            if conn is not None:
+                rows = conn.execute(
+                    f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
+                           m.workspace, m.workspace_canonical, m.source_type,
+                           m.confidence, m.protection_level, m.event_time,
+                           m.ingest_time, m.metadata, m.content,
+                           m.version AS memory_row_version, m.agent_id,
+                           m.source_ref, m.created_at AS memory_created_at
+                        FROM memory_evidence_vec v
+                        JOIN memory_evidence e ON e.id=v.id
+                        JOIN memories m ON m.id=e.memory_id
+                        WHERE v.embedding MATCH ? AND k=? AND {status_sql}
+                          AND {memory_status_sql}{id_constraint}
+                        ORDER BY v.distance""",
+                    [json.dumps(query_embedding), requested_k, *eligible_params],
+                ).fetchall()
+            else:
+                with self._db.connection() as owned:
+                    rows = owned.execute(
+                        f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
+                               m.workspace, m.workspace_canonical, m.source_type,
+                               m.confidence, m.protection_level, m.event_time,
+                               m.ingest_time, m.metadata, m.content,
+                               m.version AS memory_row_version, m.agent_id,
+                               m.source_ref, m.created_at AS memory_created_at
                             FROM memory_evidence_vec v
                             JOIN memory_evidence e ON e.id=v.id
                             JOIN memories m ON m.id=e.memory_id
-                            WHERE v.embedding MATCH ? AND k=? AND {' AND '.join(clauses)}
+                            WHERE v.embedding MATCH ? AND k=? AND {status_sql}
+                              AND {memory_status_sql}{id_constraint}
                             ORDER BY v.distance""",
-                    query_json=json.dumps(query_embedding),
-                    requested_k=requested_k,
-                    params=filter_params,
-                    filtered=filtered,
-                )
+                        [json.dumps(query_embedding), requested_k, *eligible_params],
+                    ).fetchall()
             return [dict(row) for row in rows]
         except sqlite3.Error:
             return []

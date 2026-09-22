@@ -292,6 +292,16 @@ class SchemaStore:
                 sqlite_vec.load(conn)
                 conn.enable_load_extension(False)
                 self._sqlite_vec_loadable = True
+                # 0.16.12 P3-T3: the KNN rowid-IN prefilter (evidence knn /
+                # subject_tags_knn) depends on SQLite's vtab_in interface
+                # (3.38+). On older SQLite the IN constraint may not push into
+                # the vec0 scan — refuse vec mode outright rather than risk
+                # silently wrong KNN results (caught below → warn + fallback).
+                if sqlite3.sqlite_version_info < (3, 38):
+                    raise RuntimeError(
+                        f"SQLite {sqlite3.sqlite_version} < 3.38: the vec0 "
+                        "rowid-IN KNN prefilter is unsupported"
+                    )
                 self.state.sqlite_vec_available = True
                 self.state.mode = "sqlite_vec"
                 # Table creation is lazy since 0.15.0: the derived vec0 tables
