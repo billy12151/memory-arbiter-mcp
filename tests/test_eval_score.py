@@ -96,3 +96,61 @@ def test_gate_relative_drop_semantics() -> None:
     assert failed["gate"] == "FAILED"
     assert failed["failures"][0]["metric"] == "recall.recall_at_10.rate"
     assert failed["failures"][0]["relative_drop"] == round((0.95 - 0.50) / 0.95, 4)
+
+
+def test_compute_perf_stats() -> None:
+    raw = {
+        "replay_perf": [
+            {"fixture_key": "t-a", "elapsed_ms": 100.0, "duplicate_replay": False},
+            {"fixture_key": "t-b", "elapsed_ms": 300.0, "duplicate_replay": False},
+            {"fixture_key": "t-c", "elapsed_ms": 5.0, "duplicate_replay": True},
+        ],
+        "queries": [
+            {"qid": "A01", "elapsed_ms": 50.0},
+            {"qid": "A02", "elapsed_ms": 80.0},
+        ],
+        "conflict": [
+            {"pair_id": "p1", "label": "true_conflict", "skipped_member_replay": False,
+             "sync": True, "async": False, "notice_missing": False, "right_write_ms": 4200.0,
+             "units": 49, "notice_count": 1,
+             "_receipt": {"status": "completed", "notices_created": 1, "reasons_seen": [],
+                          "pairs_examined": 3}},
+            {"pair_id": "p2", "label": "coexist", "skipped_member_replay": False,
+             "sync": False, "async": False, "notice_missing": True, "right_write_ms": 4600.0,
+             "units": 70, "notice_count": 0,
+             "_receipt": {"status": "completed", "notices_created": 0,
+                          "reasons_seen": ["pairs_examined_capped"], "pairs_examined": 10}},
+            {"pair_id": "p3", "label": "noise", "skipped_member_replay": True,
+             "sync": None, "async": None, "notice_missing": None},
+        ],
+    }
+    perf = score.compute_perf(raw)
+    assert perf["write_ms"]["n"] == 3 and perf["write_ms"]["max_ms"] == 300.0
+    assert perf["write_ms_fresh"]["n"] == 2  # 幂等重放单列
+    assert perf["find_ms"]["p50_ms"] == 50.0  # nearest-rank：两样本取低位
+    assert perf["conflict_right_write_ms"]["n"] == 2  # skipped 行不进耗时统计
+    window = perf["conflict_window"]
+    assert window["n"] == 2 and window["completed"] == 2
+    assert window["avg_pairs_examined"] == 6.5
+    assert window["pairs_examined_capped_rows"] == 1
+    assert window["units_capped_rows"] == 1  # units=70 ≥ 64 预算
+    assert window["avg_units"] == 59.5
+    assert window["avg_notice_count"] == 0.5
+
+
+def test_perf_keys_are_excluded_from_gate() -> None:
+    # perf 是耗时信息位：基线侧带 perf、当前侧数值大幅波动，门仍 PASSED
+    baseline = {
+        "perf": {"write_ms": {"n": 3, "p50_ms": 5.0, "p95_ms": 5.0, "max_ms": 5.0}},
+        "recall": {"recall_at_10": {"rate": 0.9}},
+    }
+    current = {
+        "perf": {"write_ms": {"n": 3, "p50_ms": 9999.0, "p95_ms": 9999.0, "max_ms": 9999.0}},
+        "recall": {"recall_at_10": {"rate": 0.9}},
+    }
+    flat = score._flatten(current)
+    assert not any(key.startswith("perf.") for key in flat)
+    assert score.gate(current, baseline)["gate"] == "PASSED"
+    # render 只喂 perf/env（其余套件段缺失时跳过渲染）
+    markdown = score.render_markdown({"env": {}, "perf": current["perf"]}, None)
+    assert "性能" in markdown and "9999" in markdown

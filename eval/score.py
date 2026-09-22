@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import math
 from pathlib import Path
 from typing import Any
 
@@ -185,7 +185,111 @@ def score_all(raw: dict) -> dict[str, Any]:
         "recall": score_recall(raw),
         "similarity": score_similarity(raw),
         "conflict": score_conflict(raw),
+        "perf": compute_perf(raw),
     }
+
+
+# ---- perf：性能基线段（P0-T3，informational——不进回归门） -------------------
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    """nearest-rank 百分位（与 tools._pair_timing_summary 同口径）."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    idx = max(0, min(len(ordered) - 1, math.ceil(fraction * len(ordered)) - 1))
+    return round(ordered[idx], 1)
+
+
+def _ms_stats(values: list[float]) -> dict[str, Any]:
+    return {
+        "n": len(values),
+        "p50_ms": _percentile(values, 0.5),
+        "p95_ms": _percentile(values, 0.95),
+        "max_ms": round(max(values), 1) if values else None,
+    }
+
+
+def compute_perf(raw: dict) -> dict[str, Any] | None:
+    """0.16.12 perf 基线：write/find/冲突窗耗时与预算消耗（纯信息位）.
+
+    耗时指标天然有噪声，绝不进 gate()（_flatten 显式跳过顶层 perf 键）；
+    未来独立 perf 门阈值在噪声带数据齐后另定。
+    """
+    from memory_arbiter.constants import (
+        SEMANTIC_MAX_EVIDENCE_UNITS,
+        SEMANTIC_MAX_EXAMINED_PAIRS,
+    )
+
+    replay = raw.get("replay_perf") or []
+    queries = raw.get("queries") or []
+    conflict = raw.get("conflict") or []
+    if not (replay or queries or conflict):
+        return None
+    perf: dict[str, Any] = {}
+    if replay:
+        perf["write_ms"] = _ms_stats([
+            float(row["elapsed_ms"]) for row in replay
+            if isinstance(row.get("elapsed_ms"), (int, float))
+        ])
+        fresh = [
+            float(row["elapsed_ms"]) for row in replay
+            if isinstance(row.get("elapsed_ms"), (int, float)) and not row.get("duplicate_replay")
+        ]
+        if fresh:
+            perf["write_ms_fresh"] = _ms_stats(fresh)
+    if queries:
+        perf["find_ms"] = _ms_stats([
+            float(row["elapsed_ms"]) for row in queries
+            if isinstance(row.get("elapsed_ms"), (int, float))
+        ])
+    if conflict:
+        valid = [row for row in conflict if not row.get("skipped_member_replay")]
+        writes = [
+            float(row["right_write_ms"]) for row in valid
+            if isinstance(row.get("right_write_ms"), (int, float))
+        ]
+        if writes:
+            perf["conflict_right_write_ms"] = _ms_stats(writes)
+        receipts = [row.get("_receipt") or {} for row in valid]
+        with_receipt = [r for r in receipts if r.get("status") is not None]
+        completed = sum(1 for r in with_receipt if r.get("status") == "completed")
+        pairs_values = [
+            int(r["pairs_examined"]) for r in with_receipt
+            if isinstance(r.get("pairs_examined"), int)
+        ]
+        units_values = [
+            int(row["units"]) for row in valid
+            if isinstance(row.get("units"), int)
+        ]
+        notice_counts = [
+            int(row["notice_count"]) for row in valid
+            if isinstance(row.get("notice_count"), int)
+        ]
+        perf["conflict_window"] = {
+            "n": len(valid),
+            "receipt_n": len(with_receipt),
+            "completed": completed,
+            "completed_rate": _pct(completed, len(valid)) if valid else None,
+            "avg_pairs_examined": (
+                round(sum(pairs_values) / len(pairs_values), 2) if pairs_values else None
+            ),
+            "pairs_examined_capped_rows": sum(
+                1 for r in with_receipt
+                if any(str(t).endswith("_capped") for t in (r.get("reasons_seen") or []))
+            ),
+            "avg_units": (
+                round(sum(units_values) / len(units_values), 1) if units_values else None
+            ),
+            "units_capped_rows": sum(
+                1 for u in units_values if u >= SEMANTIC_MAX_EVIDENCE_UNITS
+            ),
+            "pairs_budget": SEMANTIC_MAX_EXAMINED_PAIRS,
+            "units_budget": SEMANTIC_MAX_EVIDENCE_UNITS,
+            "avg_notice_count": (
+                round(sum(notice_counts) / len(notice_counts), 2) if notice_counts else None
+            ),
+        }
+    return perf or None
 
 
 # ---- gate：基线对比（相对下降，provisional 阈值） ---------------------------
@@ -193,6 +297,9 @@ def score_all(raw: dict) -> dict[str, Any]:
 def _flatten(metrics: dict, prefix: str = "") -> dict[str, float]:
     flat: dict[str, float] = {}
     for key, value in metrics.items():
+        # perf 段是耗时/预算信息位：噪声大，绝不进回归门（P0-T3 显式排除）
+        if prefix == "" and key == "perf":
+            continue
         if isinstance(value, dict):
             flat.update(_flatten(value, f"{prefix}{key}."))
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -300,6 +407,27 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
             f"- 成员重叠跳过 {overall['skipped_member_replay']} 对（不计指标）",
             "",
         ]
+    perf = scored.get("perf")
+    if perf:
+        lines += ["## 性能（informational——不进回归门）", ""]
+        for label, key in (("写入（fixture 重放）", "write_ms"), ("写入（非幂等重放）", "write_ms_fresh"),
+                           ("查询（recall 34 query）", "find_ms"), ("冲突对右侧写入", "conflict_right_write_ms")):
+            bucket = perf.get(key)
+            if bucket:
+                lines.append(
+                    f"- {label}：p50 **{bucket['p50_ms']}ms** · p95 **{bucket['p95_ms']}ms** · "
+                    f"max {bucket['max_ms']}ms（n={bucket['n']}）"
+                )
+        window = perf.get("conflict_window")
+        if window:
+            lines.append(
+                f"- 冲突窗：完成率 **{window['completed_rate']}**（{window['completed']}/{window['n']}） · "
+                f"平均检查对数 {window['avg_pairs_examined']}（预算 {window['pairs_budget']}，"
+                f"capped 行 {window['pairs_examined_capped_rows']}） · "
+                f"平均单元 {window['avg_units']}（预算 {window['units_budget']}，"
+                f"capped 行 {window['units_capped_rows']}） · 平均 notice 数 {window['avg_notice_count']}"
+            )
+        lines.append("")
     if gate_result:
         lines += [
             "## 回归门（provisional 阈值，待 owner 依首份基线定正式门槛）",
