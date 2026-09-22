@@ -22,6 +22,10 @@ from .timeutil import utc_now_iso
 # byte-fallback character landing exactly on the cut boundary can shift the
 # cut by one trailing token — the same tail-truncation regime as before), so
 # the space id must NOT rotate.
+# ⚠️ P1-T5 audit obligation: read.py's table-first outline serves preview
+# heads/offsets straight from memory_evidence; any bump here that changes
+# unit segmentation MUST re-run scripts/audit_outline_table_parity.py on a
+# real-DB copy and keep the mismatch rate at zero before shipping.
 EMBEDDING_PIPELINE_VERSION = 2
 
 EncodeFn = Callable[[str], list[float]]

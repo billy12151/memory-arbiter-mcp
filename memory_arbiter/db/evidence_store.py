@@ -235,6 +235,74 @@ class EvidenceStore:
         except sqlite3.Error:
             return {}
 
+    def outline_rows(
+        self, memory_id: int, memory_version: int, *, limit: int,
+    ) -> "dict[str, Any] | None":
+        """Current-version outline rows for preview building (0.16.12 P1-T5).
+
+        Returns {"total": N, "rows": [...]} with N the exact count of
+        heading/text units (drives the "还有 N 段" marker) and rows the first
+        ``limit`` (LIMIT must exceed the caller's max segments by 1 only for
+        the caller's own needs — here we return exactly ``limit`` rows).
+        None when this version has no heading/text rows published yet — the
+        caller falls back to reparsing (parity guaranteed by the P1-T5 audit;
+        the None branch covers the post-edit/pre-republish window)."""
+        try:
+            with self._db.connection() as conn:
+                count_row = conn.execute(
+                    "SELECT COUNT(*) FROM memory_evidence "
+                    "WHERE memory_id=? AND memory_version=? AND kind IN ('heading','text')",
+                    (int(memory_id), int(memory_version)),
+                ).fetchone()
+                total = int(count_row[0]) if count_row else 0
+                if total == 0:
+                    return None
+                rows = [dict(row) for row in conn.execute(
+                    """SELECT unit_index, kind, text, start_offset
+                       FROM memory_evidence
+                       WHERE memory_id=? AND memory_version=? AND kind IN ('heading','text')
+                       ORDER BY unit_index LIMIT ?""",
+                    (int(memory_id), int(memory_version), int(limit)),
+                ).fetchall()]
+            return {"total": total, "rows": rows}
+        except sqlite3.Error:
+            return None
+
+    def outline_rows_for_ids(
+        self, entries: "list[tuple[int, int]]",
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Batch outline fetch (0.16.12 P1-T5): ALL heading/text rows for the
+        page's ids in ONE connection (row-value IN, chunked) — keeps P1-T4's
+        connection batching intact on preview paths. Per-id lists are ordered
+        by unit_index; the caller derives total (=len) and the head slice.
+        Ids with no current-version rows are absent from the map."""
+        if not entries:
+            return {}
+        pairs = sorted({(int(mid), int(version)) for mid, version in entries})
+        out: dict[int, list[dict[str, Any]]] = {}
+        try:
+            with self._db.connection() as conn:
+                for start in range(0, len(pairs), 200):
+                    chunk = pairs[start:start + 200]
+                    placeholders = ",".join("(?,?)" for _ in chunk)
+                    params = [value for pair in chunk for value in pair]
+                    rows = conn.execute(
+                        f"""SELECT memory_id, unit_index, kind, text, start_offset, end_offset
+                            FROM memory_evidence
+                            WHERE (memory_id, memory_version) IN ({placeholders})
+                              AND kind IN ('heading','text')
+                            ORDER BY memory_id, unit_index""",
+                        params,
+                    ).fetchall()
+                    for row in rows:
+                        out.setdefault(int(row["memory_id"]), []).append(
+                            {key: row[key] for key in
+                             ("unit_index", "kind", "text", "start_offset", "end_offset")}
+                        )
+            return out
+        except sqlite3.Error:
+            return {}
+
     def knn(
         self,
         query_embedding: list[float],

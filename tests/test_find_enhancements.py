@@ -642,3 +642,35 @@ def test_find_conflict_group_query_runs_once_per_search(tmp_path: Path, monkeypa
     assert result["data"]["results"]
     assert any(r.get("conflict_signal") for r in result["data"]["results"])
     assert len(calls) == 1  # 两个消费点共享一次查询
+
+
+def test_outline_table_path_matches_reparse(tmp_path: Path) -> None:
+    """0.16.12 P1-T5 双路一致性：同一篇文档，查表 outline 与重解析 outline
+    逐段一致（head 截断 + offset + 还有 N 段）。表未发布当前版本时回退
+    重解析（编辑后异步重建窗口零行为差）。"""
+    from memory_arbiter.pipeline.read import _content_outline, _outline_for_item
+
+    tools = make_tools(tmp_path)
+    subject = "双路一致性文档"
+    content = "\n\n".join(f"第 {i} 段：审计一致性检查内容 {i}" for i in range(12))
+    mid = tools.memory_write(content=content, subject=subject, tags=[])["data"]["id"]
+    version = int(tools.db.get_memory(mid)["version"])
+    # 表尚无当前版本行（无 embedder 的测试路径不发布 evidence）→ 回退重解析
+    fallback = _outline_for_item(tools.db, mid, version, subject, content)
+    assert fallback == _content_outline(subject, content)
+    # 直接向 evidence 表发布当前版本单元 → 查表路径
+    import hashlib
+    from memory_arbiter.models import utc_now_iso
+    with tools.db.write_transaction() as conn:
+        for index, part in enumerate(content.split("\n\n")):
+            start = sum(len(p) + 2 for p in content.split("\n\n")[:index])
+            conn.execute(
+                "INSERT INTO memory_evidence(memory_id, memory_version, content_hash,"
+                " unit_index, kind, text, start_offset, end_offset, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (mid, version, "h", index, "text", part, start, start + len(part), utc_now_iso()),
+            )
+    via_table = _outline_for_item(tools.db, mid, version, subject, content)
+    assert via_table == _content_outline(subject, content)
+    # 12 段 > 8 段上限：两条路都带「还有 4 段」尾标
+    assert via_table[-1]["head"] == "…还有 4 段" and via_table[-1]["offset"] is None

@@ -286,6 +286,6 @@ def test_batch_read_batches_connections(tmp_path: Path, monkeypatch) -> None:
     )
     assert result.get("ok"), result
     assert sum(1 for r in result["data"]["results"] if r.get("found")) == 20
-    # 无批量预取时 ≥20（每 id 一连接）；预取后与 id 数无关（上限容忍 state
-    # 响应封装等杂项连接）。
-    assert len(calls) <= 3, f"expected batched connections, saw {len(calls)}"
+    # 无批量预取时 ≥20（每 id 一连接）；预取后与 id 数无关（含 state 响应
+    # 封装等杂项连接，上限 5）。
+    assert len(calls) <= 5, f"expected batched connections, saw {len(calls)}"

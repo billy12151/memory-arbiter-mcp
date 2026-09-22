@@ -98,6 +98,50 @@ def _unit_aligned_hits(
     return hit_spans, upgraded
 
 
+def _outline_from_rows(rows: list[dict[str, Any]], total: int) -> list[dict[str, Any]]:
+    """Bounded outline from unit rows; ``total`` is the exact heading/text
+    unit count (drives the "还有 N 段" marker). Shared by the single-id and
+    batch-prefetched table paths."""
+    outline: list[dict[str, Any]] = [
+        {
+            "head": (str(row["text"] or "").splitlines()[0] if row["text"] else "")[:_OUTLINE_HEAD_CHARS],
+            "offset": int(row["start_offset"]),
+        }
+        for row in rows[:_OUTLINE_MAX_SEGMENTS]
+    ]
+    if total > _OUTLINE_MAX_SEGMENTS:
+        outline.append({"head": f"…还有 {total - _OUTLINE_MAX_SEGMENTS} 段", "offset": None})
+    return outline
+
+
+def _outline_for_item(
+    db: Any, memory_id: int, version: int, subject: str, content: str,
+    rows: "list[dict[str, Any]] | None" = None,
+) -> list[dict[str, Any]]:
+    """P1-T5 table-first outline: serve from memory_evidence (same source the
+    evidence pipeline published — parity proven by the 632/632 zero-mismatch
+    audit in scripts/audit_outline_table_parity.py) and fall back to
+    reparsing exactly when the table cannot serve the CURRENT version
+    (post-edit/pre-republish window, or vec-less test paths).
+
+    ``rows``: the caller's batch-prefetched heading/text rows for THIS memory
+    (None = the single-item query path). An empty list means the prefetch
+    found nothing for the current version → reparse fallback."""
+    if rows is None:
+        try:
+            packed = db.evidence.outline_rows(
+                int(memory_id), int(version), limit=_OUTLINE_MAX_SEGMENTS + 1,
+            )
+        except Exception:
+            packed = None
+        if packed is None:
+            return _content_outline(subject, content)
+        return _outline_from_rows(packed["rows"], int(packed["total"]))
+    if not rows:
+        return _content_outline(subject, content)
+    return _outline_from_rows(rows, len(rows))
+
+
 def _content_outline(subject: str, content: str) -> list[dict[str, Any]]:
     """Bounded table-of-contents for a find preview item.
 
@@ -169,7 +213,10 @@ def _hit_spans(raw_hits: Any, content: str) -> "list[dict[str, Any]] | None":
     ]
 
 
-def _preview_item(item: dict[str, Any], *, content_mode: str = "preview") -> dict[str, Any]:
+def _preview_item(
+    item: dict[str, Any], *, content_mode: str = "preview", db: Any = None,
+    outline_rows: "list[dict[str, Any]] | None" = None,
+) -> dict[str, Any]:
     """Build one find index-page item: metadata + content_chars + outline.
 
     v0.15.10 content_mode (single-choice enum, replaces the removed
@@ -189,7 +236,15 @@ def _preview_item(item: dict[str, Any], *, content_mode: str = "preview") -> dic
     content = str(item.get("content") or "")
     preview = dict(item)
     preview["content_chars"] = len(content)
-    preview["outline"] = _content_outline(str(item.get("subject") or ""), content)
+    if db is not None and item.get("id") is not None:
+        # P1-T5: table-first outline (falls back to reparse inside)
+        preview["outline"] = _outline_for_item(
+            db, int(item["id"]), int(item.get("version") or 1),
+            str(item.get("subject") or ""), content,
+            rows=outline_rows if outline_rows is not None else None,
+        )
+    else:
+        preview["outline"] = _content_outline(str(item.get("subject") or ""), content)
     keep_content = content_mode == "full"
     if content_mode == "hits":
         spans = _hit_spans(item.get("_evidence_hits"), content)
@@ -440,7 +495,20 @@ class ReadPipeline:
         # a bounded outline (offsets share read's span coordinate system);
         # v0.15.10: content_mode picks the content depth — preview (default),
         # hits (vector-hit spans, full-text upgrade at >=50% coverage), full.
-        results = [_preview_item(r, content_mode=content_mode) for r in results]
+        # P1-T5: one batched outline prefetch for the whole page (preview /
+        # hits modes) keeps the per-item outline off the per-item connection.
+        _outline_map: dict[int, list[dict[str, Any]]] = {}
+        if content_mode in {"preview", "hits"} and results:
+            _outline_map = self.db.evidence.outline_rows_for_ids([
+                (int(r["id"]), int(r.get("version") or 1))
+                for r in results if r.get("id") is not None
+            ])
+        results = [
+            _preview_item(
+                r, content_mode=content_mode, db=self.db,
+                outline_rows=_outline_map.get(int(r["id"]), []),
+            ) for r in results
+        ]
         response_data = {
             "results": results,
             "count": len(results),
@@ -803,7 +871,7 @@ class ReadPipeline:
                 k: v for k, v in row.items()
                 if not k.startswith("_") or (keep_hits and k == "_evidence_hits")
             }
-            return _preview_item(clean, content_mode=content_mode)
+            return _preview_item(clean, content_mode=content_mode, db=self.db)
 
         results: list[dict[str, Any]] = []
         if deduplicate:
@@ -1182,7 +1250,10 @@ class ReadPipeline:
                 key: value for key, value in memory.items() if key != "content"
             }
             preview["content_chars"] = len(content)
-            preview["outline"] = _content_outline(str(memory.get("subject") or ""), content)
+            preview["outline"] = _outline_for_item(
+                self.db, int(memory["id"]), int(memory.get("version") or 1),
+                str(memory.get("subject") or ""), content,
+            )
             data = {"memory": preview}
         elif content_mode == "hits":
             unit_hits = _unit_aligned_hits(self.db, memory, span)
@@ -1192,7 +1263,10 @@ class ReadPipeline:
                     key: value for key, value in memory.items() if key != "content"
                 }
                 record["content_chars"] = len(content)
-                record["outline"] = _content_outline(str(memory.get("subject") or ""), content)
+                record["outline"] = _outline_for_item(
+                    self.db, int(memory["id"]), int(memory.get("version") or 1),
+                    str(memory.get("subject") or ""), content,
+                )
                 record["hit_spans"] = hit_spans
                 if upgraded is not None:
                     record["content"] = upgraded
@@ -1374,6 +1448,11 @@ class ReadPipeline:
         unit_rows_map: dict[int, list[dict[str, Any]]] = (
             self.db.evidence.text_unit_rows_for_ids(unit_needed) if unit_needed else {}
         )
+        outline_map: dict[int, list[dict[str, Any]]] = (
+            self.db.evidence.outline_rows_for_ids([
+                (mid, int(rec.get("version") or 1)) for mid, rec in visible_records.items()
+            ]) if content_mode in {"preview", "hits"} else {}
+        )
 
         results: list[dict[str, Any]] = []
         not_found: list[int] = []
@@ -1389,7 +1468,11 @@ class ReadPipeline:
             if content_mode == "preview":
                 record = {key: value for key, value in memory.items() if key != "content"}
                 record["content_chars"] = len(content)
-                record["outline"] = _content_outline(str(memory.get("subject") or ""), content)
+                record["outline"] = _outline_for_item(
+                    self.db, mid, int(memory.get("version") or 1),
+                    str(memory.get("subject") or ""), content,
+                    rows=outline_map.get(mid, []),
+                )
                 item["memory"] = record
             elif content_mode == "hits":
                 unit_hits = _unit_aligned_hits(
@@ -1397,7 +1480,11 @@ class ReadPipeline:
                 )
                 record = {key: value for key, value in memory.items() if key != "content"}
                 record["content_chars"] = len(content)
-                record["outline"] = _content_outline(str(memory.get("subject") or ""), content)
+                record["outline"] = _outline_for_item(
+                    self.db, mid, int(memory.get("version") or 1),
+                    str(memory.get("subject") or ""), content,
+                    rows=outline_map.get(mid, []),
+                )
                 if unit_hits is not None:
                     hit_spans, upgraded = unit_hits
                     record["hit_spans"] = hit_spans
