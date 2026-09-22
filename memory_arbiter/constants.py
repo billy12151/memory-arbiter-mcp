@@ -140,6 +140,12 @@ SEMANTIC_MAX_ROWS = 256
 # similarity because 98% of same-topic pairs are continuations, not
 # conflicts (12th/13th-round evidence). Weights sum to 1.0; recalibrated
 # with the P2-0 corpus during P2-3.2.
+# 0.17.0 P2-3.3/P2-5.3: claims channel attr-vector gate τ (8th-round spike:
+# A/B recall 4/4, C2+D1 accepted as advisory FPs; asymmetric-benefit doctrine).
+CLAIM_ATTR_TAU = 0.70
+# 0.17.0 review A3: the claims channel is zero-Qwen with no natural pairs
+# cap — notices per write are bounded here instead (overflow visible).
+CLAIMS_MAX_NOTICES_PER_WRITE = 5
 PAIR_SCORE_W_OVERLAP = 0.40
 PAIR_SCORE_W_NUMERIC_ROUTE = 0.30
 PAIR_SCORE_W_BOTH_VALUES = 0.30

@@ -34,13 +34,16 @@ def test_config_registry_only_describes_current_architecture() -> None:
         "semantic_conflict.on_write", "semantic_conflict.n_gpu_layers",
         "semantic_conflict.notice_sync_wait_ms",
         "update_check.enabled", "include_size",
+        "claims.required",
     }
     assert not any(
         "max_unit_chars" in path or "workspace_" in path
         or path.startswith("vec.") or "provider" in path or "n_ctx" in path
         for path in paths
     )
-    assert not any("claim" in path or "split" in path or "pair_text_gate" in path for path in paths)
+    # 0.17.0: claims.required is a LIVE key (P2-5.2 grey-period switch); the
+    # old "claim*" tombstone guard is narrowed to the dead split/pair keys.
+    assert not any("split" in path or "pair_text_gate" in path for path in paths)
     assert sum(len(group["items"]) for group in grouped_descriptors()) == len(CONFIG_DESCRIPTORS)
     assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
 

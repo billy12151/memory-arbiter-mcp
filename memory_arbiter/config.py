@@ -50,6 +50,7 @@ class Settings:
     # wins); preload/resident are frozen true — a configured model loads at
     # startup and stays resident.
     semantic_conflict_enabled: bool = False
+    claims_required: bool = False
     semantic_conflict_model_path: Path | None = None
     semantic_conflict_on_write: str = "async"
     # A3 (0.15.14): Qwen offload layer count. -1 = full Metal offload (the
@@ -237,6 +238,10 @@ class Settings:
             update_check_enabled=update_check_enabled,
             include_size=pick_bool_field(
                 cfg.get("include_size"), name="include_size", default_bool=True
+            ),
+            claims_required=pick_bool_field(
+                cfg.get("claims", {}).get("required") if isinstance(cfg.get("claims"), dict) else None,
+                "claims.required", False,
             ),
             semantic_conflict_enabled=pick_bool_field(
                 semantic_cfg.get("enabled"), name="semantic_conflict.enabled",

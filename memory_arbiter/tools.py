@@ -1575,7 +1575,18 @@ class MemoryTools:
         return self._semantic_worker.enqueue(int(memory_id), snapshot)
 
     def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
-        return self._evidence.process_conflicts(memory_id, snapshot)
+        result = self._evidence.process_conflicts(memory_id, snapshot)
+        # 0.17.0 P2-5.3: the zero-Qwen claims channel rides the same
+        # post-commit job (additive receipt keys; never blocks the text path).
+        # Skipped jobs (pending activation etc.) keep their exact old shape.
+        if result.get("status") != "skipped":
+            try:
+                claims_result = self._evidence.check_claims_conflicts(memory_id, snapshot)
+                if isinstance(claims_result, dict):
+                    result["claims_channel"] = claims_result
+            except Exception:
+                pass
+        return result
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         return self._write_pipeline.memory_write(**payload)

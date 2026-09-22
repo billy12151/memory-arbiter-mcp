@@ -4,6 +4,7 @@ from __future__ import annotations
 import difflib
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -57,7 +58,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory", "remember"): {
         "content", "workspace", "tags", "source_type", "source_ref",
         "event_time", "ingest_time", "confidence", "protection_level", "status",
-        "subject", "metadata",
+        "subject", "metadata", "claims",
     },
     ("memory", "find"): {
         "query", "workspace", "tags", "limit", "offset", "debug_ranking",
@@ -75,7 +76,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "id", "memory_id", "new_content", "old_text", "new_text", "patches",
         "new_subject", "new_tags", "reason", "authorized", "tags_only", "add_tags",
         "remove_tags", "expected_version", "expected_content_hash", "content_hash",
-        "workspace",
+        "workspace", "claims",
     },
     ("memory", "judge"): {
         "id", "conflict_id", "expected_revision", "chosen_value", "decided_by",
@@ -791,6 +792,44 @@ def _v_enums(
     return None
 
 
+def _v_claims(
+    surface: str, operation: str, payload: dict[str, Any], result: ValidationResult,
+) -> dict[str, Any] | None:
+    """0.17.0 P2-5.1: claims schema gate (hard errors only — the missing-key
+    grey/enforce split lives in the write layer where settings are visible).
+
+    An empty array is an EXPLICIT "no claims" statement and always passes.
+    Per-item bounds align with the conflict-value protocol (64 chars / 12
+    words, owner 2026-09-22 ruling #③) so grounding never contradicts the
+    schema."""
+    if (surface, operation) not in {("memory", "remember"), ("memory", "update")}:
+        return None
+    if payload.get("claims") is None:
+        return None
+    claims = payload.get("claims")
+    if not isinstance(claims, list):
+        return _error("claims", "must be an array of {attr, value} objects (or [] to declare none)")
+    if len(claims) > 20:
+        return _error("claims", "at most 20 claims per memory", count=len(claims))
+    for index, item in enumerate(claims):
+        if not isinstance(item, dict):
+            return _error("claims", f"claims[{index}] must be an object", index=index)
+        attr = item.get("attr")
+        value = item.get("value")
+        if not isinstance(attr, str) or not (1 <= len(attr.strip()) <= 64):
+            return _error("claims", f"claims[{index}].attr must be 1-64 chars", index=index)
+        if not isinstance(value, str) or not (1 <= len(value.strip()) <= 64):
+            return _error(
+                "claims", f"claims[{index}].value must be 1-64 chars (提炼成短值，勿整句)",
+                index=index,
+            )
+        if len(re.findall(r"\S+", value.strip())) > 12:
+            return _error("claims", f"claims[{index}].value must be at most 12 words", index=index)
+        if value.strip() in attr.strip():
+            return _error("claims", f"claims[{index}].attr must not contain the value", index=index)
+    return None
+
+
 def _v_remember_status(
     surface: str, operation: str, payload: dict[str, Any], result: ValidationResult,
 ) -> dict[str, Any] | None:
@@ -821,6 +860,7 @@ _VALIDATORS: tuple[_Validator, ...] = (
     _v_bounded_strings,
     _v_tag_lists,
     _v_metadata,
+    _v_claims,
     _v_structured_limits,
     _v_candidate_key,
     _v_slot_key,

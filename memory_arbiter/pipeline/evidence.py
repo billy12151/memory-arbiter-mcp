@@ -66,6 +66,195 @@ class EvidencePipeline:
     def _ensure_semantic_backend(self) -> "SemanticBackend | None":
         return self._tools._ensure_semantic_backend()
 
+    def check_claims_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """0.17.0 P2-5.3: the zero-Qwen claims channel (owner decision #6).
+
+        Every claim of the freshly-written memory searches the claim-vector
+        KNN (same workspace, active, current version); attr_cos ≥
+        CLAIM_ATTR_TAU + value_norm difference + coexistence veto (A4) +
+        provenance SOFT gate (owner 2026-09-22: both sides filled AND
+        unequal → veto; anything else passes — the attr slot itself anchors
+        the comparison) + evidence-channel pair-closure dedup → notice.
+        Bounded by CLAIMS_MAX_NOTICES_PER_WRITE (review A3); overflow is
+        counted, never silent."""
+        from ..constants import CLAIMS_MAX_NOTICES_PER_WRITE, CLAIM_ATTR_TAU
+        from ..semantic_conflict import vector_cosine
+
+        record = snapshot if snapshot.get("content") is not None else (
+            self.db.get_memory(int(memory_id)) or {}
+        )
+        version = int(record.get("version") or 1)
+        workspace = (
+            record.get("workspace_canonical") or record.get("workspace")
+            if self.settings.isolation == "strict" else None
+        )
+        own_claims = self.db.claims.current_claims(int(memory_id))
+        if not own_claims:
+            return {"claims_checked": 0, "notices": 0}
+        if not self.db.state.sqlite_vec_available:
+            return {"claims_checked": len(own_claims), "notices": 0, "reason": "vec_unavailable"}
+        # Own claim vectors (published on the write path).
+        own_rows: dict[int, list[float]] = {}
+        with self.db.connection() as conn:
+            for row in conn.execute(
+                """SELECT c.id AS cid, v.embedding FROM memory_claims c
+                   LEFT JOIN memory_claim_vec v ON v.id=c.id
+                   WHERE c.memory_id=? AND c.memory_version=?""",
+                (int(memory_id), version),
+            ).fetchall():
+                if row["embedding"] is not None:
+                    own_rows[int(row["cid"])] = self.db.evidence._blob_to_vector(bytes(row["embedding"]))
+        if not own_rows:
+            return {"claims_checked": len(own_claims), "notices": 0, "reason": "vectors_pending"}
+
+        from ..acl import workspace_scope_sql
+        workspace_sql, workspace_params = workspace_scope_sql(
+            "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)", workspace,
+        )
+        eligible = "m.status='active' AND c.memory_version = m.version AND c.memory_id != ?"
+        eligible_params: list[Any] = [int(memory_id)]
+        if workspace_sql:
+            eligible += f" AND {workspace_sql}"
+            eligible_params.extend(workspace_params)
+        id_constraint = f"c.id IN (SELECT c.id FROM memory_claims c JOIN memories m ON m.id=c.memory_id WHERE {eligible})"
+
+        raw_meta = record.get("metadata")
+        own_metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        own_entity = str(own_metadata.get("entity") or "").strip()
+        own_scope = str(own_metadata.get("scope") or "").strip()
+
+        notices = 0
+        capped = False
+        checked = 0
+        with self.db.connection() as conn:
+            for claim in own_claims:
+                own_vector = own_rows.get(int(claim["id"]))
+                if not own_vector:
+                    continue
+                checked += 1
+                hits = conn.execute(
+                    f"""SELECT c.*, v.distance AS distance,
+                               m.subject, m.metadata, m.workspace, m.workspace_canonical
+                        FROM memory_claim_vec v
+                        JOIN memory_claims c ON c.id=v.id
+                        JOIN memories m ON m.id=c.memory_id
+                        WHERE v.embedding MATCH ? AND k=10 AND {id_constraint}
+                        ORDER BY v.distance""",
+                    [json.dumps(own_vector), *eligible_params],
+                ).fetchall()
+                for hit in hits:
+                    hit_vector = None
+                    vec_row = conn.execute(
+                        "SELECT embedding FROM memory_claim_vec WHERE id=?", (int(hit["id"]),)
+                    ).fetchone()
+                    if vec_row is not None and vec_row["embedding"] is not None:
+                        hit_vector = self.db.evidence._blob_to_vector(bytes(vec_row["embedding"]))
+                    attr_cos = vector_cosine(own_vector, hit_vector)
+                    same_exact = str(hit["attr_norm"]) == str(claim["attr_norm"])
+                    if not same_exact and (attr_cos is None or attr_cos < CLAIM_ATTR_TAU):
+                        continue
+                    if str(hit["value_norm"]) == str(claim["value_norm"]):
+                        continue
+                    peer_id = int(hit["memory_id"])
+                    # A4 coexistence: either side declaring multiple values for
+                    # the attr is a self-coexistence, not an opposing claim.
+                    if len(self.db.claims.coexisting_values(int(memory_id), str(claim["attr_norm"]))) > 1:
+                        continue
+                    if len(self.db.claims.coexisting_values(peer_id, str(hit["attr_norm"]))) > 1:
+                        continue
+                    # Soft provenance gate (owner 2026-09-22 拍板；单侧未填=
+                    # 不挡——review 推荐①，随 P2-5 review 收口)。
+                    raw_hit_meta = hit["metadata"] if "metadata" in hit.keys() else None
+                    hit_metadata = raw_hit_meta if isinstance(raw_hit_meta, dict) else {}
+                    if isinstance(raw_hit_meta, str) and raw_hit_meta:
+                        try:
+                            hit_metadata = json.loads(raw_hit_meta)
+                        except (TypeError, ValueError):
+                            hit_metadata = {}
+                    hit_entity = str(hit_metadata.get("entity") or "").strip()
+                    hit_scope = str(hit_metadata.get("scope") or "").strip()
+                    if (
+                        own_entity and hit_entity and own_entity != hit_entity
+                        and own_scope and hit_scope and own_scope != hit_scope
+                    ):
+                        continue
+                    # Cross-channel dedup (appendix C 7): a pair the evidence
+                    # channel already settled this version never double-fires.
+                    if self.db.semantic_notices.is_semantic_pair_closed_on_conn(
+                        conn, int(memory_id), peer_id, version, int(hit["memory_version"] or 1),
+                    ):
+                        continue
+                    if notices >= CLAIMS_MAX_NOTICES_PER_WRITE:
+                        capped = True
+                        break
+                    entity = own_entity if own_entity == hit_entity else (own_entity or hit_entity or "")
+                    scope = own_scope if own_scope == hit_scope else (own_scope or hit_scope or "")
+                    if not entity or not scope:
+                        continue
+                    from ..text import canon_entity, canon_scope
+                    slot_key = {
+                        "entity": canon_entity(entity), "attribute": str(hit["attr_norm"]),
+                        "scope": canon_scope(scope),
+                    }
+                    outcome = self.db.record_semantic_notice(
+                        memory_id=int(memory_id), peer_id=peer_id, severity="normal",
+                        notice_type="claim_conflict",
+                        title=f"Claim conflict with #{peer_id}",
+                        message=f"claims attr {claim['attr']} value differs",
+                        payload={
+                            "route": "notice_ready",
+                            "reason": "claim_attr_vector_gate",
+                            "source": "claim_conflict",
+                            "slot_key": slot_key,
+                            "slot_provenance": {
+                                "entity": "metadata", "scope": "metadata",
+                                "attribute": "claims_channel",
+                            },
+                            "attr_cos": round(float(attr_cos or 1.0), 4),
+                            "member_versions": [
+                                {"memory_id": int(memory_id), "version": version,
+                                 "value": str(claim["value_norm"]),
+                                 "evidence": {"quote": str(claim["value"])}},
+                                {"memory_id": peer_id, "version": int(hit["memory_version"] or 1),
+                                 "value": str(hit["value_norm"]),
+                                 "evidence": {"quote": str(hit["value"])}},
+                            ],
+                            "value_groups": [
+                                {"normalized_value": str(claim["value_norm"]),
+                                 "display_value": str(claim["value"]),
+                                 "members": [f"{memory_id}@{version}"]},
+                                {"normalized_value": str(hit["value_norm"]),
+                                 "display_value": str(hit["value"]),
+                                 "members": [f"{peer_id}@{int(hit['memory_version'] or 1)}"]},
+                            ],
+                            "candidate_key": {
+                                "detector_version": CONFLICT_DETECTOR_VERSION,
+                                "members": sorted([
+                                    f"{memory_id}@{version}",
+                                    f"{peer_id}@{int(hit['memory_version'] or 1)}",
+                                ]),
+                                "evidence": [],
+                            },
+                            "left_evidence": {"text": str(claim["value"])},
+                            "right_evidence": {"text": str(hit["value"])},
+                            "claims_channel": True,
+                        },
+                        dedupe_key=notice_dedupe_key(
+                            int(memory_id), peer_id, version, int(hit["memory_version"] or 1),
+                            "claim_conflict",
+                        ),
+                        left_version=version, right_version=int(hit["memory_version"] or 1),
+                        source="claim_conflict",
+                    )
+                    if outcome.get("outcome") == "created":
+                        notices += 1
+                if capped:
+                    break
+        result: dict[str, Any] = {"claims_checked": checked, "notices": notices}
+        if capped:
+            result["claims_notices_capped"] = True
+        return result
+
     def drain_conflict_backlog(self, limit: int = 2) -> int:
         """0.17.0 P2-4.2: idle-worker consumption of the conflict backlog.
 

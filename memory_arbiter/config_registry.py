@@ -18,6 +18,7 @@ GROUPS = [
     {"key": "workspace", "label_en": "Workspace", "label_zh": "工作区"},
     {"key": "embedding", "label_en": "Evidence embedding", "label_zh": "Evidence 向量"},
     {"key": "semantic", "label_en": "Conflict filtering", "label_zh": "冲突降噪"},
+    {"key": "claims", "label_en": "Structured claims", "label_zh": "结构化声明"},
     {"key": "update", "label_en": "Update check", "label_zh": "更新检查"},
     {"key": "reporting", "label_en": "Recall metering", "label_zh": "召回计量"},
 ]
@@ -46,6 +47,7 @@ CONFIG_DESCRIPTORS = [
     _item("embedding.model_path", "embedding", "embedding_model_path"),
     _item("embedding.auto_query", "embedding", "embedding_auto_query", True),
     _item("embedding.auto_write", "embedding", "embedding_auto_write", True),
+    _item("claims.required", "claims", "claims_required", False),
     _item("semantic_conflict.enabled", "semantic", "semantic_conflict_enabled", False),
     _item("semantic_conflict.model_path", "semantic", "semantic_conflict_model_path"),
     _item("semantic_conflict.on_write", "semantic", "semantic_conflict_on_write", "async"),

@@ -287,6 +287,87 @@ class WritePipeline:
         except Exception:
             return None
 
+    def _persist_claims(
+        self, memory_id: int, record: Any, claims: list[Any],
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Normalize + ground + persist claims with attr vectors (P2-5.2).
+
+        Rejections are per-item and reported back (claims_rejected) — the
+        write itself is already durable and never fails here."""
+        from ..semantic_conflict import normalize_attribute, normalize_value
+
+        rejected: list[dict[str, Any]] = []
+        prepared: list[dict[str, Any]] = []
+        content = str(record.content or "")
+        seen_norm: set[tuple[str, str]] = set()
+        for index, item in enumerate(claims if isinstance(claims, list) else []):
+            if not isinstance(item, dict):
+                continue  # schema 层已硬拒，这里只处理幸存者
+            attr = str(item.get("attr") or "").strip()
+            value = str(item.get("value") or "").strip()
+            if not attr or not value:
+                continue
+            if value not in content:
+                rejected.append({"index": index, "reason": "value_not_in_content"})
+                continue
+            attr_norm = normalize_attribute(attr)
+            value_norm = normalize_value(value)
+            if not attr_norm or not value_norm:
+                rejected.append({"index": index, "reason": "unnormalizable"})
+                continue
+            key = (attr_norm, value_norm)
+            if key in seen_norm:
+                rejected.append({"index": index, "reason": "duplicate_norm"})
+                continue
+            seen_norm.add(key)
+            prepared.append({
+                "attr": attr, "attr_norm": attr_norm,
+                "value": value, "value_norm": value_norm,
+                "source": "agent",
+            })
+        if not prepared:
+            return 0, rejected
+        written = 0
+        try:
+            embedder, _warnings = self._tools._ensure_embedder()
+            if embedder is None:
+                # 无 embedder：claims 行照落（精确键通道可用），向量留空由
+                # 后续 backfill/写路径补——不阻塞契约。
+                result = self.db.claims.insert(
+                    memory_id=memory_id, memory_version=1,  # 新写路径：insert 即 version 1
+                    claims=prepared,
+                )
+                return int(result.get("written") or 0), rejected
+            with self.db.write_transaction() as conn:
+                from ..models import utc_now_iso
+                now = utc_now_iso()
+                for claim in prepared[:20]:
+                    cur = conn.execute(
+                        """INSERT OR IGNORE INTO memory_claims(
+                             memory_id, memory_version, attr, attr_norm,
+                             value, value_norm, source, created_at)
+                           VALUES(?,?,?,?,?,?,?,?)""",
+                        (
+                            memory_id, 1,
+                            claim["attr"], claim["attr_norm"],
+                            claim["value"], claim["value_norm"],
+                            claim["source"], now,
+                        ),
+                    )
+                    if cur.rowcount:
+                        written += 1
+                        claim_id = int(cur.lastrowid or 0)
+                        er = embedder.embed_text(prefix="", body=claim["attr"])
+                        if er and er.embedding:
+                            import json as _json
+                            conn.execute(
+                                "INSERT OR REPLACE INTO memory_claim_vec(id, embedding) VALUES (?, ?)",
+                                (claim_id, _json.dumps(list(er.embedding))),
+                            )
+            return written, rejected
+        except Exception:
+            return 0, rejected
+
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         payload = dict(payload)
         validation = validate_product_payload("memory", "remember", payload)
@@ -302,6 +383,20 @@ class WritePipeline:
                 {"written": False, "error": "isolation=strict requires a workspace on every write"},
                 ok=False,
             )
+        # 0.17.0 P2-5.2: claims 必填灰度（owner 决策 #6）。缺失时灰度期只
+        # 警告教学（agent 下次补上），enforce 期（claims.required=true）硬拒。
+        if payload.get("claims") is None:
+            teaching = (
+                "claims 必填：有则填 [{\"attr\":..., \"value\":...}]，无则传 []。"
+                "缺失的写入按灰度策略继续。"
+            )
+            if getattr(self.settings, "claims_required", False):
+                return self._tools.db.state.response(
+                    {"written": False, "error": "invalid_input", "field": "claims",
+                     "reason": teaching},
+                    ok=False,
+                )
+            validation.warnings.append(teaching)
         # The validate_product_payload call above is the single validation
         # funnel: the MCP surface runs it before dispatch, and direct
         # memory_write callers (release smoke, tests) run it here — the
@@ -378,6 +473,14 @@ class WritePipeline:
             insert_done = True
             if any("workspace canonical vector publish failed" in warning for warning in write_warnings):
                 workspace["vector_publish_pending"] = True
+            # 0.17.0 P2-5.2: claims 落库（同事务纪律的 post-commit 近似：insert
+            # 已完成，此处短事务写 claims+向量；失败不影响写入本身）。
+            claims_written = 0
+            claims_rejected: list[dict[str, Any]] = []
+            if memory_id is not None and payload.get("claims") is not None:
+                claims_written, claims_rejected = self._persist_claims(
+                    int(memory_id), record, payload["claims"],
+                )
             data: dict[str, Any] = {
                 "id": memory_id,
                 "backup_only": memory_id is None,
@@ -385,6 +488,11 @@ class WritePipeline:
                 "workspace_canonical": workspace["canonical"],
                 "workspace_matched_by": workspace["matched_by"],
             }
+            if payload.get("claims") is not None:
+                # additive 响应键：写入数 + 逐条拒收（agent 可自我纠正）
+                data["claims_written"] = claims_written
+                if claims_rejected:
+                    data["claims_rejected"] = claims_rejected
             self._apply_workspace_response(data, workspace)
             redirect_notice = workspace.pop("redirect_notice", None)
             if redirect_notice is not None:

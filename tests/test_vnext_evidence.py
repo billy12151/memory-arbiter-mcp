@@ -670,7 +670,7 @@ def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, mo
     # than returning the older waiting_for_evidence_index placeholder.
     check_receipt = result["data"]["semantic_conflict_check"]
     check_receipt.pop("elapsed_ms", None)  # 0.16.12 job 实际耗时键，值不定
-    for _row_key in ("rows_mode", "rows_examined"):  # 0.17.0 P2-3 行级回执键
+    for _row_key in ("rows_mode", "rows_examined", "claims_channel"):  # 0.17.0 P2-3 行级回执键
         check_receipt.pop(_row_key, None)
     assert check_receipt == {
         "status": "completed",
@@ -1065,7 +1065,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
 
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     first.pop("elapsed_ms", None)
-    for _row_key in ("rows_mode", "rows_examined"):
+    for _row_key in ("rows_mode", "rows_examined", "claims_channel"):
         first.pop(_row_key, None)
     assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4, "pairs_examined": 0}
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
@@ -1076,7 +1076,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
 
     second = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     second.pop("elapsed_ms", None)
-    for _row_key in ("rows_mode", "rows_examined"):
+    for _row_key in ("rows_mode", "rows_examined", "claims_channel"):
         second.pop(_row_key, None)
     assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 0}
     assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 4
@@ -2909,6 +2909,7 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
 
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     result.pop("elapsed_ms", None)
+    result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1}
     # A clean model decision is not counted as check degradation.
     degradation = tools._semantic_status()["check_degradation"]
@@ -2949,6 +2950,7 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
 
     result.pop("elapsed_ms", None)
+    result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1}
     assert deadlines == [None]  # single-direction: one extraction per pair
 
@@ -2999,10 +3001,12 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     # truncated flags that the check was bounded, not exhaustive
     # (second-round review).
     result.pop("elapsed_ms", None)
+    result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     # 0.17.0 P2-3/P2-4: rows receipt keys + budget-skipped pairs backlog
     result.pop("rows_mode", None)
     result.pop("rows_examined", None)
     result.pop("backlogged", None)
+    result.pop("claims_channel", None)
     assert {
         "status": "completed", "outcome": "notices_created", "notices_created": 1,
         "truncated": True, "reasons_seen": ["qwen_budget_exhausted"],

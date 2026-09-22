@@ -1161,6 +1161,7 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "semantic_conflict_notice_sync_wait_ms",
         "config_warnings",
         "config_file_loaded",
+        "claims_required",
     }
 )
 
@@ -1170,7 +1171,8 @@ def test_settings_field_set_matches_slim_contract() -> None:
     # semantic_conflict_max_notice_pairs removed (A5) and policy_path/policy
     # removed (B1: AgentPolicy deleted). config_file_loaded stays a
     # runtime-injected field (never a file key, not in the registry).
-    assert len(SLIM_SETTINGS_FIELDS) == 21
+    # 0.17.0 P2-5.2: claims_required added (grey-period switch, default off).
+    assert len(SLIM_SETTINGS_FIELDS) == 22
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 
