@@ -53,7 +53,11 @@ SCHEMA_MIGRATIONS = {
 # machine-decidable routes, proportional normalize gate, and the write-time
 # pre-gates with unified internal Qwen slot extraction (plan #977 §1.1-§1.9)
 # — same treatment: the epoch re-arms one full round under the new semantics.
-CONFLICT_DETECTOR_VERSION = "difference-classifier-v3"
+# v4 (0.17.0): row-level conflict channel + attr-vector gate + process-record
+# subject guard + lineage veto — a detection-semantic change (plan §10: the
+# unified bump retires unit-keyed scan rows and re-arms one full round,
+# co-collecting the P2-1 误杀对 revival).
+CONFLICT_DETECTOR_VERSION = "difference-classifier-v4"
 # 0.17.0 (review BUG-10): memory_claims is a LIVE table now (P2-5 claims
 # channel, additive.py builds it in every current library) — it must not
 # appear in the legacy-tombstone set or mema upgrade / doctor CLI would

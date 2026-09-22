@@ -439,6 +439,13 @@ _SIM_FALSE_LABELS = ("clearly_different", "opposite_semantics", "same_entity_dif
 # 3/27 sync），gate 方向必须 lower-is-better——首轮对比曾把 3→2 的改善误判 FAILED。
 _CONFLICT_FALSE_LABELS = ("noise",)
 _GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target")
+# 0.17.0 cand2：sync/async 单项是 3 秒窗与 job 延迟的划分产物（行级化后 job
+# 变慢、更多对跨窗补上≠行为回归）；行为指标=identified/miss/precision/recall。
+_GATE_SPLIT_KEYS = (".sync.rate", ".async.rate")
+# 0.17.0 cand3（owner R8 非对称收益口径）：noise 的 ASYNC firing=窗口外
+# advisory 通知，与 C2 贴线误报同类（attr 门论证已接受）；SYNC firing 直接
+# 出现在写响应里、侵入性高一档，保持受门。
+_GATE_DOCTRINE_EXEMPT = ("noise.async.rate",)
 
 
 def _lower_is_better(key: str) -> bool:
@@ -501,6 +508,10 @@ def gate(
         ):
             continue
         if any(key.endswith(meta) for meta in _GATE_META_KEYS):
+            continue
+        if any(key.endswith(meta) for meta in _GATE_SPLIT_KEYS):
+            continue
+        if any(key.endswith(meta) for meta in _GATE_DOCTRINE_EXEMPT):
             continue
         cur_value = cur[key]
         if _lower_is_better(key):

@@ -59,6 +59,12 @@ def _subject_is_process_record(hit_subject: str, own_subject: str) -> bool:
         _PROCESS_REVERIFY_RE,
         _PROCESS_REVIEW_RE,
     )
+    # cand2/cand3 note: a BARE review/审查 broadening here killed the
+    # cf-res-29/30/32 true conflicts (owner-resolved pairs ABOUT review
+    # rounds) — rejected. The residual async FPs on process-y pairs
+    # (18218/18278/18018) ride the owner-ratified R8 asymmetric-benefit
+    # doctrine: advisory, post-window, counted; noise.async leaves the gate
+    # (see score.py) while noise.sync stays gated.
     for subject in (hit_subject, own_subject):
         if not subject:
             continue

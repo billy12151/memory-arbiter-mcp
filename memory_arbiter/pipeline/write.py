@@ -11,7 +11,6 @@ from ..embedder import ManagedEmbedder
 from .. import workspace_rules
 from ..constants import (
     WRITE_DUPLICATE_VEC_TOP_K,
-    WRITE_SIMILAR_CONTENT_COSINE,
     WRITE_SIMILAR_CONTENT_FLOOR,
     WRITE_SIMILAR_CONTENT_MIN,
     WRITE_SIMILAR_SUBJECT_FLOOR,
@@ -227,10 +226,9 @@ class WritePipeline:
           1. 双轴 OR 校准门（0.17.0）：(subject≥0.45 且 content≥0.22) 或
              (subject≥0.80 且 content≥0.15)；空 subject 纯内容门 ≥0.22；
           2. content confirmation — full-body char-trigram cosine
-             (semantic_conflict's own _char_ngrams/_cosine) ≥
-             WRITE_SIMILAR_CONTENT_COSINE. This replaced the tag-Jaccard
-             gate, which on the real library blocked cross-habit duplicate
-             rewrites while waving through same-subject serials.
+             (semantic_conflict's own _char_ngrams/_cosine)，0.17.0 校准轮
+             起并入双轴 OR 门（单轴 0.40 硬门退役：retitled 近重复 c∈
+             [0.17,0.40] 被结构性漏检，cand3 实测）。
         The old "near-identical subject ⇒ duplicate" assumption is dead:
         98% of subject-similar pairs on the production library are
         same-topic continuations with dissimilar bodies. Bodies under
@@ -270,9 +268,9 @@ class WritePipeline:
                     low_confidence = True
                 else:
                     content_cos = _cosine(own_grams, _char_ngrams(row_content))
-                    if content_cos < WRITE_SIMILAR_CONTENT_COSINE:
-                        continue
                     low_confidence = False
+                    # 0.17.0 校准轮：旧 0.40 单轴硬门退役——双轴 OR 门
+                    # （见下）承担全部准入，空 subject 走 FLOOR 地板。
                 ratio = -1.0
                 if subject and row_subject:
                     # Series suppression keeps its meaning: identical modulo
