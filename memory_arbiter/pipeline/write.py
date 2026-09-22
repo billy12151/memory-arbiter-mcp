@@ -654,18 +654,26 @@ class WritePipeline:
         except Exception:
             return None
         for hit in hits:
-            peer = self.db.get_memory(int(hit.get("memory_id") or 0))
-            if not peer or peer.get("status") != "active":
+            peer_id = int(hit.get("memory_id") or 0)
+            if not peer_id:
                 continue
-            ws = str(peer.get("workspace_canonical") or peer.get("workspace") or "").strip()
+            # 0.16.12 P2-T5: the knn SELECT already carries m.status and the
+            # workspace fields, and its default filter enforces 'active'
+            # twice (vec0 parent_status + memories.status) — the per-hit
+            # get_memory re-read bought nothing. The hit row IS the
+            # query-time snapshot; consuming it directly is at least as
+            # consistent (no TOCTOU window between two reads).
+            if str(hit.get("status") or "") != "active":
+                continue
+            ws = str(hit.get("workspace_canonical") or hit.get("workspace") or "").strip()
             if ws and not is_default_workspace_term(ws):
                 return {
                     "suggested_workspace": ws,
-                    "from_memory_id": int(peer.get("id") or 0),
+                    "from_memory_id": peer_id,
                     "basis": "subject_nearest_memory",
                     "note": (
                         "Not auto-assigned: this memory is in 'default'. Its subject is "
-                        f"closest to memory #{peer.get('id')} in workspace {ws!r}. If it belongs "
+                        f"closest to memory #{peer_id} in workspace {ws!r}. If it belongs "
                         "there, rewrite with that workspace or use governance to move it."
                     ),
                 }
