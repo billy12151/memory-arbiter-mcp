@@ -308,6 +308,15 @@ class WritePipeline:
     def _persist_claims(
         self, memory_id: int, record: Any, claims: list[Any],
     ) -> tuple[int, list[dict[str, Any]]]:
+        return WritePipeline._persist_claims_for_version(
+            self._tools, memory_id, int(getattr(record, "version", 1) or 1), record, claims,
+        )
+
+    @staticmethod
+    def _persist_claims_for_version(
+        tools: "Any", memory_id: int, memory_version: int, record: Any, claims: list[Any],
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Shared by write (version 1) and edit (post-bump version) paths."""
         """Normalize + ground + persist claims with attr vectors (P2-5.2).
 
         Rejections are per-item and reported back (claims_rejected) — the
@@ -347,26 +356,33 @@ class WritePipeline:
             return 0, rejected
         written = 0
         try:
-            embedder, _warnings = self._tools._ensure_embedder()
+            embedder, _warnings = tools._ensure_embedder()
             if embedder is None:
                 # 无 embedder：claims 行照落（精确键通道可用），向量留空由
                 # 后续 backfill/写路径补——不阻塞契约。
-                result = self.db.claims.insert(
-                    memory_id=memory_id, memory_version=1,  # 新写路径：insert 即 version 1
+                result = tools.db.claims.insert(
+                    memory_id=memory_id, memory_version=memory_version,
                     claims=prepared,
                 )
                 return int(result.get("written") or 0), rejected
-            with self.db.write_transaction() as conn:
+            # Adversarial review P2-7: ALL attr embeddings happen BEFORE the
+            # write transaction — model inference under BEGIN IMMEDIATE held
+            # the library write lock for up to 20 embeds.
+            attr_vectors: "list[list[float] | None]" = []
+            for claim in prepared[:20]:
+                er = embedder.embed_text(prefix="", body=claim["attr"])
+                attr_vectors.append([float(x) for x in er.embedding] if er and er.embedding else None)
+            with tools.db.write_transaction() as conn:
                 from ..models import utc_now_iso
                 now = utc_now_iso()
-                for claim in prepared[:20]:
+                for claim, vec in zip(prepared[:20], attr_vectors):
                     cur = conn.execute(
                         """INSERT OR IGNORE INTO memory_claims(
                              memory_id, memory_version, attr, attr_norm,
                              value, value_norm, source, created_at)
                            VALUES(?,?,?,?,?,?,?,?)""",
                         (
-                            memory_id, 1,
+                            memory_id, memory_version,
                             claim["attr"], claim["attr_norm"],
                             claim["value"], claim["value_norm"],
                             claim["source"], now,
@@ -375,12 +391,11 @@ class WritePipeline:
                     if cur.rowcount:
                         written += 1
                         claim_id = int(cur.lastrowid or 0)
-                        er = embedder.embed_text(prefix="", body=claim["attr"])
-                        if er and er.embedding:
+                        if vec is not None:
                             import json as _json
                             conn.execute(
                                 "INSERT OR REPLACE INTO memory_claim_vec(id, embedding) VALUES (?, ?)",
-                                (claim_id, _json.dumps(list(er.embedding))),
+                                (claim_id, _json.dumps(vec)),
                             )
             return written, rejected
         except Exception:
@@ -470,6 +485,10 @@ class WritePipeline:
                                 "subject": dup.get("subject"),
                                 "ingest_time": dup.get("ingest_time"),
                             },
+                            # 0.17.0 (adversarial review P2-9): replayed claims
+                            # are NOT written — say so instead of vanishing.
+                            **({"claims_ignored_on_replay": True}
+                               if payload.get("claims") else {}),
                         },
                         extra_warnings=validation.warnings,
                         extra_notices=[{

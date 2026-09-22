@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 from .difference_classifier import _cn_to_int
 from .constants import (
+    CLAIM_ATTR_TAU,
     SEMANTIC_N_CTX,
     SEMANTIC_PAIR_MAX_ATTEMPTS,
     SEMANTIC_PAIR_RETRY_MAX_TOKENS,
@@ -418,8 +419,8 @@ _PROCESS_RELEASE_RE = re.compile(
 # enumerated lineage vocabulary, Chinese product names may miss extraction,
 # cross-references like「文档1.0升级到2.0」inside one side can confuse.
 _LINEAGE_MARKER_RE = re.compile(
-    r"(?:设计文档|最终设计|方案|文档|规格|spec|design)[^\n]{0,3}?"
-    r"v?(\d+(?:\.\d+)+)"
+    r"(?:设计文档|最终设计|方案|文档|规格|spec|design)\s*v(\d+(?:\.\d+)*)"
+    r"|(?:设计文档|最终设计|方案|文档|规格|spec|design)[^\n]{0,3}?版本\s*(\d+(?:\.\d+)*)"
     r"|第\s*([一二三四五六七八九十\d]+)\s*版",
     re.IGNORECASE,
 )
@@ -434,9 +435,10 @@ def _lineage_primary_version(text: str) -> "tuple[int, ...] | None":
     if not matches:
         return None
     versions: list[tuple[int, ...]] = []
-    for dotted, nth in matches:
-        if dotted:
-            versions.append(tuple(int(part) for part in dotted.split(".")))
+    for dotted, versioned, nth in matches:
+        text_version = dotted or versioned
+        if text_version:
+            versions.append(tuple(int(part) for part in text_version.split(".")))
         elif nth:
             parsed: "int | None" = int(nth) if nth.isdigit() else None
             if parsed is None:
@@ -1143,6 +1145,7 @@ def evaluate_single_direction_extraction(
     forward: AttributeValueExtraction | None,
     left: dict[str, Any],
     right: dict[str, Any],
+    attr_cos: "float | None" = None,
 ) -> PairGateResult:
     """Single-direction notice gate (owner 2026-09-17, write-time peer path).
 
@@ -1156,8 +1159,19 @@ def evaluate_single_direction_extraction(
     """
     if forward is None:
         return PairGateResult("review_candidate", "qwen_unverified")
+    # 0.17.0 P2-3.3 (spike R8): the attribute mirror accepts STRICT equality
+    # OR attr-vector cosine ≥ CLAIM_ATTR_TAU — the 1st-round kill (A-group
+    # synonym conflicts died at mismatched attribute NAMES with every value
+    # correct). attr_cos comes from the CALLER's embedder budget (2 short
+    # embeds <5ms/pair) so this gate stays a pure function; None keeps the
+    # strict-equality-only behaviour (scan/legacy paths unchanged).
+    attr_norm_a = normalize_attribute(forward.attribute_a)
+    attr_norm_b = normalize_attribute(forward.attribute_b)
+    attr_aligned = attr_norm_a == attr_norm_b or (
+        attr_cos is not None and attr_cos >= CLAIM_ATTR_TAU
+    )
     if not (
-        normalize_attribute(forward.attribute_a) == normalize_attribute(forward.attribute_b)
+        attr_aligned
         and normalize_value(forward.value_a) != normalize_value(forward.value_b)
     ):
         return PairGateResult("review_candidate", "not_same_attribute_different_value")
@@ -1171,7 +1185,7 @@ def evaluate_single_direction_extraction(
         return PairGateResult("review_candidate", veto, grounded=True)
     return PairGateResult(
         "notice_ready", "same_attribute_different_grounded_value",
-        normalize_attribute(forward.attribute_a), normalize_value(forward.value_a),
+        attr_norm_a, normalize_value(forward.value_a),
         normalize_value(forward.value_b), True,
     )
 

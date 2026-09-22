@@ -413,6 +413,12 @@ class MemoryTools:
                     # re-enqueue every pair the new classifier keeps without
                     # UNIQUE collisions.
                     conn.execute("DELETE FROM scan_queue")
+                    # NOT internal_conflicts: the owner's no-resurrection rule
+                    # (judged pairs never re-judged across generations) wins
+                    # over the P2-5 unit↔row index-key overlap — that overlap
+                    # may suppress a bounded set of internal findings for
+                    # never-edited memories (documented plan known-limit);
+                    # version bumps on any edit rebuild the rows anyway.
             except Exception:
                 pass
             self.db.meta.record_scan_epoch_arm(
@@ -1728,11 +1734,16 @@ class MemoryTools:
         # Skipped jobs (pending activation etc.) keep their exact old shape.
         if result.get("status") != "skipped":
             try:
-                claims_result = self._evidence.check_claims_conflicts(memory_id, snapshot)
+                surfaced = result.get("surfaced_peers") or []
+                claims_result = self._evidence.check_claims_conflicts(
+                    memory_id, snapshot,
+                    skip_peers={int(p) for p in surfaced} if surfaced else None,
+                )
                 if isinstance(claims_result, dict):
                     result["claims_channel"] = claims_result
             except Exception:
                 pass
+        result.pop("surfaced_peers", None)  # internal cross-channel key, never in receipts
         return result
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:

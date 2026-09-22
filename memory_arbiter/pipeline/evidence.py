@@ -46,6 +46,35 @@ _TECHNICAL_REASONS = {
 }
 
 
+def _attr_cos_or_none(
+    embedder: "Any", forward: "Any",
+) -> "float | None":
+    """P2-3.3 attr-vector cosine for the single-direction gate: None when the
+    attributes already match STRICTLY (no embed spent) or no embedder — the
+    gate then falls back to strict-equality-only (legacy/scan semantics)."""
+    from ..semantic_conflict import normalize_attribute, vector_cosine
+    if forward is None or embedder is None:
+        return None
+    attr_a = getattr(forward, "attribute_a", None)
+    attr_b = getattr(forward, "attribute_b", None)
+    if not attr_a or not attr_b:
+        return None
+    if normalize_attribute(str(attr_a)) == normalize_attribute(str(attr_b)):
+        return None
+    ea = embedder.embed_text(prefix="", body=str(attr_a))
+    eb = embedder.embed_text(prefix="", body=str(attr_b))
+    if not ea.embedding or not eb.embedding:
+        return None
+    # Degenerate-vector guard: byte-identical embeddings carry ZERO
+    # discrimination between the two attribute strings (fake embedders
+    # collapse distinct strings onto one vector; a real model never does).
+    # Reporting cos=1.0 here would wave mismatched attributes through on
+    # testimony the embedder cannot actually give — fall back to strict.
+    if list(ea.embedding) == list(eb.embedding):
+        return None
+    return vector_cosine(list(ea.embedding), list(eb.embedding))
+
+
 class EvidencePipeline:
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
@@ -66,7 +95,10 @@ class EvidencePipeline:
     def _ensure_semantic_backend(self) -> "SemanticBackend | None":
         return self._tools._ensure_semantic_backend()
 
-    def check_claims_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+    def check_claims_conflicts(
+        self, memory_id: int, snapshot: dict[str, Any],
+        skip_peers: "set[int] | None" = None,
+    ) -> dict[str, Any]:
         """0.17.0 P2-5.3: the zero-Qwen claims channel (owner decision #6).
 
         Every claim of the freshly-written memory searches the claim-vector
@@ -124,8 +156,19 @@ class EvidencePipeline:
         own_scope = str(own_metadata.get("scope") or "").strip()
 
         notices = 0
-        capped = False
+        capped_count = 0
         checked = 0
+        fired_attrs: set[str] = set()  # A3: one notice per attr per write
+        skip = skip_peers or set()
+        own_coexistence: dict[str, list[str]] = {
+            str(claim_row["attr_norm"]): [
+                str(v) for v in self.db.claims.coexisting_values(
+                    int(memory_id), str(claim_row["attr_norm"]),
+                )
+            ]
+            for claim_row in own_claims
+        }
+        peer_coexistence: dict[int, dict[str, list[str]]] = {}
         with self.db.connection() as conn:
             for claim in own_claims:
                 own_vector = own_rows.get(int(claim["id"]))
@@ -142,6 +185,8 @@ class EvidencePipeline:
                         ORDER BY v.distance""",
                     [json.dumps(own_vector), *eligible_params],
                 ).fetchall()
+                if str(claim["attr_norm"]) in fired_attrs:
+                    continue  # A3: same attr already reported this write
                 for hit in hits:
                     hit_vector = None
                     vec_row = conn.execute(
@@ -156,11 +201,26 @@ class EvidencePipeline:
                     if str(hit["value_norm"]) == str(claim["value_norm"]):
                         continue
                     peer_id = int(hit["memory_id"])
+                    if peer_id in skip:
+                        continue  # evidence channel already surfaced this pair
                     # A4 coexistence: either side declaring multiple values for
                     # the attr is a self-coexistence, not an opposing claim.
-                    if len(self.db.claims.coexisting_values(int(memory_id), str(claim["attr_norm"]))) > 1:
+                    # Prefetched per (memory, attr) — per-hit connection churn
+                    # was ~800 opens/write (adversarial review P2-7).
+                    if len(own_coexistence.get(str(claim["attr_norm"]), ())) > 1:
                         continue
-                    if len(self.db.claims.coexisting_values(peer_id, str(hit["attr_norm"]))) > 1:
+                    peer_attrs = peer_coexistence.get(peer_id)
+                    if peer_attrs is None:
+                        peer_attrs = {
+                            str(row["attr_norm"]): [
+                                str(v) for v in self.db.claims.coexisting_values(
+                                    peer_id, str(row["attr_norm"]),
+                                )
+                            ]
+                            for row in self.db.claims.current_claims(peer_id)
+                        }
+                        peer_coexistence[peer_id] = peer_attrs
+                    if len(peer_attrs.get(str(hit["attr_norm"]), ())) > 1:
                         continue
                     # Soft provenance gate (owner 2026-09-22 拍板；单侧未填=
                     # 不挡——review 推荐①，随 P2-5 review 收口)。
@@ -185,8 +245,8 @@ class EvidencePipeline:
                     ):
                         continue
                     if notices >= CLAIMS_MAX_NOTICES_PER_WRITE:
-                        capped = True
-                        break
+                        capped_count += 1
+                        continue  # count the overflow, keep scanning cheaper
                     entity = own_entity if own_entity == hit_entity else (own_entity or hit_entity or "")
                     scope = own_scope if own_scope == hit_scope else (own_scope or hit_scope or "")
                     if not entity or not scope:
@@ -248,11 +308,10 @@ class EvidencePipeline:
                     )
                     if outcome.get("outcome") == "created":
                         notices += 1
-                if capped:
-                    break
+                        fired_attrs.add(str(claim["attr_norm"]))
         result: dict[str, Any] = {"claims_checked": checked, "notices": notices}
-        if capped:
-            result["claims_notices_capped"] = True
+        if capped_count:
+            result["claims_notices_capped"] = capped_count
         return result
 
     def drain_conflict_backlog(self, limit: int = 2) -> int:
@@ -265,8 +324,9 @@ class EvidencePipeline:
         nothing (the entry stays pending for a backend-bearing pass — never
         silently completed)."""
         processed = 0
+        skipped: list[int] = []  # unprocessable this pass (no backend) — rotate past, never freeze
         while processed < limit:
-            entry = self.db.conflict_backlog.take_next()
+            entry = self.db.conflict_backlog.take_next(exclude_ids=skipped)
             if entry is None:
                 break
             left_id = int(entry["left_memory_id"])
@@ -295,7 +355,12 @@ class EvidencePipeline:
             if extraction is None:
                 backend = self._ensure_semantic_backend()
                 if backend is None:
-                    break  # keep pending; a later backend-bearing pass retries
+                    # P2-4 livelock fix: skip-and-rotate instead of breaking —
+                    # the entry stays pending for a backend-bearing pass while
+                    # lower-scored entries (if any carry stored extraction)
+                    # still drain.
+                    skipped.append(int(entry["id"]))
+                    continue
                 embedder, _warnings = self._ensure_embedder()
                 direct = direct_value_verdict(left_text, right_text, decision, embedder=embedder)
                 if direct is not None:
@@ -328,6 +393,7 @@ class EvidencePipeline:
                     forward = backend.classify_pair(_env(left, left_text), _env(right, right_text))
                 gate = evaluate_single_direction_extraction(
                     signal_extraction(forward), _env(left, left_text), _env(right, right_text),
+                    attr_cos=_attr_cos_or_none(embedder, signal_extraction(forward)),
                 )
                 if gate.state == "notice_ready":
                     self._record_backlog_notice(
@@ -618,12 +684,13 @@ class EvidencePipeline:
         by_peer: dict[int, tuple[dict[str, Any], Any, Any]] = {}
         reached_pair: set[int] = set()
 
-        def _enqueue_backlog(entries: list[tuple[int, tuple[dict[str, Any], Any, Any]]]) -> int:
+        def _enqueue_backlog(entries: list[tuple[int, tuple[dict[str, Any], Any, Any]]]) -> tuple[int, int]:
             """0.17.0 P2-4.2: truncation leftovers land in conflict_backlog
             instead of vanishing. Identity = detector version + both
             members@version + row anchors (review A7: a detector bump or a
             member edit invalidates the frozen pair)."""
             enqueued = 0
+            evicted_total = 0
             left_version = int(record.get("version") or 1)
             for peer_id, (hit, seg_view, decision) in entries:
                 from ..constants import (
@@ -654,7 +721,8 @@ class EvidencePipeline:
                 )
                 if outcome.get("outcome") in {"queued", "duplicate"}:
                     enqueued += 1
-            return enqueued
+                evicted_total += int(outcome.get("evicted") or 0)
+            return enqueued, evicted_total
 
         # P2-T2: same digest as the stale check above — the maintained
         # content_sha column (or its recompute fallback), never a fresh hash.
@@ -895,9 +963,11 @@ class EvidencePipeline:
                 early_result["internal_conflicts"] = internal_found
             # 0.17.0 P2-4.2: collected-but-unexamined candidates go to the
             # backlog (owner design #8) — the receipt says how many.
-            early_backlogged = _enqueue_backlog(list(by_peer.items()))
+            early_backlogged, early_evicted = _enqueue_backlog(list(by_peer.items()))
             if early_backlogged:
                 early_result["backlogged"] = early_backlogged
+            if early_evicted:
+                early_result["backlog_evicted"] = early_evicted
             return early_result
 
         backend = self._ensure_semantic_backend()
@@ -956,6 +1026,7 @@ class EvidencePipeline:
         max_examined_pairs = max(1, SEMANTIC_MAX_EXAMINED_PAIRS)
         pairs_examined = 0
         surfaced = 0
+        surfaced_peer_ids: set[int] = set()
         dropped_unlocalizable = 0
         backlogged = 0
         incomplete_reason: str | None = None
@@ -1028,6 +1099,8 @@ class EvidencePipeline:
                     forward = classify(env_a, env_b)
                     gate = evaluate_single_direction_extraction(
                         signal_extraction(forward), env_a, env_b,
+                        # internal path keeps STRICT attribute equality
+                        # (docstring contract; P2-3.3 targets the peer path).
                     )
                     if gate.state == "notice_ready":
                         reason_text = (
@@ -1151,6 +1224,7 @@ class EvidencePipeline:
                 )
                 gate = evaluate_single_direction_extraction(
                     signal_extraction(forward_signal), left_env, right_env,
+                    attr_cos=_attr_cos_or_none(embedder, signal_extraction(forward_signal)),
                 )
                 qwen = {
                     "status": gate.state, "reason": gate.reason,
@@ -1302,6 +1376,7 @@ class EvidencePipeline:
             # already surfaced) — since A5 it is a result summary, not a gate.
             if outcome.get("outcome") == "created":
                 surfaced += 1
+                surfaced_peer_ids.add(int(peer_id))
             elif outcome.get("outcome") not in {"deduped"}:
                 # Second-round review: a ready pair whose notice could not be
                 # persisted (workspace_mismatch / invalid_snapshot /
@@ -1314,11 +1389,16 @@ class EvidencePipeline:
         # visible, never silently dropped (owner design #8). Stale/duplicate
         # keys report as enqueued here; eviction counts ride the store.
         leftover_entries = [item for item in ordered if item[0] not in reached_pair]
+        sweep_evicted = 0
         if leftover_entries:
-            backlogged = _enqueue_backlog(leftover_entries)
+            backlogged, sweep_evicted = _enqueue_backlog(leftover_entries)
         if surfaced:
             result: dict[str, Any] = {
                 "status": "completed", "outcome": "notices_created", "notices_created": surfaced,
+                # 0.17.0: peers the evidence channel surfaced THIS run — the
+                # claims channel skips them (cross-channel single-report,
+                # plan appendix C-7 ruling: strongest evidence wins).
+                "surfaced_peers": sorted(surfaced_peer_ids),
             }
             if internal_found:
                 result["internal_conflicts"] = internal_found
@@ -1359,6 +1439,9 @@ class EvidencePipeline:
             # 0.17.0 P2-4.2: truncation leftovers went to the conflict
             # backlog instead of vanishing.
             result["backlogged"] = backlogged
+        if sweep_evicted:
+            # P2-4.3: cap evictions are visible, never silent.
+            result["backlog_evicted"] = sweep_evicted
         if rows_mode:
             result["rows_mode"] = True
             result["rows_examined"] = int(units_examined)

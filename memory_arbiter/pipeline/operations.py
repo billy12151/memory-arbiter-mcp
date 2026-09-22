@@ -2664,6 +2664,7 @@ class OperationsPipeline:
         tags_only: bool = False,
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
+        claims: list[dict[str, Any]] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         """In-place edit a memory's content or tags.
@@ -2875,6 +2876,21 @@ class OperationsPipeline:
             "history_id": history_id,
             "record": updated,
         }
+        # 0.17.0 P2-5.2 (adversarial review P1-3): content edits re-supply
+        # claims for the NEW version — the old rows are version-orphaned by
+        # design; without this hook every edited memory's claims channel
+        # went permanently silent. tags_only keeps the current claims.
+        claims_written = 0
+        claims_rejected: list[dict[str, Any]] = []
+        if claims is not None and not tags_only and updated is not None:
+            from .write import WritePipeline
+            claims_written, claims_rejected = WritePipeline._persist_claims_for_version(
+                self._tools, memory_id_int,
+                int(updated.get("version") or 1), updated, claims,
+            )
+            data["claims_written"] = claims_written
+            if claims_rejected:
+                data["claims_rejected"] = claims_rejected
         data["evidence_index"], data["semantic_conflict_check"] = (
             self._post_commit(memory_id_int, updated, recheck_conflicts=True)
         )

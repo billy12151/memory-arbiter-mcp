@@ -253,6 +253,28 @@ def _c_evidence_coverage(ctx: _DoctorCtx) -> Finding:
     return _finding("evidence.coverage", ctx.indexed == ctx.eligible or not ctx.settings.embedding_auto_write, f"{ctx.indexed}/{ctx.eligible} memories indexed", evidence={"indexed": ctx.indexed, "eligible": ctx.eligible, "non_indexable": ctx.counts["non_indexable_memories"], "units": ctx.units})
 
 
+def _c_claims_coverage(ctx: _DoctorCtx) -> Finding:
+    # 0.17.0 P2-5.4: claims adoption gauge — informational (grey-period by
+    # design); run memory_repair(task='claims_backfill') to raise it.
+    try:
+        with_claims = int(ctx.conn.execute(
+            """SELECT COUNT(DISTINCT c.memory_id) FROM memory_claims c
+               JOIN memories m ON m.id=c.memory_id
+               WHERE m.status='active' AND c.memory_version = m.version"""
+        ).fetchone()[0])
+        active = int(ctx.conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE status='active'"
+        ).fetchone()[0])
+    except sqlite3.Error:
+        return _finding("claims.coverage", True, "claims coverage unknown (table unavailable)", evidence={})
+    return _finding(
+        "claims.coverage", True,
+        f"{with_claims}/{active} active memories carry current claims "
+        "(grey period; claims_backfill raises it)",
+        evidence={"claims_with": with_claims, "active_memories": active},
+    )
+
+
 def _c_row_vector_coverage(ctx: _DoctorCtx) -> Finding:
     # 0.17.0 P2-2.5: row-level conflict vectors follow the evidence-indexed
     # set. Informational by design (plan §4): the gap right after upgrade is
@@ -713,6 +735,7 @@ _CHECKS: tuple[_Check, ...] = (
     _c_semantic_judge_model,
     _c_config_warnings,
     _c_row_vector_coverage,
+    _c_claims_coverage,
 )
 
 

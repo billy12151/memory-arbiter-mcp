@@ -54,8 +54,14 @@ SCHEMA_MIGRATIONS = {
 # pre-gates with unified internal Qwen slot extraction (plan #977 §1.1-§1.9)
 # — same treatment: the epoch re-arms one full round under the new semantics.
 CONFLICT_DETECTOR_VERSION = "difference-classifier-v3"
+# 0.17.0 (review BUG-10): memory_claims is a LIVE table now (P2-5 claims
+# channel, additive.py builds it in every current library) — it must not
+# appear in the legacy-tombstone set or mema upgrade / doctor CLI would
+# misjudge every 0.17.0 library as legacy. Owner ruling on the name clash
+# (plan appendix C-11): first implementer owns the name; the vnext wishlist
+# re-plans when it lands, so only the vec sketches stay tombstoned.
 LEGACY_DERIVED_TABLES = {
-    "memory_claims", "memories_vec", "memory_sections_vec",
+    "memories_vec", "memory_sections_vec",
 }
 
 
@@ -110,7 +116,7 @@ def detect_upgrade_source_generation(path: Path) -> DatabaseGeneration:
                 str(row[0])
                 for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name IN ('memories','migration_state','memory_claims',"
+                    "AND name IN ('memories','migration_state',"
                     "'memories_vec','memory_sections_vec')"
                 )
             }

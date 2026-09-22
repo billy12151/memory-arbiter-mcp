@@ -460,6 +460,14 @@ class MemoriesStore:
                 "WHERE memory_id=?",
                 (int(memory_id),),
             )
+            # 0.17.0 (adversarial review P1-3): claims are version-pinned the
+            # same way — a status flip must not orphan them (strict-mode
+            # pending→active would otherwise silence the claims channel).
+            conn.execute(
+                "UPDATE memory_claims SET memory_version=memory_version+1 "
+                "WHERE memory_id=?",
+                (int(memory_id),),
+            )
         if status_changed and self.state.sqlite_vec_available:
             try:
                 conn.execute(
@@ -488,6 +496,13 @@ class MemoriesStore:
                         "DELETE FROM memory_claim_vec WHERE id IN "
                         "(SELECT id FROM memory_claims WHERE memory_id=?)",
                         (int(memory_id),),
+                    )
+                    # 0.17.0 (adversarial review P2-8): the summary vec feeds
+                    # the write-time duplicate-hint recall (P2-7) — a retired
+                    # row must stop being a candidate/voter immediately, not
+                    # at the next boot backfill purge.
+                    conn.execute(
+                        "DELETE FROM memory_summary_vec WHERE id = ?", (int(memory_id),),
                     )
             except sqlite3.Error:
                 # Governance must remain available while the derived index is

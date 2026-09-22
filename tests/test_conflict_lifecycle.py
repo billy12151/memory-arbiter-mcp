@@ -2715,3 +2715,41 @@ def test_lineage_version_evolution_veto_e1() -> None:
     assert d.reason != "lineage_version_evolution"
     # 无谱系对：原行为不变
     assert decide_evidence("连接池上限为 10。", "连接池上限为 99。").reason == "numeric_value_candidate"
+    # 对抗 review P1-1 反例：标记词+十进制数值是中文配置句式，不是版本号
+    assert decide_evidence("熔断方案 1.5 秒超时。", "熔断方案 2.0 秒超时。").reason == "numeric_value_candidate"
+    assert decide_evidence("上传规格 0.5mb 上限。", "上传规格 2.5mb 上限。").reason == "numeric_value_candidate"
+    # v 前缀整数（无点）也生效
+    assert decide_evidence(
+        "方案 v1 上线后参数 X 为 5。", "方案 v2 上线后参数 X 为 9。",
+    ).reason == "lineage_version_evolution"
+
+
+def test_attribute_vector_gate_p233() -> None:
+    """0.17.0 P2-3.3：属性严格相等 OR attr_cos≥τ（spike R8：A 组同义冲突
+    值全对、死在属性名不对齐）。None 回退严格相等（扫/旧路径语义不变）。"""
+    from memory_arbiter.semantic_conflict import (
+        CLAIM_ATTR_TAU,
+        evaluate_single_direction_extraction,
+        signal_extraction,
+    )
+    from types import SimpleNamespace
+    forward = SimpleNamespace(
+        attribute_a="超时时间", value_a="500 毫秒",
+        attribute_b="响应等待上限", value_b="3 秒",
+    )
+    left = {"quote": "超时时间统一为 500 毫秒。"}
+    right = {"quote": "响应等待上限是 3 秒。"}
+    # 严格相等不过，attr_cos 高分过门（A 组复活）
+    gate = evaluate_single_direction_extraction(forward, left, right, attr_cos=CLAIM_ATTR_TAU + 0.05)
+    assert gate.state == "notice_ready", gate
+    # attr_cos 低分：仍是 not_same_attribute（C2 贴线由 advisory 兜）
+    low = evaluate_single_direction_extraction(forward, left, right, attr_cos=CLAIM_ATTR_TAU - 0.2)
+    assert low.state == "review_candidate" and low.reason == "not_same_attribute_different_value"
+    # None=严格相等语义（旧路径）
+    legacy = evaluate_single_direction_extraction(forward, left, right)
+    assert legacy.reason == "not_same_attribute_different_value"
+    # 严格相等对不受 attr_cos 影响
+    same = SimpleNamespace(
+        attribute_a="超时", value_a="500 毫秒", attribute_b="超时", value_b="3 秒",
+    )
+    assert evaluate_single_direction_extraction(same, left, right).state == "notice_ready"

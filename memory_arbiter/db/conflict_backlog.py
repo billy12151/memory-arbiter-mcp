@@ -122,17 +122,26 @@ class ConflictBacklogStore:
         except sqlite3.Error as exc:
             return {"outcome": "error", "error": str(exc), "evicted": 0}
 
-    def take_next(self) -> dict[str, Any] | None:
+    def take_next(self, exclude_ids: "list[int] | None" = None) -> dict[str, Any] | None:
         """Highest-score pending row (worker idle path); marks nothing —
-        the caller completes or re-queues it."""
+        the caller completes or re-queues it. ``exclude_ids`` lets an idle
+        drain SKIP entries it cannot process this pass (no backend) without
+        freezing on the queue head (adversarial review P2-4)."""
         if not self._db_available:
             return None
+        exclusion = ""
+        params: list[Any] = []
+        if exclude_ids:
+            marks = ",".join("?" for _ in exclude_ids)
+            exclusion = f" AND id NOT IN ({marks})"
+            params.extend(int(i) for i in exclude_ids)
         try:
             with self._db.connection() as conn:
                 row = conn.execute(
-                    """SELECT * FROM conflict_backlog
-                       WHERE status='pending'
-                       ORDER BY pair_score DESC, id ASC LIMIT 1"""
+                    f"""SELECT * FROM conflict_backlog
+                       WHERE status='pending'{exclusion}
+                       ORDER BY pair_score DESC, id ASC LIMIT 1""",
+                    params,
                 ).fetchone()
                 if row is None:
                     return None

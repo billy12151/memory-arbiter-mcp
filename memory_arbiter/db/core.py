@@ -634,11 +634,15 @@ class MemoryDB:
         if not self._db_available:
             return []
         exclude_sql = ""
-        params: list[Any] = [max(1, int(limit))]
+        params: list[Any] = []
         if exclude_ids:
             marks = ",".join("?" for _ in exclude_ids)
             exclude_sql = f" AND id NOT IN ({marks})"
-            params = [max(1, int(limit)), *exclude_ids]
+            params.extend(int(i) for i in exclude_ids)
+        # bind order follows the SQL: NOT IN placeholders first, LIMIT last
+        # (adversarial review P1-2 — the swapped order silently turned the
+        # first exclude id into the LIMIT and re-selected just-scanned rows).
+        params.append(max(1, int(limit)))
         try:
             with self.connection() as conn:
                 return [

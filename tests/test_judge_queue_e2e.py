@@ -111,7 +111,7 @@ def _run(tools: MemoryTools) -> None:
         row["memory_id"] == owner_example
         for row in tools.db.internal_conflicts.list_pending()
     ), "owner 例句（记忆内极性对）写时必须落 internal（fail-open 无归因）"
-    kick = _kick(tools, max_memories=500, time_budget_s=180.0)
+    kick = _kick(tools, max_memories=500, time_budget_s=180.0, slow_lane=False)
     assert kick["complete"] is True, kick
     assert _pending_conflicts(tools) > 0, "种子对必须入队"
     with tools.db.connection() as conn:
@@ -128,7 +128,7 @@ def _run(tools: MemoryTools) -> None:
 
     # ── 2) no-resurrection, same detector: full watermark reset + kick ───
     tools.db.clear_all_scan_watermarks()
-    kick = _kick(tools, max_memories=500, time_budget_s=180.0)
+    kick = _kick(tools, max_memories=500, time_budget_s=180.0, slow_lane=False)
     assert kick["complete"] is True
     assert _pending_conflicts(tools) == 0, "同代重扫不得复活已判对"
     assert tools.db.internal_conflicts.list_pending() == [], "同代重扫不得复活已判 internal"
@@ -149,7 +149,7 @@ def _run(tools: MemoryTools) -> None:
                 remaining = conn.execute(
                     "SELECT COUNT(*) FROM scan_queue WHERE kind='conflict'").fetchone()[0]
             assert remaining == 0, "换代 boot 清旧 epoch 队列行"
-            kick = _kick(tools2, max_memories=500, time_budget_s=180.0)
+            kick = _kick(tools2, max_memories=500, time_budget_s=180.0, slow_lane=False)
             assert kick["complete"] is True
             assert _pending_conflicts(tools2) == 0, (
                 "换代后精确 hash 匹配失效，成员 refs 兜底必须挡住已判对"
@@ -176,7 +176,7 @@ def _run(tools: MemoryTools) -> None:
     })
     assert tools.wait_evidence_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
-    kick = _kick(tools, max_memories=500, time_budget_s=180.0)
+    kick = _kick(tools, max_memories=500, time_budget_s=180.0, slow_lane=False)
     assert kick["complete"] is True
     with tools.db.connection() as conn:
         rows = [json.loads(r[0]) for r in conn.execute(
