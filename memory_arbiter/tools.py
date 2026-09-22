@@ -120,6 +120,11 @@ class MemoryTools:
         # Same contract for the C3a summary vectors (0.15.13): one per active
         # memory, workspace-anomaly voting index.
         self._summary_vec_backfilled = False
+        # 0.16.12 P2-T4: boot backfills run on this daemon thread (flags above
+        # flip to "scheduled" when it starts).
+        self._backfill_thread: threading.Thread | None = None
+        self._backfill_done = threading.Event()
+        self._backfill_done.set()
         banner = self._setup_capability_banner()
         if banner is not None:
             # Persistent (deduped) — rides every response's warnings until the
@@ -833,24 +838,44 @@ class MemoryTools:
                 warning = f"vector space state initialization failed: {exc}"
                 self._embedder_warnings.append(warning)
                 warnings.append(warning)
-            if not self._subject_tags_backfilled:
-                # Runs under _embedder_lock like the model build above. Failure
-                # is fail-open and non-repeating in-process: the next process
-                # restart retries, because nothing marks the backfill done in
-                # the DB until its rows are actually written.
+            if not (self._subject_tags_backfilled and self._summary_vec_backfilled):
+                # 0.16.12 P2-T4 step 2: the boot backfills move OFF the
+                # _embedder_lock onto a daemon thread — the first write/find
+                # that built the embedder no longer blocks on re-embedding
+                # every pre-existing active row. Embedding stays serial: the
+                # backfill's embed_text calls take the embedder's own
+                # _embed_lock, the same lock the evidence worker's embeds
+                # take. Flag semantics change from "ran" to "scheduled";
+                # failure retries on the next process restart (same
+                # fail-open, non-repeating contract as before).
                 self._subject_tags_backfilled = True
-                try:
-                    self._backfill_subject_tags_vectors(embedder)
-                except Exception:
-                    pass
-            if not self._summary_vec_backfilled:
-                # C3a summary vectors: same fail-open, non-repeating contract.
                 self._summary_vec_backfilled = True
-                try:
-                    self._backfill_memory_summary_vectors(embedder)
-                except Exception:
-                    pass
+                if self._backfill_thread is None:
+                    self._backfill_done.clear()
+                    self._backfill_thread = threading.Thread(
+                        target=self._run_boot_backfills, args=(embedder,),
+                        name="mema-boot-backfill", daemon=True,
+                    )
+                    self._backfill_thread.start()
             return self._embedder, warnings
+
+    def _run_boot_backfills(self, embedder: "ManagedEmbedder") -> None:
+        try:
+            try:
+                self._backfill_subject_tags_vectors(embedder)
+            except Exception:
+                pass
+            try:
+                self._backfill_memory_summary_vectors(embedder)
+            except Exception:
+                pass
+        finally:
+            self._backfill_done.set()
+
+    def wait_boot_backfills(self, timeout: float = 120.0) -> bool:
+        """Block until the boot backfill thread finished (test/verification
+        wait point; the thread itself is a daemon and never blocks shutdown)."""
+        return self._backfill_done.wait(timeout)
 
     SUMMARY_SEGMENT_CHARS = 40
     SUMMARY_TOTAL_CHARS = 800
@@ -907,8 +932,31 @@ class MemoryTools:
                 except Exception:
                     continue
             for memory_id, vector in prepared:
-                if self.db.upsert_summary_vector(memory_id, vector):
-                    written += 1
+                # 0.16.12 P2-T4 step 1: one short write transaction per 64-row
+                # chunk (mirroring _backfill_subject_tags_vectors) instead of
+                # one upsert_summary_vector transaction per row — the embed
+                # above already ran outside the transaction, and the active
+                # status re-check happens under this chunk's write lock.
+                try:
+                    with self.db.write_transaction() as conn:
+                        status_row = conn.execute(
+                            "SELECT status FROM memories WHERE id = ?", (memory_id,),
+                        ).fetchone()
+                        if status_row is None or str(status_row["status"]) != "active":
+                            conn.execute(
+                                "DELETE FROM memory_summary_vec WHERE id = ?", (memory_id,),
+                            )
+                            continue
+                        conn.execute(
+                            "DELETE FROM memory_summary_vec WHERE id = ?", (memory_id,),
+                        )
+                        conn.execute(
+                            "INSERT INTO memory_summary_vec(id, embedding) VALUES (?, ?)",
+                            (memory_id, json.dumps(vector)),
+                        )
+                        written += 1
+                except Exception:
+                    continue
         return written
 
     def _backfill_subject_tags_vectors(self, embedder: "ManagedEmbedder") -> int:

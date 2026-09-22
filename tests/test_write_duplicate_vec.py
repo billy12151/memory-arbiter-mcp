@@ -313,3 +313,50 @@ def test_knn_failure_falls_back_to_scan_hint(
     hints = _similar_notices(result)
     assert len(hints) == 1
     assert hints[0]["matches"][0]["memory_id"] == first["id"]
+
+
+def test_boot_backfill_backgrounded_and_reads_degrade(tmp_path: Path, monkeypatch) -> None:
+    """0.16.12 P2-T4：_ensure_embedder 不再锁内联跑 backfill——启动快返回，
+    backfill 后台线程进行中 find 正常降级工作，完成等待点可用。"""
+    pytest.importorskip("sqlite_vec")
+    import time as _time
+
+    model = tmp_path / "fake.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=tmp_path / "bg.sqlite3", backup_jsonl=tmp_path / "backup.jsonl",
+        embedding_model_path=model,
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    # 预写存量（无向量）→ backfill 有活干
+    for i in range(3):
+        tools.memory_write(content=f"存量记忆 {i} 的内容", subject=f"legacy-{i}",
+                           tags=["legacy"], source_type="agent_generated")
+
+    class SlowEmbedder(CharHistogramEmbedder):
+        embed_epoch = 0
+
+        @staticmethod
+        def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
+            _time.sleep(0.05)  # 拉长 backfill 窗口
+            return CharHistogramEmbedder.embed_text(prefix, body, max_body_chars)
+
+    import memory_arbiter.embedder as emb_mod
+
+    monkeypatch.setattr(emb_mod, "build_embedder", lambda *a, **k: (SlowEmbedder(), []))
+    started = _time.perf_counter()
+    embedder, _ = tools._ensure_embedder()
+    elapsed = _time.perf_counter() - started
+    assert embedder is not None
+    assert elapsed < 1.0, f"ensure_embedder 应快返回（后台化），实际 {elapsed:.2f}s"
+    assert tools._backfill_thread is not None
+    # backfill 进行中：find 正常（embed 慢也只影响向量通道，词法降级可用）
+    result = tools.memory("find", {"query": "存量记忆", "limit": 5})
+    assert result["ok"], result
+    # 完成等待点：3 条 × 两个索引的向量终将写满
+    assert tools.wait_boot_backfills(timeout=30.0)
+    assert tools.wait_evidence_worker_drained(timeout=10.0)
+    with tools.db.connection() as conn:
+        st = conn.execute("SELECT COUNT(*) FROM subject_tags_vec").fetchone()[0]
+        sm = conn.execute("SELECT COUNT(*) FROM memory_summary_vec").fetchone()[0]
+    assert st == 3 and sm == 3
