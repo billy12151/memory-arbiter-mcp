@@ -12,6 +12,7 @@ from ..constants import (
     SEMANTIC_JOB_TIMEOUT_MS,
     SEMANTIC_MAX_EVIDENCE_UNITS,
     SEMANTIC_MAX_EXAMINED_PAIRS,
+    SEMANTIC_MAX_ROWS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
 from ..difference_classifier import classify_pair
@@ -39,7 +40,8 @@ if TYPE_CHECKING:
 _TECHNICAL_REASONS = {
     "qwen_timeout", "qwen_unavailable", "qwen_backend_error",
     "qwen_invalid_output", "qwen_budget_exhausted", "notice_budget_exhausted",
-    "evidence_units_capped", "pairs_examined_capped", "notice_write_failed",
+    "evidence_units_capped", "rows_capped", "pairs_examined_capped",
+    "notice_write_failed",
 }
 
 
@@ -261,28 +263,120 @@ class EvidencePipeline:
             return float(value) if value is not None else None
 
         max_units = max(1, SEMANTIC_MAX_EVIDENCE_UNITS)
+        max_rows = max(1, SEMANTIC_MAX_ROWS)
         workspace = (
             record.get("workspace_canonical") or record.get("workspace")
             if self.settings.isolation == "strict" else None
         )
         by_peer: dict[int, tuple[dict[str, Any], Any, Any]] = {}
+        reached_pair: set[int] = set()
+
+        def _enqueue_backlog(entries: list[tuple[int, tuple[dict[str, Any], Any, Any]]]) -> int:
+            """0.17.0 P2-4.2: truncation leftovers land in conflict_backlog
+            instead of vanishing. Identity = detector version + both
+            members@version + row anchors (review A7: a detector bump or a
+            member edit invalidates the frozen pair)."""
+            enqueued = 0
+            left_version = int(record.get("version") or 1)
+            for peer_id, (hit, seg_view, decision) in entries:
+                from ..constants import (
+                    PAIR_SCORE_W_BOTH_VALUES,
+                    PAIR_SCORE_W_NUMERIC_ROUTE,
+                )
+                score = 0.0
+                if str(decision.reason or "") == "numeric_value_candidate":
+                    score += PAIR_SCORE_W_NUMERIC_ROUTE
+                if decision.left_value and decision.right_value:
+                    score += PAIR_SCORE_W_BOTH_VALUES
+                right_version = int(hit.get("version") or hit.get("memory_row_version") or 1)
+                key_hash = hashlib.sha256(
+                    "|".join((
+                        CONFLICT_DETECTOR_VERSION,
+                        f"{memory_id}@{left_version}",
+                        f"{peer_id}@{right_version}",
+                        f"{seg_view.start_offset}-{seg_view.end_offset}",
+                        f"{hit.get('start_offset')}-{hit.get('end_offset')}",
+                    )).encode("utf-8"),
+                ).hexdigest()
+                outcome = self.db.conflict_backlog.enqueue(
+                    candidate_key_hash=key_hash,
+                    left_memory_id=int(memory_id), left_version=left_version,
+                    right_memory_id=int(peer_id), right_version=right_version,
+                    left_text=str(seg_view.text), right_text=str(hit.get("text") or ""),
+                    pair_score=score,
+                )
+                if outcome.get("outcome") in {"queued", "duplicate"}:
+                    enqueued += 1
+            return enqueued
+
         # P2-T2: same digest as the stale check above — the maintained
         # content_sha column (or its recompute fallback), never a fresh hash.
         content_hash = row_sha
-        unit_vectors = self.db.evidence.current_text_vectors(
+        # 0.17.0 P2-3.1: the conflict channel is ROW-level first. A1 timing
+        # bridge (review): read the published row vectors; when the evidence
+        # worker has not landed the publish yet, recover in-job with
+        # rowseg+embed — the same read-then-recover contract the unit path
+        # always had, so the two worker queues need no ordering guarantee.
+        row_vectors = self.db.evidence.current_row_vectors(
             int(memory_id), int(record.get("version") or 1), content_hash,
         )
-        if not unit_vectors:
-            # Recovery fallback for an incomplete/legacy evidence publish. The
-            # normal write path has just published these vectors, so avoid a
-            # second GGUF embedding pass in the common synchronous-notice path.
-            unit_vectors = []
-            for unit in local_text_units(str(record.get("subject") or ""), content):
-                if unit.kind != "text":
-                    continue
-                embedded = embedder.embed_text(prefix="", body=unit.text)
+        if not row_vectors and embedder is not None:
+            from ..rowseg import segment_rows
+            row_vectors = []
+            for segment in segment_rows(str(record.get("subject") or ""), content):
+                embedded = embedder.embed_text(prefix="", body=segment.text)
                 if embedded.embedding:
-                    unit_vectors.append((unit, list(embedded.embedding)))
+                    row_vectors.append((segment, list(embedded.embedding)))
+        # Graceful degradation (mid-backfill / degraded embedder): no rows
+        # anywhere → the pre-0.17.0 unit path stays the candidate source, so
+        # detection never goes BLIND while row coverage catches up.
+        rows_mode = bool(row_vectors)
+        unit_vectors: list[tuple[Any, list[float]]] = []
+        if not rows_mode:
+            unit_vectors = self.db.evidence.current_text_vectors(
+                int(memory_id), int(record.get("version") or 1), content_hash,
+            )
+            if not unit_vectors:
+                # Recovery fallback for an incomplete/legacy evidence publish. The
+                # normal write path has just published these vectors, so avoid a
+                # second GGUF embedding pass in the common synchronous-notice path.
+                unit_vectors = []
+                for unit in local_text_units(str(record.get("subject") or ""), content):
+                    if unit.kind != "text":
+                        continue
+                    embedded = embedder.embed_text(prefix="", body=unit.text)
+                    if embedded.embedding:
+                        unit_vectors.append((unit, list(embedded.embedding)))
+        # Normalized segment view: rows carry row_index, units carry
+        # unit_index — the view exposes .unit_index for BOTH so every
+        # downstream consumer (internal create, envelopes, member evidence)
+        # stays unchanged (P2-3.1 keeps every gate a pure text-pair function;
+        # only the input granularity changed).
+        from collections import namedtuple
+        _SegView = namedtuple("_SegView", "text start_offset end_offset unit_index")
+        paired = list(row_vectors if rows_mode else unit_vectors)
+        seg_views = [
+            _SegView(
+                seg.text, int(seg.start_offset), int(seg.end_offset),
+                int(seg.row_index if rows_mode else seg.unit_index),
+            )
+            for seg, _embedding in paired
+        ]
+        seg_embeddings = [embedding for _seg, embedding in paired]
+        if rows_mode:
+            # P2-3.1 值锚定行优先：rows carrying an extractable value lead the
+            # cap order (12th round: value features are the conflict
+            # predictor; topic similarity is not). Deterministic tiebreak by
+            # segment order.
+            from ..semantic_conflict import _VALUE_RE
+            order = sorted(
+                range(len(seg_views)),
+                key=lambda idx: (0 if _VALUE_RE.search(seg_views[idx].text) else 1, seg_views[idx].unit_index),
+            )
+            seg_views = [seg_views[idx] for idx in order]
+            seg_embeddings = [seg_embeddings[idx] for idx in order]
+        max_segments = max_rows if rows_mode else max_units
+        segments_capped_reason = "rows_capped" if rows_mode else "evidence_units_capped"
         # 0.16.0 E10① (§6⑳): same-memory internal examination comes FIRST —
         # units are in hand (no KNN), the rule is deterministic, and the
         # finding lands in the dedicated internal_conflicts structure (the
@@ -304,27 +398,29 @@ class EvidencePipeline:
         # technical failure→pending unannotated (fail-open).
         internal_found = 0
         internal_version = int(record.get("version") or 1)
-        text_units = [unit for unit, _embedding in unit_vectors]
+        # 0.17.0 P2-3.1: internal (same-memory) pairs are row segments in
+        # rows mode (row_index lands in internal_conflicts' unit_a/unit_b —
+        # the 0.17.0 detector bump separates the index semantics cleanly).
         from ..scan_pipeline import internal_pair_admission
 
         internal_qwen_pairs: list[tuple[Any, Any, Any]] = []
-        for i in range(len(text_units)):
-            for j in range(i + 1, len(text_units)):
-                unit_a, unit_b = text_units[i], text_units[j]
-                internal_decision = decide_evidence(unit_a.text, unit_b.text)
+        for i in range(len(seg_views)):
+            for j in range(i + 1, len(seg_views)):
+                seg_a, seg_b = seg_views[i], seg_views[j]
+                internal_decision = decide_evidence(seg_a.text, seg_b.text)
                 admitted = internal_pair_admission(
-                    unit_a.text, unit_b.text,
-                    (unit_a.start_offset, unit_a.end_offset),
-                    (unit_b.start_offset, unit_b.end_offset),
+                    seg_a.text, seg_b.text,
+                    (seg_a.start_offset, seg_a.end_offset),
+                    (seg_b.start_offset, seg_b.end_offset),
                     internal_decision,
                     exists_probe=lambda: self.db.internal_conflicts.exists_on_conn(
                         job_conn, int(memory_id), internal_version,
-                        unit_a.unit_index, unit_b.unit_index,
+                        seg_a.unit_index, seg_b.unit_index,
                     ),
                 )
                 if not admitted:
                     continue
-                internal_qwen_pairs.append((unit_a, unit_b, internal_decision))
+                internal_qwen_pairs.append((seg_a, seg_b, internal_decision))
         units_examined = 0
         # 0.16.2 write-time pre-gates (owner, data-driven): two deterministic
         # filters run in the KNN collection loop, BEFORE the per-peer dedup —
@@ -356,22 +452,34 @@ class EvidencePipeline:
         # notice_budget_exhausted. The cap is checked first so a state where
         # both hold attributes to the more specific cause.
         truncation_reason: str | None = None
-        for unit, embedding in unit_vectors:
+        # 0.17.0 P2-3.1: the cross loop walks the normalized segments —
+        # row_knn in rows mode (candidates are clean short sentences or
+        # header-folded table rows), evidence_knn otherwise. Rows carry no
+        # 'text'-only kind filter (table rows are first-class candidates).
+        for seg_view, embedding in zip(seg_views, seg_embeddings):
             active_deadline = backlog_deadline()
-            if units_examined >= max_units:
-                truncation_reason = "evidence_units_capped"
+            if units_examined >= max_segments:
+                truncation_reason = segments_capped_reason
                 break
             if active_deadline is not None and time.monotonic() >= active_deadline:
                 truncation_reason = "notice_budget_exhausted"
                 break
             units_examined += 1
-            for hit in self.db.evidence_knn(
-                embedding, k=5, workspace=workspace,
-                exclude_memory_id=memory_id, conn=job_conn,
-            ):
-                if hit.get("kind") != "text":
+            knn_hits = (
+                self.db.row_knn(
+                    embedding, k=5, workspace=workspace,
+                    exclude_memory_id=memory_id, conn=job_conn,
+                )
+                if rows_mode else
+                self.db.evidence_knn(
+                    embedding, k=5, workspace=workspace,
+                    exclude_memory_id=memory_id, conn=job_conn,
+                )
+            )
+            for hit in knn_hits:
+                if not rows_mode and hit.get("kind") != "text":
                     continue
-                decision = decide_evidence(unit.text, str(hit.get("text") or ""))
+                decision = decide_evidence(seg_view.text, str(hit.get("text") or ""))
                 if decision.action == "ignore":
                     continue
                 # 0.16.4 §1: cross-memory evolution domain — the earliest
@@ -398,7 +506,7 @@ class EvidencePipeline:
                     provenance_filtered += 1
                     continue
                 if classify_pair(
-                    unit.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
+                    seg_view.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
                 ) == "clear":
                     no_difference_filtered += 1
                     continue
@@ -408,7 +516,7 @@ class EvidencePipeline:
                 # notify-priority protection lost its subject — the closer
                 # neighbour of the same peer wins outright.
                 if existing is None or closer:
-                    by_peer[peer_id] = (hit, unit, decision)
+                    by_peer[peer_id] = (hit, seg_view, decision)
         if truncation_reason:
             # E10① order guarantee: internal findings land BEFORE the cross
             # loop and survive its truncation. The internal Qwen pass has not
@@ -438,6 +546,11 @@ class EvidencePipeline:
             }
             if internal_found:
                 early_result["internal_conflicts"] = internal_found
+            # 0.17.0 P2-4.2: collected-but-unexamined candidates go to the
+            # backlog (owner design #8) — the receipt says how many.
+            early_backlogged = _enqueue_backlog(list(by_peer.items()))
+            if early_backlogged:
+                early_result["backlogged"] = early_backlogged
             return early_result
 
         backend = self._ensure_semantic_backend()
@@ -459,10 +572,30 @@ class EvidencePipeline:
                 peer_id: vector_cosine(own_vector, hint_vectors.get(peer_id))
                 for peer_id in by_peer
             }
+        # 0.17.0 P2-3.4: pair_score orders the Qwen budget — value features
+        # lead (routed numeric + both-sides-extractable), C4 subject/tags
+        # overlap is the base, row distance the tiebreak. Order-only: a
+        # single pair's verdict never changes (owner-approved boundary).
+        # Weights initial; P2-3.2 recalibrates on the noisy corpus.
+        from ..constants import (
+            PAIR_SCORE_W_BOTH_VALUES,
+            PAIR_SCORE_W_NUMERIC_ROUTE,
+            PAIR_SCORE_W_OVERLAP,
+        )
+
+        def _pair_score(peer_id: int, triple: tuple[dict[str, Any], Any, Any]) -> float:
+            _hit, _seg, decision = triple
+            score = PAIR_SCORE_W_OVERLAP * float(overlap_rank.get(peer_id) or 0.0)
+            if str(decision.reason or "") == "numeric_value_candidate":
+                score += PAIR_SCORE_W_NUMERIC_ROUTE
+            if decision.left_value and decision.right_value:
+                score += PAIR_SCORE_W_BOTH_VALUES
+            return score
+
         ordered = sorted(
             by_peer.items(),
             key=lambda item: (
-                -overlap_rank.get(item[0], 0.0),
+                -_pair_score(item[0], item[1]),
                 float(item[1][0].get("distance") or 9),
             ),
         )
@@ -476,6 +609,8 @@ class EvidencePipeline:
         max_examined_pairs = max(1, SEMANTIC_MAX_EXAMINED_PAIRS)
         pairs_examined = 0
         surfaced = 0
+        dropped_unlocalizable = 0
+        backlogged = 0
         incomplete_reason: str | None = None
 
         def envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
@@ -591,6 +726,7 @@ class EvidencePipeline:
         for peer_id, (hit, unit, decision) in ordered:
             peer = peer_rows.get(int(peer_id))
             if not peer or peer.get("status") != "active":
+                reached_pair.add(peer_id)  # settled (inactive) — not backlog
                 continue
             record_row: dict[str, Any] = record or {}
             peer_row: dict[str, Any] = peer or {}
@@ -599,7 +735,10 @@ class EvidencePipeline:
             if self.db.semantic_notices.is_semantic_pair_closed_on_conn(
                 job_conn, memory_id, peer_id, left_version, right_version,
             ):
+                reached_pair.add(peer_id)  # settled (closed) — not backlog
                 continue
+            # NOT reached yet: budget/cap skips below leave the pair
+            # unmarked so the post-loop backlog sweep picks it up.
             # Deterministic direct path (2026-09-16, owner-approved): same
             # value-stripped key + canonical value difference IS the
             # same-attribute-different-value shape — land the notice without
@@ -610,6 +749,8 @@ class EvidencePipeline:
             direct = direct_value_verdict(
                 unit.text, str(hit.get("text") or ""), decision, embedder=embedder,
             )
+            if direct is not None:
+                reached_pair.add(peer_id)  # deterministic verdict — settled
             if direct is not None:
                 gate = PairGateResult(
                     "notice_ready", "deterministic_same_key_value_diff",
@@ -637,6 +778,7 @@ class EvidencePipeline:
                     incomplete_reason = "pairs_examined_capped"
                     break
                 pairs_examined += 1
+                reached_pair.add(peer_id)  # Qwen examined — settled
                 left_env = envelope(record_row, unit.text)
                 right_env = envelope(peer_row, str(hit.get("text") or ""))
                 # pair-v7: hand Qwen the rule layer's extracted value difference
@@ -684,13 +826,16 @@ class EvidencePipeline:
                     # The model explicitly reported an unextractable field: a
                     # completed negative decision (fail-closed for notice), not
                     # a technical failure (spec §8 diagnostics distinction).
+                    dropped_unlocalizable += 1
                     continue
                 else:
                     reason = gate.reason
                 if reason == "qwen_unverified":
                     # Grounding failed: uncertain — fail-closed for notices and
-                    # the pair remains a scan review candidate.
+                    # the pair remains a scan review candidate. Owner ruling
+                    # #9: unlocalizable candidates are DROPPED, counted loud.
                     record_degradation(reason)
+                    dropped_unlocalizable += 1
                     incomplete_reason = reason
                     continue
                 if reason in _TECHNICAL_REASONS:
@@ -818,6 +963,12 @@ class EvidencePipeline:
                 # was found and lost.
                 record_degradation("notice_write_failed")
                 incomplete_reason = "notice_write_failed"
+        # 0.17.0 P2-4.2: budget/cap leftovers land in the backlog — bounded,
+        # visible, never silently dropped (owner design #8). Stale/duplicate
+        # keys report as enqueued here; eviction counts ride the store.
+        leftover_entries = [item for item in ordered if item[0] not in reached_pair]
+        if leftover_entries:
+            backlogged = _enqueue_backlog(leftover_entries)
         if surfaced:
             result: dict[str, Any] = {
                 "status": "completed", "outcome": "notices_created", "notices_created": surfaced,
@@ -851,8 +1002,19 @@ class EvidencePipeline:
             filter_summary["internal_qwen_confirmed"] = internal_qwen_confirmed
         if internal_qwen_vetoed:
             filter_summary["internal_qwen_vetoed"] = internal_qwen_vetoed
+        if dropped_unlocalizable:
+            # 0.17.0 P2-3.5 (owner ruling #9): dropped unlocalizable pairs are
+            # never silent — the counter rides every completed receipt.
+            filter_summary["dropped_unlocalizable"] = dropped_unlocalizable
         if filter_summary:
             result["deterministic_filter"] = filter_summary
+        if backlogged:
+            # 0.17.0 P2-4.2: truncation leftovers went to the conflict
+            # backlog instead of vanishing.
+            result["backlogged"] = backlogged
+        if rows_mode:
+            result["rows_mode"] = True
+            result["rows_examined"] = int(units_examined)
         if reasons_seen:
             # Degradations may also occur on pairs before a later pair surfaces
             # a notice, so the list is attached to completed outcomes too.

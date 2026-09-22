@@ -1197,6 +1197,31 @@ class EvidenceStore:
                 },
             }
 
+    def scan_rows(self, memory_id: int, memory_version: int) -> list[dict[str, Any]]:
+        """0.17.0 P2-3.1: current-version row segments for the scan side's
+        INTERNAL examination. Same dict shape as scan_units — ``unit_index``
+        carries row_index on purpose so _examine_internal stays byte-for-byte
+        shared with the write side (whose internal rows land with the same
+        row indexes; the 0.17.0 detector bump retires the old unit-indexed
+        rows). Empty list = no rows published yet (pre-backfill), caller
+        falls back to units."""
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    """SELECT r.id AS eid, r.row_index AS unit_index, r.kind AS kind,
+                              r.text AS text, r.start_offset AS start_offset,
+                              r.end_offset AS end_offset, r.content_hash AS content_hash,
+                              v.embedding AS embedding
+                       FROM memory_row r
+                       LEFT JOIN memory_row_vec v ON v.id=r.id
+                       WHERE r.memory_id=? AND r.memory_version=?
+                       ORDER BY r.row_index""",
+                    (int(memory_id), int(memory_version)),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
+
     def scan_units(self, memory_id: int, memory_version: int) -> list[dict[str, Any]]:
         """Current-version text units with evidence-row identity + vectors.
 

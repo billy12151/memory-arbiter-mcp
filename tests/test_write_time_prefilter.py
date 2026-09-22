@@ -81,6 +81,7 @@ def test_provenance_gate_skips_qwen_and_reports(tmp_path: Path, monkeypatch) -> 
     assert tools.wait_evidence_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["status"] == "completed"
@@ -99,6 +100,7 @@ def test_provenance_gate_entity_mismatch_blocks(tmp_path: Path, monkeypatch) -> 
     assert tools.wait_evidence_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert backend.calls == 0
@@ -119,6 +121,7 @@ def test_no_difference_check_pair_skipped_before_qwen(tmp_path: Path, monkeypatc
     assert tools.wait_evidence_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["deterministic_filter"]["no_difference_skipped"] >= 1
@@ -135,6 +138,7 @@ def test_direct_path_lands_notice_without_qwen(tmp_path: Path, monkeypatch) -> N
     assert tools.wait_evidence_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["outcome"] == "notices_created"
@@ -161,6 +165,7 @@ def test_multi_value_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -> Non
     assert tools.wait_evidence_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["outcome"] == "notices_created"
@@ -178,6 +183,7 @@ def test_direct_path_dimension_veto_falls_back_to_qwen(tmp_path: Path, monkeypat
     assert tools.wait_evidence_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     # decide_evidence kills explicit scope mismatches at ignore; the point
@@ -198,6 +204,7 @@ def test_direct_path_version_token_guard(tmp_path: Path, monkeypatch) -> None:
     assert tools.wait_evidence_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     notices = tools.db.list_semantic_notices(status="open")
@@ -220,6 +227,7 @@ def test_notify_pair_passes_both_gates(tmp_path: Path, monkeypatch) -> None:
     assert tools.wait_evidence_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits(tools, [peer]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     # 0.16.4 §1: a cross-memory notify pair IS the evolution domain — the
@@ -242,6 +250,7 @@ def test_clear_hit_does_not_burn_peer_slot(tmp_path: Path, monkeypatch) -> None:
     clear_hit = _hits(tools, [peer], texts=["压测报告已归档，采样窗口五百毫秒"], distances=[0.05])[0]
     keep_hit = _hits(tools, [peer], texts=["连接池上限为 10。"], distances=[0.30])[0]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [clear_hit, keep_hit])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [clear_hit, keep_hit])  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["outcome"] == "notices_created", "the keeper hit must represent the peer"
@@ -259,6 +268,7 @@ def test_internal_keep_shape_qwen_confirmed_annotates_reason(tmp_path: Path, mon
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
     result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
     pending = tools.db.internal_conflicts.list_pending()
@@ -279,6 +289,7 @@ def test_internal_qwen_veto_persists_and_scan_cannot_resurrect(tmp_path: Path, m
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
 
     class SameValue:
         @staticmethod
@@ -318,6 +329,7 @@ def test_internal_technical_failure_fails_open(tmp_path: Path, monkeypatch) -> N
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
 
     class Broken:
         @staticmethod
@@ -341,6 +353,7 @@ def test_internal_no_backend_lands_unannotated(tmp_path: Path, monkeypatch) -> N
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
     tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
@@ -360,6 +373,7 @@ def test_internal_no_difference_shape_never_lands(tmp_path: Path, monkeypatch) -
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
@@ -374,8 +388,6 @@ def test_internal_keepers_survive_collection_truncation(tmp_path: Path, monkeypa
     exhaustion hit DURING the KNN collection loop must not drop the already
     collected internal keepers — E10① says internal findings land first and
     survive cross-loop truncation; the fail-open landing closes the gap."""
-    from memory_arbiter.constants import SEMANTIC_MAX_EVIDENCE_UNITS
-
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     mid = tools.memory_write(
@@ -383,16 +395,17 @@ def test_internal_keepers_survive_collection_truncation(tmp_path: Path, monkeypa
         subject="internal-trunc", tags=[],
     )["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
-    # Force the unit cap to trip on the FIRST unit: the internal keepers were
+    # Force the cap to trip on the FIRST segment: the internal keepers were
     # collected before collection even started, but the Qwen pass (and the
     # old landing point) sits after the truncation return.
+    # 0.17.0 P2-3.1：行级模式帽=SEMANTIC_MAX_ROWS、原因=rows_capped
     monkeypatch.setattr(
-        "memory_arbiter.pipeline.evidence.SEMANTIC_MAX_EVIDENCE_UNITS", 0,
+        "memory_arbiter.pipeline.evidence.SEMANTIC_MAX_ROWS", 0,
     )
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
     result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
     assert result["status"] == "incomplete"
-    assert result["reason"] == "evidence_units_capped"
+    assert result["reason"] == "rows_capped"
     assert result["internal_conflicts"] >= 1, "internal keepers must land despite truncation"
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
     assert pending, "the internal keeper row exists"
@@ -438,6 +451,7 @@ def test_internal_notify_ready_lands_pending_with_attribution(tmp_path: Path, mo
     mid = tools.memory_write(content=_OWNER_EXAMPLE, subject="internal-ready", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
     backend = _CountingBackend(_oriented_polarity_backend())
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
@@ -459,6 +473,7 @@ def test_internal_notify_negative_veto_dismissed_no_resurrect(tmp_path: Path, mo
     mid = tools.memory_write(content=_OWNER_EXAMPLE, subject="internal-veto-n", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
 
     class SameValue:
         @staticmethod
@@ -497,6 +512,7 @@ def test_internal_notify_fail_open_lands_unannotated(tmp_path: Path, monkeypatch
     mid = tools.memory_write(content=_OWNER_EXAMPLE, subject="internal-open-n", tags=[])["data"]
     assert tools.wait_evidence_worker_drained(timeout=5)
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
     result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]

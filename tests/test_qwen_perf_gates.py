@@ -91,6 +91,7 @@ def _write_check_scene(tools: MemoryTools, peers: int) -> dict[str, Any]:
 
 def _run_job(monkeypatch: pytest.MonkeyPatch, tools: MemoryTools, scene: dict[str, Any], backend: Any) -> dict[str, Any]:
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(scene["hits"]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(scene["hits"]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     record = tools.db.get_memory(int(scene["new"]["id"]))
     return tools._process_semantic_conflict_job(

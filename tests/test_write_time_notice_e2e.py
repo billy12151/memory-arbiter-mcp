@@ -124,6 +124,7 @@ def _stub_knn_peer(monkeypatch: pytest.MonkeyPatch, tools: MemoryTools, peer_id:
         "metadata": meta,
     }]
     monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(hits))  # 0.17.0 P2-3 行级候选同注入
 
 
 def _run_check(monkeypatch: pytest.MonkeyPatch, tools: MemoryTools, peer_id: int, new_id: int, peer_text: str, backend: Any = None) -> dict[str, Any]:
@@ -295,22 +296,23 @@ def _write_many_units(tools: MemoryTools, paragraphs: int) -> int:
 
 def test_over_cap_memory_reports_evidence_units_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """>64 text units (cap since 0.15.14 A5) -> incomplete/evidence_units_capped."""
-    from memory_arbiter.constants import SEMANTIC_MAX_EVIDENCE_UNITS
-
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", lambda timeout: None)
-    memory_id = _write_many_units(tools, SEMANTIC_MAX_EVIDENCE_UNITS + 10)
+    memory_id = _write_many_units(tools, 8)
+
+    # 0.17.0 P2-3.1：行级模式帽=SEMANTIC_MAX_ROWS、原因=rows_capped
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MAX_ROWS", 3)
 
     result = tools._process_semantic_conflict_job(memory_id, _job_snapshot(tools, memory_id))
 
     assert result["status"] == "incomplete"
-    assert result["reason"] == "evidence_units_capped"
+    assert result["reason"] == "rows_capped"
     assert result["notices_created"] == 0
-    assert result["reasons_seen"] == ["evidence_units_capped"]
+    assert result["reasons_seen"] == ["rows_capped"]
     status = tools._check_degradation_status()
-    assert status["last_reason"] == "evidence_units_capped"
-    assert "evidence_units_capped" in status["note"]
+    assert status["last_reason"] == "rows_capped"
+    assert "rows_capped" in status["note"]
 
 
 def test_job_deadline_keeps_notice_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -339,23 +341,24 @@ def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkey
     The deadline is pushed past only after the 24th unit has been examined, so
     the 25th loop iteration sees both causes; the cap check runs first.
     """
-    from memory_arbiter.constants import SEMANTIC_MAX_EVIDENCE_UNITS as _UNITS
-
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    memory_id = _write_many_units(tools, _UNITS + 16)
+    memory_id = _write_many_units(tools, 8)
 
+    # 0.17.0 P2-3.1：rows 模式帽语义（_ROWS 行、第 _ROWS 次 KNN 后推死线）
+    from memory_arbiter.constants import SEMANTIC_MAX_ROWS as _ROWS
     clock = {"now": 100.0}
     fairness_deadline = 100.5
     knn_calls = {"n": 0}
 
     def fake_knn(*a: Any, **k: Any) -> list[dict[str, Any]]:
         knn_calls["n"] += 1
-        if knn_calls["n"] >= _UNITS:
+        if knn_calls["n"] >= 3:
             clock["now"] = fairness_deadline + 1.0
         return []
 
-    monkeypatch.setattr(tools.db, "evidence_knn", fake_knn)
+    monkeypatch.setattr(tools.db, "row_knn", fake_knn)
+    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MAX_ROWS", 3)
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.time.monotonic", lambda: clock["now"])
     monkeypatch.setattr(
         tools._semantic_worker, "pending_job_deadline", lambda timeout: fairness_deadline,
@@ -363,14 +366,15 @@ def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkey
 
     result = tools._process_semantic_conflict_job(memory_id, _job_snapshot(tools, memory_id))
 
-    assert knn_calls["n"] == _UNITS
-    assert result["reason"] == "evidence_units_capped"
+    assert knn_calls["n"] == 3
+    assert result["reason"] == "rows_capped"
 
 
 def test_technical_reasons_registry_includes_evidence_units_capped() -> None:
     from memory_arbiter.pipeline.evidence import _TECHNICAL_REASONS
 
     assert "evidence_units_capped" in _TECHNICAL_REASONS
+    assert "rows_capped" in _TECHNICAL_REASONS
     assert "notice_budget_exhausted" in _TECHNICAL_REASONS
 
 

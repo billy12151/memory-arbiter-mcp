@@ -308,10 +308,14 @@ class ScanPipeline:
         outcome["version"] = version
         outcome["workspace"] = workspace
         units = self.db.evidence.scan_units(memory_id, version)
+        # 0.17.0 P2-3.1: the internal examination runs on ROW segments when
+        # they exist — same indexes the write side lands, so a write-time
+        # Qwen veto row survives via exists() (index semantics must never
+        # split between the two producers). No rows yet → unit fallback.
+        internal_source = self.db.evidence.scan_rows(memory_id, version) or units
         if not units:
             return outcome
-        # 1) same-memory internal examination (no KNN needed; rule-only).
-        internal = self._examine_internal(memory_id, version, workspace, units)
+        internal = self._examine_internal(memory_id, version, workspace, internal_source)
         outcome["internal"] = internal
         entity_a = self._entity_of(record)
         peer_entities: dict[int, "str | None"] = {}

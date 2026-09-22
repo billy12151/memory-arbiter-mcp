@@ -129,6 +129,20 @@ SEMANTIC_MAX_EVIDENCE_UNITS = 64
 # grammar-free decode (A2) the measured p95 pair ≈ 1.6s ×1.5 load margin
 # ⇒ 10. Pairs beyond the cap report incomplete reason=pairs_examined_capped.
 SEMANTIC_MAX_EXAMINED_PAIRS = 10
+# 0.17.0 P2-3.1: row cap for the row-level conflict channel (sentences +
+# header-folded table rows; ~35 rows per typical memory, 256 covers the
+# real-library tail). Rows sort value-anchored-first before the cap bites
+# (P2-3.1, plan §5); the truncation reason is rows_capped. Initial value —
+# P2-3.2 recalibrates on the noisy corpus (constants keep the evidence chain).
+SEMANTIC_MAX_ROWS = 256
+# 0.17.0 P2-3.4: candidate pair_score weights (order-only, never a verdict).
+# Base is the C4 subject/tags overlap; value features outrank topic
+# similarity because 98% of same-topic pairs are continuations, not
+# conflicts (12th/13th-round evidence). Weights sum to 1.0; recalibrated
+# with the P2-0 corpus during P2-3.2.
+PAIR_SCORE_W_OVERLAP = 0.40
+PAIR_SCORE_W_NUMERIC_ROUTE = 0.30
+PAIR_SCORE_W_BOTH_VALUES = 0.30
 SEMANTIC_PRELOAD = True
 SEMANTIC_RESIDENT = True
 
