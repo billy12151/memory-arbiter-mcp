@@ -808,7 +808,9 @@ def test_placement_suggestion_for_empty_workspace(tmp_path):
     from memory_arbiter.models import MemoryRecord
     t = _placement_tools(tmp_path)
     # Nearest neighbor lives in a real workspace.
-    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 42, "distance": 5.0}]  # type: ignore
+    # 0.16.12 P2-T5: hits carry m.status/workspace fields (production SELECT)
+    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 42, "distance": 5.0, "status": "active",
+                                          "workspace": "金营项目", "workspace_canonical": "金营项目"}]  # type: ignore
     t.db.get_memory = lambda mid: {"id": 42, "status": "active", "workspace": "金营项目",  # type: ignore
                                    "workspace_canonical": "金营项目"} if mid == 42 else None
     rec = MemoryRecord.from_input(
@@ -826,7 +828,8 @@ def test_no_placement_suggestion_when_neighbor_is_default(tmp_path):
     from memory_arbiter.models import MemoryRecord
     t = _placement_tools(tmp_path)
     # Only default-workspace neighbors → global memory stays in default, no hint.
-    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 7, "distance": 5.0}]  # type: ignore
+    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 7, "distance": 5.0, "status": "superseded",
+                                          "workspace": "别家项目", "workspace_canonical": "别家项目"}]  # type: ignore
     t.db.get_memory = lambda mid: {"id": 7, "status": "active", "workspace": "default",  # type: ignore
                                    "workspace_canonical": "default"} if mid == 7 else None
     rec = MemoryRecord.from_input(
@@ -2011,7 +2014,9 @@ def test_placement_hint_still_fires_for_default_synonym(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "_ensure_embedder", lambda: (FixedEmbedder([1.0, 0.0]), []))
     monkeypatch.setattr(
         tools.db, "evidence_knn",
-        lambda emb, k=8: [{"memory_id": proj["data"]["id"], "distance": 0.1}],
+        lambda emb, k=8: [{"memory_id": proj["data"]["id"], "distance": 0.1,
+                            "status": "active", "workspace": "projA",
+                            "workspace_canonical": "projA"}],
     )
 
     w = _default_insulation_write(tools, "editor preference", "默认", subject="editor preference")
