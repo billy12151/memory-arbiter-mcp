@@ -1439,7 +1439,12 @@ class MemoryTools:
         snapshot = {
             "memory_id": int(memory_id),
             "version": version,
-            "content_hash": hashlib.sha256(str(content or "").encode("utf-8")).hexdigest(),
+            # 0.16.12 P2-T2: prefer the maintained content_sha column over a
+            # fresh hash (identical value by construction; NULL falls back).
+            "content_hash": (
+                str(stored.get("content_sha") or "")
+                or hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
+            ),
             "task_id": task_id,
             "dedupe_key": task_id,
         }

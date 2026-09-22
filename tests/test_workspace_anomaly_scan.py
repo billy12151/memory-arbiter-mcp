@@ -234,3 +234,38 @@ def test_anomaly_scan_requires_numpy(vec_tools: MemoryTools, monkeypatch: pytest
     # Structured capability error, same contract as sqlite_vec_unavailable.
     assert result["ok"] is False
     assert result["data"].get("error") == "numpy_unavailable"
+
+
+def test_edit_skips_redundant_vector_refreshes(vec_tools, monkeypatch) -> None:
+    """0.16.12 P2-T1：派生输入未变的 refresh 跳过——纯内容编辑不动 subject/tags
+    向量；subject 变更两侧都刷；identical 三元组全跳。"""
+    tools = vec_tools
+    mid = tools.memory_write(
+        content="原始内容：接口超时 500ms", subject="超时配置", tags=["runbook"],
+        source_type="agent_generated",
+    )["data"]["id"]
+    calls = {"subject_tags": 0, "summary": 0}
+    monkeypatch.setattr(
+        tools._write_pipeline, "refresh_subject_tags_vector",
+        lambda mid_: calls.__setitem__("subject_tags", calls["subject_tags"] + 1),
+    )
+    monkeypatch.setattr(
+        tools._write_pipeline, "refresh_summary_vector",
+        lambda mid_: calls.__setitem__("summary", calls["summary"] + 1),
+    )
+    # 内容变、subject/tags 不变 → 只刷 summary
+    edited = tools.memory_edit(mid, new_content="新内容：接口超时改为 5s")
+    assert edited.get("ok"), edited
+    assert calls == {"subject_tags": 0, "summary": 1}
+    # subject 也变（内容随传保持不变）→ 两侧都刷
+    content_now = str(tools.db.get_memory(mid)["content"])
+    edited = tools.memory_edit(mid, new_content=content_now, new_subject="超时配置 v2")
+    assert edited.get("ok"), edited
+    assert calls == {"subject_tags": 1, "summary": 2}
+    # 等值替换内容（三元组不变）→ 全跳
+    current = tools.db.get_memory(mid)
+    edited = tools.memory_edit(
+        mid, new_content=str(current["content"]), new_subject=str(current["subject"]),
+    )
+    assert edited.get("ok"), edited
+    assert calls == {"subject_tags": 1, "summary": 2}

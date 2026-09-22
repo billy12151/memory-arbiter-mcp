@@ -30,6 +30,25 @@ from ..models import MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingC
 from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
 
+
+def _embed_input_profile(record: dict[str, Any] | None) -> tuple[str, str, str]:
+    """Derived-embedding input profile (0.16.12 P2-T1): the normalized
+    (subject, tags, content) triple the two recall-vector refreshes re-embed
+    from. Row-level equality of this triple means the refreshed vectors would
+    be byte-identical, so the re-embed is skippable."""
+    if not record:
+        return ("", "", "")
+    try:
+        tags = json.loads(record.get("tags") or "[]")
+        tag_profile = " ".join(sorted(str(t) for t in tags if str(t).strip()))
+    except (TypeError, ValueError):
+        tag_profile = str(record.get("tags") or "")
+    return (
+        str(record.get("subject") or ""),
+        tag_profile,
+        str(record.get("content") or ""),
+    )
+
 if TYPE_CHECKING:
     from ..update_monitor import UpdateMonitor
     from ..tools import MemoryTools
@@ -2845,17 +2864,27 @@ class OperationsPipeline:
             "history_id": history_id,
             "record": updated,
         }
-        data["record"] = self.db.get_memory(memory_id_int)
         data["evidence_index"], data["semantic_conflict_check"] = (
-            self._post_commit(memory_id_int, data["record"], recheck_conflicts=True)
+            self._post_commit(memory_id_int, updated, recheck_conflicts=True)
         )
-        # Subject/tags may have changed with the content edit: re-embed the
-        # duplicate-hint recall vector for the row's current values.
-        self._tools._write_pipeline.refresh_subject_tags_vector(memory_id_int)
-        # C3a summary vector follows the same realignment (content edits
-        # change its segment inputs; edits bump the version, which is the
-        # anomaly vote's natural refresh point).
-        self._tools._write_pipeline.refresh_summary_vector(memory_id_int)
+        # 0.16.12 P2-T1: the two recall-vector refreshes re-embed from the
+        # row's derived inputs — skip whichever re-embed cannot change the
+        # vector. The pre-edit row read inside the same write transaction
+        # (:current above) is the exact baseline edit_memory_intent applied
+        # its deltas to, so this comparison is race-free. The separate
+        # post-commit re-read of the row is gone (P2-T3): edit_result always
+        # carries the transaction's own post-edit record.
+        pre_inputs = _embed_input_profile(current)
+        post_inputs = _embed_input_profile(updated)
+        if pre_inputs[:2] != post_inputs[:2]:
+            # Subject/tags shape the duplicate-hint recall vector.
+            self._tools._write_pipeline.refresh_subject_tags_vector(memory_id_int)
+        if pre_inputs != post_inputs:
+            # C3a summary vector: subject+tags+content segments (edits bump
+            # the version, which is the anomaly vote's refresh point — but a
+            # metadata-only edit with identical derived inputs re-embeds the
+            # same text for nothing).
+            self._tools._write_pipeline.refresh_summary_vector(memory_id_int)
         unresolved = self.db.conflicts.list_open_conflicts_for_memory_ids(
             [memory_id_int], include_applying=True,
         )

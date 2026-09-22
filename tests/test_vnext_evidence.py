@@ -3234,3 +3234,24 @@ def test_exact_match_write_repairs_missing_canonical_vector(tmp_path: Path) -> N
     with tools.db.connection() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM workspace_canonicals_vec").fetchone()["c"]
     assert count >= 1
+
+
+def test_publish_consumes_row_content_sha(tmp_path: Path, monkeypatch) -> None:
+    """0.16.12 P2-T2：行有 content_sha 列时 publish/快照不再重算哈希。"""
+    tools = make_tools(tmp_path, semantic_enabled=False)
+    mid = tools.memory_write(content="哈希消费验证内容", subject="sha", source_type="agent_generated")["data"]["id"]
+    tools.wait_evidence_worker_drained(timeout=10.0)
+    row = tools.db.get_memory(mid)
+    assert row.get("content_sha")
+
+    import memory_arbiter.pipeline.evidence as pe_mod
+
+    calls = []
+    real_hash = pe_mod.evidence_content_hash
+    monkeypatch.setattr(
+        pe_mod, "evidence_content_hash",
+        lambda text: (calls.append(text), real_hash(text))[1],
+    )
+    published = tools._evidence.index_memory(mid)
+    assert published.get("published") is True, published
+    assert calls == [], "行 content_sha 在位时不得重算哈希"

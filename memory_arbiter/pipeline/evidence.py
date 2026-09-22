@@ -89,9 +89,14 @@ class EvidencePipeline:
             if not result.embedding:
                 return {"status": "failed", "reason": "empty_embedding"}
             embeddings.append(list(result.embedding))
+        # 0.16.12 P2-T2: prefer the row's maintained content_sha column (set
+        # at insert and every content edit) — one hash per write instead of
+        # re-hashing here; NULL only on exotic legacy rows, hence the fallback.
+        row_sha = str(current.get("content_sha") or "") or evidence_content_hash(
+            str(current.get("content") or "")
+        )
         published = self.db.evidence.publish(
-            int(memory_id), int(current.get("version") or 1),
-            evidence_content_hash(str(current.get("content") or "")), units, embeddings,
+            int(memory_id), int(current.get("version") or 1), row_sha, units, embeddings,
         )
         if published.get("published"):
             # Self-heal the embedding-space mismatch: once a rebuild has
@@ -122,7 +127,13 @@ class EvidencePipeline:
         if int(record.get("version") or 1) != int(snapshot.get("version") or 1):
             return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
         content = str(record.get("content") or "")
-        if hashlib.sha256(content.encode()).hexdigest() != snapshot.get("content_hash"):
+        # 0.16.12 P2-T2: the row's content_sha column IS sha256(content) (set
+        # at insert, recomputed on every content edit) — compare against it
+        # instead of re-hashing the content again (legacy NULL falls back).
+        row_sha = str(record.get("content_sha") or "")
+        if not row_sha:
+            row_sha = hashlib.sha256(content.encode()).hexdigest()
+        if row_sha != snapshot.get("content_hash"):
             return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
         embedder, _ = self._ensure_active_embedder()
         if embedder is None:
@@ -208,7 +219,9 @@ class EvidencePipeline:
             if self.settings.isolation == "strict" else None
         )
         by_peer: dict[int, tuple[dict[str, Any], Any, Any]] = {}
-        content_hash = evidence_content_hash(content)
+        # P2-T2: same digest as the stale check above — the maintained
+        # content_sha column (or its recompute fallback), never a fresh hash.
+        content_hash = row_sha
         unit_vectors = self.db.evidence.current_text_vectors(
             int(memory_id), int(record.get("version") or 1), content_hash,
         )
