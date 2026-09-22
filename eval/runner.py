@@ -432,7 +432,8 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
             # 新增回执键）与降级标记，供 score.py perf 段离线汇总。
             row["_receipt"] = {
                 key: receipt.get(key)
-                for key in ("status", "notices_created", "reasons_seen", "pairs_examined")
+                for key in ("status", "notices_created", "reasons_seen", "pairs_examined",
+                            "elapsed_ms", "internal_conflicts", "deterministic_filter")
                 if key in receipt
             }
         notice_final, notice_count = _pair_notice_row(tools, int(left_id), int(right_id))

@@ -668,7 +668,9 @@ def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, mo
     # The write's sync gate waits for this exact reserved task. A fast local
     # index + semantic pass may therefore complete in the same request rather
     # than returning the older waiting_for_evidence_index placeholder.
-    assert result["data"]["semantic_conflict_check"] == {
+    check_receipt = result["data"]["semantic_conflict_check"]
+    check_receipt.pop("elapsed_ms", None)  # 0.16.12 job 实际耗时键，值不定
+    assert check_receipt == {
         "status": "completed",
         "outcome": "checked_no_notice",
         "notices_created": 0,
@@ -1058,6 +1060,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    first.pop("elapsed_ms", None)
     assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4, "pairs_examined": 0}
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
     assert len(notices) == 4
@@ -1066,6 +1069,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
         assert conn.execute("SELECT COUNT(*) FROM conflicts WHERE notice_type IS NOT NULL").fetchone()[0] == 4
 
     second = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    second.pop("elapsed_ms", None)
     assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 0}
     assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 4
 
@@ -2896,6 +2900,7 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: SameValue())
 
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
+    result.pop("elapsed_ms", None)
     assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 1}
     # A clean model decision is not counted as check degradation.
     degradation = tools._semantic_status()["check_degradation"]
@@ -2935,6 +2940,7 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
 
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
 
+    result.pop("elapsed_ms", None)
     assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1, "pairs_examined": 1}
     assert deadlines == [None]  # single-direction: one extraction per pair
 
@@ -2984,6 +2990,7 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     # (qwen_budget_exhausted) after the first pair's notice was created;
     # truncated flags that the check was bounded, not exhaustive
     # (second-round review).
+    result.pop("elapsed_ms", None)
     assert result == {
         "status": "completed", "outcome": "notices_created", "notices_created": 1,
         "truncated": True, "reasons_seen": ["qwen_budget_exhausted"],

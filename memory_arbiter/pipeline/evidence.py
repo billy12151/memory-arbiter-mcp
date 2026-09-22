@@ -145,8 +145,9 @@ class EvidencePipeline:
         # own per-notice write transactions and never touch this connection.
         with self.db.connection() as job_conn:
             job_conn.execute("BEGIN")
+            job_started = time.monotonic()
             try:
-                return self._process_conflicts_job(
+                result = self._process_conflicts_job(
                     memory_id, snapshot, record, job_conn, content, row_sha,
                 )
             finally:
@@ -154,6 +155,12 @@ class EvidencePipeline:
                     job_conn.rollback()
                 except sqlite3.Error:
                     pass
+        # 0.16.12 eval contract: ACTUAL job execution time (embedding +
+        # KNN candidate collection + Qwen pairs + notice writes), excluding
+        # the caller's notice_sync_wait window — additive receipt key so the
+        # harness can report processing cost without the wait-window noise.
+        result["elapsed_ms"] = round((time.monotonic() - job_started) * 1000, 1)
+        return result
 
     def _process_conflicts_job(
         self, memory_id: int, snapshot: dict[str, Any],

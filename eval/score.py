@@ -265,6 +265,22 @@ def compute_perf(raw: dict) -> dict[str, Any] | None:
             int(row["notice_count"]) for row in valid
             if isinstance(row.get("notice_count"), int)
         ]
+        job_ms_values = [
+            float(r["elapsed_ms"]) for r in with_receipt
+            if isinstance(r.get("elapsed_ms"), (int, float))
+        ]
+        internal_values = [
+            int(r["internal_conflicts"]) for r in with_receipt
+            if isinstance(r.get("internal_conflicts"), int)
+        ]
+        qwen_filter_confirmed = sum(
+            int(((r.get("deterministic_filter") or {}).get("internal_qwen_confirmed")) or 0)
+            for r in with_receipt
+        )
+        qwen_filter_vetoed = sum(
+            int(((r.get("deterministic_filter") or {}).get("internal_qwen_vetoed")) or 0)
+            for r in with_receipt
+        )
         perf["conflict_window"] = {
             "n": len(valid),
             "receipt_n": len(with_receipt),
@@ -273,12 +289,19 @@ def compute_perf(raw: dict) -> dict[str, Any] | None:
             "avg_pairs_examined": (
                 round(sum(pairs_values) / len(pairs_values), 2) if pairs_values else None
             ),
+            # 0.16.12 eval contract: job 实际执行耗时（不含 3 秒同步等待窗）
+            "job_ms": _ms_stats(job_ms_values),
+            "avg_units": (
+                round(sum(units_values) / len(units_values), 1) if units_values else None
+            ),
+            "avg_internal_pairs": (
+                round(sum(internal_values) / len(internal_values), 2) if internal_values else None
+            ),
+            "internal_qwen_confirmed": qwen_filter_confirmed,
+            "internal_qwen_vetoed": qwen_filter_vetoed,
             "pairs_examined_capped_rows": sum(
                 1 for r in with_receipt
                 if "pairs_examined_capped" in (r.get("reasons_seen") or [])
-            ),
-            "avg_units": (
-                round(sum(units_values) / len(units_values), 1) if units_values else None
             ),
             "units_capped_rows": sum(
                 1 for u in units_values if u >= SEMANTIC_MAX_EVIDENCE_UNITS
@@ -440,6 +463,7 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
                 f"- 冲突窗：完成率 **{window['completed_rate']}**（{window['completed']}/{window['n']}） · "
                 f"平均 Qwen 检查对数 {window['avg_pairs_examined']}（预算 {window['pairs_budget']}，"
                 f"capped 行 {window['pairs_examined_capped_rows']}） · "
+                f"job 实际耗时 p50 **{window['job_ms']['p50_ms']}ms** / p95 {window['job_ms']['p95_ms']}ms · "
                 f"平均单元 {window['avg_units']}（预算 {window['units_budget']}，"
                 f"capped 行 {window['units_capped_rows']}） · 平均 notice 数 {window['avg_notice_count']}"
             )
