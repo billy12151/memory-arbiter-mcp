@@ -11,6 +11,7 @@ from typing import Any, TYPE_CHECKING
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
 from ..evidence import EvidenceUnit, has_indexable_text, INDEXABLE_PREFILTER_SQL
+from ..rowseg import RowSegment
 from ..models import utc_now_iso
 
 if TYPE_CHECKING:
@@ -62,9 +63,21 @@ class EvidenceStore:
         content_hash: str,
         units: list[EvidenceUnit],
         embeddings: list[list[float]],
+        rows: "list[RowSegment] | None" = None,
+        row_embeddings: "list[list[float]] | None" = None,
     ) -> dict[str, Any]:
+        # 0.17.0 P2-2.3: row-level vectors land in the SAME publish
+        # transaction as the units (owner: one atomic snapshot per version);
+        # the row EMBEDDING happens outside the transaction in index_memory,
+        # mirroring the unit discipline.
+        if rows is None:
+            rows = []
+        if row_embeddings is None:
+            row_embeddings = []
         if len(units) != len(embeddings) or any(not value for value in embeddings):
             return {"outcome": "invalid_embeddings", "published": False}
+        if len(rows) != len(row_embeddings) or any(not value for value in row_embeddings):
+            return {"outcome": "invalid_row_embeddings", "published": False}
         try:
             with self._db.write_transaction() as conn:
                 current = conn.execute(
@@ -106,7 +119,39 @@ class EvidenceStore:
                         "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES (?,?,?)",
                         (int(cur.lastrowid), parent_status, json.dumps(embedding)),
                     )
-            return {"outcome": "published", "published": True, "unit_count": len(units)}
+                # Row-level store (P2-2.2): same delete+rebuild discipline as
+                # the units, INSIDE the same transaction, sharing the
+                # parent_status snapshot taken above.
+                if old_row_ids := [
+                    int(row["id"]) for row in conn.execute(
+                        "SELECT id FROM memory_row WHERE memory_id=?", (int(memory_id),)
+                    ).fetchall()
+                ]:
+                    placeholders = ",".join("?" for _ in old_row_ids)
+                    conn.execute(f"DELETE FROM memory_row_vec WHERE id IN ({placeholders})", old_row_ids)
+                conn.execute("DELETE FROM memory_row WHERE memory_id=?", (int(memory_id),))
+                for row, embedding in zip(rows, row_embeddings):
+                    cur = conn.execute(
+                        """INSERT INTO memory_row(
+                             memory_id,memory_version,content_hash,row_index,kind,text,
+                             start_offset,end_offset,created_at
+                           ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (
+                            int(memory_id), int(memory_version), content_hash,
+                            int(row.row_index), row.kind, row.text,
+                            int(row.start_offset), int(row.end_offset), utc_now_iso(),
+                        ),
+                    )
+                    if cur.lastrowid is None:
+                        raise sqlite3.Error("row insert did not return an id")
+                    conn.execute(
+                        "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES (?,?,?)",
+                        (int(cur.lastrowid), parent_status, json.dumps(embedding)),
+                    )
+            return {
+                "outcome": "published", "published": True,
+                "unit_count": len(units), "row_count": len(rows),
+            }
         except sqlite3.Error as exc:
             return {"outcome": "error", "published": False, "error": str(exc)}
 
@@ -402,6 +447,174 @@ class EvidenceStore:
                             ORDER BY v.distance""",
                         [json.dumps(query_embedding), requested_k, *eligible_params],
                     ).fetchall()
+            return [dict(row) for row in rows]
+        except sqlite3.Error:
+            return []
+
+    def publish_rows(
+        self,
+        memory_id: int,
+        memory_version: int,
+        content_hash: str,
+        rows: "list[RowSegment]",
+        row_embeddings: "list[list[float]]",
+    ) -> dict[str, Any]:
+        """Rows-only publish for the存量 backfill (P2-2.5): never touches the
+        unit tables (publish() would rebuild them empty). Same staleness
+        checks and delete+rebuild discipline as the unit publish."""
+        if len(rows) != len(row_embeddings) or any(not value for value in row_embeddings):
+            return {"outcome": "invalid_row_embeddings", "published": False}
+        try:
+            with self._db.write_transaction() as conn:
+                current = conn.execute(
+                    "SELECT version, content FROM memories WHERE id=?", (int(memory_id),)
+                ).fetchone()
+                if current is None or int(current["version"] or 1) != int(memory_version):
+                    return {"outcome": "stale_snapshot", "published": False}
+                from ..evidence import evidence_content_hash
+                if evidence_content_hash(str(current["content"] or "")) != content_hash:
+                    return {"outcome": "stale_snapshot", "published": False}
+                if old_row_ids := [
+                    int(row["id"]) for row in conn.execute(
+                        "SELECT id FROM memory_row WHERE memory_id=?", (int(memory_id),)
+                    ).fetchall()
+                ]:
+                    placeholders = ",".join("?" for _ in old_row_ids)
+                    conn.execute(f"DELETE FROM memory_row_vec WHERE id IN ({placeholders})", old_row_ids)
+                conn.execute("DELETE FROM memory_row WHERE memory_id=?", (int(memory_id),))
+                status_row = conn.execute(
+                    "SELECT status FROM memories WHERE id=?", (int(memory_id),)
+                ).fetchone()
+                parent_status = str(status_row["status"] if status_row else "deleted")
+                for row, embedding in zip(rows, row_embeddings):
+                    cur = conn.execute(
+                        """INSERT INTO memory_row(
+                             memory_id,memory_version,content_hash,row_index,kind,text,
+                             start_offset,end_offset,created_at
+                           ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (
+                            int(memory_id), int(memory_version), content_hash,
+                            int(row.row_index), row.kind, row.text,
+                            int(row.start_offset), int(row.end_offset), utc_now_iso(),
+                        ),
+                    )
+                    if cur.lastrowid is None:
+                        raise sqlite3.Error("row insert did not return an id")
+                    conn.execute(
+                        "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES (?,?,?)",
+                        (int(cur.lastrowid), parent_status, json.dumps(embedding)),
+                    )
+            return {"outcome": "published", "published": True, "row_count": len(rows)}
+        except sqlite3.Error as exc:
+            return {"outcome": "error", "published": False, "error": str(exc)}
+
+    def current_row_vectors(
+        self, memory_id: int, memory_version: int, content_hash: str,
+    ) -> "list[tuple[RowSegment, list[float]]]":
+        """Return the exact current row segments and their published vectors.
+
+        A1 timing bridge: process_conflicts reads this first and falls back to
+        an in-job rowseg+embed when the publish has not landed yet — the same
+        read-then-recover contract as current_text_vectors.
+        """
+        if not self._db.state.sqlite_vec_available:
+            return []
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    """SELECT r.row_index,r.kind,r.text,r.start_offset,r.end_offset,
+                              v.embedding
+                       FROM memory_row r
+                       JOIN memory_row_vec v ON v.id=r.id
+                       WHERE r.memory_id=? AND r.memory_version=? AND r.content_hash=?
+                       ORDER BY r.row_index""",
+                    (int(memory_id), int(memory_version), str(content_hash)),
+                ).fetchall()
+            return [
+                (
+                    RowSegment(
+                        kind=str(row["kind"]), text=str(row["text"]),
+                        start_offset=int(row["start_offset"]),
+                        end_offset=int(row["end_offset"]),
+                        row_index=int(row["row_index"]),
+                    ),
+                    self._blob_to_vector(bytes(row["embedding"])),
+                )
+                for row in rows
+                if row["embedding"] is not None
+            ]
+        except sqlite3.Error:
+            return []
+
+    def row_knn(
+        self,
+        query_embedding: list[float],
+        *,
+        k: int = 5,
+        parent_status_filter: str = "active",
+        workspace: "WorkspaceScope" = None,
+        exclude_memory_id: int | None = None,
+        exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
+        conn: "sqlite3.Connection | None" = None,
+    ) -> list[dict[str, Any]]:
+        """KNN over row vectors (P2-2.4) — the conflict channel's candidate
+        source. Identical rowid-IN pre-filter contract as EvidenceStore.knn
+        (k applies to the filtered set); candidates are short sentences or
+        header-folded table rows, so Qwen always sees clean short text.
+        Default k=5 mirrors the write-time unit window (evidence.py)."""
+        if not self._db.state.sqlite_vec_available or not query_embedding:
+            return []
+        if parent_status_filter == "expired":
+            status_sql = "v.parent_status NOT IN ('active','deleted')"
+            memory_status_sql = "m.status NOT IN ('active','deleted')"
+        elif parent_status_filter == "all":
+            status_sql = "v.parent_status != 'deleted'"
+            memory_status_sql = "m.status != 'deleted'"
+        else:
+            status_sql = "v.parent_status='active'"
+            memory_status_sql = "m.status='active'"
+        requested_k = max(1, int(k))
+        workspace_sql, workspace_params = workspace_scope_sql(
+            "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)", workspace,
+        )
+        from ..acl import workspace_exclusion_sql
+        excl_sql, _, excl_params = workspace_exclusion_sql(exclude_workspaces)
+        eligible_clauses = [memory_status_sql]
+        eligible_params: list[Any] = []
+        if workspace_sql:
+            eligible_clauses.append(workspace_sql)
+            eligible_params.extend(workspace_params)
+        if excl_sql:
+            eligible_clauses.append(excl_sql)
+            eligible_params.extend(excl_params)
+        if exclude_memory_id is not None:
+            eligible_clauses.append("r.memory_id != ?")
+            eligible_params.append(int(exclude_memory_id))
+        filtered = bool(eligible_clauses[1:])
+        id_constraint = (
+            f" AND v.id IN (SELECT r.id FROM memory_row r "
+            f"JOIN memories m ON m.id=r.memory_id WHERE {' AND '.join(eligible_clauses)})"
+            if filtered else ""
+        )
+        sql = f"""SELECT r.*, v.distance AS distance, m.status, m.subject, m.tags,
+                     m.workspace, m.workspace_canonical, m.source_type,
+                     m.confidence, m.protection_level, m.event_time,
+                     m.ingest_time, m.metadata, m.content,
+                     m.version AS memory_row_version, m.agent_id,
+                     m.source_ref, m.created_at AS memory_created_at
+                  FROM memory_row_vec v
+                  JOIN memory_row r ON r.id=v.id
+                  JOIN memories m ON m.id=r.memory_id
+                  WHERE v.embedding MATCH ? AND k=? AND {status_sql}
+                    AND {memory_status_sql}{id_constraint}
+                  ORDER BY v.distance"""
+        params = [json.dumps(query_embedding), requested_k, *eligible_params]
+        try:
+            if conn is not None:
+                rows = conn.execute(sql, params).fetchall()
+            else:
+                with self._db.connection() as owned:
+                    rows = owned.execute(sql, params).fetchall()
             return [dict(row) for row in rows]
         except sqlite3.Error:
             return []

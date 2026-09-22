@@ -90,6 +90,20 @@ class EvidencePipeline:
             if not result.embedding:
                 return {"status": "failed", "reason": "empty_embedding"}
             embeddings.append(list(result.embedding))
+        # 0.17.0 P2-2.3: row-level embed for the conflict channel — outside
+        # the publish transaction (same discipline as units), landing in the
+        # same atomic snapshot. ~10→~35 embeds per memory on the GPU worker
+        # thread; the write path itself stays async (P0 evidence queue).
+        from ..rowseg import segment_rows
+        row_segments = segment_rows(
+            str(current.get("subject") or ""), str(current.get("content") or ""),
+        )
+        row_embeddings: list[list[float]] = []
+        for segment in row_segments:
+            result = embedder.embed_text(prefix="", body=segment.text)
+            if not result.embedding:
+                return {"status": "failed", "reason": "empty_embedding"}
+            row_embeddings.append(list(result.embedding))
         # 0.16.12 P2-T2: prefer the row's maintained content_sha column (set
         # at insert and every content edit) — one hash per write instead of
         # re-hashing here; NULL only on exotic legacy rows, hence the fallback.
@@ -98,6 +112,7 @@ class EvidencePipeline:
         )
         published = self.db.evidence.publish(
             int(memory_id), int(current.get("version") or 1), row_sha, units, embeddings,
+            rows=row_segments, row_embeddings=row_embeddings,
         )
         if published.get("published"):
             # Self-heal the embedding-space mismatch: once a rebuild has

@@ -253,6 +253,30 @@ def _c_evidence_coverage(ctx: _DoctorCtx) -> Finding:
     return _finding("evidence.coverage", ctx.indexed == ctx.eligible or not ctx.settings.embedding_auto_write, f"{ctx.indexed}/{ctx.eligible} memories indexed", evidence={"indexed": ctx.indexed, "eligible": ctx.eligible, "non_indexable": ctx.counts["non_indexable_memories"], "units": ctx.units})
 
 
+def _c_row_vector_coverage(ctx: _DoctorCtx) -> Finding:
+    # 0.17.0 P2-2.5: row-level conflict vectors follow the evidence-indexed
+    # set. Informational by design (plan §4): the gap right after upgrade is
+    # the boot backfill's pending queue — a snapshot cannot judge whether it
+    # is shrinking, so the numbers go to detail and never to overall status.
+    try:
+        covered = int(ctx.conn.execute(
+            "SELECT COUNT(DISTINCT r.memory_id) FROM memory_row r"
+        ).fetchone()[0])
+        eligible = int(ctx.conn.execute(
+            "SELECT COUNT(DISTINCT e.memory_id) FROM memory_evidence e"
+        ).fetchone()[0])
+    except sqlite3.Error:
+        return _finding(
+            "rows.coverage", True, "row vector coverage unknown (table unavailable)",
+            evidence={},
+        )
+    return _finding(
+        "rows.coverage", True,
+        f"{covered}/{eligible} evidence-indexed memories have row vectors",
+        evidence={"row_covered": covered, "row_eligible": eligible},
+    )
+
+
 def _c_evidence_freshness(ctx: _DoctorCtx) -> Finding:
     return _finding("evidence.freshness", ctx.evidence_stale == 0, f"{ctx.evidence_stale} stale evidence rows", evidence={"stale": ctx.evidence_stale})
 
@@ -677,6 +701,7 @@ _CHECKS: tuple[_Check, ...] = (
     _c_workspace_review,
     _c_semantic_judge_model,
     _c_config_warnings,
+    _c_row_vector_coverage,
 )
 
 

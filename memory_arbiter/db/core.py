@@ -110,6 +110,11 @@ class MemoryDB:
         self.backup_replay = BackupReplayStore(self)
         self.evidence = EvidenceStore(self)
         self.scan_queue = ScanQueueStore(self)
+        # 0.17.0 Part 2: write-time conflict backlog + structured claims.
+        from .claims import ClaimsStore
+        from .conflict_backlog import ConflictBacklogStore
+        self.conflict_backlog = ConflictBacklogStore(self)
+        self.claims = ClaimsStore(self)
         self.internal_conflicts = InternalConflictStore(self)
         # Hold one lock across the generation gate and any first-start schema
         # creation. Current databases skip DDL entirely at normal startup.
@@ -422,6 +427,15 @@ class MemoryDB:
     ) -> list[dict[str, Any]]:
         return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id, exclude_workspaces=exclude_workspaces, conn=conn)
 
+    def row_knn(
+        self, query_embedding: list[float], *, k: int = 5, parent_status_filter: str = "active",
+        workspace: WorkspaceScope = None, exclude_memory_id: int | None = None,
+        exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        """0.17.0 P2-2.4: row-level KNN convenience (conflict channel)."""
+        return self.evidence.row_knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id, exclude_workspaces=exclude_workspaces, conn=conn)
+
     def scan_rule_candidates(
         self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
         include_check: bool = False, max_distance: float | None = None,
@@ -525,6 +539,9 @@ class MemoryDB:
 
     def missing_summary_vec_rows(self) -> list[dict[str, Any]]:
         return self.memories.missing_summary_vec_rows()
+
+    def missing_row_vector_rows(self) -> list[dict[str, Any]]:
+        return self.memories.missing_row_vector_rows()
 
     def all_summary_vectors(self) -> dict[int, tuple[str, list[float]]]:
         return self.memories.all_summary_vectors()

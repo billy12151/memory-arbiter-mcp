@@ -470,13 +470,33 @@ class SchemaStore:
                 "Workspace anomaly triage will be unavailable."
             )
 
+    def ensure_memory_row_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
+        # 0.17.0 P2-2.2: row-level vectors for the conflict channel. Mirrors
+        # memory_evidence_vec's lifecycle exactly: parent_status auxiliary
+        # column, delete+rebuild on publish, status flip on lifecycle change
+        # (memories.update_memory_on_conn). One row per memory_row segment.
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_row_vec "
+            f"USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[{int(dim)}])"
+        )
+
+    def ensure_memory_claim_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
+        # 0.17.0 P2-5.1: attr vectors for the zero-Qwen claims channel.
+        # Row ids are memory_claims ids; eligibility is pinned by the
+        # memory_claims row itself (active + current version), enforced in
+        # the rowid-IN subquery — no parent_status column needed here.
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_claim_vec "
+            f"USING vec0(id INTEGER PRIMARY KEY, embedding float[{int(dim)}])"
+        )
+
     def rebuild_vec_tables(self, conn: sqlite3.Connection, dim: int) -> None:
         """Drop the vec0 tables (and vec0 shadow leftovers) and re-create
         them empty at ``dim``. Must run inside the caller's transaction —
         the flip to mismatch commits atomically with it."""
         for table in (
             "memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec",
-            "memory_summary_vec",
+            "memory_summary_vec", "memory_row_vec", "memory_claim_vec",
         ):
             conn.execute(f"DROP TABLE IF EXISTS {table}")
         shadows = conn.execute(
@@ -484,7 +504,9 @@ class SchemaStore:
             "name LIKE 'memory_evidence_vec_%' OR "
             "name LIKE 'workspace_canonicals_vec_%' OR "
             "name LIKE 'subject_tags_vec_%' OR "
-            "name LIKE 'memory_summary_vec_%')"
+            "name LIKE 'memory_summary_vec_%' OR "
+            "name LIKE 'memory_row_vec_%' OR "
+            "name LIKE 'memory_claim_vec_%')"
         ).fetchall()
         for row in shadows:
             conn.execute(f'DROP TABLE IF EXISTS "{str(row[0])}"')
@@ -492,6 +514,8 @@ class SchemaStore:
         self.ensure_workspace_vec_table(conn, dim)
         self.ensure_subject_tags_vec_table(conn, dim)
         self.ensure_memory_summary_vec_table(conn, dim)
+        self.ensure_memory_row_vec_table(conn, dim)
+        self.ensure_memory_claim_vec_table(conn, dim)
 
     def ensure_vec_tables(self, dim: int) -> list[str]:
         """Lazily create the derived vec0 tables at the model-reported dim.
@@ -508,6 +532,8 @@ class SchemaStore:
             self.ensure_workspace_vec_table(conn, dim)
             self.ensure_subject_tags_vec_table(conn, dim)
             self.ensure_memory_summary_vec_table(conn, dim)
+            self.ensure_memory_row_vec_table(conn, dim)
+            self.ensure_memory_claim_vec_table(conn, dim)
             conn.commit()
             self._db._sqlite_vec_loadable = True
             self.state.sqlite_vec_available = True
@@ -539,19 +565,22 @@ class SchemaStore:
             conn.enable_load_extension(False)
             expected = {
                 "memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec",
-                "memory_summary_vec",
+                "memory_summary_vec", "memory_row_vec", "memory_claim_vec",
             }
             before = {
                 str(row[0]) for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name IN ('memory_evidence_vec','workspace_canonicals_vec',"
-                    "'subject_tags_vec','memory_summary_vec')"
+                    "'subject_tags_vec','memory_summary_vec','memory_row_vec',"
+                    "'memory_claim_vec')"
                 )
             }
             self.ensure_evidence_vec_table(conn, dim)
             self.ensure_workspace_vec_table(conn, dim)
             self.ensure_subject_tags_vec_table(conn, dim)
             self.ensure_memory_summary_vec_table(conn, dim)
+            self.ensure_memory_row_vec_table(conn, dim)
+            self.ensure_memory_claim_vec_table(conn, dim)
             conn.commit()
             self._db._sqlite_vec_loadable = True
             self.state.sqlite_vec_available = True

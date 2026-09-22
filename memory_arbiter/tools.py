@@ -875,8 +875,53 @@ class MemoryTools:
                 self._backfill_memory_summary_vectors(embedder)
             except Exception:
                 pass
+            try:
+                # 0.17.0 P2-2.5: row-level vectors for the conflict channel
+                # (per-memory short transactions, embed outside; failures
+                # leave the memory pending for the next restart).
+                self._backfill_memory_row_vectors(embedder)
+            except Exception:
+                pass
         finally:
             self._backfill_done.set()
+
+    def _backfill_memory_row_vectors(self, embedder: "ManagedEmbedder") -> int:
+        """Row-vector backfill: segment + embed + publish_rows per active
+        memory that has evidence units but no rows yet. publish_rows rechecks
+        version and content hash under its own transaction, so a concurrent
+        edit simply yields stale_snapshot and the memory stays pending."""
+        from .evidence import evidence_content_hash
+        from .pipeline.evidence import EvidencePipeline  # noqa: F401  (类型注释用)
+        from .rowseg import segment_rows
+
+        rows = self.db.missing_row_vector_rows()
+        written = 0
+        for row in rows:
+            try:
+                content = str(row.get("content") or "")
+                row_sha = str(row.get("content_sha") or "") or evidence_content_hash(content)
+                segments = segment_rows(str(row.get("subject") or ""), content)
+                if not segments:
+                    continue
+                vectors: list[list[float]] = []
+                ok = True
+                for segment in segments:
+                    er = embedder.embed_text(prefix="", body=segment.text)
+                    if not er or not er.embedding:
+                        ok = False
+                        break
+                    vectors.append([float(x) for x in er.embedding])
+                if not ok:
+                    continue
+                outcome = self.db.evidence.publish_rows(
+                    int(row["id"]), int(row["version"] or 1), row_sha,
+                    segments, vectors,
+                )
+                if outcome.get("published"):
+                    written += 1
+            except Exception:
+                continue
+        return written
 
     def wait_boot_backfills(self, timeout: float = 120.0) -> bool:
         """Block until the boot backfill thread finished (test/verification

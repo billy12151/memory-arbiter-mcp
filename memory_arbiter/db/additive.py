@@ -29,6 +29,8 @@ import json
 import sqlite3
 
 from ..models import utc_now_iso
+from .claims import claims_ddl
+from .conflict_backlog import conflict_backlog_ddl
 
 # migration_state guard key: the candidate-row migration runs exactly once.
 _MIGRATION_KEY = "scan_queue_candidate_migration_v1"
@@ -48,6 +50,30 @@ def voided_identity_hash(base: str, row_id: int) -> str:
     if base:
         return _sha(f"{base}:voided:{row_id}")
     return _sha(f"voided:{row_id}")
+
+
+def memory_row_ddl() -> str:
+    # 0.17.0 P2-2.2: row-level store for the conflict channel (dual
+    # granularity — search keeps the evidence units, owner decision #5).
+    # Vectors live in the memory_row_vec vec0 table (schema.py, dim from the
+    # embedder); lifecycle mirrors memory_evidence_vec (parent_status flip on
+    # status change, delete+rebuild on publish).
+    return """
+    CREATE TABLE IF NOT EXISTS memory_row (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      memory_version INTEGER NOT NULL,
+      content_hash TEXT,
+      row_index INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('sentence','table_row')),
+      text TEXT NOT NULL,
+      start_offset INTEGER NOT NULL,
+      end_offset INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(memory_id, row_index)
+    );
+    CREATE INDEX IF NOT EXISTS memory_row_memory_idx ON memory_row(memory_id);
+    """
 
 
 def scan_queue_ddl() -> str:
@@ -162,6 +188,18 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     conn.executescript(normalize_audit_ddl())
     if not audit_existed:
         applied.append("normalize_audit")
+    # 0.17.0 Part 2: row-level conflict store + write-time backlog + claims.
+    for name, ddl in (
+        ("memory_row", memory_row_ddl()),
+        ("conflict_backlog", conflict_backlog_ddl()),
+        ("memory_claims", claims_ddl()),
+    ):
+        existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone())
+        conn.executescript(ddl)
+        if not existed:
+            applied.append(name)
     migrated = _migrate_legacy_candidates(conn)
     if migrated:
         applied.append(f"candidate_rows_migrated({migrated})")

@@ -467,6 +467,13 @@ class MemoriesStore:
                     "(SELECT id FROM memory_evidence WHERE memory_id=?)",
                     (str(new_status or "deleted"), int(memory_id)),
                 )
+                # 0.17.0 P2-2.2: the row-level conflict store mirrors the
+                # evidence lifecycle exactly (same parent_status flip).
+                conn.execute(
+                    "UPDATE memory_row_vec SET parent_status=? WHERE id IN "
+                    "(SELECT id FROM memory_row WHERE memory_id=?)",
+                    (str(new_status or "deleted"), int(memory_id)),
+                )
                 if str(new_status or "deleted") != "active":
                     # The duplicate-hint recall index tracks the ACTIVE set;
                     # leaving a stale row would only waste KNN window slots
@@ -474,6 +481,13 @@ class MemoriesStore:
                     # drift). Re-activation paths re-publish on activation.
                     conn.execute(
                         "DELETE FROM subject_tags_vec WHERE id = ?", (int(memory_id),)
+                    )
+                    # Claims attr vectors follow the active set the same way;
+                    # the version-pinned memory_claims rows stay for audit.
+                    conn.execute(
+                        "DELETE FROM memory_claim_vec WHERE id IN "
+                        "(SELECT id FROM memory_claims WHERE memory_id=?)",
+                        (int(memory_id),),
                     )
             except sqlite3.Error:
                 # Governance must remain available while the derived index is
@@ -748,6 +762,24 @@ class MemoriesStore:
                 "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
             })
         return out
+
+    def missing_row_vector_rows(self) -> list[dict[str, Any]]:
+        """0.17.0 P2-2.5: active memories with published evidence units but
+        no row segments — the row backfill's pending set."""
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    """SELECT m.id, m.version, m.subject, m.content,
+                              COALESCE(m.content_sha,'') AS content_sha
+                       FROM memories m
+                       WHERE m.status='active'
+                         AND EXISTS(SELECT 1 FROM memory_evidence e WHERE e.memory_id=m.id)
+                         AND NOT EXISTS(SELECT 1 FROM memory_row r WHERE r.memory_id=m.id)
+                       ORDER BY m.id"""
+                ).fetchall()
+                return [dict(r) for r in rows]
+        except sqlite3.Error:
+            return []
 
     def missing_summary_vec_rows(self) -> list[dict[str, Any]]:
         """Active memories whose summary vector is absent (C3a backfill set).
