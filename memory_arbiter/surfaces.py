@@ -220,7 +220,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
     },
     "memory_repair": {
         "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-        "tasks": ["rebuild_evidence", "scan_pipeline", "scan_queue", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
+        "tasks": ["rebuild_evidence", "scan_pipeline", "scan_queue", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "claims_backfill", "help"],
         "examples": {
             "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
             "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},

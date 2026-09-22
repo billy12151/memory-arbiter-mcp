@@ -212,10 +212,12 @@ def _run_e2e(tools: MemoryTools) -> None:
             for i in ws_items
         ]})
         assert submit["ok"], submit
-    _kick(tools, max_memories=500, time_budget_s=180.0)
+    # 0.17.0 P2-6.2：慢车道按墙钟轮转会在后续 kick 发现新对（设计意图=
+    # 全覆盖），零变化断言关掉它，只测水位幂等不变量。
+    _kick(tools, max_memories=500, time_budget_s=180.0, slow_lane=False)
     with tools.db.connection() as conn:
         before = conn.execute("SELECT COUNT(*) FROM scan_queue").fetchone()[0]
-    kick2 = _kick(tools, max_memories=500, time_budget_s=180.0)
+    kick2 = _kick(tools, max_memories=500, time_budget_s=180.0, slow_lane=False)
     assert kick2["complete"] is True
     with tools.db.connection() as conn:
         after = conn.execute("SELECT COUNT(*) FROM scan_queue").fetchone()[0]

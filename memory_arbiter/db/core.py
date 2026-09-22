@@ -617,6 +617,34 @@ class MemoryDB:
                 ).fetchall()
             ]
 
+    def least_recently_scanned_ids(self, *, limit: int = 20, exclude_ids: "list[int] | None" = None) -> list[int]:
+        """0.17.0 P2-6.2: slow-lane anchors — oldest last_scanned_at first,
+        NULL (never scanned) first of all; watermark-current memories only
+        (a pending main-batch memory is the fast lane's job)."""
+        if not self._db_available:
+            return []
+        exclude_sql = ""
+        params: list[Any] = [max(1, int(limit))]
+        if exclude_ids:
+            marks = ",".join("?" for _ in exclude_ids)
+            exclude_sql = f" AND id NOT IN ({marks})"
+            params = [max(1, int(limit)), *exclude_ids]
+        try:
+            with self.connection() as conn:
+                return [
+                    int(row[0]) for row in conn.execute(
+                        f"""SELECT id FROM memories
+                            WHERE status='active'
+                              AND (scan_watermark IS NOT NULL AND scan_watermark >= version)
+                            {exclude_sql}
+                            ORDER BY last_scanned_at IS NOT NULL, last_scanned_at ASC, id ASC
+                            LIMIT ?""",
+                        params,
+                    ).fetchall()
+                ]
+        except sqlite3.Error:
+            return []
+
     def pending_scan_memory_count(self) -> int:
         if not self._db_available:
             return 0
@@ -633,9 +661,13 @@ class MemoryDB:
             return False
         try:
             with self.write_transaction() as conn:
+                # 0.17.0 P2-6.2: the slow lane rotates by wall time — stamp it
+                # on the same UPDATE (one transaction, no extra write).
+                from ..models import utc_now_iso
                 cur = conn.execute(
-                    "UPDATE memories SET scan_watermark=? WHERE id=? AND version=?",
-                    (int(version), int(memory_id), int(version)),
+                    "UPDATE memories SET scan_watermark=?, last_scanned_at=? "
+                    "WHERE id=? AND version=?",
+                    (int(version), utc_now_iso(), int(memory_id), int(version)),
                 )
                 return bool(cur.rowcount)
         except sqlite3.Error:

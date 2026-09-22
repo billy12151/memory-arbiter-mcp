@@ -66,13 +66,16 @@ def test_top3_rank_gate_skips_deep_check_pairs(tmp_path: Path) -> None:
         return hits
 
     original_knn = pipeline.db.evidence.knn
+    original_row_knn = pipeline.db.row_knn  # 0.17.0 P2-6.1 行级候选同注入
     pipeline.db.evidence.knn = _fake_knn
+    pipeline.db.row_knn = _fake_knn
     try:
         outcome = pipeline._process_memory(
             a, suppression=pipeline._load_suppression(), neighbor_k=10,
         )
     finally:
         pipeline.db.evidence.knn = original_knn
+        pipeline.db.row_knn = original_row_knn
     sets = _conflict_member_sets(tools)
     assert {a, check_peer_shallow} in sets, "a keepable check pair INSIDE top-3 must queue"
     assert {a, check_peer_deep} not in sets, "the identical shape BEYOND top-3 must be gate-blocked"
@@ -107,13 +110,16 @@ def test_notify_pairs_queue_from_deep_ranks(tmp_path: Path) -> None:
         return hits
 
     original_knn = pipeline.db.evidence.knn
+    original_row_knn = pipeline.db.row_knn  # 0.17.0 P2-6.1 行级候选同注入
     pipeline.db.evidence.knn = _fake_knn
+    pipeline.db.row_knn = _fake_knn
     try:
         pipeline._process_memory(
             a, suppression=pipeline._load_suppression(), neighbor_k=10,
         )
     finally:
         pipeline.db.evidence.knn = original_knn
+        pipeline.db.row_knn = original_row_knn
     sets = _conflict_member_sets(tools)
     # 0.16.4 §1: the evolution-domain exclusion runs BEFORE the rank gate —
     # a notify peer at ANY rank (deep or shallow) never queues.

@@ -280,6 +280,8 @@ SCAN_PIPELINE_NEIGHBOR_K = 10
 # neighbour ranks; notify routes keep the full top-10 (real-conflict recall
 # has no threshold). A rank tightening, not an absolute distance band.
 SCAN_MACHINE_ROUTE_TOP_K = 3
+# 0.17.0 P2-6.2: slow-lane anchors per kick (owner default 20, adjustable).
+SCAN_SLOW_LANE_PER_KICK = 20
 
 # 0.16.0 workspace-normalization gate (plan §6⑫); 0.16.2 recalibrates the
 # vote threshold from the absolute >=8/10 (based on the 930/950 cases owner

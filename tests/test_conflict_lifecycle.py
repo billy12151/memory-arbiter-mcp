@@ -2693,3 +2693,25 @@ def test_pre_qwen_veto_process_records() -> None:
     ).reason != "process_record"
     assert "pre-verify" not in _PROCESS_REVERIFY_RE.pattern  # 边界在位
     assert not _PROCESS_REVERIFY_RE.search("we pre-verify the checksum")
+
+
+def test_lineage_version_evolution_veto_e1() -> None:
+    """0.17.0 P2-6.3（E1）：双侧自报不同谱系版本=取代演进，不按冲突报；
+    E2（产品版本差异）与无谱系对不受影响。"""
+    from memory_arbiter.semantic_conflict import decide_evidence
+    assert decide_evidence(
+        "缓存 TTL 设计文档 v1.0：本地缓存 TTL 5 分钟，按业务域配置。",
+        "缓存 TTL 设计文档 v2.0 取代 v1.0：TTL 调整为 10 分钟。",
+    ).reason == "lineage_version_evolution"
+    assert decide_evidence(
+        "限流规则第一版：单机 100 QPS。",
+        "限流规则第 2 版：单机 200 QPS。",
+    ).reason == "lineage_version_evolution"
+    # E2：同谱系语境下的产品版本差异仍是候选（不 veto）
+    d = decide_evidence(
+        "网关设计文档定稿：产品版本要求 1.0，协议走 gRPC。",
+        "网关设计文档定稿：产品版本要求 2.0，协议走 REST。",
+    )
+    assert d.reason != "lineage_version_evolution"
+    # 无谱系对：原行为不变
+    assert decide_evidence("连接池上限为 10。", "连接池上限为 99。").reason == "numeric_value_candidate"

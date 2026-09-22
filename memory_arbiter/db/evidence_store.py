@@ -1218,7 +1218,17 @@ class EvidenceStore:
                        ORDER BY r.row_index""",
                     (int(memory_id), int(memory_version)),
                 ).fetchall()
-                return [dict(row) for row in rows]
+            decoded = []
+            for row in rows:
+                item = dict(row)
+                blob = item.get("embedding")
+                if blob is not None:
+                    try:
+                        item["embedding"] = self._blob_to_vector(bytes(blob))
+                    except (TypeError, ValueError):
+                        item["embedding"] = None
+                decoded.append(item)
+            return decoded
         except sqlite3.Error:
             return []
 

@@ -1901,6 +1901,7 @@ class MemoryTools:
             max_memories=payload.get("max_memories") or 400,
             time_budget_s=payload.get("time_budget_s") or 45.0,
             neighbor_k=payload.get("neighbor_k") or 10,
+            slow_lane=bool(payload.get("slow_lane", True)),
         )
 
     def scan_pipeline_status(self) -> dict[str, Any]:

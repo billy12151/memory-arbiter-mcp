@@ -29,6 +29,7 @@ from typing import Any, TYPE_CHECKING
 
 from .constants import (
     SCAN_MACHINE_ROUTE_TOP_K,
+    SCAN_SLOW_LANE_PER_KICK,
 )
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .difference_classifier import classify_pair, internal_noise_pair, is_garbage
@@ -95,6 +96,7 @@ class ScanPipeline:
         max_memories: int = DEFAULT_MAX_MEMORIES,
         time_budget_s: float = DEFAULT_TIME_BUDGET_S,
         neighbor_k: int = DEFAULT_NEIGHBOR_K,
+        slow_lane: bool = True,
     ) -> dict[str, Any]:
         if not self.db.db_available:
             return {"ok": False, "error": "database_unavailable"}
@@ -109,6 +111,7 @@ class ScanPipeline:
                 max_memories=max_memories,
                 time_budget_s=time_budget_s,
                 neighbor_k=neighbor_k,
+                slow_lane=slow_lane,
             )
         finally:
             self._kick_lock.release()
@@ -119,6 +122,7 @@ class ScanPipeline:
         max_memories: int,
         time_budget_s: float,
         neighbor_k: int,
+        slow_lane: bool = True,
     ) -> dict[str, Any]:
         vec_state = self.db.get_vec_index_state()
         if vec_state.get("state") in {"mismatch", "failed"}:
@@ -236,6 +240,32 @@ class ScanPipeline:
         if pending_left == 0:
             state["complete"] = True
         complete = bool(state.get("complete"))
+        # 0.17.0 P2-6.2 slow lane: with the fast lane settled (or its batch
+        # exhausted for this kick), spend a small leftover budget rotating
+        # through the LEAST-recently-scanned watermark-current memories —
+        # full coverage by wall time, no detector-version bump required.
+        # Best-effort: budget exhaustion and errors just defer to next kick.
+        slow_lane_done = 0
+        if slow_lane and (complete or processed < 5):
+            try:
+                remaining = budget - (time.monotonic() - started)
+                if remaining > 2.0:
+                    slow_ids = self.db.least_recently_scanned_ids(
+                        limit=SCAN_SLOW_LANE_PER_KICK, exclude_ids=processed_ids,
+                    )
+                    for slow_id in slow_ids:
+                        if time.monotonic() - started > budget:
+                            break
+                        slow_outcome = self._process_memory(
+                            slow_id, suppression=suppression, neighbor_k=neighbor_k,
+                        )
+                        if slow_outcome.get("version") is not None:
+                            self.db.mark_scanned(slow_id, int(slow_outcome["version"]))
+                        queued += slow_outcome["queued"]
+                        internal_found += slow_outcome["internal"]
+                        slow_lane_done += 1
+            except Exception:
+                pass
         self.db.meta.record_scan_pipeline_state(state)
         # C5 pacing record + audit line: the same doctor faces the legacy
         # scan path uses (broken-chain alarm, scan_required/scan_stale).
@@ -255,6 +285,7 @@ class ScanPipeline:
             "round_id": state.get("round_id"),
             "mode": state.get("mode"),
             "processed_this_kick": processed,
+            "slow_lane_processed": slow_lane_done,
             "processed_round_total": round_processed + processed,
             "queued_total": queued,
             "auto_rejected_total": auto_rejected,
@@ -319,11 +350,20 @@ class ScanPipeline:
         outcome["internal"] = internal
         entity_a = self._entity_of(record)
         peer_entities: dict[int, "str | None"] = {}
+        # 0.17.0 P2-6.1: cross-memory candidates run on ROW vectors when
+        # published (same identity discipline as the write side — eid is the
+        # memory_row.id; the 0.17.0 detector bump retires unit-keyed rows).
+        # No rows yet (pre-backfill) → the unit loop stands.
+        cross_units = internal_source if internal_source is not units else units
+        cross_knn = (
+            (lambda embedding, **kw: self.db.row_knn(embedding, **kw))
+            if cross_units is not units else self.db.evidence.knn
+        )
         # 2) cross-memory same-bucket rank pairing.
-        for unit in units:
+        for unit in cross_units:
             if unit.get("embedding") is None:
                 continue
-            hits = self.db.evidence.knn(
+            hits = cross_knn(
                 unit["embedding"], k=neighbor_k + 1,
                 workspace=workspace or None,
                 exclude_memory_id=memory_id,
@@ -332,8 +372,9 @@ class ScanPipeline:
             # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
             # not raw row positions).
             text_rank = 0
+            rows_knn = cross_units is not units
             for hit in hits:
-                if hit.get("kind") != "text":
+                if not rows_knn and hit.get("kind") != "text":
                     continue
                 peer_id = int(hit["memory_id"])
                 if peer_id == memory_id:

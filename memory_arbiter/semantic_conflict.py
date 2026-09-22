@@ -409,6 +409,44 @@ _PROCESS_DESIGN_RE = re.compile(
 _PROCESS_RELEASE_RE = re.compile(
     r"发版完成|已发布|已上线|released|deployment complete", re.IGNORECASE,
 )
+
+# 0.17.0 P2-6.3: lineage-version evolution veto (E1). Both sides carrying a
+# LINEAGE marker (design doc / spec / 第N版) with DIFFERENT version numbers
+# is a supersedes relationship, not a competing claim — the value delta the
+# gates see is the intentional revision. Same-lineage product-version deltas
+# (E2) deliberately stay candidates. Known limits recorded in the plan:
+# enumerated lineage vocabulary, Chinese product names may miss extraction,
+# cross-references like「文档1.0升级到2.0」inside one side can confuse.
+_LINEAGE_MARKER_RE = re.compile(
+    r"(?:设计文档|最终设计|方案|文档|规格|spec|design)[^\n]{0,3}?"
+    r"v?(\d+(?:\.\d+)+)"
+    r"|第\s*([一二三四五六七八九十\d]+)\s*版",
+    re.IGNORECASE,
+)
+
+
+def _lineage_primary_version(text: str) -> "tuple[int, ...] | None":
+    """The text's self-declared lineage versions as numeric tuples (highest
+    wins at comparison); None when it carries no lineage marker at all — the
+    veto needs BOTH sides self-declared. Cross-references (「v2.0 取代 v1.0」)
+    resolve by MAX version: the superseding doc owns the pair."""
+    matches = _LINEAGE_MARKER_RE.findall(text or "")
+    if not matches:
+        return None
+    versions: list[tuple[int, ...]] = []
+    for dotted, nth in matches:
+        if dotted:
+            versions.append(tuple(int(part) for part in dotted.split(".")))
+        elif nth:
+            parsed: "int | None" = int(nth) if nth.isdigit() else None
+            if parsed is None:
+                from .difference_classifier import _cn_to_int
+                parsed = _cn_to_int(nth)
+            if parsed is not None:
+                versions.append((parsed,))
+    if not versions:
+        return None
+    return max(versions)
 _VALUE_RE = re.compile(
     r"(?<![\w.])v?\d+(?:\.\d+){0,2}\s*"
     r"(?:ms|s|秒|分钟|小时|个工作日|工作日|个自然日|自然日|日|天|%|mb|gb|kb|条|次|核|g"
@@ -514,6 +552,15 @@ def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
         or (_PROCESS_DESIGN_RE.search(right_text or "") and _PROCESS_RELEASE_RE.search(left_text or ""))
     ):
         return EvidenceDecision("ignore", "process_record")
+
+    # 0.17.0 P2-6.3 (E1): both sides self-declare a lineage version and the
+    # PRIMARY (max) versions differ → supersedes evolution, never a competing
+    # claim. Equal primaries fall through (same-generation text); E2
+    # product-version deltas deliberately stay candidates.
+    _left_lineage = _lineage_primary_version(left_text or "")
+    _right_lineage = _lineage_primary_version(right_text or "")
+    if _left_lineage is not None and _right_lineage is not None and _left_lineage != _right_lineage:
+        return EvidenceDecision("ignore", "lineage_version_evolution")
 
     left_values = _normalized_values(left_text)
     right_values = _normalized_values(right_text)

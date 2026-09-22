@@ -170,6 +170,11 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     if not has_column(conn, "memories", "scan_watermark"):
         conn.execute("ALTER TABLE memories ADD COLUMN scan_watermark INTEGER")
         applied.append("memories.scan_watermark")
+    # 0.17.0 P2-6.2: slow-lane rotation clock — "least recently scanned"
+    # picks anchors by wall time, independent of version bumps.
+    if not has_column(conn, "memories", "last_scanned_at"):
+        conn.execute("ALTER TABLE memories ADD COLUMN last_scanned_at TEXT")
+        applied.append("memories.last_scanned_at")
     scan_queue_existed = bool(conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scan_queue'"
     ).fetchone())
