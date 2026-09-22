@@ -475,31 +475,45 @@ class SemanticNoticeStore:
         if left_id == right_id:
             # A self-pair cannot be covered by any two-member dismissal.
             return False
+        with self._db.connection() as conn:
+            return self.is_semantic_pair_closed_on_conn(
+                conn, left_id, right_id, left_version, right_version, notice_type,
+            )
+
+    def is_semantic_pair_closed_on_conn(
+        self, conn: sqlite3.Connection,
+        left_id: int, right_id: int,
+        left_version: int | None = None, right_version: int | None = None,
+        notice_type: str = "semantic_evidence",
+    ) -> bool:
+        """Same proof on the caller's connection (0.16.12 P2-T6: one read
+        connection threads through the whole process_conflicts job)."""
+        left_id, right_id = int(left_id), int(right_id)
+        if left_id == right_id:
+            return False
         if left_version is not None and right_version is not None:
             from ..semantic_conflict import notice_dedupe_key
 
             key = notice_dedupe_key(
                 left_id, right_id, int(left_version), int(right_version), notice_type,
             )
-            with self._db.connection() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM conflicts WHERE notice_dedupe_key=? "
-                    "AND notice_delivery_status IN ('dismissed','resolved') LIMIT 1",
-                    (key,),
-                ).fetchone()
+            row = conn.execute(
+                "SELECT 1 FROM conflicts WHERE notice_dedupe_key=? "
+                "AND notice_delivery_status IN ('dismissed','resolved') LIMIT 1",
+                (key,),
+            ).fetchone()
             return row is not None
         # Version-less fallback: same-notice proof by member id EXISTS.
         members_json = "CASE WHEN json_valid(member_versions) THEN member_versions ELSE '[]' END"
-        with self._db.connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM conflicts "
-                "WHERE notice_delivery_status IN ('dismissed','resolved') AND notice_type=? "
-                f"AND EXISTS (SELECT 1 FROM json_each({members_json}) "
-                "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?) "
-                f"AND EXISTS (SELECT 1 FROM json_each({members_json}) "
-                "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?) LIMIT 1",
-                (notice_type, left_id, right_id),
-            ).fetchone()
+        row = conn.execute(
+            "SELECT 1 FROM conflicts "
+            "WHERE notice_delivery_status IN ('dismissed','resolved') AND notice_type=? "
+            f"AND EXISTS (SELECT 1 FROM json_each({members_json}) "
+            "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?) "
+            f"AND EXISTS (SELECT 1 FROM json_each({members_json}) "
+            "WHERE CAST(json_each.value->>'memory_id' AS INTEGER)=?) LIMIT 1",
+            (notice_type, left_id, right_id),
+        ).fetchone()
         return row is not None
 
     def update_semantic_notice_status(self, notice_id: int, status: str, reason: str = "", workspace_canonical: "WorkspaceScope" = None, conflict_id: int | None = None) -> dict[str, Any]:

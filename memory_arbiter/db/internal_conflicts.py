@@ -77,11 +77,27 @@ class InternalConflictStore:
             return True  # degrade closed: a down DB must not duplicate rows
         try:
             with self._db.connection() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM internal_conflicts WHERE memory_id=? AND memory_version=? "
-                    "AND unit_a=? AND unit_b=? AND status!='stale' LIMIT 1",
-                    (int(memory_id), int(memory_version), int(unit_a), int(unit_b)),
-                ).fetchone()
+                return self.exists_on_conn(
+                    conn, memory_id, memory_version, unit_a, unit_b,
+                )
+        except sqlite3.Error:
+            return True
+
+    def exists_on_conn(
+        self, conn: sqlite3.Connection,
+        memory_id: int, memory_version: int, unit_a: int, unit_b: int,
+    ) -> bool:
+        """Same probe on the caller's connection (0.16.12 P2-T6: the
+        process_conflicts job threads one read connection through every
+        per-pair existence check instead of opening one each)."""
+        if not self._db._db_available:
+            return True
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM internal_conflicts WHERE memory_id=? AND memory_version=? "
+                "AND unit_a=? AND unit_b=? AND status!='stale' LIMIT 1",
+                (int(memory_id), int(memory_version), int(unit_a), int(unit_b)),
+            ).fetchone()
             return row is not None
         except sqlite3.Error:
             return True

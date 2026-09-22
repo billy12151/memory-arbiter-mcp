@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import json
 import time
 from typing import Any, TYPE_CHECKING
@@ -135,6 +136,26 @@ class EvidencePipeline:
             row_sha = hashlib.sha256(content.encode()).hexdigest()
         if row_sha != snapshot.get("content_hash"):
             return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
+        # 0.16.12 P2-T6: the whole job body runs on ONE read-only connection
+        # — per-unit evidence_knn, per-pair exists/closed probes and the peer
+        # prefetch all reuse it instead of opening one connection each. Under
+        # WAL this read snapshot is MORE consistent than the previous
+        # open-per-read behaviour (each old read saw a different point in
+        # time); the job's own notice writes keep their own per-notice write
+        # transactions and never touch this connection.
+        job_conn = self.db._new_connection()
+        try:
+            return self._process_conflicts_job(
+                memory_id, snapshot, record, job_conn, content, row_sha,
+            )
+        finally:
+            job_conn.close()
+
+    def _process_conflicts_job(
+        self, memory_id: int, snapshot: dict[str, Any],
+        record: dict[str, Any], job_conn: "sqlite3.Connection",
+        content: str, row_sha: str,
+    ) -> dict[str, Any]:
         embedder, _ = self._ensure_active_embedder()
         if embedder is None:
             return {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
@@ -270,8 +291,8 @@ class EvidencePipeline:
                     (unit_a.start_offset, unit_a.end_offset),
                     (unit_b.start_offset, unit_b.end_offset),
                     internal_decision,
-                    exists_probe=lambda: self.db.internal_conflicts.exists(
-                        int(memory_id), internal_version,
+                    exists_probe=lambda: self.db.internal_conflicts.exists_on_conn(
+                        job_conn, int(memory_id), internal_version,
                         unit_a.unit_index, unit_b.unit_index,
                     ),
                 )
@@ -320,7 +341,7 @@ class EvidencePipeline:
             units_examined += 1
             for hit in self.db.evidence_knn(
                 embedding, k=5, workspace=workspace,
-                exclude_memory_id=memory_id,
+                exclude_memory_id=memory_id, conn=job_conn,
             ):
                 if hit.get("kind") != "text":
                     continue
@@ -536,15 +557,20 @@ class EvidencePipeline:
             ):
                 internal_found += 1
 
+        # P2-T6: batch-prefetch every candidate peer in ONE id-IN query
+        # instead of one get_memory connection per pair.
+        peer_rows = self.db.get_memories_by_ids([int(pid) for pid, _triple in ordered])
         for peer_id, (hit, unit, decision) in ordered:
-            peer = self.db.get_memory(peer_id)
+            peer = peer_rows.get(int(peer_id))
             if not peer or peer.get("status") != "active":
                 continue
             record_row: dict[str, Any] = record or {}
             peer_row: dict[str, Any] = peer or {}
             left_version = int(record.get("version") or 1)
             right_version = int(peer.get("version") or 1)
-            if self.db.is_semantic_pair_closed(memory_id, peer_id, left_version, right_version):
+            if self.db.semantic_notices.is_semantic_pair_closed_on_conn(
+                job_conn, memory_id, peer_id, left_version, right_version,
+            ):
                 continue
             # Deterministic direct path (2026-09-16, owner-approved): same
             # value-stripped key + canonical value difference IS the

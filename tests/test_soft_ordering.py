@@ -137,7 +137,7 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
                          "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
     }
 
-    def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None) -> list[dict[str, Any]]:
+    def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None) -> list[dict[str, Any]]:
         return [
             {"memory_id": pid, "id": hit["id"], "kind": "text", "text": hit["text"],
              "start_offset": hit["start_offset"], "end_offset": hit["end_offset"],
@@ -186,7 +186,7 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(pipeline.evidence, "decide_evidence", decide)
 
-    def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None) -> list[dict[str, Any]]:
+    def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None) -> list[dict[str, Any]]:
         return [
             {"memory_id": int(check_peer["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green",
              "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
