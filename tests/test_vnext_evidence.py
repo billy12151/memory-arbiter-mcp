@@ -674,6 +674,7 @@ def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, mo
         "notices_created": 0,
         "task_id": task_id,
         "dedupe_key": task_id,
+        "pairs_examined": 0,
     }
     assert tools.wait_evidence_worker_drained(timeout=2)
     # The enqueue observation is taken inside the evidence worker after
@@ -1057,7 +1058,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4}
+    assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4, "pairs_examined": 0}
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
     assert len(notices) == 4
     assert all(n["payload"]["route"] == "notice_ready" for n in notices)
@@ -1065,7 +1066,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
         assert conn.execute("SELECT COUNT(*) FROM conflicts WHERE notice_type IS NOT NULL").fetchone()[0] == 4
 
     second = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
+    assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 0}
     assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 4
 
 
@@ -2895,7 +2896,7 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: SameValue())
 
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
-    assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
+    assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 1}
     # A clean model decision is not counted as check degradation.
     degradation = tools._semantic_status()["check_degradation"]
     assert degradation["last_reason"] != "not_same_attribute_different_value"
@@ -2934,7 +2935,7 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
 
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
 
-    assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1}
+    assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1, "pairs_examined": 1}
     assert deadlines == [None]  # single-direction: one extraction per pair
 
 
@@ -2986,6 +2987,7 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     assert result == {
         "status": "completed", "outcome": "notices_created", "notices_created": 1,
         "truncated": True, "reasons_seen": ["qwen_budget_exhausted"],
+        "pairs_examined": 1,
     }
     assert deadlines == [None]  # single-direction: one extraction per pair
     assert len(tools.db.list_semantic_notices(status="open", limit=10)) == 1

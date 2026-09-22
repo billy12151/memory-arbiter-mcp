@@ -72,16 +72,27 @@ def test_replay_is_idempotent_on_identical_content() -> None:
         _envelope("t-ccc3", "主题甲", "内容一：金营平台需求管理"),
     ]
     with temp_library(embed_model=None) as tools:
-        id_map = replay_fixtures(tools, envelopes)
+        id_map, perf_rows = replay_fixtures(tools, envelopes)
         assert len(set(id_map.values())) == 2
         assert id_map["t-aaa1"] == id_map["t-ccc3"]
+        # 0.16.12 perf 采集：逐条写入计时行，字段齐且非负，产物可序列化
+        assert len(perf_rows) == len(envelopes)
+        assert perf_rows[2]["duplicate_replay"] is True
+        assert all(row["elapsed_ms"] >= 0 for row in perf_rows)
+        assert all(
+            {"fixture_key", "elapsed_ms", "duplicate_replay"} <= set(row) for row in perf_rows
+        )
+        assert json.dumps(perf_rows, ensure_ascii=False)
 
 
 def test_legacy_source_type_falls_back_to_unknown() -> None:
     assert "agent_observed" not in VALID_SOURCE_TYPES
     with temp_library(embed_model=None) as tools:
-        new_id, replayed = _remember(tools, _envelope("t-ddd4", "主题丙", "内容三", source_type="agent_observed"))
+        new_id, replayed, elapsed_ms = _remember(
+            tools, _envelope("t-ddd4", "主题丙", "内容三", source_type="agent_observed"),
+        )
         assert new_id is not None and replayed is False
+        assert elapsed_ms >= 0
 
 
 def test_recall_collection_shape() -> None:
@@ -89,7 +100,7 @@ def test_recall_collection_shape() -> None:
                  _envelope("t-bbb2", "mema 发版流程", "内容二：mema 发版流程检查单")]
     queries = [{"qid": "T01", "kind": "lookup", "query": "金营平台需求管理"}]
     with temp_library(embed_model=None) as tools:
-        id_map = replay_fixtures(tools, envelopes)
+        id_map, _ = replay_fixtures(tools, envelopes)
         collected = run_recall_queries(tools, queries, id_map)
         self_recall = run_self_recall(tools, envelopes, id_map)
     row = collected[0]

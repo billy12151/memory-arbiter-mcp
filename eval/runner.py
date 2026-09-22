@@ -28,6 +28,7 @@ sys.path.insert(0, str(REPO))
 
 from memory_arbiter import __version__ as MEMA_VERSION  # noqa: E402
 from memory_arbiter.config import Settings  # noqa: E402
+from memory_arbiter.constants import NOTICE_SYNC_WAIT_MS  # noqa: E402
 from memory_arbiter.db import MemoryDB  # noqa: E402
 from memory_arbiter.tools import MemoryTools  # noqa: E402
 
@@ -116,8 +117,8 @@ def temp_library(
             shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _remember(tools: MemoryTools, envelope: dict) -> tuple[int | None, bool]:
-    """写入一条 fixture，返回 (新库 id, 是否 duplicate_replay 幂等返回)."""
+def _remember(tools: MemoryTools, envelope: dict) -> tuple[int | None, bool, float]:
+    """写入一条 fixture，返回 (新库 id, 是否 duplicate_replay 幂等返回, 耗时 ms)."""
     data: dict[str, Any] = {
         "content": envelope["content"],
         "subject": envelope["subject"],
@@ -128,27 +129,37 @@ def _remember(tools: MemoryTools, envelope: dict) -> tuple[int | None, bool]:
         "metadata": envelope.get("metadata") or {},
         "agent_id": EVAL_AGENT,
     }
+    started = time.perf_counter()
     result = tools.memory("remember", data)
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     payload = result.get("data") or {}
     # 0.16.6 防重门：同内容重放幂等返回 ok=True + duplicate_replay（无 record）
     if payload.get("duplicate_replay"):
         replay_of = payload.get("replay_of") or {}
-        return int(replay_of["memory_id"]), True
+        return int(replay_of["memory_id"]), True, elapsed_ms
     if result.get("ok"):
         record = payload.get("record") or {}
-        return int(record["id"]), False
+        return int(record["id"]), False, elapsed_ms
     raise RuntimeError(f"fixture replay failed: {json.dumps(payload, ensure_ascii=False)[:400]}")
 
 
-def replay_fixtures(tools: MemoryTools, envelopes: list[dict], progress_every: int = 50) -> dict[str, int]:
-    """重放全部 fixtures；fixture_key（content_sha 寻址）→ 新库 id."""
+def replay_fixtures(
+    tools: MemoryTools, envelopes: list[dict], progress_every: int = 50,
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    """重放全部 fixtures；返回 (fixture_key→新库 id, 逐条写入耗时行)."""
     id_map: dict[str, int] = {}
+    perf_rows: list[dict[str, Any]] = []
     sha_to_key = {row["content_sha"]: row["fixture_key"] for row in envelopes}
     duplicates = 0
     started = time.perf_counter()
     for index, envelope in enumerate(envelopes, 1):
-        new_id, replayed = _remember(tools, envelope)
+        new_id, replayed, elapsed_ms = _remember(tools, envelope)
         id_map[envelope["fixture_key"]] = new_id
+        perf_rows.append({
+            "fixture_key": envelope["fixture_key"],
+            "elapsed_ms": elapsed_ms,
+            "duplicate_replay": replayed,
+        })
         duplicates += int(replayed)
         if index % progress_every == 0:
             print(f"[replay] {index}/{len(envelopes)} ({time.perf_counter() - started:.0f}s)")
@@ -160,7 +171,7 @@ def replay_fixtures(tools: MemoryTools, envelopes: list[dict], progress_every: i
     if duplicates:
         print(f"[replay] {duplicates} duplicate_replay (identical content, idempotent)")
     tools.wait_evidence_worker_drained(timeout=120.0)
-    return id_map
+    return id_map, perf_rows
 
 
 def _run_find(tools: MemoryTools, query: str, limit: int = 10) -> dict[str, Any]:
@@ -282,8 +293,10 @@ def run_similarity_suite(tools: MemoryTools, cases: list[dict]) -> dict[str, Any
     return {"anchor_ids": anchor_ids, "cases": results}
 
 
-def _remember_envelope(tools: MemoryTools, envelope: dict, pair_entity: str | None = None) -> tuple[int | None, bool, dict]:
-    """按冲突对成员 envelope 写入，返回 (新库 id, 是否幂等重放, 完整响应).
+def _remember_envelope(
+    tools: MemoryTools, envelope: dict, pair_entity: str | None = None,
+) -> tuple[int | None, bool, dict, float]:
+    """按冲突对成员 envelope 写入，返回 (新库 id, 是否幂等重放, 完整响应, 耗时 ms).
 
     pair_entity：写时语义检测的配对前提是两成员 metadata.entity/scope 完全
     相同（pipeline/evidence.py provenance 门）。真库历史快照大多未填这两
@@ -304,14 +317,16 @@ def _remember_envelope(tools: MemoryTools, envelope: dict, pair_entity: str | No
         "metadata": metadata,
         "agent_id": EVAL_AGENT,
     }
+    started = time.perf_counter()
     result = tools.memory("remember", data)
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     payload = result.get("data") or {}
     if payload.get("duplicate_replay"):
         replay_of = payload.get("replay_of") or {}
-        return int(replay_of["memory_id"]), True, result
+        return int(replay_of["memory_id"]), True, result, elapsed_ms
     if result.get("ok"):
         record = payload.get("record") or {}
-        return int(record["id"]), False, result
+        return int(record["id"]), False, result, elapsed_ms
     raise RuntimeError(f"pair member replay failed: {json.dumps(payload, ensure_ascii=False)[:300]}")
 
 
@@ -365,11 +380,12 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
         left_sha, right_sha = _sha_of(left), _sha_of(right)
         left_id = right_id = None
         right_result: dict = {}
+        right_write_ms: float | None = None
         if left_sha not in seen_shas:
-            left_id, _, _ = _remember_envelope(tools, left, pair_entity)
+            left_id, _, _, _ = _remember_envelope(tools, left, pair_entity)
             seen_shas.add(left_sha)
         if right_sha not in seen_shas:
-            right_id, _, right_result = _remember_envelope(tools, right, pair_entity)
+            right_id, _, right_result, right_write_ms = _remember_envelope(tools, right, pair_entity)
             seen_shas.add(right_sha)
             if right_id is None:
                 pass
@@ -378,6 +394,7 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
             "label": pair["label"],
             "skipped_member_replay": left_id is None or right_id is None,
             "sync": None, "async": None, "notice_missing": None,
+            "right_write_ms": right_write_ms,
             "_left_id": left_id, "_right_id": right_id,
             "_right_result": right_result.get("data") if right_result else None,
         })
@@ -388,8 +405,17 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
         check = ((right_result.get("data") or {}).get("semantic_conflict_check")) or {}
         task_id = str(check.get("task_id") or "")
         notice_row = _pair_notice_row(tools, int(left_id), int(right_id))
+        receipt: dict | None = None
         if task_id:
-            tools._semantic_worker.wait_task(task_id, timeout=180.0)
+            receipt = tools._semantic_worker.wait_task(task_id, timeout=180.0)
+        if receipt is not None:
+            # 0.16.12 perf：完成回执的预算消耗（pairs_examined 为 0.16.12
+            # 新增回执键）与降级标记，供 score.py perf 段离线汇总。
+            row["_receipt"] = {
+                key: receipt.get(key)
+                for key in ("status", "notices_created", "reasons_seen", "pairs_examined")
+                if key in receipt
+            }
         notice_final = _pair_notice_row(tools, int(left_id), int(right_id)) or notice_row
         # 三结局：识别以「conflicts 表出现该对 candidate notice」为准；
         # sync=同步窗内已完成且当场创建了 notice（notices_created>0）。
@@ -457,11 +483,12 @@ def main() -> int:
     recall: list[dict[str, Any]] | None = None
     self_recall: list[dict[str, Any]] | None = None
     similarity: dict[str, Any] | None = None
+    replay_perf: list[dict[str, Any]] | None = None
     if want_recall or want_similarity:
         suite_start = time.monotonic()
         with temp_library(embed_model, keep_db=args.keep_db) as tools:
             if want_recall:
-                id_map = replay_fixtures(tools, targets + distractors)
+                id_map, replay_perf = replay_fixtures(tools, targets + distractors)
                 print(f"[replay] library size={len(set(id_map.values()))}")
                 recall = run_recall_queries(tools, queries, id_map)
                 self_recall = run_self_recall(tools, targets, id_map)
@@ -490,8 +517,9 @@ def main() -> int:
             "targets": len(targets),
             "distractors": len(distractors),
             "semantic_conflict_enabled": want_conflict,
-            "conflict_sync_wait_ms": 3000,
+            "conflict_sync_wait_ms": NOTICE_SYNC_WAIT_MS,
         },
+        "replay_perf": replay_perf,
         "queries": recall,
         "self_recall": self_recall,
         "similarity": similarity,

@@ -372,6 +372,9 @@ class EvidencePipeline:
             early_result: dict[str, Any] = {
                 "status": "incomplete", "reason": truncation_reason,
                 "notices_created": 0, "reasons_seen": reasons_seen,
+                # Internal-truncation exits before the cross-memory loop even
+                # starts, so no pairs were examined yet (counter not yet live).
+                "pairs_examined": 0,
             }
             if internal_found:
                 early_result["internal_conflicts"] = internal_found
@@ -787,4 +790,7 @@ class EvidencePipeline:
             # Degradations may also occur on pairs before a later pair surfaces
             # a notice, so the list is attached to completed outcomes too.
             result["reasons_seen"] = reasons_seen
+        # 0.16.12 perf baseline: the examination budget actually consumed this
+        # run (additive receipt key; also visible on completed write receipts).
+        result["pairs_examined"] = int(pairs_examined)
         return result
