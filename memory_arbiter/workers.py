@@ -395,16 +395,34 @@ class SemanticConflictWorker:
 
     def _run(self) -> None:
         while True:
+            memory_id: int | None = None
+            snapshot: dict[str, Any] | None = None
+            idle_tick = False
             with self._cond:
                 while (not self._pending or self._paused) and not self._shutdown:
-                    self._cond.wait()
+                    # 0.17.0 P2-4.2: timed wait — an empty, unpaused queue
+                    # ticks into a bounded conflict-backlog drain; a queued
+                    # job's notify still wakes this immediately, so new
+                    # writes always preempt the backlog (owner rule).
+                    self._cond.wait(timeout=5.0)
+                    if not self._pending and not self._paused and not self._shutdown:
+                        idle_tick = True
+                        break
                 if self._shutdown and not self._pending:
                     return
                 if self._shutdown and self._paused:
                     return
-                memory_id = next(iter(self._pending))
-                snapshot = self._pending.pop(memory_id)
-                self._inflight.add(memory_id)
+                if not idle_tick:
+                    memory_id = next(iter(self._pending))
+                    snapshot = self._pending.pop(memory_id)
+                    self._inflight.add(memory_id)
+            if idle_tick:
+                try:
+                    self._tools._evidence.drain_conflict_backlog(limit=2)
+                except Exception:
+                    pass  # idle-path best effort; entries stay pending
+                continue
+            assert memory_id is not None and snapshot is not None
             error_message: str | None = None
             job_result: dict[str, Any] = {"status": "incomplete", "reason": "worker_error"}
             task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")

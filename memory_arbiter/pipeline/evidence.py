@@ -28,6 +28,7 @@ from ..semantic_conflict import (
     evaluate_single_direction_extraction,
     is_cross_evolution,
     notice_dedupe_key,
+    normalize_value,
     signal_extraction,
 )
 from ..text import canon_entity, canon_scope
@@ -64,6 +65,163 @@ class EvidencePipeline:
 
     def _ensure_semantic_backend(self) -> "SemanticBackend | None":
         return self._tools._ensure_semantic_backend()
+
+    def drain_conflict_backlog(self, limit: int = 2) -> int:
+        """0.17.0 P2-4.2: idle-worker consumption of the conflict backlog.
+
+        Bounded per call (``limit`` entries); new writes always win because
+        the caller only invokes this when the job queue is empty and rechecks
+        between entries. A stored extraction replays through the deterministic
+        gate without Qwen; a Qwen-less replay with no extraction lands
+        nothing (the entry stays pending for a backend-bearing pass — never
+        silently completed)."""
+        processed = 0
+        while processed < limit:
+            entry = self.db.conflict_backlog.take_next()
+            if entry is None:
+                break
+            left_id = int(entry["left_memory_id"])
+            right_id = int(entry["right_memory_id"])
+            # Version drift re-check at consumption time (refresh_stale is the
+            # bulk sweep; this is the per-entry guard).
+            rows = self.db.get_memories_by_ids([left_id, right_id])
+            left = rows.get(left_id)
+            right = rows.get(right_id)
+            if (
+                not left or not right
+                or str(left.get("status")) != "active" or str(right.get("status")) != "active"
+                or int(left.get("version") or 1) != int(entry["left_version"])
+                or int(right.get("version") or 1) != int(entry["right_version"])
+            ):
+                self.db.conflict_backlog.refresh_stale()
+                continue
+            extraction = entry.get("extraction") if isinstance(entry.get("extraction"), dict) else None
+            left_text = str(entry["left_text"] or "")
+            right_text = str(entry["right_text"] or "")
+            decision = decide_evidence(left_text, right_text)
+            if decision.action == "ignore" or is_cross_evolution(decision):
+                self.db.conflict_backlog.complete(int(entry["id"]))
+                processed += 1
+                continue
+            if extraction is None:
+                backend = self._ensure_semantic_backend()
+                if backend is None:
+                    break  # keep pending; a later backend-bearing pass retries
+                embedder, _warnings = self._ensure_embedder()
+                direct = direct_value_verdict(left_text, right_text, decision, embedder=embedder)
+                if direct is not None:
+                    self._record_backlog_notice(
+                        left, right, left_text, right_text, decision,
+                        str(direct[0]), str(direct[1]), str(direct[2]),
+                        reason="deterministic_same_key_value_diff",
+                    )
+                    self.db.conflict_backlog.complete(int(entry["id"]))
+                    processed += 1
+                    continue
+                def _env(memory: dict[str, Any], quote: str) -> dict[str, Any]:
+                    metadata_value = memory.get("metadata")
+                    metadata = metadata_value if isinstance(metadata_value, dict) else {}
+                    return {
+                        "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
+                        "tags": list(memory.get("tags") or [])[:20],
+                        "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
+                        "memory_id": int(memory.get("id") or 0),
+                        "version": int(memory.get("version") or 1),
+                        "event_time": memory.get("event_time"),
+                        "metadata": {k: metadata.get(k) for k in ("entity", "scope") if metadata.get(k)},
+                    }
+                try:
+                    forward = backend.classify_pair(
+                        _env(left, left_text), _env(right, right_text),
+                        retry_allowed=not self._semantic_worker.has_pending_jobs(),
+                    )
+                except TypeError:
+                    forward = backend.classify_pair(_env(left, left_text), _env(right, right_text))
+                gate = evaluate_single_direction_extraction(
+                    signal_extraction(forward), _env(left, left_text), _env(right, right_text),
+                )
+                if gate.state == "notice_ready":
+                    self._record_backlog_notice(
+                        left, right, left_text, right_text, decision,
+                        str(gate.attribute), str(gate.value_a), str(gate.value_b),
+                        reason=str(gate.reason),
+                    )
+                self.db.conflict_backlog.complete(int(entry["id"]))
+                processed += 1
+                continue
+            # Stored extraction replays through the deterministic gate (never
+            # re-spends Qwen — owner design #8).
+            attr = str(extraction.get("attribute") or "")
+            value_a = str(extraction.get("value_a") or "")
+            value_b = str(extraction.get("value_b") or "")
+            if attr and value_a and value_b and normalize_value(value_a) != normalize_value(value_b):
+                self._record_backlog_notice(
+                    left, right, left_text, right_text, decision,
+                    attr, value_a, value_b, reason="backlog_stored_extraction",
+                )
+            self.db.conflict_backlog.complete(int(entry["id"]))
+            processed += 1
+        return processed
+
+    def _record_backlog_notice(
+        self, left: dict[str, Any], right: dict[str, Any],
+        left_text: str, right_text: str, decision: Any,
+        attribute: str, value_a: str, value_b: str, *, reason: str,
+    ) -> None:
+        """Record one notice for a backlog pair through the standard channel
+        (dedupe/suppression identical to the write path)."""
+        left_id = int(left.get("id") or 0)
+        right_id = int(right.get("id") or 0)
+        left_version = int(left.get("version") or 1)
+        right_version = int(right.get("version") or 1)
+        raw_meta = left.get("metadata")
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        raw_peer_meta = right.get("metadata")
+        peer_metadata = raw_peer_meta if isinstance(raw_peer_meta, dict) else {}
+        entity = metadata.get("entity") if metadata.get("entity") == peer_metadata.get("entity") else None
+        scope = metadata.get("scope") if metadata.get("scope") == peer_metadata.get("scope") else None
+        if not entity or not scope:
+            return  # soft-invisible: slot provenance missing, dedupe will keep the pair calm
+        slot_key = {
+            "entity": canon_entity(entity), "attribute": attribute, "scope": canon_scope(scope),
+        }
+        slot_json = json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        self.db.record_semantic_notice(
+            memory_id=left_id, peer_id=right_id, severity="normal",
+            notice_type="semantic_evidence",
+            title=f"Possible memory change with #{right_id}",
+            message=str(decision.reason or "backlog"),
+            payload={
+                "route": "notice_ready", "reason": reason,
+                "prompt_version": PAIR_PROMPT_VERSION,
+                "anchors": decision.anchors,
+                "slot_key": slot_key,
+                "slot_provenance": {"entity": "metadata", "scope": "metadata", "attribute": "backlog"},
+                "member_versions": [
+                    {"memory_id": left_id, "version": left_version, "value": value_a,
+                     "evidence": {"quote": left_text}},
+                    {"memory_id": right_id, "version": right_version, "value": value_b,
+                     "evidence": {"quote": right_text}},
+                ],
+                "value_groups": [
+                    {"normalized_value": value_a, "display_value": value_a, "members": [f"{left_id}@{left_version}"]},
+                    {"normalized_value": value_b, "display_value": value_b, "members": [f"{right_id}@{right_version}"]},
+                ],
+                "candidate_key": {
+                    "detector_version": CONFLICT_DETECTOR_VERSION,
+                    "members": sorted([f"{left_id}@{left_version}", f"{right_id}@{right_version}"]),
+                    "evidence": [],
+                },
+                "left_evidence": {"text": left_text},
+                "right_evidence": {"text": right_text},
+                "backlog": True,
+            },
+            dedupe_key=notice_dedupe_key(
+                left_id, right_id, left_version, right_version, "semantic_evidence",
+            ),
+            left_version=left_version, right_version=right_version,
+            source="semantic_evidence",
+        )
 
     def index_memory(self, memory_id: int, record: dict[str, Any] | None = None) -> dict[str, Any]:
         current = record or self.db.get_memory(int(memory_id))

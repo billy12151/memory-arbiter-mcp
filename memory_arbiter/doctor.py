@@ -534,6 +534,17 @@ def _c_conflicts_scan_queue_backlog(ctx: _DoctorCtx) -> Finding:
     except sqlite3.Error:
         internal_pending = 0
     queue_backlog += internal_pending
+    # 0.17.0 P2-4.3: write-time conflict backlog rides the same visible
+    # metric (500-cap bounded; eviction/overflow shows in the evidence keys).
+    try:
+        cb_rows = ctx.conn.execute(
+            "SELECT status, COUNT(*) AS c FROM conflict_backlog GROUP BY status"
+        ).fetchall()
+        cb_counts = {str(row["status"]): int(row["c"]) for row in cb_rows}
+    except sqlite3.Error:
+        cb_counts = {}
+    cb_pending = cb_counts.get("pending", 0)
+    queue_backlog += cb_pending
     return _finding(
         "conflicts.scan_queue_backlog", queue_backlog < 100,
         (
@@ -543,7 +554,7 @@ def _c_conflicts_scan_queue_backlog(ctx: _DoctorCtx) -> Finding:
             "when convenient, let the agent read the queue "
             "(memory_repair task='scan_queue', action='page')"
         ),
-        evidence={**queue_counts, "backlog": queue_backlog, "internal_pending": internal_pending},
+        evidence={**queue_counts, "backlog": queue_backlog, "internal_pending": internal_pending, "conflict_backlog_pending": cb_pending},
     )
 
 

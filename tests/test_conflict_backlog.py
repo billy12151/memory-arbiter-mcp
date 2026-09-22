@@ -165,3 +165,46 @@ def test_ddl_idempotent_on_real_db(tmp_path: Path) -> None:
             conn.executescript(conflict_backlog_ddl())
             conn.commit()
         assert store.counts() == {}
+
+
+def test_drain_consumes_stored_extraction_and_lands_notice(tmp_path: Path) -> None:
+    """P2-4.2：stored extraction 直接过确定性门落 notice、条目 done；
+    version 漂移条目被 refresh_stale 收编不消化。"""
+    import sys
+    sys.path.insert(0, str(REPO / "tests"))
+    from test_vnext_evidence import make_tools
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "prod"}
+    a = tools.memory_write(
+        content="连接池上限为 10。", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(
+        content="连接池上限为 99。", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_evidence_worker_drained(timeout=5)
+    result = tools.db.conflict_backlog.enqueue(
+        candidate_key_hash="kb-1",
+        left_memory_id=a["id"], left_version=1,
+        right_memory_id=b["id"], right_version=1,
+        left_text="连接池上限为 10。", right_text="连接池上限为 99。",
+        pair_score=0.6,
+        extraction={"attribute": "连接池上限", "value_a": "10", "value_b": "99"},
+    )
+    assert result["outcome"] == "queued"
+    processed = tools._evidence.drain_conflict_backlog(limit=2)
+    assert processed == 1
+    assert tools.db.conflict_backlog.counts().get("done") == 1
+    notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == a["id"]]
+    assert len(notices) == 1 and notices[0]["payload"].get("backlog") is True
+
+    # version 漂移：入队后编辑左侧 → 消化时判 stale，不落 notice 不计 processed
+    tools.db.conflict_backlog.enqueue(
+        candidate_key_hash="kb-2",
+        left_memory_id=a["id"], left_version=1,
+        right_memory_id=b["id"], right_version=1,
+        left_text="x", right_text="y", pair_score=0.1,
+    )
+    tools.db.edit_memory_intent(a["id"], new_content="连接池上限为 20。", reason="edit")
+    refreshed = tools._evidence.drain_conflict_backlog(limit=2)
+    assert refreshed == 0
+    assert tools.db.conflict_backlog.counts().get("stale", 0) >= 1
