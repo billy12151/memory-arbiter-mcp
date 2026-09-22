@@ -15,7 +15,9 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "eval"))
 
 from runner import (  # noqa: E402
+    FIXTURES,
     VALID_SOURCE_TYPES,
+    _load_jsonl,
     _remember,
     build_settings,
     replay_fixtures,
@@ -93,6 +95,51 @@ def test_legacy_source_type_falls_back_to_unknown() -> None:
         )
         assert new_id is not None and replayed is False
         assert elapsed_ms >= 0
+
+
+def test_pairs_large_fixture_schema() -> None:
+    """P0-T2 中大型用例组：schema/体量/单元数/标签/埋点唯一性守卫。"""
+    from memory_arbiter.evidence import local_text_units
+
+    rows = _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
+    regular_ids = {row["pair_id"] for row in _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")}
+    assert 6 <= len(rows) <= 8
+    conflict = [row for row in rows if row["label"] == "true_conflict"]
+    coexist = [row for row in rows if row["label"] == "coexist"]
+    assert 2 <= len(conflict) <= 5 and 1 <= len(coexist) <= 3
+    for row in rows:
+        assert row["shape"] == "large_unit"
+        assert row["label"] in {"true_conflict", "coexist", "noise"}
+        assert row["pair_id"] not in regular_ids  # 不与常规对集撞 id
+        units_seen: dict[str, int] = {}
+        for side in ("left", "right"):
+            member = row[side]
+            for field in ("content", "subject", "tags", "workspace", "event_time",
+                          "source_type", "metadata", "memory_id"):
+                assert field in member
+            content = member["content"]
+            assert 4 <= len(content.encode("utf-8")) / 1024 <= 8, (row["pair_id"], side)
+            units = local_text_units(member["subject"], content)
+            assert 30 <= len(units) <= 60, (row["pair_id"], side, len(units))
+            units_seen[side] = len(units)
+        # 左右单元数一致（分歧以等位替换单元实现，便于逐单元对齐）
+        left_units = [u.text for u in local_text_units(row["left"]["subject"], row["left"]["content"])]
+        right_units = [u.text for u in local_text_units(row["right"]["subject"], row["right"]["content"])]
+        assert len(left_units) == len(right_units)
+        diffs = [i for i, (a, b) in enumerate(zip(left_units, right_units)) if a != b]
+        if row["label"] == "true_conflict":
+            assert len(diffs) == 1, (row["pair_id"], diffs)  # 单一冲突埋点，可归因
+        else:
+            assert len(diffs) >= 1  # 共存对：有差异但无对立决策
+
+
+def test_label_overrides_covers_large_pairs_audit() -> None:
+    import json
+
+    overrides = json.loads((FIXTURES / "conflict" / "label_overrides.json").read_text(encoding="utf-8"))
+    rows = _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
+    for row in rows:
+        assert row["pair_id"] in overrides  # 自标审计已登记（null=不改 label）
 
 
 def test_recall_collection_shape() -> None:

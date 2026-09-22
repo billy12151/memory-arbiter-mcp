@@ -330,8 +330,12 @@ def _remember_envelope(
     raise RuntimeError(f"pair member replay failed: {json.dumps(payload, ensure_ascii=False)[:300]}")
 
 
-def _pair_notice_row(tools: MemoryTools, left_id: int, right_id: int) -> dict | None:
-    """查临时库 conflicts 表：成员同时含 left/right 的 candidate 语义 notice 行."""
+def _pair_notice_row(tools: MemoryTools, left_id: int, right_id: int) -> tuple[dict | None, int]:
+    """查临时库 conflicts 表：成员同时含 left/right 的 candidate 语义 notice 行.
+
+    返回 (首个匹配行或 None, 匹配行数)——0.16.12 起 large_unit 对埋了多个
+    分歧点，notice_count 用于观察第 2/3 个埋点是否进入 Qwen 预算。
+    """
     import sqlite3 as _sq
 
     conn = _sq.connect(tools.settings.db_path)
@@ -341,14 +345,29 @@ def _pair_notice_row(tools: MemoryTools, left_id: int, right_id: int) -> dict | 
             "SELECT id, conflict_point, notice_type, notice_message, created_at "
             "FROM conflicts WHERE status='candidate' ORDER BY id",
         ).fetchall()
+        matched: list[dict] = []
         for row in rows:
             members = conn.execute(
                 "SELECT member_versions FROM conflicts WHERE id=?", (row["id"],),
             ).fetchone()
             ids = {int(m["memory_id"]) for m in json.loads(members["member_versions"])}
             if left_id in ids and right_id in ids:
-                return dict(row)
-        return None
+                matched.append(dict(row))
+        return (matched[0] if matched else None), len(matched)
+    finally:
+        conn.close()
+
+
+def _evidence_unit_count(tools: MemoryTools, memory_id: int) -> int:
+    """drain 后该记忆实际发布的 evidence 单元数（cap 观测，64 上限）。"""
+    import sqlite3 as _sq
+
+    conn = _sq.connect(tools.settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (int(memory_id),),
+        ).fetchone()
+        return int(row[0])
     finally:
         conn.close()
 
@@ -404,7 +423,7 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
             continue
         check = ((right_result.get("data") or {}).get("semantic_conflict_check")) or {}
         task_id = str(check.get("task_id") or "")
-        notice_row = _pair_notice_row(tools, int(left_id), int(right_id))
+        notice_row, _ = _pair_notice_row(tools, int(left_id), int(right_id))
         receipt: dict | None = None
         if task_id:
             receipt = tools._semantic_worker.wait_task(task_id, timeout=180.0)
@@ -416,7 +435,10 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
                 for key in ("status", "notices_created", "reasons_seen", "pairs_examined")
                 if key in receipt
             }
-        notice_final = _pair_notice_row(tools, int(left_id), int(right_id)) or notice_row
+        notice_final, notice_count = _pair_notice_row(tools, int(left_id), int(right_id))
+        notice_final = notice_final or notice_row
+        row["notice_count"] = notice_count
+        row["units"] = _evidence_unit_count(tools, int(right_id))
         # 三结局：识别以「conflicts 表出现该对 candidate notice」为准；
         # sync=同步窗内已完成且当场创建了 notice（notices_created>0）。
         identified = notice_final is not None or int(check.get("notices_created") or 0) > 0
@@ -499,10 +521,13 @@ def main() -> int:
     conflict: list[dict[str, Any]] | None = None
     if want_conflict:
         suite_start = time.monotonic()
+        # 0.16.12 P0-T2：常规对集 + 中大型 large_unit 对集合并执行
         conflict_pairs = _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
+        conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
         with temp_library(embed_model, qwen_model=qwen_model) as tools:
             conflict = run_conflict_suite(tools, conflict_pairs)
-        print(f"[timer] conflict suite {time.monotonic() - suite_start:.0f}s (66 pairs, 3s sync window + Qwen)")
+        print(f"[timer] conflict suite {time.monotonic() - suite_start:.0f}s "
+              f"({len(conflict_pairs)} pairs, 3s sync window + Qwen)")
 
     raw = {
         "suite": args.suite,

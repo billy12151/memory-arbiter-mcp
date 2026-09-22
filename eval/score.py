@@ -127,10 +127,14 @@ def score_conflict(raw: dict) -> dict[str, Any] | None:
     if conflict is None:
         return None
     valid = [row for row in conflict if not row["skipped_member_replay"]]
-    # runner 采集不带 shape：按 pair_id 从对集 join（对集是 shape 的权威源）
+    # runner 采集不带 shape：按 pair_id 从对集 join（对集是 shape 的权威源）；
+    # 0.16.12 起合并 pairs_large.jsonl（large_unit 中大型用例组）
     shape_of = {
         pair["pair_id"]: pair.get("shape") or "governed_negative"
-        for pair in _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
+        for pair in (
+            _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
+            + _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
+        )
     }
 
     def _outcome_row(rows: list[dict]) -> dict[str, Any]:
@@ -168,7 +172,7 @@ def score_conflict(raw: dict) -> dict[str, Any] | None:
         },
         "by_shape": {
             shape: _outcome_row([r for r in valid if shape_of.get(r["pair_id"], "governed_negative") == shape])
-            for shape in ("scan_evolution", "governed_negative", "write_opposition")
+            for shape in ("scan_evolution", "governed_negative", "write_opposition", "large_unit")
         },
     }
 
