@@ -451,6 +451,12 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
             f"- {gate_result['gate']}（相对下降阈值 {gate_result['rel_drop_threshold']:.0%}）",
         ]
         for failure in gate_result["failures"]:
+            if failure.get("direction") == "corpus_mismatch":
+                lines.append(
+                    f"  - {failure['metric']}: 基线 {failure['baseline']} vs 当前 {failure['current']}"
+                    f"（{failure.get('note') or '语料版本不一致'}）"
+                )
+                continue
             if failure.get("direction") == "lower_is_better":
                 lines.append(
                     f"  - {failure['metric']}（越低越好）: {failure['baseline']} → {failure['current']}"
