@@ -3,6 +3,18 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.16.12] — 2026-09-22
+
+Performance Part 1（写入/查询链路提速，行为不变）。21 项任务全落地，两轮 review（第二轮对抗性）累计 12 项修复；全量 harness 两轮对 0.16.11 三轮基线回归门 PASSED、召回/冲突/相似提示行为指标逐位一致。harness 口径：写入 p50 **463.8→318.0ms（-31%）**、查询 p50 **173.7→116.7ms（-33%）**；真实库 KNN 工作负载 **51.8s→6.8s（7.65x）**（scripts/knn_old_new_gate.py，476 组新旧对拍）。
+
+### Changed
+
+- **perf(knn): evidence_knn/subject_tags_knn rowid-IN 预过滤改写。** workspace/黑名单/exclude 谓词全部移入 `v.id IN (SELECT …)` 子查询——spike 实证 sqlite-vec 将其下推进 vec0 扫描且 k 作用于过滤后集合，故 `k=requested_k` 单次执行，退役 `db/_knn.py` 的 COUNT+k×4 窗口循环。跨 workspace 饥饿结构性消失；旧路在 k 超 vec0 4096 上限时静默空返（生产中被 except 吞掉）的缺陷一并消除。上线门：真实库 476 组对比 434 组逐字节一致 + 0 tie 序差 + 5 组旧路饥饿欠返回（前缀证）+ 37 组旧路上限崩溃。**注意：vec 模式现要求 SQLite ≥3.38**（vtab_in 依赖），不满足时 warn 并降级 FTS5（本机 3.53.4）。
+- **perf(read): 查询链路六项。** ① 查询 embedding LRU 缓存（128 条，key=space+embedder 谱系+设备 epoch+query，GPU→CPU 降级即失效）；② notice claim 只读预检——零 pending 时旁路 BEGIN IMMEDIATE（每次产品面调用省一次写锁往返）；③ memory_search 冲突组查询去重（signal 挂接与 unresolved_conflict_count 共享一次查询）；④ batch_read 单连接批量预取（50 id 从 ≥50 连接降到 3）；⑤ outline 查表化（真实库 632/632 零不一致审计通过，当前版本无行回退重解析；bump 分段逻辑须重跑 `scripts/audit_outline_table_parity.py`）；⑥ linked_open_items per-tag df 指纹缓存（COUNT+SUM(version)，tags-only/workspace 迁移等盲区写点显式失效）。
+- **perf(write): 写入链路六项。** ① edit 冗余 re-embed 跳过（(subject,tags,content) 派生三元组对比：纯内容编辑不再重嵌 subject/tags 向量、等值编辑全跳）；② content_sha 列复用（insert/edit 即时维护，evidence 快照/冲突校验三处重算消除；publish 内 stale 校验重算保留——本质是校验）；③ edit 双 get_memory 合并；④ boot backfill 64 行分批事务+后台 daemon 线程（首写/首查不再阻塞于存量重嵌入；回填带快照输入复核防并发编辑回退；shutdown 有界等待规避 Metal 退出崩溃）；⑤ placement hint 零额外查询（直接消费 knn hit 自带字段）；⑥ process_conflicts 全 job 单只读连接+BEGIN 快照（连接数 O(单元+对)→O(1)，job 内读一致性反而更优）。
+- **perf(db): memories(status, ingest_time) 幂等 additive 索引**——服务 recent/browse 的 COUNT 与 ORDER BY ingest_time DESC；零查询逻辑改动。
+- **feat(eval): harness 性能基线设施（P0）。** runner 逐条写入计时+冲突行 right_write_ms/units/notice_count+wait_task 回执捕获；conflict 语料扩至 **conflict-v2-large**（66→74 对，新增 8 对 large_unit 中大型用例：数值直通/文本结论/稀释埋点/共存负例，label_overrides 全登记自标审计）；score.py 增 perf 段（informational，`_flatten` 显式排除绝不进回归门）+ gate 前置校验两侧 `env.conflict_corpus_version` 一致（拒绝跨语料对比）；process_conflicts 完成回执新增 additive 键 `pairs_examined`（完成态写响应可见）。新基线入库 `eval/baselines/baseline-0.16.11.json`（对比唯一口径）。
+
 ## [0.16.11] — 2026-09-20
 
 ### Changed

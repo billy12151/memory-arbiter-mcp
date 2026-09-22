@@ -1,3 +1,3 @@
 """Memory Arbiter MCP package."""
 
-__version__ = "0.16.11"
+__version__ = "0.16.12"
