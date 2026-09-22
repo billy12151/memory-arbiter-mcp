@@ -519,25 +519,34 @@ def test_product_server_exposes_linked_open_items_option(tmp_path: Path) -> None
 
 
 def test_df_cache_invalidates_on_tag_edit(tmp_path: Path) -> None:
-    """0.16.12 P1-T6：edit 改 tags 后指纹变（version+1），下一次 find 的
-    linked_open_items 立即用新 df——缓存不串味。"""
+    """0.16.12 P1-T6：tags-only 编辑（不 bump version）显式失效 df 缓存——
+    用 stoplist 阈值（df/active ≥ 0.20）制造可判别跳变：加 tag 前 alpha
+    df=2/11=0.18 不进 stoplist（todo 候选可见），给 3 行补 alpha 后
+    df=5/11=0.45 进 stoplist（候选消失）。若缓存未失效，第二个 find 仍用
+    旧 df，todo-x 仍会出现。"""
     tools = _tools(tmp_path)
-    # 结果条（带 meaningful tag）+ 两条 todo 候选
-    _write(tools, content="结果条", subject="result", tags=["proj"], workspace="ws")
-    _write(tools, content="todo 甲", subject="todo-a", tags=["todo", "proj"], workspace="ws")
-    _write(tools, content="todo 乙", subject="todo-b", tags=["todo", "other"], workspace="ws")
-    first = tools.memory("find", {"query": "result", "limit": 10})
+    _write(tools, content="结果条正文", subject="result", tags=["alpha"], workspace="ws")
+    _write(tools, content="todo 候选条目", subject="todo-x", tags=["todo", "alpha"], workspace="ws")
+    filler = [
+        _write(tools, content=f"填充条目 {i}", subject=f"filler-{i}", tags=["fill"], workspace="ws")
+        for i in range(9)
+    ]
+    first = tools.memory("find", {"query": "结果条正文", "limit": 10})
     assert first["ok"], first
     assert tools.db._linked_df_cache, "df 缓存应已回填"
-    # edit：给 todo 乙补 proj tag（version 递增 → 指纹变 → 缓存失效）
-    todo_b = tools.memory("find", {"query": "todo 乙", "limit": 5})
-    target = next(
-        r["id"] for r in todo_b["data"]["results"] if "todo-b" in str(r.get("subject"))
-    )
-    edited = tools.memory_edit(memory_id=target, tags_only=True, add_tags=["proj"])
-    assert edited.get("ok"), edited
-    second = tools.memory("find", {"query": "result", "limit": 10})
+    linked_first = {
+        str(item.get("subject")) for item in (first["data"].get("linked_open_items") or [])
+    }
+    assert any("todo-x" in subj for subj in linked_first), linked_first  # df=0.18 未拦
+
+    for mid in filler[:3]:
+        edited = tools.memory_edit(memory_id=mid, tags_only=True, add_tags=["alpha"])
+        assert edited.get("ok"), edited
+    second = tools.memory("find", {"query": "结果条正文", "limit": 10})
     assert second["ok"], second
-    linked = second["data"].get("linked_open_items") or []
-    subjects = {str(item.get("subject")) for item in linked}
-    assert any("todo-b" in s for s in subjects), f"edit 后的 tag 必须立即生效: {subjects}"
+    linked_second = {
+        str(item.get("subject")) for item in (second["data"].get("linked_open_items") or [])
+    }
+    assert not any("todo-x" in subj for subj in linked_second), (
+        f"tags-only 编辑后 df 必须立即失效（alpha 已进 stoplist）: {linked_second}"
+    )

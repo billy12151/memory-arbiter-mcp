@@ -543,6 +543,9 @@ def main() -> int:
             "distractors": len(distractors),
             "semantic_conflict_enabled": want_conflict,
             "conflict_sync_wait_ms": NOTICE_SYNC_WAIT_MS,
+            # 0.16.12 P0-T2 起冲突对集= pairs.jsonl + pairs_large.jsonl；
+            # 语料变更必须 bump 此版本号并重建基线（第一轮 review finding）
+            "conflict_corpus_version": "conflict-v2-large",
         },
         "replay_perf": replay_perf,
         "queries": recall,

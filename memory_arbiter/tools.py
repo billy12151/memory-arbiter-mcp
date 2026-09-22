@@ -906,6 +906,8 @@ class MemoryTools:
         prepare per chunk, commit in one short transaction, failures leave
         rows missing for the next restart.
         """
+        from .pipeline.operations import _embed_input_profile
+
         rows = self.db.missing_summary_vec_rows()
         written = 0
         try:
@@ -918,9 +920,16 @@ class MemoryTools:
             pass
         for start in range(0, len(rows), 64):
             chunk = rows[start:start + 64]
-            prepared: list[tuple[int, list[float]]] = []
+            # prepared carries the snapshot's derived-input profile: under the
+            # chunk's write lock we re-check status AND that the row's
+            # subject/tags/content still match the snapshot — a concurrent
+            # edit's refresh_*_vector may already have written the NEW vector,
+            # and overwriting it with the snapshot's embedding would regress
+            # the row until its next edit (first-round review finding).
+            prepared: list[tuple[int, list[float], tuple[str, str, str]]] = []
             for row in chunk:
                 try:
+                    profile = _embed_input_profile(row)
                     er = embedder.embed_text(
                         prefix="",
                         body=self._summary_embed_text(
@@ -928,24 +937,27 @@ class MemoryTools:
                         ),
                     )
                     if er and er.embedding:
-                        prepared.append((int(row["id"]), [float(x) for x in er.embedding]))
+                        prepared.append((int(row["id"]), [float(x) for x in er.embedding], profile))
                 except Exception:
                     continue
-            for memory_id, vector in prepared:
-                # 0.16.12 P2-T4 step 1: one short write transaction per 64-row
-                # chunk (mirroring _backfill_subject_tags_vectors) instead of
-                # one upsert_summary_vector transaction per row — the embed
-                # above already ran outside the transaction, and the active
-                # status re-check happens under this chunk's write lock.
-                try:
-                    with self.db.write_transaction() as conn:
-                        status_row = conn.execute(
-                            "SELECT status FROM memories WHERE id = ?", (memory_id,),
+            # 0.16.12 P2-T4: ONE short write transaction per 64-row chunk
+            # (mirroring _backfill_subject_tags_vectors) — the embed above ran
+            # outside the transaction; status/inputs re-check under the lock.
+            try:
+                with self.db.write_transaction() as conn:
+                    for memory_id, vector, profile in prepared:
+                        fresh = conn.execute(
+                            "SELECT status, subject, tags, content FROM memories WHERE id = ?",
+                            (memory_id,),
                         ).fetchone()
-                        if status_row is None or str(status_row["status"]) != "active":
+                        if fresh is None or str(fresh["status"]) != "active":
                             conn.execute(
                                 "DELETE FROM memory_summary_vec WHERE id = ?", (memory_id,),
                             )
+                            continue
+                        if _embed_input_profile(dict(fresh)) != profile:
+                            # Inputs moved since the snapshot — a fresher
+                            # refresh already owns this row; skip, don't regress.
                             continue
                         conn.execute(
                             "DELETE FROM memory_summary_vec WHERE id = ?", (memory_id,),
@@ -955,8 +967,8 @@ class MemoryTools:
                             (memory_id, json.dumps(vector)),
                         )
                         written += 1
-                except Exception:
-                    continue
+            except Exception:
+                continue
         return written
 
     def _backfill_subject_tags_vectors(self, embedder: "ManagedEmbedder") -> int:
@@ -972,6 +984,7 @@ class MemoryTools:
         next process start. Returns the number of vectors actually written
         (not the number of candidates).
         """
+        from .pipeline.operations import _embed_input_profile
         from .pipeline.write import WritePipeline
 
         rows = self.db.missing_subject_tags_rows()
@@ -989,7 +1002,10 @@ class MemoryTools:
             pass
         for start in range(0, len(rows), 64):
             chunk = rows[start:start + 64]
-            prepared: list[tuple[int, str]] = []
+            # Snapshot profile (subject, tags) guards the same race the
+            # summary backfill guards: a concurrent edit's refresh may have
+            # already written the NEW vector — skip instead of regressing.
+            prepared: list[tuple[int, str, tuple[str, str]]] = []
             for row in chunk:
                 try:
                     er = embedder.embed_text(
@@ -1002,20 +1018,23 @@ class MemoryTools:
                         prepared.append((
                             int(row["id"]),
                             json.dumps([float(x) for x in er.embedding]),
+                            _embed_input_profile(row)[:2],
                         ))
                 except Exception:
                     continue
             with self.db.write_transaction() as conn:
-                for memory_id, blob in prepared:
+                for memory_id, blob, profile in prepared:
                     # Re-check under the write lock: a retire that committed
                     # after the snapshot must not leave a stale vector.
-                    status_row = conn.execute(
-                        "SELECT status FROM memories WHERE id = ?", (memory_id,)
+                    fresh = conn.execute(
+                        "SELECT status, subject, tags FROM memories WHERE id = ?", (memory_id,)
                     ).fetchone()
-                    if status_row is None or str(status_row["status"]) != "active":
+                    if fresh is None or str(fresh["status"]) != "active":
                         conn.execute(
                             "DELETE FROM subject_tags_vec WHERE id = ?", (memory_id,),
                         )
+                        continue
+                    if _embed_input_profile(dict(fresh))[:2] != profile:
                         continue
                     # vec0 rejects conflict clauses; the delete keeps the
                     # statement safe against a concurrent publish.

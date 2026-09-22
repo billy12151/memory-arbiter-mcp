@@ -1743,6 +1743,9 @@ class WorkspaceStore:
         )
         if (cur.rowcount or 0) == 0:
             return False, ["memory id not found."]
+        # Scope membership changed without COUNT/version movement — the
+        # linked-df fingerprint cannot see this; drop the cache explicitly.
+        self._db.invalidate_linked_df_cache()
         conn.execute(
             "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
             (canonical, utc_now_iso()),
@@ -1855,6 +1858,8 @@ class WorkspaceStore:
         )
         if (cur.rowcount or 0) == 0:
             return False, ["memory id not found."]
+        # Same fingerprint blind spot as the canonical setter above.
+        self._db.invalidate_linked_df_cache()
         if not is_default_workspace_term(workspace):
             # The global pool is a reserved term, never a registry row.
             conn.execute(

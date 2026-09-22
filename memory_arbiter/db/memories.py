@@ -311,25 +311,35 @@ class MemoriesStore:
         with self.connection() as conn:
             return self._fetch_memory(conn, memory_id)
 
-    def get_memories_by_ids(self, ids: "list[int]") -> dict[int, dict[str, Any]]:
+    def get_memories_by_ids(
+        self, ids: "list[int]", *, conn: sqlite3.Connection | None = None,
+    ) -> dict[int, dict[str, Any]]:
         """Batch row fetch for id-driven reads (0.16.12 P1-T4): ONE connection
         (chunked IN) instead of one get_memory connection per id. Visibility
-        is NOT applied here — callers run the shared caller predicate."""
-        if not self._db_available or not ids:
+        is NOT applied here — callers run the shared caller predicate.
+        ``conn`` (P2-T6): optional caller-owned connection to reuse."""
+        if (conn is None and not self._db_available) or not ids:
             return {}
         unique = sorted({int(i) for i in ids})
         out: dict[int, dict[str, Any]] = {}
-        with self.connection() as conn:
+
+        def _fetch(c: sqlite3.Connection) -> None:
             for start in range(0, len(unique), 500):
                 chunk = unique[start:start + 500]
                 placeholders = ",".join("?" for _ in chunk)
-                rows = conn.execute(
+                rows = c.execute(
                     f"SELECT * FROM memories WHERE id IN ({placeholders})",
                     chunk,
                 ).fetchall()
                 for row in rows:
                     record = _row_to_dict(row)
                     out[int(record["id"])] = record
+
+        if conn is not None:
+            _fetch(conn)
+            return out
+        with self.connection() as owned:
+            _fetch(owned)
         return out
 
     def get_memory_for_workspace(
@@ -1124,6 +1134,9 @@ class MemoriesStore:
             "UPDATE memories SET tags=? WHERE id=?",
             (json.dumps(new_tags_list, ensure_ascii=False), memory_id),
         )
+        # Tags changed without a version bump — the linked-df fingerprint
+        # (COUNT+SUM(version)) cannot see this; drop the cache explicitly.
+        self._db.invalidate_linked_df_cache()
         if self.state.fts5_available:
             old_content = current["content"]
             old_subject = current.get("subject")

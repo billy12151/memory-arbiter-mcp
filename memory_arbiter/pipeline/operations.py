@@ -35,14 +35,22 @@ def _embed_input_profile(record: dict[str, Any] | None) -> tuple[str, str, str]:
     """Derived-embedding input profile (0.16.12 P2-T1): the normalized
     (subject, tags, content) triple the two recall-vector refreshes re-embed
     from. Row-level equality of this triple means the refreshed vectors would
-    be byte-identical, so the re-embed is skippable."""
+    be byte-identical, so the re-embed is skippable. Accepts tags in either
+    shape — the raw JSON string (SQL rows) or an already-parsed list
+    (missing_*_rows snapshots) — so profiles compare equal across sources."""
     if not record:
         return ("", "", "")
-    try:
-        tags = json.loads(record.get("tags") or "[]")
-        tag_profile = " ".join(sorted(str(t) for t in tags if str(t).strip()))
-    except (TypeError, ValueError):
-        tag_profile = str(record.get("tags") or "")
+    raw_tags = record.get("tags")
+    if isinstance(raw_tags, str):
+        try:
+            tags = json.loads(raw_tags or "[]")
+        except (TypeError, ValueError):
+            tags = []
+    elif isinstance(raw_tags, (list, tuple)):
+        tags = list(raw_tags)
+    else:
+        tags = []
+    tag_profile = " ".join(sorted(str(t) for t in tags if str(t).strip()))
     return (
         str(record.get("subject") or ""),
         tag_profile,

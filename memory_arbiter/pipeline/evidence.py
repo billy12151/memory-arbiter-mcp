@@ -137,19 +137,23 @@ class EvidencePipeline:
         if row_sha != snapshot.get("content_hash"):
             return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
         # 0.16.12 P2-T6: the whole job body runs on ONE read-only connection
-        # — per-unit evidence_knn, per-pair exists/closed probes and the peer
-        # prefetch all reuse it instead of opening one connection each. Under
-        # WAL this read snapshot is MORE consistent than the previous
-        # open-per-read behaviour (each old read saw a different point in
-        # time); the job's own notice writes keep their own per-notice write
-        # transactions and never touch this connection.
-        job_conn = self.db._new_connection()
-        try:
-            return self._process_conflicts_job(
-                memory_id, snapshot, record, job_conn, content, row_sha,
-            )
-        finally:
-            job_conn.close()
+        # under an explicit read transaction — per-unit evidence_knn, per-pair
+        # exists/closed probes and the peer prefetch all reuse it instead of
+        # opening one connection each. The BEGIN gives the job a single WAL
+        # snapshot (the old open-per-read behaviour saw a different
+        # point-in-time on every read); the job's own notice writes keep their
+        # own per-notice write transactions and never touch this connection.
+        with self.db.connection() as job_conn:
+            job_conn.execute("BEGIN")
+            try:
+                return self._process_conflicts_job(
+                    memory_id, snapshot, record, job_conn, content, row_sha,
+                )
+            finally:
+                try:
+                    job_conn.rollback()
+                except sqlite3.Error:
+                    pass
 
     def _process_conflicts_job(
         self, memory_id: int, snapshot: dict[str, Any],
@@ -559,7 +563,9 @@ class EvidencePipeline:
 
         # P2-T6: batch-prefetch every candidate peer in ONE id-IN query
         # instead of one get_memory connection per pair.
-        peer_rows = self.db.get_memories_by_ids([int(pid) for pid, _triple in ordered])
+        peer_rows = self.db.get_memories_by_ids(
+            [int(pid) for pid, _triple in ordered], conn=job_conn,
+        )
         for peer_id, (hit, unit, decision) in ordered:
             peer = peer_rows.get(int(peer_id))
             if not peer or peer.get("status") != "active":

@@ -275,7 +275,7 @@ def compute_perf(raw: dict) -> dict[str, Any] | None:
             ),
             "pairs_examined_capped_rows": sum(
                 1 for r in with_receipt
-                if any(str(t).endswith("_capped") for t in (r.get("reasons_seen") or []))
+                if "pairs_examined_capped" in (r.get("reasons_seen") or [])
             ),
             "avg_units": (
                 round(sum(units_values) / len(units_values), 1) if units_values else None
@@ -422,7 +422,7 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
         if window:
             lines.append(
                 f"- 冲突窗：完成率 **{window['completed_rate']}**（{window['completed']}/{window['n']}） · "
-                f"平均检查对数 {window['avg_pairs_examined']}（预算 {window['pairs_budget']}，"
+                f"平均 Qwen 检查对数 {window['avg_pairs_examined']}（预算 {window['pairs_budget']}，"
                 f"capped 行 {window['pairs_examined_capped_rows']}） · "
                 f"平均单元 {window['avg_units']}（预算 {window['units_budget']}，"
                 f"capped 行 {window['units_capped_rows']}） · 平均 notice 数 {window['avg_notice_count']}"

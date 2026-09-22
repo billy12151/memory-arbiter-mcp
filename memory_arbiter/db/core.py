@@ -93,9 +93,10 @@ class MemoryDB:
         self.state = DegradeState()
         self._db_available = False
         # 0.16.12 P1-T6: per-scope linked-open-items df cache. Fingerprint =
-        # (COUNT(active), SUM(version)) — every product write path moves one
-        # of the two (insert/delete/status flip ⇒ COUNT; edit ⇒ version), so
-        # a matching fingerprint means the df map cannot have changed.
+        # (COUNT(active), SUM(version)) — most product write paths move one of
+        # the two (insert/delete/status flip ⇒ COUNT; edit ⇒ version); the
+        # paths that don't (tags-only edits, workspace moves) invalidate
+        # explicitly via invalidate_linked_df_cache().
         self._linked_df_cache: dict[tuple[str, ...], tuple[tuple[int, int], dict[str, int]]] = {}
         self._linked_df_cache_lock = threading.Lock()
         self._sqlite_vec_loadable = False
@@ -122,6 +123,15 @@ class MemoryDB:
             self._init_database(
                 initialize_schema=allow_incomplete or generation in {"missing", "empty"},
             )
+
+    def invalidate_linked_df_cache(self) -> None:
+        """Explicit df-cache invalidation for the write paths the
+        (COUNT(active), SUM(version)) fingerprint cannot see: tags-only
+        edits (no version bump) and workspace moves/renames (scope membership
+        changes without count/version movement) — first-round review finding.
+        Clearing all scopes is deliberately conservative."""
+        with self._linked_df_cache_lock:
+            self._linked_df_cache.clear()
 
     # ------------------------------------------------------------------
     #  Connection factory + context managers
@@ -459,8 +469,10 @@ class MemoryDB:
     def get_memory(self, memory_id: int) -> dict[str, Any] | None:
         return self.memories.get_memory(memory_id)
 
-    def get_memories_by_ids(self, ids: list[int]) -> dict[int, dict[str, Any]]:
-        return self.memories.get_memories_by_ids(ids)
+    def get_memories_by_ids(
+        self, ids: list[int], *, conn: sqlite3.Connection | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        return self.memories.get_memories_by_ids(ids, conn=conn)
 
     def get_memory_for_workspace(
         self, memory_id: int, ws_canonical: str, admitted: "WorkspaceScope" = None,
