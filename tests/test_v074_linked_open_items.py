@@ -516,3 +516,28 @@ def test_product_server_exposes_linked_open_items_option(tmp_path: Path) -> None
     assert disabled["data"]["linked_open_items"] == []
     assert enabled["data"]["linked_open_items"]
     bundle.tools.shutdown(timeout=1)
+
+
+def test_df_cache_invalidates_on_tag_edit(tmp_path: Path) -> None:
+    """0.16.12 P1-T6：edit 改 tags 后指纹变（version+1），下一次 find 的
+    linked_open_items 立即用新 df——缓存不串味。"""
+    tools = _tools(tmp_path)
+    # 结果条（带 meaningful tag）+ 两条 todo 候选
+    _write(tools, content="结果条", subject="result", tags=["proj"], workspace="ws")
+    _write(tools, content="todo 甲", subject="todo-a", tags=["todo", "proj"], workspace="ws")
+    _write(tools, content="todo 乙", subject="todo-b", tags=["todo", "other"], workspace="ws")
+    first = tools.memory("find", {"query": "result", "limit": 10})
+    assert first["ok"], first
+    assert tools.db._linked_df_cache, "df 缓存应已回填"
+    # edit：给 todo 乙补 proj tag（version 递增 → 指纹变 → 缓存失效）
+    todo_b = tools.memory("find", {"query": "todo 乙", "limit": 5})
+    target = next(
+        r["id"] for r in todo_b["data"]["results"] if "todo-b" in str(r.get("subject"))
+    )
+    edited = tools.memory_edit(memory_id=target, tags_only=True, add_tags=["proj"])
+    assert edited.get("ok"), edited
+    second = tools.memory("find", {"query": "result", "limit": 10})
+    assert second["ok"], second
+    linked = second["data"].get("linked_open_items") or []
+    subjects = {str(item.get("subject")) for item in linked}
+    assert any("todo-b" in s for s in subjects), f"edit 后的 tag 必须立即生效: {subjects}"

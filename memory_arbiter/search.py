@@ -1412,20 +1412,36 @@ def _linked_open_items_for_search(
                 return []
 
             # per-tag df across the active set (json_valid guard ⇒ M4-A silence).
+            # 0.16.12 P1-T6: cached per scope behind the global fingerprint
+            # (COUNT(active), SUM(version)) — the L1/L2 queries above stay
+            # live (they gate whether df is needed at all), only the GROUP BY
+            # json_each full scan is memoised.
             tag_df: dict[str, int] = {}
-            df_rows = conn.execute(
-                f"""
-                SELECT tag.value AS t, COUNT(DISTINCT m.id) AS df
-                FROM memories m, json_each(
-                  CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END
-                ) AS tag
-                WHERE m.status='active' {workspace_clause} AND tag.type='text'
-                GROUP BY tag.value
-                """,
-                workspace_params,
-            ).fetchall()
-            for r in df_rows:
-                tag_df[r["t"]] = int(r["df"])
+            scope_key = tuple(str(p) for p in workspace_params)
+            fp_row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(version),0) FROM memories WHERE status='active'"
+            ).fetchone()
+            fingerprint = (int(fp_row[0]), int(fp_row[1]))
+            with db._linked_df_cache_lock:
+                cached = db._linked_df_cache.get(scope_key)
+            if cached is not None and cached[0] == fingerprint:
+                tag_df = dict(cached[1])
+            else:
+                df_rows = conn.execute(
+                    f"""
+                    SELECT tag.value AS t, COUNT(DISTINCT m.id) AS df
+                    FROM memories m, json_each(
+                      CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END
+                    ) AS tag
+                    WHERE m.status='active' {workspace_clause} AND tag.type='text'
+                    GROUP BY tag.value
+                    """,
+                    workspace_params,
+                ).fetchall()
+                for r in df_rows:
+                    tag_df[r["t"]] = int(r["df"])
+                with db._linked_df_cache_lock:
+                    db._linked_df_cache[scope_key] = (fingerprint, dict(tag_df))
 
             scored: list[dict[str, Any]] = []
             for row in cand_rows:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import re
 import sqlite3
 import time
@@ -91,6 +92,12 @@ class MemoryDB:
         self.settings = settings
         self.state = DegradeState()
         self._db_available = False
+        # 0.16.12 P1-T6: per-scope linked-open-items df cache. Fingerprint =
+        # (COUNT(active), SUM(version)) — every product write path moves one
+        # of the two (insert/delete/status flip ⇒ COUNT; edit ⇒ version), so
+        # a matching fingerprint means the df map cannot have changed.
+        self._linked_df_cache: dict[tuple[str, ...], tuple[tuple[int, int], dict[str, int]]] = {}
+        self._linked_df_cache_lock = threading.Lock()
         self._sqlite_vec_loadable = False
         self.semantic_notices = SemanticNoticeStore(self)
         self.audit = AuditStore(self)
