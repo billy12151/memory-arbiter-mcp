@@ -3,6 +3,22 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.17.0] — 2026-09-22
+
+冲突/相似识别率提升（Part 2）。P2-0~P2-7 全量实施 + 两轮 review（第二轮对抗性）13 项修复；对 0.16.12 基线（conflict-v3-noisy 全量语料）的对比数字见发版前 harness 报告。**行为门：新表全部 additive（memory_row/memory_row_vec/memory_claims/memory_claim_vec/conflict_backlog）、memories.last_scanned_at 加列；claims 为 remember/update 新增必填字段（灰度 claims.required 默认 false 只警告）；发版须统一 bump CONFLICT_DETECTOR_VERSION 并触发一次全量重扫。**
+
+### Changed
+
+- **feat(corpus): harness 真实噪音语料（P2-0）。** pairs_noisy.jsonl 26 对（每侧 291-332 字长段落；植入诱饵数值/中文时长/多值共句/否定句/样板话/表格行内冲突/A6 短句时长对）+ similarity cases_noisy.jsonl 16 例（三类负例在场使误报率可度量）；corpus bump **conflict-v3-noisy**、相似语料版本键 similarity_corpus_version 进 gate 前置校验；基线实测：0.16.12 在 noisy 桶 2/26（14 真冲突漏检 13、表格对真阳性、**「半秒 vs 500ms」同值对假阳性=归一化缺陷活体证据**）。
+- **fix(detect): 修复包四项（P2-1）。** 裸「复审」误 veto 收紧为评审记录语境（「每半年复审」政策对复活）；中文时长词折算（半秒/一刻钟/半小时/两秒/十点→数值单位，normalize_value 预折）；中文时长值抽取正则（单位前瞻扩 毫秒/秒/分钟/小时/刻钟/点 + 周期字负向后顾防「周四点评会」类误抽 + 半+时长预折 0.5）；few-shot 复读检测（值词 mysql/sqlite 在抽取不在两侧 quote → parrot_invalid → 去例句 system 重试、user turn 原样、计数进 usage）。
+- **feat(rows): 行级向量基础设施（P2-2）。** rowseg 分段器（散文按句/表格一行一条=表头列名:值拼接≤200 字/多行表头合并/≥8 字过滤/标题与 subject 不索引）；memory_row+memory_row_vec（parent_status 生命周期镜像 evidence_vec）；publish 同事务原子落行+单元（embed 事务外）；row_knn rowid-IN 同款；boot backfill + doctor rows.coverage。
+- **feat(detect): 冲突链路行级化（P2-3）。** process_conflicts 段源换行级（A1 时序桥=current_row_vectors 先读/job 内补/单元回退；帽 SEMANTIC_MAX_ROWS=256 值锚定行优先、rows_capped）；**属性向量门**（严格相等 OR attr_cos≥0.70，spike R8：A 组同义冲突属性名不对齐即死的复活；退化向量护栏）；pair_score 排序（值特征 0.60 + C4 overlap 0.40，只改顺序）；回执 rows_mode/rows_examined/dropped_unlocalizable/backlogged。
+- **feat(backlog): 写时冲突候选积压队列（P2-4）。** 截断/预算跳过对入 conflict_backlog（键=detector 版本+成员@version+行锚；500 帽按分淘汰计数可见）；语义 worker 空闲 5 秒 tick 消化（limit=2、新写入 notify 抢占、paused 不动）；stored extraction 直接过确定性门不重花 Qwen；doctor 队列口径并入。
+- **feat(claims): 结构化声明契约与零 Qwen 通道（P2-5）。** remember/update 新增 claims 必填（空数组=显式无；灰度 claims.required 默认 false；attr 1-64/value 1-64 且≤12 词/attr 不含 value）；逐条拒收回执 claims_rejected；memory_claims+memory_claim_vec（version 钉死、状态翻转迁移防孤儿、编辑重供）；**claims 冲突通道**（claim 向量 KNN rowid-IN 同 workspace+active+当前版本、attr_cos≥τ 或 attr_norm 相等、值不同、双侧自共存不报【A4】、provenance 软门、跨通道去重、5 条/写帽）；存量 backfill=memory_repair(task='claims_backfill')（50/批+游标+「配置项」prompt+五层过滤链+data.model_path 指定便宜模型）；doctor claims.coverage。
+- **feat(scan): 扫描侧行级+慢车道+谱系 veto（P2-6）。** 跨记忆候选换行级 KNN（无行回退单元）；last_scanned_at 墙钟慢车道（20 条/kick 轮转全覆盖、slow_lane=false 可关）；谱系版本演进 veto（双侧自报 v 前缀/版本字样/第N版且主版本不同→演进不报；E2 产品版本差异保持候选）。
+- **feat(similarity): 写时相似检查 summary 向量化（P2-7）。** 候选生成换 memory_summary_vec（空 subject 不再取消资格）；细排门 content 3-gram 余弦为主门、subject 0.8 仅在内容重叠<0.60 时生效（改标题近重复过门）；subject_tags_vec 发布保留。
+- **fix(review): 两轮 review 13 项修复。** 谱系正则误杀（配置句式不当版本号）、慢车道 SQL 参数序、claims 编辑/激活孤儿、memory_claims 摘出 LEGACY_DERIVED_TABLES（防 upgrade/doctor 误判）、backlog 队头活锁、claims 帽计数+同 attr 单发+跨通道去重、性能三处（预取/并入/预 embed）、summary_vec 生命周期、replay 教学键、淘汰计数、doctor 覆盖率。已知取舍：epoch 不清 internal_conflicts（判过不重判契约优先）。
+
 ## [0.16.12] — 2026-09-22
 
 Performance Part 1（写入/查询链路提速，行为不变）。21 项任务全落地，两轮 review（第二轮对抗性）累计 12 项修复；全量 harness 两轮对 0.16.11 三轮基线回归门 PASSED、召回/冲突/相似提示行为指标逐位一致。harness 口径：写入 p50 **463.8→318.0ms（-31%）**、查询 p50 **173.7→116.7ms（-33%）**；真实库 KNN 工作负载 **51.8s→6.8s（7.65x）**（scripts/knn_old_new_gate.py，476 组新旧对拍）。

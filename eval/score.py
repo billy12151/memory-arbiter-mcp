@@ -435,13 +435,18 @@ _LOWER_IS_BETTER_SUBSTR = (
     "coexist_false_positive",
 )
 _SIM_FALSE_LABELS = ("clearly_different", "opposite_semantics", "same_entity_diff_attr")
+# 0.17.0 校准轮：conflict 的 noise 标签 firing 同为假阳性（半秒 bug 时代曾
+# 3/27 sync），gate 方向必须 lower-is-better——首轮对比曾把 3→2 的改善误判 FAILED。
+_CONFLICT_FALSE_LABELS = ("noise",)
 _GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target")
 
 
 def _lower_is_better(key: str) -> bool:
     if any(s in key for s in _LOWER_IS_BETTER_SUBSTR):
         return True
-    return any(f".{label}." in key for label in _SIM_FALSE_LABELS)
+    if any(f".{label}." in key for label in _SIM_FALSE_LABELS):
+        return True
+    return any(f".{label}." in key for label in _CONFLICT_FALSE_LABELS)
 
 
 def gate(

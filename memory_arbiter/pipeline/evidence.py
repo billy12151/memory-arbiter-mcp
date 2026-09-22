@@ -46,6 +46,29 @@ _TECHNICAL_REASONS = {
 }
 
 
+def _subject_is_process_record(hit_subject: str, own_subject: str) -> bool:
+    """Memory-level process-record guard for row-level candidates: the
+    whole-text vetoes (review rounds / design→release / re-verify) lose
+    their context once a memory is split into sentences — a release-notes
+    row pair and a review row pair of the SAME two process records then
+    look like value conflicts. Either subject carrying the process shape
+    disqualifies the pair (cand1: cf-noise-18298/18278/18218 async FPs)."""
+    from ..semantic_conflict import (
+        _PROCESS_DESIGN_RE,
+        _PROCESS_RELEASE_RE,
+        _PROCESS_REVERIFY_RE,
+        _PROCESS_REVIEW_RE,
+    )
+    for subject in (hit_subject, own_subject):
+        if not subject:
+            continue
+        if _PROCESS_REVIEW_RE.search(subject) or _PROCESS_REVERIFY_RE.search(subject):
+            return True
+        if _PROCESS_DESIGN_RE.search(subject) and _PROCESS_RELEASE_RE.search(subject):
+            return True
+    return False
+
+
 def _attr_cos_or_none(
     embedder: "Any", forward: "Any",
 ) -> "float | None":
@@ -896,6 +919,13 @@ class EvidencePipeline:
                     continue
                 decision = decide_evidence(seg_view.text, str(hit.get("text") or ""))
                 if decision.action == "ignore":
+                    continue
+                # 0.17.0 校准轮（对抗 review 遗留）：行级拆句让整文过程记录
+                # veto（review/设计→发版/复验）只看到句子看不到语境——按记忆
+                # 级 subject 复核一次，过程记录对的任何行对都不进门。
+                if _subject_is_process_record(
+                    str(hit.get("subject") or ""), str(record.get("subject") or ""),
+                ):
                     continue
                 # 0.16.4 §1: cross-memory evolution domain — the earliest
                 # kill. It happens BEFORE the provenance gate, so a notify

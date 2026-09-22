@@ -186,10 +186,15 @@ SCAN_TASK_RECHECK_SECONDS = 3600
 # Qwen scan line, not this millisecond sync channel.
 WRITE_SIMILAR_SUBJECT_RATIO = 0.8
 WRITE_SIMILAR_CONTENT_COSINE = 0.4
-# 0.17.0 P2-7: subject-gate exemption line — content trigram overlap at or
-# above this passes WITHOUT the subject ratio (retitled near-duplicates).
-# Below it the subject gate still applies (two-axis confirmation).
-WRITE_SIMILAR_CONTENT_EXEMPT = 0.60
+# 0.17.0 P2-7 校准轮（cand1 数据）：双轴 OR 规则——(subject≥0.45 且
+# content≥0.22) 或 (subject≥0.80 且 content≥0.15)。语料实测分布：真近重复
+# (含 noisy 改写) s∈[0.32,1.0]/c∈[0.17,0.74]，组内样板互撞带 s≈0.10/c∈
+# [0.60,0.74]（旧豁免线 0.60 正落在带内致 sim07 假阳性），负例带 c≤0.16。
+# 地板 0.22 取负例带之上、真值地板之下；0.45/0.80 分层兜 sim12 型低内容对。
+WRITE_SIMILAR_SUBJECT_FLOOR = 0.45
+WRITE_SIMILAR_CONTENT_FLOOR = 0.22
+WRITE_SIMILAR_SUBJECT_STRONG = 0.80
+WRITE_SIMILAR_CONTENT_MIN = 0.15
 WRITE_SIMILAR_MIN_CONTENT_CHARS = 40
 WRITE_SIMILAR_MAX_HINTS = 2
 # Recall channel (0.15.3): with a loaded embedder the hint recalls candidates

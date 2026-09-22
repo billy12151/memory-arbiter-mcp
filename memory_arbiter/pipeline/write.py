@@ -12,11 +12,13 @@ from .. import workspace_rules
 from ..constants import (
     WRITE_DUPLICATE_VEC_TOP_K,
     WRITE_SIMILAR_CONTENT_COSINE,
-    WRITE_SIMILAR_CONTENT_EXEMPT,
+    WRITE_SIMILAR_CONTENT_FLOOR,
+    WRITE_SIMILAR_CONTENT_MIN,
+    WRITE_SIMILAR_SUBJECT_FLOOR,
+    WRITE_SIMILAR_SUBJECT_STRONG,
     WRITE_SIMILAR_FALLBACK_SCAN_LIMIT,
     WRITE_SIMILAR_MAX_HINTS,
     WRITE_SIMILAR_MIN_CONTENT_CHARS,
-    WRITE_SIMILAR_SUBJECT_RATIO,
     is_default_workspace_term,
 )
 from ..models import MemoryRecord, MemoryStatus
@@ -111,15 +113,25 @@ class WritePipeline:
                 # P2-7: candidates recall on the SUMMARY vector — retitled
                 # near-duplicates stay reachable; content trigram owns the
                 # fine gate (the old subject-first recall killed them).
-                er = embedder.embed_text(
-                    prefix="",
-                    body=MemoryTools._summary_embed_text(
-                        subject, getattr(record, "tags", None),
-                        str(getattr(record, "content", None) or ""),
-                    ),
+                summary_text = MemoryTools._summary_embed_text(
+                    subject, getattr(record, "tags", None),
+                    str(getattr(record, "content", None) or ""),
                 )
+                er = embedder.embed_text(prefix="", body=summary_text)
                 if er is not None and er.embedding:
                     vector = [float(x) for x in er.embedding]
+                    # 校准轮：该向量即 refresh_summary_vector 稍后要写的同一条
+                    # ——就地 upsert（此时记忆行已 insert），refresh 侧做输入
+                    # 未变跳过，写路径 inline embed 从 3 次回 2 次。
+                    try:
+                        import json as _json
+                        with self.db.write_transaction() as conn:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO memory_summary_vec(id, embedding) VALUES (?, ?)",
+                                (int(memory_id), _json.dumps(vector)),
+                            )
+                    except Exception:
+                        pass
                     rows = self.db.memory_summary_knn(
                         vector,
                         k=WRITE_DUPLICATE_VEC_TOP_K,
@@ -212,7 +224,8 @@ class WritePipeline:
         same-workspace active rows over subject_tags_vec (fallback: capped
         legacy scan when no embedder/index is available). The fine-ranking
         then applies TWO gates, both deterministic and model-free:
-          1. normalized-subject ratio ≥ WRITE_SIMILAR_SUBJECT_RATIO;
+          1. 双轴 OR 校准门（0.17.0）：(subject≥0.45 且 content≥0.22) 或
+             (subject≥0.80 且 content≥0.15)；空 subject 纯内容门 ≥0.22；
           2. content confirmation — full-body char-trigram cosine
              (semantic_conflict's own _char_ngrams/_cosine) ≥
              WRITE_SIMILAR_CONTENT_COSINE. This replaced the tag-Jaccard
@@ -267,10 +280,21 @@ class WritePipeline:
                     if row_subject != subject and self._DIGIT_RUN.sub("#", row_subject) == subject_series:
                         continue
                     ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
-                    if (
-                        ratio < WRITE_SIMILAR_SUBJECT_RATIO
-                        and content_cos < WRITE_SIMILAR_CONTENT_EXEMPT
+                    if low_confidence:
+                        # 短文本旁路（旧行为）：方差太高只认强标题，低置信标记。
+                        if ratio < WRITE_SIMILAR_SUBJECT_STRONG:
+                            continue
+                    elif not (
+                        # 0.17.0 校准轮双轴 OR（constants 注释含分布证据）：
+                        # retitled 近重复两轴同降，AND 结构性漏检；样板互撞
+                        # c 高 s 极低被拦。
+                        (ratio >= WRITE_SIMILAR_SUBJECT_FLOOR and content_cos >= WRITE_SIMILAR_CONTENT_FLOOR)
+                        or (ratio >= WRITE_SIMILAR_SUBJECT_STRONG and content_cos >= WRITE_SIMILAR_CONTENT_MIN)
                     ):
+                        continue
+                elif not low_confidence:
+                    # 空 subject 纯内容门（负例带 ≤0.16，地板同上）。
+                    if content_cos < WRITE_SIMILAR_CONTENT_FLOOR:
                         continue
                 scored.append((ratio, content_cos, low_confidence, row))
             if not scored:
@@ -583,8 +607,18 @@ class WritePipeline:
                     response.setdefault("notices", []).append(similar_notice)
                 # C3a summary vector: publish on the write path so the
                 # anomaly index tracks new rows without waiting for a
-                # restart backfill. Best-effort, fail-open.
-                self.refresh_summary_vector(int(memory_id))
+                # restart backfill. Best-effort, fail-open. 校准轮：候选段
+                # 已就地把同一条 summary 向量 upsert（同 record 同事务窗口），
+                # 存在即跳过——inline embed 计数回到基线 2 次。
+                try:
+                    with self.db.connection() as conn:
+                        already = conn.execute(
+                            "SELECT 1 FROM memory_summary_vec WHERE id=?", (int(memory_id),),
+                        ).fetchone()
+                except Exception:
+                    already = None
+                if already is None:
+                    self.refresh_summary_vector(int(memory_id))
             return response
         except Exception as exc:
             if insert_done:

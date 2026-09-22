@@ -142,5 +142,9 @@
   "ny-neg-boilerplate": [
     null,
     "self-label audit: harness 构造 noisy（0.17.0 P2-0.1）——样板话浓度极限：大段样板重复，关键句同值「值班响应十分钟内」→ 不应报"
+  ],
+  "cf-noise-11-917-918": [
+    "true_conflict",
+    "calibration audit 2026-09-22: owner 后续裁定 conflict-test export-format json vs csv 为真冲突基准对（tests/test_write_time_prefilter 保活注释）；corpus 原标 noise 系裁定前口径，随 0.17.0 校准轮翻转"
   ]
 }
