@@ -363,6 +363,7 @@ def test_boot_backfill_backgrounded_and_reads_degrade(tmp_path: Path, monkeypatc
 
 
 def test_knn_rowid_in_matches_bruteforce_topk(tmp_path: Path) -> None:
+    pytest.importorskip("sqlite_vec")  # CI [test] extra has no vec0 module
     """P3-T1 暴力对拍：strict 库 + 手工发布受控向量（跨工作区更近干扰行 +
     tie 距离 + exclude），rowid-IN KNN 的 top-k 集合与 Python 参考一致。
     非 strict 库所有 workspace 共享首个 canonical（单桶模型），跨工作区
