@@ -550,6 +550,16 @@ class ReadPipeline:
         extra_warnings.extend(ensure_warnings)
         if embedder is None:
             return None
+        # 0.16.12 P1-T1: identical query within the same (space, lineage,
+        # epoch) skips the synchronous embed — the first vec-state check above
+        # already gated this path, and a hit means the stored vector is the
+        # byte-identical output of a previous embed under this lineage.
+        cache_key = self._tools._query_embed_cache_key(
+            embedder, query, vec_state.get("active_space_id"),
+        )
+        cached = self._tools._query_embed_cache_get(cache_key)
+        if cached is not None:
+            return cached
         try:
             # Char-level pre-trim for pathological pastes; the token
             # budget inside embed_text still makes the final cut.
@@ -567,6 +577,7 @@ class ReadPipeline:
                     )
                     extra_warnings.append(f"vec_disabled={reason}")
                     return None
+                self._tools._query_embed_cache_put(cache_key, er.embedding)
                 return er.embedding
             extra_warnings.append(
                 f"auto-embedding query failed: {getattr(embedder, 'last_encode_error', None) or 'encode returned empty embedding'}"

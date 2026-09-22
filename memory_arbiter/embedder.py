@@ -70,6 +70,10 @@ class ManagedEmbedder:
     gpu_backed: bool = False
     device_degraded: bool = False
     device_degraded_at: str | None = None
+    # 0.16.12 query-embed LRU cache epoch: bumped on the one-shot GPU→CPU
+    # degrade so cached query vectors from the GPU lineage are never served
+    # against the CPU lineage (low-bit float differences between devices).
+    embed_epoch: int = 0
     _cpu_rebuild: CpuRebuildFn | None = None
     # Frees the instance the current closures capture. Swapped to None once
     # consumed; the GPU→CPU degrade closes the broken GPU instance eagerly
@@ -246,6 +250,7 @@ class ManagedEmbedder:
         if not self.gpu_backed or self.device_degraded or self._cpu_rebuild is None:
             return False
         self.device_degraded = True
+        self.embed_epoch += 1
         # Free the broken GPU instance NOW, under the lock, instead of
         # waiting for refcount finalization — its Metal buffers are exactly
         # what the process-exit device teardown trips over.

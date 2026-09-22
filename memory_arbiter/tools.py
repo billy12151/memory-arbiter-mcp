@@ -5,7 +5,7 @@ import json
 import math
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from contextvars import ContextVar
 from typing import Any, Callable, cast
 
@@ -55,6 +55,15 @@ class MemoryTools:
         # seeded into read/search responses — they are surfaced by doctor,
         # console settings, and memory status instead (0.15.0 behavior change).
         self._embedder_warnings: list[str] = []
+        # 0.16.12 P1-T1 query-embed LRU cache (capacity 128): identical
+        # (space, embedder lineage, query) triples return the stored vector
+        # instead of re-embedding. Keyed by the vec index's active space id,
+        # the process build counter (embedder rebuild) and the embedder's own
+        # device epoch (GPU→CPU degrade), so vectors never cross lineages.
+        self._embedder_builds = 0
+        self._query_embed_cache: "OrderedDict[tuple[Any, ...], list[float]]" = OrderedDict()
+        self._query_embed_cache_lock = threading.Lock()
+        self._query_embed_cache_capacity = 128
         self._update_monitor: UpdateMonitor | None = None
         self._evidence_worker = LocalTextIndexWorker(self)
         self._surfaces = ProductSurfaces(self)
@@ -752,6 +761,32 @@ class MemoryTools:
     def _index_local_text_evidence(self, memory_id: int, record: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._evidence.index_memory(memory_id, record)
 
+    def _query_embed_cache_key(
+        self, embedder: ManagedEmbedder, query: str, active_space_id: Any,
+    ) -> tuple[Any, ...]:
+        """Cache key: (space, build lineage, device epoch, query)."""
+        return (
+            str(active_space_id), int(self._embedder_builds),
+            int(getattr(embedder, "embed_epoch", 0)), query,
+        )
+
+    def _query_embed_cache_get(self, key: tuple[Any, ...]) -> "list[float] | None":
+        with self._query_embed_cache_lock:
+            cached = self._query_embed_cache.get(key)
+            if cached is None:
+                return None
+            self._query_embed_cache.move_to_end(key)
+            # Stored list is shared: callers must treat it as read-only
+            # (downstream only json-serialises it into SQL).
+            return cached
+
+    def _query_embed_cache_put(self, key: tuple[Any, ...], embedding: "list[float]") -> None:
+        with self._query_embed_cache_lock:
+            self._query_embed_cache[key] = embedding
+            self._query_embed_cache.move_to_end(key)
+            while len(self._query_embed_cache) > self._query_embed_cache_capacity:
+                self._query_embed_cache.popitem(last=False)
+
     def _ensure_embedder(self) -> tuple[ManagedEmbedder | None, list[str]]:
         if self._embedder_loaded:
             return self._embedder, []
@@ -777,6 +812,12 @@ class MemoryTools:
                 return None, warnings
             self._embedder = embedder
             self._embedder_loaded = True  # cache only on successful build
+            # 0.16.12 query-embed LRU: a fresh embedder instance invalidates
+            # every cached query vector (different lineage) — bump the build
+            # counter that keys the cache and drop the stale entries outright.
+            self._embedder_builds += 1
+            with self._query_embed_cache_lock:
+                self._query_embed_cache.clear()
             try:
                 # Lazy vec-table creation: the derived vec0 tables are built
                 # here (first successful embedder load), not at schema init,
