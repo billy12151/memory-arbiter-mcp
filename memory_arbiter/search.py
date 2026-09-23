@@ -32,7 +32,7 @@ RetrievalMode = Literal[
     "unavailable",       # SQLite not available
 ]
 
-from .constants import CONTENT_LIKE_CAP, Isolation, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
+from .constants import CONTENT_LIKE_CAP, COS_EXACT_BOOST, Isolation, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
 
 
 @dataclass
@@ -51,8 +51,16 @@ class SearchOutcome:
 
 # Single source: text.CJK_RE_SEARCH (Phase 1). Re-exported here for back-compat.
 from .text import CJK_RE_SEARCH as _CJK_RE
+from .semantic_conflict import vector_cosine
 # shared vector-admission helpers + the weak weighting curve.
 from .workspace_rules import weak_workspace_vector_weight, workspace_vector_distance
+
+
+def _subject_key(value: Any) -> str:
+    """Gate-v2 G2 exact-hit normalization: casefold + strip ALL whitespace,
+    both sides (方案口径). Not the evidence-text normalize (it folds units
+    and aliases) — subject equality is a literal identity test."""
+    return "".join(str(value or "").casefold().split())
 
 
 def _is_cjk_token(token: str) -> bool:
@@ -796,9 +804,13 @@ def _wide_recall(
                 "score": score,
             })
         ranked: list[tuple[float, int, dict[str, Any]]] = []
+        best_hit_ids: dict[int, int] = {}
         for mid, entry in by_memory.items():
             hits = sorted(entry["hits"], key=lambda h: float(h.get("score") or 0.0), reverse=True)
             best = float(hits[0].get("score") or 0.0) if hits else 0.0
+            best_evidence_id = hits[0].get("evidence_id") if hits else None
+            if best_evidence_id is not None:
+                best_hit_ids[mid] = int(best_evidence_id)
             support = 0.0
             seen_kinds: set[str] = set()
             for hit in hits[1:4]:
@@ -809,6 +821,20 @@ def _wide_recall(
                 support += max(0.0, float(hit.get("score") or 0.0) - 0.45)
             ranked.append((best + 0.08 * support, mid, entry["row"]))
         ranked.sort(reverse=True, key=lambda item: item[0])
+        # Gate-v2 G2: true cosine for each memory's best row (the legacy
+        # `1.0 - L2 distance` score goes negative on non-unit vectors and
+        # #91's display read -67.5). One batched IN fetch for the per-memory
+        # best rows only — the full window (cap*16 rows) would pull ~800
+        # blobs per query for a value only the best row feeds.
+        best_cosines: dict[int, float] = {}
+        if best_hit_ids and query_embedding:
+            best_vectors = db.evidence.row_vectors_for_ids(
+                list(best_hit_ids.values()),
+            )
+            for mid, row_id in best_hit_ids.items():
+                vector = best_vectors.get(row_id)
+                if vector:
+                    best_cosines[mid] = vector_cosine(list(query_embedding), vector)
         evidence_only: list[int] = []
         for evidence_rank, (_score, mid, row) in enumerate(
             ranked[:evidence_memory_cap], 1,
@@ -824,6 +850,9 @@ def _wide_recall(
                 key=lambda h: float(h.get("score") or 0.0),
                 reverse=True,
             )
+            best_cosine = best_cosines.get(mid)
+            if best_cosine is not None:
+                d["_evidence_best_score"] = best_cosine
             if lexical_row is None:
                 evidence_only.append(mid)
             pool[mid] = d
@@ -865,6 +894,7 @@ def _wide_recall(
     # Fuse channel ranks, then restore the original bounded pool size. A memory
     # present in both channels naturally receives more support than one present
     # in only one channel. Trust/recency remain later, lightweight adjustments.
+    query_key = _subject_key(query)
     for memory_id, row in pool.items():
         lexical = lexical_rank.get(int(memory_id))
         evidence = row.get("_evidence_rank")
@@ -872,8 +902,27 @@ def _wide_recall(
         if lexical is not None:
             fusion += 1.0 / (_RRF_K + lexical)
             row["_lexical_rank"] = lexical
+            # Gate-v2 G2 transparency: the FTS channel's raw rank on the item
+            # (the fusion arithmetic flattens rank differences into ~1/60
+            # steps — #91 read evidence cosine 1.0 through lexical rank 15).
+            row["lexical_rank"] = lexical
         if evidence is not None:
             fusion += 1.0 / (_RRF_K + int(evidence))
+        # Gate-v2 G2 exact-hit guarantee (owner 拍板 6): a memory whose
+        # subject IS the query (normalized: casefold + strip whitespace), or
+        # whose best evidence row's TRUE cosine clears COS_EXACT_BOOST, is
+        # what the user asked for — +1.0 fusion dwarfs every rank
+        # computation (~300 final points) instead of competing with them.
+        best_cosine = row.get("_evidence_best_score")
+        if (
+            (query_key and query_key == _subject_key(row.get("subject")))
+            or (best_cosine is not None and best_cosine >= COS_EXACT_BOOST)
+        ):
+            fusion += 1.0
+            row["_exact_match"] = True
+            if best_cosine is not None:
+                # Transparency: the evidence channel's real cosine on the item.
+                row["evidence_best_score"] = round(float(best_cosine), 4)
         row["_fusion_score"] = fusion
 
     fused = sorted(
@@ -907,6 +956,15 @@ def _wide_recall(
         selected[int(row["id"])] = row
     for row in evidence_candidates[:evidence_quota]:
         selected[int(row["id"])] = row
+    # Gate-v2 G2: exact hits are exempt from the quota arithmetic — both
+    # quotas admit by ORIGINAL channel rank, and an exact match entering the
+    # pool through a late channel (surface/LIKE) carries the worst ranks, so
+    # without this seat it would be trimmed before its +1.0 fusion ever gets
+    # to rerank (adversarial review P1: the fixture pool was too small to
+    # catch this; the real library would have starved it).
+    for row in fused:
+        if row.get("_exact_match") and int(row["id"]) not in selected:
+            selected[int(row["id"])] = row
     # v0.15.9: bounded reserved seats for channel-3 surface hits — without
     # this, exact subject/tags matches starve in the fusion-order trim because
     # they always carry the worst lexical ranks (they enter the pool last).

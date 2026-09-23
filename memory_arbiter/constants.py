@@ -143,6 +143,17 @@ SEMANTIC_INTERNAL_MAX_ROWS = 256
 # keepers now take at most this many Qwen slots (value-anchored ranking
 # already ordered them); E10①'s land-first guarantee is unchanged.
 SEMANTIC_INTERNAL_QWEN_MAX_PAIRS = 3
+# Owner insight 2026-09-23: the detection window must surface CONFLICT
+# candidates, not the globally most-similar rows — a wide window deduped per
+# peer keeps every plausible opponent represented; the per-peer dict then
+# keeps each opponent's closest row as its representative.
+SEMANTIC_CROSS_KNN_WINDOW = 16
+# Gate-v2 G2 (owner 拍板 6): an evidence-channel best whose TRUE cosine
+# clears this is the text the user asked for (#91: raw KNN first yet
+# find-rank 15 after RRF rank-flattening) — the fusion boost bypasses rank
+# arithmetic entirely. The detection side reuses the same ceiling: pairs at
+# or above it are duplicates, not conflicts (G4 repeatability skip).
+COS_EXACT_BOOST = 0.98
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.

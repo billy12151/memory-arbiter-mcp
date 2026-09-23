@@ -274,6 +274,48 @@ class EvidenceStore:
         except sqlite3.Error:
             return {}
 
+    def row_vectors_for_ids(
+        self,
+        row_ids: "list[int] | set[int]",
+        *,
+        conn: "sqlite3.Connection | None" = None,
+    ) -> dict[int, list[float]]:
+        """Batch row-vector fetch for the true-cosine gates (gate-v2 G2/G4).
+
+        row_knn returns L2 distances only — the cosine band, the exact-hit
+        boost and pair_score all need the raw vectors to compute real
+        cosines (non-unit rows, |v|≈16.5, make L2-to-cos constants wrong).
+        SQL discipline (#1051): one id-IN query per 200-id chunk, no text
+        column; missing ids (never published / pre-backfill) are absent
+        from the map, callers treat that as "no cosine available"."""
+        ids = sorted({int(value) for value in row_ids})
+        out: dict[int, list[float]] = {}
+        if not ids:
+            return out
+
+        def _run(c: sqlite3.Connection) -> None:
+            for start in range(0, len(ids), 200):
+                chunk = ids[start:start + 200]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = c.execute(
+                    f"SELECT id, embedding FROM memory_row_vec "
+                    f"WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    if row["embedding"] is not None:
+                        out[int(row["id"])] = self._blob_to_vector(bytes(row["embedding"]))
+
+        try:
+            if conn is not None:
+                _run(conn)
+            else:
+                with self._db.connection() as owned:
+                    _run(owned)
+        except sqlite3.Error:
+            return {}
+        return out
+
     # (0.17.0 C5: the unit-table knn() was retired — row_knn is the
     # only KNN over the evidence channel's vectors.)
 
