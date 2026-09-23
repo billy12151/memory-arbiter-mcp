@@ -521,6 +521,80 @@ class ScanPipeline:
                 )
                 if enqueued:
                     outcome["queued"] += 1
+        # Gate-v2 G6b 通道 C (scan leg): anchor claims × neighbour sentences.
+        # The attr vector queries sentence rows in the SAME bucket; pairs
+        # passing the cosine band enqueue with the claim declaration and the
+        # sentence as DUAL evidence — the Agent judges directly (no Qwen on
+        # the scan path). Versional attrs are exempted (D1) and counted.
+        from .semantic_conflict import attr_is_versional
+        from .pipeline.gates import candidate_cos_gate as _ccg
+        channel_c_queued = 0
+        channel_c_versional = 0
+        claims = self.db.claims.current_claims(memory_id) if hasattr(self.db, "claims") else []
+        claim_vectors: dict[int, list[float]] = {}
+        try:
+            with self.db.connection() as conn:
+                for row in conn.execute(
+                    """SELECT c.id AS cid, v.embedding FROM memory_claims c
+                       LEFT JOIN memory_claim_vec v ON v.id=c.id
+                       WHERE c.memory_id=? AND c.memory_version=?""",
+                    (memory_id, version),
+                ).fetchall():
+                    if row["embedding"] is not None:
+                        claim_vectors[int(row["cid"])] = (
+                            self.db.evidence._blob_to_vector(bytes(row["embedding"]))
+                        )
+        except sqlite3.Error:
+            claim_vectors = {}
+        surfaced_c_peers: set[int] = set()
+        for claim in claims:
+            attr_vector = claim_vectors.get(int(claim["id"]))
+            if not attr_vector:
+                continue
+            if attr_is_versional(str(claim.get("attr") or claim["attr_norm"])):
+                channel_c_versional += 1
+                continue
+            hits_c = self.db.row_knn(
+                attr_vector, k=neighbor_k + 1, workspace=workspace or None,
+                exclude_memory_id=memory_id, include_subject_rows=False,
+            )
+            vecs_c = self.db.evidence.row_vectors_for_ids(
+                [int(h["id"]) for h in hits_c],
+            )
+            passed_c, _below, _ceil = _ccg(attr_vector, hits_c, vecs_c)
+            for hit_c, cos_c in passed_c:
+                peer_id_c = int(hit_c["memory_id"])
+                if peer_id_c == memory_id or peer_id_c in surfaced_c_peers:
+                    continue
+                surfaced_c_peers.add(peer_id_c)
+                decision_c = decide_evidence(
+                    f"{claim.get('attr')}为{claim.get('value')}",
+                    str(hit_c.get("text") or ""),
+                )
+                refs_c, candidate_key_c, candidate_hash_c = self._pair_identity(
+                    memory_id, version,
+                    {"text": f"[claim] {claim.get('attr')}={claim.get('value')}",
+                     "start_offset": 0, "end_offset": len(str(claim.get("value") or "")),
+                     "eid": int(claim["id"]), "content_hash": ""},
+                    peer_id_c, hit_c,
+                )
+                if self._suppressed(refs_c, candidate_hash_c, suppression):
+                    continue
+                enqueued_c = self._enqueue_pair(
+                    workspace, memory_id, version,
+                    {"text": f"[claim] {claim.get('attr')}={claim.get('value')}",
+                     "start_offset": 0, "end_offset": len(str(claim.get("value") or "")),
+                     "eid": int(claim["id"]), "memory_version": version, "content_hash": ""},
+                    peer_id_c, hit_c,
+                    decision=decision_c, candidate_key=candidate_key_c,
+                    candidate_hash=candidate_hash_c,
+                )
+                if enqueued_c:
+                    channel_c_queued += 1
+        if channel_c_queued:
+            outcome["channel_c_queued"] = channel_c_queued
+        if channel_c_versional:
+            outcome["channel_c_versional_vetoed"] = channel_c_versional
         # Gate-v2 G4/G5 observability (conditional, additive receipt keys).
         if memory_pairs_excluded:
             outcome["memory_pairs_excluded"] = memory_pairs_excluded

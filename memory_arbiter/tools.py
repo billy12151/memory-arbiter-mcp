@@ -1741,15 +1741,25 @@ class MemoryTools:
         if result.get("status") != "skipped":
             try:
                 surfaced = result.get("surfaced_peers") or []
+                skip_peers = {int(p) for p in surfaced} if surfaced else None
                 claims_result = self._evidence.check_claims_conflicts(
-                    memory_id, snapshot,
-                    skip_peers={int(p) for p in surfaced} if surfaced else None,
+                    memory_id, snapshot, skip_peers=skip_peers,
                 )
                 if isinstance(claims_result, dict):
                     result["claims_channel"] = claims_result
+                # Gate-v2 G6b 通道 C: claims×sentences over the SAME clean
+                # neighbour list channel A used (三通道零重叠的名单共享).
+                allowed = result.pop("_allowed_memory_ids", None)
+                channel_c = self._evidence.check_claim_sentence_conflicts(
+                    memory_id, snapshot, skip_peers=skip_peers,
+                    allowed_memory_ids=allowed,
+                )
+                if isinstance(channel_c, dict):
+                    result["claims_channel_c"] = channel_c
             except Exception:
                 pass
         result.pop("surfaced_peers", None)  # internal cross-channel key, never in receipts
+        result.pop("_allowed_memory_ids", None)
         return result
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:

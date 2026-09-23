@@ -375,3 +375,84 @@ def test_compute_pair_score_formula() -> None:
     equal = SimpleNamespace(reason="numeric_value_candidate",
                             left_value="500ms", right_value="0.5s")
     assert compute_pair_score(equal, 0.94, "x", "y") == pytest.approx(0.65)
+
+
+# ── G6b channel C (claims×sentences) ────────────────────────────────────────
+
+def test_channel_c_reports_claim_vs_sentence_conflict(tmp_path, monkeypatch) -> None:
+    """通道 C：own claim 的 attr 向量在干净名单句子行上捞出对立句 → Qwen
+    情形 a 抽值 → 异值落 notice（#50 形态：对方没填 claims 不断线）。"""
+    import tests.test_vnext_evidence as tv
+
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    # own claim grounded in own content; the peer carries the opposing
+    # sentence and NO claims at all (channel C's whole point).
+    # A REAL peer memory (the notice path validates the peer row in DB).
+    peer = tools.memory_write(content="twine 上传 dist/* 会 409。", subject="twine", tags=[])["data"]
+    new = tools.memory_write(
+        content="上传约定：dist/* 路径禁用。", subject="internal", tags=[],
+        claims=[{"attr": "上传方式", "value": "dist/* 路径禁用"}],
+    )["data"]
+    tools.wait_semantic_worker_drained(timeout=5)
+
+    captured: list[str] = []
+
+    class CBackend:
+        @staticmethod
+        def classify_pair(left, right, **kw):
+            captured.append(right.get("quote") or "")
+            from memory_arbiter.semantic_conflict import ModelSignal
+            return ModelSignal(
+                True, "attribute_value_extraction", None, "",
+                {"attribute_a": "上传方式", "value_a": "dist/* 路径禁用",
+                 "attribute_b": "上传方式", "value_b": "twine 上传 dist/*"},
+                None,
+            )
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: CBackend())
+    monkeypatch.setattr(
+        tools.db, "row_knn",
+        lambda embedding, **kw: [{
+            "memory_id": int(peer["id"]), "id": 42, "kind": "text",
+            "text": "twine 上传 dist/* 会 409。",
+            "start_offset": 0, "end_offset": 18,
+            "distance": 0.2, "memory_row_version": 1,
+        }],
+    )
+    # attr vector is the fake's [0,1]: cos([0,1],[0.4,0.9])≈0.914 ∈ band.
+    monkeypatch.setattr(
+        tools.db.evidence, "row_vectors_for_ids",
+        lambda ids, conn=None: {42: [0.4, 0.9]},
+    )
+    result = tools._evidence.check_claim_sentence_conflicts(
+        new["id"], tv._job_snapshot(tools, new["id"]),
+        skip_peers=None, allowed_memory_ids=[int(peer["id"])],
+    )
+    assert captured, "channel C must consult Qwen with the sentence"
+    assert result["notices"] == 1
+    notices = tools.db.list_semantic_notices(status="open")
+    assert any(n.get("payload", {}).get("channel_c") for n in notices)
+
+
+def test_channel_c_versional_attr_exempt_and_skip_peers(tmp_path) -> None:
+    from memory_arbiter.pipeline.evidence import EvidencePipeline
+    import tests.test_vnext_evidence as tv
+
+    tools = tv.make_tools(tmp_path)
+    new = tools.memory_write(
+        content="版本记录 v0.2.1 发布说明。", subject="rel", tags=[],
+        claims=[{"attr": "版本", "value": "版本记录 v0.2.1 发布说明"}],
+    )["data"]
+    # Versional attr → exempted before any KNN, own counter (分键).
+    result = EvidencePipeline(tools).check_claim_sentence_conflicts(
+        new["id"], tv._job_snapshot(tools, new["id"]),
+        skip_peers=None, allowed_memory_ids=[1, 2, 3],
+    )
+    assert result["channel_c_versional_vetoed"] == 1
+    # Empty clean list → channel C is a no-op (名单共享语义).
+    result2 = EvidencePipeline(tools).check_claim_sentence_conflicts(
+        new["id"], tv._job_snapshot(tools, new["id"]),
+        skip_peers=None, allowed_memory_ids=[],
+    )
+    assert result2["claims_checked"] == 0

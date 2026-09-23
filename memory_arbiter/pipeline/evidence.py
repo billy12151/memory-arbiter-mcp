@@ -525,6 +525,210 @@ class EvidencePipeline:
         )
         return "created" if outcome.get("outcome") == "created" else "skipped"
 
+    def check_claim_sentence_conflicts(
+        self, memory_id: int, snapshot: dict[str, Any],
+        skip_peers: "set[int] | None" = None,
+        allowed_memory_ids: "list[int] | None" = None,
+    ) -> dict[str, Any]:
+        """Gate-v2 G6b 通道 C: claims×sentences across the clean neighbour
+        list (owner 2026-09-23). Each own claim's ATTR vector queries the
+        sentence rows inside the G5 clean list (claims never depend on the
+        peer filling claims); pairs passing the cosine band go to Qwen as
+        case a (the prompt names the attr). Versional attrs are exempted
+        (D1, own counter). Cross-channel dedup rides skip_peers (channel A's
+        surfaced peers) and the shared per-write notice cap."""
+        from ..constants import (
+            CLAIMS_MAX_NOTICES_PER_WRITE,
+            SEMANTIC_CANDIDATE_COS_CEIL,
+            SEMANTIC_CANDIDATE_COS_FLOOR,
+            SEMANTIC_CROSS_KNN_WINDOW,
+        )
+        from ..semantic_conflict import attr_is_versional, vector_cosine
+        from .gates import dispatch_hint_text
+
+        record = snapshot if snapshot.get("content") is not None else (
+            self.db.get_memory(int(memory_id)) or {}
+        )
+        version = int(record.get("version") or 1)
+        if not self.db.state.sqlite_vec_available:
+            return {"channel_c": True, "reason": "vec_unavailable"}
+        own_claims = self.db.claims.current_claims(int(memory_id))
+        if not own_claims or allowed_memory_ids is None or not allowed_memory_ids:
+            return {"channel_c": True, "claims_checked": 0, "notices": 0}
+        workspace = (
+            record.get("workspace_canonical") or record.get("workspace")
+            if self.settings.isolation == "strict" else None
+        )
+        skip = skip_peers or set()
+        # own claim vectors (attr embeddings published on the write path)
+        own_vectors: dict[int, list[float]] = {}
+        with self.db.connection() as conn:
+            for row in conn.execute(
+                """SELECT c.id AS cid, v.embedding FROM memory_claims c
+                   LEFT JOIN memory_claim_vec v ON v.id=c.id
+                   WHERE c.memory_id=? AND c.memory_version=?""",
+                (int(memory_id), version),
+            ).fetchall():
+                if row["embedding"] is not None:
+                    own_vectors[int(row["cid"])] = self.db.evidence._blob_to_vector(
+                        bytes(row["embedding"])
+                    )
+        notices = 0
+        capped = 0
+        versional = 0
+        unresolved = 0
+        checked = 0
+        backend = self._ensure_semantic_backend()
+        embedder, _warnings = self._ensure_active_embedder()
+        peer_content_cache: dict[int, dict[str, Any]] = {}
+
+        def peer_row(peer_id: int) -> dict[str, Any]:
+            if peer_id not in peer_content_cache:
+                peer_content_cache[peer_id] = self.db.get_memory(peer_id) or {}
+            return peer_content_cache[peer_id]
+
+        for claim in own_claims:
+            attr_vector = own_vectors.get(int(claim["id"]))
+            if not attr_vector:
+                continue
+            if attr_is_versional(str(claim.get("attr") or claim["attr_norm"])):
+                versional += 1
+                continue  # D1: expected timeline evolution
+            hits = self.db.row_knn(
+                attr_vector, k=SEMANTIC_CROSS_KNN_WINDOW, workspace=workspace,
+                exclude_memory_id=int(memory_id), include_subject_rows=False,
+                include_memory_ids=allowed_memory_ids,
+            )
+            for hit in hits:
+                if notices >= CLAIMS_MAX_NOTICES_PER_WRITE:
+                    capped += 1
+                    break
+                peer_id = int(hit["memory_id"])
+                if peer_id in skip:
+                    continue  # channel A already surfaced this peer
+                # cosine band on the TRUE attr-vector×sentence cosine
+                hit_vectors = self.db.evidence.row_vectors_for_ids(
+                    [int(hit["id"])],
+                )
+                vector = hit_vectors.get(int(hit["id"]))
+                if not vector:
+                    continue
+                cos = vector_cosine(attr_vector, vector)
+                if not (SEMANTIC_CANDIDATE_COS_FLOOR <= cos < SEMANTIC_CANDIDATE_COS_CEIL):
+                    continue
+                checked += 1
+                peer = peer_row(peer_id)
+                if str(peer.get("status") or "") != "active":
+                    continue
+                left_env: dict[str, Any] = {
+                    "quote": str(record.get("content") or "")[:1000],
+                    "subject": str(record.get("subject") or "")[:200],
+                    "tags": list(record.get("tags") or [])[:20],
+                    "workspace_canonical": record.get("workspace_canonical") or record.get("workspace"),
+                    "memory_id": int(memory_id), "version": version,
+                    "event_time": record.get("event_time"), "metadata": {},
+                    "dispatch_hint": (
+                        f"{dispatch_hint_text('extract_value')} 需抽取的属性名：{claim['attr']}"
+                    ),
+                }
+                right_env: dict[str, Any] = {
+                    "quote": str(hit.get("text") or "")[:1000],
+                    "subject": str(peer.get("subject") or "")[:200],
+                    "tags": list(peer.get("tags") or [])[:20],
+                    "workspace_canonical": peer.get("workspace_canonical") or peer.get("workspace"),
+                    "memory_id": peer_id,
+                    "version": int(hit.get("memory_row_version") or 1),
+                    "event_time": peer.get("event_time"), "metadata": {},
+                }
+                if backend is None:
+                    unresolved += 1
+                    continue
+                try:
+                    forward = backend.classify_pair(
+                        left_env, right_env, deadline_monotonic=None, retry_allowed=False,
+                    )
+                except TypeError:
+                    forward = backend.classify_pair(left_env, right_env)
+                gate = evaluate_single_direction_extraction(
+                    signal_extraction(forward), left_env, right_env,
+                    attr_cos=_attr_cos_or_none(embedder, signal_extraction(forward)),
+                )
+                if gate.state != "notice_ready":
+                    unresolved += 1
+                    continue
+                extracted = str(gate.value_b or "")
+                if not extracted or normalize_value(extracted) == normalize_value(
+                    str(claim["value_norm"]),
+                ):
+                    unresolved += 1
+                    continue
+                slot_key = _retired_gate_slot_key(
+                    record.get("workspace_canonical") or record.get("workspace"),
+                    str(claim["attr_norm"]), str(record.get("subject") or ""),
+                )
+                peer_version = int(hit.get("memory_row_version") or 1)
+                outcome = self.db.record_semantic_notice(
+                    memory_id=int(memory_id), peer_id=peer_id, severity="normal",
+                    notice_type="claim_conflict",
+                    title=f"Claim conflict with #{peer_id}",
+                    message=f"channel-C claim vs sentence attr {claim['attr']} differs",
+                    payload={
+                        "route": "notice_ready",
+                        "reason": "claim_channel_c_attr_sentence",
+                        "source": "claim_conflict",
+                        "slot_key": slot_key,
+                        "slot_provenance": {
+                            "entity": "workspace", "scope": "subject",
+                            "attribute": "claims_channel_c",
+                        },
+                        "attr_cos": round(float(cos), 4),
+                        "member_versions": [
+                            {"memory_id": int(memory_id), "version": version,
+                             "value": str(claim["value_norm"]),
+                             "evidence": {"quote": str(claim["value"])}},
+                            {"memory_id": peer_id, "version": peer_version,
+                             "value": extracted,
+                             "evidence": {"quote": str(hit.get("text") or "")}},
+                        ],
+                        "value_groups": [
+                            {"normalized_value": str(claim["value_norm"]),
+                             "display_value": str(claim["value"]),
+                             "members": [f"{memory_id}@{version}"]},
+                            {"normalized_value": normalize_value(extracted),
+                             "display_value": extracted,
+                             "members": [f"{peer_id}@{peer_version}"]},
+                        ],
+                        "candidate_key": {
+                            "detector_version": CONFLICT_DETECTOR_VERSION,
+                            "members": sorted([
+                                f"{memory_id}@{version}", f"{peer_id}@{peer_version}",
+                            ]),
+                            "evidence": [],
+                        },
+                        "left_evidence": {"text": str(claim["value"])},
+                        "right_evidence": {"text": str(hit.get("text") or "")},
+                        "claims_channel": True,
+                        "channel_c": True,
+                    },
+                    dedupe_key=notice_dedupe_key(
+                        int(memory_id), peer_id, version, peer_version, "claim_conflict",
+                    ),
+                    left_version=version, right_version=peer_version,
+                    source="claim_conflict",
+                )
+                if outcome.get("outcome") == "created":
+                    notices += 1
+        result: dict[str, Any] = {
+            "channel_c": True, "claims_checked": checked, "notices": notices,
+        }
+        if capped:
+            result["channel_c_capped"] = capped
+        if versional:
+            result["channel_c_versional_vetoed"] = versional
+        if unresolved:
+            result["channel_c_unresolved"] = unresolved
+        return result
+
     def drain_conflict_backlog(self, limit: int = 2) -> int:
         """0.17.0 P2-4.2: idle-worker consumption of the conflict backlog.
 
@@ -1970,6 +2174,10 @@ class EvidencePipeline:
             gate_rows["repeatability_skipped"] = repeatability_skipped
         if gate_rows:
             result["candidate_gates"] = gate_rows
+        # INTERNAL key (popped by the job wrapper): the G5 clean neighbour
+        # list, shared by channel C (claims×sentences) — never in receipts.
+        if allowed_memory_ids is not None:
+            result["_allowed_memory_ids"] = allowed_memory_ids
         if internal_qwen_confirmed:
             filter_summary["internal_qwen_confirmed"] = internal_qwen_confirmed
         if internal_qwen_vetoed:
