@@ -22,11 +22,8 @@ from .timeutil import utc_now_iso
 # byte-fallback character landing exactly on the cut boundary can shift the
 # cut by one trailing token — the same tail-truncation regime as before), so
 # the space id must NOT rotate.
-# ⚠️ P1-T5 audit obligation: read.py's table-first outline serves preview
-# heads/offsets straight from memory_evidence; any change that alters unit
-# segmentation — a bump here OR any edit to local_text_units/分段逻辑 itself
-# — MUST re-run scripts/audit_outline_table_parity.py on a real-DB copy and
-# keep the mismatch rate at zero before shipping.
+# (0.17.0 C4: the P1-T5 unit-parity audit obligation retired with the unit
+# tables — outline serves from memory_row now; rowseg owns segmentation.)
 EMBEDDING_PIPELINE_VERSION = 2
 
 EncodeFn = Callable[[str], list[float]]

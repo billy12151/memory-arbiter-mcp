@@ -118,11 +118,10 @@ def _outline_for_item(
     db: Any, memory_id: int, version: int, subject: str, content: str,
     rows: "list[dict[str, Any]] | None" = None,
 ) -> list[dict[str, Any]]:
-    """P1-T5 table-first outline: serve from memory_evidence (same source the
-    evidence pipeline published — parity proven by the 632/632 zero-mismatch
-    audit in scripts/audit_outline_table_parity.py) and fall back to
-    reparsing exactly when the table cannot serve the CURRENT version
-    (post-edit/pre-republish window, or vec-less test paths).
+    """P1-T5 table-first outline: serve from memory_row (0.17.0 C4: rows are
+    the outline source — the unit tables retired with the old parity audit)
+    and fall back to reparsing exactly when the table cannot serve the
+    CURRENT version (post-edit/pre-republish window, or vec-less test paths).
 
     ``rows``: the caller's batch-prefetched heading/text rows for THIS memory
     (None = the single-item query path). An empty list means the prefetch
@@ -145,8 +144,8 @@ def _outline_for_item(
 def _content_outline(subject: str, content: str) -> list[dict[str, Any]]:
     """Bounded table-of-contents for a find preview item.
 
-    Segments reuse the evidence pipeline's local_text_units (heading/text
-    kinds only; the subject unit is excluded) so offsets share read's span
+    Segments reuse local_text_units (heading/text kinds only; the subject is
+    excluded) so offsets share read's span
     coordinate system — span={"start": offset, "end": offset + N} slices the
     exact source region. Over-long contents collapse into a trailing
     "…还有 N 段" marker with offset=None.

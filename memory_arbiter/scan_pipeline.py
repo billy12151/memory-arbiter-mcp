@@ -343,7 +343,13 @@ class ScanPipeline:
         # gate and the `is not units` identity probe are gone. No rows yet
         # (mid-backfill) means nothing scannable this round; the slow lane
         # re-picks the memory later.
-        internal_source = self.db.evidence.scan_rows(memory_id, version)
+        internal_source = [
+            row for row in self.db.evidence.scan_rows(memory_id, version)
+            # C3 A+ guard (adversarial review P2): subject rows are index
+            # participants, never scan originators — same discipline as the
+            # write-side loops and the diagnostic channel's anchor SQL.
+            if str(row.get("kind") or "") != "subject"
+        ]
         if not internal_source:
             return outcome
         internal = self._examine_internal(memory_id, version, workspace, internal_source)
@@ -368,10 +374,7 @@ class ScanPipeline:
             # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
             # not raw row positions).
             text_rank = 0
-            rows_knn = True
             for hit in hits:
-                if not rows_knn and hit.get("kind") != "text":
-                    continue
                 peer_id = int(hit["memory_id"])
                 if peer_id == memory_id:
                     continue

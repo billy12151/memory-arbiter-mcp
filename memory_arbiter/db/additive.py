@@ -97,6 +97,16 @@ def rebuild_memory_row_for_subject_kind(conn: sqlite3.Connection) -> str:
     conn.execute("DROP TABLE memory_row")
     conn.execute("ALTER TABLE memory_row_migration RENAME TO memory_row")
     conn.execute("CREATE INDEX IF NOT EXISTS memory_row_memory_idx ON memory_row(memory_id)")
+    # P3 fix (adversarial review): ids restart at 1 — a stale rebuild epoch
+    # (old MAX id) would mark every re-embedded row as pre-epoch and block
+    # the mismatch->ready flip forever. Clear it; a rebuild in flight re-arms
+    # on its next execute.
+    try:
+        conn.execute(
+            "DELETE FROM _vec_index_meta WHERE key='space_rebuild_evidence_id'"
+        )
+    except sqlite3.Error:
+        pass
     return "memory_row_subject_kind(rebuilt)"
 
 

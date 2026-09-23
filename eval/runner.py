@@ -424,13 +424,13 @@ def _pair_notice_row(
 
 
 def _evidence_unit_count(tools: MemoryTools, memory_id: int) -> int:
-    """drain 后该记忆实际发布的 evidence 单元数（cap 观测，64 上限）。"""
+    """drain 后该记忆实际发布的行数（0.17.0 C5：行级口径，原单元数语义）。"""
     import sqlite3 as _sq
 
     conn = _sq.connect(tools.settings.db_path)
     try:
         row = conn.execute(
-            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?",
+            "SELECT COUNT(*) FROM memory_row WHERE memory_id=?",
             (int(memory_id),),
         ).fetchone()
         return int(row[0])

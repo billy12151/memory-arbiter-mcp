@@ -429,8 +429,12 @@ def _lineage_primary_version(text: str) -> "tuple[int, ...] | None":
 # blend, same style as _LINEAGE_MARKER_RE), NOT an enumerated allow-list:
 # the word-list route was retired once already (0.16.4 evolution domain
 # replaced it); pure vocab cannot cover variants like 客户端版本/release notes.
+# Word boundaries on the English vocabulary (adversarial review P2): plain
+# substrings matched build_command / tags / release_channel / docker-build
+# steps — real config conflicts got silently exempted. CJK terms need no
+# boundary (they carry their own).
 _VERSIONAL_ATTR_RE = re.compile(
-    r"版本|version|commit|revision|release|tag|build|发版",
+    r"版本|发版|\b(?:version|commit|revision|release|tag|build)\b",
     re.IGNORECASE,
 )
 

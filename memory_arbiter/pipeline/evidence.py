@@ -207,7 +207,9 @@ class EvidencePipeline:
                     continue
                 # D1 (owner 2026-09-23): version-like attrs are expected
                 # timeline evolution — skip before any KNN work and count.
-                if attr_is_versional(str(claim["attr_norm"])):
+                # Judged on the RAW attr: attr_norm strips spaces, which
+                # defeats the vocabulary's word boundaries (releasenotes).
+                if attr_is_versional(str(claim.get("attr") or claim["attr_norm"])):
                     versional_vetoed += 1
                     continue
                 checked += 1
@@ -238,7 +240,7 @@ class EvidencePipeline:
                     # (own-level skip above already took those), but a
                     # τ-similar peer attr can still be version semantics
                     # (发布说明 ≈ release notes) — same exemption applies.
-                    if attr_is_versional(str(hit["attr_norm"])):
+                    if attr_is_versional(str(hit["attr"] or hit["attr_norm"])):
                         versional_vetoed += 1
                         continue
                     if str(hit["value_norm"]) == str(claim["value_norm"]):
@@ -608,25 +610,36 @@ class EvidencePipeline:
         DONE = object()
 
         def produce() -> None:
-            produced = 0
+            # P1-1 fix (adversarial review): the EMBED set is uncapped —
+            # publish_rows needs every row; the detection cap lives in the
+            # consumer. Only the phase wall-clock stops submissions here.
+            # P1-2 fix: a failed item keeps its POSITION (yielded as None and
+            # the stream ends) so the consumer's landed prefix can never
+            # misalign segments with vectors.
             phase_started = time.monotonic()
             try:
+                stop = False
                 for start in range(0, len(ranked_segments), SEMANTIC_STREAM_BATCH_ROWS):
-                    if produced >= max_segments:
-                        break
-                    if time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
+                    if stop or time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
                         break  # phase cap: stop submitting, tail is lowest-value
                     batch = ranked_segments[start:start + SEMANTIC_STREAM_BATCH_ROWS]
                     results = embedder.embed_texts([seg.text for seg in batch])
-                    pairs = [
-                        (seg, [float(x) for x in result.embedding])
-                        for seg, result in zip(batch, results)
-                        if result.embedding
-                    ]
-                    produced += len(batch)
+                    pairs: list[tuple[Any, Any]] = []
+                    for seg, result in zip(batch, results):
+                        if not result.embedding:
+                            # A failed item ends the stream AT its position;
+                            # publishing the prefix stays aligned, the rest
+                            # waits for the backfill.
+                            out.put(pairs)
+                            out.put([(seg, None)])
+                            stop = True
+                            break
+                        pairs.append((seg, [float(x) for x in result.embedding]))
+                    if stop:
+                        break
                     out.put(pairs)
             except Exception:
-                pass  # degraded embedder: empty/short stream, memory stays pending
+                pass  # degraded embedder: short stream, memory stays pending
             finally:
                 out.put(DONE)
 
@@ -1023,7 +1036,14 @@ class EvidencePipeline:
 
         internal_qwen_pairs: list[tuple[Any, Any, Any]] = []
         # C3 A+ guard: subject rows never originate pairs (internal or cross).
-        originator_views = [v for v in seg_views if v.kind != "subject"]
+        # Adversarial-review follow-up: an INDEPENDENT cap (not the cross
+        # loop's) — O(n²) construction with row granularity needs its own
+        # ceiling, while E10①'s guarantee (internal keepers land despite
+        # cross truncation) forbids sharing the cross cap.
+        from ..constants import SEMANTIC_INTERNAL_MAX_ROWS
+        originator_views = [
+            v for v in seg_views if v.kind != "subject"
+        ][:SEMANTIC_INTERNAL_MAX_ROWS]
         for i in range(len(originator_views)):
             for j in range(i + 1, len(originator_views)):
                 seg_a, seg_b = originator_views[i], originator_views[j]
@@ -1076,90 +1096,121 @@ class EvidencePipeline:
         # row_knn in rows mode (candidates are clean short sentences or
         # header-folded table rows), evidence_knn otherwise. Rows carry no
         # 'text'-only kind filter (table rows are first-class candidates).
-        landed_embeddings: list[list[float]] = []
+        landed: list[tuple[Any, list[float]]] = []
         streaming = bool(pending_segments)
+        ranked_pending: list[Any] = []
         if streaming:
             # C7: iterate the lazy stream (ranking already applied to
-            # pending_segments via `paired`); embeddings land in stream order
-            # = publish order below.
+            # pending_segments via `paired`). The stream is ALWAYS drained:
+            # the producer thread must exit (no leak) and publish needs every
+            # embedding — the detection cap/deadline below stop DETECTION,
+            # never the collection of vectors (P1/P2 fixes, adversarial
+            # review: partial publishes and dead threads are both gone).
             ranked_pending = [seg for seg, _none in paired]
             pair_iter = self._streamed_pairs(
                 ranked_pending, embedder, max_segments,
             )
         else:
             pair_iter = iter(zip(seg_views, seg_embeddings))
-        for seg_view, embedding in pair_iter:
-            if streaming:
-                landed_embeddings.append(embedding)
-            if seg_view.kind == "subject":
-                continue  # C3 A+ guard: indexed, never a pair originator
-            active_deadline = backlog_deadline()
-            if units_examined >= max_segments:
-                truncation_reason = segments_capped_reason
-                break
-            if active_deadline is not None and time.monotonic() >= active_deadline:
-                truncation_reason = "notice_budget_exhausted"
-                break
-            units_examined += 1
-            knn_hits = self.db.row_knn(
-                embedding, k=5, workspace=workspace,
-                exclude_memory_id=memory_id, conn=job_conn,
-            )
-            for hit in knn_hits:
-                decision = decide_evidence(seg_view.text, str(hit.get("text") or ""))
-                if decision.action == "ignore":
-                    continue
-                # 0.17.0 校准轮（对抗 review 遗留）：行级拆句让整文过程记录
-                # veto（review/设计→发版/复验）只看到句子看不到语境——按记忆
-                # 级 subject 复核一次，过程记录对的任何行对都不进门。
-                if _subject_is_process_record(
-                    str(hit.get("subject") or ""), str(record.get("subject") or ""),
-                ):
-                    continue
-                # 0.16.4 §1: cross-memory evolution domain — the earliest
-                # kill. It happens BEFORE the provenance gate, so a notify
-                # shape never consumes provenance/classifier work, a peer
-                # slot, a sort position, or Qwen budget. Same predicate as
-                # the scan side (§0.5 single implementation).
-                if is_cross_evolution(decision):
-                    continue
-                peer_id = int(hit["memory_id"])
-                raw_hit_meta = hit.get("metadata")
-                if isinstance(raw_hit_meta, str) and raw_hit_meta:
-                    try:
-                        raw_hit_meta = json.loads(raw_hit_meta)
-                    except (TypeError, ValueError):
-                        raw_hit_meta = {}
-                hit_metadata = raw_hit_meta if isinstance(raw_hit_meta, dict) else {}
-                hit_entity = str(hit_metadata.get("entity") or "").strip()
-                hit_scope = str(hit_metadata.get("scope") or "").strip()
-                if not (
-                    own_entity and hit_entity and own_entity == hit_entity
-                    and own_scope and hit_scope and own_scope == hit_scope
-                ):
-                    provenance_filtered += 1
-                    continue
-                if classify_pair(
-                    seg_view.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
-                ) == "clear":
-                    no_difference_filtered += 1
-                    continue
-                existing = by_peer.get(peer_id)
-                closer = existing is not None and float(hit.get("distance") or 9) < float(existing[0].get("distance") or 9)
-                # 0.16.4 §1: only check shapes reach here now, so the
-                # notify-priority protection lost its subject — the closer
-                # neighbour of the same peer wins outright.
-                if existing is None or closer:
-                    by_peer[peer_id] = (hit, seg_view, decision)
+        try:
+            for seg_view, embedding in pair_iter:
+                if streaming:
+                    if embedding is None:
+                        # Producer signalled a failed item at this position:
+                        # the landed prefix is aligned and complete; the rest
+                        # waits for the backfill (no partial-with-holes
+                        # publish).
+                        break
+                    landed.append((seg_view, embedding))
+                if seg_view.kind == "subject":
+                    continue  # C3 A+ guard: indexed, never a pair originator
+                if units_examined >= max_segments:
+                    truncation_reason = truncation_reason or segments_capped_reason
+                    continue  # detection capped; keep draining for publish
+                active_deadline = backlog_deadline()
+                if active_deadline is not None and time.monotonic() >= active_deadline:
+                    truncation_reason = truncation_reason or "notice_budget_exhausted"
+                    continue  # budget gone; keep draining for publish
+                units_examined += 1
+                knn_hits = self.db.row_knn(
+                    embedding, k=5, workspace=workspace,
+                    exclude_memory_id=memory_id, conn=job_conn,
+                )
+                for hit in knn_hits:
+                    decision = decide_evidence(seg_view.text, str(hit.get("text") or ""))
+                    if decision.action == "ignore":
+                        continue
+                    # 0.17.0 校准轮（对抗 review 遗留）：行级拆句让整文过程记录
+                    # veto（review/设计→发版/复验）只看到句子看不到语境——按记忆
+                    # 级 subject 复核一次，过程记录对的任何行对都不进门。
+                    if _subject_is_process_record(
+                        str(hit.get("subject") or ""), str(record.get("subject") or ""),
+                    ):
+                        continue
+                    # 0.16.4 §1: cross-memory evolution domain — the earliest
+                    # kill. It happens BEFORE the provenance gate, so a notify
+                    # shape never consumes provenance/classifier work, a peer
+                    # slot, a sort position, or Qwen budget. Same predicate as
+                    # the scan side (§0.5 single implementation).
+                    if is_cross_evolution(decision):
+                        continue
+                    peer_id = int(hit["memory_id"])
+                    raw_hit_meta = hit.get("metadata")
+                    if isinstance(raw_hit_meta, str) and raw_hit_meta:
+                        try:
+                            raw_hit_meta = json.loads(raw_hit_meta)
+                        except (TypeError, ValueError):
+                            raw_hit_meta = {}
+                    hit_metadata = raw_hit_meta if isinstance(raw_hit_meta, dict) else {}
+                    hit_entity = str(hit_metadata.get("entity") or "").strip()
+                    hit_scope = str(hit_metadata.get("scope") or "").strip()
+                    if not (
+                        own_entity and hit_entity and own_entity == hit_entity
+                        and own_scope and hit_scope and own_scope == hit_scope
+                    ):
+                        provenance_filtered += 1
+                        continue
+                    if classify_pair(
+                        seg_view.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
+                    ) == "clear":
+                        no_difference_filtered += 1
+                        continue
+                    existing = by_peer.get(peer_id)
+                    closer = existing is not None and float(hit.get("distance") or 9) < float(existing[0].get("distance") or 9)
+                    # 0.16.4 §1: only check shapes reach here now, so the
+                    # notify-priority protection lost its subject — the closer
+                    # neighbour of the same peer wins outright.
+                    if existing is None or closer:
+                        by_peer[peer_id] = (hit, seg_view, decision)
+        except Exception:
+            # A mid-collection failure must not strand the producer thread
+            # (P2 leak fix): closing the generator wakes its queue wait; the
+            # daemon thread's remaining put is unbounded-safe (queue depth 1
+            # drains via GC'd consumer... belt: producer puts are followed by
+            # a final DONE put that may block — the daemon flag keeps the
+            # process free to exit regardless).
+            try:
+                close = getattr(pair_iter, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+            raise
         if streaming:
-            # C7: the index duty completes AFTER collection on the streaming
-            # path — publish every embedded row (still ahead of every Qwen
-            # call below), then heal + anchor the detection budget.
-            if landed_embeddings:
-                landed_segments = ranked_pending[: len(landed_embeddings)]
+            # C7 (P1 fix, adversarial review): publish ONLY the complete,
+            # position-aligned set. A short stream (phase timeout / failed
+            # embed) publishes NOTHING — current_row_vectors stays empty, the
+            # next job or backfill re-embeds whole; a partial-with-holes or
+            # misaligned publish would poison the row store until the next
+            # version bump.
+            publishable = (
+                landed if len(landed) == len(ranked_pending) else []
+            )
+            if publishable:
                 published = self.db.evidence.publish_rows(
                     int(memory_id), int(record.get("version") or 1), content_hash,
-                    landed_segments, landed_embeddings,
+                    [seg for seg, _embedding in publishable],
+                    [embedding for _seg, embedding in publishable],
                 )
                 if published.get("published"):
                     vec_state = self.db.get_vec_index_state()
@@ -1170,6 +1221,8 @@ class EvidencePipeline:
                         self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
                 # stale_snapshot et al: in-memory vectors served this run; the
                 # next job lands the new version's rows.
+            elif ranked_pending:
+                truncation_reason = truncation_reason or "embed_phase_incomplete"
             publish_done_at.append(time.monotonic())
         if truncation_reason:
             # E10① order guarantee: internal findings land BEFORE the cross

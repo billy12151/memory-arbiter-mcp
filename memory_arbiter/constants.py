@@ -132,6 +132,11 @@ SEMANTIC_EMBED_PHASE_TIMEOUT_MS = 30000
 # overlap the GPU work; value-anchor ranking happens BEFORE batching, so a
 # deadline/cap hit stops later batches and always cuts the lowest-value tail.
 SEMANTIC_STREAM_BATCH_ROWS = 16
+# Adversarial-review follow-up: internal (same-memory) pair construction is
+# O(n²) in segment count — row granularity multiplied n (a 300-row table is
+# ~45k pairs). Independent from the cross-loop cap so E10① (internal keepers
+# land despite cross truncation) keeps its own headroom.
+SEMANTIC_INTERNAL_MAX_ROWS = 256
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.

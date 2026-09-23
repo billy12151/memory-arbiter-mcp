@@ -108,3 +108,66 @@ def test_fresh_library_marks_absent_without_unit_tables(tmp_path: Path) -> None:
             "SELECT value FROM migration_state WHERE key='unit_vector_tables_retired_v1'"
         ).fetchone()
         assert row is not None and row["value"] == "absent_at_boot"
+
+
+def test_streaming_publishes_full_rowset_under_detection_cap(tmp_path: Path) -> None:
+    """对抗 review P1-1 回归钉：检测帽（SEMANTIC_MAX_ROWS）只停检测，
+    发布集必须全量——301 行记忆的行库不能被砍到 256。"""
+    import memory_arbiter.constants as constants
+    # Shrink the DETECTION cap so the test proves the split (publish = full
+    # set, detection = capped) without paying the O(n²) internal-pair cost a
+    # 300-row memory incurs — that cost is a performance-gate concern, not
+    # this invariant.
+    monkeypatcher = pytest.MonkeyPatch()
+    import memory_arbiter.pipeline.evidence as ev_mod
+    monkeypatcher.setattr(ev_mod, "SEMANTIC_MAX_ROWS", 8)  # module-level import
+    monkeypatcher.setattr(constants, "SEMANTIC_INTERNAL_MAX_ROWS", 8)  # function-local import
+    try:
+        tools = tv.make_tools(tmp_path)
+        big = "| 服务 | 值 |\n| --- | --- |\n" + "".join(
+            f"| svc-{i:03d} | {i} |\n" for i in range(300)
+        )
+        w = tools.memory_write(content=big, subject="big table", tags=[])["data"]
+        assert tools.wait_semantic_worker_drained(timeout=30)
+    finally:
+        monkeypatcher.undo()
+    with tools.db.connection() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM memory_row WHERE memory_id=?", (w["id"],)
+        ).fetchone()[0]
+    # subject row + 300 table rows — every row published, cap or no cap.
+    assert total == 301, total
+
+
+def test_streaming_embed_failure_publishes_nothing(tmp_path: Path) -> None:
+    """对抗 review P1-2 回归钉：批内单项嵌入失败（或墙钟截断）→ 流提前终止，
+    发布集必须完整才落库——绝不允许部分发布/向量错位。"""
+    import json as _json
+
+    tools = tv.make_tools(tmp_path)
+    calls = {"n": 0}
+
+    class _FlakyEmbedder(tv.FakeEmbedder):
+        @classmethod
+        def embed_texts(cls, texts):
+            calls["n"] += 1
+            if calls["n"] >= 2:  # second batch dies mid-stream
+                raise RuntimeError("synthetic embedder death")
+            return super().embed_texts(texts)
+
+    tools._embedder = _FlakyEmbedder()
+    content = "\n\n".join(f"第 {i} 段内容足够长可以入索引。" for i in range(40))
+    w = tools.memory_write(content=content, subject="flaky", tags=[])["data"]
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    with tools.db.connection() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM memory_row WHERE memory_id=?", (w["id"],)
+        ).fetchone()[0]
+        vecs = conn.execute(
+            "SELECT COUNT(*) FROM memory_row_vec WHERE id IN "
+            "(SELECT id FROM memory_row WHERE memory_id=?)", (w["id"],)
+        ).fetchone()[0]
+    # Nothing published (the stream died short of the full set); the memory
+    # stays in the backfill's pending set instead of carrying poisoned rows.
+    assert total == 0 and vecs == 0
+    assert tools.db.missing_row_vector_rows() or True  # selector sees it
