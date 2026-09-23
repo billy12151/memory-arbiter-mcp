@@ -13,6 +13,7 @@ from ..constants import (
     SEMANTIC_JOB_TIMEOUT_MS,
     SEMANTIC_MAX_EVIDENCE_UNITS,
     SEMANTIC_MAX_EXAMINED_PAIRS,
+    SEMANTIC_INTERNAL_QWEN_MAX_PAIRS,
     SEMANTIC_MAX_ROWS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
@@ -1370,7 +1371,14 @@ class EvidencePipeline:
         #   unavailable model)
         internal_qwen_confirmed = 0
         internal_qwen_vetoed = 0
+        internal_qwen_budget = max(0, SEMANTIC_INTERNAL_QWEN_MAX_PAIRS)
         for unit_a, unit_b, internal_decision in internal_qwen_pairs:
+            if internal_qwen_budget <= 0:
+                # Harness regression fix: row granularity multiplied internal
+                # keepers and they starved the cross pairs out of the shared
+                # Qwen budget. E10① keeps its land-first guarantee — within
+                # this smaller, value-ranked budget.
+                break
             reason_text = str(internal_decision.reason or "")
             if backend is not None:
                 active_deadline = backlog_deadline()
@@ -1380,6 +1388,7 @@ class EvidencePipeline:
                 ) and pairs_examined < max_examined_pairs
                 if budget_ok:
                     pairs_examined += 1
+                    internal_qwen_budget -= 1
                     env_a = envelope(record, unit_a.text)
                     env_b = envelope(record, unit_b.text)
                     if internal_decision.left_value and internal_decision.right_value:

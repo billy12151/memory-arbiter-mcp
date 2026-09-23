@@ -137,6 +137,12 @@ SEMANTIC_STREAM_BATCH_ROWS = 16
 # ~45k pairs). Independent from the cross-loop cap so E10① (internal keepers
 # land despite cross truncation) keeps its own headroom.
 SEMANTIC_INTERNAL_MAX_ROWS = 256
+# Harness-found regression: row granularity multiplied internal keepers
+# (~dozens per long memory) and they consumed the WHOLE shared Qwen pair
+# budget (cross pairs never reached Qwen — recall 0.372→0.163). Internal
+# keepers now take at most this many Qwen slots (value-anchored ranking
+# already ordered them); E10①'s land-first guarantee is unchanged.
+SEMANTIC_INTERNAL_QWEN_MAX_PAIRS = 3
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.
