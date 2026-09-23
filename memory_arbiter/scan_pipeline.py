@@ -132,7 +132,9 @@ class ScanPipeline:
         if pending_ws:
             # 0.16.10 §九 (owner 2026-09-19): workspace 归一判定清完才扫冲突——
             # C3b 同桶配对，桶归属未治理完时扫描基数是错的。门禁放在 round
-            # 状态读写之前：被挡时零副作用（不建 round、不动水位、不写日志）。
+            # 状态读写之前：被挡时零副作用（不建 round、不动水位、不写日志；
+            # 唯一的例外是上面的 _expire_confirmed_pair_pending 自愈——其副作用
+            # 正是清退这些拦路的双确认行，幂等）。
             return {
                 "ok": False,
                 "error": "workspace_backlog_pending",

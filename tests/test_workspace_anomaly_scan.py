@@ -324,6 +324,27 @@ def test_confirmed_pair_not_suspected(vec_tools: MemoryTools) -> None:
     assert finding["suspected_workspace"] == "dbpgsql"
 
 
+def test_default_endpoint_never_exempted(vec_tools: MemoryTools) -> None:
+    """§5 第一行：default 作任一端点门 A 永不豁免（保留真错桶捕捉能力）。
+    快照里即便列入 default（reserved term），加载端 is_default_workspace_term
+    也会把它过滤掉，default 源/目标的提议照常生成。"""
+    tools = vec_tools
+    _beta_clan(tools, 9)  # dbpgsql 投票基数
+    tools.memory_write(
+        content="生产环境数据库使用 PostgreSQL，落在 default 的错位记忆。",
+        subject="default-misplaced", tags=["db"], workspace="default",
+    )
+    assert tools.wait_semantic_worker_drained(timeout=10)
+
+    # 快照同时列入两端（含 default）——default 仍须提议。
+    _confirm_snapshot(tools, ["dbpgsql", "default"])
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["status"] == "ok"
+    hit = next(f for f in data["findings"]
+               if f["workspace"] == "default" and f["suspected_workspace"] == "dbpgsql")
+    assert hit["memory_id"] >= 1
+
+
 def test_confirmed_pair_does_not_consume_cap(vec_tools: MemoryTools) -> None:
     tools = vec_tools
     _beta_clan(tools, 9)   # dbpgsql 投票基数

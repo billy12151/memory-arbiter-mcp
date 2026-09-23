@@ -127,14 +127,14 @@ class ScanQueueStore:
                 rows = conn.execute(
                     "SELECT memory_id, version, suspected_workspace FROM workspace_dismissals"
                 ).fetchall()
-        except sqlite3.Error:
+            index: dict[int, set[tuple[int, str]]] = {}
+            for row in rows:
+                index.setdefault(int(row["memory_id"]), set()).add(
+                    (int(row["version"]), str(row["suspected_workspace"]))
+                )
+            return index
+        except (sqlite3.Error, TypeError, ValueError):
             return {}
-        index: dict[int, set[tuple[int, str]]] = {}
-        for row in rows:
-            index.setdefault(int(row["memory_id"]), set()).add(
-                (int(row["version"]), str(row["suspected_workspace"]))
-            )
-        return index
 
     def record_workspace_dismissals_on_conn(
         self, conn: sqlite3.Connection, rows: list[tuple[int, int, str, str]],

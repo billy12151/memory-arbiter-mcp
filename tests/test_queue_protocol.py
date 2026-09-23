@@ -622,3 +622,50 @@ def test_version_bump_reopens(tmp_path: Path) -> None:
             "SELECT status FROM scan_queue WHERE kind='workspace' AND status='pending'"
         ).fetchall()
     assert len(rows) == 1, "version+1 后同桶提议必须重新入队"
+
+
+def test_hint_branches_leave_no_durable_row(tmp_path: Path) -> None:
+    """R1 补测（R2-3 语义钉）：protected / multi_family hint 分支只翻队列
+    状态，绝不落 workspace_dismissals——hint 语义是「请用户处置」，一旦落
+    持久表就变成永久豁免、治理入口静默关闭。"""
+    tools = make_tools(tmp_path)
+    # protected 分支：own ∈ PROTECTED_WORKSPACES，confirmed 提交在 protected
+    # 检查（current/target 任一受保护）即降级 hint，走不到投票门。
+    protected_mid = _write(tools, "受保护桶条目", "mema-twin 专属内容，独苗", workspace="mema-twin")
+    _enqueue_workspace_candidate(tools, protected_mid, own="mema-twin",
+                                 suspected="dbpgsql", tag="hint-protected")
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": protected_mid, "status": "confirmed",
+         "target_workspace": "dbpgsql", "conf": 0.9, "reason": "投票门不会执行"},
+    ])
+    assert result["results"][0]["outcome"] == "protected_bucket_hint"
+
+    # multi_family 分支（E7-4）：subject/tags 提及 ≥2 个已注册项目族。
+    # 注：FakeEmbedder 下未注册桶名会被写时向量归并进既有桶（见 cap 测试
+    # 注释），两个族与跨族记忆的桶都必须经 move_memories_workspace 直写
+    # 才能得到确定 canonical。
+    _write(tools, "族甲", "dbpgsql 后端栈内容，兄弟 0", workspace="dbpgsql")
+    fw_id = _write(tools, "族乙", "前端栈内容，兄弟 0", workspace="dbpgsql")
+    moved = tools.memory_govern("move_memories_workspace", {
+        "memory_ids": [fw_id], "new_workspace": "frontweb",
+        "reason": "seed second family", "authorized": True,
+    })
+    assert moved["ok"], moved
+    multi_mid = _write(tools, "跨族条目", "dbpgsql 与 frontweb 的跨项目内容，独苗",
+                       workspace="dbpgsql", tags=["dbpgsql", "frontweb"])
+    _enqueue_workspace_candidate(tools, multi_mid, own="dbpgsql", suspected="frontweb",
+                                 tag="hint-multi")
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": multi_mid, "status": "confirmed",
+         "target_workspace": "frontweb", "conf": 0.9, "reason": "跨族提示"},
+    ])
+    assert result["results"][0]["outcome"] == "multi_family_hint"
+
+    with tools.db.connection() as conn:
+        durable = int(conn.execute("SELECT COUNT(*) FROM workspace_dismissals").fetchone()[0])
+        queue_status = conn.execute(
+            "SELECT status FROM scan_queue WHERE kind='workspace'"
+        ).fetchall()
+    assert durable == 0, "hint 分支不得落持久豁免"
+    assert queue_status, "hint 分支仍须了结 pending 行"
+    assert all(str(r[0]) == "dismissed" for r in queue_status)
