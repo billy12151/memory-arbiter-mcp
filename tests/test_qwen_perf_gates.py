@@ -97,6 +97,7 @@ def _write_check_scene(tools: MemoryTools, peers: int) -> dict[str, Any]:
 def _run_job(monkeypatch: pytest.MonkeyPatch, tools: MemoryTools, scene: dict[str, Any], backend: Any) -> dict[str, Any]:
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(scene["hits"]))
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(scene["hits"]))  # 0.17.0 P2-3 行级候选同注入
+    _pass_cos_gate(monkeypatch)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     record = tools.db.get_memory(int(scene["new"]["id"]))
     return tools._process_semantic_conflict_job(
@@ -123,6 +124,17 @@ class _ValueBackend:
             "attribute_b": "取值", "value_b": cls._value(right),
         }
         return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+
+def _pass_cos_gate(monkeypatch, cos: float = 0.85):
+    """Gate-v2 G4: pass every hand-built hit through the cosine band
+    (embedder-agnostic — patches the gates module, which the detection loop
+    imports at call time)."""
+    import memory_arbiter.pipeline.gates as _gates
+    monkeypatch.setattr(
+        _gates, "candidate_cos_gate",
+        lambda own, hits, vecs: ([(h, cos) for h in hits], [], []),
+    )
+
 
 
 def test_pairs_cap_reports_incomplete_when_no_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -33,9 +33,16 @@ class FakeEmbedder:
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
         text = f"{prefix}\n{body}".casefold()
+        # Gate-v2 G4: the two directions are deliberately NOT orthogonal —
+        # real-model same-template sentences sit in the 0.95+ cosine band
+        # (标定 #3), orthogonal fakes (cos 0.0) would be filtered as noise
+        # by the candidate cosine gate before any ranking happens. The
+        # angle is tuned to cos≈0.68: inside the [0.60, 0.98) conflict band
+        # yet OUTSIDE the workspace-name admission radius (distance ≤0.25
+        # would fold "apisvc" into "dbpgsql" and break the suspect channel).
         if "postgres" in text or "pgsql" in text:
-            return EmbedResult([1.0, 0.0], False, len(text), len(text))
-        return EmbedResult([0.0, 1.0], False, len(text), len(text))
+            return EmbedResult([0.9308, 0.3653], False, len(text), len(text))
+        return EmbedResult([0.3653, 0.9308], False, len(text), len(text))
 
 
 def make_tools(tmp_path: Path) -> MemoryTools:

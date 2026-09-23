@@ -154,6 +154,15 @@ SEMANTIC_CROSS_KNN_WINDOW = 16
 # arithmetic entirely. The detection side reuses the same ceiling: pairs at
 # or above it are duplicates, not conflicts (G4 repeatability skip).
 COS_EXACT_BOOST = 0.98
+# Gate-v2 G4 candidate cosine band on TRUE row-to-row cosine (calibration
+# table §1: true conflicts 0.80-0.97, same-topic non-conflicts 0.64-0.75,
+# random same-bucket p5=0.554 — below-floor pairs are noise; at/above-ceil
+# pairs are duplicates that belong to the similarity/duplicates channel,
+# hence the ceil == COS_EXACT_BOOST). Non-unit row vectors (|v|≈16.5) make
+# L2-to-cos conversion unreliable, so the gate runs on fetched vectors, one
+# batched IN query per collection loop.
+SEMANTIC_CANDIDATE_COS_FLOOR = 0.60
+SEMANTIC_CANDIDATE_COS_CEIL = COS_EXACT_BOOST
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.

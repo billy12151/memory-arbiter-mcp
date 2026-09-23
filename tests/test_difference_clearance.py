@@ -14,6 +14,18 @@ from memory_arbiter.db_generation import CONFLICT_DETECTOR_VERSION
 from test_scan_pipeline import make_tools, _write
 
 
+def _pass_cos_gate(tools, monkeypatch, cos: float = 0.85) -> None:
+    """Gate-v2 G4: hand-built knn hits carry no real row ids, so the
+    true-cosine gate would drop them all (no vector, no verdict). Mock the
+    vector fetch with a direction whose cosine vs the fake [0,1] rows is
+    `cos` — inside the [0.60, 0.98) band."""
+    vector = [((1 - cos * cos) ** 0.5), cos]
+    monkeypatch.setattr(
+        tools.db.evidence, "row_vectors_for_ids",
+        lambda ids, conn=None: {int(i): vector for i in ids},
+    )
+
+
 def _conflict_member_sets(tools) -> list[set[int]]:
     with tools.db.connection() as conn:
         rows = conn.execute(
@@ -69,6 +81,13 @@ def test_top3_rank_gate_skips_deep_check_pairs(tmp_path: Path) -> None:
     original_row_knn = pipeline.db.row_knn  # 0.17.0 P2-6.1 行级候选同注入
     pipeline.db.evidence.row_knn = _fake_knn
     pipeline.db.row_knn = _fake_knn
+    # Gate-v2 G4: this test pins the TOP-3 RANK gate, not the cosine band —
+    # pass every hand-built hit through the band gate untouched.
+    import memory_arbiter.pipeline.gates as _gates_module
+    _orig_gate = _gates_module.candidate_cos_gate
+    _gates_module.candidate_cos_gate = (
+        lambda own, hits, vecs: ([(h, 0.85) for h in hits], [], [])
+    )
     try:
         outcome = pipeline._process_memory(
             a, suppression=pipeline._load_suppression(), neighbor_k=10,
@@ -113,6 +132,13 @@ def test_notify_pairs_queue_from_deep_ranks(tmp_path: Path) -> None:
     original_row_knn = pipeline.db.row_knn  # 0.17.0 P2-6.1 行级候选同注入
     pipeline.db.evidence.row_knn = _fake_knn
     pipeline.db.row_knn = _fake_knn
+    # Gate-v2 G4: this test pins the TOP-3 RANK gate, not the cosine band —
+    # pass every hand-built hit through the band gate untouched.
+    import memory_arbiter.pipeline.gates as _gates_module
+    _orig_gate = _gates_module.candidate_cos_gate
+    _gates_module.candidate_cos_gate = (
+        lambda own, hits, vecs: ([(h, 0.85) for h in hits], [], [])
+    )
     try:
         pipeline._process_memory(
             a, suppression=pipeline._load_suppression(), neighbor_k=10,

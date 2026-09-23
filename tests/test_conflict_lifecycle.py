@@ -48,6 +48,18 @@ def _record(db: MemoryDB, members: list[ConflictMember], *, expected_revision=No
     )
 
 
+
+def _pass_cos_gate(monkeypatch, cos: float = 0.85):
+    """Gate-v2 G4: pass every hand-built hit through the cosine band
+    (embedder-agnostic — patches the gates module, which the detection loop
+    imports at call time)."""
+    import memory_arbiter.pipeline.gates as _gates
+    monkeypatch.setattr(
+        _gates, "candidate_cos_gate",
+        lambda own, hits, vecs: ([(h, cos) for h in hits], [], []),
+    )
+
+
 def test_fresh_schema_has_single_conflict_table_and_group_indexes(tmp_path: Path) -> None:
     db = _db(tmp_path)
     with db.connection() as conn:
@@ -879,8 +891,9 @@ def test_notice_value_groups_tolerate_missing_parsed_keys(tmp_path: Path, monkey
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "MyProject", "scope": "Production"}
-    peer, new = _write_pair(tools, meta)
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [_hit(peer["id"], "database is mysql", metadata=dict(meta))])
+    peer, new = _write_pair(tools, meta, left="database mysql 8 and 16", right="database sqlite 3 and 4")
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [_hit(peer["id"], "database mysql 8 and 16", metadata=dict(meta))])
+    _pass_cos_gate(monkeypatch)
 
     class Backend:
         @staticmethod
@@ -917,16 +930,21 @@ def test_same_reason_degradation_counted_once_per_task(tmp_path: Path, monkeypat
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "svc", "scope": "production"}
     peers = [
-        tools.memory_write(content=f"database is {value}", subject=value, tags=[], metadata=meta)["data"]
+        tools.memory_write(
+            content=f"database {value} 8 and 16", subject=value, tags=[], metadata=meta,
+        )["data"]
         for value in ("mysql", "postgres")
     ]
-    new = tools.memory_write(content="database is sqlite", subject="sqlite", tags=[], metadata=meta)["data"]
+    new = tools.memory_write(
+        content="database sqlite 3 and 4", subject="sqlite", tags=[], metadata=meta,
+    )["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [
-        _hit(peers[0]["id"], "database is mysql", row_id=1, distance=0.1, metadata=dict(meta)),
-        _hit(peers[1]["id"], "database is postgres", row_id=2, distance=0.2, metadata=dict(meta)),
+        _hit(peers[0]["id"], "database mysql 8 and 16", row_id=1, distance=0.1, metadata=dict(meta)),
+        _hit(peers[1]["id"], "database postgres 8 and 16", row_id=2, distance=0.2, metadata=dict(meta)),
     ]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(hits))
+    _pass_cos_gate(monkeypatch)
 
     class BadOutput:
         @staticmethod

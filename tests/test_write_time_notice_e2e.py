@@ -47,7 +47,10 @@ class FakeEmbedder:
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars: int | None = None) -> EmbedResult:
         text = f"{prefix}\n{body}".casefold()
-        vector = [1.0, 0.0] if "json" in text else [0.0, 1.0]
+        # Gate-v2 G4: cos≈0.68 between the two directions — inside the
+        # candidate cosine band, so csv/json template pairs survive the gate
+        # (orthogonal fakes would be filtered as below-floor noise).
+        vector = [0.9308, 0.3653] if "json" in text else [0.3653, 0.9308]
         return EmbedResult(vector, False, len(text), len(text))
 
 
@@ -291,7 +294,7 @@ def test_pair_prompt_caps_quotes_at_400_chars() -> None:
 def _write_many_units(tools: MemoryTools, paragraphs: int) -> int:
     """Write one memory whose content segments into many text units."""
     content = "\n\n".join(
-        f"第{index}条部署记录涉及网关配置与索引参数。" for index in range(paragraphs)
+        f"部署记录 {index}：网关超时阈值 {index}00ms。" for index in range(paragraphs)
     )
     written = tools.memory_write(content=content, subject="deployment log", tags=[])["data"]
     assert tools.wait_semantic_worker_drained(timeout=5)
@@ -328,7 +331,10 @@ def test_job_deadline_keeps_notice_budget_exhausted(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(
         tools._semantic_worker, "pending_job_deadline", lambda timeout: _time.monotonic() - 1.0,
     )
-    written = tools.memory_write(content="两条记录而已。", subject="small", tags=[])["data"]
+    # Gate-v2 G4: the row must pass the sentence prefilter to enter the
+    # examination loop — only then can the (already-past) deadline truncate
+    # it and surface notice_budget_exhausted.
+    written = tools.memory_write(content="两条记录而已：超时阈值 500ms。", subject="small", tags=[])["data"]
     assert tools.wait_semantic_worker_drained(timeout=5)
     memory_id = int(written["id"])
 

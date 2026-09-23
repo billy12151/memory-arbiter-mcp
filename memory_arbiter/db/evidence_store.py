@@ -813,6 +813,77 @@ class EvidenceStore:
                         "end": min(len(content), end + 128),
                     }
 
+                def _pool_near_duplicate(
+                    peer: int, hit: "dict[str, Any]", anchor: int,
+                    unit_row: "dict[str, Any]", text_a: str, reason: str,
+                ) -> None:
+                    """Gate-v2 G4: shared duplicates_pool admission for BOTH
+                    near-duplicate sources — the deterministic ignore routes
+                    and the at-ceil cosine pairs. Same suppression contract,
+                    same free-dict-replace cap accounting."""
+                    nonlocal duplicates_truncated
+                    pair_key = (min(anchor, peer), max(anchor, peer))
+                    member_refs, _key, candidate_hash = self._unit_pair_identity(
+                        anchor, unit_row, peer, hit,
+                    )
+                    recorded = recorded_candidate_statuses.get(candidate_hash)
+                    if recorded is not None or any(
+                        member_refs <= group_members for group_members in active_group_members
+                    ) or any(
+                        member_refs <= group_members for group_members in dismissed_group_members
+                    ):
+                        return
+                    hit_text = str(hit.get("text") or "")
+                    # Re-hitting an already-pooled pair is a free dict
+                    # replace, not pool growth — it must not count against
+                    # the cap or flag truncation that never happened.
+                    if pair_key in duplicates_pool or len(duplicates_pool) < duplicates_cap:
+                        duplicates_pool[pair_key] = {
+                            "left_id": pair_key[0], "right_id": pair_key[1],
+                            "reason": reason,
+                            "distance": float(hit.get("distance") or 0),
+                            "candidate_key_hash": candidate_hash,
+                            "left_snippet": text_a[:200] if pair_key[0] == anchor else hit_text[:200],
+                            "right_snippet": hit_text[:200] if pair_key[1] == peer else text_a[:200],
+                            "members": [
+                                {
+                                    "memory_id": pair_key[0],
+                                    "version": int(unit_row["memory_version"] or 1) if pair_key[0] == anchor else int(hit.get("memory_version") or hit.get("memory_row_version") or 1),
+                                    "attribute_raw": None, "value_raw": None,
+                                    "normalized_attribute": None, "normalized_value": None,
+                                    "evidence_quote": text_a if pair_key[0] == anchor else hit_text,
+                                    "evidence_span": (
+                                        [int(unit_row["start_offset"] or 0), int(unit_row["end_offset"] or 0)]
+                                        if pair_key[0] == anchor else
+                                        [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
+                                    ),
+                                    "content_hash": str(unit_row["content_hash"] or "") if pair_key[0] == anchor else str(hit.get("content_hash") or ""),
+                                    "evidence_unit": int(unit_row["eid"]) if pair_key[0] == anchor else int(hit.get("id") or 0),
+                                    "direction": "deterministic", "prompt_version": None,
+                                    "detector_version": CONFLICT_DETECTOR_VERSION,
+                                },
+                                {
+                                    "memory_id": pair_key[1],
+                                    "version": int(hit.get("memory_version") or hit.get("memory_row_version") or 1) if pair_key[1] == peer else int(unit_row["memory_version"] or 1),
+                                    "attribute_raw": None, "value_raw": None,
+                                    "normalized_attribute": None, "normalized_value": None,
+                                    "evidence_quote": hit_text if pair_key[1] == peer else text_a,
+                                    "evidence_span": (
+                                        [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
+                                        if pair_key[1] == peer else
+                                        [int(unit_row["start_offset"] or 0), int(unit_row["end_offset"] or 0)]
+                                    ),
+                                    "content_hash": str(hit.get("content_hash") or "") if pair_key[1] == peer else str(unit_row["content_hash"] or ""),
+                                    "evidence_unit": int(hit.get("id") or 0) if pair_key[1] == peer else int(unit_row["eid"]),
+                                    "direction": "deterministic", "prompt_version": None,
+                                    "detector_version": CONFLICT_DETECTOR_VERSION,
+                                },
+                            ],
+                        }
+                    else:
+                        duplicates_truncated = True
+
+
                 # C3b: same-bucket pairing. Under a strict caller scope the
                 # anchor bucket must stay inside the admitted set.
                 admitted_names = set(workspace_names) if workspace_names else set()
@@ -820,6 +891,7 @@ class EvidenceStore:
                     anchor_bucket and (workspace is None or anchor_bucket in admitted_names)
                 ) else workspace
                 suspect_bucket = suspected.get(anchor_id)
+                from ..pipeline.gates import candidate_cos_gate
                 for unit in (() if first_unit is None else itertools.chain((first_unit,), units)):
                     text = str(unit["text"] or "")
                     if not text:
@@ -832,6 +904,23 @@ class EvidenceStore:
                         exclude_memory_id=anchor_id,
                         include_subject_rows=False,
                     )
+                    # Gate-v2 G4 余弦门 (diagnostic-channel leg): below-floor
+                    # pairs are noise; AT/ABOVE-ceil pairs are near-duplicates
+                    # — they route into duplicates_pool below instead of being
+                    # dropped (that pool IS their governance consumer). The
+                    # suspect-bucket sweep stays OUTSIDE the gate: those hits
+                    # are cross-bucket references, not conflict candidates.
+                    gate_vectors = self.row_vectors_for_ids(
+                        [int(hit["id"]) for hit in hits], conn=conn,
+                    )
+                    _passed, _below, at_ceil_pairs = candidate_cos_gate(unit_vector, hits, gate_vectors)
+                    hits = [hit for hit, _cos in _passed]
+                    if include_duplicates:
+                        for dup_hit, _dup_cos in at_ceil_pairs:
+                            _pool_near_duplicate(
+                                int(dup_hit["memory_id"]), dup_hit, anchor_id, unit,
+                                text, "near_duplicate_cosine",
+                            )
                     # C3b: the suspected-bucket sweep for misplaced memories.
                     suspect_hits: list[dict[str, Any]] = []
                     if suspect_bucket and suspect_bucket != anchor_bucket:
@@ -885,70 +974,9 @@ class EvidenceStore:
                             continue
                         if decision.action == "ignore":
                             if include_duplicates and decision.reason in {"equivalent_value", "compatible_evidence"}:
-                                pair_key = (min(anchor_id, peer_id), max(anchor_id, peer_id))
-                                member_refs, _key, candidate_hash = self._unit_pair_identity(
-                                    anchor_id, unit, peer_id, hit,
+                                _pool_near_duplicate(
+                                    peer_id, hit, anchor_id, unit, text, decision.reason,
                                 )
-                                recorded = recorded_candidate_statuses.get(candidate_hash)
-                                if recorded is None and not any(
-                                    member_refs <= group_members for group_members in active_group_members
-                                ) and not any(
-                                    member_refs <= group_members for group_members in dismissed_group_members
-                                ):
-                                    hit_text_ignored = str(hit.get("text") or "")
-                                    # Re-hitting an already-pooled pair is a
-                                    # free dict replace, not pool growth — it
-                                    # must not count against the cap or flag
-                                    # truncation that never happened.
-                                    if pair_key in duplicates_pool or len(duplicates_pool) < duplicates_cap:
-                                        # Members mirror the record_conflict
-                                        # contract so an agent can dismiss a
-                                        # false positive without re-deriving
-                                        # the evidence identity.
-                                        duplicates_pool[pair_key] = {
-                                            "left_id": pair_key[0], "right_id": pair_key[1],
-                                            "reason": decision.reason,
-                                            "distance": float(hit.get("distance") or 0),
-                                            "candidate_key_hash": candidate_hash,
-                                            "left_snippet": text[:200] if pair_key[0] == anchor_id else hit_text_ignored[:200],
-                                            "right_snippet": hit_text_ignored[:200] if pair_key[1] == peer_id else text[:200],
-                                            "members": [
-                                                {
-                                                    "memory_id": pair_key[0],
-                                                    "version": int(unit["memory_version"] or 1) if pair_key[0] == anchor_id else int(hit.get("memory_version") or hit.get("memory_row_version") or 1),
-                                                    "attribute_raw": None, "value_raw": None,
-                                                    "normalized_attribute": None, "normalized_value": None,
-                                                    "evidence_quote": text if pair_key[0] == anchor_id else hit_text_ignored,
-                                                    "evidence_span": (
-                                                        [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)]
-                                                        if pair_key[0] == anchor_id else
-                                                        [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
-                                                    ),
-                                                    "content_hash": str(unit["content_hash"] or "") if pair_key[0] == anchor_id else str(hit.get("content_hash") or ""),
-                                                    "evidence_unit": int(unit["eid"]) if pair_key[0] == anchor_id else int(hit.get("id") or 0),
-                                                    "direction": "deterministic", "prompt_version": None,
-                                                    "detector_version": CONFLICT_DETECTOR_VERSION,
-                                                },
-                                                {
-                                                    "memory_id": pair_key[1],
-                                                    "version": int(hit.get("memory_version") or hit.get("memory_row_version") or 1) if pair_key[1] == peer_id else int(unit["memory_version"] or 1),
-                                                    "attribute_raw": None, "value_raw": None,
-                                                    "normalized_attribute": None, "normalized_value": None,
-                                                    "evidence_quote": hit_text_ignored if pair_key[1] == peer_id else text,
-                                                    "evidence_span": (
-                                                        [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
-                                                        if pair_key[1] == peer_id else
-                                                        [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)]
-                                                    ),
-                                                    "content_hash": str(hit.get("content_hash") or "") if pair_key[1] == peer_id else str(unit["content_hash"] or ""),
-                                                    "evidence_unit": int(hit.get("id") or 0) if pair_key[1] == peer_id else int(unit["eid"]),
-                                                    "direction": "deterministic", "prompt_version": None,
-                                                    "detector_version": CONFLICT_DETECTOR_VERSION,
-                                                },
-                                            ],
-                                        }
-                                    else:
-                                        duplicates_truncated = True
                             continue
                         # Numeric deltas remain a deterministic scan baseline
                         # candidate even though they can no longer directly

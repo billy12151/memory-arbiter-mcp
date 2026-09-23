@@ -117,14 +117,25 @@ def _active_records(tools: MemoryTools) -> list[dict[str, Any]]:
         rows = conn.execute("SELECT * FROM memories ORDER BY id").fetchall()
     return [dict(row) for row in rows]
 
+def _pass_cos_gate(monkeypatch, cos: float = 0.85):
+    """Gate-v2 G4: pass every hand-built hit through the cosine band
+    (embedder-agnostic — patches the gates module, which the detection loop
+    imports at call time)."""
+    import memory_arbiter.pipeline.gates as _gates
+    monkeypatch.setattr(
+        _gates, "candidate_cos_gate",
+        lambda own, hits, vecs: ([(h, cos) for h in hits], [], []),
+    )
+
+
 
 def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Same action level: high-overlap peer evaluated before low-overlap."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     far = _write(tools, "invoice process is manual", "billing", ["billing"])
-    near = _write(tools, "deploy pipeline is green", "deploy", ["deploy"])
-    new = _write(tools, "deploy pipeline is blue", "deploy2", ["deploy"])
+    near = _write(tools, "deploy pipeline is green 8 and 16", "deploy", ["deploy"])
+    new = _write(tools, "deploy pipeline is blue 9 and 17", "deploy2", ["deploy"])
     assert tools.wait_semantic_worker_drained(timeout=5)
     _publish_hint_vectors(tools)
 
@@ -135,7 +146,7 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", lambda timeout: None)
 
     hits_by_peer = {
-        int(near["id"]): {"memory_id": int(near["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green",
+        int(near["id"]): {"memory_id": int(near["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green 8 and 16",
                          "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
         int(far["id"]): {"memory_id": int(far["id"]), "id": 2, "kind": "text", "text": "invoice process is manual",
                          "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
@@ -150,6 +161,7 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
         ]
 
     monkeypatch.setattr(tools.db, "row_knn", fake_knn)
+    _pass_cos_gate(monkeypatch)
 
     result = tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 
@@ -165,9 +177,9 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
     """A deterministic notify pair outranks a check pair even with zero overlap."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    check_peer = _write(tools, "deploy pipeline is green", "deploy", ["deploy"])  # same topic
+    check_peer = _write(tools, "deploy pipeline is green 8 and 16", "deploy", ["deploy"])  # same topic
     notify_peer = _write(tools, "invoice process is manual", "billing", ["billing"])  # zero overlap
-    new = _write(tools, "deploy pipeline is blue", "deploy2", ["deploy"])
+    new = _write(tools, "deploy pipeline is blue 9 and 17", "deploy2", ["deploy"])
     assert tools.wait_semantic_worker_drained(timeout=5)
     _publish_hint_vectors(tools)
 
@@ -192,13 +204,14 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
 
     def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None, **_kw: Any) -> list[dict[str, Any]]:
         return [
-            {"memory_id": int(check_peer["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green",
+            {"memory_id": int(check_peer["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green 8 and 16",
              "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
             {"memory_id": int(notify_peer["id"]), "id": 2, "kind": "text", "text": "invoice process is manual",
              "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
         ]
 
     monkeypatch.setattr(tools.db, "row_knn", fake_knn)
+    _pass_cos_gate(monkeypatch)
 
     tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 

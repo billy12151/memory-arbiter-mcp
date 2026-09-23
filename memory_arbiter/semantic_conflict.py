@@ -458,6 +458,25 @@ _VALUE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Gate-v2 G4 sentence prefilter (方案词表, 与 decide 相邻): a row must carry
+# an extractable value, a negation, a time anchor, an assignment shape, or
+# BE a table row (gated in pipeline/gates.row_prefilter by kind) to
+# originate a KNN query — 64% of real-library rows pass (标定 #9: 值 41% +
+# 仅否定 23%), cutting the rest of the KNN spend. The assignment shapes
+# (对抗 review P1-5) cover TEXT-value oppositions the numeric _VALUE_RE
+# cannot see: "export-format 取值为 csv" / "上传方式=非 dist/*" / "利率
+# 上限为 LPR 四倍" are mainline conflict shapes, not the pure-prose gap.
+# Known accepted gap (方案 §5): "X 使用 A vs X 使用 B" / "岗位定级 P5"
+# forms without any marker stay un-originated on the WRITE path; the scan
+# path skips this prefilter by design and the Agent judges them there.
+_NEGATION_WORDS = r"(?:不|没|非|未|无|难道|决不|except|never|not|isn't|doesn't|won't|can't)"
+_TIME_ANCHOR = r"(?:星期[一二三四五六日天]|周[一二三四五六日天]|昨天|今天|明天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}[日号])"
+_ASSIGNMENT_SHAPE = r"(?:取值|配置为|设置为|默认为|等于|上限|下限|阈值|限额|配额|=)"
+_SENT_PREFILTER = re.compile(
+    rf"{_VALUE_RE.pattern}|{_NEGATION_WORDS}|{_TIME_ANCHOR}|{_ASSIGNMENT_SHAPE}",
+    re.IGNORECASE,
+)
+
 
 def _numeric_stripped_skeleton(text: str) -> str:
     """Value-stripped normalized skeleton: what remains when every numeric

@@ -878,10 +878,12 @@ class EvidencePipeline:
             record.get("workspace_canonical") or record.get("workspace")
             if self.settings.isolation == "strict" else None
         )
-        by_peer: dict[int, tuple[dict[str, Any], Any, Any]] = {}
+        by_peer: dict[int, tuple[dict[str, Any], Any, Any, float]] = {}
         reached_pair: set[int] = set()
 
-        def _enqueue_backlog(entries: list[tuple[int, tuple[dict[str, Any], Any, Any]]]) -> tuple[int, int]:
+        def _enqueue_backlog(
+            entries: "list[tuple[int, tuple[dict[str, Any], Any, Any, float]]]",
+        ) -> tuple[int, int]:
             """0.17.0 P2-4.2: truncation leftovers land in conflict_backlog
             instead of vanishing. Identity = detector version + both
             members@version + row anchors (review A7: a detector bump or a
@@ -889,7 +891,7 @@ class EvidencePipeline:
             enqueued = 0
             evicted_total = 0
             left_version = int(record.get("version") or 1)
-            for peer_id, (hit, seg_view, decision) in entries:
+            for peer_id, (hit, seg_view, decision, _pair_cos) in entries:
                 from ..constants import (
                     PAIR_SCORE_W_BOTH_VALUES,
                     PAIR_SCORE_W_NUMERIC_ROUTE,
@@ -1089,6 +1091,27 @@ class EvidencePipeline:
             )
         else:
             pair_iter = iter(zip(seg_views, seg_embeddings))
+        # Gate-v2 G4: the sentence prefilter is an OPTIONAL layer — the
+        # write path runs it (and the claims-coverage skip, owner 拍板), the
+        # scan path never sees this code (gates.row_prefilter is one shared
+        # implementation; the scan编排 simply does not call it). Filtered /
+        # covered rows do NOT count against rows_examined — their counters
+        # are their own receipt keys.
+        from .gates import candidate_cos_gate, claim_value_spans, row_prefilter
+        own_claims = self.db.claims.current_claims(int(memory_id))
+        own_claim_spans = claim_value_spans(content, own_claims)
+        # KEYED BY ROW INDEX, never object identity: the streaming path
+        # yields the raw segments while seg_views are _SegView copies — the
+        # same row under two Python objects. row_index is the stable key
+        # across both.
+        admissible_row_idx = {
+            int(getattr(view, "unit_index", getattr(view, "row_index", 0)))
+            for view in row_prefilter(seg_views, own_claim_spans)
+        }
+        prefiltered_rows = 0
+        rows_covered_by_claims = 0
+        below_cos_floor = 0
+        repeatability_skipped = 0
         try:
             for seg_view, embedding in pair_iter:
                 if streaming:
@@ -1101,6 +1124,18 @@ class EvidencePipeline:
                     landed.append((seg_view, embedding))
                 if seg_view.kind == "subject":
                     continue  # C3 A+ guard: indexed, never a pair originator
+                if int(getattr(seg_view, "unit_index", getattr(seg_view, "row_index", 0))) not in admissible_row_idx:
+                    # Gate-v2 G4: the row failed the sentence prefilter OR is
+                    # already represented by an own claim (覆盖句跳过) — it
+                    # never originates a KNN query and never spends budget.
+                    if any(
+                        span_start < seg_view.end_offset and seg_view.start_offset < span_end
+                        for span_start, span_end in own_claim_spans
+                    ):
+                        rows_covered_by_claims += 1
+                    else:
+                        prefiltered_rows += 1
+                    continue
                 if units_examined >= max_segments:
                     truncation_reason = truncation_reason or segments_capped_reason
                     continue  # detection capped; keep draining for publish
@@ -1114,7 +1149,22 @@ class EvidencePipeline:
                     exclude_memory_id=memory_id, conn=job_conn,
                     include_subject_rows=False,  # subject rows poison the window
                 )
+                # Gate-v2 G4 余弦门: true cosine band on fetched vectors —
+                # below floor is noise (保安一号), at/above ceil is a
+                # duplicate that belongs to the similarity channel, never a
+                # conflict report; the band split stays observable.
+                hit_vectors = self.db.evidence.row_vectors_for_ids(
+                    [int(hit["id"]) for hit in knn_hits], conn=job_conn,
+                )
+                gated, below_floor_pairs, at_ceil_pairs = candidate_cos_gate(
+                    embedding, knn_hits, hit_vectors,
+                )
+                below_cos_floor += len(below_floor_pairs)
+                repeatability_skipped += len(at_ceil_pairs)
+                gated_cos = {id(hit): cos for hit, cos in gated}
                 for hit in knn_hits:
+                    if id(hit) not in gated_cos:
+                        continue
                     decision = decide_evidence(seg_view.text, str(hit.get("text") or ""))
                     if decision.action == "ignore":
                         continue
@@ -1142,9 +1192,11 @@ class EvidencePipeline:
                     closer = existing is not None and float(hit.get("distance") or 9) < float(existing[0].get("distance") or 9)
                     # 0.16.4 §1: only check shapes reach here now, so the
                     # notify-priority protection lost its subject — the closer
-                    # neighbour of the same peer wins outright.
+                    # neighbour of the same peer wins outright. pair_cos rides
+                    # the representative for the gate-v2 G6 ranking (band
+                    # membership), computed already by the cosine gate.
                     if existing is None or closer:
-                        by_peer[peer_id] = (hit, seg_view, decision)
+                        by_peer[peer_id] = (hit, seg_view, decision, gated_cos[id(hit)])
         except Exception:
             # A mid-collection failure must not strand the producer thread
             # (P2 leak fix): closing the generator wakes its queue wait; the
@@ -1255,8 +1307,10 @@ class EvidencePipeline:
             PAIR_SCORE_W_OVERLAP,
         )
 
-        def _pair_score(peer_id: int, triple: tuple[dict[str, Any], Any, Any]) -> float:
-            _hit, _seg, decision = triple
+        def _pair_score(
+            peer_id: int, triple: "tuple[dict[str, Any], Any, Any, float]",
+        ) -> float:
+            _hit, _seg, decision, _pair_cos = triple
             score = PAIR_SCORE_W_OVERLAP * float(overlap_rank.get(peer_id) or 0.0)
             if str(decision.reason or "") == "numeric_value_candidate":
                 score += PAIR_SCORE_W_NUMERIC_ROUTE
@@ -1406,7 +1460,7 @@ class EvidencePipeline:
         peer_rows = self.db.get_memories_by_ids(
             [int(pid) for pid, _triple in ordered], conn=job_conn,
         )
-        for peer_id, (hit, unit, decision) in ordered:
+        for peer_id, (hit, unit, decision, _pair_cos) in ordered:
             peer = peer_rows.get(int(peer_id))
             if not peer or peer.get("status") != "active":
                 reached_pair.add(peer_id)  # settled (inactive) — not backlog
@@ -1677,6 +1731,19 @@ class EvidencePipeline:
         filter_summary: dict[str, int] = {}
         if no_difference_filtered:
             filter_summary["no_difference_skipped"] = no_difference_filtered
+        # Gate-v2 G4 observability: the prefilter/coverage/band split (the
+        # unfiltered zero case keeps the exact-shape response contract).
+        gate_rows: dict[str, int] = {}
+        if prefiltered_rows:
+            gate_rows["prefiltered_rows"] = prefiltered_rows
+        if rows_covered_by_claims:
+            gate_rows["rows_covered_by_claims"] = rows_covered_by_claims
+        if below_cos_floor:
+            gate_rows["below_cos_floor"] = below_cos_floor
+        if repeatability_skipped:
+            gate_rows["repeatability_skipped"] = repeatability_skipped
+        if gate_rows:
+            result["candidate_gates"] = gate_rows
         if internal_qwen_confirmed:
             filter_summary["internal_qwen_confirmed"] = internal_qwen_confirmed
         if internal_qwen_vetoed:

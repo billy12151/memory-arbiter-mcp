@@ -86,6 +86,18 @@ def make_tools(tmp_path: Path, *, semantic_enabled: bool = False) -> MemoryTools
     return tools
 
 
+
+def _pass_cos_gate(monkeypatch, cos: float = 0.85):
+    """Gate-v2 G4: pass every hand-built hit through the cosine band
+    (embedder-agnostic — patches the gates module, which the detection loop
+    imports at call time)."""
+    import memory_arbiter.pipeline.gates as _gates
+    monkeypatch.setattr(
+        _gates, "candidate_cos_gate",
+        lambda own, hits, vecs: ([(h, cos) for h in hits], [], []),
+    )
+
+
 def test_local_text_units_are_simple_and_cover_headings() -> None:
     units = local_text_units(
         "Database policy",
@@ -581,6 +593,7 @@ def test_evidence_candidate_enters_when_lexical_pool_is_full(tmp_path: Path, mon
     import memory_arbiter.search as _search_mod
     monkeypatch.setattr(_search_mod, "QUERY_RECALL_SCORE_FLOOR", -1.0)
     monkeypatch.setattr(tools.db, "row_knn", row_knn)
+    _pass_cos_gate(monkeypatch)
     result = tools.memory_search(
         query="needle", limit=4, query_embedding=[1.0, 0.0],
         include_linked_open_items=False, include_conflict_signal=False,
@@ -783,6 +796,7 @@ def test_vnext_weak_isolation_does_not_hard_filter_semantic_candidates(tmp_path:
     monkeypatch.setattr(tools.db, "row_knn", row_knn)
     # 0.17.0 P2-3：行级模式候选走 row_knn，同样不得被 workspace 硬过滤
     monkeypatch.setattr(tools.db, "row_knn", row_knn)
+    _pass_cos_gate(monkeypatch)
     record = tools.db.get_memory(written["id"])
     tools._process_semantic_conflict_job(written["id"], {
         "version": record["version"],
@@ -1082,6 +1096,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
         for i, peer in enumerate(peers)
     ]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -1123,6 +1138,7 @@ def test_unified_notice_dedupe_does_not_starve_fresh_pair(tmp_path: Path, monkey
         for i, peer in enumerate(peers)
     ]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -1143,12 +1159,13 @@ def test_check_degradation_is_visible_in_semantic_status(tmp_path: Path, monkeyp
     tools = make_tools(tmp_path, semantic_enabled=False)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "checkout-api", "scope": "production"}
-    peer = tools.memory_write(content="database connection policy", subject="pool", tags=[], metadata=meta)["data"]
-    new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[], metadata=meta)["data"]
+    peer = tools.memory_write(content="database connection policy 8 and 16", subject="pool", tags=[], metadata=meta)["data"]
+    new = tools.memory_write(content="database connection pool size 3 and 4", subject="pool2", tags=[], metadata=meta)["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
     assert tools._ensure_semantic_backend() is None
-    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
+    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy 8 and 16", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     assert tools.db.list_semantic_notices(status="open") == []
     degradation = tools._semantic_status()["check_degradation"]
@@ -1346,11 +1363,15 @@ def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path,
     tools = make_tools(tmp_path, semantic_enabled=False)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "checkout-api", "scope": "production"}
-    peer = tools.memory_write(content="database connection policy", subject="pool", tags=[], metadata=meta)["data"]
-    new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[], metadata=meta)["data"]
+    # Multi-value corpus: passes the gate-v2 prefilter AND keeps the
+    # deterministic direct verdict silent (", " in left_value) so the pair
+    # reaches the failing-Qwen mocks this test exists to pin.
+    peer = tools.memory_write(content="database connection policy 8 and 16", subject="pool", tags=[], metadata=meta)["data"]
+    new = tools.memory_write(content="database connection pool size 3 and 4", subject="pool2", tags=[], metadata=meta)["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
-    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
+    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy 8 and 16", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
 
     truncated_raw = '{"attribute_a": "数据库选型", "value_a": "MySQL", "attribute_b":'
     cases = [
@@ -2919,12 +2940,13 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "svc", "scope": "production"}
-    peer = tools.memory_write(content="database is mysql here", subject="a", tags=[], metadata=meta)["data"]
-    new = tools.memory_write(content="database is mysql there", subject="b", tags=[], metadata=meta)["data"]
+    peer = tools.memory_write(content="database is mysql 8 here", subject="a", tags=[], metadata=meta)["data"]
+    new = tools.memory_write(content="database is mysql 8 there", subject="b", tags=[], metadata=meta)["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
-    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql here",
+    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql 8 here",
              "start_offset": 0, "end_offset": 22, "distance": 0.1}]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
 
     # Same normalized value on both sides → clean not_same_attribute_different_value.
     class SameValue:
@@ -2955,12 +2977,13 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_JOB_TIMEOUT_MS", 10)
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MIN_PAIR_BUDGET_MS", 5)
     metadata = {"entity": "svc", "scope": "production"}
-    peer = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=metadata)["data"]
-    new = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=metadata)["data"]
+    peer = tools.memory_write(content="database is mysql 8 and 16", subject="a", tags=[], metadata=metadata)["data"]
+    new = tools.memory_write(content="database is sqlite 3 and 4", subject="b", tags=[], metadata=metadata)["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
-    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql",
+    hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql 8 and 16",
              "start_offset": 0, "end_offset": 17, "distance": 0.1}]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
 
     deadlines = []
     base = _grounded_db_backend()
@@ -2992,17 +3015,18 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     metadata = {"entity": "svc", "scope": "production"}
     peer_values = ("mysql", "postgres")
     peers = [
-        tools.memory_write(content=f"database is {value}", subject=value, tags=[], metadata=metadata)["data"]
+        tools.memory_write(content=f"database is {value} 8 and 16", subject=value, tags=[], metadata=metadata)["data"]
         for value in peer_values
     ]
-    new = tools.memory_write(content="database is sqlite", subject="sqlite", tags=[], metadata=metadata)["data"]
+    new = tools.memory_write(content="database is sqlite 3 and 4", subject="sqlite", tags=[], metadata=metadata)["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [
-        {"memory_id": peer["id"], "id": index + 1, "kind": "text", "text": f"database is {peer_values[index]}",
-         "start_offset": 0, "end_offset": len(f"database is {peer_values[index]}"), "distance": 0.1 + index * 0.01}
+        {"memory_id": peer["id"], "id": index + 1, "kind": "text", "text": f"database is {peer_values[index]} 8 and 16",
+         "start_offset": 0, "end_offset": len(f"database is {peer_values[index]} 8 and 16"), "distance": 0.1 + index * 0.01}
         for index, peer in enumerate(peers)
     ]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
     clock = {"now": 100.0}
     fairness_deadline = 100.04
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.time.monotonic", lambda: clock["now"])
@@ -3091,7 +3115,7 @@ def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkey
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "svc", "scope": "production"}
-    a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
+    a = tools.memory_write(content="database is mysql 8", subject="a", tags=[], metadata=meta)["data"]
     b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
@@ -3134,6 +3158,7 @@ def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkey
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
              "start_offset": 0, "end_offset": 18, "distance": 0.1}]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
     snapshot = {
         "memory_id": a["id"], "version": updated["version"],
         "content_hash": evidence_content_hash(updated["content"]),
@@ -3154,7 +3179,7 @@ def test_applying_reentry_does_not_suppress_different_slot(tmp_path: Path, monke
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "svc", "scope": "production"}
-    a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
+    a = tools.memory_write(content="database is mysql 8", subject="a", tags=[], metadata=meta)["data"]
     b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
 
@@ -3195,6 +3220,7 @@ def test_applying_reentry_does_not_suppress_different_slot(tmp_path: Path, monke
     monkeypatch.setattr(tools.db, "row_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
     # 0.17.0 P2-3：行级模式候选走 row_knn，注入同一批受控命中
     monkeypatch.setattr(tools.db, "row_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
     snapshot = {
         "memory_id": a["id"], "version": updated["version"],
@@ -3223,7 +3249,7 @@ def test_applying_reentry_context_requires_revision_and_action(
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "svc", "scope": "production"}
-    a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
+    a = tools.memory_write(content="database is mysql 8", subject="a", tags=[], metadata=meta)["data"]
     b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
     assert tools.wait_semantic_worker_drained(timeout=2)
 
@@ -3261,6 +3287,7 @@ def test_applying_reentry_context_requires_revision_and_action(
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
              "start_offset": 0, "end_offset": 18, "distance": 0.1}]
     monkeypatch.setattr(tools.db, "row_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
+    _pass_cos_gate(monkeypatch)
     context = {
         "conflict_id": conflict_id, "revision": 2, "memory_id": a["id"],
         "action": "update_current_claim", "chosen_value": "sqlite",

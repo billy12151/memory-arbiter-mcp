@@ -73,6 +73,18 @@ def _payload(notice: dict) -> dict:
 # ── gate 1: provenance (RETIRED in gate-v2 G3 — the two former blocks are
 # now retirement-benefit pins: pairs the old gate silenced land their notices) ──
 
+
+def _pass_cos_gate(monkeypatch, cos: float = 0.85):
+    """Gate-v2 G4: pass every hand-built hit through the cosine band
+    (embedder-agnostic — patches the gates module, which the detection loop
+    imports at call time)."""
+    import memory_arbiter.pipeline.gates as _gates
+    monkeypatch.setattr(
+        _gates, "candidate_cos_gate",
+        lambda own, hits, vecs: ([(h, cos) for h in hits], [], []),
+    )
+
+
 def test_provenance_retired_peer_without_metadata_now_reports(tmp_path: Path, monkeypatch) -> None:
     """退役收益钉：peer 完全没有 entity/scope metadata 的对立对，被旧 provenance
     硬门整批消音（真库真冲突 #50 双侧均 {} 的形态）——退役后正常落 notice。"""
@@ -83,6 +95,7 @@ def test_provenance_retired_peer_without_metadata_now_reports(tmp_path: Path, mo
     assert tools.wait_semantic_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))
+    _pass_cos_gate(monkeypatch)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["status"] == "completed"
@@ -105,6 +118,7 @@ def test_provenance_retired_unequal_metadata_no_longer_blocks(tmp_path: Path, mo
     assert tools.wait_semantic_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))
+    _pass_cos_gate(monkeypatch)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["notices_created"] == 1
@@ -116,11 +130,14 @@ def test_provenance_retired_unequal_metadata_no_longer_blocks(tmp_path: Path, mo
 def test_no_difference_check_pair_skipped_before_qwen(tmp_path: Path, monkeypatch) -> None:
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
+    # Gate-v2 G4: the pair must first PASS the sentence prefilter (a value
+    # marker) to reach the no-difference classifier — the Chinese-numeral
+    # variant ("五百毫秒") never reaches the KNN at all now.
     peer = tools.memory_write(
-        content="压测报告已归档，采样窗口五百毫秒", subject="bench", tags=[], metadata=META,
+        content="压测报告已归档，采样窗口 500ms", subject="bench", tags=[], metadata=META,
     )["data"]
     new = tools.memory_write(
-        content="压测报告完成归档，五百毫秒的采样窗口", subject="bench2", tags=[], metadata=META,
+        content="压测报告完成归档，500ms 的采样窗口", subject="bench2", tags=[], metadata=META,
     )["data"]
     assert tools.wait_semantic_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())

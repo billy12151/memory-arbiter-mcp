@@ -413,6 +413,12 @@ class ScanPipeline:
             # discipline as the write side — they crowd out body rows).
             return self.db.row_knn(embedding, include_subject_rows=False, **kw)
         # 2) cross-memory same-bucket rank pairing.
+        # Gate-v2 G4: the scan orchestration SKIPS the sentence prefilter by
+        # owner decision (Agent judges prose oppositions) but runs the SAME
+        # cosine band gate — one shared implementation (pipeline.gates).
+        from .pipeline.gates import candidate_cos_gate
+        below_cos_floor = 0
+        repeatability_skipped = 0
         for unit in cross_units:
             if unit.get("embedding") is None:
                 continue
@@ -421,6 +427,13 @@ class ScanPipeline:
                 workspace=workspace or None,
                 exclude_memory_id=memory_id,
             )
+            hit_vectors = self.db.evidence.row_vectors_for_ids(
+                [int(hit["id"]) for hit in hits],
+            )
+            _passed, below_pairs, at_ceil_pairs = candidate_cos_gate(unit["embedding"], hits, hit_vectors)
+            hits = [hit for hit, _cos in _passed]
+            below_cos_floor += len(below_pairs)
+            repeatability_skipped += len(at_ceil_pairs)
             # Rank counts TEXT hits only — non-text units the KNN interleaves
             # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
             # not raw row positions).
@@ -483,6 +496,11 @@ class ScanPipeline:
                 )
                 if enqueued:
                     outcome["queued"] += 1
+        # Gate-v2 G4 observability (conditional, additive receipt keys).
+        if below_cos_floor:
+            outcome["below_cos_floor"] = below_cos_floor
+        if repeatability_skipped:
+            outcome["repeatability_skipped"] = repeatability_skipped
         return outcome
 
     def _examine_internal(
