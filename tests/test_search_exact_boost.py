@@ -139,3 +139,25 @@ def test_plain_query_ordering_unchanged_and_no_exact_keys(tmp_path: Path) -> Non
     # No exact leg fired: no transparency keys, no boost marker effects.
     for row in results:
         assert "evidence_best_score" not in row
+
+
+def test_exact_hit_survives_crowded_pool_via_quota_exempt_seat(tmp_path) -> None:
+    """前半对抗 review P2：豁免席（quota exempt seat）此前零用例覆盖——构造
+    exact 记忆仅经 surface/LIKE 晚进池（lexical/evidence 原始名次都垫底）
+    的场景，断言它仍存活并置顶。"""
+    import re
+
+    tools = _make_tools(tmp_path)
+    exact = _write_and_index(tools, "zz exact needle qq", "gamma exact body text")
+    # Fill the lexical channel with 40 better-matching distractors (they all
+    # contain the query tokens in content AND subject; the exact memory's
+    # tokens appear only in subject+content words the FTS ranks lower).
+    for i in range(40):
+        _write_and_index(
+            tools,
+            f"distractor {i} gamma exact body text",
+            f"gamma exact body text variant {i} extra padding words",
+        )
+    result = tools.memory_search(query="zz exact needle qq")
+    ids = [int(row["id"]) for row in result["data"]["results"]]
+    assert ids and ids[0] == exact, "exact subject match must survive the crowded pool"

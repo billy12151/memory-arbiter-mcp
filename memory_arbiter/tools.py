@@ -1753,6 +1753,7 @@ class MemoryTools:
                 channel_c = self._evidence.check_claim_sentence_conflicts(
                     memory_id, snapshot, skip_peers=skip_peers,
                     allowed_memory_ids=allowed,
+                    notices_used=int((claims_result or {}).get("notices") or 0),
                 )
                 if isinstance(channel_c, dict):
                     result["claims_channel_c"] = channel_c

@@ -526,6 +526,7 @@ class EvidencePipeline:
         self, memory_id: int, snapshot: dict[str, Any],
         skip_peers: "set[int] | None" = None,
         allowed_memory_ids: "list[int] | None" = None,
+        notices_used: int = 0,
     ) -> dict[str, Any]:
         """Gate-v2 G6b 通道 C: claims×sentences across the clean neighbour
         list (owner 2026-09-23). Each own claim's ATTR vector queries the
@@ -597,7 +598,10 @@ class EvidencePipeline:
                 include_memory_ids=allowed_memory_ids,
             )
             for hit in hits:
-                if notices >= CLAIMS_MAX_NOTICES_PER_WRITE:
+                # P2-6: the cap is SHARED with the claims channel — the
+                # wrapper hands in how many notices that channel already
+                # spent this write, so the write total stays ≤ 5.
+                if notices + notices_used >= CLAIMS_MAX_NOTICES_PER_WRITE:
                     capped += 1
                     break
                 peer_id = int(hit["memory_id"])
