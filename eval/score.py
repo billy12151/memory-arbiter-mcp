@@ -270,6 +270,63 @@ def score_conflict(raw: dict) -> dict[str, Any] | None:
     }
 
 
+def score_conflict_claims(raw: dict) -> dict[str, Any] | None:
+    """Gate-v2 G7b: per-channel metrics for the claims corpus (B =
+    deterministic claims×claims, C = claims×sentence KNN), plus the merged
+    totals. Row shape matches the conflict suite; `channel` rides the
+    corpus."""
+    conflict = raw.get("conflict_claims")
+    if conflict is None:
+        return None
+    valid = [row for row in conflict if not row["skipped_member_replay"]]
+
+    def _bucket(rows: list[dict]) -> dict[str, Any]:
+        sync = sum(1 for r in rows if r["sync"])
+        async_ = sum(1 for r in rows if r["async"])
+        miss = sum(1 for r in rows if r["notice_missing"])
+        identified = sync + async_
+        true_rows = [r for r in rows if r["label"] == "true_conflict"]
+        true_identified = sum(
+            1 for r in rows if r["label"] == "true_conflict" and (r["sync"] or r["async"])
+        )
+        identified_rows = [r for r in rows if r["sync"] or r["async"]]
+        return {
+            "n": len(rows),
+            "sync": {"count": sync, "rate": _pct(sync, len(rows))},
+            "async": {"count": async_, "rate": _pct(async_, len(rows))},
+            "miss": {"count": miss, "rate": _pct(miss, len(rows))},
+            "identified": {"count": identified, "rate": _pct(identified, len(rows))},
+            "recall": {
+                "count": true_identified,
+                "total": len(true_rows),
+                "rate": _pct(true_identified, len(true_rows)),
+            },
+            "precision": {
+                "count": true_identified,
+                "total": len(identified_rows),
+                "rate": _pct(true_identified, len(identified_rows)),
+            },
+        }
+
+    def _by_label(rows: list[dict]) -> dict[str, Any]:
+        labels = sorted({r["label"] for r in rows})
+        return {
+            label: _bucket([r for r in rows if r["label"] == label])
+            for label in labels
+        }
+
+    b_rows = [r for r in valid if r.get("channel") == "B"]
+    c_rows = [r for r in valid if r.get("channel") == "C"]
+    return {
+        "channel_b": _bucket(b_rows),
+        "channel_b_by_label": _by_label(b_rows),
+        "channel_c": _bucket(c_rows),
+        "channel_c_by_label": _by_label(c_rows),
+        "merged": _bucket(valid),
+        "skipped_member_replay": len(conflict) - len(valid),
+    }
+
+
 def score_all(raw: dict) -> dict[str, Any]:
     return {
         "mema_version": raw.get("mema_version"),
@@ -278,6 +335,7 @@ def score_all(raw: dict) -> dict[str, Any]:
         "recall": score_recall(raw),
         "similarity": score_similarity(raw),
         "conflict": score_conflict(raw),
+        "conflict_claims": score_conflict_claims(raw),
         "perf": compute_perf(raw),
     }
 

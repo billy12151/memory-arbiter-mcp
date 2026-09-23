@@ -377,6 +377,11 @@ def _remember_envelope(
         "metadata": metadata,
         "agent_id": EVAL_AGENT,
     }
+    # Gate-v2 G7b: claims ride the write (attr/value pairs; the server's
+    # grounding contract requires value ⊂ content — the corpus loader
+    # asserts that before anything is written).
+    if envelope.get("claims"):
+        data["claims"] = envelope["claims"]
     started = time.perf_counter()
     result = tools.memory("remember", data)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -436,6 +441,28 @@ def _evidence_unit_count(tools: MemoryTools, memory_id: int) -> int:
         return int(row[0])
     finally:
         conn.close()
+
+
+def _load_claims_pairs() -> list[dict]:
+    """Gate-v2 G7b: load the claims corpus with a grounding self-check —
+    every claims.value must be a literal slice of its own side's content
+    (the server rejects ungrounded claims, so an ungrounded corpus would
+    silently test nothing)."""
+    path = FIXTURES / "conflict" / "pairs_claims.jsonl"
+    if not path.exists():
+        return []
+    pairs = _load_jsonl(path)
+    for pair in pairs:
+        for side in ("left", "right"):
+            content = str(pair[side].get("content") or "")
+            for claim in pair[side].get("claims") or []:
+                value = str(claim.get("value") or "")
+                if value and value not in content:
+                    raise RuntimeError(
+                        f"claims corpus grounding violation: {pair['pair_id']} "
+                        f"{side} value {value!r} not in content"
+                    )
+    return pairs
 
 
 def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, Any]]:
@@ -637,6 +664,7 @@ def main() -> int:
             f"[timer] recall+similarity suite {time.monotonic() - suite_start:.0f}s total (replay+index+queries inside)"
         )
     conflict: list[dict[str, Any]] | None = None
+    conflict_claims: list[dict[str, Any]] | None = None
     if want_conflict:
         suite_start = time.monotonic()
         # 0.16.12 P0-T2：常规对集 + 中大型 large_unit 对集合并执行
@@ -646,6 +674,13 @@ def main() -> int:
         conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_noisy.jsonl")
         with temp_library(embed_model, qwen_model=qwen_model) as tools:
             conflict = run_conflict_suite(tools, conflict_pairs)
+        # Gate-v2 G7b: the claims corpus (B/C channels) runs in the SAME
+        # library pass — B pairs exercise the deterministic claims×claims
+        # channel, C pairs the claims×sentence KNN channel.
+        claims_pairs = _load_claims_pairs()
+        if claims_pairs:
+            with temp_library(embed_model, qwen_model=qwen_model) as tools:
+                conflict_claims = run_conflict_suite(tools, claims_pairs)
         print(
             f"[timer] conflict suite {time.monotonic() - suite_start:.0f}s "
             f"({len(conflict_pairs)} pairs, 3s sync window + Qwen)"
@@ -669,6 +704,7 @@ def main() -> int:
             # 0.17.0 P2-0.1 起再加 pairs_noisy.jsonl；
             # 语料变更必须 bump 此版本号并重建基线（第一轮 review finding）
             "conflict_corpus_version": "conflict-v3-noisy",
+            "conflict_claims_corpus_version": "conflict-claims-v1",
             # 0.17.0 P2-0.1：相似套件同样可变（cases.jsonl + cases_noisy.jsonl），
             # 版本键进 env 供 gate 前置校验拒绝跨语料对比（review R1-5）
             "similarity_corpus_version": "similarity-v2-noisy",
@@ -678,6 +714,9 @@ def main() -> int:
         "self_recall": self_recall,
         "similarity": similarity,
         "conflict": conflict,
+        # Gate-v2 G7b: the claims corpus results (B/C channels), same row
+        # shape as conflict rows + a "channel" field from the corpus.
+        "conflict_claims": conflict_claims,
     }
     args.out.mkdir(parents=True, exist_ok=True)
     out_path = args.out / f"{args.suite}-{args.label}.json"
