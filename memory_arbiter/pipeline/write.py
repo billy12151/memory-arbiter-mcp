@@ -361,6 +361,11 @@ class WritePipeline:
             if value not in content:
                 rejected.append({"index": index, "reason": "value_not_in_content"})
                 continue
+            # agent 供给通道同样受契约长度约束（schema 校验器只覆盖 remember/update，
+            # backfill apply 在此兜住：attr 1-64、value 1-64 且 ≤12 词）
+            if len(attr) > 64 or len(value) > 64 or len(value.split()) > 12:
+                rejected.append({"index": index, "reason": "unbounded"})
+                continue
             attr_norm = normalize_attribute(attr)
             value_norm = normalize_value(value)
             if not attr_norm or not value_norm:
