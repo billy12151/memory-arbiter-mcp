@@ -90,9 +90,15 @@ def rebuild_memory_row_for_subject_kind(conn: sqlite3.Connection) -> str:
     if "'subject'" in existing_sql:
         return "memory_row_subject_kind(already)"
     conn.execute("DROP TABLE IF EXISTS memory_row_migration")
+    # memory_row_ddl() carries TWO statements (table + index) — sqlite3's
+    # execute() takes one at a time; split them explicitly (found live at
+    # boot: the additive chain aborted with "only one statement at a time").
     conn.execute(
-        memory_row_ddl().replace("CREATE TABLE IF NOT EXISTS memory_row (",
-                                 "CREATE TABLE memory_row_migration (", 1)
+        memory_row_ddl()
+        .replace("CREATE TABLE IF NOT EXISTS memory_row (",
+                 "CREATE TABLE memory_row_migration (", 1)
+        .split("CREATE INDEX")[0]
+        .strip()
     )
     conn.execute("DROP TABLE memory_row")
     conn.execute("ALTER TABLE memory_row_migration RENAME TO memory_row")
