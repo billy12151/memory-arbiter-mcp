@@ -2262,6 +2262,31 @@ def test_confirm_expires_pending_confirmed_pairs(tmp_path):
     assert _workspace_row_status(tools, live_hash) == "pending"
 
 
+def test_confirm_sweep_falls_back_to_canonical_column(tmp_path):
+    """R2 F4 补测：detail 缺 current_workspace（旧版/半完整行）时清场回退
+    workspace_canonical 列——半 detail 行不比空 detail 行糟，仍须被治理。"""
+    tools = review_doctor_make_tools(tmp_path)
+    mid_a = _write(tools, "a", "projA")
+    _write(tools, "b", "projB")  # 注册 projB，确认快照须含两端才会清场
+    import hashlib
+
+    candidate_key_hash = hashlib.sha256(b"confirm-sweep:col-fallback").hexdigest()
+    outcome = tools.db.scan_queue.enqueue(
+        kind="workspace",
+        workspace_canonical="projA",
+        candidate_key_hash=candidate_key_hash,
+        member_versions=[{"memory_id": mid_a, "version": 1}],
+        evidence=[], reason="t", severity="normal", source="test",
+        detail={"suspected_workspace": "projB"},  # 无 current_workspace
+    )
+    assert outcome.get("outcome") == "queued", outcome
+
+    r = tools.memory_govern("confirm_workspaces", {"authorized": True})
+    assert r["ok"] is True
+    assert r["data"]["suppressed_pending"] == 1
+    assert _workspace_row_status(tools, candidate_key_hash) == "expired"
+
+
 def test_confirm_expiry_failure_warns_not_fails(tmp_path, monkeypatch):
     """清场抛错绝不回滚快照：confirmed 仍 true、suppressed_pending=-1、
     降级 warning（下次 kick 自愈兜底）。"""

@@ -686,8 +686,24 @@ class QueueProtocol:
         in ``workspace_dismissals`` in the SAME transaction — the queue row
         and its durable suppression flip together or not at all. Hint
         branches (protected/multi_family) and confirmed pass durable_record=
-        False: they only flip queue status, never mint a durable exemption."""
+        False: they only flip queue status, never mint a durable exemption.
+
+        Two hardening degrades (R2 review):
+        - workspace_dismissals missing (additive skipped on a read-only/
+          damaged DB, boot degrades to a warning): the combined transaction
+          would roll the queue flip back — the agent decision MUST land, so
+          the except path retries the legacy pure-UPDATE (pre-C2 semantics);
+          the durable exemption is lost, one more dismiss re-mints it.
+        - The durable identity pins the CURRENT memory version, not the row's
+          pinned one: an edit-before-dismiss sequence must not re-open the
+          exact noise the agent is settling (reopen is the edit's job when it
+          comes after the dismiss)."""
         now = utc_now_iso()
+        current_version: int | None = None
+        if status == "dismissed" and durable_record:
+            record = self.db.get_memory(int(memory_id))
+            if record is not None:
+                current_version = int(record.get("version") or 1)
         try:
             with self.db.write_transaction() as conn:
                 rows = conn.execute(
@@ -706,9 +722,14 @@ class QueueProtocol:
                     if status != "dismissed" or not durable_record:
                         continue  # hint/confirmed 分支只翻状态，不留持久 record
                     try:
-                        version = int(json.loads(str(row["member_versions"] or "[]"))[0]["version"])
+                        # 钉当前版本：行钉可能是 enqueue 之后的旧版本（edit 先于
+                        # dismiss），按行钉落表会让刚处置的噪音立即复发。
+                        version = current_version
+                        if version is None:
+                            version = int(json.loads(str(row["member_versions"] or "[]"))[0]["version"])
                         suspected = str(json.loads(str(row["detail"] or "{}"))["suspected_workspace"])
-                    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    except (IndexError, KeyError, TypeError, ValueError, OverflowError,
+                            json.JSONDecodeError):
                         continue  # envelope 损坏：行照常了结，只是无法留持久豁免
                     durable.append((int(memory_id), version, suspected, why))
                 if durable:
@@ -717,6 +738,25 @@ class QueueProtocol:
                     """UPDATE scan_queue SET status=?, decided_reason=?, decided_at=?, updated_at=?
                        WHERE id=? AND status='pending'""",  # CAS（仓库 B10 纪律）
                     [(status, why, now, now, rid) for rid in row_ids],
+                )
+        except Exception:
+            # F1 (R2)：durable 表缺失时 INSERT 连坐队列翻转（假绿 dismissed +
+            # 行永 pending + §九永久卡死）——队列翻转必须落地，回退旧路径。
+            self._expire_workspace_rows_legacy_fallback(memory_id, status, why, now)
+
+    def _expire_workspace_rows_legacy_fallback(
+        self, memory_id: int, status: str, why: str, now: str,
+    ) -> None:
+        """Pre-C2 pure-UPDATE path — guarantees the queue flip lands whenever the
+        old code would have landed it (workspace_dismissals absent/degraded)."""
+        try:
+            with self.db.write_transaction() as conn:
+                conn.execute(
+                    """UPDATE scan_queue SET status=?, decided_reason=?, decided_at=?, updated_at=?
+                       WHERE kind='workspace' AND status='pending'
+                         AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
+                                    WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
+                    (status, why, now, now, int(memory_id)),
                 )
         except Exception:
             pass

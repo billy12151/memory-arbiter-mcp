@@ -669,3 +669,130 @@ def test_hint_branches_leave_no_durable_row(tmp_path: Path) -> None:
     assert durable == 0, "hint 分支不得落持久豁免"
     assert queue_status, "hint 分支仍须了结 pending 行"
     assert all(str(r[0]) == "dismissed" for r in queue_status)
+
+
+def test_dismiss_pins_current_version_after_edit(tmp_path: Path) -> None:
+    """R2 补测（旧钉复发窗口实锤）：edit 先于 dismiss 时 durable 身份必须钉
+    当前版本——行钉 v1/记忆 v2 时按行钉落表，门 B 按当前版本比较立即不匹配，
+    agent 刚处置的噪音下轮原样复发（重开应由 dismiss 之后的编辑触发）。"""
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+    _enqueue_workspace_candidate(tools, mid, tag="stale-pin")
+    edited = tools.memory_edit(mid, new_content="后端使用 postgres 主库，已修订口径")
+    assert edited.get("ok"), edited
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    assert int(tools.db.get_memory(mid)["version"]) == 2
+
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "编辑后噪音"},
+    ])
+    assert result["results"][0]["outcome"] == "dismissed"
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT memory_id, version, suspected_workspace FROM workspace_dismissals"
+        ).fetchall()
+    assert [(int(r[0]), int(r[1]), str(r[2])) for r in rows] == [(mid, 2, "dbpgsql")]
+
+    # 整表 DELETE 模拟启动 purge/换代后重扫：钉当前版本 → 同身份不复发。
+    with tools.db.write_transaction() as conn:
+        conn.execute("DELETE FROM scan_queue")
+    tools.db.clear_all_scan_watermarks()
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    assert kick["ok"], kick
+    assert _workspace_row_count(tools) == 0, "edit-先于-dismiss 的处置不得一轮后复发"
+
+
+def test_duplicate_dismiss_idempotent(tmp_path: Path) -> None:
+    """§5「重复 dismiss | INSERT OR IGNORE 幂等」补测：同身份两个 pending 行
+    （fail-open 窗口/存量行，不同 candidate_key_hash）一次 dismiss——两行都
+    了结，durable 表只落一行（变异实锤 plain INSERT 会假绿 + 第二行永 pending）。"""
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+    _enqueue_workspace_candidate(tools, mid, tag="dup-a")
+    outcome = tools.db.scan_queue.enqueue(
+        kind="workspace",
+        workspace_canonical="ws",
+        candidate_key_hash=hashlib.sha256(b"ws-dismiss:dup-b").hexdigest(),
+        member_versions=[{"memory_id": mid, "version": 1}],
+        evidence=[], reason="vector vote 9/9 -> 'dbpgsql'", severity="normal",
+        source="test",
+        detail={"current_workspace": "ws", "suspected_workspace": "dbpgsql"},
+    )
+    assert outcome.get("outcome") == "queued", outcome
+
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "重复处置"},
+    ])
+    assert result["results"][0]["outcome"] == "dismissed"
+    with tools.db.connection() as conn:
+        durable = int(conn.execute("SELECT COUNT(*) FROM workspace_dismissals").fetchone()[0])
+        statuses = conn.execute(
+            "SELECT status FROM scan_queue WHERE kind='workspace'"
+        ).fetchall()
+    assert durable == 1
+    assert len(statuses) == 2 and all(str(r[0]) == "dismissed" for r in statuses)
+
+
+def test_dismiss_falls_back_when_dismissals_table_missing(tmp_path: Path) -> None:
+    """R2 F1（P1）回归：additive 建表被跳过（只读/损坏库 boot 只降级 warning，
+    4a07cdc 实锤过同类事故）时，durable INSERT 不再连坐队列翻转——except 回退
+    旧纯 UPDATE 路径保底翻转（行不卡 §九）；durable 豁免丢失至多再 dismiss
+    一次补回。"""
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+    _enqueue_workspace_candidate(tools, mid, tag="no-table")
+    with tools.db.write_transaction() as conn:
+        conn.execute("DROP TABLE workspace_dismissals")
+
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "表缺失保底"},
+    ])
+    assert result["results"][0]["outcome"] == "dismissed"
+    with tools.db.connection() as conn:
+        statuses = conn.execute(
+            "SELECT status FROM scan_queue WHERE kind='workspace'"
+        ).fetchall()
+    assert [str(r[0]) for r in statuses] == ["dismissed"], "队列翻转必须落地（旧语义保底）"
+
+
+def test_load_workspace_dismissals_bad_row_fail_open(tmp_path: Path) -> None:
+    """R1 修复①的回归钉：dismissal 表内坏行（SQLite 灵活类型允许 TEXT 存入
+    INTEGER 列）不得让索引构建抛 TypeError/ValueError 直上无 try 兜底的
+    weekly 主循环——fail-open 空索引，扫描照跑（回到现状噪音方向）。"""
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+    _enqueue_workspace_candidate(tools, mid, tag="bad-row")
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "先落一行好的"},
+    ])
+    assert result["results"][0]["outcome"] == "dismissed"
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO workspace_dismissals(memory_id, version, suspected_workspace, decided_at)"
+            " VALUES (999, 'not-an-int', 'dbpgsql', '2026-09-23T00:00:00Z')"
+        )
+    assert tools.db.scan_queue.load_workspace_dismissals() == {}
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["status"] == "ok", "坏行不得崩掉整轮 weekly 扫描"
+
+
+def test_confirmed_move_leaves_no_durable_row(tmp_path: Path) -> None:
+    """R2 变异 Mut-D 补测：confirmed 搬桶成功（:661 默认 durable_record=False，
+    :706 守卫）不得 mint 持久豁免——守卫被删会让「已搬走的旧身份」永久豁免。"""
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+    _enqueue_workspace_candidate(tools, mid, tag="confirmed-move")
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": mid, "status": "confirmed",
+         "target_workspace": "dbpgsql", "conf": 0.9, "reason": "投票门 9/9"},
+    ])
+    entry = result["results"][0]
+    assert entry["outcome"] == "moved", entry
+    with tools.db.connection() as conn:
+        durable = int(conn.execute("SELECT COUNT(*) FROM workspace_dismissals").fetchone()[0])
+        queue_status = conn.execute(
+            "SELECT status FROM scan_queue WHERE kind='workspace'"
+        ).fetchall()
+    assert durable == 0, "confirmed 搬桶不得落持久豁免"
+    # 搬桶使行钉（旧桶/旧版本）失效，队列行被作废——重点是 durable 不落表。
+    assert all(str(r[0]) != "pending" for r in queue_status)
