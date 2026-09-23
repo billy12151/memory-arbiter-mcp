@@ -100,7 +100,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 3. 值在对应证据引用中有 grounding，机械的大小写/单位/数字/已确认别名推导除外；
 4. 归一后的值确实不同；
 5. 确定性的重复、兼容、环境/版本/地域/对象、观察时间、历史/当前、演进和测量范围 veto 均不命中；
-6. 正式槽位具备充分的 `workspace_canonical + entity + attribute + scope` 来源。
+6. 正式槽位具备充分的 `workspace_canonical + attribute + subject` 身份（gate-v2：metadata entity/scope 已退役，历史冲突组保留旧 slot 键）。
 
 模糊的属性相似不能创建正式槽位。Qwen 失败或缺席无权否决确定性的扫描候选。
 

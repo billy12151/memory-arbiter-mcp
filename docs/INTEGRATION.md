@@ -100,7 +100,7 @@ The model must not return a final conflict/coexistence decision, winner, or muta
 3. values are grounded in their corresponding evidence quote, except mechanical case/unit/number/confirmed-alias derivations;
 4. normalized values actually differ;
 5. deterministic duplicate, compatibility, environment/version/region/object, observation-time, historical/current, evolution, and measurement-scope vetoes do not apply;
-6. a formal slot has sufficient `workspace_canonical + entity + attribute + scope` provenance.
+6. a formal slot has sufficient `workspace_canonical + attribute + subject` identity (gate-v2: metadata entity/scope are retired; historical groups keep their old slot keys).
 
 Fuzzy attribute similarity cannot create a formal slot. Qwen failure or absence has no authority to veto deterministic scan candidates.
 

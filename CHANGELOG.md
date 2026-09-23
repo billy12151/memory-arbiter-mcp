@@ -5,6 +5,19 @@ Versions follow semantic versioning.
 
 ## [0.17.0] — 2026-09-22
 
+### Changed (0.17.0 追加包：冲突检测门 v2 分层重设计+召回融合修正，owner 2026-09-23 拍板，未发版一次性收敛)
+
+方案：docs/mema-conflict-gate-v2-2026-09-23.md（mema #1059；两轮方案 review——对码轮+两个独立对抗轮——的修正已全部回写实施）。漏斗架构：②″记忆级一揽子筛选 → B claims×claims（确定性零 Qwen）→ C claims×句子（attr 向量 KNN）→ A 句子×句子（初筛[编排可选层：写入调用、扫描跳过] → 真余弦区间门 → 三情形 Qwen 分流）；写入与扫描=同一套层（pipeline/gates.py）的两种编排。
+
+- **feat(G1): capped recall 双口径。** R@k 分母 min(相关数,k)（微平均 Σmin(R_i,k)），classic 与 capped 并报；B03 形态（6 relevant、top5 装满）不再被 k+1 名罚分。
+- **feat(G2): 精确命中保底+证据分真余弦。** subject 归一相等或证据 best 真余弦 ≥0.98 → fusion +1.0（配额裁剪豁免——按原始名次收录会饿死晚进池的精确命中）；item 级新增 evidence_best_score/lexical_rank 透明键；#91（余弦 1.0、KNN 第一、find 排 15）修复。
+- **feat(G3)!: provenance 硬门退役+存储层单点剥离。** metadata.entity/scope 全链退役：序列化点三处（INSERT/UPDATE/update_metadata——第三处为对抗 review 发现）过 _strip_retired_metadata_keys；丢 notice 检查四处全改 slot 新口径 {entity=workspace 名, attribute, scope=subject 前 32 字}（claims 通道与 backlog 不改会整体消声）；keyed migration json_remove 存量清理（json_valid 保险）；vnext 迁移复制后补跑；写入响应废弃提示；scan 慢道 entity 层删除。
+- **feat(G4): 句子初筛（编排可选层）+claims 覆盖句跳过+候选真余弦区间门。** 词表=数字值|否定|时间锚|赋值形态（取值/配置为/上限/= 等——对抗 review：文本值对立是主形态）|表格行；claim value 位置定位覆盖句不从通道 A 发起（三通道零重叠）；cos∈[0.60,0.98) 区间门三处同构（写入/慢道/诊断通道），below-floor 丢、at-ceil 写入侧计 repeatability_skipped、诊断通道路由 duplicates_pool（治理合并池不被掏空）；初筛词表不含「使用/是」等超高频词（超宽进=初筛白做），「X 使用 A vs B」类留扫描侧 Agent。
+- **feat(G5): 记忆级一揽子筛选+KNN 邻居范围限定。** 标题粗筛一次（SEMANTIC_NEIGHBOR_SCREEN=50）→ memory_pair_excluded 三判（版本对立【双侧版本形态+主版本不同+去版本主干一致——cf-res-9 实证防误杀】/过程记录【从句子循环挪入】/发版方案形态）→ 排除名单 → 句子 KNN include_memory_ids rowid-IN 范围限定；2024 vs 2025 规划毙、0.16.12 vs 0.16.11 发版闭环毙、cf-res-9/27/28/29/30 真冲突不毙。
+- **feat(G6): claims 单边桥+三情形分流+排序重写。** qwen_dispatch（a 单边有值/b 双值待属性对齐/c 双属性待值对齐；direct 前置）+ pair-v9 prompt 指示语变体；PAIR_PROMPT_VERSION/CONFLICT_DETECTOR_VERSION 双 bump；_pair_score=0.40*冲突带+0.25*数值路由+0.20*值不等+0.15*否定（C4 overlap 降 tiebreak——同话题度在候选集内无区分度）；backlog 同公式；单边桥=无同名属性时 attr 向量定向捞 peer 句子 Qwen 抽值（帽 2/写，claim_bridge_unresolved 可观测）。
+- **feat(G6b): 通道 C claims×句子。** attr 向量在干净名单句子行 KNN → 区间门 → Qwen 情形 a；版本豁免 D1 分键计数；扫描侧同构入 scan_queue（claim 声明+句子双证据 check_hint）；skip_peers 跨通道去重。反向通道（邻居 claims×own 句子）不做，挂观测（方案 §5）。
+- **feat(G7/G7b): harness。** claims 套件 40 对（B 类四形态 5×4 + C 类两形态 10×2，grounding 自检），score_conflict_claims 分通道统计；baseline-0.17.0-gate-v2.json 于五轮基线跑后落盘（gate=新基线-10% provisional）。
+
 ### Changed (0.17.0 追加包：单元向量全局退役，owner 2026-09-23 拍板，未发版一次性收敛)
 
 - **feat(C1): 嵌入器批量 API。** `ManagedEmbedder.embed_texts`——短条目（≤500 字符）一次 `embed(list)`（spike：跨 n_batch 零丢条、1.73x 墙钟）；超长条目单条走 embed_text 保预算截断一致；批量失败重试一次→逐条兜底（never-raises）；GPU→CPU 降级清批量闭包走逐条。backfill 接批嵌。
