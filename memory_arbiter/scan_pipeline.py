@@ -407,7 +407,9 @@ class ScanPipeline:
         # identity discipline as the write side (eid is the memory_row.id).
         cross_units = internal_source
         def cross_knn(embedding: list[float], **kw: Any) -> list[dict[str, Any]]:
-            return self.db.row_knn(embedding, **kw)
+            # Detection window: exclude the peers' subject rows (same
+            # discipline as the write side — they crowd out body rows).
+            return self.db.row_knn(embedding, include_subject_rows=False, **kw)
         # 2) cross-memory same-bucket rank pairing.
         for unit in cross_units:
             if unit.get("embedding") is None:

@@ -380,6 +380,7 @@ class EvidenceStore:
         exclude_memory_id: int | None = None,
         exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
         conn: "sqlite3.Connection | None" = None,
+        include_subject_rows: bool = True,
     ) -> list[dict[str, Any]]:
         """KNN over row vectors (P2-2.4) — the conflict channel's candidate
         source. Identical rowid-IN pre-filter contract as EvidenceStore.knn
@@ -405,6 +406,12 @@ class EvidenceStore:
         excl_sql, _, excl_params = workspace_exclusion_sql(exclude_workspaces)
         eligible_clauses = [memory_status_sql]
         eligible_params: list[Any] = []
+        # Harness-found regression: a peer's subject row is its most-similar
+        # hit for a same-topic sentence and POISONED the detection window
+        # (k=5) — the opposing body rows never surfaced. Detection excludes
+        # subject rows; search/placement/self-recall keep them (default).
+        if not include_subject_rows:
+            eligible_clauses.append("r.kind != 'subject'")
         if workspace_sql:
             eligible_clauses.append(workspace_sql)
             eligible_params.extend(workspace_params)
@@ -730,13 +737,14 @@ class EvidenceStore:
                         k=max(1, int(neighbor_k)) + 1,
                         workspace=pairing_scope,
                         exclude_memory_id=anchor_id,
+                        include_subject_rows=False,
                     )
                     # C3b: the suspected-bucket sweep for misplaced memories.
                     suspect_hits: list[dict[str, Any]] = []
                     if suspect_bucket and suspect_bucket != anchor_bucket:
                         suspect_hits = self.row_knn(
                             unit_vector,
-                            k=max(1, int(neighbor_k)) + 1,
+                            k=max(1, int(neighbor_k)) + 1, include_subject_rows=False,
                             workspace=suspect_bucket,
                             exclude_memory_id=anchor_id,
                         )

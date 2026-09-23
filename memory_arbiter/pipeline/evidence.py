@@ -1136,6 +1136,7 @@ class EvidencePipeline:
                 knn_hits = self.db.row_knn(
                     embedding, k=5, workspace=workspace,
                     exclude_memory_id=memory_id, conn=job_conn,
+                    include_subject_rows=False,  # subject rows poison the window
                 )
                 for hit in knn_hits:
                     decision = decide_evidence(seg_view.text, str(hit.get("text") or ""))
