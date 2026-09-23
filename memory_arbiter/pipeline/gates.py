@@ -239,3 +239,41 @@ def qwen_dispatch(decision: Any) -> str:
 def dispatch_hint_text(case: str) -> str:
     """The one-line task instruction for the prompt variant (pair-v9)."""
     return _DISPATCH_HINTS.get(case, "")
+
+
+def compute_pair_score(
+    decision: Any, pair_cos: float, unit_text: str, hit_text: str,
+) -> float:
+    """⑦ pair_score（G6 重写，纯函数）：预算消费顺序，永不改变判定。
+
+    score = 0.40*band(clamp((cos-FLOOR)/0.20)) + 0.25*numeric_route
+          + 0.20*values_differ(normalized unequal) + 0.15*negation(单侧)
+    Negation opposition = the G4 negation vocab hitting EXACTLY ONE side.
+    Value-equal pairs are settled at adjudication — the bonus is only for
+    opposing evidence; text pairs of undecided equality score 0. Weights are
+    initial values — recalibrated at G7 (五轮基线)."""
+    from ..constants import (
+        PAIR_SCORE_W_CONFLICT_BAND,
+        PAIR_SCORE_W_NEGATION,
+        PAIR_SCORE_W_NUMERIC_ROUTE,
+        PAIR_SCORE_W_VALUES_DIFFER,
+        SEMANTIC_CANDIDATE_COS_FLOOR,
+    )
+    from ..semantic_conflict import _NEGATION_WORDS, normalize_value
+
+    band = max(0.0, min(1.0, (float(pair_cos) - SEMANTIC_CANDIDATE_COS_FLOOR) / 0.20))
+    score = PAIR_SCORE_W_CONFLICT_BAND * band
+    if str(getattr(decision, "reason", "") or "") == "numeric_value_candidate":
+        score += PAIR_SCORE_W_NUMERIC_ROUTE
+    left_value = getattr(decision, "left_value", None)
+    right_value = getattr(decision, "right_value", None)
+    if left_value and right_value:
+        try:
+            if normalize_value(left_value) != normalize_value(right_value):
+                score += PAIR_SCORE_W_VALUES_DIFFER
+        except Exception:
+            score += PAIR_SCORE_W_VALUES_DIFFER
+    pattern = re.compile(_NEGATION_WORDS, re.IGNORECASE)
+    if bool(pattern.search(unit_text or "")) != bool(pattern.search(hit_text or "")):
+        score += PAIR_SCORE_W_NEGATION
+    return score

@@ -10,15 +10,10 @@ from typing import Any, TYPE_CHECKING, Iterator
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
-    PAIR_SCORE_W_CONFLICT_BAND,
-    PAIR_SCORE_W_NEGATION,
-    PAIR_SCORE_W_NUMERIC_ROUTE,
-    PAIR_SCORE_W_VALUES_DIFFER,
     SEMANTIC_JOB_TIMEOUT_MS,
     SEMANTIC_MAX_EVIDENCE_UNITS,
     SEMANTIC_MAX_EXAMINED_PAIRS,
     SEMANTIC_INTERNAL_QWEN_MAX_PAIRS,
-    SEMANTIC_CANDIDATE_COS_FLOOR,
     SEMANTIC_CROSS_KNN_WINDOW,
     SEMANTIC_MAX_ROWS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
@@ -1074,17 +1069,13 @@ class EvidencePipeline:
             left_version = int(record.get("version") or 1)
             for peer_id, (hit, seg_view, decision, pair_cos) in entries:
                 # Gate-v2 G6: the backlog priority uses the SAME score as the
-                # live Qwen budget (band + numeric + values_differ + negation)
-                # — a stale formula would starve high-band pairs after a
-                # truncation.
-                _band = max(0.0, min(1.0, (float(pair_cos) - 0.60) / 0.20))
-                score = PAIR_SCORE_W_CONFLICT_BAND * _band
-                if str(decision.reason or "") == "numeric_value_candidate":
-                    score += PAIR_SCORE_W_NUMERIC_ROUTE
-                if _values_differ_norm(decision):
-                    score += PAIR_SCORE_W_VALUES_DIFFER
-                if _negation_opposition(seg_view.text, str(hit.get("text") or "")):
-                    score += PAIR_SCORE_W_NEGATION
+                # live Qwen budget — a stale formula would starve high-band
+                # pairs after a truncation.
+                from .gates import compute_pair_score
+
+                score = compute_pair_score(
+                    decision, pair_cos, seg_view.text, str(hit.get("text") or ""),
+                )
                 right_version = int(hit.get("version") or hit.get("memory_row_version") or 1)
                 key_hash = hashlib.sha256(
                     "|".join((
@@ -1529,16 +1520,10 @@ class EvidencePipeline:
         def _pair_score(
             peer_id: int, triple: "tuple[dict[str, Any], Any, Any, float]",
         ) -> float:
+            from .gates import compute_pair_score
+
             _hit, _seg, decision, pair_cos = triple
-            band = max(0.0, min(1.0, (float(pair_cos) - SEMANTIC_CANDIDATE_COS_FLOOR) / 0.20))
-            score = PAIR_SCORE_W_CONFLICT_BAND * band
-            if str(decision.reason or "") == "numeric_value_candidate":
-                score += PAIR_SCORE_W_NUMERIC_ROUTE
-            if _values_differ_norm(decision):
-                score += PAIR_SCORE_W_VALUES_DIFFER
-            if _negation_opposition(_seg.text, str(_hit.get("text") or "")):
-                score += PAIR_SCORE_W_NEGATION
-            return score
+            return compute_pair_score(decision, pair_cos, _seg.text, str(_hit.get("text") or ""))
 
         def _value_gap(triple: "tuple[dict[str, Any], Any, Any, float]") -> float:
             _hit, _seg, decision, _pair_cos = triple

@@ -235,7 +235,7 @@ def test_qwen_dispatch_three_cases() -> None:
 
 
 def test_pair_score_orders_high_band_first(tmp_path, monkeypatch) -> None:
-    """cos 高（冲突带满分）的对先于 cos 低的对消费 Qwen 预算；排序不改变判定。"""
+    """带内两对都被 Qwen 消费（预算顺序的纯函数钉在 compute_pair_score 单测）。"""
     import tests.test_vnext_evidence as tv
     from memory_arbiter.constants import SEMANTIC_MAX_EXAMINED_PAIRS
 
@@ -288,9 +288,15 @@ def test_pair_score_orders_high_band_first(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(tools.db.evidence, "row_vectors_for_ids", fake_vectors)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: Backend())
     tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
-    assert Backend.calls >= 1
-    if len(consumed) >= 1:
-        assert consumed[0] == int(peer_hi["id"]), "high-band peer must consume budget first"
+    assert sorted(consumed) == sorted([int(peer_hi["id"]), int(peer_lo["id"])])
+    # Pure-function ordering pin: identical signals, hi band 1.0 > lo band.
+    from types import SimpleNamespace
+    from memory_arbiter.pipeline.gates import compute_pair_score
+    decision = SimpleNamespace(reason="numeric_value_candidate",
+                               left_value="300", right_value="100")
+    hi = compute_pair_score(decision, 0.94, "a 500ms", "b 500ms")
+    lo = compute_pair_score(decision, 0.785, "a 500ms", "b 500ms")
+    assert hi > lo
 
 
 def test_claim_bridge_extracts_and_reports(tmp_path, monkeypatch) -> None:
@@ -345,3 +351,27 @@ def test_claim_bridge_extracts_and_reports(tmp_path, monkeypatch) -> None:
     assert claims.get("notices", 0) >= 1
     notices = tools.db.list_semantic_notices(status="open")
     assert any(n.get("payload", {}).get("claim_bridge") for n in notices)
+
+
+def test_compute_pair_score_formula() -> None:
+    """G6 排序公式纯函数钉：band 主导、numeric/values_differ/negation 各自
+    加分、值相等不加分（裁决层已毙）、文本值对判不了等不加、平手链由调用方
+    排序键处理。"""
+    from types import SimpleNamespace
+    from memory_arbiter.pipeline.gates import compute_pair_score
+
+    numeric = SimpleNamespace(reason="numeric_value_candidate",
+                              left_value="300", right_value="100")
+    # cos 0.94 → band (0.94-0.60)/0.20 = 1.0（饱和）；全信号 → 0.40+0.25+0.20=0.85
+    assert compute_pair_score(numeric, 0.94, "网关超时 500ms", "网关超时 300ms") == pytest.approx(0.85)
+    # cos 0.60 → band 0 → 0.25+0.20=0.45；cos 0.70 → band 0.5 → 0.65（band 主导）
+    assert compute_pair_score(numeric, 0.60, "", "") == pytest.approx(0.45)
+    assert compute_pair_score(numeric, 0.70, "", "") == pytest.approx(0.65)
+    # negation: 单侧命中加 0.15，双侧命中（同一形态）不加
+    polarity = SimpleNamespace(reason="polarity_changed", left_value=None, right_value=None)
+    assert compute_pair_score(polarity, 0.60, "包含缓存", "不包含缓存") == pytest.approx(0.15)
+    assert compute_pair_score(polarity, 0.60, "不包含缓存", "不含缓存") == pytest.approx(0.0)
+    # 值相等（换算后）：裁决层已毙的形态，排序不加分
+    equal = SimpleNamespace(reason="numeric_value_candidate",
+                            left_value="500ms", right_value="0.5s")
+    assert compute_pair_score(equal, 0.94, "x", "y") == pytest.approx(0.65)
