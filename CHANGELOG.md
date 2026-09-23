@@ -5,6 +5,15 @@ Versions follow semantic versioning.
 
 ## [0.17.0] — 2026-09-22
 
+### Changed (0.17.0 追加包：单元向量全局退役，owner 2026-09-23 拍板，未发版一次性收敛)
+
+- **feat(C1): 嵌入器批量 API。** `ManagedEmbedder.embed_texts`——短条目（≤500 字符）一次 `embed(list)`（spike：跨 n_batch 零丢条、1.73x 墙钟）；超长条目单条走 embed_text 保预算截断一致；批量失败重试一次→逐条兜底（never-raises）；GPU→CPU 降级清批量闭包走逐条。backfill 接批嵌。
+- **feat(C2-C5): 工人合并+subject 行级化+单元向量全链退役（合批）。** 写入/编辑 post-commit 一个语义 job 一条龙（分段→批嵌→publish_rows 先于 Qwen→检测；四形态矩阵含 recheck_disabled/replay/off→index_only；队列帽 200；公平 deadline=max(墙,publish_done+timeout) 且墙已过截断优先）；**subject 行（A+ 拍板，R13 废止）**置首入索引（self-recall/placement 信号回归）但不作检测发起段；「很短。」类兜底行保证每条可索引记忆 ≥1 行；查询召回/outline/hits/过期通道/placement/扫描/诊断通道全部换行级（k=cap*16，聚合含 support 照用）；EvidenceStore.publish 退役、publish_rows 写事务四点收紧（单 SELECT 合并/content_sha 免重算/DELETE 子查询化/executemany）；memories.py 单元生命周期 SQL 退役+行级对等腿补齐（含 P2-2.3 遗漏的行删除腿）；space rebuild 全链换行表；subject 行级化存量迁移（keyed migration 重建表+清空重嵌，boot backfill 幂等补齐）。
+- **feat(C6): 守卫式单元表删除。** boot additive 迁移：一条 NOT EXISTS 守卫 SQL（非 deleted+可索引+有单元+无行=阻塞）满足才 DROP memory_evidence(+vec)，不满足下次 boot 再试；migration_state 键防重入；fresh 库不建单元表；backfill 选择器扩非 deleted（owner 拍板②：expired 族补行，过期检索向量通道保全）；vnext 迁移五处切行表（含两个 review 盲点修复：preserve 探针计数行表防异空间向量误判 ready、指纹行存储化）。
+- **feat(C7): 流式收集（独立可 revert）。** 首写路径嵌入与收集重叠：producer 线程批嵌（16/批、深度 1 队列）领先主线程一批，KNN+门在 GPU 工作时并行；值锚定排序前置保截尾；publish 收集后仍先于一切 Qwen。
+- 已知取舍记录：单线程串行吞吐（原两 worker 流水线合并，owner 接受单机低写入）；embed_texts 持锁期间 backfill 单条嵌入阻塞为常态；无单元回退路径（owner 拍板全局退役）。
+
+
 冲突/相似识别率提升（Part 2）。P2-0~P2-7 全量实施 + 两轮 review（第二轮对抗性）13 项修复；对 0.16.12 基线（conflict-v3-noisy 全量语料）的对比数字见发版前 harness 报告。**行为门：新表全部 additive（memory_row/memory_row_vec/memory_claims/memory_claim_vec/conflict_backlog）、memories.last_scanned_at 加列；claims 为 remember/update 新增必填字段（灰度 claims.required 默认 false 只警告）；发版须统一 bump CONFLICT_DETECTOR_VERSION 并触发一次全量重扫。**
 
 ### Changed

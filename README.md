@@ -81,7 +81,7 @@ Every product call returns the envelope `{ok, mode, warnings, degraded, data}`. 
 Lexical and evidence channels recall independently and merge per memory with reciprocal-rank fusion, then trust, recency, filter, and workspace adjustments.
 
 - **Lexical**: FTS5 over content plus subject/tags LIKE; the bounded content-LIKE anchor channel runs only when vectors are unavailable (degradation path since 0.16.10).
-- **Evidence**: a background worker derives local-text evidence units from the `subject`, Markdown headings, sentence/paragraph groups, and overlapping windows for long text. The indexer never extracts facts, infers entities, or calls a model — it only slices the stored source. Evidence hits carry source offsets. `memory(action="read", data={"memory_id": 42, "span":{"start":120,"end":640}})` returns only that clipped source window plus `data.span.{start,end,total_chars}`; omit `span` to read the complete source. Span bounds are strict integers with `0 <= start < end`, and `end` clips at content length.
+- **Evidence**: the write-path job derives row segments from the `subject` (leading subject row), sentences, and table rows (0.17.0: the former unit tables retired; row vectors are the one evidence channel). The indexer never extracts facts, infers entities, or calls a model — it only slices the stored source. Evidence hits carry source offsets. `memory(action="read", data={"memory_id": 42, "span":{"start":120,"end":640}})` returns only that clipped source window plus `data.span.{start,end,total_chars}`; omit `span` to read the complete source. Span bounds are strict integers with `0 <= start < end`, and `end` clips at content length.
 
 ## Conflict groups and notices
 
