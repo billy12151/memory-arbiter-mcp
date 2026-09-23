@@ -4,8 +4,9 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import json
+import threading
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Iterator
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
@@ -584,6 +585,60 @@ class EvidencePipeline:
             **published,
         }
 
+    @staticmethod
+    def _streamed_pairs(
+        ranked_segments: list[Any], embedder: Any, max_segments: int,
+    ) -> "Iterator[tuple[Any, list[float]]]":
+        """C7: lazy (segment, embedding) stream, one batch ahead.
+
+        A daemon producer thread embeds SEMANTIC_STREAM_BATCH_ROWS at a time
+        into a depth-1 queue; the main thread's KNN+gates consume the
+        previous batch while the GPU works on the next (the llama call holds
+        the embedder lock; KNN never touches it, so the overlap is real).
+        Ranking happened BEFORE this call, so the cap/phase-timeout stops
+        here always cut the lowest-value tail. Embed failures degrade to
+        skipped segments (the memory stays pending for the backfill).
+        """
+        import queue as _queue
+        from ..constants import (
+            SEMANTIC_EMBED_PHASE_TIMEOUT_MS, SEMANTIC_STREAM_BATCH_ROWS,
+        )
+
+        out: "_queue.Queue[Any]" = _queue.Queue(maxsize=1)
+        DONE = object()
+
+        def produce() -> None:
+            produced = 0
+            phase_started = time.monotonic()
+            try:
+                for start in range(0, len(ranked_segments), SEMANTIC_STREAM_BATCH_ROWS):
+                    if produced >= max_segments:
+                        break
+                    if time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
+                        break  # phase cap: stop submitting, tail is lowest-value
+                    batch = ranked_segments[start:start + SEMANTIC_STREAM_BATCH_ROWS]
+                    results = embedder.embed_texts([seg.text for seg in batch])
+                    pairs = [
+                        (seg, [float(x) for x in result.embedding])
+                        for seg, result in zip(batch, results)
+                        if result.embedding
+                    ]
+                    produced += len(batch)
+                    out.put(pairs)
+            except Exception:
+                pass  # degraded embedder: empty/short stream, memory stays pending
+            finally:
+                out.put(DONE)
+
+        threading.Thread(
+            target=produce, name="mema-stream-embed", daemon=True,
+        ).start()
+        while True:
+            item = out.get()
+            if item is DONE:
+                return
+            yield from item
+
     def index_rows_in_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         """C2 (0.17.0 worker merge): the job's index-only form.
 
@@ -884,79 +939,60 @@ class EvidencePipeline:
         row_vectors = self.db.evidence.current_row_vectors(
             int(memory_id), int(record.get("version") or 1), content_hash,
         )
+        # C7 streaming: on the first-write path the job does NOT embed inline.
+        # The cross-memory loop below consumes a lazy (segment, embedding)
+        # stream produced one batch ahead on a single worker thread, so
+        # KNN+gates overlap the GPU work; publish_rows lands AFTER collection
+        # (still ahead of every Qwen call — invariant unchanged) and the
+        # space-rebuild heal moved with it.
+        pending_segments: list[Any] = []
         if not row_vectors and embedder is not None:
             from ..rowseg import segment_rows
-            segments = segment_rows(str(record.get("subject") or ""), content)
-            results = embedder.embed_texts([segment.text for segment in segments])
-            row_vectors = []
-            vectors: list[list[float]] = []
-            for segment, embed_result in zip(segments, results):
-                if not embed_result.embedding:
-                    vectors = []
-                    break
-                vectors.append([float(x) for x in embed_result.embedding])
-                row_vectors.append((segment, [float(x) for x in embed_result.embedding]))
-            if vectors:
-                published = self.db.evidence.publish_rows(
-                    int(memory_id), int(record.get("version") or 1), content_hash,
-                    segments, vectors,
-                )
-                if published.get("published"):
-                    vec_state = self.db.get_vec_index_state()
-                    if (
-                        vec_state.get("state") == "mismatch"
-                        and vec_state.get("target_space_id") == embedder.embedding_space_id
-                    ):
-                        self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
-                if not published.get("published"):
-                    # stale_snapshot et al: a concurrent edit superseded this
-                    # pass — the in-memory vectors still serve this run, the
-                    # next job lands the new version's rows.
-                    row_vectors = row_vectors or []
-        # Anchor the detection budget after the index phase on every path
-        # (recovered-publish or already-current rows).
-        publish_done_at.append(time.monotonic())
+            pending_segments = list(
+                segment_rows(str(record.get("subject") or ""), content)
+            )
+        elif row_vectors:
+            # Already-published rows: the collection phase is over the index,
+            # anchor the detection budget now (the streaming path anchors
+            # after its post-collection publish instead).
+            publish_done_at.append(time.monotonic())
         # C5 (unit retirement): rows are the only candidate source. No rows
         # recoverable in-job (degraded embedder) → the memory stays pending
         # for the backfill; the detection phase sees an empty segment set
         # rather than falling back to units.
-        rows_mode = bool(row_vectors)
+        rows_mode = bool(row_vectors) or bool(pending_segments)
         # Normalized segment view: rows carry row_index, units carry
         # unit_index — the view exposes .unit_index for BOTH so every
         # downstream consumer (internal create, envelopes, member evidence)
         # stays unchanged (P2-3.1 keeps every gate a pure text-pair function;
         # only the input granularity changed).
         from collections import namedtuple
-        _SegView = namedtuple("_SegView", "text start_offset end_offset unit_index")
-        # C3 A+ guard: the subject row participates in the INDEX (peers find
-        # it — self-recall, placement) but never originates a pair: subject
-        # version progression (「服务 2024 规划」→「服务 2025 规划」) is
-        # timeline evolution, not numeric conflict — the row-channel
-        # counterpart of the unit channel's kind='text' filter.
-        paired = [
-            (seg, embedding) for seg, embedding in row_vectors
-            if getattr(seg, "kind", "sentence") != "subject"
+        # C7: kind rides the view so consumers can skip the subject row
+        # (index participant, never a pair originator — C3 A+ guard).
+        _SegView = namedtuple("_SegView", "text start_offset end_offset unit_index kind")
+        paired: list[tuple[Any, Any]] = list(row_vectors) or [
+            (seg, None) for seg in pending_segments
         ]
+        # P2-3.1 值锚定行优先：rows carrying an extractable value lead the cap
+        # order (12th round: value features are the conflict predictor; topic
+        # similarity is not). Deterministic tiebreak by segment order. C7:
+        # ranking precedes batching, so a deadline/cap hit stops later
+        # batches and always cuts the lowest-value tail.
+        from ..semantic_conflict import _VALUE_RE
+        paired.sort(
+            key=lambda pair: (
+                0 if _VALUE_RE.search(pair[0].text) else 1,
+                int(getattr(pair[0], "row_index", 0)),
+            )
+        )
         seg_views = [
             _SegView(
                 seg.text, int(seg.start_offset), int(seg.end_offset),
-                int(seg.row_index),
+                int(seg.row_index), str(getattr(seg, "kind", "sentence")),
             )
             for seg, _embedding in paired
         ]
         seg_embeddings = [embedding for _seg, embedding in paired]
-        if rows_mode:
-            # P2-3.1 值锚定行优先：rows carrying an extractable value lead the
-            # cap order (12th round: value features are the conflict
-            # predictor; topic similarity is not). Deterministic tiebreak by
-            # segment order.
-            from ..semantic_conflict import _VALUE_RE
-            order = sorted(
-                range(len(seg_views)),
-                key=lambda idx: (0 if _VALUE_RE.search(seg_views[idx].text) else 1, seg_views[idx].unit_index),
-            )
-            seg_views = [seg_views[idx] for idx in order]
-            seg_embeddings = [seg_embeddings[idx] for idx in order]
         max_segments = max_rows if rows_mode else max_units
         segments_capped_reason = "rows_capped" if rows_mode else "evidence_units_capped"
         # 0.16.0 E10① (§6⑳): same-memory internal examination comes FIRST —
@@ -986,9 +1022,11 @@ class EvidencePipeline:
         from ..scan_pipeline import internal_pair_admission
 
         internal_qwen_pairs: list[tuple[Any, Any, Any]] = []
-        for i in range(len(seg_views)):
-            for j in range(i + 1, len(seg_views)):
-                seg_a, seg_b = seg_views[i], seg_views[j]
+        # C3 A+ guard: subject rows never originate pairs (internal or cross).
+        originator_views = [v for v in seg_views if v.kind != "subject"]
+        for i in range(len(originator_views)):
+            for j in range(i + 1, len(originator_views)):
+                seg_a, seg_b = originator_views[i], originator_views[j]
                 internal_decision = decide_evidence(seg_a.text, seg_b.text)
                 admitted = internal_pair_admission(
                     seg_a.text, seg_b.text,
@@ -1038,7 +1076,23 @@ class EvidencePipeline:
         # row_knn in rows mode (candidates are clean short sentences or
         # header-folded table rows), evidence_knn otherwise. Rows carry no
         # 'text'-only kind filter (table rows are first-class candidates).
-        for seg_view, embedding in zip(seg_views, seg_embeddings):
+        landed_embeddings: list[list[float]] = []
+        streaming = bool(pending_segments)
+        if streaming:
+            # C7: iterate the lazy stream (ranking already applied to
+            # pending_segments via `paired`); embeddings land in stream order
+            # = publish order below.
+            ranked_pending = [seg for seg, _none in paired]
+            pair_iter = self._streamed_pairs(
+                ranked_pending, embedder, max_segments,
+            )
+        else:
+            pair_iter = iter(zip(seg_views, seg_embeddings))
+        for seg_view, embedding in pair_iter:
+            if streaming:
+                landed_embeddings.append(embedding)
+            if seg_view.kind == "subject":
+                continue  # C3 A+ guard: indexed, never a pair originator
             active_deadline = backlog_deadline()
             if units_examined >= max_segments:
                 truncation_reason = segments_capped_reason
@@ -1097,6 +1151,26 @@ class EvidencePipeline:
                 # neighbour of the same peer wins outright.
                 if existing is None or closer:
                     by_peer[peer_id] = (hit, seg_view, decision)
+        if streaming:
+            # C7: the index duty completes AFTER collection on the streaming
+            # path — publish every embedded row (still ahead of every Qwen
+            # call below), then heal + anchor the detection budget.
+            if landed_embeddings:
+                landed_segments = ranked_pending[: len(landed_embeddings)]
+                published = self.db.evidence.publish_rows(
+                    int(memory_id), int(record.get("version") or 1), content_hash,
+                    landed_segments, landed_embeddings,
+                )
+                if published.get("published"):
+                    vec_state = self.db.get_vec_index_state()
+                    if (
+                        vec_state.get("state") == "mismatch"
+                        and vec_state.get("target_space_id") == embedder.embedding_space_id
+                    ):
+                        self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
+                # stale_snapshot et al: in-memory vectors served this run; the
+                # next job lands the new version's rows.
+            publish_done_at.append(time.monotonic())
         if truncation_reason:
             # E10① order guarantee: internal findings land BEFORE the cross
             # loop and survive its truncation. The internal Qwen pass has not

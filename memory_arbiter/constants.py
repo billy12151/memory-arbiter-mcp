@@ -127,6 +127,11 @@ EVIDENCE_QUEUE_MAX_SIZE = 200
 # (incomplete → retry) instead of parking the single worker thread and
 # starving every queued job behind it.
 SEMANTIC_EMBED_PHASE_TIMEOUT_MS = 30000
+# C7: streaming collection batch size. The producer embeds one batch ahead on
+# a single worker thread (queue depth 1) so the main thread's KNN+gates
+# overlap the GPU work; value-anchor ranking happens BEFORE batching, so a
+# deadline/cap hit stops later batches and always cuts the lowest-value tail.
+SEMANTIC_STREAM_BATCH_ROWS = 16
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.
