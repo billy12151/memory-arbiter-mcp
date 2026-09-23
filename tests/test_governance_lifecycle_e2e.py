@@ -55,6 +55,10 @@ class FakeEmbedder:
         vector = [1.0, 0.0] if "dist" in text else [0.0, 1.0]
         return EmbedResult(vector, False, len(text), len(text))
 
+    @classmethod
+    def embed_texts(cls, texts):
+        return [cls.embed_text(prefix="", body=t) for t in texts]
+
 
 def _make_tools(tmp_path: Path) -> MemoryTools:
     pytest.importorskip("sqlite_vec")
@@ -203,7 +207,7 @@ def test_slow_governance_lifecycle_e2e_real_models(tmp_path: Path, real_backend:
             content=_RELEASE_RIGHT, subject="发版流程", tags=["release"],
             metadata=dict(_META), workspace="governance-e2e",
         )["data"]
-        assert tools.wait_evidence_worker_drained(timeout=5)
+        assert tools.wait_semantic_worker_drained(timeout=5)
 
         value_left, value_right = _real_extraction(
             real_backend, _RELEASE_LEFT, _RELEASE_RIGHT, int(left["id"]), int(right["id"]),
@@ -272,7 +276,7 @@ def test_slow_governance_recovery_e2e_real_models(tmp_path: Path, real_backend: 
             content=_RELEASE_RIGHT, subject="发版流程", tags=["release"],
             metadata=dict(_META), workspace="governance-e2e",
         )["data"]
-        assert tools.wait_evidence_worker_drained(timeout=5)
+        assert tools.wait_semantic_worker_drained(timeout=5)
 
         value_left, value_right = _real_extraction(
             real_backend, _RELEASE_LEFT, _RELEASE_RIGHT, int(left["id"]), int(right["id"]),

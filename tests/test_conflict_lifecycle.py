@@ -859,7 +859,7 @@ def _write_pair(tools, meta: dict, left: str = "database is mysql",
                 right: str = "database is sqlite") -> tuple[dict, dict]:
     peer = tools.memory_write(content=left, subject="a", tags=[], metadata=meta)["data"]
     new = tools.memory_write(content=right, subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     return peer, new
 
 
@@ -880,7 +880,7 @@ def test_notice_value_groups_tolerate_missing_parsed_keys(tmp_path: Path, monkey
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "MyProject", "scope": "Production"}
     peer, new = _write_pair(tools, meta)
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [_hit(peer["id"], "database is mysql", metadata=dict(meta))])
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [_hit(peer["id"], "database is mysql", metadata=dict(meta))])
 
     class Backend:
         @staticmethod
@@ -920,12 +920,12 @@ def test_same_reason_degradation_counted_once_per_task(tmp_path: Path, monkeypat
         for value in ("mysql", "postgres")
     ]
     new = tools.memory_write(content="database is sqlite", subject="sqlite", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [
         _hit(peers[0]["id"], "database is mysql", row_id=1, distance=0.1, metadata=dict(meta)),
         _hit(peers[1]["id"], "database is postgres", row_id=2, distance=0.2, metadata=dict(meta)),
     ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(hits))
 
     class BadOutput:
         @staticmethod
@@ -1014,7 +1014,7 @@ def test_applying_suppression_matches_raw_and_canon_slot_forms(
     tools.db.edit_memory_intent(a["id"], new_content="连接池上限为 30。", reason="apply")
     updated = tools.db.get_memory(a["id"])
     monkeypatch.setattr(
-        tools.db, "evidence_knn", lambda *a_, **k: [_hit(b["id"], "连接池上限为 20。")],
+        tools.db, "row_knn", lambda *a_, **k: [_hit(b["id"], "连接池上限为 20。")],
     )
     snapshot = {
         "memory_id": a["id"], "version": updated["version"],
@@ -1486,8 +1486,9 @@ from memory_arbiter.db_generation import (
     CURRENT_SCHEMA_GENERATION,
     detect_database_generation,
 )
-from memory_arbiter.evidence import evidence_content_hash, local_text_units
+from memory_arbiter.evidence import evidence_content_hash
 from memory_arbiter.models import MemoryRecord
+from memory_arbiter.rowseg import segment_rows
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.vnext_migration import (
     _configured_embedding_space_id,
@@ -1526,13 +1527,15 @@ def _mark_current_space(db: MemoryDB, settings: Settings) -> str:
             "SELECT id,version,content,subject,status FROM memories WHERE status!='deleted'"
         )]
     for memory in memories:
-        units = local_text_units(
+        # 0.17.0 C5: rows are the evidence channel — publish_rows is the one
+        # true publisher (unit tables are never written).
+        rows = segment_rows(
             str(memory.get("subject") or ""), str(memory.get("content") or ""),
         )
-        embeddings = [[0.0, 1.0] for _unit in units]
-        published = db.evidence.publish(
+        embeddings = [[0.0, 1.0] for _row in rows]
+        published = db.evidence.publish_rows(
             int(memory["id"]), int(memory.get("version") or 1),
-            evidence_content_hash(str(memory.get("content") or "")), units, embeddings,
+            evidence_content_hash(str(memory.get("content") or "")), rows, embeddings,
         )
         assert published.get("published") is True
     with db.connection() as conn:
@@ -1916,7 +1919,7 @@ def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Pa
     with sqlite3.connect(target_path) as conn:
         state = dict(conn.execute("SELECT key,value FROM migration_state"))
         columns = {row[1] for row in conn.execute("PRAGMA table_info(conflicts)")}
-        assert conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM memory_row").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM conflicts").fetchone()[0] == 0
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='semantic_notices'"
@@ -1955,7 +1958,7 @@ def test_previous_generation_with_old_embedding_space_preserves_then_marks_misma
         )
         source_vectors = [
             tuple(row) for row in conn.execute(
-                "SELECT id,parent_status,hex(embedding) FROM memory_evidence_vec ORDER BY id"
+                "SELECT id,parent_status,hex(embedding) FROM memory_row_vec ORDER BY id"
             ).fetchall()
         ]
     settings = source_settings
@@ -1976,7 +1979,7 @@ def test_previous_generation_with_old_embedding_space_preserves_then_marks_misma
         conn.enable_load_extension(False)
         state = dict(conn.execute("SELECT key,value FROM _vec_index_meta"))
         target_vectors = conn.execute(
-            "SELECT id,parent_status,hex(embedding) FROM memory_evidence_vec ORDER BY id"
+            "SELECT id,parent_status,hex(embedding) FROM memory_row_vec ORDER BY id"
         ).fetchall()
     assert state["state"] == "mismatch"
     assert state["active_space_id"] == "old-pipeline-space"
@@ -2016,11 +2019,11 @@ def test_previous_generation_with_incomplete_same_space_index_defers_to_doctor(
     assert memory_id is not None
     _mark_current_space(source, settings)
     with source.write_transaction() as conn:
-        evidence_id = conn.execute(
-            "SELECT id FROM memory_evidence WHERE memory_id=? ORDER BY id LIMIT 1",
+        row_id = conn.execute(
+            "SELECT id FROM memory_row WHERE memory_id=? ORDER BY id LIMIT 1",
             (memory_id,),
         ).fetchone()[0]
-        conn.execute("DELETE FROM memory_evidence_vec WHERE id=?", (evidence_id,))
+        conn.execute("DELETE FROM memory_row_vec WHERE id=?", (row_id,))
         conn.execute(
             "UPDATE migration_state SET value='local_text_evidence_v1' "
             "WHERE key='schema_generation'"

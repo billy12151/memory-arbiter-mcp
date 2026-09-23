@@ -46,6 +46,13 @@ class FakeEmbedder:
     dim = 2
     last_encode_error = None
 
+    @classmethod
+    def embed_texts(cls, texts: list[str]) -> list["EmbedResult"]:
+        # C1: index-path batch API — the fake has no batch closure, so it
+        # delegates per item (the same route ManagedEmbedder takes when
+        # encode_batch is None).
+        return [cls.embed_text(prefix="", body=text) for text in texts]
+
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars: int | None = None) -> EmbedResult:
         text = f"{prefix}\n{body}".casefold()

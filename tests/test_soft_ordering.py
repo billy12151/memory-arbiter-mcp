@@ -30,6 +30,10 @@ class _VecEmbedder:
     last_encode_error = None
 
     @staticmethod
+    def embed_texts(texts):
+        return [_VecEmbedder.embed_text(prefix="", body=t) for t in texts]
+
+    @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars: int | None = None) -> EmbedResult:
         text = f"{prefix}\n{body}".casefold()
         if "deploy" in text:
@@ -121,7 +125,7 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
     far = _write(tools, "invoice process is manual", "billing", ["billing"])
     near = _write(tools, "deploy pipeline is green", "deploy", ["deploy"])
     new = _write(tools, "deploy pipeline is blue", "deploy2", ["deploy"])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     _publish_hint_vectors(tools)
 
     # new shares subject/tags vector space with `near` (deploy) and is
@@ -145,7 +149,7 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
             for pid, hit in hits_by_peer.items()
         ]
 
-    monkeypatch.setattr(tools.db, "evidence_knn", fake_knn)
+    monkeypatch.setattr(tools.db, "row_knn", fake_knn)
 
     result = tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 
@@ -164,7 +168,7 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
     check_peer = _write(tools, "deploy pipeline is green", "deploy", ["deploy"])  # same topic
     notify_peer = _write(tools, "invoice process is manual", "billing", ["billing"])  # zero overlap
     new = _write(tools, "deploy pipeline is blue", "deploy2", ["deploy"])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     _publish_hint_vectors(tools)
 
     backend = _RecordingBackend()
@@ -194,7 +198,7 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
              "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
         ]
 
-    monkeypatch.setattr(tools.db, "evidence_knn", fake_knn)
+    monkeypatch.setattr(tools.db, "row_knn", fake_knn)
 
     tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 
@@ -222,7 +226,7 @@ def test_subject_tags_vectors_batch_read(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     one = _write(tools, "deploy note", "deploy", ["deploy"])
     two = _write(tools, "invoice note", "billing", ["billing"])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     _publish_hint_vectors(tools)
 
     found = tools.db.memories.subject_tags_vectors([int(one["id"]), int(two["id"]), 999999])

@@ -172,7 +172,7 @@ def test_backfill_restores_missing_actives_only(tmp_path: Path) -> None:
     tools = make_vec_tools(tmp_path)
     keep = _write(tools, "存量记忆一", ["legacy"])
     drop = _write(tools, "存量记忆二", ["legacy"])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     # Simulate a library created before 0.15.3: no hint vectors at all.
     with tools.db.write_transaction() as conn:
         conn.execute("DELETE FROM subject_tags_vec")
@@ -355,7 +355,7 @@ def test_boot_backfill_backgrounded_and_reads_degrade(tmp_path: Path, monkeypatc
     assert result["ok"], result
     # 完成等待点：3 条 × 两个索引的向量终将写满
     assert tools.wait_boot_backfills(timeout=30.0)
-    assert tools.wait_evidence_worker_drained(timeout=10.0)
+    assert tools.wait_semantic_worker_drained(timeout=10.0)
     with tools.db.connection() as conn:
         st = conn.execute("SELECT COUNT(*) FROM subject_tags_vec").fetchone()[0]
         sm = conn.execute("SELECT COUNT(*) FROM memory_summary_vec").fetchone()[0]
@@ -393,18 +393,21 @@ def test_knn_rowid_in_matches_bruteforce_topk(tmp_path: Path) -> None:
     by_memory: dict[int, list] = {}
     for mid, text, uidx, vec, _dist in published:
         by_memory.setdefault(mid, []).append((text, uidx, vec))
+    from memory_arbiter.rowseg import RowSegment
+
     for mid, entries in by_memory.items():
-        outcome = db.evidence.publish(
+        outcome = db.evidence.publish_rows(
             mid, 2, evidence_content_hash(content_of[mid]),
-            [EvidenceUnit("text", text, 0, len(text), uidx) for text, uidx, _ in entries],
+            [RowSegment(kind="sentence", text=text, start_offset=0,
+                        end_offset=len(text), row_index=uidx) for text, uidx, _ in entries],
             [vec for _, _, vec in entries],
         )
         assert outcome.get("published"), outcome
     query = [1.0, 0.0]
     for k in (1, 2, 3, 4):
         for exclude in (None, a1):
-            got = db.evidence_knn(list(query), k=k, workspace="projA", exclude_memory_id=exclude)
-            got_set = {(int(r["memory_id"]), int(r["unit_index"])) for r in got}
+            got = db.row_knn(list(query), k=k, workspace="projA", exclude_memory_id=exclude)
+            got_set = {(int(r["memory_id"]), int(r["row_index"])) for r in got}
             eligible = sorted(
                 ((dist, mid, uidx) for mid, _t, uidx, _v, dist in published
                  if mid != exclude and mid != b1),

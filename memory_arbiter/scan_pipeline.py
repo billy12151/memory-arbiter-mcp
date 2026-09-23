@@ -338,27 +338,23 @@ class ScanPipeline:
         ).strip()
         outcome["version"] = version
         outcome["workspace"] = workspace
-        units = self.db.evidence.scan_units(memory_id, version)
-        # 0.17.0 P2-3.1: the internal examination runs on ROW segments when
-        # they exist — same indexes the write side lands, so a write-time
-        # Qwen veto row survives via exists() (index semantics must never
-        # split between the two producers). No rows yet → unit fallback.
-        internal_source = self.db.evidence.scan_rows(memory_id, version) or units
-        if not units:
+        # C2/C5 (0.17.0 worker merge): the scan source is rows, full stop —
+        # the job no longer publishes unit vectors, so the old `if not units`
+        # gate and the `is not units` identity probe are gone. No rows yet
+        # (mid-backfill) means nothing scannable this round; the slow lane
+        # re-picks the memory later.
+        internal_source = self.db.evidence.scan_rows(memory_id, version)
+        if not internal_source:
             return outcome
         internal = self._examine_internal(memory_id, version, workspace, internal_source)
         outcome["internal"] = internal
         entity_a = self._entity_of(record)
         peer_entities: dict[int, "str | None"] = {}
-        # 0.17.0 P2-6.1: cross-memory candidates run on ROW vectors when
-        # published (same identity discipline as the write side — eid is the
-        # memory_row.id; the 0.17.0 detector bump retires unit-keyed rows).
-        # No rows yet (pre-backfill) → the unit loop stands.
-        cross_units = internal_source if internal_source is not units else units
-        cross_knn = (
-            (lambda embedding, **kw: self.db.row_knn(embedding, **kw))
-            if cross_units is not units else self.db.evidence.knn
-        )
+        # 0.17.0 P2-6.1: cross-memory candidates run on ROW vectors — same
+        # identity discipline as the write side (eid is the memory_row.id).
+        cross_units = internal_source
+        def cross_knn(embedding: list[float], **kw: Any) -> list[dict[str, Any]]:
+            return self.db.row_knn(embedding, **kw)
         # 2) cross-memory same-bucket rank pairing.
         for unit in cross_units:
             if unit.get("embedding") is None:
@@ -372,7 +368,7 @@ class ScanPipeline:
             # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
             # not raw row positions).
             text_rank = 0
-            rows_knn = cross_units is not units
+            rows_knn = True
             for hit in hits:
                 if not rows_knn and hit.get("kind") != "text":
                     continue

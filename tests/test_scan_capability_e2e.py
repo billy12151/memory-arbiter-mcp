@@ -133,7 +133,7 @@ def _build_library(tools: MemoryTools) -> dict[str, Any]:
         subject="pg-misplaced", tags=["dbpgsql", "postgres"], metadata=dict(_PORT_META),
         workspace="apisvc",
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=30)
+    assert tools.wait_semantic_worker_drained(timeout=30)
     return {"port_a": port_a, "port_b": port_b, "misplaced": misplaced}
 
 

@@ -751,7 +751,7 @@ except Exception:
 
 
 @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not installed")
-def test_strict_evidence_knn_excludes_closer_cross_workspace_vector(tmp_path):
+def test_strict_row_knn_excludes_closer_cross_workspace_vector(tmp_path):
     """Adversarial vector channel: a cross-workspace memory whose vector is
     CLOSER to the query than the same-workspace hit must still be excluded
     under strict. Verifies vec_knn's workspace_predicate is wired and its
@@ -764,18 +764,27 @@ def test_strict_evidence_knn_excludes_closer_cross_workspace_vector(tmp_path):
     assert _confirm_pending(tools, a_mid)["ok"] is True
     b_mid = _write(tools, "beta cross ws exact", "projB")["data"]["id"]
     assert _confirm_pending(tools, b_mid)["ok"] is True
-    from memory_arbiter.evidence import EvidenceUnit, evidence_content_hash
-    db.evidence.publish(a_mid, 2, evidence_content_hash("alpha same ws"), [EvidenceUnit("text", "alpha same ws", 0, 13, 0)], [[0.9, 0.1]])
-    db.evidence.publish(b_mid, 2, evidence_content_hash("beta cross ws exact"), [EvidenceUnit("text", "beta cross ws exact", 0, 19, 0)], [[1.0, 0.0]])
+    from memory_arbiter.evidence import evidence_content_hash
+    from memory_arbiter.rowseg import RowSegment
+    db.evidence.publish_rows(
+        a_mid, 2, evidence_content_hash("alpha same ws"),
+        [RowSegment(kind="sentence", text="alpha same ws", start_offset=0, end_offset=13, row_index=0)],
+        [[0.9, 0.1]],
+    )
+    db.evidence.publish_rows(
+        b_mid, 2, evidence_content_hash("beta cross ws exact"),
+        [RowSegment(kind="sentence", text="beta cross ws exact", start_offset=0, end_offset=19, row_index=0)],
+        [[1.0, 0.0]],
+    )
     res = tools.memory_search(query="x", workspace="projA", limit=10, query_embedding=[1.0, 0.0])
     rows = _results(res)
     assert {r["workspace"] for r in rows} == {"projA"}, (
         f"vec_knn leaked closer cross-workspace vector: {[r['workspace'] for r in rows]}"
     )
     # Direct evidence KNN confirms the predicate (not just the search wrapper).
-    knn_a = db.evidence_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projA")
+    knn_a = db.row_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projA")
     assert all(r.get("workspace") == "projA" for r in knn_a)
-    knn_b = db.evidence_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projB")
+    knn_b = db.row_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projB")
     assert all(r.get("workspace") == "projB" for r in knn_b)
 
 
@@ -809,7 +818,7 @@ def test_placement_suggestion_for_empty_workspace(tmp_path):
     t = _placement_tools(tmp_path)
     # Nearest neighbor lives in a real workspace.
     # 0.16.12 P2-T5: hits carry m.status/workspace fields (production SELECT)
-    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 42, "distance": 5.0, "status": "active",
+    t.db.row_knn = lambda *a, **k: [{"memory_id": 42, "distance": 5.0, "status": "active",
                                           "workspace": "金营项目", "workspace_canonical": "金营项目"}]  # type: ignore
     t.db.get_memory = lambda mid: {"id": 42, "status": "active", "workspace": "金营项目",  # type: ignore
                                    "workspace_canonical": "金营项目"} if mid == 42 else None
@@ -828,7 +837,7 @@ def test_no_placement_suggestion_when_neighbor_is_default(tmp_path):
     from memory_arbiter.models import MemoryRecord
     t = _placement_tools(tmp_path)
     # Only default-workspace neighbors → global memory stays in default, no hint.
-    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 7, "distance": 5.0, "status": "superseded",
+    t.db.row_knn = lambda *a, **k: [{"memory_id": 7, "distance": 5.0, "status": "superseded",
                                           "workspace": "别家项目", "workspace_canonical": "别家项目"}]  # type: ignore
     t.db.get_memory = lambda mid: {"id": 7, "status": "active", "workspace": "default",  # type: ignore
                                    "workspace_canonical": "default"} if mid == 7 else None
@@ -843,7 +852,7 @@ def test_no_placement_suggestion_when_neighbor_is_default(tmp_path):
 def test_no_placement_suggestion_without_subject(tmp_path):
     from memory_arbiter.models import MemoryRecord
     t = _placement_tools(tmp_path)
-    t.db.evidence_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not embed"))  # type: ignore
+    t.db.row_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not embed"))  # type: ignore
     rec = MemoryRecord.from_input(
         {"content": "正文", "subject": "", "workspace": ""},
         t.settings.defaults(),
@@ -855,7 +864,7 @@ def test_no_placement_suggestion_without_subject(tmp_path):
 def test_non_default_workspace_gets_no_placement_suggestion(tmp_path):
     from memory_arbiter.models import MemoryRecord
     t = _placement_tools(tmp_path)
-    t.db.evidence_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run for a real ws"))  # type: ignore
+    t.db.row_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run for a real ws"))  # type: ignore
     rec = MemoryRecord.from_input(
         {"content": "正文", "subject": "某主题", "workspace": "some-real-project"},
         t.settings.defaults(),
@@ -1079,33 +1088,35 @@ def test_admitted_canonicals_do_not_truncate_valid_neighbors(tmp_path):
     assert "neighbor-024" in admitted
 
 
-def test_evidence_knn_does_not_starve_scoped_hit_after_global_2048(tmp_path):
+def test_row_knn_does_not_starve_scoped_hit_after_global_2048(tmp_path):
     """A scoped evidence hit after >2048 closer out-of-scope units remains
     reachable; admission is not a fixed global-window post-filter."""
     tools = strict_admission_make_tools(tmp_path)
     far_memory = active_write(tools, "far evidence owner", "unrelated-ws", "far evidence")
     target_memory = active_write(tools, "target admitted evidence", "agent-rail", "target evidence")
     with tools.db.write_transaction() as conn:
+        # 0.17.0: unit tables retired — the evidence channel's vectors are
+        # memory_row/memory_row_vec (row_index, kind sentence/table_row).
         for index in range(2050):
             cur = conn.execute(
-                "INSERT INTO memory_evidence(memory_id,memory_version,content_hash,unit_index,kind,text,start_offset,end_offset,created_at) "
+                "INSERT INTO memory_row(memory_id,memory_version,content_hash,row_index,kind,text,start_offset,end_offset,created_at) "
                 "VALUES(?,1,?,?,?,?,0,1,'2026-01-01T00:00:00Z')",
                 (far_memory, "f" * 64, index, "sentence", f"far-{index}"),
             )
             conn.execute(
-                "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES(?,'active',?)",
+                "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES(?,'active',?)",
                 (int(cur.lastrowid), json.dumps(VEC_SELF)),
             )
         cur = conn.execute(
-            "INSERT INTO memory_evidence(memory_id,memory_version,content_hash,unit_index,kind,text,start_offset,end_offset,created_at) "
+            "INSERT INTO memory_row(memory_id,memory_version,content_hash,row_index,kind,text,start_offset,end_offset,created_at) "
             "VALUES(?,1,?,0,'sentence','target',0,6,'2026-01-01T00:00:00Z')",
             (target_memory, "t" * 64),
         )
         conn.execute(
-            "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES(?,'active',?)",
+            "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES(?,'active',?)",
             (int(cur.lastrowid), json.dumps(VEC_FAR)),
         )
-    hits = tools.db.evidence_knn(
+    hits = tools.db.row_knn(
         VEC_SELF, k=1, workspace=("agent-lane", "agent-rail"),
     )
     assert [int(hit["memory_id"]) for hit in hits] == [target_memory]
@@ -2013,7 +2024,7 @@ def test_placement_hint_still_fires_for_default_synonym(tmp_path, monkeypatch):
     proj = _default_insulation_write(tools, "projA memory", "projA", subject="projA subject")
     monkeypatch.setattr(tools, "_ensure_embedder", lambda: (FixedEmbedder([1.0, 0.0]), []))
     monkeypatch.setattr(
-        tools.db, "evidence_knn",
+        tools.db, "row_knn",
         lambda emb, k=8: [{"memory_id": proj["data"]["id"], "distance": 0.1,
                             "status": "active", "workspace": "projA",
                             "workspace_canonical": "projA"}],

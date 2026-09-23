@@ -445,6 +445,9 @@ def test_migrate_into_target_with_existing_vector_keeps_it(tmp_path: Path) -> No
         def embed_text(self, *, prefix: str = "", body: str = "", max_body_chars: int = 0):
             return type("ER", (), {"embedding": [0.25, 0.75], "last_encode_error": None})()
 
+        def embed_texts(self, texts):
+            return [self.embed_text(prefix="", body=t) for t in texts]
+
     register(tools, "target-ws")
     write(tools, "target-ws", "winner fact")
     tools.db.workspaces.publish_workspace_canonical_vector("target-ws", [0.25, 0.75])
@@ -1866,9 +1869,9 @@ def test_deep_doctor_owns_integrity_generation_and_vector_health(tmp_path):
         )
         memory_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         conn.execute(
-            """INSERT INTO memory_evidence(memory_id,memory_version,content_hash,
-               unit_index,kind,text,start_offset,end_offset,created_at)
-               VALUES(?,1,'hash',0,'text','body',0,4,'2026-01-01T00:00:00Z')""",
+            """INSERT INTO memory_row(memory_id,memory_version,content_hash,
+               row_index,kind,text,start_offset,end_offset,created_at)
+               VALUES(?,1,'hash',0,'sentence','body',0,4,'2026-01-01T00:00:00Z')""",
             (memory_id,),
         )
 

@@ -117,8 +117,16 @@ SEMANTIC_PAIR_RETRY_MAX_TOKENS = 512
 # neither queue competition nor retries explain.
 SEMANTIC_PAIR_RING_SIZE = 20
 SEMANTIC_PAIR_LONG_DECODE_TOKENS = 256
-SEMANTIC_QUEUE_MAX_SIZE = 100
+# C2 (0.17.0 unit retirement): the worker merge moved indexing into the
+# semantic job, so this queue now carries the combined index+detect load —
+# it inherits the old evidence-queue watermark (200) instead of 100.
+SEMANTIC_QUEUE_MAX_SIZE = 200
 EVIDENCE_QUEUE_MAX_SIZE = 200
+# C2: wall-clock cap for the job's embed+publish phase. Normal batched embeds
+# are ~300ms/memory; a GPU rebuild-class stall must fail the job fast
+# (incomplete → retry) instead of parking the single worker thread and
+# starving every queued job behind it.
+SEMANTIC_EMBED_PHASE_TIMEOUT_MS = 30000
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.

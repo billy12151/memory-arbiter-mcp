@@ -51,6 +51,10 @@ class FakeEmbedder:
         return EmbedResult(vector, False, len(text), len(text))
 
 
+    @classmethod
+    def embed_texts(cls, texts):
+        return [cls.embed_text(prefix="", body=t) for t in texts]
+
 def make_tools(tmp_path: Path) -> MemoryTools:
     pytest.importorskip("sqlite_vec")
     model = tmp_path / "fake.gguf"
@@ -107,7 +111,7 @@ class _FormatBackend:
 def _write_pair(tools: MemoryTools, left: str, right: str) -> tuple[int, int]:
     peer = tools.memory_write(content=left, subject="peer", tags=[], metadata=dict(_META))["data"]
     new = tools.memory_write(content=right, subject="new", tags=[], metadata=dict(_META))["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     return int(peer["id"]), int(new["id"])
 
 
@@ -123,7 +127,7 @@ def _stub_knn_peer(monkeypatch: pytest.MonkeyPatch, tools: MemoryTools, peer_id:
         "start_offset": 0, "end_offset": len(text), "distance": 0.1,
         "metadata": meta,
     }]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(hits))
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(hits))  # 0.17.0 P2-3 行级候选同注入
 
 
@@ -185,7 +189,7 @@ def test_true_duplicates_stay_guarded(tmp_path: Path, monkeypatch: pytest.Monkey
     tools = make_tools(tmp_path)
     peer = tools.memory_write(content="clash 的代理端口是 6789。", subject="p1", tags=[], metadata=dict(_META))["data"]
     new = tools.memory_write(content="clash 的代理端口是 6789", subject="n1", tags=[], metadata=dict(_META))["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     _FormatBackend.calls = 0
     result = _run_check(monkeypatch, tools, int(peer["id"]), int(new["id"]), "clash 的代理端口是 6789。")
     assert result["outcome"] == "checked_no_notice", result
@@ -194,7 +198,7 @@ def test_true_duplicates_stay_guarded(tmp_path: Path, monkeypatch: pytest.Monkey
     # Same numeric value restated with identical prose shape (same guard path).
     peer2 = tools.memory_write(content="扫描超时配置为 5000ms，已冻结。", subject="p2", tags=[], metadata=dict(_META))["data"]
     new2 = tools.memory_write(content="扫描超时配置为 5000ms 已冻结", subject="n2", tags=[], metadata=dict(_META))["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     _FormatBackend.calls = 0
     result2 = _run_check(monkeypatch, tools, int(peer2["id"]), int(new2["id"]), "扫描超时配置为 5000ms，已冻结。")
     assert result2["outcome"] == "checked_no_notice", result2
@@ -207,7 +211,7 @@ def _isolated_write(tools: MemoryTools, content: str, subject: str) -> dict[str,
     tests flip the route back on around their explicit post-commit call."""
     tools.settings.semantic_conflict_on_write = "off"
     data = tools.memory_write(content=content, subject=subject, tags=[], metadata=dict(_META))["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools.settings.semantic_conflict_on_write = "async"
     return data
 
@@ -290,7 +294,7 @@ def _write_many_units(tools: MemoryTools, paragraphs: int) -> int:
         f"第{index}条部署记录涉及网关配置与索引参数。" for index in range(paragraphs)
     )
     written = tools.memory_write(content=content, subject="deployment log", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     return int(written["id"])
 
 
@@ -325,7 +329,7 @@ def test_job_deadline_keeps_notice_budget_exhausted(tmp_path: Path, monkeypatch:
         tools._semantic_worker, "pending_job_deadline", lambda timeout: _time.monotonic() - 1.0,
     )
     written = tools.memory_write(content="两条记录而已。", subject="small", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     memory_id = int(written["id"])
 
     result = tools._process_semantic_conflict_job(memory_id, _job_snapshot(tools, memory_id))

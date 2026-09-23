@@ -322,6 +322,9 @@ def test_doctor_deep_probe_reports_dimension_mismatch(tmp_path: Path) -> None:
             from memory_arbiter.embedder import EmbedResult
             return EmbedResult([0.1, 0.2, 0.3], False, 1, 1)
 
+        def embed_texts(self, texts):
+            return [self.embed_text(prefix="", body=t) for t in texts]
+
     report = run_all_checks(
         _sqlite3.connect(settings.db_path), settings, deep=True,
         embedder_probe=lambda: (ProbeEmbedder(), []),
@@ -342,6 +345,9 @@ def test_doctor_cli_deep_probe_uses_settings_embedder(monkeypatch, tmp_path) -> 
         def embed_text(self, prefix="", body=""):
             from memory_arbiter.embedder import EmbedResult
             return EmbedResult([0.1, 0.2], False, 1, 1)
+
+        def embed_texts(self, texts):
+            return [self.embed_text(prefix="", body=t) for t in texts]
 
     def fake_build_embedder(*_args, **_kwargs):
         return ProbeEmbedder(), []

@@ -53,11 +53,11 @@ def voided_identity_hash(base: str, row_id: int) -> str:
 
 
 def memory_row_ddl() -> str:
-    # 0.17.0 P2-2.2: row-level store for the conflict channel (dual
-    # granularity — search keeps the evidence units, owner decision #5).
+    # 0.17.0 P2-2.2: row-level store. C3 adds the leading subject row
+    # (kind='subject', span (0,0)) — plan A+, owner 2026-09-23.
     # Vectors live in the memory_row_vec vec0 table (schema.py, dim from the
-    # embedder); lifecycle mirrors memory_evidence_vec (parent_status flip on
-    # status change, delete+rebuild on publish).
+    # embedder); lifecycle mirrors the retired evidence_vec (parent_status
+    # flip on status change, delete+rebuild on publish).
     return """
     CREATE TABLE IF NOT EXISTS memory_row (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +65,7 @@ def memory_row_ddl() -> str:
       memory_version INTEGER NOT NULL,
       content_hash TEXT,
       row_index INTEGER NOT NULL,
-      kind TEXT NOT NULL CHECK(kind IN ('sentence','table_row')),
+      kind TEXT NOT NULL CHECK(kind IN ('subject','sentence','table_row')),
       text TEXT NOT NULL,
       start_offset INTEGER NOT NULL,
       end_offset INTEGER NOT NULL,
@@ -74,6 +74,30 @@ def memory_row_ddl() -> str:
     );
     CREATE INDEX IF NOT EXISTS memory_row_memory_idx ON memory_row(memory_id);
     """
+
+
+def rebuild_memory_row_for_subject_kind(conn: sqlite3.Connection) -> str:
+    """C3: existing 0.17.0-dev databases carry the two-value CHECK
+    (sentence/table_row) — SQLite cannot ALTER a CHECK, so rebuild the table
+    with the three-value DDL. Rows themselves are DROPPED: the subject row is
+    a new leading row for every memory, so the whole store re-embeds via the
+    boot backfill anyway (plan C3 存量迁移 — idempotent, one-time)."""
+    existing_sql = ""
+    for row in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_row'"
+    ):
+        existing_sql = str(row["sql"] or "")
+    if "'subject'" in existing_sql:
+        return "memory_row_subject_kind(already)"
+    conn.execute("DROP TABLE IF EXISTS memory_row_migration")
+    conn.execute(
+        memory_row_ddl().replace("CREATE TABLE IF NOT EXISTS memory_row (",
+                                 "CREATE TABLE memory_row_migration (", 1)
+    )
+    conn.execute("DROP TABLE memory_row")
+    conn.execute("ALTER TABLE memory_row_migration RENAME TO memory_row")
+    conn.execute("CREATE INDEX IF NOT EXISTS memory_row_memory_idx ON memory_row(memory_id)")
+    return "memory_row_subject_kind(rebuilt)"
 
 
 def scan_queue_ddl() -> str:
@@ -241,8 +265,42 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     notice_keys = _backfill_notice_dedupe_keys(conn)
     if notice_keys:
         applied.append(notice_keys)
+    subject_rows = _rebuild_memory_row_store(conn)
+    if subject_rows:
+        applied.append(subject_rows)
     conn.commit()
     return applied
+
+
+_SUBJECT_ROW_KEY = "memory_row_subject_kind_v1"
+
+
+def _rebuild_memory_row_store(conn: sqlite3.Connection) -> str:
+    """C3 keyed migration: rebuild memory_row with the three-value kind CHECK
+    and EMPTY it (subject rows are new for every memory — the boot backfill
+    re-embeds the whole store, idempotent). The vec table's stale ids are
+    cleared when the table exists; vec-less environments skip silently."""
+    try:
+        already = conn.execute(
+            "SELECT value FROM migration_state WHERE key=?", (_SUBJECT_ROW_KEY,)
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    if already is not None:
+        return ""
+    result = rebuild_memory_row_for_subject_kind(conn)
+    try:
+        conn.execute("DELETE FROM memory_row_vec")
+    except sqlite3.Error:
+        pass  # vec table not present in vec-less environments
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO migration_state(key,value) VALUES (?,?)",
+            (_SUBJECT_ROW_KEY, result),
+        )
+    except sqlite3.Error:
+        return ""
+    return result
 
 
 _NUMERIC_SWEEP_KEY = "scan_pipeline_numeric_sweep_v1"

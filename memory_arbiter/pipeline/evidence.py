@@ -16,7 +16,7 @@ from ..constants import (
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
 from ..difference_classifier import classify_pair
-from ..evidence import evidence_content_hash, local_text_units
+from ..evidence import evidence_content_hash
 from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
 from ..semantic_conflict import (
@@ -540,38 +540,33 @@ class EvidencePipeline:
                 "reason": "embedding_space_rebuild_required",
                 "warnings": warnings,
             }
-        units = local_text_units(
-            str(current.get("subject") or ""), str(current.get("content") or ""),
-        )
-        embeddings: list[list[float]] = []
-        for unit in units:
-            result = embedder.embed_text(prefix="", body=unit.text)
-            if not result.embedding:
-                return {"status": "failed", "reason": "empty_embedding"}
-            embeddings.append(list(result.embedding))
-        # 0.17.0 P2-2.3: row-level embed for the conflict channel — outside
-        # the publish transaction (same discipline as units), landing in the
-        # same atomic snapshot. ~10→~35 embeds per memory on the GPU worker
-        # thread; the write path itself stays async (P0 evidence queue).
+        # C5 (unit retirement): index_memory embeds ROWS ONLY (subject row
+        # first, sentences/table rows, C3 fallback — see rowseg), batched via
+        # embed_texts; the unit tables are no longer written. Remaining
+        # callers: boot backfill / repair — the write path indexes inside the
+        # semantic job (C2).
         from ..rowseg import segment_rows
         row_segments = segment_rows(
             str(current.get("subject") or ""), str(current.get("content") or ""),
         )
         row_embeddings: list[list[float]] = []
-        for segment in row_segments:
-            result = embedder.embed_text(prefix="", body=segment.text)
-            if not result.embedding:
-                return {"status": "failed", "reason": "empty_embedding"}
-            row_embeddings.append(list(result.embedding))
+        ok = True
+        for embed_result in embedder.embed_texts([seg.text for seg in row_segments]):
+            if not embed_result.embedding:
+                ok = False
+                break
+            row_embeddings.append([float(x) for x in embed_result.embedding])
+        if not ok:
+            return {"status": "failed", "reason": "empty_embedding"}
         # 0.16.12 P2-T2: prefer the row's maintained content_sha column (set
         # at insert and every content edit) — one hash per write instead of
         # re-hashing here; NULL only on exotic legacy rows, hence the fallback.
         row_sha = str(current.get("content_sha") or "") or evidence_content_hash(
             str(current.get("content") or "")
         )
-        published = self.db.evidence.publish(
-            int(memory_id), int(current.get("version") or 1), row_sha, units, embeddings,
-            rows=row_segments, row_embeddings=row_embeddings,
+        published = self.db.evidence.publish_rows(
+            int(memory_id), int(current.get("version") or 1), row_sha,
+            row_segments, row_embeddings,
         )
         if published.get("published"):
             # Self-heal the embedding-space mismatch: once a rebuild has
@@ -588,6 +583,90 @@ class EvidencePipeline:
             "status": "indexed" if published.get("published") else "failed",
             **published,
         }
+
+    def index_rows_in_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """C2 (0.17.0 worker merge): the job's index-only form.
+
+        Segment + batch-embed + publish rows — the indexing duty that used to
+        live on the local-text index worker. Reached for index_only snapshots
+        (conflict-apply edits §15.3, replay postprocess) and for every job
+        when semantic_conflict_on_write="off". Idempotent: current rows for
+        the version win, nothing re-embeds.
+        """
+        from ..constants import SEMANTIC_EMBED_PHASE_TIMEOUT_MS
+
+        record = self.db.get_memory(int(memory_id))
+        if record and record.get("status") == "pending":
+            return {"status": "skipped", "reason": "pending_workspace_activation",
+                    "index_only": True, "notices_created": 0}
+        if not record or record.get("status") != "active":
+            return {"status": "incomplete", "reason": "memory_not_active",
+                    "index_only": True, "notices_created": 0}
+        version = int(record.get("version") or 1)
+        if version != int(snapshot.get("version") or 1):
+            return {"status": "incomplete", "reason": "stale_snapshot",
+                    "index_only": True, "notices_created": 0}
+        content = str(record.get("content") or "")
+        row_sha = str(record.get("content_sha") or "") or evidence_content_hash(content)
+        # _ensure_embedder (NOT the space-gated _ensure_active_embedder): a
+        # mismatch rebuild drives this path precisely to WRITE into the new
+        # space — the gate would return None and deadlock the flip.
+        embedder, _ = self._ensure_embedder()
+        if embedder is None:
+            return {"status": "incomplete", "reason": "embedder_unavailable",
+                    "index_only": True, "notices_created": 0}
+        vec_state = self.db.get_vec_index_state()
+        if vec_state.get("state") == "failed" or (
+            vec_state.get("state") == "mismatch"
+            and vec_state.get("target_space_id") != embedder.embedding_space_id
+        ):
+            return {"status": "incomplete", "reason": "embedding_space_rebuild_required",
+                    "index_only": True, "notices_created": 0}
+        if vec_state.get("state") in {"mismatch", "failed"}:
+            # C2: a mismatch rebuild drives EVERY index_only job through this
+            # path — existing rows live in the OLD space, so "already current"
+            # would strand the flip. Republish unconditionally; the heal at
+            # the tail settles ready once the whole index is in the target
+            # space. (The mismatch guard for ordinary detection jobs stays in
+            # process_conflicts.)
+            pass
+        elif self.db.evidence.current_row_vectors(int(memory_id), version, row_sha):
+            return {"status": "indexed", "reason": "already_current",
+                    "index_only": True, "notices_created": 0}
+        from ..rowseg import segment_rows
+        phase_started = time.monotonic()
+        segments = segment_rows(str(record.get("subject") or ""), content)
+        results = embedder.embed_texts([segment.text for segment in segments])
+        if time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
+            # The llama call itself cannot be interrupted mid-flight; the cap
+            # marks the job incomplete (retry) and keeps the stall observable
+            # instead of silently treating a wedged embedder as success.
+            return {"status": "incomplete", "reason": "embed_phase_timeout",
+                    "index_only": True, "notices_created": 0}
+        vectors: list[list[float]] = []
+        for embed_result in results:
+            if not embed_result.embedding:
+                return {"status": "incomplete", "reason": "empty_embedding",
+                        "index_only": True, "notices_created": 0}
+            vectors.append([float(x) for x in embed_result.embedding])
+        published = self.db.evidence.publish_rows(
+            int(memory_id), version, row_sha, segments, vectors,
+        )
+        if published.get("published"):
+            # C2: the space-rebuild self-heal moved with the indexing duty —
+            # once every non-deleted memory has rows in the target space, the
+            # vec channel flips back to ready (spec §19).
+            vec_state = self.db.get_vec_index_state()
+            if (
+                vec_state.get("state") == "mismatch"
+                and vec_state.get("target_space_id") == embedder.embedding_space_id
+            ):
+                self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
+            return {"status": "indexed", "index_only": True,
+                    "row_count": int(published.get("row_count") or len(segments)),
+                    "notices_created": 0}
+        return {"status": "incomplete", "reason": f"publish_{published.get('outcome')}",
+                "index_only": True, "notices_created": 0}
 
     def process_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Run the bounded notice gate and report completion to sync callers."""
@@ -714,10 +793,33 @@ class EvidencePipeline:
             self._tools._record_check_degradation(reason, sample)
 
         def backlog_deadline() -> float | None:
+            # C2: detection-phase deadline = max(fairness wall, this job's
+            # own budget counted from publish completion). The fairness wall
+            # (oldest queued job's enqueue time + timeout, from the worker's
+            # pending snapshot) is unchanged; publish_done_at carries the
+            # execution-time anchor the pending snapshot cannot know.
             value = self._semantic_worker.pending_job_deadline(
                 SEMANTIC_JOB_TIMEOUT_MS / 1000.0,
             )
-            return float(value) if value is not None else None
+            if value is None:
+                # Idle queue: the old contract stands — no wall, no cap; an
+                # in-flight Qwen pair runs to completion.
+                return None
+            wall = float(value)
+            if publish_done_at:
+                own = publish_done_at[0] + SEMANTIC_JOB_TIMEOUT_MS / 1000.0
+                if wall <= time.monotonic():
+                    # The fairness wall has ALREADY blown (the oldest queued
+                    # job waited past its budget) — truncation wins over the
+                    # own-anchor extension; never let one slow job park the
+                    # whole queue behind max(wall, own).
+                    return wall
+                # Busy queue, wall still ahead: the embed phase must not eat
+                # the detection budget, so count this job's budget from
+                # publish completion — but never SHORTEN the wall other
+                # queued jobs already rely on.
+                return max(wall, own)
+            return wall
 
         max_units = max(1, SEMANTIC_MAX_EVIDENCE_UNITS)
         max_rows = max(1, SEMANTIC_MAX_ROWS)
@@ -771,41 +873,54 @@ class EvidencePipeline:
         # P2-T2: same digest as the stale check above — the maintained
         # content_sha column (or its recompute fallback), never a fresh hash.
         content_hash = row_sha
-        # 0.17.0 P2-3.1: the conflict channel is ROW-level first. A1 timing
-        # bridge (review): read the published row vectors; when the evidence
-        # worker has not landed the publish yet, recover in-job with
-        # rowseg+embed — the same read-then-recover contract the unit path
-        # always had, so the two worker queues need no ordering guarantee.
+        # C2: publish_done_at anchors this job's own detection budget AFTER
+        # the index phase (embedding is index work, not conflict budget).
+        publish_done_at: list[float] = []
+        # 0.17.0 C2: the index duty lives in the job. Read the published row
+        # vectors; when they are missing, recover in-job with
+        # segment+batch-embed+PUBLISH (invariant: publish precedes any Qwen
+        # call — a Qwen stall must never cost the search vectors). The old
+        # two-queue chain (evidence worker → semantic forward) is gone.
         row_vectors = self.db.evidence.current_row_vectors(
             int(memory_id), int(record.get("version") or 1), content_hash,
         )
         if not row_vectors and embedder is not None:
             from ..rowseg import segment_rows
+            segments = segment_rows(str(record.get("subject") or ""), content)
+            results = embedder.embed_texts([segment.text for segment in segments])
             row_vectors = []
-            for segment in segment_rows(str(record.get("subject") or ""), content):
-                embedded = embedder.embed_text(prefix="", body=segment.text)
-                if embedded.embedding:
-                    row_vectors.append((segment, list(embedded.embedding)))
-        # Graceful degradation (mid-backfill / degraded embedder): no rows
-        # anywhere → the pre-0.17.0 unit path stays the candidate source, so
-        # detection never goes BLIND while row coverage catches up.
+            vectors: list[list[float]] = []
+            for segment, embed_result in zip(segments, results):
+                if not embed_result.embedding:
+                    vectors = []
+                    break
+                vectors.append([float(x) for x in embed_result.embedding])
+                row_vectors.append((segment, [float(x) for x in embed_result.embedding]))
+            if vectors:
+                published = self.db.evidence.publish_rows(
+                    int(memory_id), int(record.get("version") or 1), content_hash,
+                    segments, vectors,
+                )
+                if published.get("published"):
+                    vec_state = self.db.get_vec_index_state()
+                    if (
+                        vec_state.get("state") == "mismatch"
+                        and vec_state.get("target_space_id") == embedder.embedding_space_id
+                    ):
+                        self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
+                if not published.get("published"):
+                    # stale_snapshot et al: a concurrent edit superseded this
+                    # pass — the in-memory vectors still serve this run, the
+                    # next job lands the new version's rows.
+                    row_vectors = row_vectors or []
+        # Anchor the detection budget after the index phase on every path
+        # (recovered-publish or already-current rows).
+        publish_done_at.append(time.monotonic())
+        # C5 (unit retirement): rows are the only candidate source. No rows
+        # recoverable in-job (degraded embedder) → the memory stays pending
+        # for the backfill; the detection phase sees an empty segment set
+        # rather than falling back to units.
         rows_mode = bool(row_vectors)
-        unit_vectors: list[tuple[Any, list[float]]] = []
-        if not rows_mode:
-            unit_vectors = self.db.evidence.current_text_vectors(
-                int(memory_id), int(record.get("version") or 1), content_hash,
-            )
-            if not unit_vectors:
-                # Recovery fallback for an incomplete/legacy evidence publish. The
-                # normal write path has just published these vectors, so avoid a
-                # second GGUF embedding pass in the common synchronous-notice path.
-                unit_vectors = []
-                for unit in local_text_units(str(record.get("subject") or ""), content):
-                    if unit.kind != "text":
-                        continue
-                    embedded = embedder.embed_text(prefix="", body=unit.text)
-                    if embedded.embedding:
-                        unit_vectors.append((unit, list(embedded.embedding)))
         # Normalized segment view: rows carry row_index, units carry
         # unit_index — the view exposes .unit_index for BOTH so every
         # downstream consumer (internal create, envelopes, member evidence)
@@ -813,11 +928,19 @@ class EvidencePipeline:
         # only the input granularity changed).
         from collections import namedtuple
         _SegView = namedtuple("_SegView", "text start_offset end_offset unit_index")
-        paired = list(row_vectors if rows_mode else unit_vectors)
+        # C3 A+ guard: the subject row participates in the INDEX (peers find
+        # it — self-recall, placement) but never originates a pair: subject
+        # version progression (「服务 2024 规划」→「服务 2025 规划」) is
+        # timeline evolution, not numeric conflict — the row-channel
+        # counterpart of the unit channel's kind='text' filter.
+        paired = [
+            (seg, embedding) for seg, embedding in row_vectors
+            if getattr(seg, "kind", "sentence") != "subject"
+        ]
         seg_views = [
             _SegView(
                 seg.text, int(seg.start_offset), int(seg.end_offset),
-                int(seg.row_index if rows_mode else seg.unit_index),
+                int(seg.row_index),
             )
             for seg, _embedding in paired
         ]
@@ -924,20 +1047,11 @@ class EvidencePipeline:
                 truncation_reason = "notice_budget_exhausted"
                 break
             units_examined += 1
-            knn_hits = (
-                self.db.row_knn(
-                    embedding, k=5, workspace=workspace,
-                    exclude_memory_id=memory_id, conn=job_conn,
-                )
-                if rows_mode else
-                self.db.evidence_knn(
-                    embedding, k=5, workspace=workspace,
-                    exclude_memory_id=memory_id, conn=job_conn,
-                )
+            knn_hits = self.db.row_knn(
+                embedding, k=5, workspace=workspace,
+                exclude_memory_id=memory_id, conn=job_conn,
             )
             for hit in knn_hits:
-                if not rows_mode and hit.get("kind") != "text":
-                    continue
                 decision = decide_evidence(seg_view.text, str(hit.get("text") or ""))
                 if decision.action == "ignore":
                     continue

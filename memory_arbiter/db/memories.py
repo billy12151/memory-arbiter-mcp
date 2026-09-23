@@ -455,8 +455,12 @@ class MemoriesStore:
             # These updates do not change evidence text. Keep the derived rows
             # pinned to the new authoritative memory version in the same
             # transaction instead of making doctor report false staleness.
+            # 0.17.0 C5: the unit version-pin leg's ROW counterpart — a
+            # status flip does NOT republish rows (only content edits do),
+            # so pin memory_row the same way or doctor reports false
+            # staleness and version checks drift.
             conn.execute(
-                "UPDATE memory_evidence SET memory_version=memory_version+1 "
+                "UPDATE memory_row SET memory_version=memory_version+1 "
                 "WHERE memory_id=?",
                 (int(memory_id),),
             )
@@ -470,18 +474,19 @@ class MemoriesStore:
             )
         if status_changed and self.state.sqlite_vec_available:
             try:
-                conn.execute(
-                    "UPDATE memory_evidence_vec SET parent_status=? WHERE id IN "
-                    "(SELECT id FROM memory_evidence WHERE memory_id=?)",
-                    (str(new_status or "deleted"), int(memory_id)),
-                )
+                # (0.17.0 C5: the memory_evidence_vec parent_status flip
+                # retired with the unit tables.)
                 # 0.17.0 P2-2.2: the row-level conflict store mirrors the
                 # evidence lifecycle exactly (same parent_status flip).
-                conn.execute(
-                    "UPDATE memory_row_vec SET parent_status=? WHERE id IN "
-                    "(SELECT id FROM memory_row WHERE memory_id=?)",
-                    (str(new_status or "deleted"), int(memory_id)),
-                )
+                try:
+                    conn.execute(
+                        "UPDATE memory_row_vec SET parent_status=? WHERE id IN "
+                        "(SELECT id FROM memory_row WHERE memory_id=?)",
+                        (str(new_status or "deleted"), int(memory_id)),
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "no such table" not in str(exc):
+                        raise
                 if str(new_status or "deleted") != "active":
                     # The duplicate-hint recall index tracks the ACTIVE set;
                     # leaving a stale row would only waste KNN window slots
@@ -1771,13 +1776,26 @@ class MemoriesStore:
                 int(memory_id),
             ),
         )
-        evidence_ids = [int(row["id"]) for row in conn.execute(
-            "SELECT id FROM memory_evidence WHERE memory_id=?", (int(memory_id),)
-        ).fetchall()]
-        if evidence_ids and self.state.sqlite_vec_available:
-            placeholders = ",".join("?" for _ in evidence_ids)
-            conn.execute(f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})", evidence_ids)
-        conn.execute("DELETE FROM memory_evidence WHERE memory_id=?", (int(memory_id),))
+        # 0.17.0 C5: the unit delete leg is retired; the ROW delete leg
+        # replaces it (subquery form — no id-list round-trip). Discovered in
+        # review: rows never HAD a delete leg here (P2-2.3 gap) — deleted
+        # memories would have leaked live row vectors into KNN windows.
+        if self.state.sqlite_vec_available:
+            try:
+                conn.execute(
+                    "DELETE FROM memory_row_vec WHERE id IN "
+                    "(SELECT id FROM memory_row WHERE memory_id=?)",
+                    (int(memory_id),),
+                )
+            except sqlite3.OperationalError as exc:
+                # Lazy vec tables (embedder never built): nothing was ever
+                # indexed, so there is nothing to cascade — the edit itself
+                # must not fail over the derived store's absence.
+                if "no such table" not in str(exc):
+                    raise
+        conn.execute(
+            "DELETE FROM memory_row WHERE memory_id=?", (int(memory_id),)
+        )
         if self.state.fts5_available:
             conn.execute(
                 "INSERT INTO memories_fts(memories_fts, rowid, content, tags, subject) VALUES('delete', ?, ?, ?, ?)",

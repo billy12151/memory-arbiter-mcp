@@ -6,7 +6,6 @@ import time
 from typing import Any, TYPE_CHECKING
 
 from .constants import EVIDENCE_QUEUE_MAX_SIZE, SEMANTIC_PRELOAD, SEMANTIC_QUEUE_MAX_SIZE
-from .models import TrustedApplyingContext
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
@@ -96,45 +95,17 @@ class LocalTextIndexWorker:
                     return
                 memory_id = next(iter(self._pending))
                 snapshot = self._pending.pop(memory_id)
-                # Registered under the same cond hold as the pop: wait_drained
-                # must never observe a popped-but-unregistered item. Every
-                # fallible step after the block (task_id construction included)
-                # sits inside the try, so the finally always discards.
                 self._inflight.add(memory_id)
             try:
-                task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")
+                # C2 (0.17.0 worker merge): this worker no longer forwards to
+                # the semantic queue — write-path indexing lives in the
+                # semantic job itself. Remaining producers: boot backfill /
+                # repair paths calling index_memory directly.
                 current = self._tools.db.get_memory(memory_id)
                 if current is None or int(current.get("version") or 1) != int(snapshot.get("version") or 1):
                     result = {"status": "skipped", "reason": "stale_or_missing"}
                 else:
                     result = self._tools._index_local_text_evidence(memory_id, current)
-                    if result.get("status") == "indexed":
-                        context = snapshot.get("trusted_applying_context")
-                        if context is not None and not isinstance(context, TrustedApplyingContext):
-                            # Snapshots cross a thread boundary as plain dicts
-                            # (to_dict on enqueue); the enqueue path expects the
-                            # frozen dataclass and calls .to_dict() itself.
-                            # from_dict returns None on malformed input, which
-                            # degrades to the context-free check (fail-open).
-                            context = TrustedApplyingContext.from_dict(context)
-                        if context is None:
-                            self._tools._enqueue_semantic_conflict_check(
-                                memory_id, current, after_evidence=True,
-                            )
-                        else:
-                            self._tools._enqueue_semantic_conflict_check(
-                                memory_id, current, after_evidence=True,
-                                trusted_applying_context=context,
-                            )
-                if result.get("status") != "indexed":
-                    self._tools._semantic_worker.complete(
-                        task_id,
-                        {
-                            "status": "incomplete",
-                            "reason": f"evidence_index_{result.get('reason') or result.get('status') or 'failed'}",
-                            "notices_created": 0,
-                        },
-                    )
                 with self._cond:
                     # A stale publish race (edit landed between fetch and
                     # publish) is routine coalescing, not an error.
@@ -144,10 +115,6 @@ class LocalTextIndexWorker:
                     self._last_error = None if clean else str(result)
                     self._processed += 1
             except Exception as exc:
-                self._tools._semantic_worker.complete(
-                    task_id,
-                    {"status": "incomplete", "reason": "evidence_index_error", "error": str(exc), "notices_created": 0},
-                )
                 with self._cond:
                     self._last_error = str(exc)
             finally:
@@ -178,10 +145,11 @@ class SemanticConflictWorker:
         self._completed: dict[str, dict[str, Any]] = {}
 
     def start(self) -> None:
-        if self._tools.settings.semantic_conflict_on_write == "off":
-            return
+        # C2: the thread must run even with semantic_conflict_on_write="off" —
+        # every job then degrades to index_only (segment+embed+publish, no
+        # detection) inside _process_semantic_conflict_job.
         self._ensure_thread()
-        if SEMANTIC_PRELOAD:
+        if SEMANTIC_PRELOAD and self._tools.settings.semantic_conflict_on_write != "off":
             threading.Thread(
                 target=self._preload_backend,
                 name="memory-arbiter-semantic-preload",

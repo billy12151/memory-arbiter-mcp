@@ -45,7 +45,7 @@ def test_scan_log_written_on_full_boundary_with_audit_fields(tmp_path: Path) -> 
     ))
     tools.memory_write(content="alpha deployment note", subject="alpha note", tags=[], workspace="w")
     tools.memory_write(content="beta deployment note", subject="beta note", tags=[], workspace="w")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     result = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
     assert result["ok"] is True, result
@@ -84,7 +84,7 @@ def test_scan_log_full_boundary_writes_and_partial_page_does_not(tmp_path: Path)
     tools.settings.semantic_conflict_model_path = tools.settings.embedding_model_path
     tools.memory_write(content="first deployment note", subject="first note", tags=[], workspace="w")
     tools.memory_write(content="second deployment note", subject="second note", tags=[], workspace="w")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     path = tools.db.scan_log_path
 
@@ -335,7 +335,7 @@ def test_spec_sample_calls_execute_end_to_end(tmp_path: Path) -> None:
     tools.settings.semantic_conflict_on_write = "off"
     tools.memory_write(content="database is mysql", subject="db", tags=[])["data"]
     tools.memory_write(content="database is sqlite", subject="db2", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     kick = tools.memory_repair("scan_pipeline", {"action": "kick"})
     assert kick["ok"] is True, kick
@@ -355,7 +355,7 @@ def test_doctor_flags_spec_drift_until_pipeline_kick(tmp_path: Path) -> None:
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     tools.memory_write(content="drift memory", subject="drift", tags=[], workspace="w")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     # Simulate the v1-era flow the old task used: a completed scan_candidates
     # boundary writes scan activity WITHOUT the v2 spec stamp.
     result = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
@@ -386,7 +386,7 @@ def test_scan_candidates_echoes_spec_drift_hint(tmp_path: Path) -> None:
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     tools.memory_write(content="echo memory", subject="echo", tags=[], workspace="w")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     result = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10})
     assert result["ok"] is True, result
     echo = result["data"].get("scheduled_tasks_spec")

@@ -33,6 +33,13 @@ class FakeEmbedder:
     dim = 2
     last_encode_error = None
 
+    @classmethod
+    def embed_texts(cls, texts: list[str]) -> list["EmbedResult"]:
+        # C1: index-path batch API — the fake has no batch closure, so it
+        # delegates per item (the same route ManagedEmbedder takes when
+        # encode_batch is None).
+        return [cls.embed_text(prefix="", body=text) for text in texts]
+
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
         text = f"{prefix}\n{body}".casefold()
@@ -502,16 +509,24 @@ def test_write_publishes_local_text_evidence(tmp_path: Path) -> None:
     assert result["ok"] is True
     memory_id = result["data"]["id"]
     assert result["data"]["evidence_index"]["status"] == "queued"
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     coverage = tools.db.evidence.coverage()
     assert coverage["indexed_memories"] == 1
-    assert coverage["units"] >= 2
+    # C2/C3: rows are the store (subject row + sentences); units retired.
     with tools.db.connection() as conn:
-        row = conn.execute("SELECT content_hash FROM memory_evidence WHERE memory_id=? LIMIT 1", (memory_id,)).fetchone()
-    assert row["content_hash"] == evidence_content_hash(result["data"]["record"]["content"])
+        rows = conn.execute(
+            "SELECT kind, content_hash FROM memory_row WHERE memory_id=? ORDER BY row_index",
+            (memory_id,),
+        ).fetchall()
+    kinds = [r["kind"] for r in rows]
+    assert kinds[0] == "subject" and len(rows) >= 2  # A+ subject row leads
+    assert all(
+        r["content_hash"] == evidence_content_hash(result["data"]["record"]["content"])
+        for r in rows
+    )
 
 
-def test_vnext_search_uses_evidence_knn_not_legacy_vectors(tmp_path: Path) -> None:
+def test_vnext_search_uses_row_knn_not_legacy_vectors(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     target = tools.memory_write(
         content="服务数据库选择 PostgreSQL 16。",
@@ -519,7 +534,7 @@ def test_vnext_search_uses_evidence_knn_not_legacy_vectors(tmp_path: Path) -> No
         tags=["db"],
     )["data"]["id"]
     tools.memory_write(content="用户今天想喝咖啡。", subject="lunch", tags=["food"])
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     result = tools.memory_search(query="pgsql database", limit=5, content_mode="full")
     ids = [row["id"] for row in result["data"]["results"]]
     assert target in ids
@@ -550,7 +565,7 @@ def test_evidence_candidate_enters_when_lexical_pool_is_full(tmp_path: Path, mon
     assert target is not None
     tools.db.state.sqlite_vec_available = True
 
-    def evidence_knn(*_args, **_kwargs):
+    def row_knn(*_args, **_kwargs):
         return [{
             **target,
             "id": 999,
@@ -565,7 +580,7 @@ def test_evidence_candidate_enters_when_lexical_pool_is_full(tmp_path: Path, mon
     # 0.15.9: this pins pool ADMISSION, not page relevance; disable the floor.
     import memory_arbiter.search as _search_mod
     monkeypatch.setattr(_search_mod, "QUERY_RECALL_SCORE_FLOOR", -1.0)
-    monkeypatch.setattr(tools.db, "evidence_knn", evidence_knn)
+    monkeypatch.setattr(tools.db, "row_knn", row_knn)
     result = tools.memory_search(
         query="needle", limit=4, query_embedding=[1.0, 0.0],
         include_linked_open_items=False, include_conflict_signal=False,
@@ -589,7 +604,7 @@ def test_exact_subject_match_survives_evidence_fusion(tmp_path: Path, monkeypatc
     assert semantic is not None
     tools.db.state.sqlite_vec_available = True
 
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *_args, **_kwargs: [{
+    monkeypatch.setattr(tools.db, "row_knn", lambda *_args, **_kwargs: [{
         **semantic,
         "id": 1000,
         "memory_id": semantic_id,
@@ -616,7 +631,7 @@ def test_numeric_candidate_fails_closed_without_qwen(tmp_path: Path, monkeypatch
     meta = {"entity": "checkout-api", "scope": "production"}
     old = tools.memory_write(content="接口超时为 5 秒，队列长度为 3。", subject="timeout", tags=["api"], metadata=meta)["data"]
     new = tools.memory_write(content="接口超时为 30 秒，队列长度为 5。", subject="timeout", tags=["api"], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     assert result["status"] == "incomplete"
@@ -639,7 +654,7 @@ def test_direct_path_works_without_qwen(tmp_path: Path, monkeypatch) -> None:
     meta = {"entity": "checkout-api", "scope": "production"}
     tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=["api"], metadata=meta)
     new = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=["api"], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     assert result["status"] == "completed"
@@ -654,23 +669,18 @@ def test_direct_path_works_without_qwen(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, monkeypatch) -> None:
+    """C2 单队列不变式（原「链式转发」语义反转重写）：写入只排一个语义
+    job，索引（分段→批嵌→publish_rows）与检测在同一 job 内按序完成——
+    publish 先于检测、行在库、evidence worker 无任务。"""
     tools = make_tools(tmp_path, semantic_enabled=False)
-    calls = []
-    original = tools._enqueue_semantic_conflict_check
-
-    def tracked(memory_id, record, *, after_evidence=False):
-        calls.append((memory_id, after_evidence, tools.db.evidence.coverage()["indexed_memories"]))
-        return original(memory_id, record, after_evidence=after_evidence)
-
-    monkeypatch.setattr(tools, "_enqueue_semantic_conflict_check", tracked)
     result = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])
+    memory_id = result["data"]["id"]
     task_id = result["data"]["evidence_index"]["semantic_task_id"]
-    # The write's sync gate waits for this exact reserved task. A fast local
-    # index + semantic pass may therefore complete in the same request rather
-    # than returning the older waiting_for_evidence_index placeholder.
+    # The write's sync gate waits for this exact task; a fast local index +
+    # detect pass completes inside the same request.
     check_receipt = result["data"]["semantic_conflict_check"]
-    check_receipt.pop("elapsed_ms", None)  # 0.16.12 job 实际耗时键，值不定
-    for _row_key in ("rows_mode", "rows_examined", "claims_channel"):  # 0.17.0 P2-3 行级回执键
+    check_receipt.pop("elapsed_ms", None)
+    for _row_key in ("rows_mode", "rows_examined", "claims_channel"):
         check_receipt.pop(_row_key, None)
     assert check_receipt == {
         "status": "completed",
@@ -680,10 +690,16 @@ def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, mo
         "dedupe_key": task_id,
         "pairs_examined": 0,
     }
-    assert tools.wait_evidence_worker_drained(timeout=2)
-    # The enqueue observation is taken inside the evidence worker after
-    # publish, so this still proves semantic work was chained behind evidence.
-    assert calls == [(result["data"]["id"], True, 1)]
+    assert tools.wait_semantic_worker_drained(timeout=2)
+    # 单队列不变式：行已发布（含 A+ subject 行），检测在同一 job 完成，
+    # 旧索引工人不再收到任何任务。
+    with tools.db.connection() as conn:
+        kinds = [r["kind"] for r in conn.execute(
+            "SELECT kind FROM memory_row WHERE memory_id=? ORDER BY row_index", (memory_id,)
+        )]
+    assert kinds and kinds[0] == "subject"
+    assert tools.db.evidence.coverage()["indexed_memories"] == 1
+    assert tools._evidence_worker.status()["queue_depth"] == 0
 
 
 def test_semantic_job_reuses_just_published_evidence_vectors(tmp_path: Path, monkeypatch) -> None:
@@ -692,7 +708,7 @@ def test_semantic_job_reuses_just_published_evidence_vectors(tmp_path: Path, mon
     CountingEmbedder.calls = 0
     tools._embedder = CountingEmbedder()
     written = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     indexed_calls = CountingEmbedder.calls
     assert indexed_calls > 0
 
@@ -703,20 +719,24 @@ def test_semantic_job_reuses_just_published_evidence_vectors(tmp_path: Path, mon
 
 
 def test_evidence_publish_rejects_stale_snapshot(tmp_path: Path) -> None:
+    from memory_arbiter.rowseg import segment_rows
+
     tools = make_tools(tmp_path)
     written = tools.memory_write(content="旧内容。", subject="snapshot", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     memory_id = written["id"]
     current = tools.db.get_memory(memory_id)
-    stale_units = local_text_units(current["subject"], current["content"])
+    stale_rows = segment_rows(current["subject"], current["content"])
     edited = tools.memory_edit(memory_id=memory_id, new_content="新内容。")
     assert edited["ok"] is True
-    result = tools.db.evidence.publish(
+    # C5: publish_rows is the publisher; a stale (id, version) snapshot
+    # must still reject instead of clobbering the newer version's rows.
+    result = tools.db.evidence.publish_rows(
         memory_id,
         int(current["version"]),
         evidence_content_hash(current["content"]),
-        stale_units,
-        [[0.0, 1.0] for _ in stale_units],
+        stale_rows,
+        [[0.0, 1.0] for _ in stale_rows],
     )
     assert result["outcome"] == "stale_snapshot"
 
@@ -724,21 +744,22 @@ def test_evidence_publish_rejects_stale_snapshot(tmp_path: Path) -> None:
 def test_vnext_status_change_updates_evidence_parent_status(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     written = tools.memory_write(content="待废弃事实。", subject="status", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     assert tools.db.update_memory(written["id"], {"status": "superseded"}) is True
+    # C5: the flip lives on the row store (unit tables retired).
     with tools.db.connection() as conn:
         statuses = {
             row["parent_status"] for row in conn.execute(
-                "SELECT v.parent_status FROM memory_evidence_vec v "
-                "JOIN memory_evidence e ON e.id=v.id WHERE e.memory_id=?",
+                "SELECT v.parent_status FROM memory_row_vec v "
+                "JOIN memory_row r ON r.id=v.id WHERE r.memory_id=?",
                 (written["id"],),
             )
         }
         versions = {
             (int(row["memory_version"]), int(row["version"]))
             for row in conn.execute(
-                "SELECT e.memory_version,m.version FROM memory_evidence e "
-                "JOIN memories m ON m.id=e.memory_id WHERE e.memory_id=?",
+                "SELECT r.memory_version,m.version FROM memory_row r "
+                "JOIN memories m ON m.id=r.memory_id WHERE r.memory_id=?",
                 (written["id"],),
             )
         }
@@ -752,16 +773,16 @@ def test_vnext_weak_isolation_does_not_hard_filter_semantic_candidates(tmp_path:
     written = tools.memory_write(
         content="接口超时为 5 秒。", subject="timeout", tags=[], workspace="alpha",
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     seen = []
 
-    def evidence_knn(*args, **kwargs):
+    def row_knn(*args, **kwargs):
         seen.append(kwargs.get("workspace"))
         return []
 
-    monkeypatch.setattr(tools.db, "evidence_knn", evidence_knn)
+    monkeypatch.setattr(tools.db, "row_knn", row_knn)
     # 0.17.0 P2-3：行级模式候选走 row_knn，同样不得被 workspace 硬过滤
-    monkeypatch.setattr(tools.db, "row_knn", evidence_knn)
+    monkeypatch.setattr(tools.db, "row_knn", row_knn)
     record = tools.db.get_memory(written["id"])
     tools._process_semantic_conflict_job(written["id"], {
         "version": record["version"],
@@ -860,7 +881,7 @@ def test_previous_generation_old_space_is_preserved_and_disabled(
         content="旧空间中的内容。", subject="旧空间", tags=[],
     )
     assert written["ok"] is True
-    assert source_tools.wait_evidence_worker_drained(timeout=5)
+    assert source_tools.wait_semantic_worker_drained(timeout=5)
     with source_db.write_transaction() as conn:
         conn.execute(
             "UPDATE migration_state SET value='local_text_evidence_v1' "
@@ -923,7 +944,7 @@ def test_preserve_migration_keeps_derived_rows_for_later_health_repair(
     deleted = source_tools.memory_write(
         content="deleted", subject="deleted", workspace="project-beta",
     )["data"]["id"]
-    assert source_tools.wait_evidence_worker_drained(timeout=5)
+    assert source_tools.wait_semantic_worker_drained(timeout=5)
     with source_db.write_transaction() as conn:
         conn.execute("UPDATE memories SET status='deleted' WHERE id=?", (deleted,))
         conn.execute(
@@ -957,10 +978,10 @@ def test_preserve_migration_keeps_derived_rows_for_later_health_repair(
     ))
     with target_db.connection() as conn:
         evidence_memory_ids = {
-            int(row[0]) for row in conn.execute("SELECT DISTINCT memory_id FROM memory_evidence")
+            int(row[0]) for row in conn.execute("SELECT DISTINCT memory_id FROM memory_row")
         }
-        units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
-        vectors = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
+        units = int(conn.execute("SELECT COUNT(*) FROM memory_row").fetchone()[0])
+        vectors = int(conn.execute("SELECT COUNT(*) FROM memory_row_vec").fetchone()[0])
         workspace_vectors = int(
             conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0]
         )
@@ -1054,13 +1075,13 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
     new = tools.memory_write(
         content="连接池上限为 99。", subject="poolx", tags=[], metadata=metadata,
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [
         {"memory_id": peer["id"], "id": i, "kind": "text", "text": f"连接池上限为 {i + 10}。",
          "start_offset": 0, "end_offset": 11, "distance": 0.10 + i * 0.05}
         for i, peer in enumerate(peers)
     ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -1095,13 +1116,13 @@ def test_unified_notice_dedupe_does_not_starve_fresh_pair(tmp_path: Path, monkey
     new = tools.memory_write(
         content="连接池上限为 99。", subject="poolx", tags=[], metadata=metadata,
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [
         {"memory_id": peer["id"], "id": i, "kind": "text", "text": f"连接池上限为 {i + 10}。",
          "start_offset": 0, "end_offset": 11, "distance": 0.10 + i * 0.05}
         for i, peer in enumerate(peers)
     ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
 
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
@@ -1124,10 +1145,10 @@ def test_check_degradation_is_visible_in_semantic_status(tmp_path: Path, monkeyp
     meta = {"entity": "checkout-api", "scope": "production"}
     peer = tools.memory_write(content="database connection policy", subject="pool", tags=[], metadata=meta)["data"]
     new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     assert tools._ensure_semantic_backend() is None
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     assert tools.db.list_semantic_notices(status="open") == []
     degradation = tools._semantic_status()["check_degradation"]
@@ -1147,13 +1168,13 @@ def test_short_paragraphs_merge_instead_of_drop() -> None:
 def test_knn_enforces_memory_status_despite_stale_parent(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     written = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     # Simulate a vec-disabled process superseding the memory: parent_status
     # stays 'active' while memories.status is authoritative.
     tools.db.state.sqlite_vec_available = False
     assert tools.db.update_memory(written["id"], {"status": "superseded"})
     tools.db.state.sqlite_vec_available = True
-    hits = tools.db.evidence_knn([0.8, 0.2], k=5, parent_status_filter="active")
+    hits = tools.db.row_knn([0.8, 0.2], k=5, parent_status_filter="active")
     assert all(h["memory_id"] != written["id"] for h in hits)
 
 
@@ -1168,7 +1189,7 @@ def test_knn_workspace_overfetch_restores_recall(tmp_path: Path) -> None:
     bulk_record = tools.memory_write(
         content=bulk, subject="pg bulk", tags=[], workspace="wsA",
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     # FakeEmbedder intentionally maps all workspace names to one vector, so
     # normal workspace resolution treats wsB as an alias of wsA. This test is
     # about KNN filtering rather than canonicalization; restore the intended
@@ -1178,7 +1199,7 @@ def test_knn_workspace_overfetch_restores_recall(tmp_path: Path) -> None:
             "UPDATE memories SET workspace_canonical=workspace WHERE id IN (?,?)",
             (peer["id"], bulk_record["id"]),
         )
-    hits = tools.db.evidence_knn([1.0, 0.0], k=5, workspace="wsB", exclude_memory_id=999999)
+    hits = tools.db.row_knn([1.0, 0.0], k=5, workspace="wsB", exclude_memory_id=999999)
     assert any(h["memory_id"] == peer["id"] for h in hits)
 
 
@@ -1187,7 +1208,7 @@ def test_evidence_only_candidates_carry_memory_row_shape(tmp_path: Path) -> None
     tools.memory_write(content="postgresql 连接池上限为 20。", subject="pool limit", tags=["db"], workspace="w")
     # A memory with zero lexical overlap so it can only be recalled via evidence.
     tools.memory_write(content="pgsql 的 pool 上限数值是二十，注意与连接数区分。", subject="pool", tags=["db"], workspace="w")
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     result = tools.memory_search(query="连接池 上限")
     for row in result["data"]["results"]:
         assert isinstance(row.get("version"), int)
@@ -1252,18 +1273,25 @@ def test_semantic_worker_coalescing_completes_displaced_task() -> None:
 
 
 def test_evidence_index_error_completes_exact_reserved_task(tmp_path: Path, monkeypatch) -> None:
+    """C2 语义：索引失败发生在语义 job 内（单队列），worker 把精确的
+    task 标 incomplete——写入侧 sync 窗收到同一 task 的失败回执。"""
     tools = make_tools(tmp_path)
+
+    def failing_job(memory_id, snapshot):
+        # Simulates the job's index phase failing (C2: indexing lives in the
+        # semantic job now — the failure surface moved with it).
+        return {"status": "incomplete", "reason": "index_synthetic_failure",
+                "notices_created": 0}
+
     monkeypatch.setattr(
-        tools, "_index_local_text_evidence",
-        lambda memory_id, record: {"status": "failed", "reason": "synthetic_failure"},
+        tools._evidence, "process_conflicts", failing_job,
     )
     result = tools.memory_write(content="index me", subject="index failure", tags=[])
     check = result["data"]["semantic_conflict_check"]
     task_id = result["data"]["evidence_index"]["semantic_task_id"]
-    assert check == {
-        "status": "incomplete", "reason": "evidence_index_synthetic_failure", "notices_created": 0,
-        "task_id": task_id, "dedupe_key": task_id,
-    }
+    assert check["status"] == "incomplete"
+    assert "synthetic_failure" in str(check.get("reason"))
+    assert check["task_id"] == task_id and check["dedupe_key"] == task_id
     assert "timeout_continuing_async" not in str(result)
 
 
@@ -1320,9 +1348,9 @@ def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path,
     meta = {"entity": "checkout-api", "scope": "production"}
     peer = tools.memory_write(content="database connection policy", subject="pool", tags=[], metadata=meta)["data"]
     new = tools.memory_write(content="database connection pool size", subject="pool2", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database connection policy", "start_offset": 0, "end_offset": 26, "distance": 0.2}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
 
     truncated_raw = '{"attribute_a": "数据库选型", "value_a": "MySQL", "attribute_b":'
     cases = [
@@ -1428,7 +1456,7 @@ def test_space_rebuild_flips_mismatch_back_to_ready(tmp_path: Path) -> None:
     first = tools.memory_write(
         content="接口超时为 5 秒。", subject="timeout", tags=[], workspace="project",
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     # Simulate a model swap: the active space no longer matches the live embedder.
     tools.db.init_vec_index_state("fake-vnext-space", True)
     tools.db.init_vec_index_state("new-space-v2", True)
@@ -1442,7 +1470,7 @@ def test_space_rebuild_flips_mismatch_back_to_ready(tmp_path: Path) -> None:
     rebuild = tools.memory_repair("rebuild_evidence", {"dry_run": False})
     assert rebuild["ok"] is True and rebuild["data"]["queued"] >= 1
     assert rebuild["data"]["workspace_vector_rebuild"]["ok"] is True
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     state = tools.db.get_vec_index_state()
     assert state["state"] == "ready"
@@ -1459,7 +1487,7 @@ def test_space_rebuild_flips_mismatch_back_to_ready(tmp_path: Path) -> None:
 def test_lazy_space_check_blocks_ordinary_publish_until_rebuild_starts(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     first = tools.memory_write(content="old space", subject="old", tags=[])["data"]["id"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.connection() as conn:
         before = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
 
@@ -1481,9 +1509,9 @@ def test_explicit_rebuild_recovers_missing_vector_tables(tmp_path: Path) -> None
     pytest.importorskip("sqlite_vec")
     tools = make_tools(tmp_path)
     tools.memory_write(content="repair me", subject="repair", workspace="project")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.write_transaction() as conn:
-        conn.execute("DROP TABLE memory_evidence_vec")
+        conn.execute("DROP TABLE memory_row_vec")
         conn.execute("DROP TABLE workspace_canonicals_vec")
     tools.db.state.sqlite_vec_available = False
     tools.db._sqlite_vec_loadable = False
@@ -1492,7 +1520,7 @@ def test_explicit_rebuild_recovers_missing_vector_tables(tmp_path: Path) -> None
     assert preview["ok"] is True
     assert preview["data"]["vector_table_repair"] == {
         "required": True,
-        "missing_tables": ["memory_evidence_vec", "workspace_canonicals_vec"],
+        "missing_tables": ["memory_row_vec", "workspace_canonicals_vec"],
         "recreated": False,
         "warnings": [],
     }
@@ -1501,10 +1529,10 @@ def test_explicit_rebuild_recovers_missing_vector_tables(tmp_path: Path) -> None
     result = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
     assert result["ok"] is True, result
     assert result["data"]["vector_table_repair"]["recreated"] is True
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     assert tools.db.get_vec_index_state()["state"] == "ready"
     with tools.db.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0] > 0
+        assert conn.execute("SELECT COUNT(*) FROM memory_row_vec").fetchone()[0] > 0
         assert conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0] == 1
 
 
@@ -1514,7 +1542,7 @@ def test_space_rebuild_completion_purges_deleted_evidence_and_requires_vectors(
     tools = make_tools(tmp_path)
     active = tools.memory_write(content="active", subject="a", tags=[])["data"]["id"]
     deleted = tools.memory_write(content="deleted", subject="d", tags=[])["data"]["id"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools._embedder = FakeEmbedder()
     tools._embedder.embedding_space_id = "space-b"
     tools.db.init_vec_index_state("space-b", True)
@@ -1522,16 +1550,16 @@ def test_space_rebuild_completion_purges_deleted_evidence_and_requires_vectors(
         conn.execute("UPDATE memories SET status='deleted' WHERE id=?", (deleted,))
     rebuild = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
     assert rebuild["ok"] is True
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.write_transaction() as conn:
         active_evidence = conn.execute(
-            "SELECT id FROM memory_evidence WHERE memory_id=? ORDER BY id", (active,),
+            "SELECT id FROM memory_row WHERE memory_id=? ORDER BY id", (active,),
         ).fetchall()
         deleted_evidence = conn.execute(
-            "SELECT id FROM memory_evidence WHERE memory_id=?", (deleted,),
+            "SELECT id FROM memory_row WHERE memory_id=?", (deleted,),
         ).fetchall()
         missing_vector_id = int(active_evidence[0]["id"])
-        conn.execute("DELETE FROM memory_evidence_vec WHERE id=?", (missing_vector_id,))
+        conn.execute("DELETE FROM memory_row_vec WHERE id=?", (missing_vector_id,))
         conn.executemany(
             "INSERT INTO _vec_index_meta(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -1543,27 +1571,27 @@ def test_space_rebuild_completion_purges_deleted_evidence_and_requires_vectors(
             ),
         )
         conn.execute(
-            "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES(?,?,?)",
+            "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES(?,?,?)",
             (999999, "active", "[0.0,1.0]"),
         )
     assert tools.db.maybe_complete_space_rebuild("space-b") is False
     with tools.db.write_transaction() as conn:
         conn.execute(
-            "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES(?,?,?)",
+            "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES(?,?,?)",
             (missing_vector_id, "active", "[0.0,1.0]"),
         )
     assert tools.db.maybe_complete_space_rebuild("space-b") is True
     with tools.db.connection() as conn:
         assert conn.execute(
-            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (deleted,)
+            "SELECT COUNT(*) FROM memory_row WHERE memory_id=?", (deleted,)
         ).fetchone()[0] == 0
         assert not deleted_evidence or conn.execute(
-            "SELECT COUNT(*) FROM memory_evidence_vec WHERE id IN ("
+            "SELECT COUNT(*) FROM memory_row_vec WHERE id IN ("
             + ",".join("?" for _ in deleted_evidence) + ")",
             tuple(int(row["id"]) for row in deleted_evidence),
         ).fetchone()[0] == 0
         assert conn.execute(
-            "SELECT COUNT(*) FROM memory_evidence_vec WHERE id=999999"
+            "SELECT COUNT(*) FROM memory_row_vec WHERE id=999999"
         ).fetchone()[0] == 0
 
 
@@ -1573,7 +1601,7 @@ def test_mismatch_rebuild_paginates_across_batches_and_flips_only_at_end(tmp_pat
         tools.memory_write(content=f"条目 {i}：连接池为 {i}0。", subject=f"item{i}", tags=[])["data"]["id"]
         for i in range(6)
     ]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools.db.init_vec_index_state("new-space-v2", True)
     assert tools.db.get_vec_index_state()["state"] == "mismatch"
     tools._embedder = FakeEmbedder()
@@ -1585,7 +1613,7 @@ def test_mismatch_rebuild_paginates_across_batches_and_flips_only_at_end(tmp_pat
     for _round in range(3):
         result = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 2})
         assert result["ok"] is True and result["data"]["queued"] == 2
-        assert tools.wait_evidence_worker_drained(timeout=5)
+        assert tools.wait_semantic_worker_drained(timeout=5)
         batch_ids = sorted(item["memory_id"] for item in result["data"]["results"])
         assert not set(batch_ids) & set(seen), "rebuild re-selected an already republished memory"
         seen.extend(batch_ids)
@@ -1600,7 +1628,7 @@ def test_space_rebuild_epoch_ignores_same_second_old_rows(tmp_path: Path) -> Non
     tools = make_tools(tmp_path)
     tools.memory_write(content="旧空间内容甲。", subject="a", tags=[])
     tools.memory_write(content="旧空间内容乙。", subject="b", tags=[])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools.db.init_vec_index_state("new-space-v2", True)
     tools._embedder = FakeEmbedder()
     tools._embedder.embedding_space_id = "new-space-v2"
@@ -1608,18 +1636,18 @@ def test_space_rebuild_epoch_ignores_same_second_old_rows(tmp_path: Path) -> Non
     # Start the rebuild (marks the evidence-id epoch) but republish only one
     # memory in the same second — old-space rows must NOT count as rebuilt.
     tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 1})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     assert tools.db.get_vec_index_state()["state"] == "mismatch"
     # An ordinary publish of the other memory completes the rebuild.
     tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 5})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     assert tools.db.get_vec_index_state()["state"] == "ready"
 
 
 def test_rebuild_dry_run_has_no_side_effects_in_mismatch_mode(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     tools.memory_write(content="内容。", subject="s", tags=[])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools.db.init_vec_index_state("new-space-v2", True)
     preview = tools.memory_repair("rebuild_evidence", {"dry_run": True})
     assert preview["data"]["count"] >= 1
@@ -1638,8 +1666,8 @@ def test_knn_truncates_to_requested_k_with_filters(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     for i in range(4):
         tools.memory_write(content=f"postgres 条目 {i}：连接池说明 {i}。", subject=f"pg{i}", tags=[], workspace="w")
-    assert tools.wait_evidence_worker_drained(timeout=5)
-    hits = tools.db.evidence_knn([1.0, 0.0], k=3, workspace="w", exclude_memory_id=999999)
+    assert tools.wait_semantic_worker_drained(timeout=5)
+    hits = tools.db.row_knn([1.0, 0.0], k=3, workspace="w", exclude_memory_id=999999)
     assert 0 < len(hits) <= 3
 
 
@@ -1683,17 +1711,17 @@ def test_retarget_mid_rebuild_resets_epoch_and_republishes_everything(tmp_path: 
     tools = make_tools(tmp_path)
     first = tools.memory_write(content="条目一内容。", subject="a", tags=[])["data"]["id"]
     second = tools.memory_write(content="条目二内容。", subject="b", tags=[])["data"]["id"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     # Swap A->B, rebuild one of two memories (partial), then retarget B->C.
     tools._embedder = FakeEmbedder()
     tools._embedder.embedding_space_id = "space-b"
     tools.db.init_vec_index_state("space-b", True)
     tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 1})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     assert tools.db.get_vec_index_state()["state"] == "mismatch"
     with tools.db.connection() as conn:
-        b_phase_max = conn.execute("SELECT COALESCE(MAX(id),0) FROM memory_evidence").fetchone()[0]
+        b_phase_max = conn.execute("SELECT COALESCE(MAX(id),0) FROM memory_row").fetchone()[0]
 
     tools._embedder.embedding_space_id = "space-c"
     tools.db.init_vec_index_state("space-c", True)
@@ -1704,13 +1732,13 @@ def test_retarget_mid_rebuild_resets_epoch_and_republishes_everything(tmp_path: 
     # (a stale epoch would leave the first memory's B-space vectors in place
     # while still flipping to ready).
     tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     state = tools.db.get_vec_index_state()
     assert state["state"] == "ready" and state["active_space_id"] == "space-c"
     with tools.db.connection() as conn:
         for mid in (first, second):
             newest = conn.execute(
-                "SELECT COALESCE(MAX(id),0) FROM memory_evidence WHERE memory_id=?",
+                "SELECT COALESCE(MAX(id),0) FROM memory_row WHERE memory_id=?",
                 (mid,),
             ).fetchone()[0]
             assert newest > b_phase_max, "memory not republished after retarget"
@@ -1721,7 +1749,7 @@ def test_zero_unit_memory_does_not_block_space_rebuild_flip(tmp_path: Path) -> N
 
     tools = make_tools(tmp_path)
     tools.memory_write(content="正常内容。", subject="s", tags=[])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     # A legacy/imported row with no indexable text (product writes validate
     # non-blank content, so reach around them with raw SQL).
     with tools.db.write_transaction() as conn:
@@ -1737,7 +1765,7 @@ def test_zero_unit_memory_does_not_block_space_rebuild_flip(tmp_path: Path) -> N
     tools._embedder.embedding_space_id = "space-b"
     tools.db.init_vec_index_state("space-b", True)
     result = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     # The zero-unit memory must not stay pending forever: after the batch the
     # next execute selects nothing new and settles the flip immediately.
     again = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
@@ -1763,7 +1791,7 @@ def test_backfill_phase_target_is_not_current_generation(tmp_path: Path) -> None
 def test_empty_batch_execute_settles_flip_without_unrelated_write(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     tools.memory_write(content="内容。", subject="s", tags=[])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools._embedder = FakeEmbedder()
     tools._embedder.embedding_space_id = "space-b"
     tools.db.init_vec_index_state("space-b", True)
@@ -1789,7 +1817,7 @@ def test_unicode_whitespace_memory_does_not_block_space_rebuild_flip(tmp_path: P
 
     tools = make_tools(tmp_path)
     real_id = tools.memory_write(content="正常内容。", subject="s", tags=[])["data"]["id"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.write_transaction() as conn:
         conn.execute(
             """INSERT INTO memories(content, agent_id, workspace, tags, source_type,
@@ -1805,7 +1833,7 @@ def test_unicode_whitespace_memory_does_not_block_space_rebuild_flip(tmp_path: P
     dry = tools.memory_repair("rebuild_evidence", {"dry_run": True, "batch_size": 10})
     assert dry["data"]["memory_ids"] == [real_id]
     tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     again = tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
     assert again["data"]["queued"] == 0
     state = tools.db.get_vec_index_state()
@@ -1820,10 +1848,10 @@ def test_ready_revert_mid_rebuild_purges_foreign_space_rows(tmp_path: Path) -> N
     tools = make_tools(tmp_path)
     first = tools.memory_write(content="条目一内容。", subject="a", tags=[])["data"]["id"]
     second = tools.memory_write(content="条目二内容。", subject="b", tags=[])["data"]["id"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.connection() as conn:
         second_rows = conn.execute(
-            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (second,)
+            "SELECT COUNT(*) FROM memory_row WHERE memory_id=?", (second,)
         ).fetchone()[0]
     assert second_rows > 0
 
@@ -1833,7 +1861,7 @@ def test_ready_revert_mid_rebuild_purges_foreign_space_rows(tmp_path: Path) -> N
     tools._embedder.embedding_space_id = "space-b"
     tools.db.init_vec_index_state("space-b", True)
     tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 1})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.connection() as conn:
         epoch = int(conn.execute(
             "SELECT value FROM _vec_index_meta WHERE key='space_rebuild_evidence_id'"
@@ -1847,17 +1875,17 @@ def test_ready_revert_mid_rebuild_purges_foreign_space_rows(tmp_path: Path) -> N
     assert state["state"] == "ready" and state["active_space_id"] == "fake-vnext-space"
     with tools.db.connection() as conn:
         first_rows = conn.execute(
-            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (first,)
+            "SELECT COUNT(*) FROM memory_row WHERE memory_id=?", (first,)
         ).fetchone()[0]
         second_now = conn.execute(
-            "SELECT COUNT(*) FROM memory_evidence WHERE memory_id=?", (second,)
+            "SELECT COUNT(*) FROM memory_row WHERE memory_id=?", (second,)
         ).fetchone()[0]
         max_second_id = conn.execute(
-            "SELECT COALESCE(MAX(id),0) FROM memory_evidence WHERE memory_id=?", (second,)
+            "SELECT COALESCE(MAX(id),0) FROM memory_row WHERE memory_id=?", (second,)
         ).fetchone()[0]
         vec_orphans = conn.execute(
-            "SELECT COUNT(*) FROM memory_evidence_vec v "
-            "WHERE NOT EXISTS(SELECT 1 FROM memory_evidence e WHERE e.id=v.id)"
+            "SELECT COUNT(*) FROM memory_row_vec v "
+            "WHERE NOT EXISTS(SELECT 1 FROM memory_row e WHERE e.id=v.id)"
         ).fetchone()[0]
     assert first_rows == 0  # purged B-space rows; republished on next rebuild
     assert second_now == second_rows and max_second_id <= epoch
@@ -1868,7 +1896,7 @@ def test_ready_revert_mid_rebuild_purges_foreign_space_rows(tmp_path: Path) -> N
     dry = tools.memory_repair("rebuild_evidence", {"dry_run": True, "batch_size": 10})
     assert dry["data"]["memory_ids"] == [first]
     tools.memory_repair("rebuild_evidence", {"dry_run": False, "batch_size": 10})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     coverage = tools.db.evidence.coverage()
     assert coverage["indexed_memories"] == coverage["eligible_memories"] == 2
 
@@ -1876,7 +1904,7 @@ def test_ready_revert_mid_rebuild_purges_foreign_space_rows(tmp_path: Path) -> N
 def test_rebuild_evidence_response_surfaces_vec_index_state(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     tools.memory_write(content="内容。", subject="s", tags=[])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     # Empty pending set with a live embedder: the execute settles the flip
     # and the response must say so.
@@ -2452,7 +2480,7 @@ def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> Non
     dup1 = tools.memory_write(content="完全一样的配置说明文字。", subject="same", tags=[])["data"]
     dup2 = tools.memory_write(content="完全一样的配置说明文字。", subject="same", tags=[])["data"]
     far = tools.memory_write(content="PostgreSQL 数据库生产环境配置。", subject="db", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     result = tools.memory_repair(
         "scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True},
@@ -2490,7 +2518,7 @@ def test_scan_candidates_enumerates_filters_and_paginates(tmp_path: Path) -> Non
     dismissed_scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     assert key not in {(c["left_id"], c["right_id"]) for c in dismissed_scan["data"]["candidates"]}
     tools.memory("update", {"memory_id": a["id"], "new_content": "接口超时为 60 秒，已修订。", "reason": "r"})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     reopened = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     assert key in {(c["left_id"], c["right_id"]) for c in reopened["data"]["candidates"]}
 
@@ -2504,7 +2532,7 @@ def test_scan_candidates_pagination_and_check_gate(tmp_path: Path) -> None:
     # Real rule check pair: structurally similar, no deterministic signal.
     chk1 = tools.memory_write(content="服务使用数据库甲存储数据。", subject="store", tags=[])["data"]
     chk2 = tools.memory_write(content="服务采用数据库乙保存数据。", subject="store", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     # Cursor pagination: one anchor per batch, union covers everything.
     collected, anchor, batches = set(), 0, 0
@@ -2539,7 +2567,7 @@ def test_record_conflict_not_a_conflict_registration(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = tools.memory_write(content="阈值 100。", subject="th", tags=[])["data"]
     b = tools.memory_write(content="阈值 200。", subject="th", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
@@ -2586,7 +2614,7 @@ def test_scan_candidates_review_regression_batch(tmp_path: Path) -> None:
     # only body-text units participate (matching the write-time path).
     v1 = tools.memory_write(content="服务部署文档正文内容，部署步骤说明。", subject="服务 2024 规划", tags=[])["data"]
     v2 = tools.memory_write(content="服务部署文档正文内容，回滚步骤说明。", subject="服务 2025 规划", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     subject_pair = (min(v1["id"], v2["id"]), max(v1["id"], v2["id"]))
     assert subject_pair not in {(c["left_id"], c["right_id"]) for c in scan["data"]["candidates"]}
@@ -2599,7 +2627,7 @@ def test_scan_candidates_review_regression_batch(tmp_path: Path) -> None:
     twin = tools.memory_write(
         content="完全相同的开场说明。\n重试次数为 5 次。", subject="mixed", tags=[],
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     scan2 = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     mixed_pair = (min(mixed["id"], twin["id"]), max(mixed["id"], twin["id"]))
     clue = next(
@@ -2622,7 +2650,7 @@ def test_scan_candidates_strict_workspace_does_not_leak(tmp_path: Path) -> None:
         content="接口超时为 5 秒。", subject="timeout", tags=[], workspace="apisvc",
     )["data"]
     tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[], workspace="apisvc")["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.connection() as conn:
         canonicals = {
             row["id"]: row["workspace_canonical"]
@@ -2632,7 +2660,7 @@ def test_scan_candidates_strict_workspace_does_not_leak(tmp_path: Path) -> None:
     # A later active row in another workspace must not create a phantom next
     # cursor for strict workspace pagination.
     tools.memory_write(content="末尾外部工作区。", subject="tail", tags=[], workspace="dbapgsql")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     result = tools.memory_repair(
         "scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "workspace": "apisvc"},
@@ -2656,7 +2684,7 @@ def test_read_span_window_and_clue_deep_read(tmp_path: Path) -> None:
     content = "第一段背景说明文字。\n重试次数为 3 次。\n第三段运维备注信息。"
     a = tools.memory_write(content=content, subject="span", tags=[])["data"]
     b = tools.memory_write(content="第一段背景说明文字。\n重试次数为 5 次。\n第三段运维备注信息。", subject="span", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     # 0.16.0 unit-aligned span read (plan §3): the window returns the COMPLETE
     # evidence units overlapping [start, end) — never a half-sentence slice.
@@ -2720,7 +2748,7 @@ def test_deep_read_spans_follow_clue_upgrade_and_drifted_offsets(tmp_path: Path)
     tools = make_tools(tmp_path)
     a = tools.memory_write(content=content_a, subject="upg", tags=[])["data"]
     b = tools.memory_write(content=content_b, subject="upg", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     scan = tools.memory_repair(
         "scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_check": True, "include_quotes": True},
@@ -2754,7 +2782,7 @@ def test_deep_read_survives_offset_drift_on_dense_content(tmp_path: Path) -> Non
     tools = make_tools(tmp_path)
     a = tools.memory_write(content=dense("30"), subject="cfg", tags=[])["data"]
     b = tools.memory_write(content=dense("90"), subject="cfg", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
     pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
     clue = next(c for c in scan["data"]["candidates"] if (c["left_id"], c["right_id"]) == pair)
@@ -2893,10 +2921,10 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
     meta = {"entity": "svc", "scope": "production"}
     peer = tools.memory_write(content="database is mysql here", subject="a", tags=[], metadata=meta)["data"]
     new = tools.memory_write(content="database is mysql there", subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql here",
              "start_offset": 0, "end_offset": 22, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
 
     # Same normalized value on both sides → clean not_same_attribute_different_value.
     class SameValue:
@@ -2929,10 +2957,10 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     metadata = {"entity": "svc", "scope": "production"}
     peer = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=metadata)["data"]
     new = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=metadata)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [{"memory_id": peer["id"], "id": 1, "kind": "text", "text": "database is mysql",
              "start_offset": 0, "end_offset": 17, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
 
     deadlines = []
     base = _grounded_db_backend()
@@ -2968,13 +2996,13 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
         for value in peer_values
     ]
     new = tools.memory_write(content="database is sqlite", subject="sqlite", tags=[], metadata=metadata)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [
         {"memory_id": peer["id"], "id": index + 1, "kind": "text", "text": f"database is {peer_values[index]}",
          "start_offset": 0, "end_offset": len(f"database is {peer_values[index]}"), "distance": 0.1 + index * 0.01}
         for index, peer in enumerate(peers)
     ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     clock = {"now": 100.0}
     fairness_deadline = 100.04
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.time.monotonic", lambda: clock["now"])
@@ -3065,7 +3093,7 @@ def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkey
     meta = {"entity": "svc", "scope": "production"}
     a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
     b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
 
     # Record + judge the a/b conflict into applying with a as the wrong current fact.
@@ -3105,7 +3133,7 @@ def test_applying_reentry_suppresses_same_conflict_notice(tmp_path: Path, monkey
     updated = tools.db.get_memory(a["id"])
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
              "start_offset": 0, "end_offset": 18, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
     snapshot = {
         "memory_id": a["id"], "version": updated["version"],
         "content_hash": evidence_content_hash(updated["content"]),
@@ -3128,7 +3156,7 @@ def test_applying_reentry_does_not_suppress_different_slot(tmp_path: Path, monke
     meta = {"entity": "svc", "scope": "production"}
     a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
     b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
 
     from memory_arbiter.models import ConflictMember, ConflictValueGroup
 
@@ -3164,7 +3192,7 @@ def test_applying_reentry_does_not_suppress_different_slot(tmp_path: Path, monke
     updated = tools.db.get_memory(a["id"])
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "连接池上限为 10。",
              "start_offset": 0, "end_offset": 11, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
     # 0.17.0 P2-3：行级模式候选走 row_knn，注入同一批受控命中
     monkeypatch.setattr(tools.db, "row_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
@@ -3197,7 +3225,7 @@ def test_applying_reentry_context_requires_revision_and_action(
     meta = {"entity": "svc", "scope": "production"}
     a = tools.memory_write(content="database is mysql", subject="a", tags=[], metadata=meta)["data"]
     b = tools.memory_write(content="database is sqlite", subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
 
     from memory_arbiter.models import ConflictMember, ConflictValueGroup
 
@@ -3232,7 +3260,7 @@ def test_applying_reentry_context_requires_revision_and_action(
     monkeypatch.setattr(tools, "_ensure_semantic_backend", _grounded_db_backend)
     hits = [{"memory_id": b["id"], "id": 1, "kind": "text", "text": "database is sqlite",
              "start_offset": 0, "end_offset": 18, "distance": 0.1}]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a_, **k: _hits_with_metadata(tools, list(hits)))
     context = {
         "conflict_id": conflict_id, "revision": 2, "memory_id": a["id"],
         "action": "update_current_claim", "chosen_value": "sqlite",
@@ -3265,7 +3293,7 @@ def test_publish_consumes_row_content_sha(tmp_path: Path, monkeypatch) -> None:
     """0.16.12 P2-T2：行有 content_sha 列时 publish/快照不再重算哈希。"""
     tools = make_tools(tmp_path, semantic_enabled=False)
     mid = tools.memory_write(content="哈希消费验证内容", subject="sha", source_type="agent_generated")["data"]["id"]
-    tools.wait_evidence_worker_drained(timeout=10.0)
+    tools.wait_semantic_worker_drained(timeout=10.0)
     row = tools.db.get_memory(mid)
     assert row.get("content_sha")
 

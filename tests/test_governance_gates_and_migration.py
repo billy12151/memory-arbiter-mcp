@@ -258,11 +258,11 @@ def test_replay_backup_drains_evidence_worker(tmp_path: Path, monkeypatch) -> No
         calls.append(timeout)
         return True
 
-    monkeypatch.setattr(tools, "wait_evidence_worker_drained", _fake_drain)
+    monkeypatch.setattr(tools, "wait_semantic_worker_drained", _fake_drain)
     result = tools.memory_repair("replay_backup", {"dry_run": False, "authorized": True})
     assert result["ok"] is True, result
     assert calls, "replay must drain the evidence worker before responding"
-    assert result["data"]["evidence_worker_drained"] is True
+    assert result["data"]["semantic_worker_drained"] is True
 
     calls.clear()
     preview = tools.memory_repair("replay_backup", {"dry_run": True})

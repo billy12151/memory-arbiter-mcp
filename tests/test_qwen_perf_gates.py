@@ -30,6 +30,11 @@ class FakeEmbedder:
     dim = 2
     last_encode_error = None
 
+    @classmethod
+    def embed_texts(cls, texts):
+        # C1: batch entry used by the index path; fakes delegate per item.
+        return [cls.embed_text(prefix="", body=t) for t in texts]
+
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars: int | None = None) -> EmbedResult:
         text = f"{prefix}\n{body}".casefold()
@@ -74,7 +79,7 @@ def _write_check_scene(tools: MemoryTools, peers: int) -> dict[str, Any]:
     new = tools.memory_write(
         content="连接池上限为 99，队列长度为 99。", subject="new", tags=[], metadata=dict(_META),
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     hits = [
         {
             "memory_id": peer["id"], "id": index, "kind": "text",
@@ -90,7 +95,7 @@ def _write_check_scene(tools: MemoryTools, peers: int) -> dict[str, Any]:
 
 
 def _run_job(monkeypatch: pytest.MonkeyPatch, tools: MemoryTools, scene: dict[str, Any], backend: Any) -> dict[str, Any]:
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(scene["hits"]))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(scene["hits"]))
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(scene["hits"]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     record = tools.db.get_memory(int(scene["new"]["id"]))

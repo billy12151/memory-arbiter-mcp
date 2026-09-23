@@ -755,9 +755,13 @@ def _wide_recall(
     # bool alias carries no narrowing).
     if vector_available and query_embedding is not None:
         evidence_memory_cap = max(pool_cap, 10)
-        evidence_rows = db.evidence_knn(
+        # C4: the evidence channel rides ROW vectors (unit tables retired).
+        # k widened cap*8→cap*16: rows are ~3.4x the units for the same
+        # memory, so the same memory-level recall needs a deeper row window
+        # (calibrated by R@10 + noise-recall gates, plan §3).
+        evidence_rows = db.row_knn(
             query_embedding,
-            k=evidence_memory_cap * 8,
+            k=evidence_memory_cap * 16,
             parent_status_filter=status_filter,
             workspace=ws_canonical,
             exclude_workspaces=exclude_workspaces,

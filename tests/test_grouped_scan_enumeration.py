@@ -66,7 +66,7 @@ def _library_with_misplacement(tools: MemoryTools) -> dict:
         content="生产环境数据库使用 PostgreSQL，端口是 5433。", subject="port-b",
         tags=["db"], workspace="dbpgsql",
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     return {"misplaced": misplaced, "partner": partner}
 
 

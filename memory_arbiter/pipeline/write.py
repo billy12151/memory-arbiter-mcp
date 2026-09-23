@@ -845,7 +845,9 @@ class WritePipeline:
         if not er or not er.embedding:
             return None
         try:
-            hits = self.db.evidence_knn(list(er.embedding), k=8)
+            # C4: row vectors (the subject row carries the strongest
+            # subject-to-subject match this hint lives on — plan A+).
+            hits = self.db.row_knn(list(er.embedding), k=8)
         except Exception:
             return None
         for hit in hits:

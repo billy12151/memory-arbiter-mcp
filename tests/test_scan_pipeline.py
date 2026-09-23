@@ -23,6 +23,13 @@ class FakeEmbedder:
     dim = 2
     last_encode_error = None
 
+    @classmethod
+    def embed_texts(cls, texts: list[str]) -> list["EmbedResult"]:
+        # C1: index-path batch API — the fake has no batch closure, so it
+        # delegates per item (the same route ManagedEmbedder takes when
+        # encode_batch is None).
+        return [cls.embed_text(prefix="", body=text) for text in texts]
+
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
         text = f"{prefix}\n{body}".casefold()
@@ -299,7 +306,7 @@ def test_kick_excludes_evolution_and_keeps_numeric(tmp_path: Path) -> None:
     b = _write(tools, "演进排除乙", "该功能不包含缓存模块")
     n1 = _write(tools, "版本快照甲", "重试次数为 3 次")
     n2 = _write(tools, "版本快照乙", "重试次数为 5 次")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
 
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     assert kick["ok"], kick
@@ -334,7 +341,7 @@ def test_evolution_excluded_write_time_no_notice(tmp_path: Path) -> None:
     assert tools.memory_set_entity(b, "网关", "路由")["data"]["updated"]
     # Version lift re-runs the write-time evidence loop with metadata live.
     tools.memory("update", {"memory_id": b, "new_content": "该功能不包含缓存模块与限流", "reason": "evo"})
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     with tools.db.connection() as conn:
         notices = conn.execute(
             "SELECT COUNT(*) FROM conflicts WHERE source='semantic_evidence'"
@@ -351,7 +358,7 @@ def test_evolution_retroactive_migration_idempotent(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "迁移甲", "重试次数为 3 次")
     b = _write(tools, "迁移乙", "重试次数为 5 次")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
         row = conn.execute(
@@ -410,7 +417,7 @@ def test_kick_idempotent_rescan_no_duplicate_queue_rows(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "幂等甲", "后端使用 postgres 数据库")
     b = _write(tools, "幂等乙", "后端数据库是 postgres 集群")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     first = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     assert first["data"]["complete"] is True
     with tools.db.connection() as conn:
@@ -431,7 +438,7 @@ def test_edit_lifts_suppression_and_requeues_new_identity(tmp_path: Path) -> Non
     # domain now.
     a = _write(tools, "编辑甲", "重试次数为 3 次")
     b = _write(tools, "编辑乙", "重试次数为 5 次")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
         rows = [dict(r) for r in conn.execute("SELECT kind, member_versions FROM scan_queue WHERE kind='conflict'").fetchall()]
@@ -453,7 +460,7 @@ def test_edit_lifts_suppression_and_requeues_new_identity(tmp_path: Path) -> Non
     # (keep the pure numeric sentence shape — extra prose shifts the
     # skeleton and the difference classifier clears the pair).
     tools.memory("update", {"memory_id": a, "new_content": "重试次数为 7 次", "reason": "edit"})
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
         rows_after = [dict(r) for r in conn.execute("SELECT * FROM scan_queue").fetchall()]
@@ -465,7 +472,7 @@ def test_internal_conflict_lands_in_dedicated_structure(tmp_path: Path) -> None:
     # One memory contradicting itself (numeric route is deterministic);
     # heading-separated so the splitter yields two disjoint text units.
     mid = _write(tools, "自相矛盾", "## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     assert kick["ok"]
     pending = tools.db.internal_conflicts.list_pending()
@@ -480,7 +487,7 @@ def test_kick_resume_across_partial_batches(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     for i in range(5):
         _write(tools, f"分批主题{i}", f"分批正文内容{i} postgres")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     first = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 2})
     assert first["data"]["complete"] is False
     assert first["data"]["processed_this_kick"] == 2
@@ -495,7 +502,7 @@ def test_move_after_queue_requeues_in_new_bucket_only(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "新桶甲", "后端使用 postgres 数据库")
     b = _write(tools, "新桶乙", "后端数据库是 postgres 集群")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     tools.memory_govern("move_memories_workspace", {
         "memory_ids": [a], "new_workspace": "ws9", "reason": "re-home", "authorized": True,
@@ -534,7 +541,7 @@ def test_scan_candidates_diagnostic_excludes_evolution(tmp_path: Path) -> None:
     b = _write(tools, "诊断演进乙", "该功能不包含缓存模块")
     n1 = _write(tools, "诊断数值甲", "重试次数为 3 次")
     n2 = _write(tools, "诊断数值乙", "重试次数为 5 次")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     result = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True,
     })
@@ -598,7 +605,7 @@ def test_kick_resumes_after_workspace_suspect_dismissed(tmp_path: Path) -> None:
     mid = _write(tools, "门禁主题", "门禁正文 postgres")
     _enqueue_workspace_item(tools, mid, "dismiss")
     _set_pending_workspace_item_status(tools, "dismissed")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
 
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     assert kick["ok"], kick
@@ -614,7 +621,7 @@ def test_kick_not_blocked_by_confirmed_workspace_row(tmp_path: Path) -> None:
     mid = _write(tools, "门禁主题", "门禁正文 postgres")
     _enqueue_workspace_item(tools, mid, "confirm")
     _set_pending_workspace_item_status(tools, "confirmed")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
 
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     assert kick["ok"], kick

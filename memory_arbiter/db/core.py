@@ -419,13 +419,8 @@ class MemoryDB:
             precomputed_embedding=precomputed_embedding,
         )
 
-    def evidence_knn(
-        self, query_embedding: list[float], *, k: int = 100, parent_status_filter: str = "active",
-        workspace: WorkspaceScope = None, exclude_memory_id: int | None = None,
-        exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
-        conn: sqlite3.Connection | None = None,
-    ) -> list[dict[str, Any]]:
-        return self.evidence.knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id, exclude_workspaces=exclude_workspaces, conn=conn)
+    # (0.17.0 C5: db.evidence_knn — the unit-table KNN forward — was retired
+    # with the unit channel; callers use row_knn.)
 
     def row_knn(
         self, query_embedding: list[float], *, k: int = 5, parent_status_filter: str = "active",

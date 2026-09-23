@@ -59,7 +59,7 @@ def test_scan_duplicates_full_sweep_lightweight(vec_tools: MemoryTools) -> None:
     _write_dup_bypass(tools, "alpha duplicate fact statement")
     _write_for_scan(tools, "beta duplicate fact statement")
     _write_dup_bypass(tools, "beta duplicate fact statement")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     data = _sweep(tools)
     assert data["total_pairs"] == 2
@@ -85,7 +85,7 @@ def test_scan_duplicates_suppresses_recorded_pairs(vec_tools: MemoryTools) -> No
     tools = vec_tools
     _write_for_scan(tools, "gamma duplicate fact statement")
     _write_dup_bypass(tools, "gamma duplicate fact statement")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     page = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 50, "k": 10,
@@ -123,7 +123,7 @@ def test_scan_duplicates_global_cap_and_truncation(
         writer = _write_for_scan if first_pass else _write_dup_bypass
         writer(tools, "alpha duplicate fact statement")
         writer(tools, "beta duplicate fact statement")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     monkeypatch.setattr("memory_arbiter.surfaces.SCAN_DUPLICATES_MAX_RESULTS", 1)
     data = _sweep(tools)
@@ -140,7 +140,7 @@ def test_scan_duplicates_aggregates_across_pages(
         writer = _write_for_scan if first_pass else _write_dup_bypass
         writer(tools, "alpha duplicate fact statement")
         writer(tools, "beta duplicate fact statement")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     monkeypatch.setattr("memory_arbiter.surfaces.SCAN_DUPLICATES_BATCH", 1)
     data = _sweep(tools)
@@ -154,7 +154,7 @@ def test_scan_duplicates_strict_scope_does_not_leak(vec_tools: MemoryTools) -> N
     _write_dup_bypass(tools, "alpha duplicate fact statement", workspace="apisvc")
     _write_for_scan(tools, "outside duplicate fact statement", workspace="dbpgsql")
     _write_dup_bypass(tools, "outside duplicate fact statement", workspace="dbpgsql")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     tools.settings.isolation = "strict"
     tools.settings.workspace = "apisvc"
@@ -184,7 +184,7 @@ def test_scan_duplicates_writes_no_scan_log_and_advances_no_progress(
     tools = vec_tools
     _write_for_scan(tools, "alpha duplicate fact statement")
     _write_dup_bypass(tools, "alpha duplicate fact statement")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     def _no_progress(**kwargs):
         raise AssertionError("scan_duplicates must not advance conflict-scan progress")
@@ -215,7 +215,7 @@ def test_scan_duplicates_page_truncation_propagates(
     _write_for_scan(tools, "shared identical duplicate fact statement")
     for _ in range(3):
         _write_dup_bypass(tools, "shared identical duplicate fact statement")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     monkeypatch.setattr("memory_arbiter.surfaces.SCAN_DUPLICATES_BATCH", 1)
     data = _sweep(tools)
@@ -229,7 +229,7 @@ def test_scan_duplicates_page_ceiling_bounds_work(
     tools = vec_tools
     for index in range(6):
         _write_for_scan(tools, f"clean library row {index}")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     monkeypatch.setattr("memory_arbiter.surfaces.SCAN_DUPLICATES_BATCH", 2)
     monkeypatch.setattr("memory_arbiter.surfaces.SCAN_DUPLICATES_MAX_PAGES", 2)

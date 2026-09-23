@@ -61,7 +61,7 @@ def test_summary_vectors_cover_writes_and_backfill(vec_tools: MemoryTools) -> No
     tools = vec_tools
     _beta_clan(tools, 2)
     _alpha_clan(tools, 1)
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     with tools.db.connection() as conn:
         ids = {int(r["id"]) for r in conn.execute("SELECT id FROM memory_summary_vec")}
@@ -86,7 +86,7 @@ def test_anomaly_scan_flags_misplaced_memory(vec_tools: MemoryTools) -> None:
         content="生产环境数据库使用 PostgreSQL，属于 dbpgsql 的错位记忆。",
         subject="misplaced", tags=["db"], workspace="apisvc",
     )
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
 
     result = tools.memory_repair("scan_workspace_anomalies", {})
     assert result["ok"] is True, result
@@ -128,7 +128,7 @@ def test_anomaly_scan_clean_library_stays_quiet(vec_tools: MemoryTools) -> None:
     # behaviour. 12/12 keeps every neighbourhood own-bucket dominated.
     _beta_clan(tools, 12)
     _alpha_clan(tools, 12)
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
 
     result = tools.memory_repair("scan_workspace_anomalies", {})
     data = result["data"]
@@ -148,7 +148,7 @@ def test_anomaly_scan_cap_ten(vec_tools: MemoryTools, monkeypatch: pytest.Monkey
             content=f"生产环境数据库使用 PostgreSQL，错位条目 {i}。",
             subject=f"misplaced-{i}", tags=["db"], workspace="apisvc",
         )
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
 
     result = tools.memory_repair("scan_workspace_anomalies", {})
     data = result["data"]
@@ -165,7 +165,7 @@ def test_move_stales_the_notice(vec_tools: MemoryTools) -> None:
         content="生产环境数据库使用 PostgreSQL，属于 dbpgsql 的错位记忆。",
         subject="misplaced", tags=["db"], workspace="apisvc",
     )
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     result = tools.memory_repair("scan_workspace_anomalies", {})
     assert result["data"]["findings"]
     with tools.db.connection() as conn:
@@ -202,7 +202,7 @@ def test_anomaly_scan_self_heals_missing_vectors(vec_tools: MemoryTools) -> None
     tools = vec_tools
     _beta_clan(tools, 2)
     _alpha_clan(tools, 2)
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.write_transaction() as conn:
         conn.execute("DELETE FROM memory_summary_vec")
 
@@ -219,7 +219,7 @@ def test_anomaly_scan_requires_numpy(vec_tools: MemoryTools, monkeypatch: pytest
 
     tools = vec_tools
     _beta_clan(tools, 2)
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     real_import = builtins.__import__
 

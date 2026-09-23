@@ -36,9 +36,8 @@ def test_publish_rows_roundtrip_and_rebuild(tmp_path: Path) -> None:
         conn.execute("UPDATE memories SET content=?, content_sha=NULL WHERE id=?", (content, mid))
 
     def _publish(rows, vecs, version=2):
-        return db.evidence.publish(
-            mid, version, evidence_content_hash(content), [], [],
-            rows=rows, row_embeddings=vecs,
+        return db.evidence.publish_rows(
+            mid, version, evidence_content_hash(content), rows, vecs,
         )
 
     rows = [
@@ -47,7 +46,7 @@ def test_publish_rows_roundtrip_and_rebuild(tmp_path: Path) -> None:
     ]
     vecs = [[1.0, 0.1], [0.9, 0.2]]
     outcome = _publish(rows, vecs)
-    assert outcome["published"] and outcome["row_count"] == 2 and outcome["unit_count"] == 0
+    assert outcome["published"] and outcome["row_count"] == 2
 
     current = db.evidence.current_row_vectors(mid, 2, evidence_content_hash(content))
     assert [r.text for r, _v in current] == [r.text for r in rows]
@@ -69,9 +68,8 @@ def test_publish_rows_roundtrip_and_rebuild(tmp_path: Path) -> None:
     assert total == 1 and vec_total == 1
 
     # 形状校验：rows 与 row_embeddings 数量不齐 → 拒绝
-    bad = db.evidence.publish(
-        mid, 2, evidence_content_hash(content), [], [],
-        rows=[_row("x" * 20, 0)], row_embeddings=[],
+    bad = db.evidence.publish_rows(
+        mid, 2, evidence_content_hash(content), [_row("x" * 20, 0)], [],
     )
     assert bad["outcome"] == "invalid_row_embeddings" and not bad["published"]
 
@@ -97,10 +95,10 @@ def test_row_knn_matches_bruteforce_topk(tmp_path: Path) -> None:
     for mid, text, ridx, vec, _dist in published:
         by_memory.setdefault(mid, []).append((text, ridx, vec))
     for mid, entries in by_memory.items():
-        outcome = db.evidence.publish(
-            mid, 2, evidence_content_hash(content_of[mid]), [], [],
-            rows=[_row(text, ridx) for text, ridx, _ in entries],
-            row_embeddings=[vec for _, _, vec in entries],
+        outcome = db.evidence.publish_rows(
+            mid, 2, evidence_content_hash(content_of[mid]),
+            [_row(text, ridx) for text, ridx, _ in entries],
+            [vec for _, _, vec in entries],
         )
         assert outcome.get("published"), outcome
     query = [1.0, 0.0]
@@ -123,9 +121,8 @@ def test_row_vec_parent_status_flips_on_retire(tmp_path: Path) -> None:
     mid = twr._write(tools, "alpha one", "projA")["data"]["id"]
     assert twr._confirm_pending(tools, mid)["ok"] is True
     content = "alpha one"
-    db.evidence.publish(
-        mid, 2, evidence_content_hash(content), [], [],
-        rows=[_row("alpha one row", 0)], row_embeddings=[[1.0, 0.1]],
+    db.evidence.publish_rows(
+        mid, 2, evidence_content_hash(content), [_row("alpha one row", 0)], [[1.0, 0.1]],
     )
     with db.connection() as conn:
         status = conn.execute(

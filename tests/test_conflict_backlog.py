@@ -181,7 +181,7 @@ def test_drain_consumes_stored_extraction_and_lands_notice(tmp_path: Path) -> No
         content="连接池上限为 10。", subject="a", tags=[], metadata=meta)["data"]
     b = tools.memory_write(
         content="连接池上限为 99。", subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     result = tools.db.conflict_backlog.enqueue(
         candidate_key_hash="kb-1",
         left_memory_id=a["id"], left_version=1,

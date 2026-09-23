@@ -208,9 +208,14 @@ class _DoctorCtx:
 
         total = int(conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
         counts = indexable_coverage_counts(conn)
-        units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
-        evidence_stale = int(conn.execute("SELECT COUNT(*) FROM memory_evidence e JOIN memories m ON m.id=e.memory_id WHERE e.memory_version<>m.version").fetchone()[0])
-        orphan = int(conn.execute("SELECT COUNT(*) FROM memory_evidence e WHERE NOT EXISTS(SELECT 1 FROM memories m WHERE m.id=e.memory_id)").fetchone()[0])
+        # C5: these counters read the row store; a pre-additive database (no
+        # memory_row yet) reports zeros instead of crashing the whole check.
+        try:
+            units = int(conn.execute("SELECT COUNT(*) FROM memory_row").fetchone()[0])
+            evidence_stale = int(conn.execute("SELECT COUNT(*) FROM memory_row e JOIN memories m ON m.id=e.memory_id WHERE e.memory_version<>m.version").fetchone()[0])
+            orphan = int(conn.execute("SELECT COUNT(*) FROM memory_row e WHERE NOT EXISTS(SELECT 1 FROM memories m WHERE m.id=e.memory_id)").fetchone()[0])
+        except sqlite3.OperationalError:
+            units = evidence_stale = orphan = 0
         open_notices = int(conn.execute(
             "SELECT COUNT(*) FROM conflicts WHERE notice_type IS NOT NULL "
             "AND notice_delivery_status IN ('pending','delivered')"
@@ -285,7 +290,7 @@ def _c_row_vector_coverage(ctx: _DoctorCtx) -> Finding:
             "SELECT COUNT(DISTINCT r.memory_id) FROM memory_row r"
         ).fetchone()[0])
         eligible = int(ctx.conn.execute(
-            "SELECT COUNT(DISTINCT e.memory_id) FROM memory_evidence e"
+            "SELECT COUNT(DISTINCT e.memory_id) FROM memory_row e"
         ).fetchone()[0])
     except sqlite3.Error:
         return _finding(
@@ -857,7 +862,7 @@ def _d_vector_space(ctx: _DeepCtx) -> Finding:
 
 
 def _d_vector_table_dimension(ctx: _DeepCtx) -> Finding:
-    evidence_dim = vec_table_dimension(ctx.base.conn, "memory_evidence_vec")
+    evidence_dim = vec_table_dimension(ctx.base.conn, "memory_row_vec")
     workspace_dim = vec_table_dimension(ctx.base.conn, "workspace_canonicals_vec")
     # Lazy table creation means absent tables are only a problem once the
     # index should be live; existing tables must agree with the active dim.
@@ -876,13 +881,13 @@ def _d_vector_table_dimension(ctx: _DeepCtx) -> Finding:
 
 def _d_vector_evidence_rows(ctx: _DeepCtx) -> Finding:
     conn = ctx.base.conn
-    evidence_vectors = _safe_count(conn, "memory_evidence_vec")
+    evidence_vectors = _safe_count(conn, "memory_row_vec")
     orphan_vectors = _safe_count(
-        conn, "memory_evidence_vec v LEFT JOIN memory_evidence e ON e.id=v.id",
+        conn, "memory_row_vec v LEFT JOIN memory_row e ON e.id=v.id",
         "e.id IS NULL",
     )
     missing_vectors = _safe_count(
-        conn, "memory_evidence e LEFT JOIN memory_evidence_vec v ON v.id=e.id",
+        conn, "memory_row e LEFT JOIN memory_row_vec v ON v.id=e.id",
         "v.id IS NULL",
     )
     # Absent tables are expected before the first embedder build (lazy
@@ -1020,7 +1025,7 @@ def _d_evidence_unit_budget(ctx: _DeepCtx) -> Finding | None:
         checked_units = 0
         worst_tokens = 0
         for row in ctx.base.conn.execute(
-            "SELECT text FROM memory_evidence WHERE length(text) > ?",
+            "SELECT text FROM memory_row WHERE length(text) > ?",
             (prefilter,),
         ).fetchall():
             checked_units += 1

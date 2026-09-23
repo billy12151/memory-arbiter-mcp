@@ -595,7 +595,8 @@ class SchemaStore:
     def missing_vector_tables(self) -> list[str]:
         """Read-only preview of derived vec0 tables requiring recreation."""
         expected = {
-            "memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec",
+            # C5: the evidence channel's vec table is the row store now.
+            "memory_row_vec", "workspace_canonicals_vec", "subject_tags_vec",
             "memory_summary_vec",
         }
         try:
@@ -603,7 +604,7 @@ class SchemaStore:
                 present = {
                     str(row[0]) for row in conn.execute(
                         "SELECT name FROM sqlite_master WHERE type='table' "
-                        "AND name IN ('memory_evidence_vec','workspace_canonicals_vec',"
+                        "AND name IN ('memory_row_vec','workspace_canonicals_vec',"
                         "'subject_tags_vec','memory_summary_vec')"
                     )
                 }

@@ -379,6 +379,9 @@ class _DoctorProbeEmbedder:
         return EmbedResult(embedding=[0.5] * self._dim, truncated=False,
                            original_tokens=len(body), used_tokens=len(body))
 
+    def embed_texts(self, texts):
+        return [self.embed_text(prefix="", body=t) for t in texts]
+
     def tokenize_locked(self, text: str) -> list[int]:
         if self._tokenize_raises:
             raise RuntimeError("tokenizer unavailable")
@@ -405,9 +408,9 @@ class TestDoctorDeepDeviceAndBudget:
             )
             memory_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             conn.execute(
-                """INSERT INTO memory_evidence(memory_id,memory_version,content_hash,
-                   unit_index,kind,text,start_offset,end_offset,created_at)
-                   VALUES(?,1,'hash',0,'text',?,0,?,'2026-01-01T00:00:00Z')""",
+                """INSERT INTO memory_row(memory_id,memory_version,content_hash,
+                   row_index,kind,text,start_offset,end_offset,created_at)
+                   VALUES(?,1,'hash',0,'sentence',?,0,?,'2026-01-01T00:00:00Z')""",
                 (memory_id, unit_text, len(unit_text)),
             )
         return settings, db

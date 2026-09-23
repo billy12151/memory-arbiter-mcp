@@ -42,7 +42,7 @@ def test_suspect_queued_and_gate_pass_moves(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _seed_cluster(tools, "proja", 12, "postgres 数据库")
     misplaced = _seed_misplaced(tools, "postgres 数据库")
-    assert tools.wait_evidence_worker_drained(timeout=15)
+    assert tools.wait_semantic_worker_drained(timeout=15)
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
     assert kick["ok"], kick
     page = _page(tools)
@@ -75,7 +75,7 @@ def test_gate_refuses_low_conf_and_vote_mismatch(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _seed_cluster(tools, "proja", 12, "postgres 数据库")
     misplaced = _seed_misplaced(tools, "postgres 数据库")
-    tools.wait_evidence_worker_drained(timeout=15)
+    tools.wait_semantic_worker_drained(timeout=15)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
     # conf below 0.8 → gate_failed, row stays pending
     result = _submit(tools, [{
@@ -102,7 +102,7 @@ def test_protected_buckets_never_move_autonomously(tmp_path: Path) -> None:
     _seed_cluster(tools, "mema-twin", 12, "postgres 偏好素材")
     # a memory in a normal bucket whose neighbors live in the protected bucket
     misplaced = _write(tools, "疑似写进偏好桶", "postgres 偏好素材 内容", workspace="pgsqlproj")
-    tools.wait_evidence_worker_drained(timeout=15)
+    tools.wait_semantic_worker_drained(timeout=15)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
     page = _page(tools)
     suspects = [i for i in page["items"] if i["kind"] == "workspace" and i["memory_id"] == misplaced]
@@ -127,7 +127,7 @@ def test_rollback_restores_auto_move(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _seed_cluster(tools, "proja", 12, "postgres 数据库")
     misplaced = _seed_misplaced(tools, "postgres 数据库")
-    tools.wait_evidence_worker_drained(timeout=15)
+    tools.wait_semantic_worker_drained(timeout=15)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
     result = _submit(tools, [{
         "kind": "workspace", "memory_id": misplaced,
@@ -166,7 +166,7 @@ def test_multi_family_mention_downgrades_to_hint(tmp_path: Path) -> None:
     # subject mentioning both
     _seed_cluster(tools, "pgsqlc", 3, "无关内容")
     multi = _write(tools, "proja 与 pgsqlc 联合决议记录", "postgres 数据库 相关", workspace="pgsqlproj")
-    tools.wait_evidence_worker_drained(timeout=15)
+    tools.wait_semantic_worker_drained(timeout=15)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
     # E7-4 unit-level check: the multi-family detector itself must flag the
     # subject that names two registered canonicals.

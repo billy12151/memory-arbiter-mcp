@@ -24,11 +24,15 @@ from .evidence import _normalize_with_map, _sentence_slices
 
 ROW_TEXT_MAX_CHARS = 200
 ROW_MIN_CHARS = 8
+# C3 fallback row cap: the leading-slice sentence row emitted when the content
+# yields nothing splittable. The span is the SAME slice the text came from —
+# content[start:end] == row text keeps the span contract intact.
+FALLBACK_ROW_CHARS = 200
 
 
 @dataclass(frozen=True)
 class RowSegment:
-    kind: str  # "sentence" | "table_row"
+    kind: str  # "subject" | "sentence" | "table_row"
     text: str
     start_offset: int
     end_offset: int
@@ -130,10 +134,17 @@ def segment_rows(subject: str, content: str) -> list[RowSegment]:
 
     Offsets are source coordinates (same normalization-to-source map as the
     evidence units), so ``content[start:end]`` always contains the row text
-    after whitespace collapse. The subject is accepted for signature symmetry
-    with ``local_text_units`` and deliberately ignored (R13).
+    after whitespace collapse — EXCEPT the subject row (span (0,0), no
+    content span; hit_spans drops it, mirroring the unit channel's subject
+    convention).
+
+    C3 (owner 2026-09-23, plan A+): a non-empty subject always lands a
+    leading ``kind="subject"`` row — self-recall, default-bucket placement,
+    and subject-only memories keep their strongest signal in the row world.
+    A memory whose content yields no rows at all gets ONE fallback sentence
+    row over the leading FALLBACK_ROW_CHARS slice, so every indexable memory
+    carries at least one row.
     """
-    del subject  # not indexed: subject_tags_vec already owns that signal
     rows: list[tuple[str, str, int, int]] = []
     spans = _line_spans(content or "")
 
@@ -193,7 +204,24 @@ def segment_rows(subject: str, content: str) -> list[RowSegment]:
     flush_table()
     flush_prose()
 
+    # C3 fallback: nothing splittable from the content — one sentence row
+    # over the leading slice keeps every indexable memory in vector recall
+    # (「很短。」/header-only/short-clause memories). The span IS the slice,
+    # so content[start:end] == row text (never truncated-text/full-span).
+    if not rows and content:
+        fallback_text = content[:FALLBACK_ROW_CHARS]
+        if fallback_text.strip():
+            rows.append(("sentence", fallback_text, 0, len(fallback_text)))
+
     rows.sort(key=lambda item: (item[2], item[3]))
+    if subject and subject.strip():
+        # C3 A+ (owner 2026-09-23): the subject row is the leading row. Span
+        # (0,0) marks "no content span" — hit_spans drops it, the same
+        # convention the unit channel used for subject units. R13's
+        # "subject not indexed" is retired; subject_tags_vec keeps its own
+        # sorting duty, this row serves evidence recall / self-recall /
+        # default-bucket placement.
+        rows.insert(0, ("subject", subject.strip(), 0, 0))
     return [
         RowSegment(
             kind=kind, text=text, start_offset=start, end_offset=end, row_index=index

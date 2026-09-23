@@ -49,6 +49,9 @@ def active_dim_on_connection(conn: sqlite3.Connection) -> int | None:
                 pass
     except sqlite3.Error:
         pass
+    dim = vec_table_dimension(conn, "memory_row_vec")
+    if dim is not None:
+        return dim
     return vec_table_dimension(conn, "memory_evidence_vec")
 
 
@@ -503,12 +506,12 @@ class MetaStore:
             self.set_meta(conn, ACTIVE_DIM_META_KEY, str(int(dim)))
 
     def mark_space_rebuild_started(self) -> None:
-        """Record the evidence-id epoch of an embedding-space rebuild (idempotent).
+        """Record the row-id epoch of an embedding-space rebuild (idempotent).
 
-        memory_evidence ids are AUTOINCREMENT-monotonic, so every row with
+        C5: memory_row ids are AUTOINCREMENT-monotonic, so every row with
         id > epoch was written after this mark — in the target embedding
         space for single-process flows. The vec channel flips back to ready
-        only once every non-deleted memory has fresh-version evidence above
+        only once every non-deleted memory has fresh-version rows above
         the epoch (timestamp comparison is deliberately avoided: second
         granularity would let same-second old-space rows count as rebuilt)."""
         db = self._db
@@ -518,7 +521,7 @@ class MetaStore:
             if self.get_meta(conn, "space_rebuild_evidence_id") is None:
                 epoch = int(
                     conn.execute(
-                        "SELECT COALESCE(MAX(id), 0) FROM memory_evidence"
+                        "SELECT COALESCE(MAX(id), 0) FROM memory_row"
                     ).fetchone()[0]
                 )
                 self.set_meta(conn, "space_rebuild_evidence_id", str(epoch))
@@ -542,14 +545,17 @@ class MetaStore:
         # evidence units) are dropped by the has_indexable_text check in
         # space_rebuild_pending_ids / maybe_complete_space_rebuild, so they
         # can never block the mismatch->ready flip.
+        # C5: the rebuild completeness oracle is the ROW store now (unit
+        # tables are retired); same epoch discipline (rows written after the
+        # rebuild epoch count as republished).
         return f"""SELECT m.id AS id, m.subject AS subject, m.content AS content
                FROM memories m
                WHERE m.status!='deleted'
                  AND {INDEXABLE_PREFILTER_SQL}
                  AND NOT EXISTS(
-                   SELECT 1 FROM memory_evidence e
-                   WHERE e.memory_id=m.id AND e.memory_version=m.version
-                     AND e.id > ?
+                   SELECT 1 FROM memory_row r
+                   WHERE r.memory_id=m.id AND r.memory_version=m.version
+                     AND r.id > ?
                  )"""
 
     def space_rebuild_pending_ids(self, limit: int) -> list[int]:
@@ -569,8 +575,9 @@ class MetaStore:
         with db.connection() as conn:
             epoch = self.get_meta(conn, "space_rebuild_evidence_id")
             if epoch is None:
+                # C5: the row store carries the epoch family now.
                 epoch = conn.execute(
-                    "SELECT COALESCE(MAX(id), 0) FROM memory_evidence"
+                    "SELECT COALESCE(MAX(id), 0) FROM memory_row"
                 ).fetchone()[0]
             last_id = 0
             while len(ids) < wanted:
@@ -616,8 +623,8 @@ class MetaStore:
                         FROM memories m
                         WHERE m.status!='deleted' AND m.id>? {workspace_sql}
                           AND {INDEXABLE_PREFILTER_SQL}
-                          AND NOT EXISTS(SELECT 1 FROM memory_evidence e
-                                         WHERE e.memory_id=m.id AND e.memory_version=m.version)
+                          AND NOT EXISTS(SELECT 1 FROM memory_row r
+                                         WHERE r.memory_id=m.id AND r.memory_version=m.version)
                         ORDER BY m.id LIMIT ?""",
                     (last_id, *params, wanted),
                 ).fetchall()
@@ -668,49 +675,31 @@ class MetaStore:
                     str(row["subject"] or ""), str(row["content"] or "")
                 ):
                     return False
-            obsolete_ids = [
-                int(row["id"])
-                for row in conn.execute(
-                    "SELECT e.id FROM memory_evidence e "
-                    "LEFT JOIN memories m ON m.id=e.memory_id "
-                    "WHERE m.id IS NULL OR m.status='deleted'"
-                )
-            ]
-            for start in range(0, len(obsolete_ids), 500):
-                chunk = obsolete_ids[start:start + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                conn.execute(
-                    f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})",
-                    chunk,
-                )
-            if obsolete_ids:
-                conn.execute(
-                    "DELETE FROM memory_evidence WHERE id IN ("
-                    "SELECT e.id FROM memory_evidence e LEFT JOIN memories m "
-                    "ON m.id=e.memory_id WHERE m.id IS NULL OR m.status='deleted')"
-                )
-            orphan_vector_ids = [
-                int(row["id"])
-                for row in conn.execute(
-                    "SELECT v.id FROM memory_evidence_vec v "
-                    "LEFT JOIN memory_evidence e ON e.id=v.id WHERE e.id IS NULL"
-                )
-            ]
-            for start in range(0, len(orphan_vector_ids), 500):
-                chunk = orphan_vector_ids[start:start + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                conn.execute(
-                    f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})",
-                    chunk,
-                )
-            evidence_ids = {
-                int(row["id"]) for row in conn.execute("SELECT id FROM memory_evidence")
+            # C5: obsolete/orphan cleanup and the final parity check run on
+            # the ROW store (single subquery deletes, no id round-trips).
+            conn.execute(
+                "DELETE FROM memory_row_vec WHERE id IN ("
+                "SELECT r.id FROM memory_row r LEFT JOIN memories m "
+                "ON m.id=r.memory_id WHERE m.id IS NULL OR m.status='deleted')"
+            )
+            conn.execute(
+                "DELETE FROM memory_row WHERE memory_id IN ("
+                "SELECT memory_id FROM memory_row r LEFT JOIN memories m "
+                "ON m.id=r.memory_id WHERE m.id IS NULL OR m.status='deleted')"
+            )
+            conn.execute(
+                "DELETE FROM memory_row_vec WHERE id IN ("
+                "SELECT v.id FROM memory_row_vec v "
+                "LEFT JOIN memory_row r ON r.id=v.id WHERE r.id IS NULL)"
+            )
+            row_ids = {
+                int(row["id"]) for row in conn.execute("SELECT id FROM memory_row")
             }
             vector_ids = {
                 int(row["id"])
-                for row in conn.execute("SELECT id FROM memory_evidence_vec")
+                for row in conn.execute("SELECT id FROM memory_row_vec")
             }
-            if vector_ids != evidence_ids:
+            if vector_ids != row_ids:
                 return False
             self.set_meta(conn, "state", "ready")
             self.set_meta(conn, "active_space_id", embedding_space_id)
@@ -764,7 +753,8 @@ class MetaStore:
                 # arms the standard mismatch rebuild instead.
                 dim_rebuilt = False
                 if active_dim is not None:
-                    existing_dim = vec_table_dimension(conn, "memory_evidence_vec")
+                    existing_dim = (vec_table_dimension(conn, "memory_row_vec")
+                                  or vec_table_dimension(conn, "memory_evidence_vec"))
                     if existing_dim is not None and existing_dim != int(active_dim):
                         self._db.schema.rebuild_vec_tables(conn, int(active_dim))
                         dim_rebuilt = True
@@ -785,23 +775,15 @@ class MetaStore:
                     # Memories whose only rows were written during the aborted
                     # rebuild lose all coverage and resurface as stale
                     # candidates for the next rebuild_evidence run.
-                    foreign_ids = [
-                        int(row["id"]) for row in conn.execute(
-                            "SELECT id FROM memory_evidence WHERE id > ?",
-                            (epoch_int,),
-                        ).fetchall()
-                    ]
-                    # Chunked: unbounded IN (...) lists exceed the variable
-                    # cap on SQLite builds compiled with the classic limits.
-                    for start in range(0, len(foreign_ids), 500):
-                        chunk = foreign_ids[start:start + 500]
-                        placeholders = ",".join("?" for _ in chunk)
-                        conn.execute(
-                            f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})",
-                            chunk,
-                        )
+                    # C5: the purge runs on the row store (subquery form —
+                    # no id round-trip, no chunk cap concern).
                     conn.execute(
-                        "DELETE FROM memory_evidence WHERE id > ?", (epoch_int,)
+                        "DELETE FROM memory_row_vec WHERE id IN "
+                        "(SELECT id FROM memory_row WHERE id > ?)",
+                        (epoch_int,),
+                    )
+                    conn.execute(
+                        "DELETE FROM memory_row WHERE id > ?", (epoch_int,)
                     )
                 if dim_rebuilt:
                     # The table rebuild above wiped all vectors (both spaces');
@@ -844,7 +826,8 @@ class MetaStore:
             # the new dim, atomically with the mismatch flip, so the rebuild
             # flow can republish into fresh tables.
             if active_dim is not None:
-                existing_dim = vec_table_dimension(conn, "memory_evidence_vec")
+                existing_dim = (vec_table_dimension(conn, "memory_row_vec")
+                                  or vec_table_dimension(conn, "memory_evidence_vec"))
                 if existing_dim is not None and existing_dim != int(active_dim):
                     self._db.schema.rebuild_vec_tables(conn, int(active_dim))
 

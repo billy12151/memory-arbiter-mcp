@@ -81,7 +81,7 @@ def test_epoch_arm_expires_old_epoch_queue_rows() -> None:
     tools = make_tools(__import__("pathlib").Path(__import__("tempfile").mkdtemp()))
     a = _write(tools, "过期甲", "数据库是 MySQL")
     b = _write(tools, "过期乙", "数据库是 PostgreSQL")
-    tools.wait_evidence_worker_drained(timeout=15)
+    tools.wait_semantic_worker_drained(timeout=15)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
         pending = conn.execute(
@@ -123,7 +123,7 @@ def test_detector_bump_does_not_resurrect_dismissed_pairs(monkeypatch, tmp_path)
     tools = make_tools(tmp_path)
     a = _write(tools, "换代甲", "重试次数为 3 次")
     b = _write(tools, "换代乙", "重试次数为 5 次")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     with tools.db.connection() as conn:
         row = conn.execute(

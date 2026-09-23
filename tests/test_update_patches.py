@@ -10,21 +10,17 @@ from typing import Any
 
 import pytest
 
-from memory_arbiter.config import Settings
-from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
 
+from test_vnext_evidence import make_tools
 
-def make_tools(tmp_path: Path) -> MemoryTools:
-    pytest.importorskip("sqlite_vec")
-    model = tmp_path / "fake.gguf"
-    model.write_bytes(b"fake")
-    settings = Settings(
-        db_path=tmp_path / "p.sqlite3",
-        backup_jsonl=tmp_path / "backup.jsonl",
-        embedding_model_path=model,
-    )
-    return MemoryTools(settings, MemoryDB(settings))
+# 0.17.0: the edit path now unconditionally rewrites the row store on every
+# content edit (DELETE FROM memory_row[_vec] + republish), so the test env
+# must mirror a healthy embedder-built library — FakeEmbedder installed and
+# the lazy vec0 tables created (the canonical make_tools from
+# test_vnext_evidence does exactly that; a bare fake.gguf model path leaves
+# memory_row_vec nonexistent and the edit transaction rolls back with
+# "no such table").
 
 
 def _write(tools: MemoryTools, content: str) -> dict[str, Any]:

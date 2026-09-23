@@ -1,7 +1,8 @@
-"""rowseg.py unit coverage — 0.17.0 P2-2.1（方案 §4）。
+"""rowseg.py unit coverage — 0.17.0 P2-2.1 + C3（方案 v3 A+）。
 
 分段器是行级向量的地基：offset 对拍（与 evidence 单元同一坐标纪律）、
-表格表头拼接、标题/subject 不索引、≥8 字过滤、块边界（空行/标题分隔表格）。
+表格表头拼接、标题不索引、≥8 字过滤、块边界（空行/标题分隔表格）；
+C3：subject 行置首（A+，span(0,0) 无内容 span）+ 短内容兜底行。
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ def test_sentence_offsets_roundtrip() -> None:
     rows = segment_rows("星澜网关超时", content)
     sentences = [r for r in rows if r.kind == "sentence"]
     assert len(sentences) == 2
+    assert rows[0].kind == "subject"  # C3：subject 行置首
     for row in sentences:
         # 源坐标纪律：collapse(content[start:end]) 必含 collapse(text)
         span = _collapse(content[row.start_offset : row.end_offset])
@@ -41,11 +43,27 @@ def test_short_sentence_filtered_and_heading_skipped() -> None:
     )  # 4 字短句低于 8 字过滤线（A6 记录在案）
 
 
-def test_subject_ignored() -> None:
+def test_subject_row_leads() -> None:
+    """C3 A+：subject 行置首（span(0,0)=无内容 span），content 空也兜住。"""
     rows = segment_rows("只有主题没有正文", "")
-    assert rows == []
+    assert len(rows) == 1 and rows[0].kind == "subject"
+    assert rows[0].text == "只有主题没有正文"
+    assert (rows[0].start_offset, rows[0].end_offset) == (0, 0)
+    assert rows[0].row_index == 0
     rows2 = segment_rows("主题甲", "正文一句话长度足够进入索引，这里是完整句子。")
-    assert all(r.text != "主题甲" for r in rows2)
+    assert rows2[0].kind == "subject" and rows2[0].text == "主题甲"
+
+
+def test_short_content_fallback_row() -> None:
+    """C3 兜底：拆不出行的内容出一条前 200 字 sentence 行，span=同切片。"""
+    rows = segment_rows("", "很短。")
+    assert len(rows) == 1 and rows[0].kind == "sentence"
+    assert rows[0].text == "很短。" and rows[0].end_offset == len("很短。")
+    long_short = "".join(["很短。" for _ in range(60)])  # 每句 3 字，全部 <8 字
+    rows2 = segment_rows("", long_short)
+    assert len(rows2) == 1 and rows2[0].kind == "sentence"
+    assert rows2[0].text == long_short[:200]
+    assert long_short[rows2[0].start_offset:rows2[0].end_offset] == rows2[0].text
 
 
 def test_table_row_text_pairs_header_with_value() -> None:
@@ -105,7 +123,7 @@ def test_blank_line_separates_two_tables() -> None:
 def test_stray_pipe_line_is_prose() -> None:
     content = "这句话里有一个 | 竖线的散文内容，不应触发表格判断逻辑的。\n"
     rows = segment_rows("主题", content)
-    assert all(r.kind == "sentence" for r in rows)
+    assert all(r.kind == "sentence" for r in rows if r.kind != "subject")
 
 
 def test_row_text_truncated_at_200() -> None:

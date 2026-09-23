@@ -304,20 +304,57 @@ class MemoryTools:
     def _enqueue_local_text_index(
         self, memory_id: int, record: dict[str, Any] | None = None,
         *, trusted_applying_context: TrustedApplyingContext | None = None,
+        recheck_conflicts: bool = True,
     ) -> dict[str, Any]:
+        """C2 (0.17.0 worker merge): enqueue the ONE semantic job that does
+        indexing AND detection. The old two-queue chain (evidence worker
+        indexes → forwards to the semantic worker) is gone; the local-text
+        index worker remains only for boot backfill / repair.
+
+        ``recheck_conflicts=False`` (conflict-apply edits §15.3, replay
+        postprocess) enqueues an index_only job: segment + batch-embed +
+        publish, no detection — same queue, same ordering guarantees.
+        ``semantic_conflict_on_write == "off"`` degrades EVERY job to
+        index_only the same way (checked again at job time, so toggling the
+        setting needs no queue surgery).
+        """
         current = record or self.db.get_memory(int(memory_id)) or {}
         version = int(current.get("version") or 1)
-        task_id = f"semantic:{int(memory_id)}@{version}"
-        self._semantic_worker.reserve(task_id)
-        snapshot: dict[str, Any] = {"version": version, "task_id": task_id}
+        # C2: index-only jobs (recheck opt-out OR the global off switch —
+        # one predicate, both the flag and the id derive from it) carry
+        # their own monotonic task id: the queue's completed-dedupe must not
+        # swallow repair retries, and an off-period job must never occupy
+        # the normal task slot a later on-period enqueue waits on.
+        index_only = (
+            not recheck_conflicts
+            or self.settings.semantic_conflict_on_write == "off"
+        )
+        task_id = (
+            f"semantic:{int(memory_id)}@{version}!index{time.monotonic_ns()}"
+            if index_only
+            else f"semantic:{int(memory_id)}@{version}"
+        )
+        content = str(current.get("content") or "")
+        content_hash = (
+            str(current.get("content_sha") or "")
+            or hashlib.sha256(content.encode("utf-8")).hexdigest()
+        )
+        snapshot: dict[str, Any] = {
+            "memory_id": int(memory_id),
+            "version": version,
+            "content_hash": content_hash,
+            "task_id": task_id,
+            "dedupe_key": task_id,
+        }
         if trusted_applying_context is not None:
             snapshot["trusted_applying_context"] = trusted_applying_context.to_dict()
-        result = self._evidence_worker.enqueue(int(memory_id), snapshot)
-        if result.get("status") != "queued":
-            self._semantic_worker.complete(
-                task_id,
-                {"status": "incomplete", "reason": f"evidence_index_{result.get('status') or 'rejected'}", "notices_created": 0},
-            )
+        # C2: index_only is decided AT ENQUEUE TIME (recheck opt-out or the
+        # global off switch). The job body itself only honours the snapshot
+        # flag, so direct _process_semantic_conflict_job calls (tests, the
+        # harness) always run the full detection regardless of the switch.
+        if index_only:
+            snapshot["index_only"] = True
+        result = self._semantic_worker.enqueue(int(memory_id), snapshot)
         return {**result, "semantic_task_id": task_id, "semantic_dedupe_key": task_id}
 
     def _enqueue_content_postcommit(
@@ -330,7 +367,9 @@ class MemoryTools:
         task_id = index.get("semantic_task_id")
         # 0 (semantic_conflict.notice_sync_wait_ms=0) = never block the write
         # response on the post-commit check: batch ingestion still gets the
-        # job run and notices deliver on a later response.
+        # job run and notices deliver on a later response. C2: the sync wait
+        # now covers the WHOLE job (embed+publish+detect) — the window is
+        # unchanged, the chain link it used to wait behind no longer exists.
         wait_ms = max(0, int(self.settings.semantic_conflict_notice_sync_wait_ms))
         can_check = bool(self._embedding_configured()) and self.settings.semantic_conflict_on_write != "off"
         completed = (
@@ -342,7 +381,7 @@ class MemoryTools:
         status = "deferred" if not can_check else "async"
         check: dict[str, Any] = {"status": status, "task_id": task_id, "dedupe_key": task_id}
         if not can_check:
-            check["reason"] = "waiting_for_evidence_index"
+            check["reason"] = "semantic_conflict_off"
         return index, check
 
     def _post_commit(
@@ -350,7 +389,7 @@ class MemoryTools:
         *, recheck_conflicts: bool,
         trusted_applying_context: TrustedApplyingContext | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Single write-path post-commit entry: index always, recheck explicitly.
+        """Single write-path post-commit entry: one job, recheck explicitly.
 
         Every writer states whether the semantic-conflict check re-enters for
         this write (recheck_conflicts) instead of each call site hand-picking
@@ -361,7 +400,11 @@ class MemoryTools:
         """
         if not recheck_conflicts:
             return (
-                self._enqueue_local_text_index(memory_id, record),
+                self._enqueue_local_text_index(
+                    memory_id, record,
+                    trusted_applying_context=trusted_applying_context,
+                    recheck_conflicts=False,
+                ),
                 {"status": "skipped", "reason": "recheck_disabled"},
             )
         return self._enqueue_content_postcommit(
@@ -1685,6 +1728,12 @@ class MemoryTools:
         }
 
     def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        # C2 (0.17.0 worker merge): the job IS the indexer now. index_only
+        # snapshots (conflict-apply edits §15.3, replay postprocess, the
+        # global off switch — stamped at enqueue time) run the index phase
+        # only: segment + batch-embed + publish, no detection, receipt says so.
+        if snapshot.get("index_only"):
+            return self._evidence.index_rows_in_job(memory_id, snapshot)
         result = self._evidence.process_conflicts(memory_id, snapshot)
         # 0.17.0 P2-5.3: the zero-Qwen claims channel rides the same
         # post-commit job (additive receipt keys; never blocks the text path).

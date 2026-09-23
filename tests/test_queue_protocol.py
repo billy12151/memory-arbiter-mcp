@@ -37,7 +37,7 @@ def test_page_returns_pair_items_with_evidence_quotes(tmp_path: Path) -> None:
     # pairs are the excluded evolution domain).
     a = _write(tools, "协议甲", "重试次数为 3 次")
     b = _write(tools, "协议乙", "重试次数为 5 次")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     items = [item for item in page["items"] if item["kind"] == "conflict"]
@@ -57,7 +57,7 @@ def test_page_closure_merges_pairs_sharing_a_member(tmp_path: Path) -> None:
     a = _write(tools, "闭包甲", "重试次数为 3 次")
     b = _write(tools, "闭包乙", "重试次数为 5 次")
     c = _write(tools, "闭包丙", "重试次数为 7 次")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     conflict_items = [item for item in page["items"] if item["kind"] == "conflict"]
@@ -71,7 +71,7 @@ def test_page_closure_merges_pairs_sharing_a_member(tmp_path: Path) -> None:
 def test_page_includes_internal_conflicts(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _write(tools, "自相矛盾协议", "## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     # 0.16.4 §3: one aggregated item per MEMORY (kind internal_memory).
@@ -94,7 +94,7 @@ def test_submit_dismiss_lands_not_a_conflict_and_expires_queue_row(tmp_path: Pat
     # exclusion, which filters only scan_numeric_autoreject rows.
     a = _write(tools, "驳回甲", "重试次数为 3 次")
     b = _write(tools, "驳回乙", "重试次数为 5 次")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     hashes = [
@@ -128,7 +128,7 @@ def test_group_dismiss_suppresses_all_pairs(tmp_path: Path) -> None:
     _write(tools, "组甲", "后端使用 postgres 数据库")
     _write(tools, "组乙", "后端数据库是 postgres 集群")
     _write(tools, "组丙", "数据库选型是 postgres 主库")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     groups = [item for item in page["items"] if item["kind"] == "conflict" and item["pair_count"] > 1]
@@ -155,7 +155,7 @@ def test_submit_confirm_promotes_open_conflict(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _write(tools, "确证甲", "数据库是 MySQL")
     _write(tools, "确证乙", "数据库是 PostgreSQL")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     conflict_items = [item for item in page["items"] if item["kind"] == "conflict"]
@@ -198,7 +198,7 @@ def test_submit_confirm_with_stale_versions_expires_row(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _write(tools, "漂移甲", "数据库是 MySQL")
     _write(tools, "漂移乙", "数据库是 PostgreSQL")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     conflict_items = [item for item in page["items"] if item["kind"] == "conflict"]
@@ -241,7 +241,7 @@ def test_submit_internal_dismiss(tmp_path: Path) -> None:
     internal_id per pair, the per-row submit stays operational."""
     tools = make_tools(tmp_path)
     _write(tools, "自相矛盾协议2", "## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     internals = [item for item in page["items"] if item["kind"] == "internal_memory"]
@@ -276,7 +276,7 @@ def test_internal_memory_page_caps_pairs_preview(tmp_path: Path) -> None:
     the FULL pair_count and the reason distribution."""
     tools = make_tools(tmp_path)
     _write(tools, "五值矛盾", _FIVE_VALUES)
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     item = _internal_page_item(tools)
     assert item["pair_count"] >= 10, item["pair_count"]
@@ -287,7 +287,7 @@ def test_internal_memory_page_caps_pairs_preview(tmp_path: Path) -> None:
 def test_internal_memory_dismiss_clears_whole_memory_no_resurrect(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     mid = _write(tools, "五值清空", _FIVE_VALUES)
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     item = _internal_page_item(tools)
     assert item["pair_count"] > 8  # guard applies; expanded=true passes below
@@ -319,7 +319,7 @@ def test_internal_memory_expanded_guard(tmp_path: Path) -> None:
     waived for resolved and for within-cap dismissals."""
     tools = make_tools(tmp_path)
     mid = _write(tools, "五值守卫", _FIVE_VALUES)
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     item = _internal_page_item(tools)
     assert item["pair_count"] > 8
@@ -358,7 +358,7 @@ def test_internal_memory_version_guard_leaves_drifted_rows(tmp_path: Path) -> No
     memory-level UPDATE only touches current-version rows."""
     tools = make_tools(tmp_path)
     mid = _write(tools, "五值漂移", _FIVE_VALUES)
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     assert _internal_page_item(tools)
     with tools.db.write_transaction() as conn:
@@ -382,7 +382,7 @@ def test_internal_memory_not_found_and_mixed_batch(tmp_path: Path) -> None:
     a = _write(tools, "混合甲", "重试次数为 3 次")
     b = _write(tools, "混合乙", "重试次数为 5 次")
     mid = _write(tools, "混合矛盾", "## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     conflict_item = next(i for i in page["items"] if i["kind"] == "conflict")
@@ -405,7 +405,7 @@ def test_queue_backlog_not_in_user_conflicts_list(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     _write(tools, "可见性甲", "数据库是 MySQL")
     _write(tools, "可见性乙", "数据库是 PostgreSQL")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     backlog = tools.db.scan_queue_backlog()
     assert backlog >= 1
@@ -422,7 +422,7 @@ def test_page_caps_group_pair_hashes_preview(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     for i in range(7):
         _write(tools, f"帽甲{i}", f"重试次数为 {3 + i} 次")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
     page = _page(tools)
     groups = [i for i in page["items"] if i["kind"] == "conflict" and i["pair_count"] > GROUP_HASHES_CAP]
@@ -439,7 +439,7 @@ def test_partial_hashes_plus_token_cannot_strand_group(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     for i in range(6):
         _write(tools, f"合甲{i}", f"超时时间为 {10 + i} 秒")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
     page = _page(tools)
     group = next(i for i in page["items"] if i["kind"] == "conflict" and i["pair_count"] > 1)
@@ -466,7 +466,7 @@ def test_token_only_deep_group_full_retrieval(tmp_path: Path, monkeypatch) -> No
     tools = make_tools(tmp_path)
     for i in range(5):
         _write(tools, f"深甲{i}", f"刷新次数为 {20 + i} 次")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
     page = _page(tools)
     group = next(i for i in page["items"] if i["kind"] == "conflict" and i["pair_count"] > 1)
@@ -492,7 +492,7 @@ def test_submit_backlog_counts_internal_rows(tmp_path: Path) -> None:
     included) — clearing internal rows must move the number."""
     tools = make_tools(tmp_path)
     mid = _write(tools, "口径矛盾", "## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。")
-    tools.wait_evidence_worker_drained(timeout=10)
+    tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     page = _page(tools)
     page_backlog = int(page.get("queue_backlog") or 0)

@@ -37,7 +37,7 @@ def test_top3_rank_gate_skips_deep_check_pairs(tmp_path: Path) -> None:
     a = _write(tools, "数值甲", "重试次数为 3 次")
     check_peer_shallow = _write(tools, "数值乙", "重试次数为 5 次")
     check_peer_deep = _write(tools, "数值丙", "重试次数为 7 次")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
 
     pipeline = tools._scan_pipeline
 
@@ -65,16 +65,16 @@ def test_top3_rank_gate_skips_deep_check_pairs(tmp_path: Path) -> None:
         })
         return hits
 
-    original_knn = pipeline.db.evidence.knn
+    original_knn = pipeline.db.evidence.row_knn
     original_row_knn = pipeline.db.row_knn  # 0.17.0 P2-6.1 行级候选同注入
-    pipeline.db.evidence.knn = _fake_knn
+    pipeline.db.evidence.row_knn = _fake_knn
     pipeline.db.row_knn = _fake_knn
     try:
         outcome = pipeline._process_memory(
             a, suppression=pipeline._load_suppression(), neighbor_k=10,
         )
     finally:
-        pipeline.db.evidence.knn = original_knn
+        pipeline.db.evidence.row_knn = original_knn
         pipeline.db.row_knn = original_row_knn
     sets = _conflict_member_sets(tools)
     assert {a, check_peer_shallow} in sets, "a keepable check pair INSIDE top-3 must queue"
@@ -88,7 +88,7 @@ def test_notify_pairs_queue_from_deep_ranks(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "主题甲", "该功能包含缓存模块")
     notify_peer = _write(tools, "主题乙", "该功能不包含缓存模块")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
 
     pipeline = tools._scan_pipeline
 
@@ -109,16 +109,16 @@ def test_notify_pairs_queue_from_deep_ranks(tmp_path: Path) -> None:
         })
         return hits
 
-    original_knn = pipeline.db.evidence.knn
+    original_knn = pipeline.db.evidence.row_knn
     original_row_knn = pipeline.db.row_knn  # 0.17.0 P2-6.1 行级候选同注入
-    pipeline.db.evidence.knn = _fake_knn
+    pipeline.db.evidence.row_knn = _fake_knn
     pipeline.db.row_knn = _fake_knn
     try:
         pipeline._process_memory(
             a, suppression=pipeline._load_suppression(), neighbor_k=10,
         )
     finally:
-        pipeline.db.evidence.knn = original_knn
+        pipeline.db.evidence.row_knn = original_knn
         pipeline.db.row_knn = original_row_knn
     sets = _conflict_member_sets(tools)
     # 0.16.4 §1: the evolution-domain exclusion runs BEFORE the rank gate —
@@ -134,7 +134,7 @@ def test_kept_numeric_pair_survives_numeric_autoreject_suppression(tmp_path: Pat
     tools = make_tools(tmp_path)
     a = _write(tools, "解蔽甲", "重试次数为 3 次")
     b = _write(tools, "解蔽乙", "重试次数为 5 次")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     version_a = int(tools.db.get_memory(a)["version"] or 1)
     version_b = int(tools.db.get_memory(b)["version"] or 1)
     # Machine numeric-reject audit row covering the same pair@version refs.

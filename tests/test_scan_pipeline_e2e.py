@@ -112,7 +112,7 @@ def _run_e2e(tools: MemoryTools) -> None:
                 subject=f"偏好素材{serial}", workspace="mema-twin", tags=[],
             )
             assert res.get("ok"), res
-    assert tools.wait_evidence_worker_drained(timeout=120)
+    assert tools.wait_semantic_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
 
     # ── 1) write-time: internal-first detection ─────────────────────────
@@ -223,7 +223,7 @@ def _run_e2e(tools: MemoryTools) -> None:
         after = conn.execute("SELECT COUNT(*) FROM scan_queue").fetchone()[0]
     assert after == before, "零变化第二轮不得新增队列项"
     tools.memory("update", {"memory_id": a, "new_content": "生产环境数据库端口设置为 5434。", "reason": "e2e edit"})
-    assert tools.wait_evidence_worker_drained(timeout=120)
+    assert tools.wait_semantic_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
     _kick(tools, max_memories=500, time_budget_s=180.0)
     with tools.db.connection() as conn:

@@ -28,12 +28,12 @@ def _batch_read(tools: MemoryTools, **payload):
 
 
 def _drain_evidence(tools: MemoryTools) -> None:
-    assert tools.wait_evidence_worker_drained(timeout=30.0)
+    assert tools.wait_semantic_worker_drained(timeout=30.0)
 
 
 def _insert_units(tools: MemoryTools, memory_id: int, units: list[tuple[str, int, int]]) -> None:
-    """Insert evidence units directly (tests run without an embedder, so the
-    async index never publishes rows on its own)."""
+    """Insert rows directly (tests run without an embedder, so the
+    async job never publishes rows on its own; C5: rows are the store)."""
     import hashlib
 
     from memory_arbiter.models import utc_now_iso
@@ -43,10 +43,10 @@ def _insert_units(tools: MemoryTools, memory_id: int, units: list[tuple[str, int
     with tools.db.write_transaction() as conn:
         for index, (text, start, end) in enumerate(units):
             conn.execute(
-                """INSERT INTO memory_evidence(
-                     memory_id,memory_version,content_hash,unit_index,kind,text,
+                """INSERT INTO memory_row(
+                     memory_id,memory_version,content_hash,row_index,kind,text,
                      start_offset,end_offset,created_at) VALUES (?,?,?,?,?,?,?,?,?)""",
-                (memory_id, int(memory["version"]), content_hash, index, "text",
+                (memory_id, int(memory["version"]), content_hash, index, "sentence",
                  text, start, end, utc_now_iso()),
             )
 

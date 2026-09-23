@@ -101,7 +101,7 @@ def _run(tools: MemoryTools) -> None:
     )
     for i in range(4):
         _write(tools, f"填充主题{i}", f"园区通行证流程第{i}条说明。")
-    assert tools.wait_evidence_worker_drained(timeout=120)
+    assert tools.wait_semantic_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
 
     # ── 1) full scan, then judge EVERYTHING in batched passes ────────────
@@ -174,7 +174,7 @@ def _run(tools: MemoryTools) -> None:
         "memory_id": p2, "new_content": "生产环境数据库端口设置为 5434。",
         "reason": "e2e edit lift",
     })
-    assert tools.wait_evidence_worker_drained(timeout=120)
+    assert tools.wait_semantic_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
     kick = _kick(tools, max_memories=500, time_budget_s=180.0, slow_lane=False)
     assert kick["complete"] is True

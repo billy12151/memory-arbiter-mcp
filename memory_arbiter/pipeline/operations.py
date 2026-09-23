@@ -141,6 +141,11 @@ class OperationsPipeline:
     def wait_evidence_worker_drained(self, *args: Any, **kwargs: Any) -> bool:
         return self._tools.wait_evidence_worker_drained(*args, **kwargs)
 
+    def wait_semantic_worker_drained(self, *args: Any, **kwargs: Any) -> bool:
+        # C2: replay's B-D2 guarantee (complete receipt ⇒ index persisted)
+        # drains the semantic queue — indexing lives there now.
+        return self._tools.wait_semantic_worker_drained(*args, **kwargs)
+
     @staticmethod
     def _compare_memories(*args: Any, **kwargs: Any) -> Any:
         # Preserve legacy patch seam for memory_arbiter.tools.compare_memories.
@@ -2457,7 +2462,11 @@ class OperationsPipeline:
             {"memory_id": mid, **self._post_commit(mid, self.db.get_memory(mid), recheck_conflicts=False)[0]}
             for mid in ids
         ]
-        failed = sum(item.get("status") != "queued" for item in results)
+        # C2: the queue dedupes by task_id — "completed" means this version's
+        # job already ran (rows persisted in the CURRENT space here, since a
+        # mismatch rebuild re-queues after the epoch mark); it counts as
+        # success, not failure.
+        failed = sum(item.get("status") not in {"queued", "completed"} for item in results)
         # A table repair / dim swap recreates subject_tags_vec empty; the
         # idempotent backfill restores hint vectors now instead of waiting
         # for a process restart (fail-open, no-rows-missing is one cheap
@@ -3080,8 +3089,11 @@ class OperationsPipeline:
         # Same for the C3a summary vector (anomaly voting index).
         self._tools._write_pipeline.refresh_summary_vector(memory_id)
         outcome = str(result.get("status") or "unknown")
-        if outcome == "queued":
-            stages["evidence"] = "queued"
+        if outcome in {"queued", "completed"}:
+            # C2: the semantic queue dedupes by task_id — "completed" means
+            # this version's job (index+detect) already ran, so the receipt's
+            # text index is persisted and the stage is complete all the same.
+            stages["evidence"] = outcome
             status, retry_code = "complete", None
         elif outcome == "skipped" and not self._embedding_configured():
             stages["evidence"] = "skipped"
@@ -3187,19 +3199,22 @@ class OperationsPipeline:
                 already_replayed.append({"replay_key": entry["replay_key"], "memory_id": replayed.get("memory_id"), "postprocess_status": "complete", **({"outcome": outcome} if outcome != "already_replayed" else {})})
             else:
                 conflicts.append({"replay_key": entry["replay_key"], "outcome": outcome})
-        # Drain the evidence worker before responding (B-D2): replay
-        # post-processing enqueues local-text indexing on the background
-        # worker, so without the drain a "complete" receipt could be observed
-        # before the evidence index is actually persisted.
-        drained = self.wait_evidence_worker_drained(timeout=30.0)
+        # Drain the semantic worker before responding (B-D2, rewired C2):
+        # replay post-processing now enqueues index_only jobs on the semantic
+        # queue (the index worker no longer serves the write path), so the
+        # "complete receipt => text index persisted" guarantee drains the
+        # semantic queue instead. The wait may cover unrelated detect jobs
+        # (Qwen-bearing, up to seconds each) — the merge's known cost for
+        # replay batches, recorded here.
+        drained = self.wait_semantic_worker_drained(timeout=30.0)
         if not drained:
             warnings.append(
-                "evidence worker did not drain within 30s; complete receipts may still have text indexing in flight"
+                "semantic worker did not drain within 30s; complete receipts may still have text indexing in flight"
             )
         return self.db.state.response(
             {
                 "dry_run": False,
-                "evidence_worker_drained": drained,
+                "semantic_worker_drained": drained,
                 "imported": imported,
                 "imported_count": len(imported),
                 "already_replayed": already_replayed,

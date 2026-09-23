@@ -668,7 +668,7 @@ def test_none_explicit_filter_scopes_before_limit(tmp_path: Path) -> None:
     for i in range(8):
         tools.memory_write(content=f"marketing note {i}", workspace="projB", subject=f"b{i}", tags=[])
     tools.memory_write(content="marketing note target", workspace="projA", subject="a", tags=[])
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     caller_canonical = tools._caller_workspace("projA").canonical
     res = tools.memory_search(query="marketing", workspace="projA", limit=3)
     results = res["data"]["results"]

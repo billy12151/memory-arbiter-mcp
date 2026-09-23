@@ -10,7 +10,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
-from ..evidence import EvidenceUnit, has_indexable_text, INDEXABLE_PREFILTER_SQL
+from ..evidence import has_indexable_text, INDEXABLE_PREFILTER_SQL
 from ..rowseg import RowSegment
 from ..models import utc_now_iso
 
@@ -24,24 +24,44 @@ def indexable_coverage_counts(conn: sqlite3.Connection) -> dict[str, int]:
     actually publish units for it. Zero-indexable-text rows (blank /
     whitespace-only legacy artifacts) are counted as non_indexable instead
     of staying a permanent coverage gap."""
-    total = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE status!='deleted'"
-        ).fetchone()[0]
-    )
-    covered = int(
-        conn.execute(
-            """SELECT COUNT(DISTINCT m.id) FROM memories m
-               WHERE m.status!='deleted'
-                 AND EXISTS(SELECT 1 FROM memory_evidence e WHERE e.memory_id=m.id)"""
-        ).fetchone()[0]
-    )
+    # C5: rows are the coverage oracle (unit tables retired). One SQL for
+    # total+covered (subquery discipline); the uncovered walk keeps the
+    # two-layer prefilter+has_indexable_text design on purpose.
+    try:
+        total_row = conn.execute(
+            """SELECT
+                 (SELECT COUNT(*) FROM memories WHERE status!='deleted') AS total,
+                 (SELECT COUNT(DISTINCT m.id) FROM memories m
+                  WHERE m.status!='deleted'
+                    AND EXISTS(SELECT 1 FROM memory_row r WHERE r.memory_id=m.id)) AS covered"""
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Pre-additive database (no memory_row yet): nothing indexed, the
+        # uncovered walk below degrades to the full prefiltered set.
+        total_row = None
+    if total_row is not None:
+        total = int(total_row["total"])
+        covered = int(total_row["covered"])
+    else:
+        covered = 0
+        total = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE status!='deleted'"
+            ).fetchone()[0]
+        )
     uncovered = 0
-    for row in conn.execute(
-        f"""SELECT m.subject AS subject, m.content AS content FROM memories m
-            WHERE m.status!='deleted' AND {INDEXABLE_PREFILTER_SQL}
-              AND NOT EXISTS(SELECT 1 FROM memory_evidence e WHERE e.memory_id=m.id)"""
-    ):
+    try:
+        pending_rows = conn.execute(
+            f"""SELECT m.subject AS subject, m.content AS content FROM memories m
+                WHERE m.status!='deleted' AND {INDEXABLE_PREFILTER_SQL}
+                  AND NOT EXISTS(SELECT 1 FROM memory_row r WHERE r.memory_id=m.id)"""
+        ).fetchall()
+    except sqlite3.OperationalError:
+        pending_rows = conn.execute(
+            f"""SELECT m.subject AS subject, m.content AS content FROM memories m
+                WHERE m.status!='deleted' AND {INDEXABLE_PREFILTER_SQL}"""
+        ).fetchall()
+    for row in pending_rows:
         if has_indexable_text(str(row["subject"] or ""), str(row["content"] or "")):
             uncovered += 1
     return {
@@ -55,156 +75,6 @@ def indexable_coverage_counts(conn: sqlite3.Connection) -> dict[str, int]:
 class EvidenceStore:
     def __init__(self, db: "MemoryDB") -> None:
         self._db = db
-
-    def publish(
-        self,
-        memory_id: int,
-        memory_version: int,
-        content_hash: str,
-        units: list[EvidenceUnit],
-        embeddings: list[list[float]],
-        rows: "list[RowSegment] | None" = None,
-        row_embeddings: "list[list[float]] | None" = None,
-    ) -> dict[str, Any]:
-        # 0.17.0 P2-2.3: row-level vectors land in the SAME publish
-        # transaction as the units (owner: one atomic snapshot per version);
-        # the row EMBEDDING happens outside the transaction in index_memory,
-        # mirroring the unit discipline.
-        if rows is None:
-            rows = []
-        if row_embeddings is None:
-            row_embeddings = []
-        if len(units) != len(embeddings) or any(not value for value in embeddings):
-            return {"outcome": "invalid_embeddings", "published": False}
-        if len(rows) != len(row_embeddings) or any(not value for value in row_embeddings):
-            return {"outcome": "invalid_row_embeddings", "published": False}
-        try:
-            with self._db.write_transaction() as conn:
-                current = conn.execute(
-                    "SELECT version, content FROM memories WHERE id=?", (int(memory_id),)
-                ).fetchone()
-                if current is None or int(current["version"] or 1) != int(memory_version):
-                    return {"outcome": "stale_snapshot", "published": False}
-                from ..evidence import evidence_content_hash
-                if evidence_content_hash(str(current["content"] or "")) != content_hash:
-                    return {"outcome": "stale_snapshot", "published": False}
-
-                old_ids = [
-                    int(row["id"]) for row in conn.execute(
-                        "SELECT id FROM memory_evidence WHERE memory_id=?", (int(memory_id),)
-                    ).fetchall()
-                ]
-                if old_ids:
-                    placeholders = ",".join("?" for _ in old_ids)
-                    conn.execute(f"DELETE FROM memory_evidence_vec WHERE id IN ({placeholders})", old_ids)
-                conn.execute("DELETE FROM memory_evidence WHERE memory_id=?", (int(memory_id),))
-
-                status_row = conn.execute("SELECT status FROM memories WHERE id=?", (int(memory_id),)).fetchone()
-                parent_status = str(status_row["status"] if status_row else "deleted")
-                for unit, embedding in zip(units, embeddings):
-                    cur = conn.execute(
-                        """INSERT INTO memory_evidence(
-                             memory_id,memory_version,content_hash,unit_index,kind,text,
-                             start_offset,end_offset,created_at
-                           ) VALUES (?,?,?,?,?,?,?,?,?)""",
-                        (
-                            int(memory_id), int(memory_version), content_hash,
-                            int(unit.unit_index), unit.kind, unit.text,
-                            int(unit.start_offset), int(unit.end_offset), utc_now_iso(),
-                        ),
-                    )
-                    if cur.lastrowid is None:
-                        raise sqlite3.Error("evidence insert did not return an id")
-                    conn.execute(
-                        "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES (?,?,?)",
-                        (int(cur.lastrowid), parent_status, json.dumps(embedding)),
-                    )
-                # Row-level store (P2-2.2): same delete+rebuild discipline as
-                # the units, INSIDE the same transaction, sharing the
-                # parent_status snapshot taken above.
-                if old_row_ids := [
-                    int(row["id"]) for row in conn.execute(
-                        "SELECT id FROM memory_row WHERE memory_id=?", (int(memory_id),)
-                    ).fetchall()
-                ]:
-                    placeholders = ",".join("?" for _ in old_row_ids)
-                    conn.execute(f"DELETE FROM memory_row_vec WHERE id IN ({placeholders})", old_row_ids)
-                conn.execute("DELETE FROM memory_row WHERE memory_id=?", (int(memory_id),))
-                for row, embedding in zip(rows, row_embeddings):
-                    cur = conn.execute(
-                        """INSERT INTO memory_row(
-                             memory_id,memory_version,content_hash,row_index,kind,text,
-                             start_offset,end_offset,created_at
-                           ) VALUES (?,?,?,?,?,?,?,?,?)""",
-                        (
-                            int(memory_id), int(memory_version), content_hash,
-                            int(row.row_index), row.kind, row.text,
-                            int(row.start_offset), int(row.end_offset), utc_now_iso(),
-                        ),
-                    )
-                    if cur.lastrowid is None:
-                        raise sqlite3.Error("row insert did not return an id")
-                    conn.execute(
-                        "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES (?,?,?)",
-                        (int(cur.lastrowid), parent_status, json.dumps(embedding)),
-                    )
-            return {
-                "outcome": "published", "published": True,
-                "unit_count": len(units), "row_count": len(rows),
-            }
-        except sqlite3.Error as exc:
-            return {"outcome": "error", "published": False, "error": str(exc)}
-
-
-    def coverage(self) -> dict[str, int]:
-        with self._db.connection() as conn:
-            counts = indexable_coverage_counts(conn)
-            units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
-            try:
-                vectors = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
-            except sqlite3.Error:
-                vectors = 0
-        return {
-            "eligible_memories": counts["eligible_memories"],
-            "non_indexable_memories": counts["non_indexable_memories"],
-            "indexed_memories": counts["indexed_memories"],
-            "units": units,
-            "vectors": vectors,
-        }
-
-    def current_text_vectors(
-        self, memory_id: int, memory_version: int, content_hash: str,
-    ) -> list[tuple[EvidenceUnit, list[float]]]:
-        """Return the exact current text units and their already-published vectors."""
-        if not self._db.state.sqlite_vec_available:
-            return []
-        try:
-            with self._db.connection() as conn:
-                rows = conn.execute(
-                    """SELECT e.unit_index,e.kind,e.text,e.start_offset,e.end_offset,
-                              v.embedding
-                       FROM memory_evidence e
-                       JOIN memory_evidence_vec v ON v.id=e.id
-                       WHERE e.memory_id=? AND e.memory_version=? AND e.content_hash=?
-                         AND e.kind='text'
-                       ORDER BY e.unit_index""",
-                    (int(memory_id), int(memory_version), str(content_hash)),
-                ).fetchall()
-            return [
-                (
-                    EvidenceUnit(
-                        kind=str(row["kind"]), text=str(row["text"]),
-                        start_offset=int(row["start_offset"]),
-                        end_offset=int(row["end_offset"]),
-                        unit_index=int(row["unit_index"]),
-                    ),
-                    self._blob_to_vector(bytes(row["embedding"])),
-                )
-                for row in rows
-                if row["embedding"] is not None
-            ]
-        except (sqlite3.Error, TypeError, ValueError, struct.error):
-            return []
 
     def text_unit_rows(
         self,
@@ -224,20 +94,23 @@ class EvidenceStore:
         """
         try:
             with self._db.connection() as conn:
+                # C4: rows are the content atom (unit tables retired);
+                # kind != 'subject' mirrors the old kind='text' intent — the
+                # subject row carries no content span.
                 if span_start is None or span_end is None:
                     return [dict(row) for row in conn.execute(
-                        """SELECT unit_index,kind,text,start_offset,end_offset
-                           FROM memory_evidence
-                           WHERE memory_id=? AND memory_version=? AND kind='text'
-                           ORDER BY unit_index""",
+                        """SELECT row_index AS unit_index,kind,text,start_offset,end_offset
+                           FROM memory_row
+                           WHERE memory_id=? AND memory_version=? AND kind != 'subject'
+                           ORDER BY row_index""",
                         (int(memory_id), int(memory_version)),
                     ).fetchall()]
                 return [dict(row) for row in conn.execute(
-                    """SELECT unit_index,kind,text,start_offset,end_offset
-                       FROM memory_evidence
-                       WHERE memory_id=? AND memory_version=? AND kind='text'
+                    """SELECT row_index AS unit_index,kind,text,start_offset,end_offset
+                       FROM memory_row
+                       WHERE memory_id=? AND memory_version=? AND kind != 'subject'
                          AND start_offset < ? AND end_offset > ?
-                       ORDER BY unit_index""",
+                       ORDER BY row_index""",
                     (int(memory_id), int(memory_version), int(span_end), int(span_start)),
                 ).fetchall()]
         except sqlite3.Error:
@@ -263,11 +136,11 @@ class EvidenceStore:
                     placeholders = ",".join("(?,?)" for _ in chunk)
                     params = [value for pair in chunk for value in pair]
                     rows = conn.execute(
-                        f"""SELECT memory_id, unit_index, kind, text, start_offset, end_offset
-                            FROM memory_evidence
+                        f"""SELECT memory_id, row_index AS unit_index, kind, text, start_offset, end_offset
+                            FROM memory_row
                             WHERE (memory_id, memory_version) IN ({placeholders})
-                              AND kind='text'
-                            ORDER BY memory_id, unit_index""",
+                              AND kind != 'subject'
+                            ORDER BY memory_id, row_index""",
                         params,
                     ).fetchall()
                     for row in rows:
@@ -293,19 +166,22 @@ class EvidenceStore:
         the None branch covers the post-edit/pre-republish window)."""
         try:
             with self._db.connection() as conn:
+                # C4: outline serves from rows (unit tables retired); the
+                # subject row is excluded (span-less, and the preview already
+                # shows subject as its own field).
                 count_row = conn.execute(
-                    "SELECT COUNT(*) FROM memory_evidence "
-                    "WHERE memory_id=? AND memory_version=? AND kind IN ('heading','text')",
+                    "SELECT COUNT(*) FROM memory_row "
+                    "WHERE memory_id=? AND memory_version=? AND kind != 'subject'",
                     (int(memory_id), int(memory_version)),
                 ).fetchone()
                 total = int(count_row[0]) if count_row else 0
                 if total == 0:
                     return None
                 rows = [dict(row) for row in conn.execute(
-                    """SELECT unit_index, kind, text, start_offset
-                       FROM memory_evidence
-                       WHERE memory_id=? AND memory_version=? AND kind IN ('heading','text')
-                       ORDER BY unit_index LIMIT ?""",
+                    """SELECT row_index AS unit_index, kind, text, start_offset
+                       FROM memory_row
+                       WHERE memory_id=? AND memory_version=? AND kind != 'subject'
+                       ORDER BY row_index LIMIT ?""",
                     (int(memory_id), int(memory_version), int(limit)),
                 ).fetchall()]
             return {"total": total, "rows": rows}
@@ -331,11 +207,11 @@ class EvidenceStore:
                     placeholders = ",".join("(?,?)" for _ in chunk)
                     params = [value for pair in chunk for value in pair]
                     rows = conn.execute(
-                        f"""SELECT memory_id, unit_index, kind, text, start_offset, end_offset
-                            FROM memory_evidence
+                        f"""SELECT memory_id, row_index AS unit_index, kind, text, start_offset, end_offset
+                            FROM memory_row
                             WHERE (memory_id, memory_version) IN ({placeholders})
-                              AND kind IN ('heading','text')
-                            ORDER BY memory_id, unit_index""",
+                              AND kind != 'subject'
+                            ORDER BY memory_id, row_index""",
                         params,
                     ).fetchall()
                     for row in rows:
@@ -347,109 +223,29 @@ class EvidenceStore:
         except sqlite3.Error:
             return {}
 
-    def knn(
-        self,
-        query_embedding: list[float],
-        *,
-        k: int = 100,
-        parent_status_filter: str = "active",
-        workspace: "WorkspaceScope" = None,
-        exclude_memory_id: int | None = None,
-        exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
-        conn: "sqlite3.Connection | None" = None,
-    ) -> list[dict[str, Any]]:
-        """KNN over evidence vectors, filtered by parent lifecycle state.
+    # (0.17.0 C5: the unit-table knn() was retired — row_knn is the
+    # only KNN over the evidence channel's vectors.)
 
-        0.16.12 P3-T1 rowid-IN rewrite: the workspace/exclusion/exclude
-        predicates move into an ``v.id IN (SELECT e.id ... JOIN memories m)``
-        subquery, which sqlite-vec pushes into the vec0 KNN scan as a true
-        PRE-filter (spike-verified on SQLite 3.53.4 + sqlite-vec: k applies to
-        the filtered set, so ``k = requested_k`` needs no window loop and no
-        COUNT). The previous global-top-k-then-filter loop could starve
-        per-workspace recall when other workspaces owned the nearest rows —
-        that starvation mode is structurally gone. vec0's ``parent_status``
-        auxiliary column stays as an in-engine pre-prune, with the
-        authoritative ``memories.status`` still enforced in both the subquery
-        and the main WHERE (best-effort double insurance, unchanged).
+    def coverage(self) -> dict[str, int]:
+        with self._db.connection() as conn:
+            counts = indexable_coverage_counts(conn)
+            units = int(conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0])
+            try:
+                vectors = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
+            except sqlite3.Error:
+                vectors = 0
+        return {
+            "eligible_memories": counts["eligible_memories"],
+            "non_indexable_memories": counts["non_indexable_memories"],
+            "indexed_memories": counts["indexed_memories"],
+            "units": units,
+            "vectors": vectors,
+        }
 
-        ``conn`` (0.16.12 P2-T6): optional caller-supplied read connection —
-        process_conflicts threads ONE connection through its whole job.
-        """
-        if not self._db.state.sqlite_vec_available or not query_embedding:
-            return []
-        if parent_status_filter == "expired":
-            status_sql = "v.parent_status NOT IN ('active','deleted')"
-            memory_status_sql = "m.status NOT IN ('active','deleted')"
-        elif parent_status_filter == "all":
-            status_sql = "v.parent_status != 'deleted'"
-            memory_status_sql = "m.status != 'deleted'"
-        else:
-            status_sql = "v.parent_status='active'"
-            memory_status_sql = "m.status='active'"
-        requested_k = max(1, int(k))
-        workspace_sql, workspace_params = workspace_scope_sql(
-            "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)", workspace,
-        )
-        from ..acl import workspace_exclusion_sql
-        excl_sql, _, excl_params = workspace_exclusion_sql(exclude_workspaces)
-        # Eligible-set subquery: every predicate that used to filter AFTER the
-        # global top-k now defines the id set vec0 scans. Parameter order here
-        # is the bind order: workspace scope params first, then exclusion
-        # (names*2), then exclude_memory_id — appended in exactly that order.
-        eligible_clauses = [memory_status_sql]
-        eligible_params: list[Any] = []
-        if workspace_sql:
-            eligible_clauses.append(workspace_sql)
-            eligible_params.extend(workspace_params)
-        if excl_sql:
-            eligible_clauses.append(excl_sql)
-            eligible_params.extend(excl_params)
-        if exclude_memory_id is not None:
-            eligible_clauses.append("e.memory_id != ?")
-            eligible_params.append(int(exclude_memory_id))
-        filtered = bool(eligible_clauses[1:])
-        id_constraint = (
-            f" AND v.id IN (SELECT e.id FROM memory_evidence e "
-            f"JOIN memories m ON m.id=e.memory_id WHERE {' AND '.join(eligible_clauses)})"
-            if filtered else ""
-        )
-        try:
-            if conn is not None:
-                rows = conn.execute(
-                    f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
-                           m.workspace, m.workspace_canonical, m.source_type,
-                           m.confidence, m.protection_level, m.event_time,
-                           m.ingest_time, m.metadata, m.content,
-                           m.version AS memory_row_version, m.agent_id,
-                           m.source_ref, m.created_at AS memory_created_at
-                        FROM memory_evidence_vec v
-                        JOIN memory_evidence e ON e.id=v.id
-                        JOIN memories m ON m.id=e.memory_id
-                        WHERE v.embedding MATCH ? AND k=? AND {status_sql}
-                          AND {memory_status_sql}{id_constraint}
-                        ORDER BY v.distance""",
-                    [json.dumps(query_embedding), requested_k, *eligible_params],
-                ).fetchall()
-            else:
-                with self._db.connection() as owned:
-                    rows = owned.execute(
-                        f"""SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags,
-                               m.workspace, m.workspace_canonical, m.source_type,
-                               m.confidence, m.protection_level, m.event_time,
-                               m.ingest_time, m.metadata, m.content,
-                               m.version AS memory_row_version, m.agent_id,
-                               m.source_ref, m.created_at AS memory_created_at
-                            FROM memory_evidence_vec v
-                            JOIN memory_evidence e ON e.id=v.id
-                            JOIN memories m ON m.id=e.memory_id
-                            WHERE v.embedding MATCH ? AND k=? AND {status_sql}
-                              AND {memory_status_sql}{id_constraint}
-                            ORDER BY v.distance""",
-                        [json.dumps(query_embedding), requested_k, *eligible_params],
-                    ).fetchall()
-            return [dict(row) for row in rows]
-        except sqlite3.Error:
-            return []
+
+    # (0.17.0 C5: the unit-table publish() was retired with the unit
+    # channel — publish_rows is the one true publisher. Test fixtures that
+    # used to hand-craft unit vectors now go through rows or the job.)
 
     def publish_rows(
         self,
@@ -466,44 +262,72 @@ class EvidenceStore:
             return {"outcome": "invalid_row_embeddings", "published": False}
         try:
             with self._db.write_transaction() as conn:
+                # C5 write-transaction tightening: ONE memories SELECT carries
+                # version/content/status/content_sha (the old body read the
+                # same row twice and re-hashed content inside the lock —
+                # content_sha is maintained on every content edit, so a
+                # non-NULL column compares directly and only legacy NULLs
+                # recompute).
                 current = conn.execute(
-                    "SELECT version, content FROM memories WHERE id=?", (int(memory_id),)
+                    "SELECT version, content, status, COALESCE(content_sha,'') AS content_sha "
+                    "FROM memories WHERE id=?",
+                    (int(memory_id),),
                 ).fetchone()
                 if current is None or int(current["version"] or 1) != int(memory_version):
                     return {"outcome": "stale_snapshot", "published": False}
                 from ..evidence import evidence_content_hash
-                if evidence_content_hash(str(current["content"] or "")) != content_hash:
+                stored_sha = str(current["content_sha"] or "")
+                effective_hash = (
+                    stored_hash if (stored_hash := stored_sha) else
+                    evidence_content_hash(str(current["content"] or ""))
+                )
+                if effective_hash != content_hash:
                     return {"outcome": "stale_snapshot", "published": False}
-                if old_row_ids := [
-                    int(row["id"]) for row in conn.execute(
-                        "SELECT id FROM memory_row WHERE memory_id=?", (int(memory_id),)
-                    ).fetchall()
-                ]:
-                    placeholders = ",".join("?" for _ in old_row_ids)
-                    conn.execute(f"DELETE FROM memory_row_vec WHERE id IN ({placeholders})", old_row_ids)
-                conn.execute("DELETE FROM memory_row WHERE memory_id=?", (int(memory_id),))
-                status_row = conn.execute(
-                    "SELECT status FROM memories WHERE id=?", (int(memory_id),)
-                ).fetchone()
-                parent_status = str(status_row["status"] if status_row else "deleted")
-                for row, embedding in zip(rows, row_embeddings):
-                    cur = conn.execute(
-                        """INSERT INTO memory_row(
-                             memory_id,memory_version,content_hash,row_index,kind,text,
-                             start_offset,end_offset,created_at
-                           ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                parent_status = str(current["status"] or "deleted")
+                # Subquery DELETEs — no id-list round-trip through Python.
+                conn.execute(
+                    "DELETE FROM memory_row_vec WHERE id IN "
+                    "(SELECT id FROM memory_row WHERE memory_id=?)",
+                    (int(memory_id),),
+                )
+                conn.execute(
+                    "DELETE FROM memory_row WHERE memory_id=?", (int(memory_id),)
+                )
+                created = utc_now_iso()
+                # Batched inserts: one executemany per table. The vec rows
+                # align by re-reading the freshly inserted ids ordered by
+                # row_index (rows are deleted+reinserted whole, so the pair
+                # (memory_id, memory_version, row_index) identifies each).
+                conn.executemany(
+                    """INSERT INTO memory_row(
+                         memory_id,memory_version,content_hash,row_index,kind,text,
+                         start_offset,end_offset,created_at
+                       ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                    [
                         (
                             int(memory_id), int(memory_version), content_hash,
                             int(row.row_index), row.kind, row.text,
-                            int(row.start_offset), int(row.end_offset), utc_now_iso(),
-                        ),
-                    )
-                    if cur.lastrowid is None:
-                        raise sqlite3.Error("row insert did not return an id")
-                    conn.execute(
-                        "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES (?,?,?)",
-                        (int(cur.lastrowid), parent_status, json.dumps(embedding)),
-                    )
+                            int(row.start_offset), int(row.end_offset), created,
+                        )
+                        for row in rows
+                    ],
+                )
+                fresh_ids = [
+                    int(r["id"]) for r in conn.execute(
+                        "SELECT id FROM memory_row WHERE memory_id=? AND memory_version=? "
+                        "ORDER BY row_index",
+                        (int(memory_id), int(memory_version)),
+                    ).fetchall()
+                ]
+                if len(fresh_ids) != len(rows):
+                    raise sqlite3.Error("row batch insert lost rows")
+                conn.executemany(
+                    "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES (?,?,?)",
+                    [
+                        (row_id, parent_status, json.dumps(embedding))
+                        for row_id, embedding in zip(fresh_ids, row_embeddings)
+                    ],
+                )
             return {"outcome": "published", "published": True, "row_count": len(rows)}
         except sqlite3.Error as exc:
             return {"outcome": "error", "published": False, "error": str(exc)}
@@ -829,19 +653,24 @@ class EvidenceStore:
                     )
                     entry["count"] += 1
                     entry["last_anchor"] = max(entry["last_anchor"], anchor_id)
-                # Only body-text units participate, matching the write-time
-                # notice path: subjects/headings are version-progression
-                # heavy and fire numeric_value_changed on their own.
+                # C2/C5: rows are the scan source — the job no longer
+                # publishes unit vectors. rowseg emits no heading rows and
+                # (pre-C3) no subject rows, so the old kind='text' filter's
+                # intent (subjects/headings excluded) holds by construction.
+                # C3 A+ guard: subject rows never ORIGINATE a scan pair
+                # (subject version progression is timeline evolution, not a
+                # numeric clue) — the row-channel counterpart of the unit
+                # channel's kind='text' anchor filter.
                 units = conn.execute(
-                    """SELECT e.id AS eid, e.text AS text, v.embedding AS embedding,
-                              e.memory_version AS memory_version, e.content_hash AS content_hash,
-                              e.start_offset AS start_offset, e.end_offset AS end_offset
-                       FROM memory_evidence e
-                       JOIN memory_evidence_vec v ON v.id=e.id
-                       WHERE e.memory_id=? AND e.memory_version=(
+                    """SELECT r.id AS eid, r.text AS text, v.embedding AS embedding,
+                              r.memory_version AS memory_version, r.content_hash AS content_hash,
+                              r.start_offset AS start_offset, r.end_offset AS end_offset
+                       FROM memory_row r
+                       JOIN memory_row_vec v ON v.id=r.id
+                       WHERE r.memory_id=? AND r.memory_version=(
                            SELECT version FROM memories WHERE id=?)
-                         AND e.kind='text'
-                       ORDER BY e.id""",
+                         AND r.kind != 'subject'
+                       ORDER BY r.id""",
                     (anchor_id, anchor_id),
                 )
                 first_unit = units.fetchone()
@@ -896,7 +725,7 @@ class EvidenceStore:
                     if not text:
                         continue
                     unit_vector = self._blob_to_vector(bytes(unit["embedding"]))
-                    hits = self.knn(
+                    hits = self.row_knn(
                         unit_vector,
                         k=max(1, int(neighbor_k)) + 1,
                         workspace=pairing_scope,
@@ -905,15 +734,16 @@ class EvidenceStore:
                     # C3b: the suspected-bucket sweep for misplaced memories.
                     suspect_hits: list[dict[str, Any]] = []
                     if suspect_bucket and suspect_bucket != anchor_bucket:
-                        suspect_hits = self.knn(
+                        suspect_hits = self.row_knn(
                             unit_vector,
                             k=max(1, int(neighbor_k)) + 1,
                             workspace=suspect_bucket,
                             exclude_memory_id=anchor_id,
                         )
                     for hit in itertools.chain(hits, suspect_hits):
-                        if hit.get("kind") != "text":
-                            continue
+                        # C2/C5: rows carry no 'text' kind — the old unit-
+                        # channel filter's intent (exclude subject/heading
+                        # units) holds by construction (rowseg emits neither).
                         peer_id = int(hit["memory_id"])
                         if peer_id == anchor_id:
                             continue
