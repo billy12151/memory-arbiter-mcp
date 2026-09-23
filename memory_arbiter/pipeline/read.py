@@ -29,7 +29,58 @@ _OUTLINE_HEAD_CHARS = 40
 # "the important hits" is a systematic bias (legal RAG loses provisos).
 _HIT_SPANS_FULL_COVERAGE = 0.5
 
+# 0.17.0 hits window (plan docs/plan-2026-09-23-hits-window.zh-CN.md): a
+# hit_window=N request extends each hit with the ±N neighbouring complete
+# rows (same memory, same version, subject rows excluded). Cap keeps the
+# >=50% coverage upgrade from turning every hits page into a full-text page.
+_HIT_WINDOW_MAX = 5
+
 _CONTENT_MODES = ("preview", "hits", "full")
+
+
+def _coerce_hit_window(value: Any, warnings: list[str]) -> int:
+    """Normalise the caller's hit_window into [0, _HIT_WINDOW_MAX].
+
+    Unparseable/negative → 0 (the byte-identical default); over the cap → the
+    cap WITH a warning (a silent clamp would hide the caller's typo).
+    Bools coerce as ints on purpose: a harmless display knob, not a span
+    coordinate, so the strict-int rejection does not apply here.
+    """
+    try:
+        window = int(value)
+    except (TypeError, ValueError):
+        return 0
+    if window < 0:
+        return 0
+    if window > _HIT_WINDOW_MAX:
+        warnings.append(
+            f"hit_window clamped to {_HIT_WINDOW_MAX} (requested {window})"
+        )
+        return _HIT_WINDOW_MAX
+    return window
+
+
+def _stale_hit_spans_warning(memory_id: int, stale: dict[str, Any]) -> str:
+    """Owner-pinned F1 wording: a dropped stale hit must tell the agent the
+    index lags and a re-query is needed — never a silent wrong-region slice."""
+    return (
+        f"item #{memory_id}: hit spans dropped — the memory was likely edited "
+        f"after your previous read (evidence index v{stale.get('evidence_version')} "
+        f"vs memory v{stale.get('memory_version')}); re-query or re-read to get fresh spans"
+    )
+
+
+def _evidence_lag_warning(memory_id: int, context: str) -> str:
+    """F1 companion for read/batch_read: the two silent fallbacks (hits → full
+    record, full+span → legacy char slice) now say WHY the unit-aligned shape
+    is missing. None is not always version lag — it also fires when the span
+    overlaps no indexed unit or the row query fails — so the wording reports
+    the missing rows and names version lag as the likely suspect, not a fact."""
+    return (
+        f"memory #{memory_id}: {context} — no current-version evidence rows matched this read "
+        "(the evidence index may lag the memory version after an edit, or rows are not published yet); "
+        "if you are reading by earlier offsets, re-query to confirm"
+    )
 
 # 0.16.0 batch read (plan §1.5): the full-content byte budget. preview/hits
 # payloads are structurally bounded, so a count cap is enough; full content
@@ -44,6 +95,7 @@ from ..constants import (  # noqa: E402
 def _unit_aligned_hits(
     db: Any, memory: dict[str, Any], span: "dict[str, Any] | None",
     rows: "list[dict[str, Any]] | None" = None,
+    window: int = 0,
 ) -> "tuple[list[dict[str, Any]], str | None] | None":
     """Unit-aligned hit spans for an id-driven hits read (plan §6⑨, four-round
     final form): the ``hits`` unit selector on id-driven calls is the per-id
@@ -61,17 +113,37 @@ def _unit_aligned_hits(
     unit rows for THIS memory (empty list = prefetched and known empty); None
     keeps the per-id query. Span overlap is applied here in Python with the
     same predicate text_unit_rows applies in SQL.
+
+    ``window`` (0.17.0 hit_window): each span-selected row is extended with
+    the ±window neighbouring complete rows from the same version. Neighbours
+    carry ``matched: false`` and the selected rows ``matched: true``; with no
+    neighbour to add the output shape stays byte-identical (no matched keys,
+    row order untouched). window>0 fetches/uses the FULL row set — the span
+    selection then happens in Python with the identical predicate, so this is
+    no extra cost on either branch (span=None full fetch is today's path).
     """
+    full_rows: "list[dict[str, Any]] | None" = None
     if rows is None:
         try:
+            fetch_full = window > 0
             rows = db.evidence.text_unit_rows(
                 int(memory["id"]), int(memory.get("version") or 1),
-                span_start=(int(span["start"]) if span else None),
-                span_end=(int(span["end"]) if span else None),
+                span_start=(int(span["start"]) if (span and not fetch_full) else None),
+                span_end=(int(span["end"]) if (span and not fetch_full) else None),
             )
         except Exception:
             return None
+        if window > 0:
+            full_rows = rows
+            if span is not None:
+                start = int(span["start"])
+                end = int(span["end"])
+                rows = [
+                    row for row in rows
+                    if int(row["start_offset"]) < end and int(row["end_offset"]) > start
+                ]
     else:
+        full_rows = rows
         if span is not None:
             start = int(span["start"])
             end = int(span["end"])
@@ -91,8 +163,46 @@ def _unit_aligned_hits(
         }
         for row in rows
     ]
+    neighbours_added = False
+    if window > 0 and full_rows:
+        selected_indexes = {int(row["unit_index"]) for row in rows}
+        neighbour_indexes: set[int] = set()
+        for row in rows:
+            ridx = int(row["unit_index"])
+            for idx in range(ridx - window, ridx + window + 1):
+                if idx not in selected_indexes:
+                    neighbour_indexes.add(idx)
+        by_index = {int(row["unit_index"]): row for row in full_rows}
+        neighbour_rows = [
+            by_index[idx] for idx in sorted(neighbour_indexes) if idx in by_index
+        ]
+        if neighbour_rows:
+            neighbours_added = True
+            for entry in hit_spans:
+                entry["matched"] = True
+            for row in neighbour_rows:
+                hit_spans.append({
+                    "text": str(row["text"]),
+                    "start_offset": int(row["start_offset"]),
+                    "end_offset": int(row["end_offset"]),
+                    "unit_index": int(row["unit_index"]),
+                    "matched": False,
+                })
+            hit_spans.sort(key=lambda entry: (entry["start_offset"], entry["end_offset"]))
     upgraded: str | None = None
-    covered = sum(item["end_offset"] - item["start_offset"] for item in hit_spans)
+    if neighbours_added:
+        # D3: coverage is computed on the extended set — merge first so
+        # overlapping/adjacent units cannot double-count into an upgrade.
+        merged: list[list[int]] = []
+        for entry in hit_spans:
+            s, e = entry["start_offset"], entry["end_offset"]
+            if merged and s <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        covered = sum(e - s for s, e in merged)
+    else:
+        covered = sum(item["end_offset"] - item["start_offset"] for item in hit_spans)
     if content and covered >= _HIT_SPANS_FULL_COVERAGE * len(content):
         upgraded = content
     return hit_spans, upgraded
@@ -166,26 +276,62 @@ def _content_outline(subject: str, content: str) -> list[dict[str, Any]]:
     return outline
 
 
-def _hit_spans(raw_hits: Any, content: str) -> "list[dict[str, Any]] | None":
+def _hit_spans(
+    raw_hits: Any, content: str, *, window: int = 0,
+    window_rows: "list[dict[str, Any]] | None" = None,
+    memory_version: int | None = None,
+) -> "tuple[list[dict[str, Any]] | None, bool, int | None]":
     """v0.15.10: build hit_spans from the evidence channel's unit-level hits.
 
-    Two mandatory cleanups (adversarial-review findings, plan §2.3):
+    Returns (spans, dropped_stale, stale_evidence_version) — dropped_stale
+    and the max dropped row version drive the caller's stale_hit_spans
+    marker + re-query warning (F1, owner 2026-09-23).
+
+    Mandatory cleanups (adversarial-review findings, plan §2.3):
     - subject-kind hits are dropped: the subject unit's offsets are (0,0) and
       carry no content-span meaning (same reason outline excludes it);
     - overlapping/adjacent intervals are merged BEFORE any length math: the
       long-text fallback slices with overlap=60, so naive summation would
       double-count coverage (premature full-text upgrades) and surface
-      duplicated text.
+      duplicated text;
+    - F1 version alignment: a hit whose evidence row was published for a
+      DIFFERENT memory version than the item's current one is dropped — the
+      old row's legal offsets would silently slice the wrong region of the
+      new content. Hits without a row_version cannot be judged and keep the
+      legacy pass-through (synthetic/direct callers; the pipeline always
+      attaches row_version since 0.17.0).
+
+    Window (0.17.0 hit_window): each surviving hit is extended with the
+    complete rows whose unit_index lies within ±window of the hit's row_index
+    (window_rows = the caller's range-prefetched current-version rows). When
+    neighbour spans join the list they carry ``matched: false`` and hit spans
+    carry ``matched: true`` so the agent can tell retrieval hits from context;
+    with no neighbours the output shape stays byte-identical to v0.15.10.
 
     ``text`` is sliced from the source content so the span and the text are
     strictly self-consistent: read span=[start_offset, end_offset] returns
-    exactly this text. Returns None when nothing survives (FTS/phrase-only
-    recall has no evidence hits — the item falls back to the preview shape).
+    exactly this text. Returns (None, dropped_stale, ...) when no hit survives
+    (FTS/phrase-only recall has no evidence hits — the item falls back to the
+    preview shape).
     """
     intervals: list[tuple[int, int]] = []
+    hit_row_indexes: list[int] = []
+    dropped_stale = False
+    stale_versions: list[int] = []
     for h in raw_hits or []:
         if not isinstance(h, dict) or str(h.get("kind") or "") == "subject":
             continue
+        if memory_version is not None:
+            raw_rv = h.get("row_version")
+            if raw_rv is not None and not isinstance(raw_rv, bool):
+                try:
+                    rv = int(raw_rv)
+                except (TypeError, ValueError):
+                    rv = None
+                if rv is not None and rv != int(memory_version):
+                    dropped_stale = True
+                    stale_versions.append(rv)
+                    continue
         s_raw, e_raw = h.get("start_offset"), h.get("end_offset")
         # Strict ints (bools rejected — v0.14 span-validation lesson): these
         # come from evidence rows, never user input, but stay defensive.
@@ -197,24 +343,94 @@ def _hit_spans(raw_hits: Any, content: str) -> "list[dict[str, Any]] | None":
         s, e = s_raw, e_raw
         if 0 <= s < e <= len(content):
             intervals.append((s, e))
+            raw_ri = h.get("row_index")
+            hit_row_indexes.append(
+                int(raw_ri)
+                if isinstance(raw_ri, int) and not isinstance(raw_ri, bool)
+                else -1
+            )
     if not intervals:
-        return None
+        return None, dropped_stale, (max(stale_versions) if stale_versions else None)
+
+    # Window extension: collect the ±N neighbour rows per surviving hit.
+    # Subject rows never enter (kind filter here mirrors row_spans_for_ids).
+    neighbour_intervals: list[tuple[int, int]] = []
+    if window > 0 and window_rows and hit_row_indexes:
+        by_index = {
+            int(row["unit_index"]): row for row in window_rows
+            if row.get("unit_index") is not None
+            and str(row.get("kind") or "") != "subject"
+        }
+        seen: set[int] = set()
+        for (s, e), ridx in zip(intervals, hit_row_indexes):
+            if ridx < 0:
+                continue
+            for idx in range(ridx - window, ridx + window + 1):
+                if idx == ridx or idx in seen:
+                    continue
+                row = by_index.get(idx)
+                if row is None:
+                    continue
+                ns_raw, ne_raw = row.get("start_offset"), row.get("end_offset")
+                if (
+                    isinstance(ns_raw, bool) or isinstance(ne_raw, bool)
+                    or not isinstance(ns_raw, int) or not isinstance(ne_raw, int)
+                ):
+                    continue
+                ns, ne = ns_raw, ne_raw
+                if 0 <= ns < ne <= len(content):
+                    seen.add(idx)
+                    neighbour_intervals.append((ns, ne))
+
+    if neighbour_intervals:
+        # D4 marking: neighbours matched=false, hits matched=true. Merging
+        # runs over the combined set; a merged run is matched=true when it
+        # contains (or overlaps) any retrieval hit.
+        combined: list[tuple[int, int, bool]] = [
+            (s, e, True) for s, e in intervals
+        ] + [(s, e, False) for s, e in sorted(set(neighbour_intervals))]
+        combined.sort(key=lambda item: (item[0], item[1]))
+        merged: list[list[Any]] = []
+        for s, e, m in combined:
+            if merged and s <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e)
+                merged[-1][2] = merged[-1][2] or m
+            else:
+                merged.append([s, e, m])
+        return (
+            [
+                {
+                    "text": content[s:e], "start_offset": s, "end_offset": e,
+                    "matched": bool(m),
+                }
+                for s, e, m in merged
+            ],
+            dropped_stale,
+            max(stale_versions) if stale_versions else None,
+        )
+
     intervals.sort()
-    merged: list[tuple[int, int]] = []
+    merged_plain: list[tuple[int, int]] = []
     for s, e in intervals:
-        if merged and s <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        if merged_plain and s <= merged_plain[-1][1]:
+            merged_plain[-1] = (merged_plain[-1][0], max(merged_plain[-1][1], e))
         else:
-            merged.append((s, e))
-    return [
-        {"text": content[s:e], "start_offset": s, "end_offset": e}
-        for s, e in merged
-    ]
+            merged_plain.append((s, e))
+    return (
+        [
+            {"text": content[s:e], "start_offset": s, "end_offset": e}
+            for s, e in merged_plain
+        ],
+        dropped_stale,
+        max(stale_versions) if stale_versions else None,
+    )
 
 
 def _preview_item(
     item: dict[str, Any], *, content_mode: str = "preview", db: Any = None,
     outline_rows: "list[dict[str, Any]] | None" = None,
+    hit_window: int = 0,
+    window_rows: "list[dict[str, Any]] | None" = None,
 ) -> dict[str, Any]:
     """Build one find index-page item: metadata + content_chars + outline.
 
@@ -226,6 +442,10 @@ def _preview_item(
       content the item upgrades to full text and hit_spans stays as an
       annotation — the server never picks "the important hits" for the agent;
     - "full": + full content (the old include_content=true escape hatch).
+
+    0.17.0 hit_window: in "hits" mode the spans extend ±hit_window complete
+    rows around each hit (window_rows = the caller's one batched prefetch);
+    dropped stale-version hits surface as a stale_hit_spans marker (F1).
 
     Internal underscore debug fields are passed through untouched — the
     debug_ranking=true page contract exposes them, and search_memories strips
@@ -246,7 +466,11 @@ def _preview_item(
         preview["outline"] = _content_outline(str(item.get("subject") or ""), content)
     keep_content = content_mode == "full"
     if content_mode == "hits":
-        spans = _hit_spans(item.get("_evidence_hits"), content)
+        spans, dropped_stale, stale_evidence_version = _hit_spans(
+            item.get("_evidence_hits"), content,
+            window=hit_window, window_rows=window_rows,
+            memory_version=int(item.get("version") or 1),
+        )
         if spans:
             covered = sum(e - s for s, e in (
                 (sp["start_offset"], sp["end_offset"]) for sp in spans
@@ -257,6 +481,14 @@ def _preview_item(
         # spans is None → vector channel contributed nothing on this item
         # (FTS/phrase-only recall, or the embedder is down): the item keeps
         # the plain preview shape.
+        if dropped_stale:
+            # F1 (owner 2026-09-23): stale-version hits are dropped, never
+            # silently sliced against the new content. The caller lifts this
+            # marker into a response-level re-query warning.
+            preview["stale_hit_spans"] = {
+                "evidence_version": stale_evidence_version,
+                "memory_version": int(item.get("version") or 1),
+            }
         preview.pop("_evidence_hits", None)
     if not keep_content:
         preview.pop("content", None)
@@ -319,7 +551,7 @@ class ReadPipeline:
         pending = int(worker.get("queue_depth") or 0) + len(worker.get("inflight") or [])
         return {"pending_evidence_index": pending}
 
-    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool | None = None, content_mode: str = "preview", **_: Any) -> dict[str, Any]:
+    def memory_search(self, query: str = "", workspace: str | None = None, tags: list[str] | None = None, limit: int = 10, offset: int = 0, debug_ranking: bool = False, query_embedding: list[float] | None = None, tags_filter: list[str] | None = None, after_time: str | None = None, before_time: str | None = None, source_type: str | None = None, include_linked_open_items: bool = True, include_conflict_signal: bool = True, include_size: bool | None = None, content_mode: str = "preview", hit_window: int = 0, **_: Any) -> dict[str, Any]:
         extra_warnings = list(self._embedder_warnings)
         if include_size is not None:
             # v0.15.6: the size block is one global config key covering every
@@ -359,6 +591,13 @@ class ReadPipeline:
                 },
                 ok=False,
             )
+        # 0.17.0 hit_window: hits-mode-only knob (silently ignored beside the
+        # other modes, matching the limit_per_query convention). Placed after
+        # the early-error returns so a clamp warning survives into the response.
+        hit_window_value = (
+            _coerce_hit_window(hit_window, extra_warnings)
+            if content_mode == "hits" else 0
+        )
         query_embedding = self._auto_embed(query, query_embedding, extra_warnings)
         ctx = self._search_scope_context(workspace, extra_warnings)
         isolation = ctx["isolation"]
@@ -502,12 +741,42 @@ class ReadPipeline:
                 (int(r["id"]), int(r.get("version") or 1))
                 for r in results if r.get("id") is not None
             ])
+        # 0.17.0 hit_window: ONE range-limited batch prefetch for the whole
+        # page (the ±N neighbour rows around each item's evidence hits), at
+        # the same point as the outline prefetch — never per item.
+        _window_map: dict[int, list[dict[str, Any]]] = {}
+        if content_mode == "hits" and hit_window_value > 0 and results:
+            _window_entries: list[tuple[int, int, int, int]] = []
+            for r in results:
+                indexes = [
+                    int(h["row_index"]) for h in (r.get("_evidence_hits") or [])
+                    if isinstance(h, dict)
+                    and isinstance(h.get("row_index"), int)
+                    and not isinstance(h.get("row_index"), bool)
+                ]
+                if indexes and r.get("id") is not None:
+                    _window_entries.append((
+                        int(r["id"]), int(r.get("version") or 1),
+                        min(indexes) - hit_window_value,
+                        max(indexes) + hit_window_value,
+                    ))
+            if _window_entries:
+                _window_map = self.db.evidence.row_spans_for_ids(_window_entries)
         results = [
             _preview_item(
                 r, content_mode=content_mode, db=self.db,
                 outline_rows=_outline_map.get(int(r["id"]), []),
+                hit_window=hit_window_value,
+                window_rows=_window_map.get(int(r["id"])),
             ) for r in results
         ]
+        if content_mode == "hits":
+            # F1 (owner 2026-09-23): every dropped stale-version hit must tell
+            # the agent the evidence index lags and a re-query is needed.
+            for r in results:
+                stale = r.get("stale_hit_spans")
+                if isinstance(stale, dict) and r.get("id") is not None:
+                    extra_warnings.append(_stale_hit_spans_warning(int(r["id"]), stale))
         response_data = {
             "results": results,
             "count": len(results),
@@ -555,10 +824,15 @@ class ReadPipeline:
                     display_hint = (
                         f'find hit-spans page ({page_cost}): content_mode="hits" '
                         "returned vector-hit spans per item (hit_spans[].text + "
-                        "start/end offsets share read's span coordinates); items "
+                        "start/end offsets share read's span coordinates; "
+                        "hit_window=N extends each hit with +/-N neighbouring "
+                        "complete sentences, neighbours marked matched=false); items "
                         "whose hits cover >=50% of the content upgraded to full "
                         "text — hit_spans never truncates. Items without vector "
-                        "hits keep the plain preview shape."
+                        "hits keep the plain preview shape. hit_spans appears only "
+                        "on query-recall pages (browse/filter pages carry none); "
+                        "stale-version hits are dropped with a stale_hit_spans "
+                        "marker and a re-query warning."
                     )
                 elif total_estimate is None:
                     # Unfiltered active query-recall: no exact total exists,
@@ -750,6 +1024,7 @@ class ReadPipeline:
         source_type: str | None = None,
         limit_per_query: int = 3,
         content_mode: str = "preview",
+        hit_window: int = 0,
         deduplicate: bool = True,
         **_: Any,
     ) -> dict[str, Any]:
@@ -808,6 +1083,12 @@ class ReadPipeline:
         deduplicate = True if deduplicate is None else bool(deduplicate)
 
         extra_warnings = list(self._embedder_warnings)
+        # 0.17.0 hit_window: hits-mode-only knob (silently ignored beside the
+        # other modes, matching the limit_per_query convention).
+        hit_window_value = (
+            _coerce_hit_window(hit_window, extra_warnings)
+            if content_mode == "hits" else 0
+        )
         ctx = self._search_scope_context(workspace, extra_warnings)
         # Parity with find (R1-F1): the caller-scope warnings belong to the
         # call, so every query in the batch shares them.
@@ -860,6 +1141,30 @@ class ReadPipeline:
             except (TypeError, ValueError):
                 return 0.0
 
+        # 0.17.0 hit_window: the ±N neighbour-row prefetch happens ONCE,
+        # after the query loop and BEFORE the merge loop (never inside
+        # _preview — that would be one query per item). Multiple collected
+        # rows of the same memory (dedup merge) contribute overlapping ranges;
+        # row_spans_for_ids dedupes the entries internally.
+        _window_map: dict[int, list[dict[str, Any]]] = {}
+        if content_mode == "hits" and hit_window_value > 0 and collected:
+            _window_entries: list[tuple[int, int, int, int]] = []
+            for _order, _row_idx, _qid, row in collected:
+                indexes = [
+                    int(h["row_index"]) for h in (row.get("_evidence_hits") or [])
+                    if isinstance(h, dict)
+                    and isinstance(h.get("row_index"), int)
+                    and not isinstance(h.get("row_index"), bool)
+                ]
+                if indexes:
+                    _window_entries.append((
+                        int(row["id"]), int(row.get("version") or 1),
+                        min(indexes) - hit_window_value,
+                        max(indexes) + hit_window_value,
+                    ))
+            if _window_entries:
+                _window_map = self.db.evidence.row_spans_for_ids(_window_entries)
+
         def _preview(row: dict[str, Any]) -> dict[str, Any]:
             # v0.15.10: batch_find searches with debug_ranking=True so rows
             # still carry _evidence_hits; in "hits" mode it survives the clean
@@ -870,7 +1175,11 @@ class ReadPipeline:
                 k: v for k, v in row.items()
                 if not k.startswith("_") or (keep_hits and k == "_evidence_hits")
             }
-            return _preview_item(clean, content_mode=content_mode, db=self.db)
+            return _preview_item(
+                clean, content_mode=content_mode, db=self.db,
+                hit_window=hit_window_value,
+                window_rows=_window_map.get(int(row["id"])),
+            )
 
         results: list[dict[str, Any]] = []
         if deduplicate:
@@ -904,6 +1213,20 @@ class ReadPipeline:
                 preview["matched_query_ids"] = [qid]
                 preview["best_query_id"] = qid
                 results.append(preview)
+
+        if content_mode == "hits":
+            # F1 (owner 2026-09-23): stale-version hits dropped by the
+            # preview builder surface as per-item re-query warnings. One per
+            # memory — deduplicate=false can carry the same memory N times.
+            _stale_seen: set[int] = set()
+            for entry in results:
+                stale = entry.get("stale_hit_spans")
+                if isinstance(stale, dict) and entry.get("id") is not None:
+                    mid = int(entry["id"])
+                    if mid in _stale_seen:
+                        continue
+                    _stale_seen.add(mid)
+                    extra_warnings.append(_stale_hit_spans_warning(mid, stale))
 
         response_data: dict[str, Any] = {
             "results": results,
@@ -1190,6 +1513,7 @@ class ReadPipeline:
         section_ids: list[int] | None = None,
         span: dict[str, Any] | None = None,
         content_mode: str = "full",
+        hit_window: int = 0,
         **_: Any,
     ) -> dict[str, Any]:
         """Return one full memory by id, a unit-aligned window of it, or its preview.
@@ -1215,22 +1539,38 @@ class ReadPipeline:
                 {"error": 'content_mode must be one of "preview" | "hits" | "full" (default "full")'},
                 ok=False,
             )
+        # 0.17.0 hit_window: hits-mode-only knob + the F1 fallback warnings
+        # share one per-call warning list (empty by default → byte-identical).
+        read_warnings: list[str] = []
+        hit_window_value = (
+            _coerce_hit_window(hit_window, read_warnings)
+            if content_mode == "hits" else 0
+        )
         span_start: int | None = None
         span_end: int | None = None
         if span is not None:
             if not isinstance(span, dict):
-                return self.db.state.response({"error": "span must be an object with start/end"}, ok=False)
+                return self.db.state.response(
+                    {"error": "span must be an object with start/end"},
+                    ok=False, extra_warnings=read_warnings,
+                )
             raw_start = span.get("start")
             raw_end = span.get("end")
             if (
                 not isinstance(raw_start, int) or isinstance(raw_start, bool)
                 or not isinstance(raw_end, int) or isinstance(raw_end, bool)
             ):
-                return self.db.state.response({"error": "span start/end must be integers"}, ok=False)
+                return self.db.state.response(
+                    {"error": "span start/end must be integers"},
+                    ok=False, extra_warnings=read_warnings,
+                )
             span_start = raw_start
             span_end = raw_end
             if span_start < 0 or span_end <= span_start:
-                return self.db.state.response({"error": "span requires 0 <= start < end"}, ok=False)
+                return self.db.state.response(
+                    {"error": "span requires 0 <= start < end"},
+                    ok=False, extra_warnings=read_warnings,
+                )
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
         if denied is not None:
@@ -1240,7 +1580,10 @@ class ReadPipeline:
             error_data: dict[str, Any] = {"error": f"memory id {memory_id_int} not found"}
             if caller.isolation == "strict":
                 error_data.update(caller.response_fields())
-            return self.db.state.response(error_data, ok=False, extra_warnings=list(caller.warnings))
+            return self.db.state.response(
+                error_data, ok=False,
+                extra_warnings=read_warnings + list(caller.warnings),
+            )
 
         content = str(memory.get("content") or "")
         data: dict[str, Any]
@@ -1255,7 +1598,7 @@ class ReadPipeline:
             )
             data = {"memory": preview}
         elif content_mode == "hits":
-            unit_hits = _unit_aligned_hits(self.db, memory, span)
+            unit_hits = _unit_aligned_hits(self.db, memory, span, window=hit_window_value)
             if unit_hits is not None:
                 hit_spans, upgraded = unit_hits
                 record = {
@@ -1274,6 +1617,11 @@ class ReadPipeline:
                 # No evidence rows for the current version (fresh write before
                 # the async index lands, or a down embedder): fall back to the
                 # full record — an honest answer beats an empty hits page.
+                # F1: the fallback is no longer silent — the agent must know
+                # the unit index lags this version.
+                read_warnings.append(_evidence_lag_warning(
+                    memory_id_int, 'content_mode="hits" fell back to the full record',
+                ))
                 data = {"memory": memory}
         else:
             if span_start is not None and span_end is not None:
@@ -1307,7 +1655,11 @@ class ReadPipeline:
                         },
                     }
                 else:
-                    # Legacy fallback while no evidence rows exist.
+                    # Legacy fallback while no evidence rows exist. F1: say so
+                    # — the agent may be reading by pre-edit offsets.
+                    read_warnings.append(_evidence_lag_warning(
+                        memory_id_int, "span read used the legacy character slice",
+                    ))
                     windowed = dict(memory)
                     windowed["content"] = content[span_start:clipped_end]
                     data = {
@@ -1341,12 +1693,13 @@ class ReadPipeline:
             data["size"] = {**size_block, "display_hint": display_hint}
         if caller.isolation == "strict":
             data.update(caller.response_fields())
-        return self.db.state.response(data, extra_warnings=list(caller.warnings))
+        return self.db.state.response(data, extra_warnings=read_warnings + list(caller.warnings))
 
     def memory_batch_read(
         self,
         memory_ids: "list[int] | None" = None,
         content_mode: str = "preview",
+        hit_window: int = 0,
         spans: "dict[str, Any] | None" = None,
         **_: Any,
     ) -> dict[str, Any]:
@@ -1371,6 +1724,13 @@ class ReadPipeline:
                  "results": [], "count": 0},
                 ok=False,
             )
+        # 0.17.0 hit_window: hits-mode-only knob + the F1 fallback warnings
+        # share one per-call warning list (empty by default → byte-identical).
+        read_warnings: list[str] = []
+        hit_window_value = (
+            _coerce_hit_window(hit_window, read_warnings)
+            if content_mode == "hits" else 0
+        )
         cap = {"preview": BATCH_READ_MAX_PREVIEW, "hits": BATCH_READ_MAX_HITS, "full": BATCH_READ_MAX_FULL}[content_mode]
         wanted: list[int] = []
         seen: set[int] = set()
@@ -1380,12 +1740,12 @@ class ReadPipeline:
             except (TypeError, ValueError):
                 return self.db.state.response(
                     {"error": "memory_ids must contain positive integer ids", "results": [], "count": 0},
-                    ok=False,
+                    ok=False, extra_warnings=read_warnings,
                 )
             if mid <= 0:
                 return self.db.state.response(
                     {"error": "memory_ids must contain positive integer ids", "results": [], "count": 0},
-                    ok=False,
+                    ok=False, extra_warnings=read_warnings,
                 )
             if mid not in seen:
                 seen.add(mid)
@@ -1393,7 +1753,7 @@ class ReadPipeline:
         if not wanted:
             return self.db.state.response(
                 {"error": "memory_ids must be a non-empty list", "results": [], "count": 0},
-                ok=False,
+                ok=False, extra_warnings=read_warnings,
             )
         if len(wanted) > cap:
             return self.db.state.response(
@@ -1401,7 +1761,7 @@ class ReadPipeline:
                     "error": f'content_mode="{content_mode}" accepts at most {cap} ids per call',
                     "cap": cap, "results": [], "count": 0,
                 },
-                ok=False,
+                ok=False, extra_warnings=read_warnings,
             )
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
@@ -1476,6 +1836,7 @@ class ReadPipeline:
             elif content_mode == "hits":
                 unit_hits = _unit_aligned_hits(
                     self.db, memory, span, rows=unit_rows_map.get(mid, []),
+                    window=hit_window_value,
                 )
                 record = {key: value for key, value in memory.items() if key != "content"}
                 record["content_chars"] = len(content)
@@ -1489,6 +1850,13 @@ class ReadPipeline:
                     record["hit_spans"] = hit_spans
                     if upgraded is not None:
                         record["content"] = upgraded
+                else:
+                    # F1: the fallback is no longer silent. (Unlike single
+                    # read, this fallback record carries no content — the
+                    # wording below must not claim a full record.)
+                    read_warnings.append(_evidence_lag_warning(
+                        mid, 'content_mode="hits" fell back to the metadata-only record',
+                    ))
                 item["memory"] = record
             else:  # full
                 record = dict(memory)
@@ -1508,6 +1876,10 @@ class ReadPipeline:
                             last_end = max(int(row["end_offset"]) for row in rows)
                             record["content"] = content[first_start:last_end]
                         else:
+                            # Legacy fallback while no evidence rows exist (F1: say so).
+                            read_warnings.append(_evidence_lag_warning(
+                                mid, "span read used the legacy character slice",
+                            ))
                             record["content"] = content[span["start"]:clipped_end]
                     else:
                         record["content"] = ""
@@ -1516,7 +1888,12 @@ class ReadPipeline:
             results.append(item)
 
         over_budget: list[dict[str, Any]] = []
-        if content_mode == "full":
+        if content_mode in {"full", "hits"}:
+            # F3 (0.17.0): the hit_window's >=50% coverage upgrade can put
+            # full contents on a hits page, so the "hits payloads are
+            # structurally bounded" premise no longer holds — any entry that
+            # carries content (upgraded hits or full) counts against the same
+            # byte budget, with the same structured over-long response.
             def _content_bytes(entry: dict[str, Any]) -> int:
                 memory = entry.get("memory") or {}
                 return len(str(memory.get("content") or "").encode("utf-8"))
@@ -1545,7 +1922,7 @@ class ReadPipeline:
                     "budget_bytes": BATCH_READ_FULL_BUDGET_BYTES,
                     "total_bytes": total_bytes,
                     "hint": (
-                        "batch read over the full-content budget; no contents were returned — "
+                        "batch read over the content byte budget; no contents were returned — "
                         "read the items individually (memory action='read') or narrow the batch"
                     ),
                 }
@@ -1553,7 +1930,9 @@ class ReadPipeline:
                     data["size"] = meter_payloads(slim_results)
                 if caller.isolation == "strict":
                     data.update(caller.response_fields())
-                return self.db.state.response(data, extra_warnings=list(caller.warnings))
+                return self.db.state.response(
+                    data, extra_warnings=read_warnings + list(caller.warnings),
+                )
 
         data = {"results": results, "count": len(results)}
         if self.settings.include_size:
@@ -1569,7 +1948,7 @@ class ReadPipeline:
             }
         if caller.isolation == "strict":
             data.update(caller.response_fields())
-        return self.db.state.response(data, extra_warnings=list(caller.warnings))
+        return self.db.state.response(data, extra_warnings=read_warnings + list(caller.warnings))
 
 
     def memory_recent(self, workspace: str | None = None, limit: int = 20, **_: Any) -> dict[str, Any]:

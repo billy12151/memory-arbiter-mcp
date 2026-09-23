@@ -674,3 +674,281 @@ def test_outline_table_path_matches_reparse(tmp_path: Path) -> None:
     assert via_table == _content_outline(subject, content)
     # 12 段 > 8 段上限：两条路都带「还有 4 段」尾标
     assert via_table[-1]["head"] == "…还有 4 段" and via_table[-1]["offset"] is None
+
+
+# ── 0.17.0: hit_window 邻句窗口 + F1 旧版本命中丢弃 ──────────────────────────
+
+
+def _window_hit(kind: str, start: int, end: int, *, row_index: int | None = None,
+                row_version: int | None = None) -> dict:
+    h = {"kind": kind, "text": "raw unit text irrelevant — spans slice source",
+         "start_offset": start, "end_offset": end, "score": 0.9}
+    if row_index is not None:
+        h["row_index"] = row_index
+    if row_version is not None:
+        h["row_version"] = row_version
+    return h
+
+
+def _window_rows(content: str, sentences: list[str], *, subject_row: bool = False) -> list[dict]:
+    spans = _sent_spans(content, sentences)
+    rows: list[dict] = []
+    start_index = 0
+    if subject_row:
+        rows.append({"unit_index": 0, "kind": "subject", "start_offset": 0, "end_offset": 0})
+        start_index = 1
+    for offset, (s, e) in enumerate(spans):
+        rows.append({"unit_index": offset + start_index, "kind": "sentence",
+                     "start_offset": s, "end_offset": e})
+    return rows
+
+
+def _sent_spans(content: str, sentences: list[str]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    for sentence in sentences:
+        start = content.index(sentence, pos)
+        spans.append((start, start + len(sentence)))
+        pos = start + len(sentence)
+    return spans
+
+
+def test_hits_window_default_zero_byte_identical() -> None:
+    """不传 hit_window：span 条目逐键与 v0.15.10 一致——无 matched、无
+    row_index 外发、无 stale_hit_spans（行为门 §4.1）。"""
+    content = _cyclic_content(100)
+    hits = [_window_hit("text", 60, 75, row_index=3, row_version=1),
+            _window_hit("text", 10, 30)]
+    preview = _preview_item(
+        {"subject": "s", "content": content, "version": 1, "_evidence_hits": hits},
+        content_mode="hits",
+    )
+    spans = preview["hit_spans"]
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in spans] == [(10, 30), (60, 75)]
+    for sp in spans:
+        assert set(sp.keys()) == {"text", "start_offset", "end_offset"}
+    assert "stale_hit_spans" not in preview
+    assert "content" not in preview
+
+
+def test_hits_window_one_includes_neighbors() -> None:
+    sentences = ["首句介绍背景情况。", "次句给出核心论断甲。", "三句展开论断甲细节。",
+                 "四句补充边界条件乙。", "末句总结全部内容。"]
+    content = "\n".join(sentences)
+    all_spans = _sent_spans(content, sentences)
+    preview = _preview_item(
+        {"subject": "s", "content": content, "version": 1,
+         "_evidence_hits": [_window_hit("text", *all_spans[2], row_index=2, row_version=1)]},
+        content_mode="hits", hit_window=1,
+        window_rows=_window_rows(content, sentences),
+    )
+    spans = preview["hit_spans"]
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in spans] == all_spans[1:4]
+    assert [sp["matched"] for sp in spans] == [False, True, False]
+    for sp in spans:
+        assert sp["text"] == content[sp["start_offset"]:sp["end_offset"]]
+        assert "\n" not in sp["text"]  # 完整句，非字符截断
+
+
+def test_hits_window_never_pulls_subject() -> None:
+    sentences = ["甲句讲规则一。", "乙句讲规则二。", "丙句讲规则三。"]
+    content = "\n".join(sentences)
+    all_spans = _sent_spans(content, sentences)
+    # subject 行在窗口范围内（row_index=0，哨兵 (0,0)）：命中 row_index=1，window=1。
+    rows = _window_rows(content, sentences, subject_row=True)
+    preview = _preview_item(
+        {"subject": "subject-哨兵文本", "content": content, "version": 1,
+         "_evidence_hits": [_window_hit("text", *all_spans[0], row_index=1, row_version=1)]},
+        content_mode="hits", hit_window=1, window_rows=rows,
+    )
+    spans = preview["hit_spans"]
+    for sp in spans:
+        assert (sp["start_offset"], sp["end_offset"]) != (0, 0)
+        assert "subject-哨兵文本" not in sp["text"]
+
+
+def test_hits_window_coverage_upgrade() -> None:
+    sentences = ["前半句话讲催收规范要求。", "后半句话记录债务转移。"]
+    content = "\n".join(sentences)
+    all_spans = _sent_spans(content, sentences)
+    preview = _preview_item(
+        {"subject": "s", "content": content, "version": 1,
+         "_evidence_hits": [_window_hit("text", *all_spans[0], row_index=0, row_version=1)]},
+        content_mode="hits", hit_window=1,
+        window_rows=_window_rows(content, sentences),
+    )
+    # 窗口扩展后覆盖 100% ≥ 50% → 升级全文，hit_spans 保留作标注。
+    assert preview["content"] == content
+    assert len(preview["hit_spans"]) == 2
+    assert {sp["matched"] for sp in preview["hit_spans"]} == {True, False}
+
+
+def test_hits_window_clamped_and_invalid(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    tools.memory_write(content="clamp 验证正文内容讲发布流程", subject="clamp", tags=[])
+    clamped = tools.memory_search(query="clamp", content_mode="hits", hit_window=99)
+    assert clamped["ok"] is True
+    assert any("hit_window clamped to 5" in w for w in clamped["warnings"])
+    for bad in ("x", -1):
+        res = tools.memory_search(query="clamp", content_mode="hits", hit_window=bad)
+        assert res["ok"] is True
+        assert not any("hit_window" in w for w in res["warnings"])
+    # 非 hits 档同传：静默忽略（无 clamp warning）。
+    preview_res = tools.memory_search(query="clamp", content_mode="preview", hit_window=99)
+    assert preview_res["ok"] is True
+    assert not any("hit_window" in w for w in preview_res["warnings"])
+
+
+def test_hits_window_adjacent_spans_stay_separate() -> None:
+    # 命中句与邻句之间有分隔空白 → 不强并，各 span 精确到句。
+    sentences = ["甲句讲规则一。", "乙句讲规则二。", "丙句讲规则三。"]
+    content = "　".join(sentences)  # 全角空格分隔
+    all_spans = _sent_spans(content, sentences)
+    assert all_spans[1][0] > all_spans[0][1]  # 确有间隔
+    preview = _preview_item(
+        {"subject": "s", "content": content, "version": 1,
+         "_evidence_hits": [_window_hit("text", *all_spans[1], row_index=1, row_version=1)]},
+        content_mode="hits", hit_window=1,
+        window_rows=_window_rows(content, sentences),
+    )
+    spans = preview["hit_spans"]
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in spans] == all_spans
+    assert [sp["text"] for sp in spans] == sentences
+
+
+def test_hits_window_directly_adjacent_merge_carries_hit_flag() -> None:
+    # 无分隔直接相连 → 合并规则照旧作用于扩展后区间集；合并段含命中 → matched=true。
+    content = "甲句内容。乙句内容。丙句内容。"
+    bounds = [(0, 5), (5, 10), (10, 15)]
+    preview = _preview_item(
+        {"subject": "s", "content": content, "version": 1,
+         "_evidence_hits": [_window_hit("text", 5, 10, row_index=1, row_version=1)]},
+        content_mode="hits", hit_window=1,
+        window_rows=[{"unit_index": i, "kind": "sentence", "start_offset": s, "end_offset": e}
+                     for i, (s, e) in enumerate(bounds)],
+    )
+    spans = preview["hit_spans"]
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in spans] == [(0, 15)]
+    assert spans[0]["matched"] is True
+    assert spans[0]["text"] == content[0:15]
+
+
+def test_hits_window_edge_cases() -> None:
+    # 空 content：区间校验恒拒 → 无 hit_spans（钉死防回归）。
+    empty = _preview_item(
+        {"subject": "s", "content": "", "version": 1,
+         "_evidence_hits": [_window_hit("text", 0, 5, row_index=0, row_version=1)]},
+        content_mode="hits", hit_window=2,
+        window_rows=[{"unit_index": 1, "kind": "sentence", "start_offset": 0, "end_offset": 5}],
+    )
+    assert "hit_spans" not in empty
+    # 单行 memory：window 退化为自身 → 无邻句 → 无 matched 键（形状不变）。
+    content = "唯一一句完整的话。"
+    single = _preview_item(
+        {"subject": "s", "content": content, "version": 1,
+         "_evidence_hits": [_window_hit("text", 0, len(content), row_index=0, row_version=1)]},
+        content_mode="hits", hit_window=3,
+        window_rows=[{"unit_index": 0, "kind": "sentence", "start_offset": 0, "end_offset": len(content)}],
+    )
+    spans = single["hit_spans"]
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in spans] == [(0, len(content))]
+    assert all("matched" not in sp for sp in spans)
+    # 单行覆盖 100% → 升级全文照常发生。
+    assert single["content"] == content
+
+
+def test_hits_stale_version_dropped_with_signal(tmp_path: Path) -> None:
+    """F1（owner 拍板）：行版本 ≠ 记忆版本的命中被丢弃（绝不静默切错区域），
+    条目带 stale_hit_spans，响应 warnings 含重新查询提示。"""
+    pytest.importorskip("sqlite_vec")
+    tools = _make_vec_tools(tmp_path)
+    mid, _ = tools.db.insert_memory(MemoryRecord(
+        content="旧版本正文讲负债重组流程安排。", agent_id="a", workspace="ws",
+        subject="负债重组", tags=[],
+    ))
+    import json as _json
+    from memory_arbiter.models import utc_now_iso
+    with tools.db.write_transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO memory_row(memory_id, memory_version, content_hash,"
+            " row_index, kind, text, start_offset, end_offset, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (mid, 1, "h", 0, "sentence", "旧版本正文讲负债重组流程安排。", 0, 14, utc_now_iso()),
+        )
+        conn.execute(
+            "INSERT INTO memory_row_vec(id, parent_status, embedding) VALUES (?,?,?)",
+            (cur.lastrowid, "active", _json.dumps([0.0, 1.0])),
+        )
+    # 模拟编辑 bump version 但行未重发布（异步窗口期）。
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE memories SET version=2, content=? WHERE id=?",
+            ("新版本正文完全不同的话题内容。", mid),
+        )
+    res = tools.memory_search(
+        query="负债重组", query_embedding=[0.0, 1.0],
+        content_mode="hits", hit_window=2,
+    )
+    assert res["ok"] is True, res["data"]
+    item = res["data"]["results"][0]
+    assert "hit_spans" not in item  # 丢弃，绝不切错区域
+    assert item["stale_hit_spans"] == {"evidence_version": 1, "memory_version": 2}
+    assert any("re-query" in w for w in res["warnings"])
+
+
+def test_hits_partial_stale_window_survives(tmp_path: Path) -> None:
+    """部分命中过期部分新鲜：新鲜命中照常出 span（含窗口扩展），stale 如实上报。"""
+    pytest.importorskip("sqlite_vec")
+    tools = _make_vec_tools(tmp_path)
+    sentences = ["过期句讲旧协议版本一。", "新鲜句讲新协议版本二。", "邻近句补充细节说明。"]
+    content = "\n".join(sentences)
+    mid, _ = tools.db.insert_memory(MemoryRecord(
+        content=content, agent_id="a", workspace="ws", subject="协议版本", tags=[],
+    ))
+    import json as _json
+    from memory_arbiter.models import utc_now_iso
+    all_spans = _sent_spans(content, sentences)
+    with tools.db.write_transaction() as conn:
+        # row_index=0 @v1（过期，占住 index 0）；row_index=1,2 @v2（当前）。
+        stale = conn.execute(
+            "INSERT INTO memory_row(memory_id, memory_version, content_hash,"
+            " row_index, kind, text, start_offset, end_offset, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (mid, 1, "h", 0, "sentence", sentences[0], *all_spans[0], utc_now_iso()),
+        )
+        conn.execute(
+            "INSERT INTO memory_row_vec(id, parent_status, embedding) VALUES (?,?,?)",
+            (stale.lastrowid, "active", _json.dumps([0.0, 1.0])),
+        )
+        # row_index=1 @v2 带向量 = 新鲜命中；row_index=2 只入 memory_row 不入
+        # vec：row_knn 返回 k 近邻不筛距离，带向量的行永远是命中——无向量的
+        # 行只能经窗口通道作为邻句带出。
+        fresh = conn.execute(
+            "INSERT INTO memory_row(memory_id, memory_version, content_hash,"
+            " row_index, kind, text, start_offset, end_offset, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (mid, 2, "h2", 1, "sentence", sentences[1], *all_spans[1], utc_now_iso()),
+        )
+        conn.execute(
+            "INSERT INTO memory_row_vec(id, parent_status, embedding) VALUES (?,?,?)",
+            (fresh.lastrowid, "active", _json.dumps([0.0, 1.0])),
+        )
+        neighbour = conn.execute(
+            "INSERT INTO memory_row(memory_id, memory_version, content_hash,"
+            " row_index, kind, text, start_offset, end_offset, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (mid, 2, "h2", 2, "sentence", sentences[2], *all_spans[2], utc_now_iso()),
+        )
+        assert neighbour.lastrowid is not None
+        conn.execute("UPDATE memories SET version=2 WHERE id=?", (mid,))
+    res = tools.memory_search(
+        query="协议版本", query_embedding=[0.0, 1.0],
+        content_mode="hits", hit_window=1,
+    )
+    assert res["ok"] is True, res["data"]
+    item = res["data"]["results"][0]
+    spans = item["hit_spans"]
+    # 新鲜命中 row_index=1 扩展 → 邻 row_index=2 带出；过期 row_index=0 不参与。
+    assert [(sp["start_offset"], sp["end_offset"]) for sp in spans] == all_spans[1:3]
+    assert [sp["matched"] for sp in spans] == [True, False]
+    assert item["stale_hit_spans"] == {"evidence_version": 1, "memory_version": 2}

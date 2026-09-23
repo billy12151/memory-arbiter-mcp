@@ -366,10 +366,17 @@ def build_runtime() -> ServerBundle:
         content — content_mode (v0.15.10, preview default) is a single-choice
         enum: "hits" adds hit_spans (vector-matched unit text + span
         coordinates, never truncated; >=50% coverage upgrades an item to full
-        text), "full" returns whole texts. Score compares only
-        within the page; if the top page misses, reword the query or add
-        tags_filter instead of deep paging. The size block meters the returned
-        page (tokens_estimate + display_hint).
+        text; hit_window=N (default 0) extends each hit with +/-N
+        neighbouring complete sentences, neighbours marked matched=false;
+        hit_spans appears only on query-recall pages — browse/filter pages
+        carry none; hits whose evidence row lags the memory's current version
+        are dropped with a stale_hit_spans marker plus a re-query warning),
+        "full" returns whole texts. Offsets are 0-based Unicode code-point
+        offsets into the content as indexed for the item's version; the
+        evidence index may lag right after an edit (see vector_lag). Score
+        compares only within the page; if the top page misses, reword the
+        query or add tags_filter instead of deep paging. The size block
+        meters the returned page (tokens_estimate + display_hint).
         """
         identity = _identity_for_tool(app) or stdio_identity
         payload, error = _data_with_request_identity(

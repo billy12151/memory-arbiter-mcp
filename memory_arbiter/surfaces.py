@@ -123,7 +123,13 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "span coordinates; NO truncation ever: when merged hits cover >=50% "
             "of the content the item upgrades to full text with hit_spans kept "
             "as an annotation, so the server never picks 'the important hits' "
-            "for you; items without vector hits keep the plain preview shape) | "
+            "for you; items without vector hits keep the plain preview shape; "
+            "hit_window=N (default 0) extends each hit with +/-N neighbouring "
+            "complete sentences, neighbours marked matched=false; hit_spans "
+            "appears only on query-recall pages — browse/filter pages carry "
+            "none; hits whose evidence row lags the memory's current version "
+            "are dropped with a stale_hit_spans marker plus a re-query "
+            "warning) | "
             "\"full\" (adds the whole content — the old include_content=true). "
             "Score is only "
             "meaningful relative to other items on the same page. If the top page "
@@ -165,7 +171,11 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "count=0/empty; batch never falls back to recent memories and every "
             "item has already passed the relevance floor. content_mode "
             "(v0.15.10, same enum as find: preview default | hits | full) picks "
-            "the per-item content depth; prefer the preview and read specific spans."
+            "the per-item content depth; hits supports hit_window=N (default 0, "
+            "±N neighbouring complete sentences around each hit, neighbours "
+            "marked matched=false; hit_spans appears only on query-recall "
+            "pages; stale-version hits are dropped with a re-query warning); "
+            "prefer the preview and read specific spans."
         ),
         "value_reference": _memory_value_reference(),
     },

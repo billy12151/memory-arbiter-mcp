@@ -223,6 +223,57 @@ class EvidenceStore:
         except sqlite3.Error:
             return {}
 
+    def row_spans_for_ids(
+        self, entries: "list[tuple[int, int, int, int]]",
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Range-limited batch row-span fetch (0.17.0 hit_window, plan Step 1).
+
+        Each entry is (memory_id, version, lo_row_index, hi_row_index) — the
+        caller derives lo/hi from its evidence hits' row_index ±window, so the
+        row count stays bounded by the window, never the document length (F4).
+        One connection, OR-of-ranges WHERE, chunked at 200 like the other
+        batch fetches; subject rows never come back (they carry no content
+        span) and ``text`` is not selected (neighbours only need offsets).
+
+        Returns {memory_id: [{unit_index, kind, start_offset, end_offset}]}
+        with each per-memory list ordered by unit_index; memories with no
+        in-range current-version rows are absent from the map.
+        """
+        if not entries:
+            return {}
+        uniq = sorted({
+            (int(mid), int(version), int(lo), int(hi))
+            for mid, version, lo, hi in entries
+        })
+        out: dict[int, list[dict[str, Any]]] = {}
+        try:
+            with self._db.connection() as conn:
+                for start in range(0, len(uniq), 200):
+                    chunk = uniq[start:start + 200]
+                    where = " OR ".join(
+                        "(memory_id=? AND memory_version=? AND row_index BETWEEN ? AND ?)"
+                        for _ in chunk
+                    )
+                    params = [value for entry in chunk for value in entry]
+                    rows = conn.execute(
+                        f"""SELECT memory_id, row_index AS unit_index, kind,
+                                  start_offset, end_offset
+                            FROM memory_row
+                            WHERE ({where}) AND kind != 'subject'
+                            ORDER BY memory_id, row_index""",
+                        params,
+                    ).fetchall()
+                    for row in rows:
+                        out.setdefault(int(row["memory_id"]), []).append(
+                            {key: row[key] for key in
+                             ("unit_index", "kind", "start_offset", "end_offset")}
+                        )
+            for per_memory in out.values():
+                per_memory.sort(key=lambda row: int(row["unit_index"]))
+            return out
+        except sqlite3.Error:
+            return {}
+
     # (0.17.0 C5: the unit-table knn() was retired — row_knn is the
     # only KNN over the evidence channel's vectors.)
 

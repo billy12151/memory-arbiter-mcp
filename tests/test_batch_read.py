@@ -289,3 +289,135 @@ def test_batch_read_batches_connections(tmp_path: Path, monkeypatch) -> None:
     # 无批量预取时 ≥20（每 id 一连接）；预取后与 id 数无关（含 state 响应
     # 封装等杂项连接，上限 5）。
     assert len(calls) <= 5, f"expected batched connections, saw {len(calls)}"
+
+
+# ── 0.17.0: read/batch_read hits 窗口 + F1 回落提示 + F3 字节预算 ────────────
+
+
+def test_read_hits_window_expands_neighbors(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    body = "第一段落讲述催收规范。\n第二段落记录债务转移流程。\n第三段落是别的主题。"
+    mid = _write(tools, "窗口读主题", body)
+    bounds = []
+    pos = 0
+    for part in body.split("\n"):
+        start = body.index(part, pos)
+        bounds.append((part, start, start + len(part)))
+        pos = start + len(part)
+    _insert_units(tools, mid, bounds)
+    mid_start = bounds[1][1]
+    res = tools.memory(action="read", data={
+        "memory_id": mid, "content_mode": "hits", "hit_window": 1,
+        "span": {"start": mid_start + 2, "end": mid_start + 5},
+    })
+    assert res.get("ok"), res
+    record = res["data"]["memory"]
+    spans = record["hit_spans"]
+    assert [sp["unit_index"] for sp in spans] == [0, 1, 2]
+    assert [sp["matched"] for sp in spans] == [False, True, False]
+    for sp in spans:
+        assert sp["text"] in body
+        assert body[sp["start_offset"]:sp["end_offset"]] == sp["text"]
+        assert "\n" not in sp["text"]  # 完整单元，无半句
+
+
+def test_read_hits_window_version_mismatch_noop(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "版本错位读主题", "版本错位正文内容。")
+    _insert_units(tools, mid, [("版本错位正文内容。", 0, 9)])
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET version=2 WHERE id=?", (mid,))
+    res = tools.memory(action="read", data={
+        "memory_id": mid, "content_mode": "hits", "hit_window": 1,
+    })
+    assert res.get("ok"), res
+    memory = res["data"]["memory"]
+    assert "hit_spans" not in memory  # 当前版本无行 → 回落全文
+    assert memory["content"] == "版本错位正文内容。"
+    assert any("evidence index may lag" in w for w in res["warnings"])
+
+
+def test_read_full_span_legacy_fallback_warns(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    body = "第一段说甲规则。第二段说乙规则。"
+    mid = _write(tools, "回落提示主题", body)
+    res = tools.memory(action="read", data={
+        "memory_id": mid, "span": {"start": 0, "end": 5},
+    })
+    assert res.get("ok"), res
+    assert res["data"]["memory"]["content"] == body[:5]
+    assert any("legacy character slice" in w for w in res["warnings"])
+
+
+def test_batch_read_hits_window(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    body_a = "甲文第一句讲催收。\n甲文第二句讲转移。"
+    body_b = "乙文第一句讲归还。\n乙文第二句讲结算。"
+    mid_a = _write(tools, "批量窗口甲", body_a)
+    mid_b = _write(tools, "批量窗口乙", body_b)
+    for mid, body in ((mid_a, body_a), (mid_b, body_b)):
+        bounds = []
+        pos = 0
+        for part in body.split("\n"):
+            start = body.index(part, pos)
+            bounds.append((part, start, start + len(part)))
+            pos = start + len(part)
+        _insert_units(tools, mid, bounds)
+    res = _batch_read(
+        tools, memory_ids=[mid_a, mid_b], content_mode="hits", hit_window=1,
+        spans={str(mid_a): {"start": 0, "end": 3}, str(mid_b): {"start": 0, "end": 3}},
+    )
+    assert res.get("ok"), res
+    by_id = {item["memory_id"]: item["memory"] for item in res["data"]["results"]}
+    for mid, body in ((mid_a, body_a), (mid_b, body_b)):
+        spans = by_id[mid]["hit_spans"]
+        assert [sp["matched"] for sp in spans] == [True, False]
+        for sp in spans:
+            assert body[sp["start_offset"]:sp["end_offset"]] == sp["text"]
+
+
+def test_batch_read_hits_fallback_warns(tmp_path: Path) -> None:
+    """F1：batch_read hits 因当前版本无行回落全文时不再静默。"""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "批量回落主题", "批量回落正文。")
+    res = _batch_read(tools, memory_ids=[mid], content_mode="hits")
+    assert res.get("ok"), res
+    item = res["data"]["results"][0]
+    # 存量回落形态：无 content 的 preview 形状（outline/content_chars 在），
+    # 本次变化=不再静默（带 lag warning）。
+    assert "hit_spans" not in item["memory"]
+    assert item["memory"]["content_chars"] > 0
+    assert any("evidence index may lag" in w for w in res["warnings"])
+
+
+def test_batch_read_full_span_legacy_fallback_warns(tmp_path: Path) -> None:
+    """F1：batch_read full+span 走 legacy 字符切片时不再静默。"""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "批量切片主题", "批量切片正文内容。")
+    res = _batch_read(
+        tools, memory_ids=[mid], content_mode="full",
+        spans={str(mid): {"start": 0, "end": 4}},
+    )
+    assert res.get("ok"), res
+    assert res["data"]["results"][0]["memory"]["content"] == "批量切片正文内容。"[:4]
+    assert any("legacy character slice" in w for w in res["warnings"])
+
+
+def test_batch_read_hits_window_budget(tmp_path: Path) -> None:
+    """F3：hits 档携带 content（≥50% 覆盖升级，任何来源——单行 100% 覆盖
+    在 window=0 时同样升级）计入同一字节预算，超预算走结构化 over-long
+    响应（永不静默截断）。"""
+    tools = make_tools(tmp_path)
+    big = "长" * 45_000  # ~135KB > 100KB 单条硬顶
+    mid = _write(tools, "超长hits预算", big)
+    _insert_units(tools, mid, [(big, 0, len(big))])
+    res = _batch_read(tools, memory_ids=[mid], content_mode="hits", hit_window=1)
+    assert res.get("ok"), res
+    data = res["data"]
+    assert data["over_budget"] is True
+    assert data["total_bytes"] > data["budget_bytes"]
+    for item in data["results"]:
+        assert "content" not in item["memory"]
+        assert item["memory"]["content_chars"] > 0
+        assert item["memory"]["hit_spans"]  # 标注保留
+    assert "individually" in data["hint"]

@@ -325,3 +325,20 @@ def test_workspace_vector_publish_failure_does_not_fail_memory_write(tmp_path: P
         ).fetchone()
     assert memory["workspace_canonical"] == "new-project"
     assert canonical["name"] == "new-project"
+
+
+def test_hit_window_whitelisted_on_four_recall_surfaces() -> None:
+    """0.17.0 hit_window：进四调用白名单——不再被 unknown field 静默 pop。"""
+    from memory_arbiter.validation import validate_product_payload
+    cases = [
+        ("find", {"query": "q"}),
+        ("batch_find", {"queries": [{"query": "q"}]}),
+        ("read", {"memory_id": 1}),
+        ("batch_read", {"memory_ids": [1]}),
+    ]
+    for operation, base in cases:
+        payload = {**base, "hit_window": 2}
+        result = validate_product_payload("memory", operation, payload)
+        assert result.error is None, (operation, result.error)
+        assert result.warnings == [], (operation, result.warnings)
+        assert payload.get("hit_window") == 2  # 未被 pop

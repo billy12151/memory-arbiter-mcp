@@ -784,6 +784,14 @@ def _wide_recall(
                 "text": row.get("text"),
                 "start_offset": row.get("start_offset"),
                 "end_offset": row.get("end_offset"),
+                # 0.17.0 hit_window + F1: the hit's row_index drives the ±N
+                # window expansion, and the row's memory_version lets the
+                # preview layer drop stale-version hits instead of slicing
+                # the new content with old offsets (owner 2026-09-23). Both
+                # ride the row_knn row (r.*); debug pages expose them
+                # additively (established _evidence_hits contract).
+                "row_index": row.get("row_index"),
+                "row_version": row.get("memory_version"),
                 "distance": distance,
                 "score": score,
             })
