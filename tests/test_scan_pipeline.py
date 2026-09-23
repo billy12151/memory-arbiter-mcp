@@ -656,3 +656,44 @@ def test_workspace_suspect_vote_pinned_to_single_row_path(
     tools.scan_pipeline_kick()
     assert seen_paths, "kick must consult the vote layer (library >= MIN_FOREIGN+1)"
     assert set(seen_paths) == {"single"}, seen_paths
+
+
+# ── 0.17.1 确认桶静默门（增量生成器同口径） ─────────────────────────────────
+
+def test_incremental_confirmed_pair_skipped(tmp_path: Path) -> None:
+    """C1 门 A 增量通道：双确认桶对不生成提议；单端确认不豁免。
+    （检测器换代清 watermark 后首轮 full round 走的就是这条生成器。）"""
+    tools = make_tools(tmp_path)
+    for i in range(9):
+        _write(tools, f"db-note-{i}", f"生产环境数据库使用 postgres，兄弟条目 {i}。",
+               workspace="dbpgsql")
+    _write(tools, "misplaced", "生产环境数据库使用 postgres", workspace="apisvc")
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    sidecar = tmp_path / "workspace_review.json"
+
+    # 两端均确认 → kick 后零 workspace 行。
+    sidecar.write_text(json.dumps({
+        "confirmed_workspaces": ["apisvc", "dbpgsql"],
+        "confirmed_at": "2026-09-23T00:00:00Z", "version": 1,
+    }), encoding="utf-8")
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    assert kick["ok"], kick
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE kind='workspace'"
+        ).fetchone()[0]
+    assert rows == 0, "双确认对的增量提议不得生成"
+
+    # 只确认 dbpgsql → own=apisvc 未确认 → 照常入队。
+    sidecar.write_text(json.dumps({
+        "confirmed_workspaces": ["dbpgsql"],
+        "confirmed_at": "2026-09-23T00:00:00Z", "version": 1,
+    }), encoding="utf-8")
+    tools.db.clear_all_scan_watermarks()
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    assert kick["ok"], kick
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE kind='workspace' AND status='pending'"
+        ).fetchone()[0]
+    assert rows == 1, "单端确认不得豁免"

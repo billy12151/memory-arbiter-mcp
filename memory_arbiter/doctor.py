@@ -35,6 +35,30 @@ class Severity(str, Enum):
 WORKSPACE_REVIEW_SIDECAR = "workspace_review.json"
 
 
+def load_confirmed_workspaces(settings: Settings) -> frozenset[str]:
+    """Confirmed-registry names from the workspace_review sidecar.
+
+    Single parse shared by workspace.review and the scan-side workspace-suspect
+    generators (0.17.x prompt suppression): a move proposal whose two buckets
+    are BOTH confirmed is never generated. Missing/corrupt sidecar -> empty
+    set (fail-open: proposals flow exactly as before the first confirm).
+    Reserved default terms are never returned, so a proposal with default as
+    either endpoint is never suppressed here.
+    """
+    sidecar = Path(settings.db_path).parent / WORKSPACE_REVIEW_SIDECAR
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return frozenset()
+    raw = data.get("confirmed_workspaces") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(
+        str(name) for name in raw
+        if isinstance(name, str) and not is_default_workspace_term(str(name))
+    )
+
+
 def _workspace_review_finding(conn: sqlite3.Connection, settings: Settings) -> Finding:
     """workspace.review — full-registry confirmation diff.
 
@@ -63,18 +87,7 @@ def _workspace_review_finding(conn: sqlite3.Connection, settings: Settings) -> F
         # Registry unreadable (legacy shape): report pass so a read hiccup
         # can't mask the real findings or wedge the exit code.
         return _finding("workspace.review", True, "workspace registry unavailable; review skipped")
-    confirmed: list[str] = []
-    if sidecar.exists():
-        try:
-            data = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            data = None
-        raw_confirmed = data.get("confirmed_workspaces") if isinstance(data, dict) else None
-        if isinstance(raw_confirmed, list):
-            confirmed = [
-                str(name) for name in raw_confirmed
-                if isinstance(name, str) and not is_default_workspace_term(name)
-            ]
+    confirmed = sorted(load_confirmed_workspaces(settings))
     new_items = sorted(set(current) - set(confirmed))
     evidence = {
         "confirmed": len(confirmed),

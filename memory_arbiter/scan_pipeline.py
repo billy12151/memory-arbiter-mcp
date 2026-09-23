@@ -666,6 +666,9 @@ class ScanPipeline:
         # the stable-sort tie discipline demands the formula never changes
         # for a given consumer (0.16.10 review finding).
         votes_by_id = compute_summary_votes(vectors, ids, path="single")
+        from .doctor import load_confirmed_workspaces
+
+        confirmed = load_confirmed_workspaces(self.db.settings)
         landed = 0
         for mid in ids:
             vote = votes_by_id.get(mid)
@@ -686,6 +689,8 @@ class ScanPipeline:
             if not record or record.get("status") != "active":
                 continue
             version = int(record.get("version") or 1)
+            if own in confirmed and best_bucket in confirmed:
+                continue  # owner-confirmed pair: no proposal, no queue row
             detail = {
                 "suspected_workspace": best_bucket,
                 "current_workspace": own,
@@ -905,6 +910,9 @@ class ScanPipeline:
         # np.argpartition left ties arbitrary and CI once selected one beta
         # neighbour where the local run selected nine.
         votes_by_id = compute_summary_votes(vectors, ids)
+        from .doctor import load_confirmed_workspaces
+
+        confirmed = load_confirmed_workspaces(self.db.settings)
         suspected: list[dict[str, Any]] = []
         for row_mid in ids:
             vote = votes_by_id.get(row_mid)
@@ -919,6 +927,9 @@ class ScanPipeline:
             # suspect generation and the decision-time re-vote.
             passed, gate_evidence = normalize_gate(votes, own)
             if passed:
+                top = str(gate_evidence["top_bucket"])
+                if own in confirmed and top in confirmed:
+                    continue  # owner-confirmed pair: never suspected
                 suspected.append({
                     "memory_id": row_mid,
                     "workspace": own,

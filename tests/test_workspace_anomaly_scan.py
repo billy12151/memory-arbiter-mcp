@@ -28,6 +28,20 @@ def vec_tools(tmp_path: Path):
     yield tools
 
 
+def _confirm_snapshot(tools: MemoryTools, names: list[str]) -> Path:
+    """Write the workspace_review sidecar the way confirm_workspaces would."""
+    sidecar = Path(tools.settings.db_path).parent / "workspace_review.json"
+    sidecar.write_text(
+        json.dumps({
+            "confirmed_workspaces": list(names),
+            "confirmed_at": "2026-09-23T00:00:00Z",
+            "version": 1,
+        }),
+        encoding="utf-8",
+    )
+    return sidecar
+
+
 def _beta_clan(tools: MemoryTools, n: int, start: int = 0) -> None:
     for i in range(start, start + n):
         tools.memory_write(
@@ -269,3 +283,109 @@ def test_edit_skips_redundant_vector_refreshes(vec_tools, monkeypatch) -> None:
     )
     assert edited.get("ok"), edited
     assert calls == {"subject_tags": 1, "summary": 2}
+
+
+# ── 0.17.1 确认桶静默门（owner 2026-09-23：用户确认过的桶不再提示搬回） ──────
+
+def _misplaced_postgres_in_apisvc(tools: MemoryTools) -> None:
+    """One PostgreSQL memory sitting in apisvc on top of the 9+2 clans."""
+    tools.memory_write(
+        content="生产环境数据库使用 PostgreSQL，属于 dbpgsql 的错位记忆。",
+        subject="misplaced", tags=["db"], workspace="apisvc",
+    )
+
+
+def test_confirmed_pair_not_suspected(vec_tools: MemoryTools) -> None:
+    tools = vec_tools
+    _beta_clan(tools, 9)
+    _alpha_clan(tools, 2)
+    _misplaced_postgres_in_apisvc(tools)
+    assert tools.wait_semantic_worker_drained(timeout=10)
+
+    # 两端都在确认快照里 → 提议根本不生成（weekly 口径：suspected==0）。
+    _confirm_snapshot(tools, ["apisvc", "dbpgsql"])
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["status"] == "ok"
+    assert data["suspected"] == 0, "双确认桶对不得再生成搬桶提议"
+    assert data["queued"] == 0
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE kind='workspace'"
+        ).fetchone()[0]
+    assert rows == 0
+
+    # 只确认一端 → 不豁免，照常入队（单端确认不静默）。
+    _confirm_snapshot(tools, ["dbpgsql"])
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["suspected"] >= 1
+    assert data["queued"] >= 1
+    finding = next(f for f in data["findings"] if f["memory_id"] == 12)
+    assert finding["workspace"] == "apisvc"
+    assert finding["suspected_workspace"] == "dbpgsql"
+
+
+def test_confirmed_pair_does_not_consume_cap(vec_tools: MemoryTools) -> None:
+    tools = vec_tools
+    _beta_clan(tools, 9)   # dbpgsql 投票基数
+    # 12 条过门条目：10 条 apisvc→dbpgsql（双确认，被静默）+
+    # 2 条 newbucket→dbpgsql（newbucket 未确认，必须照常入队）。
+    # 注：FakeEmbedder 下任何新桶名都会被向量归并进既有桶，第三桶只能
+    # 经 move_memories_workspace 直写产出。
+    for i in range(10):
+        tools.memory_write(
+            content=f"生产环境数据库使用 PostgreSQL，错位条目 {i}。",
+            subject=f"misplaced-{i}", tags=["db"], workspace="apisvc",
+        )
+    newbucket_ids = []
+    for i in range(2):
+        newbucket_ids.append(tools.memory_write(
+            content=f"生产环境数据库使用 PostgreSQL，新桶条目 {i}。",
+            subject=f"newbucket-{i}", tags=["db"], workspace="apisvc",
+        )["data"]["id"])
+    moved = tools.memory_govern("move_memories_workspace", {
+        "memory_ids": newbucket_ids, "new_workspace": "newbucket",
+        "reason": "seed unconfirmed bucket", "authorized": True,
+    })
+    assert moved["ok"], moved
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    _confirm_snapshot(tools, ["apisvc", "dbpgsql"])
+
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["suspected"] == 2, "被静默条目不得计入 suspected（cap 之前跳过）"
+    assert data["returned"] == 2, "cap=10 必须全留给未确认条目"
+    assert data["queued"] >= 2, "被静默条目挤掉真实发现名额即回归"
+    for finding in data["findings"]:
+        assert finding["workspace"] == "newbucket"
+        assert finding["suspected_workspace"] == "dbpgsql"
+
+
+def test_sidecar_corrupt_fail_open(vec_tools: MemoryTools) -> None:
+    """坏 JSON 快照 → 空确认集 → 行为与从未确认过一致（照常入队）。"""
+    tools = vec_tools
+    _beta_clan(tools, 9)
+    _alpha_clan(tools, 2)
+    _misplaced_postgres_in_apisvc(tools)
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    sidecar = _confirm_snapshot(tools, ["apisvc", "dbpgsql"])
+    sidecar.write_text("{not json", encoding="utf-8")
+
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["status"] == "ok"
+    assert data["suspected"] >= 1, "corrupt sidecar 必须 fail-open 照常提议"
+    assert data["queued"] >= 1
+
+
+def test_sidecar_missing_fail_open(vec_tools: MemoryTools) -> None:
+    """无快照文件（OSError 分支，与 corrupt 的 JSONDecodeError 分开钉）。"""
+    tools = vec_tools
+    _beta_clan(tools, 9)
+    _alpha_clan(tools, 2)
+    _misplaced_postgres_in_apisvc(tools)
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    sidecar = Path(tools.settings.db_path).parent / "workspace_review.json"
+    assert not sidecar.exists()
+
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["status"] == "ok"
+    assert data["suspected"] >= 1, "missing sidecar 必须 fail-open 照常提议"
+    assert data["queued"] >= 1
