@@ -57,7 +57,7 @@ SCHEMA_MIGRATIONS = {
 # subject guard + lineage veto — a detection-semantic change (plan §10: the
 # unified bump retires unit-keyed scan rows and re-arms one full round,
 # co-collecting the P2-1 误杀对 revival).
-CONFLICT_DETECTOR_VERSION = "difference-classifier-v4"
+CONFLICT_DETECTOR_VERSION = "gate-v2-three-dispatch-v5"
 # 0.17.0 (review BUG-10): memory_claims is a LIVE table now (P2-5 claims
 # channel, additive.py builds it in every current library) — it must not
 # appear in the legacy-tombstone set or mema upgrade / doctor CLI would

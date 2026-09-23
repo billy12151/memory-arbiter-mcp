@@ -200,3 +200,42 @@ def memory_pair_excluded(
     if _subject_is_process_record(peer_s, own_s):
         return True
     return False
+
+
+# ── ⑧ three-case Qwen dispatch (G6) ─────────────────────────────────────────
+
+_DISPATCH_HINTS = {
+    "extract_value": (
+        "情形a（单侧有值）：另一侧未抽出值——请从对应证据原文中抽取同一属性的值，"
+        "attribute 与已有值保持同一属性口径。"
+    ),
+    "align_attr": (
+        "情形b（双侧有值）：两侧候选值均已抽出——请判断它们是否属于同一属性；"
+        "仅当同属性且值不同才构成冲突。"
+    ),
+    "align_value": (
+        "情形c（双侧有属性）：属性口径已定——请从证据原文抽取各自属性值并判断是否冲突。"
+    ),
+}
+DispatchHint = str
+
+
+def qwen_dispatch(decision: Any) -> str:
+    """⑧ LLM 分流器：按形态分派 Qwen 情形（方案 2d）。
+
+    a extract_value = 单边有值（含 claims 单边桥的入口）；b align_attr =
+    双侧有值待属性对齐；c align_value = 双侧有属性待值对齐（claims 对的
+    主形态；句子层少）。"direct" 不在此判定——deterministic 直接裁决在
+    分流之前（direct_value_verdict）。"""
+    left_value = getattr(decision, "left_value", None)
+    right_value = getattr(decision, "right_value", None)
+    if left_value and right_value:
+        return "align_attr"
+    if left_value or right_value:
+        return "extract_value"
+    return "align_value"
+
+
+def dispatch_hint_text(case: str) -> str:
+    """The one-line task instruction for the prompt variant (pair-v9)."""
+    return _DISPATCH_HINTS.get(case, "")

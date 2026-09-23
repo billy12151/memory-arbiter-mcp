@@ -10,15 +10,21 @@ from typing import Any, TYPE_CHECKING, Iterator
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
+    PAIR_SCORE_W_CONFLICT_BAND,
+    PAIR_SCORE_W_NEGATION,
+    PAIR_SCORE_W_NUMERIC_ROUTE,
+    PAIR_SCORE_W_VALUES_DIFFER,
     SEMANTIC_JOB_TIMEOUT_MS,
     SEMANTIC_MAX_EVIDENCE_UNITS,
     SEMANTIC_MAX_EXAMINED_PAIRS,
     SEMANTIC_INTERNAL_QWEN_MAX_PAIRS,
+    SEMANTIC_CANDIDATE_COS_FLOOR,
     SEMANTIC_CROSS_KNN_WINDOW,
     SEMANTIC_MAX_ROWS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
 from ..difference_classifier import classify_pair
+from .gates import dispatch_hint_text, qwen_dispatch
 from ..evidence import evidence_content_hash
 from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
@@ -47,6 +53,36 @@ _TECHNICAL_REASONS = {
     "evidence_units_capped", "rows_capped", "pairs_examined_capped",
     "notice_write_failed",
 }
+
+
+_NEGATION_COMPILED = None
+
+
+def _negation_opposition(left_text: str, right_text: str) -> bool:
+    """G6: the G4 negation vocab hitting EXACTLY ONE side — an independent
+    opposition signal, never mixed with the value-differ signal."""
+    global _NEGATION_COMPILED
+    import re as _re
+    from ..semantic_conflict import _NEGATION_WORDS
+    if _NEGATION_COMPILED is None:
+        _NEGATION_COMPILED = _re.compile(_NEGATION_WORDS, _re.IGNORECASE)
+    left_hit = bool(_NEGATION_COMPILED.search(left_text or ""))
+    right_hit = bool(_NEGATION_COMPILED.search(right_text or ""))
+    return left_hit != right_hit
+
+
+def _values_differ_norm(decision: Any) -> bool:
+    """G6 owner 修正: value-equal pairs are settled at adjudication — the
+    ordering bonus is only for opposing evidence; text pairs whose equality
+    cannot be decided score 0 (Qwen case c)."""
+    left_value = getattr(decision, "left_value", None)
+    right_value = getattr(decision, "right_value", None)
+    if not left_value or not right_value:
+        return False
+    try:
+        return normalize_value(left_value) != normalize_value(right_value)
+    except Exception:
+        return True
 
 
 def _retired_gate_slot_key(workspace: Any, attribute: Any, subject: Any) -> dict[str, str]:
@@ -124,7 +160,11 @@ class EvidencePipeline:
         metadata-provenance gate is retired — claims attr alignment IS the
         identity signal now. Bounded by CLAIMS_MAX_NOTICES_PER_WRITE
         (review A3); overflow is counted, never silent."""
-        from ..constants import CLAIMS_MAX_NOTICES_PER_WRITE, CLAIM_ATTR_TAU
+        from ..constants import (
+            CLAIMS_BRIDGE_MAX_PER_WRITE,
+            CLAIMS_MAX_NOTICES_PER_WRITE,
+            CLAIM_ATTR_TAU,
+        )
         from ..semantic_conflict import attr_is_versional, vector_cosine
 
         record = snapshot if snapshot.get("content") is not None else (
@@ -169,6 +209,8 @@ class EvidencePipeline:
         capped_count = 0
         checked = 0
         versional_vetoed = 0  # D1: evolution exemption must stay observable
+        unresolved_bridges = 0
+        bridge_budget = [CLAIMS_BRIDGE_MAX_PER_WRITE]
         fired_attrs: set[str] = set()  # A3: one notice per attr per write
         skip = skip_peers or set()
         own_coexistence: dict[str, list[str]] = {
@@ -205,7 +247,21 @@ class EvidencePipeline:
                 ).fetchall()
                 if str(claim["attr_norm"]) in fired_attrs:
                     continue  # A3: same attr already reported this write
+                bridge_candidate_rows: list[dict[str, Any]] = []
+                attr_matched = False
+                bridge_ran = False
+                bridge_budget = [CLAIMS_BRIDGE_MAX_PER_WRITE]
                 for hit in hits:
+                    # Gate-v2 G6: every claim-KNN neighbour is a bridge
+                    # candidate peer (their SENTENCE rows are the attr's
+                    # semantic neighbourhood) — collected BEFORE the tau
+                    # continue, which only gates the same-attr comparison.
+                    peer_subject_raw = hit["subject"] if "subject" in hit.keys() else ""
+                    bridge_candidate_rows.append({
+                        "peer_id": int(hit["memory_id"]),
+                        "peer_version": int(hit["memory_version"] or 1),
+                        "peer_subject": str(peer_subject_raw or ""),
+                    })
                     hit_vector = None
                     vec_row = conn.execute(
                         "SELECT embedding FROM memory_claim_vec WHERE id=?", (int(hit["id"]),)
@@ -216,6 +272,7 @@ class EvidencePipeline:
                     same_exact = str(hit["attr_norm"]) == str(claim["attr_norm"])
                     if not same_exact and (attr_cos is None or attr_cos < CLAIM_ATTR_TAU):
                         continue
+                    attr_matched = True
                     # D1 hit-level fallback: the own attr is not versional
                     # (own-level skip above already took those), but a
                     # τ-similar peer attr can still be version semantics
@@ -313,12 +370,165 @@ class EvidencePipeline:
                     if outcome.get("outcome") == "created":
                         notices += 1
                         fired_attrs.add(str(claim["attr_norm"]))
+                # Gate-v2 G6 单边桥: no peer claim carries this attr — aim the
+                # attr vector at the peer's SENTENCE rows and let Qwen pull
+                # the value (case a, prompt names the attr). Unresolvable
+                # bridges are counted, never silent (claim_bridge_unresolved).
+                if (
+                    not attr_matched
+                    and str(claim["attr_norm"]) not in fired_attrs
+                    and bridge_candidate_rows
+                    and notices < CLAIMS_MAX_NOTICES_PER_WRITE
+                    and bridge_budget[0] > 0
+                ):
+                    bridge_budget[0] -= 1
+                    bridge_ran = True
+                    bridge_outcome = self._run_claim_bridge(
+                        conn, int(memory_id), version, record, claim,
+                        own_vector, bridge_candidate_rows, skip,
+                    )
+                    if bridge_outcome == "created":
+                        notices += 1
+                        fired_attrs.add(str(claim["attr_norm"]))
+                    elif bridge_outcome == "unresolved":
+                        unresolved_bridges += 1
         result: dict[str, Any] = {"claims_checked": checked, "notices": notices}
         if capped_count:
             result["claims_notices_capped"] = capped_count
         if versional_vetoed:
             result["versional_vetoed"] = versional_vetoed
+        if unresolved_bridges:
+            result["claim_bridge_unresolved"] = unresolved_bridges
         return result
+
+    def _run_claim_bridge(
+        self, conn: "sqlite3.Connection", memory_id: int, version: int,
+        record: dict[str, Any], claim: dict[str, Any], attr_vector: list[float],
+        candidate_rows: "list[dict[str, Any]]", skip: "set[int]",
+    ) -> str:
+        """Gate-v2 G6 单边桥: own claim (attr, value) has no same-attr peer
+        claim — case a of the three-case dispatch. The attr vector aims at
+        the peer's sentence rows (the channel-C KNN shape); the TOP row's
+        text goes to Qwen with a prompt naming the attr; an extracted value
+        that differs from the own claim lands the notice. Returns
+        created / unresolved / skipped."""
+        from ..constants import SEMANTIC_CROSS_KNN_WINDOW
+        from .gates import dispatch_hint_text
+
+        backend = self._ensure_semantic_backend()
+        if backend is None:
+            return "skipped"
+        row_text: str | None = None
+        row_peer: tuple[int, int] | None = None
+        for candidate in candidate_rows:
+            peer_id = int(candidate["peer_id"])
+            hits = self.db.row_knn(
+                attr_vector, k=SEMANTIC_CROSS_KNN_WINDOW,
+                workspace=(
+                    record.get("workspace_canonical") or record.get("workspace")
+                    if self.settings.isolation == "strict" else None
+                ),
+                exclude_memory_id=memory_id, conn=conn,
+                include_subject_rows=False,
+                include_memory_ids=[peer_id],
+            )
+            if hits:
+                row_text = str(hits[0].get("text") or "")
+                row_peer = (peer_id, int(hits[0].get("memory_row_version") or candidate["peer_version"]))
+                break
+        if not row_text or row_peer is None:
+            return "unresolved"
+        peer_id, peer_version = row_peer
+        if peer_id in skip:
+            return "skipped"
+        left_env: dict[str, Any] = {
+            # FULL own body as the quote: the claim value is a slice of it,
+            # and grounding rejects a value equal to the whole quote (anti
+            # copy-the-sentence rule) — Qwen must extract a compact slot.
+            "quote": str(record.get("content") or "")[:1000],
+            "subject": str(record.get("subject") or "")[:200],
+            "tags": [], "memory_id": int(memory_id), "version": version,
+            "metadata": {},
+            # case a: name the attr — Qwen extracts THAT attribute's value.
+            # (_pair_text renders the hint from the LEFT env.)
+            "dispatch_hint": (
+                f"{dispatch_hint_text('extract_value')} 需抽取的属性名：{claim['attr']}"
+            ),
+        }
+        peer_record = self.db.get_memory(peer_id) or {}
+        right_env: dict[str, Any] = {
+            "quote": row_text[:1000], "subject": str(peer_record.get("subject") or "")[:200],
+            "tags": list(peer_record.get("tags") or [])[:20],
+            "workspace_canonical": peer_record.get("workspace_canonical") or peer_record.get("workspace"),
+            "memory_id": peer_id, "version": peer_version,
+            "metadata": {},
+        }
+        try:
+            forward = backend.classify_pair(
+                left_env, right_env, deadline_monotonic=None, retry_allowed=False,
+            )
+        except TypeError:
+            forward = backend.classify_pair(left_env, right_env)
+        gate = evaluate_single_direction_extraction(
+            signal_extraction(forward), left_env, right_env,
+        )
+        if gate.state != "notice_ready":
+            return "unresolved"
+        extracted_b = str(gate.value_b or "")
+        if not extracted_b or normalize_value(extracted_b) == normalize_value(str(claim["value_norm"])):
+            return "unresolved"  # extracted the SAME value: no conflict
+        slot_key = _retired_gate_slot_key(
+            record.get("workspace_canonical") or record.get("workspace"),
+            str(claim["attr_norm"]), str(record.get("subject") or ""),
+        )
+        outcome = self.db.record_semantic_notice(
+            memory_id=memory_id, peer_id=peer_id, severity="normal",
+            notice_type="claim_conflict",
+            title=f"Claim conflict with #{peer_id}",
+            message=f"claim bridge attr {claim['attr']} value differs",
+            payload={
+                "route": "notice_ready",
+                "reason": "claim_bridge_extract_value",
+                "source": "claim_conflict",
+                "slot_key": slot_key,
+                "slot_provenance": {
+                    "entity": "workspace", "scope": "subject",
+                    "attribute": "claim_bridge",
+                },
+                "attr_cos": 1.0,
+                "member_versions": [
+                    {"memory_id": memory_id, "version": version,
+                     "value": str(claim["value_norm"]),
+                     "evidence": {"quote": str(claim["value"])}},
+                    {"memory_id": peer_id, "version": peer_version,
+                     "value": extracted_b,
+                     "evidence": {"quote": row_text}},
+                ],
+                "value_groups": [
+                    {"normalized_value": str(claim["value_norm"]),
+                     "display_value": str(claim["value"]),
+                     "members": [f"{memory_id}@{version}"]},
+                    {"normalized_value": extracted_b,
+                     "display_value": extracted_b,
+                     "members": [f"{peer_id}@{peer_version}"]},
+                ],
+                "candidate_key": {
+                    "detector_version": CONFLICT_DETECTOR_VERSION,
+                    "members": sorted([f"{memory_id}@{version}", f"{peer_id}@{peer_version}"]),
+                    "evidence": [],
+                },
+                "left_evidence": {"text": str(claim["value"])},
+                "right_evidence": {"text": row_text},
+                "claims_channel": True,
+                "claim_bridge": True,
+            },
+            dedupe_key=notice_dedupe_key(
+                memory_id, peer_id, version, peer_version, "claim_conflict",
+            ),
+            left_version=version, right_version=peer_version,
+            source="claim_conflict",
+        )
+        return "created" if outcome.get("outcome") == "created" else "skipped"
 
     def drain_conflict_backlog(self, limit: int = 2) -> int:
         """0.17.0 P2-4.2: idle-worker consumption of the conflict backlog.
@@ -862,16 +1072,19 @@ class EvidencePipeline:
             enqueued = 0
             evicted_total = 0
             left_version = int(record.get("version") or 1)
-            for peer_id, (hit, seg_view, decision, _pair_cos) in entries:
-                from ..constants import (
-                    PAIR_SCORE_W_BOTH_VALUES,
-                    PAIR_SCORE_W_NUMERIC_ROUTE,
-                )
-                score = 0.0
+            for peer_id, (hit, seg_view, decision, pair_cos) in entries:
+                # Gate-v2 G6: the backlog priority uses the SAME score as the
+                # live Qwen budget (band + numeric + values_differ + negation)
+                # — a stale formula would starve high-band pairs after a
+                # truncation.
+                _band = max(0.0, min(1.0, (float(pair_cos) - 0.60) / 0.20))
+                score = PAIR_SCORE_W_CONFLICT_BAND * _band
                 if str(decision.reason or "") == "numeric_value_candidate":
                     score += PAIR_SCORE_W_NUMERIC_ROUTE
-                if decision.left_value and decision.right_value:
-                    score += PAIR_SCORE_W_BOTH_VALUES
+                if _values_differ_norm(decision):
+                    score += PAIR_SCORE_W_VALUES_DIFFER
+                if _negation_opposition(seg_view.text, str(hit.get("text") or "")):
+                    score += PAIR_SCORE_W_NEGATION
                 right_version = int(hit.get("version") or hit.get("memory_row_version") or 1)
                 key_hash = hashlib.sha256(
                     "|".join((
@@ -1313,27 +1526,37 @@ class EvidencePipeline:
         # overlap is the base, row distance the tiebreak. Order-only: a
         # single pair's verdict never changes (owner-approved boundary).
         # Weights initial; P2-3.2 recalibrates on the noisy corpus.
-        from ..constants import (
-            PAIR_SCORE_W_BOTH_VALUES,
-            PAIR_SCORE_W_NUMERIC_ROUTE,
-            PAIR_SCORE_W_OVERLAP,
-        )
-
         def _pair_score(
             peer_id: int, triple: "tuple[dict[str, Any], Any, Any, float]",
         ) -> float:
-            _hit, _seg, decision, _pair_cos = triple
-            score = PAIR_SCORE_W_OVERLAP * float(overlap_rank.get(peer_id) or 0.0)
+            _hit, _seg, decision, pair_cos = triple
+            band = max(0.0, min(1.0, (float(pair_cos) - SEMANTIC_CANDIDATE_COS_FLOOR) / 0.20))
+            score = PAIR_SCORE_W_CONFLICT_BAND * band
             if str(decision.reason or "") == "numeric_value_candidate":
                 score += PAIR_SCORE_W_NUMERIC_ROUTE
-            if decision.left_value and decision.right_value:
-                score += PAIR_SCORE_W_BOTH_VALUES
+            if _values_differ_norm(decision):
+                score += PAIR_SCORE_W_VALUES_DIFFER
+            if _negation_opposition(_seg.text, str(_hit.get("text") or "")):
+                score += PAIR_SCORE_W_NEGATION
             return score
+
+        def _value_gap(triple: "tuple[dict[str, Any], Any, Any, float]") -> float:
+            _hit, _seg, decision, _pair_cos = triple
+            if not (decision.left_value and decision.right_value):
+                return 0.0
+            try:
+                left_num = float(normalize_value(decision.left_value).rstrip("ms条次%") or 0)
+                right_num = float(normalize_value(decision.right_value).rstrip("ms条次%") or 0)
+                return abs(left_num - right_num)
+            except (TypeError, ValueError):
+                return 0.0
 
         ordered = sorted(
             by_peer.items(),
             key=lambda item: (
                 -_pair_score(item[0], item[1]),
+                -_value_gap(item[1]),
+                -float(overlap_rank.get(item[0]) or 0.0),
                 float(item[1][0].get("distance") or 9),
             ),
         )
@@ -1535,6 +1758,10 @@ class EvidencePipeline:
                 if decision.left_value and decision.right_value:
                     left_env["rule_value"] = decision.left_value
                     right_env["rule_value"] = decision.right_value
+                # Gate-v2 G6 three-case dispatch (pair-v9): same output
+                # protocol, only the task instruction differs by shape.
+                dispatch_case = qwen_dispatch(decision)
+                left_env["dispatch_hint"] = dispatch_hint_text(dispatch_case)
                 started = time.monotonic()
                 # Single-direction gate (owner 2026-09-17): the reverse
                 # extraction was the side-attribution hedge the 0.5B needed;

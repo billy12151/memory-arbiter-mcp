@@ -217,3 +217,131 @@ def test_knn_restricted_to_clean_neighbor_list(tmp_path, monkeypatch) -> None:
         assert int(peer_same["id"]) not in allowed
         assert int(peer_diff["id"]) in allowed
     assert receipt["candidate_gates"]["memory_pairs_excluded"] == 1
+
+
+# ── G6 three-case dispatch + ranking + bridge ───────────────────────────────
+
+def test_qwen_dispatch_three_cases() -> None:
+    from types import SimpleNamespace
+    from memory_arbiter.pipeline.gates import dispatch_hint_text, qwen_dispatch
+    assert qwen_dispatch(SimpleNamespace(left_value="500ms", right_value=None)) == "extract_value"
+    assert qwen_dispatch(SimpleNamespace(left_value="5秒", right_value="3秒")) == "align_attr"
+    assert qwen_dispatch(SimpleNamespace(left_value=None, right_value=None)) == "align_value"
+    # Each case has its own task line; same protocol, different instruction.
+    assert dispatch_hint_text("extract_value") != dispatch_hint_text("align_attr") != dispatch_hint_text("align_value")
+    # The extract_value hint NAMES the attribute (单边桥契约).
+    hint = f"{dispatch_hint_text('extract_value')} 需抽取的属性名：上传方式"
+    assert "上传方式" in hint
+
+
+def test_pair_score_orders_high_band_first(tmp_path, monkeypatch) -> None:
+    """cos 高（冲突带满分）的对先于 cos 低的对消费 Qwen 预算；排序不改变判定。"""
+    import tests.test_vnext_evidence as tv
+    from memory_arbiter.constants import SEMANTIC_MAX_EXAMINED_PAIRS
+
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    # Two peers, both numeric-value candidates; the HIGH-band peer has the
+    # larger cosine (its gate cos 0.95 vs 0.61).
+    # multi-value shapes: ", " in left_value keeps the deterministic direct
+    # verdict silent so the pairs actually reach the Qwen budget ordering.
+    peer_hi = tools.memory_write(content="队列长度上限为 100 条、超时 20ms。", subject="hi", tags=[])["data"]
+    peer_lo = tools.memory_write(content="队列长度上限为 200 条、超时 30ms。", subject="lo", tags=[])["data"]
+    new = tools.memory_write(content="队列长度上限为 300 条、超时 40ms。", subject="new", tags=[])["data"]
+    assert tools.wait_semantic_worker_drained(timeout=5)
+
+    consumed: list[int] = []
+
+    class Backend:
+        calls = 0
+
+        @staticmethod
+        def classify_pair(left, right, *, deadline_monotonic=None, retry_allowed=True):
+            Backend.calls += 1
+            consumed.append(int(right.get("memory_id") or 0))
+            from memory_arbiter.semantic_conflict import ModelSignal
+            return ModelSignal(False, "unknown_field", None, "", None, None)
+
+    def fake_knn(embedding, **kw):
+        if kw.get("subject_rows_only"):
+            # coarse screen: both neighbours are in the clean list
+            return [
+                {"memory_id": int(peer_lo["id"]), "subject": "lo", "tags": []},
+                {"memory_id": int(peer_hi["id"]), "subject": "hi", "tags": []},
+            ]
+        # both peers at identical distance: order must come from the score
+        return [
+            {"memory_id": int(peer_lo["id"]), "id": 1, "kind": "text",
+             "text": "队列长度上限为 200 条、超时 30ms。", "start_offset": 0, "end_offset": 20,
+             "distance": 0.5, "subject": "lo", "tags": []},
+            {"memory_id": int(peer_hi["id"]), "id": 2, "kind": "text",
+             "text": "队列长度上限为 100 条、超时 20ms。", "start_offset": 0, "end_offset": 20,
+             "distance": 0.5, "subject": "hi", "tags": []},
+        ]
+
+    def fake_vectors(ids, conn=None):
+        # own sentence row is [0.8, 0.2] (|v|≈0.825): id 2 (hi) at cos≈0.94 →
+        # band saturated to 1.0; id 1 (lo) at cos≈0.785 → band≈0.925.
+        return {1: [0.61, 0.79], 2: [0.6, 0.4]}
+
+    monkeypatch.setattr(tools.db, "row_knn", fake_knn)
+    monkeypatch.setattr(tools.db.evidence, "row_vectors_for_ids", fake_vectors)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: Backend())
+    tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
+    assert Backend.calls >= 1
+    if len(consumed) >= 1:
+        assert consumed[0] == int(peer_hi["id"]), "high-band peer must consume budget first"
+
+
+def test_claim_bridge_extracts_and_reports(tmp_path, monkeypatch) -> None:
+    """单边桥：own claim 的属性在 peer claims 无同名属性 → attr 向量定向捞
+    peer 句子 → Qwen 情形 a 抽值（prompt 含 attr 名）→ 抽出异值落 notice。"""
+    import tests.test_vnext_evidence as tv
+
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    # claims grounding contract: value MUST be a verbatim content slice.
+    peer = tools.memory_write(
+        content="twine 上传 dist/* 路径会 409。", subject="twine", tags=[],
+        claims=[{"attr": "上传路径", "value": "dist/* 路径会 409"}],
+    )["data"]
+    new = tools.memory_write(
+        content="主仓库就是内部源，不对外提供服务。", subject="internal", tags=[],
+        claims=[{"attr": "上传方式", "value": "主仓库就是内部源"}],
+    )["data"]
+    assert tools.wait_semantic_worker_drained(timeout=5)
+
+    captured_prompts: list[str] = []
+
+    class BridgeBackend:
+        @staticmethod
+        def classify_pair(left, right, **kw):
+            captured_prompts.append(f"{left.get('dispatch_hint')}|{right.get('quote')}")
+            from memory_arbiter.semantic_conflict import ModelSignal
+            return ModelSignal(
+                True, "attribute_value_extraction", None, "",
+                # value_b must be a literal slice of the peer quote (grounding).
+                {"attribute_a": "上传方式", "value_a": "主仓库就是内部源",
+                 "attribute_b": "上传方式", "value_b": "dist/* 路径会 409"},
+                None,
+            )
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: BridgeBackend())
+    # The fake embedder's constant vectors make EVERY attr pair cos=1.0 —
+    # raise tau above 1.0 so the bridge (no same-attr peer claim) triggers.
+    monkeypatch.setattr("memory_arbiter.constants.CLAIM_ATTR_TAU", 1.1)
+    monkeypatch.setattr(
+        tools.db, "row_knn",
+        lambda embedding, **kw: [{
+            "memory_id": int(peer["id"]), "id": 1, "kind": "text",
+            "text": "twine 上传 dist/* 路径会 409。", "start_offset": 0, "end_offset": 20,
+            "distance": 0.1, "memory_row_version": 1,
+        }],
+    )
+    result = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
+    claims = result.get("claims_channel") or {}
+    assert captured_prompts, "bridge must consult Qwen with the attr-named prompt"
+    assert "上传方式" in captured_prompts[0], "case-a prompt must name the attribute"
+    assert claims.get("notices", 0) >= 1
+    notices = tools.db.list_semantic_notices(status="open")
+    assert any(n.get("payload", {}).get("claim_bridge") for n in notices)

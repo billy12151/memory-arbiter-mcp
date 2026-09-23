@@ -193,9 +193,24 @@ CLAIM_ATTR_TAU = 0.70
 # 0.17.0 review A3: the claims channel is zero-Qwen with no natural pairs
 # cap — notices per write are bounded here instead (overflow visible).
 CLAIMS_MAX_NOTICES_PER_WRITE = 5
+# Gate-v2 G6 单边桥: own claim has no same-attr peer claim — aim the attr
+# vector at the peer's sentence rows and let Qwen extract the value (case a,
+# prompt names the attr). Bounded per write; unresolved bridges are counted.
+CLAIMS_BRIDGE_MAX_PER_WRITE = 2
+# Gate-v2 G6 rewrite (owner 2026-09-23): the candidate set is ALREADY all
+# same-topic near neighbours — C4 overlap measures topic-ness, which has no
+# discrimination INSIDE the set (wrong layer), so it drops to a tiebreak.
+# The budget order now leads with the CONFLICT-BAND membership of the true
+# cosine, then the deterministic opposition signals:
+#   score = 0.40*band(clamp((cos-0.60)/0.20)) + 0.25*numeric_route
+#         + 0.20*values_differ(normalized unequal) + 0.15*negation
+# Order-only boundary invariant: a mis-rank wastes budget, never flips a
+# verdict. Weights are initial values — recalibrated at G7 (五轮基线).
 PAIR_SCORE_W_OVERLAP = 0.40
-PAIR_SCORE_W_NUMERIC_ROUTE = 0.30
-PAIR_SCORE_W_BOTH_VALUES = 0.30
+PAIR_SCORE_W_CONFLICT_BAND = 0.40
+PAIR_SCORE_W_NUMERIC_ROUTE = 0.25
+PAIR_SCORE_W_VALUES_DIFFER = 0.20
+PAIR_SCORE_W_NEGATION = 0.15
 SEMANTIC_PRELOAD = True
 SEMANTIC_RESIDENT = True
 

@@ -58,7 +58,7 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
-PAIR_PROMPT_VERSION = "pair-v8"
+PAIR_PROMPT_VERSION = "pair-v9"
 
 _PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
@@ -1672,10 +1672,15 @@ class LocalGGUFSemanticBackend:
         # stay nearest the output (see docstring), and values must still be
         # copied from the evidence text, never from the hint.
         hint = ""
+        dispatch_hint = str(left.get("dispatch_hint") or "").strip()
+        if dispatch_hint:
+            # pair-v9 (gate-v2 G6): the three-case dispatcher's task line —
+            # same output protocol, only the instruction differs.
+            hint = f"{dispatch_hint}\n"
         left_value = str(left.get("rule_value") or "").strip()
         right_value = str(right.get("rule_value") or "").strip()
         if left_value and right_value:
-            hint = (
+            hint += (
                 f"规则层候选值差（仅供定位属性，value 必须取自证据原文）："
                 f"A候选值={left_value} B候选值={right_value}\n"
                 if cjk else
