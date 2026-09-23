@@ -191,6 +191,19 @@ def normalize_audit_ddl() -> str:
     """
 
 
+def workspace_dismissals_ddl() -> str:
+    return """
+    CREATE TABLE IF NOT EXISTS workspace_dismissals(
+      memory_id INTEGER NOT NULL,
+      version INTEGER NOT NULL,
+      suspected_workspace TEXT NOT NULL,
+      reason TEXT,
+      decided_at TEXT NOT NULL,
+      PRIMARY KEY(memory_id, version, suspected_workspace)
+    );
+    """
+
+
 def has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(
         str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})")
@@ -245,6 +258,14 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
         conn.executescript(ddl)
         if not existed:
             applied.append(name)
+    # 0.17.1 workspace dismiss 持久化：决策记录独立于 scan_queue 工作台——
+    # 启动 purge / 检测器换代整表 DELETE 释放行身份后，dismiss 仍然存活。
+    dismissals_existed = bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_dismissals'"
+    ).fetchone())
+    conn.executescript(workspace_dismissals_ddl())
+    if not dismissals_existed:
+        applied.append("workspace_dismissals")
     migrated = _migrate_legacy_candidates(conn)
     if migrated:
         applied.append(f"candidate_rows_migrated({migrated})")

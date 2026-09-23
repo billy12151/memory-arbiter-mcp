@@ -4,6 +4,7 @@ dismiss → suppression), group dismissal, version-drift expiry, internal
 decisions."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -507,3 +508,117 @@ def test_submit_backlog_counts_internal_rows(tmp_path: Path) -> None:
     assert int(result["queue_backlog"]) == page_backlog - internal_rows, (
         result["queue_backlog"], page_backlog, internal_rows
     )
+
+
+# ── 0.17.1 workspace dismiss 持久化（门 B 的落点） ────────────────────────────
+
+def _workspace_clan(tools: MemoryTools) -> int:
+    """9 postgres in dbpgsql + 1 postgres in ws (the suspect). Returns the ws id.
+
+    内容必须逐条不同——content_sha 去重会把同内容写入折叠成既有 id。"""
+    for i in range(9):
+        _write(tools, f"族甲{i}", f"后端使用 postgres 主库，兄弟 {i}", workspace="dbpgsql")
+    mid = _write(tools, "错位主题", "后端使用 postgres 主库，独苗", workspace="ws")
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    return mid
+
+
+def _enqueue_workspace_candidate(
+    tools: MemoryTools, mid: int, *, own: str = "ws", suspected: str = "dbpgsql", tag: str,
+) -> None:
+    """Pending workspace row with the FULL detail envelope — 门 B/清场都解析
+    (current_workspace, suspected_workspace)，detail={} 的构造器会让断言假绿。"""
+    outcome = tools.db.scan_queue.enqueue(
+        kind="workspace",
+        workspace_canonical=own,
+        candidate_key_hash=hashlib.sha256(f"ws-dismiss:{tag}".encode("utf-8")).hexdigest(),
+        member_versions=[{"memory_id": mid, "version": 1}],
+        evidence=[],
+        reason="vector vote 9/9 -> 'dbpgsql'",
+        severity="normal",
+        source="test",
+        detail={"current_workspace": own, "suspected_workspace": suspected},
+    )
+    assert outcome.get("outcome") == "queued", outcome
+
+
+def _workspace_row_count(tools: MemoryTools) -> int:
+    with tools.db.connection() as conn:
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM scan_queue WHERE kind='workspace'"
+        ).fetchone()[0])
+
+
+def test_dismiss_records_durable_row(tmp_path: Path) -> None:
+    """Agent 显式 dismiss → workspace_dismissals 落 (mid,version,suspected) +
+    reason（同事务于队列状态翻转）；hint/confirmed 分支不落。"""
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+    _enqueue_workspace_candidate(tools, mid, tag="durable")
+
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "闲聊留在 default"},
+    ])
+    assert result["ok"], result
+    assert result["results"][0]["outcome"] == "dismissed"
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT memory_id, version, suspected_workspace, reason FROM workspace_dismissals"
+        ).fetchall()
+        queue_status = conn.execute(
+            "SELECT status FROM scan_queue WHERE kind='workspace'"
+        ).fetchall()
+    assert [(int(r[0]), int(r[1]), str(r[2])) for r in rows] == [(mid, 1, "dbpgsql")]
+    assert str(rows[0]["reason"]) == "闲聊留在 default"
+    assert [str(r[0]) for r in queue_status] == ["dismissed"]
+
+
+def test_dismiss_survives_queue_wipe(tmp_path: Path) -> None:
+    """启动 purge / 检测器换代整表 DELETE 清空 scan_queue 后，同身份不再
+    入队（门 B 幸存——队列是工作台，workspace_dismissals 才是决策记录）。"""
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+
+    # 基线：无 dismissal 时该身份确实会入队（防测试真空）。
+    tools.db.clear_all_scan_watermarks()
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    assert kick["ok"], kick
+    assert _workspace_row_count(tools) == 1, "无 dismissal 时基线必须入队"
+
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "一代噪音"},
+    ])
+    assert result["results"][0]["outcome"] == "dismissed"
+    with tools.db.write_transaction() as conn:
+        conn.execute("DELETE FROM scan_queue")
+    tools.db.clear_all_scan_watermarks()
+
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    assert kick["ok"], kick
+    assert _workspace_row_count(tools) == 0, "队列清空后同身份不得复发"
+
+
+def test_version_bump_reopens(tmp_path: Path) -> None:
+    """门 B 版本钉死：编辑 bump version 后同桶豁免失效，提议重新入队
+    （与 conflict 类 stale_snapshot「版本漂移重开」语义一致）。"""
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+    _enqueue_workspace_candidate(tools, mid, tag="reopen")
+    result = _submit(tools, [
+        {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "先压一轮"},
+    ])
+    assert result["results"][0]["outcome"] == "dismissed"
+
+    edited = tools.memory_edit(mid, new_content="后端使用 postgres 主库，已修订口径")
+    assert edited.get("ok"), edited
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    assert int(tools.db.get_memory(mid)["version"]) == 2
+    tools.db.clear_all_scan_watermarks()
+
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 20})
+    assert kick["ok"], kick
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT status FROM scan_queue WHERE kind='workspace' AND status='pending'"
+        ).fetchall()
+    assert len(rows) == 1, "version+1 后同桶提议必须重新入队"

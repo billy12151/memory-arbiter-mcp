@@ -669,6 +669,7 @@ class ScanPipeline:
         from .doctor import load_confirmed_workspaces
 
         confirmed = load_confirmed_workspaces(self.db.settings)
+        dismissed = self.db.scan_queue.load_workspace_dismissals()
         landed = 0
         for mid in ids:
             vote = votes_by_id.get(mid)
@@ -691,6 +692,8 @@ class ScanPipeline:
             version = int(record.get("version") or 1)
             if own in confirmed and best_bucket in confirmed:
                 continue  # owner-confirmed pair: no proposal, no queue row
+            if (version, best_bucket) in dismissed.get(mid, ()):
+                continue  # durable dismissal (version-pinned): no proposal
             detail = {
                 "suspected_workspace": best_bucket,
                 "current_workspace": own,
@@ -913,6 +916,7 @@ class ScanPipeline:
         from .doctor import load_confirmed_workspaces
 
         confirmed = load_confirmed_workspaces(self.db.settings)
+        dismissed = self.db.scan_queue.load_workspace_dismissals()
         suspected: list[dict[str, Any]] = []
         for row_mid in ids:
             vote = votes_by_id.get(row_mid)
@@ -930,6 +934,13 @@ class ScanPipeline:
                 top = str(gate_evidence["top_bucket"])
                 if own in confirmed and top in confirmed:
                     continue  # owner-confirmed pair: never suspected
+                entries = dismissed.get(row_mid)
+                if entries:
+                    record = self.db.get_memory(row_mid)
+                    if record is not None:
+                        top_ws = str(gate_evidence["top_bucket"])
+                        if (int(record.get("version") or 1), top_ws) in entries:
+                            continue  # durable dismissal: never suspected
                 suspected.append({
                     "memory_id": row_mid,
                     "workspace": own,

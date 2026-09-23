@@ -115,6 +115,41 @@ class ScanQueueStore:
         counts = self.counts()
         return counts.get("pending", 0)
 
+    def load_workspace_dismissals(self) -> dict[int, set[tuple[int, str]]]:
+        """Durable workspace-dismissal index: memory_id -> {(version, suspected)}.
+
+        Survives boot purges and detector-epoch wipes by design (the queue is a
+        workbench; this table is the decision record). DB error -> {} (fail-open)."""
+        if not self._db_available:
+            return {}
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT memory_id, version, suspected_workspace FROM workspace_dismissals"
+                ).fetchall()
+        except sqlite3.Error:
+            return {}
+        index: dict[int, set[tuple[int, str]]] = {}
+        for row in rows:
+            index.setdefault(int(row["memory_id"]), set()).add(
+                (int(row["version"]), str(row["suspected_workspace"]))
+            )
+        return index
+
+    def record_workspace_dismissals_on_conn(
+        self, conn: sqlite3.Connection, rows: list[tuple[int, int, str, str]],
+    ) -> int:
+        """Caller owns the transaction (atomic with the queue-row status flip)."""
+        now = utc_now_iso()
+        if rows:
+            conn.executemany(
+                """INSERT OR IGNORE INTO workspace_dismissals(
+                     memory_id, version, suspected_workspace, reason, decided_at)
+                   VALUES(?,?,?,?,?)""",
+                [(m, v, s, r, now) for (m, v, s, r) in rows],
+            )
+        return len(rows)
+
     def refresh_stale_pins(self) -> int:
         """Expire rows whose pinned member versions no longer match reality.
 

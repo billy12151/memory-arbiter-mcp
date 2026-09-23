@@ -584,7 +584,7 @@ class QueueProtocol:
         version = int(record.get("version") or 1)
         current = str(record.get("workspace_canonical") or record.get("workspace") or "")
         if status == "dismissed":
-            self._expire_workspace_rows(memory_id, "dismissed", reason)
+            self._expire_workspace_rows(memory_id, "dismissed", reason, durable_record=True)
             return {"index": index, "outcome": "dismissed", "memory_id": memory_id}
         # confirmed: the four-part gate (E7) re-runs at decision time.
         target = str(raw.get("target_workspace") or "").strip()
@@ -677,16 +677,46 @@ class QueueProtocol:
             }
         return result
 
-    def _expire_workspace_rows(self, memory_id: int, status: str, why: str) -> None:
+    def _expire_workspace_rows(
+        self, memory_id: int, status: str, why: str, *, durable_record: bool = False,
+    ) -> None:
+        """Settle ALL pending kind='workspace' rows of one memory (decision APIs
+        judge per memory, not per bucket). With ``durable_record`` (agent
+        explicit dismiss only) each row's (version, suspected) identity lands
+        in ``workspace_dismissals`` in the SAME transaction — the queue row
+        and its durable suppression flip together or not at all. Hint
+        branches (protected/multi_family) and confirmed pass durable_record=
+        False: they only flip queue status, never mint a durable exemption."""
         now = utc_now_iso()
         try:
             with self.db.write_transaction() as conn:
-                conn.execute(
-                    """UPDATE scan_queue SET status=?, decided_reason=?, decided_at=?, updated_at=?
+                rows = conn.execute(
+                    """SELECT id, member_versions, detail FROM scan_queue
                        WHERE kind='workspace' AND status='pending'
                          AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
                                     WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
-                    (status, why, now, now, int(memory_id)),
+                    (int(memory_id),),
+                ).fetchall()
+                if not rows:
+                    return
+                durable: list[tuple[int, int, str, str]] = []
+                row_ids: list[int] = []
+                for row in rows:
+                    row_ids.append(int(row["id"]))
+                    if status != "dismissed" or not durable_record:
+                        continue  # hint/confirmed 分支只翻状态，不留持久 record
+                    try:
+                        version = int(json.loads(str(row["member_versions"] or "[]"))[0]["version"])
+                        suspected = str(json.loads(str(row["detail"] or "{}"))["suspected_workspace"])
+                    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        continue  # envelope 损坏：行照常了结，只是无法留持久豁免
+                    durable.append((int(memory_id), version, suspected, why))
+                if durable:
+                    self.db.scan_queue.record_workspace_dismissals_on_conn(conn, durable)
+                conn.executemany(
+                    """UPDATE scan_queue SET status=?, decided_reason=?, decided_at=?, updated_at=?
+                       WHERE id=? AND status='pending'""",  # CAS（仓库 B10 纪律）
+                    [(status, why, now, now, rid) for rid in row_ids],
                 )
         except Exception:
             pass

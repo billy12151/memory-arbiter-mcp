@@ -389,3 +389,37 @@ def test_sidecar_missing_fail_open(vec_tools: MemoryTools) -> None:
     assert data["status"] == "ok"
     assert data["suspected"] >= 1, "missing sidecar 必须 fail-open 照常提议"
     assert data["queued"] >= 1
+
+
+def test_dismissal_suppresses_weekly(vec_tools: MemoryTools) -> None:
+    """门 B 周扫通道：dismiss 落持久表后，即使 scan_queue 整表被 purge，
+    同身份也不再入队。"""
+    tools = vec_tools
+    _beta_clan(tools, 9)
+    _misplaced_postgres_in_apisvc(tools)  # id=10：apisvc 里的错位 postgres
+    assert tools.wait_semantic_worker_drained(timeout=10)
+
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["suspected"] == 1, "基线：无 dismissal 时错位记忆必须被怀疑"
+    assert data["queued"] == 1
+    mid = 10
+
+    submitted = tools.memory_repair("scan_queue", {"action": "submit", "decisions": [
+        {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "rw dismiss"},
+    ]})
+    assert submitted["ok"], submitted
+    assert submitted["data"]["results"][0]["outcome"] == "dismissed"
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT version, suspected_workspace, reason FROM workspace_dismissals WHERE memory_id=?",
+            (mid,),
+        ).fetchone()
+    assert row is not None, "dismiss 必须落持久表"
+    assert (int(row[0]), str(row[1])) == (1, "dbpgsql")
+    assert str(row[2]) == "rw dismiss"
+
+    with tools.db.write_transaction() as conn:
+        conn.execute("DELETE FROM scan_queue")  # 模拟启动 purge / 换代清台
+    data = tools.memory_repair("scan_workspace_anomalies", {})["data"]
+    assert data["suspected"] == 0, "dismiss 后同身份不得再被怀疑（门 B 幸存）"
+    assert data["queued"] == 0
