@@ -1309,8 +1309,10 @@ class ProductSurfaces:
                 "memory_repair", f"unknown scan_queue action: {action_value} (page|submit|status)", task,
             )
         if task == "claims_backfill":
-            # 0.17.0 P2-5.4: bounded claims backfill (owner designates a cheap
-            # model via data.model_path; cursor via data.after_id).
+            # 0.17.0 P2-5.4 + D2 (owner 2026-09-23): agent-supplied claims
+            # backfill — mode='pending' lists memories lacking current claims
+            # (id cursor via data.after_id); mode='apply' submits the caller
+            # LLM's extractions. The unattended Qwen channel is retired.
             return self._tools._claims_backfill_task(data if isinstance(data, dict) else {})
         if task == "scan_duplicates":
             return self._scan_duplicates_task(task, payload)

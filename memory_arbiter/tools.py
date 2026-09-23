@@ -5,7 +5,6 @@ import json
 import math
 import threading
 import time
-from pathlib import Path
 from collections import OrderedDict, deque
 from contextvars import ContextVar
 from typing import Any, Callable, cast
@@ -1667,151 +1666,21 @@ class MemoryTools:
         mode="apply"：接收调用方抽取结果 [{memory_id, claims:[{attr,value}]}]
         （≤20 条/记忆），走 grounding+归一+attr 向量落库（source='backfill'，
         replace 语义=同版本重抽覆盖）。
-        无 mode（默认）：保留 Qwen 廉价通道（无人值守场景；需显式 model_path
-        或常驻 backend——隔离 backend 无 extract_claims，会返回
-        backend_unavailable_without_agent_mode）。"""
+        无 mode：报错引导（owner 2026-09-23 拍板退役无人值守 Qwen 通道——
+        常驻服务形态实际不可用，保留只会误导用户的 agent 以为有本地抽取）。"""
         mode = str(data.get("mode") or "").strip().lower()
         if mode == "pending":
             return self._claims_backfill_pending(data)
         if mode == "apply":
             return self._claims_backfill_apply(data)
-        import re as _re
-        from .semantic_conflict import (
-            LocalGGUFSemanticBackend,
-            normalize_attribute,
-            normalize_value,
-            vector_cosine,
-        )
-
-        after_id = int(data.get("after_id") or 0)
-        limit = max(1, min(int(data.get("limit") or 50), 50))
-        model_path = str(data.get("model_path") or "").strip()
-        try:
-            with self.db.connection() as conn:
-                rows = conn.execute(
-                    """SELECT m.id, m.version, m.content, m.subject FROM memories m
-                       WHERE m.status='active' AND m.id > ?
-                         AND NOT EXISTS (
-                           SELECT 1 FROM memory_claims c
-                           WHERE c.memory_id = m.id AND c.memory_version = m.version
-                         )
-                       ORDER BY m.id LIMIT ?""",
-                    (after_id, limit),
-                ).fetchall()
-        except Exception as exc:
-            return {"ok": False, "error": f"claims_backfill query failed: {exc}"}
-        if not rows:
-            return {"ok": True, "scanned": 0, "next_after_id": after_id,
-                    "claims_written": 0, "coverage": self.db.claims.coverage()}
-        temp_backend: "LocalGGUFSemanticBackend | None" = None
-        backend: "Any" = None
-        if model_path and Path(model_path).exists() and model_path != str(
-            getattr(self.settings, "semantic_conflict_model_path", "") or ""
-        ):
-            temp_backend = LocalGGUFSemanticBackend(Path(model_path))
-            backend = temp_backend
-        embedder, _warnings = self._ensure_embedder()
-        boilerplate_re = _re.compile(r"值班|交接|手册|规范|评审|周报|归档|复核")
-        claims_written = 0
-        rejected = {"not_grounded": 0, "unbounded": 0, "whole_sentence": 0,
-                    "boilerplate": 0, "near_dup": 0}
-        memories_with_claims = 0
-        last_id = after_id
-        try:
-            if backend is None:
-                backend = self._ensure_semantic_backend()
-            assert backend is not None
-            for row in rows:
-                last_id = int(row["id"])
-                content = str(row["content"] or "")
-                if len(content) > 6000:
-                    continue  # 散文主叙事，非配置类——留给 agent 手补
-                extracted = backend.extract_claims(content)
-                if not extracted:
-                    continue
-                prepared: list[dict[str, Any]] = []
-                attr_vectors: list[list[float]] = []
-                for item in extracted:
-                    attr = item["attr"].strip()
-                    value = item["value"].strip()
-                    if value not in content:
-                        rejected["not_grounded"] += 1
-                        continue
-                    if len(value) > 64 or len(value.split()) > 12:
-                        rejected["unbounded"] += 1
-                        continue
-                    if "。" in value or "；" in value or len(value) >= max(24, len(content) // 3):
-                        rejected["whole_sentence"] += 1
-                        continue
-                    if boilerplate_re.search(attr) or boilerplate_re.search(value):
-                        rejected["boilerplate"] += 1
-                        continue
-                    attr_norm = normalize_attribute(attr)
-                    value_norm = normalize_value(value)
-                    if not attr_norm or not value_norm:
-                        continue
-                    vec = None
-                    if embedder is not None:
-                        er = embedder.embed_text(prefix="", body=attr)
-                        if er and er.embedding:
-                            vec = [float(x) for x in er.embedding]
-                    if vec is not None and any(
-                        (vector_cosine(vec, prev) or 0.0) >= 0.95 for prev in attr_vectors
-                    ):
-                        rejected["near_dup"] += 1
-                        continue
-                    if vec is not None:
-                        attr_vectors.append(vec)
-                    prepared.append({
-                        "attr": attr, "attr_norm": attr_norm,
-                        "value": value, "value_norm": value_norm,
-                        "source": "backfill",
-                    })
-                if not prepared:
-                    continue
-                result = self.db.claims.insert(
-                    memory_id=int(row["id"]), memory_version=int(row["version"] or 1),
-                    claims=prepared,
-                )
-                written = int(result.get("written") or 0)
-                claims_written += written
-                if written:
-                    memories_with_claims += 1
-                    if embedder is not None:
-                        try:
-                            with self.db.write_transaction() as conn:
-                                import json as _json
-                                for claim, vec in zip(prepared, attr_vectors):
-                                    if vec is None:
-                                        continue
-                                    cid = conn.execute(
-                                        "SELECT id FROM memory_claims WHERE memory_id=? AND memory_version=? "
-                                        "AND attr_norm=? AND value_norm=?",
-                                        (int(row["id"]), int(row["version"] or 1),
-                                         claim["attr_norm"], claim["value_norm"]),
-                                    ).fetchone()
-                                    if cid is not None:
-                                        conn.execute(
-                                            "INSERT OR REPLACE INTO memory_claim_vec(id, embedding) VALUES (?, ?)",
-                                            (int(cid["id"]), _json.dumps(vec)),
-                                        )
-                        except Exception:
-                            pass
-            return {
-                "ok": True, "scanned": len(rows), "next_after_id": last_id,
-                "memories_with_claims": memories_with_claims,
-                "claims_written": claims_written, "rejected": rejected,
-                "coverage": self.db.claims.coverage(),
-                "model_path": model_path or str(
-                    getattr(self.settings, "semantic_conflict_model_path", "") or "resident-backend"
-                ),
-            }
-        finally:
-            if temp_backend is not None:
-                del temp_backend
-                backend = None
-                import gc as _gc
-                _gc.collect()
+        return {
+            "ok": False,
+            "error": (
+                "claims extraction is agent-supplied: use mode='pending' to list "
+                "memories lacking current claims, then mode='apply' to submit "
+                "[{memory_id, claims: [{attr, value}]}]"
+            ),
+        }
 
     def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         result = self._evidence.process_conflicts(memory_id, snapshot)

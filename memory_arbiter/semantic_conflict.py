@@ -89,36 +89,10 @@ Output: {"attribute_a":"database engine","value_a":"MySQL","attribute_b":"databa
 # the 11th-round lesson — rebuilding the user turn reset the model, only the
 # system swaps). The token list must stay in sync with the example lines
 # above (guarded by test).
-# 0.17.0 P2-5.4: claims backfill extraction. 「配置项」框架词（12th round:
-# 「声明」phrasing made the 0.6B strike; 配置项 keeps it working). No few-shot
-# values from live topics — the filter chain (grounding + bounded + whole-
-# sentence rejection) owns fabrication defence offline.
-_CLAIMS_EXTRACT_PROMPT = """你从配置类记录中抽取配置项。直接以 [ 开头输出一个 JSON 数组，不要解释。
-每个元素形如 {"attr":"配置项名","value":"取值"}：attr 是短词（不含具体值），value 是原文中的连续片段，长度不超过 64 字、不超过 12 个词，禁止整句照抄，不得以句号结尾。
-没有配置项就输出 []。最多输出 20 个。"""
-
-
-def claims_from_text(raw: str) -> list[dict[str, str]]:
-    """Parse the claims-extraction JSON array; malformed output yields []."""
-    snippet = _extract_first_json_object(raw or "")
-    if not snippet:
-        return []
-    try:
-        parsed = json.loads(snippet)
-    except (ValueError, TypeError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-    claims: list[dict[str, str]] = []
-    for item in parsed[:20]:
-        if not isinstance(item, dict):
-            continue
-        attr = str(item.get("attr") or "").strip()
-        value = str(item.get("value") or "").strip()
-        if attr and value:
-            claims.append({"attr": attr, "value": value})
-    return claims
-
+# (0.17.0 D2, owner 2026-09-23: the offline claims-extraction prompt/parser
+# and the backend extract_claims method were RETIRED with the unattended
+# Qwen backfill channel — claims extraction is agent-supplied via
+# memory_repair(task='claims_backfill', mode='pending'/'apply').)
 
 _PAIR_PARROT_VALUE_TOKENS = ("mysql", "sqlite")
 
@@ -1742,37 +1716,9 @@ class LocalGGUFSemanticBackend:
             self._inflight = max(0, self._inflight - 1)
             self._cond.notify_all()
 
-    def extract_claims(self, text: str, *, max_tokens: int = 512) -> list[dict[str, str]]:
-        """Single-input claims extraction for the offline backfill (P2-5.4).
-
-        Grammar-free decode, temperature 0 — same family settings as
-        classify_pair; failures return [] (fail-open, the memory simply
-        stays pending for the next pass)."""
-        try:
-            llm = self._ensure_llm()
-            cjk = bool(_CJK_RE.search(text or ""))
-            prompt = _CLAIMS_EXTRACT_PROMPT
-            nothink = "/no_think\n" if self._qwen3_style else ""
-            stop = None if self._qwen3_style else ["\n\n"]
-            with self._infer_lock:
-                out = llm.create_chat_completion(
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": (
-                            f"{nothink}输入: {str(text or '')[:2000]}\n输出:"
-                            if cjk else
-                            f"{nothink}Input: {str(text or '')[:2000]}\nOutput:"
-                        )},
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=0.0,
-                    top_p=0.9,
-                    stop=stop,
-                )
-            raw = str(out["choices"][0]["message"]["content"] or "")
-            return claims_from_text(raw)
-        except Exception:
-            return []
+    # (0.17.0 D2, owner 2026-09-23: extract_claims retired with the
+    # unattended Qwen backfill channel — claims extraction is agent-supplied
+    # via memory_repair(task='claims_backfill', mode='pending'/'apply').)
 
     def classify_pair(
         self, left: dict[str, Any], right: dict[str, Any],

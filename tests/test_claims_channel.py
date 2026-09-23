@@ -241,3 +241,14 @@ def test_agent_supplied_backfill_pending_and_apply(tmp_path: Path) -> None:
     })
     assert again["claims_written"] == 1
     assert len(tools.db.claims.current_claims(a["id"])) == 1
+
+
+def test_claims_backfill_no_mode_returns_guidance(tmp_path: Path) -> None:
+    """D2（owner 2026-09-23）：无人值守 Qwen 通道退役——无 mode 返回引导语。"""
+    tools = tv.make_tools(tmp_path)
+    result = tools._claims_backfill_task({})
+    assert result["ok"] is False
+    assert "mode='pending'" in result["error"] and "mode='apply'" in result["error"]
+    # model_path 残留参数不再复活 Qwen 通道
+    result2 = tools._claims_backfill_task({"model_path": "/nonexistent.gguf"})
+    assert result2["ok"] is False and "mode='pending'" in result2["error"]
