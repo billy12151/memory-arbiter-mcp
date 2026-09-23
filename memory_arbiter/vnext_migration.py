@@ -529,6 +529,18 @@ def _copy_preserved_tables(source: Path, db: MemoryDB, *, chunk_size: int = 500)
                         f"INSERT INTO {table}({quoted}) VALUES({placeholders})",
                         (tuple(row[name] for name in common) for row in rows),
                     )
+            if table == "memories":
+                # Gate-v2 G3: a 0.16-era source may carry metadata.entity/scope
+                # — the copy is column-generic (no per-row hook), so the same
+                # storage-level strip runs once over the copied table, in its
+                # own transaction, before anything reads the rows back.
+                with db.write_transaction() as dst:
+                    dst.execute(
+                        "UPDATE memories SET metadata = json_remove(metadata, '$.entity', '$.scope') "
+                        "WHERE json_valid(metadata) "
+                        "AND (json_type(metadata,'$.entity') IS NOT NULL "
+                        "  OR json_type(metadata,'$.scope')  IS NOT NULL)"
+                    )
     finally:
         src.close()
 

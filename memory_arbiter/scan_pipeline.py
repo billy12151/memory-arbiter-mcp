@@ -401,8 +401,10 @@ class ScanPipeline:
             return outcome
         internal = self._examine_internal(memory_id, version, workspace, internal_source)
         outcome["internal"] = internal
-        entity_a = self._entity_of(record)
-        peer_entities: dict[int, "str | None"] = {}
+        # Gate-v2 G3: the metadata.entity clear leg is retired with the
+        # provenance gate — classify_pair runs on text evidence alone (the
+        # entity params stay on the classifier for external callers, but the
+        # detection chain no longer reads metadata.entity).
         # 0.17.0 P2-6.1: cross-memory candidates run on ROW vectors — same
         # identity discipline as the write side (eid is the memory_row.id).
         cross_units = internal_source
@@ -453,15 +455,9 @@ class ScanPipeline:
                 # pairs must carry an extractable value difference or they
                 # are duplicates/evolution noise. Cleared pairs are
                 # counted, never enqueued, never landed in conflicts.
-                if peer_id not in peer_entities:
-                    peer_record = self.db.get_memory(peer_id)
-                    peer_entities[peer_id] = (
-                        self._entity_of(peer_record) if peer_record else None
-                    )
                 verdict = classify_pair(
                     str(unit["text"]), str(hit.get("text") or ""),
                     route=str(decision.reason or ""),
-                    entity_a=entity_a, entity_b=peer_entities[peer_id],
                 )
                 if verdict == "clear":
                     outcome["machine_cleared"] += 1
@@ -488,21 +484,6 @@ class ScanPipeline:
                 if enqueued:
                     outcome["queued"] += 1
         return outcome
-
-    @staticmethod
-    def _entity_of(record: dict[str, Any]) -> "str | None":
-        """metadata.entity of a memory row (0.16.2 §1.6 subject layer)."""
-        raw = record.get("metadata")
-        if isinstance(raw, dict):
-            value = raw.get("entity")
-            return str(value).strip() or None if value is not None else None
-        if isinstance(raw, str) and raw:
-            try:
-                value = json.loads(raw).get("entity")
-            except (TypeError, ValueError):
-                return None
-            return str(value).strip() or None if value is not None else None
-        return None
 
     def _examine_internal(
         self, memory_id: int, version: int, workspace: str,

@@ -904,9 +904,10 @@ def test_notice_value_groups_tolerate_missing_parsed_keys(tmp_path: Path, monkey
     groups = notice["payload"]["value_groups"]
     # Display values fall back to the gate's normalised values.
     assert [group["display_value"] for group in groups] == ["sqlite", "mysql"]
-    # B-C4: the notice slot_key is stored in canonical entity/scope form.
+    # Gate-v2 G3: slot identity rides workspace + own subject (the
+    # metadata entity/scope source is retired — passing it changes nothing).
     assert notice["payload"]["slot_key"] == {
-        "entity": "myproject", "attribute": "数据库选型", "scope": "production",
+        "entity": "default", "attribute": "数据库选型", "scope": "b",
     }
 
 
@@ -968,8 +969,10 @@ def _slot_member(memory_id: int, value: str) -> dict:
 
 
 @pytest.mark.parametrize("stored_entity,stored_scope", [
-    ("MyProject", "Production"),   # legacy raw (pre-canon) storage form
-    ("myproject", "production"),   # canonical storage form
+    # Gate-v2 G3: slot identity is workspace + own subject now — both sides
+    # build the canon form directly, so the old raw-vs-canon mismatch
+    # (pre-canon legacy rows) has no metadata source to diverge from.
+    ("default", "a"),
 ])
 def test_applying_suppression_matches_raw_and_canon_slot_forms(
     tmp_path: Path, monkeypatch, stored_entity: str, stored_scope: str,

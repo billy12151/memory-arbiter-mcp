@@ -20,13 +20,24 @@ from ..constants import DEFAULT_WORKSPACE_NAME, MAX_MEMORY_TOTAL_TAGS
 from ..models import MemoryRecord, utc_now_iso
 from ..text import (
     canon_entity as _canon_entity,
-    canon_scope as _canon_scope,
     subject_tokens as _subject_tokens,
 )
 from ..timeutil import parse_iso8601_utc
 
 if TYPE_CHECKING:
     from .core import MemoryDB
+
+# Gate-v2 G3 (owner 二次收紧): metadata.entity/scope are RETIRED — the
+# provenance hard gate is gone and no metadata JSON in the database may
+# carry these keys again, through ANY write path. Storage-level stripping
+# at the three serialization points (INSERT, full UPDATE, metadata update)
+# is the enforcement; tools-layer warnings are only the user-facing hint.
+_RETIRED_METADATA_KEYS = ("entity", "scope")
+
+
+def _strip_retired_metadata_keys(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of ``metadata`` without the retired keys."""
+    return {key: value for key, value in metadata.items() if key not in _RETIRED_METADATA_KEYS}
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -245,7 +256,7 @@ class MemoriesStore:
                     record.protection_level,
                     record.status,
                     record.subject,
-                    json.dumps(record.metadata, ensure_ascii=False),
+                    json.dumps(_strip_retired_metadata_keys(dict(record.metadata or {})), ensure_ascii=False),
                     utc_now_iso(),
                     content_sha(record.content),
                 ),
@@ -399,7 +410,13 @@ class MemoriesStore:
         callers need an exception to roll back the whole unit of work.
         """
         allowed = {"source_type", "confidence", "protection_level", "status", "metadata"}
-        pairs = [(key, value) for key, value in updates.items() if key in allowed]
+        # Gate-v2 G3: retired keys leave the metadata BEFORE the change
+        # probe — an update that only moves entity/scope is a no_change,
+        # never a spurious version bump or rewrite.
+        pairs = [
+            (key, _strip_retired_metadata_keys(value) if key == "metadata" and isinstance(value, dict) else value)
+            for key, value in (item for item in updates.items() if item[0] in allowed)
+        ]
         if not pairs:
             return True
         current = self._fetch_memory(conn, int(memory_id))
@@ -419,13 +436,10 @@ class MemoriesStore:
             for key, value in pairs
         )
         metadata_update = next((value for key, value in pairs if key == "metadata"), None)
-        if isinstance(metadata_update, dict):
-            current_md = current.get("metadata") or {}
-            current_md = current_md if isinstance(current_md, dict) else {}
-            snapshot_semantics_changed = snapshot_semantics_changed or (
-                _canon_entity(current_md.get("entity")) != _canon_entity(metadata_update.get("entity"))
-                or _canon_scope(current_md.get("scope")) != _canon_scope(metadata_update.get("scope"))
-            )
+        # Gate-v2 G3: the old "entity/scope changed → snapshot semantics
+        # changed → version bump" leg is gone — the keys are retired, they
+        # never reach storage (stripped below), so they can no longer drive
+        # snapshot semantics.
         if status_changed and str(new_status) == "active":
             # 0.16.6 dedup gate (owner: 只管活的): the pending row itself sat
             # outside the partial index, so the flip INTO active is the one
@@ -448,8 +462,11 @@ class MemoriesStore:
         if snapshot_semantics_changed:
             sql += ", version = version + 1"
         values = [
-            json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
-            for _, v in pairs
+            json.dumps(
+                _strip_retired_metadata_keys(v) if key == "metadata" and isinstance(v, dict) else v,
+                ensure_ascii=False,
+            ) if isinstance(v, (dict, list)) else v
+            for key, v in pairs
         ]
         values.append(int(memory_id))
         conn.execute(f"UPDATE memories SET {sql} WHERE id = ?", values)
@@ -1302,6 +1319,12 @@ class MemoriesStore:
         for key in clear_fields or []:
             metadata.pop(str(key), None)
         metadata.update(set_fields or {})
+        # Gate-v2 G3: strip BEFORE the change probe — set_entity/clear on the
+        # retired keys lands as no_change instead of an empty rewrite that
+        # would bump the version forever (third serialization point; the
+        # owner's "any path" ruling covers the repair tool too).
+        metadata = _strip_retired_metadata_keys(metadata)
+        before = _strip_retired_metadata_keys(before)
         if metadata == before:
             return {"outcome": "no_change", "memory_id": memory_id, "metadata": metadata}
         conn.execute(

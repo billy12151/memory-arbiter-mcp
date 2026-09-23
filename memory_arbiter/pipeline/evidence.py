@@ -14,6 +14,7 @@ from ..constants import (
     SEMANTIC_MAX_EVIDENCE_UNITS,
     SEMANTIC_MAX_EXAMINED_PAIRS,
     SEMANTIC_INTERNAL_QWEN_MAX_PAIRS,
+    SEMANTIC_CROSS_KNN_WINDOW,
     SEMANTIC_MAX_ROWS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
@@ -46,6 +47,19 @@ _TECHNICAL_REASONS = {
     "evidence_units_capped", "rows_capped", "pairs_examined_capped",
     "notice_write_failed",
 }
+
+
+def _retired_gate_slot_key(workspace: Any, attribute: Any, subject: Any) -> dict[str, str]:
+    """Gate-v2 G3 slot identity without metadata provenance (owner 拍板):
+    {"entity": workspace 名, "attribute": 抽取属性, "scope": subject 前 32 字}.
+    Identity key only — historical groups keep their old slot_keys untouched,
+    new groups speak the new dialect. canon_* stay for storage-side parity
+    (both sides of the B-C4 comparison canonicalise identically)."""
+    return {
+        "entity": canon_entity(str(workspace or "")),
+        "attribute": str(attribute or ""),
+        "scope": canon_scope(str(subject or "")[:32]),
+    }
 
 
 def _subject_is_process_record(hit_subject: str, own_subject: str) -> bool:
@@ -135,11 +149,10 @@ class EvidencePipeline:
         Every claim of the freshly-written memory searches the claim-vector
         KNN (same workspace, active, current version); attr_cos ≥
         CLAIM_ATTR_TAU + value_norm difference + coexistence veto (A4) +
-        provenance SOFT gate (owner 2026-09-22: both sides filled AND
-        unequal → veto; anything else passes — the attr slot itself anchors
-        the comparison) + evidence-channel pair-closure dedup → notice.
-        Bounded by CLAIMS_MAX_NOTICES_PER_WRITE (review A3); overflow is
-        counted, never silent."""
+        evidence-channel pair-closure dedup → notice. Gate-v2 G3: the soft
+        metadata-provenance gate is retired — claims attr alignment IS the
+        identity signal now. Bounded by CLAIMS_MAX_NOTICES_PER_WRITE
+        (review A3); overflow is counted, never silent."""
         from ..constants import CLAIMS_MAX_NOTICES_PER_WRITE, CLAIM_ATTR_TAU
         from ..semantic_conflict import attr_is_versional, vector_cosine
 
@@ -180,11 +193,6 @@ class EvidencePipeline:
             eligible += f" AND {workspace_sql}"
             eligible_params.extend(workspace_params)
         id_constraint = f"c.id IN (SELECT c.id FROM memory_claims c JOIN memories m ON m.id=c.memory_id WHERE {eligible})"
-
-        raw_meta = record.get("metadata")
-        own_metadata = raw_meta if isinstance(raw_meta, dict) else {}
-        own_entity = str(own_metadata.get("entity") or "").strip()
-        own_scope = str(own_metadata.get("scope") or "").strip()
 
         notices = 0
         capped_count = 0
@@ -268,22 +276,6 @@ class EvidencePipeline:
                         peer_coexistence[peer_id] = peer_attrs
                     if len(peer_attrs.get(str(hit["attr_norm"]), ())) > 1:
                         continue
-                    # Soft provenance gate (owner 2026-09-22 拍板；单侧未填=
-                    # 不挡——review 推荐①，随 P2-5 review 收口)。
-                    raw_hit_meta = hit["metadata"] if "metadata" in hit.keys() else None
-                    hit_metadata = raw_hit_meta if isinstance(raw_hit_meta, dict) else {}
-                    if isinstance(raw_hit_meta, str) and raw_hit_meta:
-                        try:
-                            hit_metadata = json.loads(raw_hit_meta)
-                        except (TypeError, ValueError):
-                            hit_metadata = {}
-                    hit_entity = str(hit_metadata.get("entity") or "").strip()
-                    hit_scope = str(hit_metadata.get("scope") or "").strip()
-                    if (
-                        own_entity and hit_entity and own_entity != hit_entity
-                        and own_scope and hit_scope and own_scope != hit_scope
-                    ):
-                        continue
                     # Cross-channel dedup (appendix C 7): a pair the evidence
                     # channel already settled this version never double-fires.
                     if self.db.semantic_notices.is_semantic_pair_closed_on_conn(
@@ -293,15 +285,10 @@ class EvidencePipeline:
                     if notices >= CLAIMS_MAX_NOTICES_PER_WRITE:
                         capped_count += 1
                         continue  # count the overflow, keep scanning cheaper
-                    entity = own_entity if own_entity == hit_entity else (own_entity or hit_entity or "")
-                    scope = own_scope if own_scope == hit_scope else (own_scope or hit_scope or "")
-                    if not entity or not scope:
-                        continue
-                    from ..text import canon_entity, canon_scope
-                    slot_key = {
-                        "entity": canon_entity(entity), "attribute": str(hit["attr_norm"]),
-                        "scope": canon_scope(scope),
-                    }
+                    slot_key = _retired_gate_slot_key(
+                        record.get("workspace_canonical") or record.get("workspace"),
+                        str(hit["attr_norm"]), str(record.get("subject") or ""),
+                    )
                     outcome = self.db.record_semantic_notice(
                         memory_id=int(memory_id), peer_id=peer_id, severity="normal",
                         notice_type="claim_conflict",
@@ -313,7 +300,7 @@ class EvidencePipeline:
                             "source": "claim_conflict",
                             "slot_key": slot_key,
                             "slot_provenance": {
-                                "entity": "metadata", "scope": "metadata",
+                                "entity": "workspace", "scope": "subject",
                                 "attribute": "claims_channel",
                             },
                             "attr_cos": round(float(attr_cos or 1.0), 4),
@@ -421,8 +408,6 @@ class EvidencePipeline:
                     processed += 1
                     continue
                 def _env(memory: dict[str, Any], quote: str) -> dict[str, Any]:
-                    metadata_value = memory.get("metadata")
-                    metadata = metadata_value if isinstance(metadata_value, dict) else {}
                     return {
                         "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
                         "tags": list(memory.get("tags") or [])[:20],
@@ -430,7 +415,7 @@ class EvidencePipeline:
                         "memory_id": int(memory.get("id") or 0),
                         "version": int(memory.get("version") or 1),
                         "event_time": memory.get("event_time"),
-                        "metadata": {k: metadata.get(k) for k in ("entity", "scope") if metadata.get(k)},
+                        "metadata": {},
                     }
                 try:
                     forward = backend.classify_pair(
@@ -477,18 +462,15 @@ class EvidencePipeline:
         right_id = int(right.get("id") or 0)
         left_version = int(left.get("version") or 1)
         right_version = int(right.get("version") or 1)
-        raw_meta = left.get("metadata")
-        metadata = raw_meta if isinstance(raw_meta, dict) else {}
-        raw_peer_meta = right.get("metadata")
-        peer_metadata = raw_peer_meta if isinstance(raw_peer_meta, dict) else {}
-        entity = metadata.get("entity") if metadata.get("entity") == peer_metadata.get("entity") else None
-        scope = metadata.get("scope") if metadata.get("scope") == peer_metadata.get("scope") else None
-        if not entity or not scope:
-            return  # soft-invisible: slot provenance missing, dedupe will keep the pair calm
-        slot_key = {
-            "entity": canon_entity(entity), "attribute": attribute, "scope": canon_scope(scope),
-        }
-        slot_json = json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        # Gate-v2 G3: the old soft-invisible return (metadata entity/scope
+        # missing → drop) is retired WITH the provenance gate — keeping it
+        # after the storage strip would have silenced EVERY backlog notice
+        # forever (entity/scope are gone from all metadata). Slot identity
+        # now rides workspace + subject (plan slot_key 连锁).
+        slot_key = _retired_gate_slot_key(
+            left.get("workspace_canonical") or left.get("workspace"),
+            attribute, str(left.get("subject") or ""),
+        )
         self.db.record_semantic_notice(
             memory_id=left_id, peer_id=right_id, severity="normal",
             notice_type="semantic_evidence",
@@ -499,7 +481,7 @@ class EvidencePipeline:
                 "prompt_version": PAIR_PROMPT_VERSION,
                 "anchors": decision.anchors,
                 "slot_key": slot_key,
-                "slot_provenance": {"entity": "metadata", "scope": "metadata", "attribute": "backlog"},
+                "slot_provenance": {"entity": "workspace", "scope": "subject", "attribute": "backlog"},
                 "member_versions": [
                     {"memory_id": left_id, "version": left_version, "value": value_a,
                      "evidence": {"quote": left_text}},
@@ -1071,20 +1053,14 @@ class EvidencePipeline:
         # Gate 0 (0.16.4 §1, evolution domain): cross-memory notify shapes
         # die above, before all of the following — timeline phenomena are
         # not conflicts.
-        # Gate 1 (provenance, zero loss): a notice needs BOTH sides' entity
-        # AND scope metadata present and equal (the post-Qwen slot builder
-        # drops anything else with slot_provenance_insufficient) — skipping
-        # early saves the two Qwen inferences per pair. Cheapest and biggest
-        # kill (~95% of representatives), so it runs FIRST.
+        # Gate 1 (provenance) is RETIRED in gate-v2 G3 (owner 拍板 1): the
+        # real library left entity/scope empty on both sides of true
+        # conflicts (#50), so the gate made everyone mutually invisible.
+        # Claims attribute alignment carries the same-subject signal now.
         # Gate 2 (difference classifier): no extractable value difference
         # means the pair can never satisfy Qwen's same-attribute-different-
         # value gate.
-        provenance_filtered = 0
         no_difference_filtered = 0
-        raw_own_meta = record.get("metadata")
-        own_metadata = raw_own_meta if isinstance(raw_own_meta, dict) else {}
-        own_entity = str(own_metadata.get("entity") or "").strip()
-        own_scope = str(own_metadata.get("scope") or "").strip()
         # Spec §15.5: a bounded check that ran out of budget must not later
         # claim checked_no_notice. The two truncation causes report
         # distinctly (2026-09-10 #957/#959 diagnosis: the shared string cost
@@ -1134,7 +1110,7 @@ class EvidencePipeline:
                     continue  # budget gone; keep draining for publish
                 units_examined += 1
                 knn_hits = self.db.row_knn(
-                    embedding, k=5, workspace=workspace,
+                    embedding, k=SEMANTIC_CROSS_KNN_WINDOW, workspace=workspace,
                     exclude_memory_id=memory_id, conn=job_conn,
                     include_subject_rows=False,  # subject rows poison the window
                 )
@@ -1157,21 +1133,6 @@ class EvidencePipeline:
                     if is_cross_evolution(decision):
                         continue
                     peer_id = int(hit["memory_id"])
-                    raw_hit_meta = hit.get("metadata")
-                    if isinstance(raw_hit_meta, str) and raw_hit_meta:
-                        try:
-                            raw_hit_meta = json.loads(raw_hit_meta)
-                        except (TypeError, ValueError):
-                            raw_hit_meta = {}
-                    hit_metadata = raw_hit_meta if isinstance(raw_hit_meta, dict) else {}
-                    hit_entity = str(hit_metadata.get("entity") or "").strip()
-                    hit_scope = str(hit_metadata.get("scope") or "").strip()
-                    if not (
-                        own_entity and hit_entity and own_entity == hit_entity
-                        and own_scope and hit_scope and own_scope == hit_scope
-                    ):
-                        provenance_filtered += 1
-                        continue
                     if classify_pair(
                         seg_view.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
                     ) == "clear":
@@ -1326,15 +1287,15 @@ class EvidencePipeline:
         incomplete_reason: str | None = None
 
         def envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
-            metadata_value = memory.get("metadata")
-            metadata = metadata_value if isinstance(metadata_value, dict) else {}
+            # Gate-v2 G3: metadata.entity/scope retired — the prompt keeps the
+            # (now always empty) metadata slot so the protocol shape is stable.
             return {
                 "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
                 "tags": list(memory.get("tags") or [])[:20],
                 "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
                 "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
                 "event_time": memory.get("event_time"),
-                "metadata": {key: metadata.get(key) for key in ("entity", "scope") if metadata.get(key)},
+                "metadata": {},
             }
 
         def classify(left_env: dict[str, Any], right_env: dict[str, Any]) -> Any:
@@ -1581,26 +1542,17 @@ class EvidencePipeline:
                 # examined and decided. The check stays complete and no
                 # degradation counter fires (spec §9/§15.5/§8).
                 continue
-            raw_meta = record_row.get("metadata")
-            metadata = raw_meta if isinstance(raw_meta, dict) else {}
-            raw_peer_meta = peer_row.get("metadata")
-            peer_metadata = raw_peer_meta if isinstance(raw_peer_meta, dict) else {}
-            entity = metadata.get("entity") if metadata.get("entity") == peer_metadata.get("entity") else None
-            scope = metadata.get("scope") if metadata.get("scope") == peer_metadata.get("scope") else None
-            if not entity or not scope:
-                incomplete_reason = "slot_provenance_insufficient"
-                continue
-            # B-C4: slot keys are built with canonicalised entity/scope (the
-            # comparison-side counterpart of the storage-side canon in
-            # db/conflicts.py _normalize_slot) so lexical variants like
-            # "MyProject"/"myproject" address the same slot.
-            slot_key = {
-                "entity": canon_entity(entity), "attribute": gate.attribute,
-                "scope": canon_scope(scope),
-            }
+            # Gate-v2 G3: slot identity rides workspace + subject (plan
+            # slot_key 连锁) — the metadata entity/scope source is retired,
+            # and the old `if not entity or not scope: continue` drop died
+            # with it (keeping it would have discarded every notice).
+            slot_key = _retired_gate_slot_key(
+                workspace or record_row.get("workspace_canonical") or record_row.get("workspace"),
+                gate.attribute, str(record_row.get("subject") or ""),
+            )
             slot_json = json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             raw_slot_json = json.dumps(
-                {"entity": entity, "attribute": gate.attribute, "scope": scope},
+                {"entity": slot_key["entity"], "attribute": gate.attribute, "scope": slot_key["scope"]},
                 ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             )
             if slot_json in applying_slots or raw_slot_json in applying_slots:
@@ -1643,7 +1595,7 @@ class EvidencePipeline:
                     "anchors": decision.anchors,
                     "slot_key": slot_key,
                     "slot_provenance": {
-                        "entity": "metadata", "scope": "metadata",
+                        "entity": "workspace", "scope": "subject",
                         "attribute": (
                             "deterministic_skeleton" if direct is not None
                             else "single_direction_extraction"
@@ -1723,8 +1675,6 @@ class EvidencePipeline:
         # what the deterministic filters killed this run, and what the
         # unified internal Qwen flow confirmed/vetoed.
         filter_summary: dict[str, int] = {}
-        if provenance_filtered:
-            filter_summary["provenance_skipped"] = provenance_filtered
         if no_difference_filtered:
             filter_summary["no_difference_skipped"] = no_difference_filtered
         if internal_qwen_confirmed:

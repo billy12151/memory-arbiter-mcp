@@ -2295,7 +2295,12 @@ class OperationsPipeline:
             )
         if caller.isolation == "strict":
             data.update(caller.response_fields())
-        return self.db.state.response(data, extra_warnings=list(caller.warnings))
+        # Gate-v2 G3: entity/scope are retired — the storage strip turns any
+        # set/clear into a metadata no-op, so say so instead of silently
+        # doing nothing.
+        warnings = list(caller.warnings)
+        warnings.append("metadata entity/scope 已废弃（0.17 门 v2），无需再传")
+        return self.db.state.response(data, extra_warnings=warnings)
 
     def memory_list_entities(
         self, limit: int = 50, include_unassigned: bool = True, **_: Any,

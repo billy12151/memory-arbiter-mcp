@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from memory_arbiter.evidence import evidence_content_hash
+from memory_arbiter.text import canon_scope
 
 from test_vnext_evidence import make_tools, _strict_pair_backend
 
@@ -69,29 +70,33 @@ def _payload(notice: dict) -> dict:
     return json.loads(payload) if isinstance(payload, str) else payload
 
 
-# ── gate 1: provenance ──────────────────────────────────────────────────────
+# ── gate 1: provenance (RETIRED in gate-v2 G3 — the two former blocks are
+# now retirement-benefit pins: pairs the old gate silenced land their notices) ──
 
-def test_provenance_gate_skips_qwen_and_reports(tmp_path: Path, monkeypatch) -> None:
+def test_provenance_retired_peer_without_metadata_now_reports(tmp_path: Path, monkeypatch) -> None:
+    """退役收益钉：peer 完全没有 entity/scope metadata 的对立对，被旧 provenance
+    硬门整批消音（真库真冲突 #50 双侧均 {} 的形态）——退役后正常落 notice。"""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    # Same-value pair on a slot the backend WOULD confirm — but the peer has
-    # no entity/scope metadata, so no notice can ever land for it.
     peer = tools.memory_write(content="连接池上限为 10。", subject="pool", tags=[])["data"]
-    new = tools.memory_write(content="连接池上限为 99。", subject="poolx", tags=[], metadata=META)["data"]
+    new = tools.memory_write(content="连接池上限为 99。", subject="poolx", tags=[])["data"]
     assert tools.wait_semantic_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["status"] == "completed"
-    assert result["notices_created"] == 0
-    assert result["deterministic_filter"]["provenance_skipped"] >= 1
-    assert backend.calls == 0, "a provenance-dead pair must never reach Qwen"
-    assert tools.db.list_semantic_notices(status="open") == []
+    assert result["notices_created"] == 1
+    assert "provenance_skipped" not in (result.get("deterministic_filter") or {})
+    notices = tools.db.list_semantic_notices(status="open")
+    assert len(notices) == 1
+    # New slot identity rides workspace + own subject, not metadata.
+    assert notices[0]["payload"]["slot_key"]["scope"] == canon_scope("poolx")
 
 
-def test_provenance_gate_entity_mismatch_blocks(tmp_path: Path, monkeypatch) -> None:
+def test_provenance_retired_unequal_metadata_no_longer_blocks(tmp_path: Path, monkeypatch) -> None:
+    """退役收益钉：双侧 metadata.entity/scope 不等（甚至一侧缺失）不再拦截——
+    identity 信号由 claims 属性对齐承担。"""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     other_meta = {"entity": "billing-api", "scope": "production"}
@@ -100,11 +105,10 @@ def test_provenance_gate_entity_mismatch_blocks(tmp_path: Path, monkeypatch) -> 
     assert tools.wait_semantic_worker_drained(timeout=5)
     backend = _CountingBackend(_strict_pair_backend())
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits(tools, [peer]))  # 0.17.0 P2-3 行级候选同注入
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
-    assert backend.calls == 0
-    assert result["deterministic_filter"]["provenance_skipped"] >= 1
+    assert result["notices_created"] == 1
+    assert "provenance_skipped" not in (result.get("deterministic_filter") or {})
 
 
 # ── gate 2: difference classifier ───────────────────────────────────────────

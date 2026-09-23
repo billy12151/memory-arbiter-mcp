@@ -523,6 +523,11 @@ def _v_metadata(
         return None
     if not isinstance(metadata, dict):
         return _error("metadata", "must be a JSON object")
+    # Gate-v2 G3 (owner 拍板 1): entity/scope are retired — accepted but
+    # stripped at storage, and the caller is told here (enforcement is the
+    # storage-level strip, this is only the user-facing hint).
+    if "entity" in metadata or "scope" in metadata:
+        result.warnings.append("metadata entity/scope 已废弃（0.17 门 v2），无需再传")
     try:
         metadata_size = _json_size(metadata)
     except (TypeError, ValueError, RecursionError):

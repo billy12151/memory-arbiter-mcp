@@ -329,17 +329,14 @@ def test_kick_excludes_evolution_and_keeps_numeric(tmp_path: Path) -> None:
 
 
 def test_evolution_excluded_write_time_no_notice(tmp_path: Path) -> None:
-    """Write-time path of the 0.16.4 exclusion: a polarity pair whose
-    entity/scope metadata is aligned (so the provenance gate would NOT kill
-    it — hit metadata is joined live from memories) still produces no
-    semantic notice and no queue row. The only remaining killer is the
-    evolution-domain exclusion: the earliest kill, ahead of provenance."""
+    """Write-time path of the 0.16.4 exclusion: a polarity pair still
+    produces no semantic notice and no queue row. Gate-v2 G3: provenance is
+    retired, so the evolution-domain exclusion is the ONLY remaining killer
+    of this shape (metadata alignment is no longer part of the chain)."""
     tools = make_tools(tmp_path)
     a = _write(tools, "写时演进甲", "该功能包含缓存模块", tags=["x"])
     b = _write(tools, "写时演进乙", "该功能不包含缓存模块", tags=["x"])
-    assert tools.memory_set_entity(a, "网关", "路由")["data"]["updated"]
-    assert tools.memory_set_entity(b, "网关", "路由")["data"]["updated"]
-    # Version lift re-runs the write-time evidence loop with metadata live.
+    # Version lift re-runs the write-time evidence loop.
     tools.memory("update", {"memory_id": b, "new_content": "该功能不包含缓存模块与限流", "reason": "evo"})
     assert tools.wait_semantic_worker_drained(timeout=10)
     with tools.db.connection() as conn:

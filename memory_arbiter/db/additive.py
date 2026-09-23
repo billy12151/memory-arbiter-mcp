@@ -308,6 +308,9 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     retired = _retire_unit_tables(conn)
     if retired:
         applied.append(retired)
+    metadata_purged = _purge_retired_metadata_keys(conn)
+    if metadata_purged:
+        applied.append(metadata_purged)
     conn.commit()
     return applied
 
@@ -374,6 +377,42 @@ def _retire_unit_tables(conn: sqlite3.Connection) -> str:
 
 
 _SUBJECT_ROW_KEY = "memory_row_subject_kind_v1"
+
+
+_METADATA_PURGE_KEY = "metadata_entity_scope_purged_v1"
+
+
+def _purge_retired_metadata_keys(conn: sqlite3.Connection) -> str:
+    """Gate-v2 G3 keyed migration (owner: 不要了就清理干净): strip the retired
+    metadata.entity/scope keys from every stored memory in ONE atomic SQL.
+    json_valid guards the whole statement — a single malformed-JSON metadata
+    row would otherwise raise inside json_type and abort boot (json_remove
+    on a NULL column is a no-op and json_valid(NULL) is NULL, so both are
+    excluded by the WHERE). Re-run is a no-op via the migration_state key;
+    the write-path strip in db/memories.py is the second, permanent half of
+    the double lock."""
+    try:
+        already = conn.execute(
+            "SELECT value FROM migration_state WHERE key=?", (_METADATA_PURGE_KEY,)
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    if already is not None:
+        return ""
+    cursor = conn.execute(
+        "UPDATE memories SET metadata = json_remove(metadata, '$.entity', '$.scope') "
+        "WHERE json_valid(metadata) "
+        "AND (json_type(metadata,'$.entity') IS NOT NULL "
+        "  OR json_type(metadata,'$.scope')  IS NOT NULL)"
+    )
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO migration_state(key,value) VALUES (?,?)",
+            (_METADATA_PURGE_KEY, f"purged({cursor.rowcount})"),
+        )
+    except sqlite3.Error:
+        pass
+    return f"metadata_entity_scope_purged({cursor.rowcount})"
 
 
 def _rebuild_memory_row_store(conn: sqlite3.Connection) -> str:

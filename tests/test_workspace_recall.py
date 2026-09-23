@@ -1404,9 +1404,22 @@ def test_entities_listing_scopes_to_admitted_set(tmp_path):
     lane_id = active_write(tools, "lane content", "agent-lane", "lane subject")
     rail_id = active_write(tools, "rail content", "agent-rail", "rail subject")
     far_id = active_write(tools, "far content", "unrelated-ws", "far subject")
-    tools.memory_set_entity(memory_id=lane_id, entity="lane-entity", workspace="agent-lane")
-    tools.memory_set_entity(memory_id=rail_id, entity="rail-entity", workspace="agent-rail")
-    tools.memory_set_entity(memory_id=far_id, entity="far-entity", workspace="unrelated-ws")
+    # Gate-v2 G3: the storage strip retires metadata.entity on every write
+    # path, so the entity rows are seeded the way a pre-purge 0.16 library
+    # would look — raw SQL, deliberately bypassing the strip (this pins the
+    # list_entities workspace scoping itself, not the write path).
+    import json as _json
+
+    def _seed_entity(memory_id: int, entity: str) -> None:
+        with tools.db.write_transaction() as conn:
+            conn.execute(
+                "UPDATE memories SET metadata=json_set(COALESCE(metadata,'{}'),'$.entity',?) WHERE id=?",
+                (entity, memory_id),
+            )
+
+    _seed_entity(lane_id, "lane-entity")
+    _seed_entity(rail_id, "rail-entity")
+    _seed_entity(far_id, "far-entity")
 
     data = tools.memory_list_entities(workspace="agent-lane")["data"]
     listed = json.dumps(data, ensure_ascii=False)
