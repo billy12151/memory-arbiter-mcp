@@ -362,6 +362,12 @@ def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkey
     knn_calls = {"n": 0}
 
     def fake_knn(*a: Any, **k: Any) -> list[dict[str, Any]]:
+        # Gate-v2 G5: the subject coarse screen (subject_rows_only) is a
+        # separate KNN before the loop — count only sentence KNNs. The
+        # screen returns a placeholder neighbour so the clean list is
+        # non-empty and the sentence loop actually runs.
+        if k.get("subject_rows_only"):
+            return [{"memory_id": 987654, "subject": "neighbour", "tags": []}]
         knn_calls["n"] += 1
         if knn_calls["n"] >= 3:
             clock["now"] = fairness_deadline + 1.0

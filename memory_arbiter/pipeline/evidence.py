@@ -62,35 +62,6 @@ def _retired_gate_slot_key(workspace: Any, attribute: Any, subject: Any) -> dict
     }
 
 
-def _subject_is_process_record(hit_subject: str, own_subject: str) -> bool:
-    """Memory-level process-record guard for row-level candidates: the
-    whole-text vetoes (review rounds / design→release / re-verify) lose
-    their context once a memory is split into sentences — a release-notes
-    row pair and a review row pair of the SAME two process records then
-    look like value conflicts. Either subject carrying the process shape
-    disqualifies the pair (cand1: cf-noise-18298/18278/18218 async FPs)."""
-    from ..semantic_conflict import (
-        _PROCESS_DESIGN_RE,
-        _PROCESS_RELEASE_RE,
-        _PROCESS_REVERIFY_RE,
-        _PROCESS_REVIEW_RE,
-    )
-    # cand2/cand3 note: a BARE review/审查 broadening here killed the
-    # cf-res-29/30/32 true conflicts (owner-resolved pairs ABOUT review
-    # rounds) — rejected. The residual async FPs on process-y pairs
-    # (18218/18278/18018) ride the owner-ratified R8 asymmetric-benefit
-    # doctrine: advisory, post-window, counted; noise.async leaves the gate
-    # (see score.py) while noise.sync stays gated.
-    for subject in (hit_subject, own_subject):
-        if not subject:
-            continue
-        if _PROCESS_REVIEW_RE.search(subject) or _PROCESS_REVERIFY_RE.search(subject):
-            return True
-        if _PROCESS_DESIGN_RE.search(subject) and _PROCESS_RELEASE_RE.search(subject):
-            return True
-    return False
-
-
 def _attr_cos_or_none(
     embedder: "Any", forward: "Any",
 ) -> "float | None":
@@ -1110,6 +1081,48 @@ class EvidencePipeline:
         }
         prefiltered_rows = 0
         rows_covered_by_claims = 0
+        # Gate-v2 G5 ②″ 记忆级一揽子筛选: ONE subject-row coarse KNN builds
+        # the neighbour list; memory_pair_excluded vets each neighbour on
+        # subject/tags alone; the sentence KNN then runs ONLY inside the
+        # clean list (rowid-IN restriction — window slots are not burned on
+        # unrelated or already-excluded memories). 宽不罚——窄才漏.
+        from .gates import memory_pair_excluded as _pair_excluded
+        from ..constants import SEMANTIC_NEIGHBOR_SCREEN
+        subject_vec = next(
+            (embedding for seg_view, embedding in paired if seg_view.kind == "subject"),
+            None,
+        ) if paired else None
+        allowed_memory_ids: list[int] | None = None
+        memory_pairs_excluded = 0
+        if subject_vec is not None:
+            neighbours = self.db.row_knn(
+                subject_vec, k=SEMANTIC_NEIGHBOR_SCREEN, workspace=workspace,
+                exclude_memory_id=memory_id, conn=job_conn,
+                include_subject_rows=True, subject_rows_only=True,
+            )
+            excluded_ids: set[int] = set()
+            own_tags = record.get("tags") or []
+            for neighbour in neighbours:
+                peer_id_n = int(neighbour["memory_id"])
+                if peer_id_n in excluded_ids:
+                    continue
+                tags_raw_n = neighbour.get("tags")
+                peer_tags_n = (
+                    json.loads(tags_raw_n) if isinstance(tags_raw_n, str) and tags_raw_n
+                    else (tags_raw_n if isinstance(tags_raw_n, list) else [])
+                )
+                if _pair_excluded(
+                    str(record.get("subject") or ""), own_tags,
+                    str(neighbour.get("subject") or ""), peer_tags_n,
+                ):
+                    excluded_ids.add(peer_id_n)
+            allowed_memory_ids = [
+                int(n["memory_id"]) for n in neighbours
+                if int(n["memory_id"]) not in excluded_ids
+            ]
+            memory_pairs_excluded = len(excluded_ids)
+            if not allowed_memory_ids:
+                allowed_memory_ids = []  # everything screened out: no KNN at all
         below_cos_floor = 0
         repeatability_skipped = 0
         try:
@@ -1144,10 +1157,13 @@ class EvidencePipeline:
                     truncation_reason = truncation_reason or "notice_budget_exhausted"
                     continue  # budget gone; keep draining for publish
                 units_examined += 1
+                if allowed_memory_ids is not None and not allowed_memory_ids:
+                    continue  # whole neighbourhood screened out
                 knn_hits = self.db.row_knn(
                     embedding, k=SEMANTIC_CROSS_KNN_WINDOW, workspace=workspace,
                     exclude_memory_id=memory_id, conn=job_conn,
                     include_subject_rows=False,  # subject rows poison the window
+                    include_memory_ids=allowed_memory_ids,
                 )
                 # Gate-v2 G4 余弦门: true cosine band on fetched vectors —
                 # below floor is noise (保安一号), at/above ceil is a
@@ -1168,13 +1184,9 @@ class EvidencePipeline:
                     decision = decide_evidence(seg_view.text, str(hit.get("text") or ""))
                     if decision.action == "ignore":
                         continue
-                    # 0.17.0 校准轮（对抗 review 遗留）：行级拆句让整文过程记录
-                    # veto（review/设计→发版/复验）只看到句子看不到语境——按记忆
-                    # 级 subject 复核一次，过程记录对的任何行对都不进门。
-                    if _subject_is_process_record(
-                        str(hit.get("subject") or ""), str(record.get("subject") or ""),
-                    ):
-                        continue
+                    # Gate-v2 G5: the whole-memory process-record veto moved
+                    # into memory_pair_excluded (once per peer at the screen,
+                    # not once per hit here).
                     # 0.16.4 §1: cross-memory evolution domain — the earliest
                     # kill. It happens BEFORE the provenance gate, so a notify
                     # shape never consumes provenance/classifier work, a peer
@@ -1734,6 +1746,8 @@ class EvidencePipeline:
         # Gate-v2 G4 observability: the prefilter/coverage/band split (the
         # unfiltered zero case keeps the exact-shape response contract).
         gate_rows: dict[str, int] = {}
+        if memory_pairs_excluded:
+            gate_rows["memory_pairs_excluded"] = memory_pairs_excluded
         if prefiltered_rows:
             gate_rows["prefiltered_rows"] = prefiltered_rows
         if rows_covered_by_claims:

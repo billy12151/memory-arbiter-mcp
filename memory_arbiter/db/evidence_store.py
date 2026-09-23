@@ -474,12 +474,18 @@ class EvidenceStore:
         exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
         conn: "sqlite3.Connection | None" = None,
         include_subject_rows: bool = True,
+        include_memory_ids: "list[int] | set[int] | None" = None,
+        subject_rows_only: bool = False,
     ) -> list[dict[str, Any]]:
         """KNN over row vectors (P2-2.4) — the conflict channel's candidate
         source. Identical rowid-IN pre-filter contract as EvidenceStore.knn
         (k applies to the filtered set); candidates are short sentences or
         header-folded table rows, so Qwen always sees clean short text.
-        Default k=5 mirrors the write-time unit window (evidence.py)."""
+        Default k=5 mirrors the write-time unit window (evidence.py).
+        Gate-v2 G5: ``include_memory_ids`` restricts the candidate set to the
+        screened neighbour list (k applies to the filtered set — spike
+        fact); ``subject_rows_only`` turns the query into the title coarse
+        screen (one KNN per write, only kind='subject' rows)."""
         if not self._db.state.sqlite_vec_available or not query_embedding:
             return []
         if parent_status_filter == "expired":
@@ -503,8 +509,15 @@ class EvidenceStore:
         # hit for a same-topic sentence and POISONED the detection window
         # (k=5) — the opposing body rows never surfaced. Detection excludes
         # subject rows; search/placement/self-recall keep them (default).
-        if not include_subject_rows:
+        if subject_rows_only:
+            eligible_clauses.append("r.kind = 'subject'")
+        elif not include_subject_rows:
             eligible_clauses.append("r.kind != 'subject'")
+        if include_memory_ids:
+            ids = sorted({int(value) for value in include_memory_ids})
+            placeholders = ",".join("?" for _ in ids)
+            eligible_clauses.append(f"r.memory_id IN ({placeholders})")
+            eligible_params.extend(ids)
         if workspace_sql:
             eligible_clauses.append(workspace_sql)
             eligible_params.extend(workspace_params)

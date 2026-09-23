@@ -416,9 +416,14 @@ class ScanPipeline:
         # Gate-v2 G4: the scan orchestration SKIPS the sentence prefilter by
         # owner decision (Agent judges prose oppositions) but runs the SAME
         # cosine band gate — one shared implementation (pipeline.gates).
-        from .pipeline.gates import candidate_cos_gate
+        from .pipeline.gates import candidate_cos_gate, memory_pair_excluded
         below_cos_floor = 0
         repeatability_skipped = 0
+        own_subject = str(record.get("subject") or "")
+        own_tags = record.get("tags") or []
+        memory_pairs_excluded = 0
+        screened_peers: set[int] = set()
+        excluded_peers: set[int] = set()
         for unit in cross_units:
             if unit.get("embedding") is None:
                 continue
@@ -441,6 +446,26 @@ class ScanPipeline:
             for hit in hits:
                 peer_id = int(hit["memory_id"])
                 if peer_id == memory_id:
+                    continue
+                # Gate-v2 G5 scan 同构: the SAME memory-level screen, called
+                # once per peer (first hit wins the verdict; later hits of
+                # the same peer reuse it).
+                if peer_id not in screened_peers:
+                    screened_peers.add(peer_id)
+                    peer_tags = hit.get("tags")
+                    if isinstance(peer_tags, str) and peer_tags:
+                        try:
+                            peer_tags = json.loads(peer_tags)
+                        except (TypeError, ValueError):
+                            peer_tags = []
+                    if memory_pair_excluded(
+                        own_subject, own_tags,
+                        str(hit.get("subject") or ""), peer_tags or [],
+                    ):
+                        excluded_peers.add(peer_id)
+                        memory_pairs_excluded += 1
+                        continue
+                if peer_id in excluded_peers:
                     continue
                 text_rank += 1
                 peer_bucket = str(
@@ -496,7 +521,9 @@ class ScanPipeline:
                 )
                 if enqueued:
                     outcome["queued"] += 1
-        # Gate-v2 G4 observability (conditional, additive receipt keys).
+        # Gate-v2 G4/G5 observability (conditional, additive receipt keys).
+        if memory_pairs_excluded:
+            outcome["memory_pairs_excluded"] = memory_pairs_excluded
         if below_cos_floor:
             outcome["below_cos_floor"] = below_cos_floor
         if repeatability_skipped:

@@ -163,6 +163,9 @@ COS_EXACT_BOOST = 0.98
 # batched IN query per collection loop.
 SEMANTIC_CANDIDATE_COS_FLOOR = 0.60
 SEMANTIC_CANDIDATE_COS_CEIL = COS_EXACT_BOOST
+# Gate-v2 G5 title coarse-screen width (方案: 30-50 条记忆, 初值 30-50,
+# 宽不罚——后续层会筛; 窄才漏). One subject-row KNN per write.
+SEMANTIC_NEIGHBOR_SCREEN = 50
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.

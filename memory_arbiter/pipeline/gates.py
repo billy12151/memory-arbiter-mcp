@@ -14,6 +14,7 @@ collection, adjudication and ranking on the same module.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Iterator
 
 from ..constants import (
@@ -107,3 +108,95 @@ def candidate_cos_gate(
         else:
             passed.append((hit, cos))
     return passed, below_floor, at_ceil
+
+
+# ── ②″ memory-level screen (G5) ─────────────────────────────────────────────
+
+# Release-record shape: a version token (v-prefixed dotted number, bare
+# dotted number, or a year) PLUS release wording — "0.16.12 发版闭环",
+# "v0.9.2 发版记录", "[已上线 v0.8.5] G6". A year counts as a version token
+# (owner 测试预期: 「2024 vs 2025 规划」毙).
+_RELEASE_VERSION_TOKEN = re.compile(
+    r"(?:v\d+(?:\.\d+)+|\d+\.\d+(?:\.\d+)+|(?:19|20)\d{2})",
+    re.IGNORECASE,
+)
+_RELEASE_WORDING = re.compile(
+    r"发版|发布|release|changelog|升级|上线|review|复盘|审查|方案|规划|闭环",
+    re.IGNORECASE,
+)
+_VERSION_TOKEN_SPLIT = re.compile(
+    r"v\d+(?:\.\d+)*|\d+(?:\.\d+)+|(?:19|20)\d{2}",
+    re.IGNORECASE,
+)
+
+
+def _subject_version_primary(subject: str) -> "tuple[int, ...] | None":
+    """The subject's release/version identity as a numeric tuple (max wins),
+    None when the subject carries no version token at all. Covers the
+    lineage marker form (方案 v2), release records (v0.9.2 发版记录) and
+    plain year planning (2024 规划)."""
+    from ..semantic_conflict import _lineage_primary_version
+
+    lineage = _lineage_primary_version(subject)
+    if lineage is not None:
+        return lineage
+    tokens = _RELEASE_VERSION_TOKEN.findall(subject or "")
+    if not tokens:
+        return None
+    return max(tuple(int(part) for part in token.lstrip("v").split(".")) for token in tokens)
+
+
+def _subject_is_process_record(hit_subject: str, own_subject: str) -> bool:
+    """Process-record guard: either subject carrying the process shape
+    (review rounds / design→release / re-verify) disqualifies the PAIR —
+    whole-text vetoes lose their context once a memory is split into
+    sentences (cf-noise-18298/18278/18218 async FPs). Lives here (gates) so
+    the memory-level screen calls it once per PEER, not once per hit."""
+    from ..semantic_conflict import (
+        _PROCESS_DESIGN_RE,
+        _PROCESS_RELEASE_RE,
+        _PROCESS_REVERIFY_RE,
+        _PROCESS_REVIEW_RE,
+    )
+    for subject in (hit_subject, own_subject):
+        if not subject:
+            continue
+        if _PROCESS_REVIEW_RE.search(subject) or _PROCESS_REVERIFY_RE.search(subject):
+            return True
+        if _PROCESS_DESIGN_RE.search(subject) and _PROCESS_RELEASE_RE.search(subject):
+            return True
+    return False
+
+
+def memory_pair_excluded(
+    own_subject: str, own_tags: "list[str] | None",
+    peer_subject: str, peer_tags: "list[str] | None",
+) -> bool:
+    """②″ 记忆级一揽子筛选（方案 G5，标题/tags 可判的全部前置）。
+
+    Three vetoes, one call per peer:
+    1+3. 版本对立/发版方案形态：BOTH sides carry a version identity, the
+         primary versions differ, and the version-stripped stems match —
+         same topic at a different generation is timeline evolution, never a
+         competing claim. Different stems are different topics (cf-res-9
+         stays); same primary version is same-generation text (cf-res-30
+         stays). Single-sided version shapes stay in (cf-res-10 stays).
+    2. 过程记录：either side's subject carries the process shape
+         (review rounds / design→release / re-verify) — moved from the
+         sentence loop where it re-judged the same peer per hit.
+    配方对立 (#50) hits none of these: the release-shaped subject has no
+    version token on both sides with matching stems, and the opposing
+    sentences are compared at the sentence layer.
+    """
+    own_s = str(own_subject or "")
+    peer_s = str(peer_subject or "")
+    own_primary = _subject_version_primary(own_s)
+    peer_primary = _subject_version_primary(peer_s)
+    if own_primary is not None and peer_primary is not None and own_primary != peer_primary:
+        own_stem = "".join(_VERSION_TOKEN_SPLIT.sub("", own_s).casefold().split())
+        peer_stem = "".join(_VERSION_TOKEN_SPLIT.sub("", peer_s).casefold().split())
+        if own_stem == peer_stem:
+            return True
+    if _subject_is_process_record(peer_s, own_s):
+        return True
+    return False
