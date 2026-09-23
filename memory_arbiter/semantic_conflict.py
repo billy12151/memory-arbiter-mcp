@@ -1688,6 +1688,16 @@ class LocalGGUFSemanticBackend:
                 f"values must be copied from the evidence text): "
                 f"A candidate={left_value} B candidate={right_value}\n"
             )
+        elif left_value:
+            # pair-v9 channel-C/bridge case a: A's value is KNOWN (structured
+            # claim) — name it so the 0.6B only has to extract B's compact
+            # value (grounding then applies to both sides as usual).
+            hint += (
+                f"A侧已知属性值={left_value}（仅供参照，B 候选值必须取自 B 证据原文）：\n"
+                if cjk else
+                f"A-side known value={left_value} (reference only; the B value "
+                f"must be copied from B evidence):\n"
+            )
         if cjk:
             return (
                 f"A metadata: {cls._memory_text(left)}\n"

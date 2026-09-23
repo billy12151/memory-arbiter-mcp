@@ -509,6 +509,9 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
             {
                 "pair_id": pair["pair_id"],
                 "label": pair["label"],
+                # Gate-v2 G7b: B/C channel tag from the claims corpus
+                # (absent for the regular conflict corpus).
+                "channel": pair.get("channel"),
                 "skipped_member_replay": left_id is None or right_id is None,
                 "sync": None,
                 "async": None,

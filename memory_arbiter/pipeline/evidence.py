@@ -576,6 +576,7 @@ class EvidencePipeline:
         versional = 0
         unresolved = 0
         checked = 0
+        _unres_reasons: dict[str, int] = {}
         backend = self._ensure_semantic_backend()
         embedder, _warnings = self._ensure_active_embedder()
         peer_content_cache: dict[int, dict[str, Any]] = {}
@@ -631,6 +632,9 @@ class EvidencePipeline:
                     "dispatch_hint": (
                         f"{dispatch_hint_text('extract_value')} 需抽取的属性名：{claim['attr']}"
                     ),
+                    # case a: own value is KNOWN (structured claim) — hint it
+                    # so the 0.6B only extracts the peer side's compact value.
+                    "rule_value": str(claim["value"]),
                 }
                 right_env: dict[str, Any] = {
                     "quote": str(hit.get("text") or "")[:1000],
@@ -646,7 +650,8 @@ class EvidencePipeline:
                     continue
                 try:
                     forward = backend.classify_pair(
-                        left_env, right_env, deadline_monotonic=None, retry_allowed=False,
+                        left_env, right_env, deadline_monotonic=None,
+                        retry_allowed=not self._semantic_worker.has_pending_jobs(),
                     )
                 except TypeError:
                     forward = backend.classify_pair(left_env, right_env)
@@ -656,6 +661,7 @@ class EvidencePipeline:
                 )
                 if gate.state != "notice_ready":
                     unresolved += 1
+                    _unres_reasons[gate.reason] = _unres_reasons.get(gate.reason, 0) + 1
                     continue
                 extracted = str(gate.value_b or "")
                 if not extracted or normalize_value(extracted) == normalize_value(
@@ -728,6 +734,7 @@ class EvidencePipeline:
             result["channel_c_versional_vetoed"] = versional
         if unresolved:
             result["channel_c_unresolved"] = unresolved
+            result["channel_c_unresolved_reasons"] = _unres_reasons
         return result
 
     def drain_conflict_backlog(self, limit: int = 2) -> int:
