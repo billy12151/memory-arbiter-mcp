@@ -449,6 +449,30 @@ def _lineage_primary_version(text: str) -> "tuple[int, ...] | None":
     if not versions:
         return None
     return max(versions)
+# 0.17.0 D1 (owner 2026-09-23): version-like claims attrs are timeline
+# evolution, never opposing claims — the claims-channel counterpart of the
+# lineage veto above, applied to the attr axis. Pattern match (regex+vocab
+# blend, same style as _LINEAGE_MARKER_RE), NOT an enumerated allow-list:
+# the word-list route was retired once already (0.16.4 evolution domain
+# replaced it); pure vocab cannot cover variants like 客户端版本/release notes.
+_VERSIONAL_ATTR_RE = re.compile(
+    r"版本|version|commit|revision|release|tag|build|发版",
+    re.IGNORECASE,
+)
+
+
+def attr_is_versional(attr_norm: str) -> bool:
+    """True when a claims attr carries version semantics (release/commit/tag).
+
+    A value delta on such an attr is expected evolution — two memories
+    recording different versions of the same artifact — so the claims channel
+    skips it and counts the skip (versional_vetoed) to keep the exemption
+    observable instead of a black hole. Deliberately narrow: numeric attrs in
+    general are NOT covered (that lesson belongs to the internal channel).
+    """
+    return bool(_VERSIONAL_ATTR_RE.search(attr_norm or ""))
+
+
 _VALUE_RE = re.compile(
     r"(?<![\w.])v?\d+(?:\.\d+){0,2}\s*"
     r"(?:ms|s|秒|分钟|小时|个工作日|工作日|个自然日|自然日|日|天|%|mb|gb|kb|条|次|核|g"

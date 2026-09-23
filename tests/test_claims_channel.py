@@ -156,6 +156,54 @@ def test_claims_channel_soft_gate_single_side_passes(tmp_path: Path) -> None:
     assert result.get("claims_channel", {}).get("notices", 0) >= 1  # 单侧未填=不拦
 
 
+def test_claims_channel_versional_attr_exempt(tmp_path: Path) -> None:
+    """D1（owner 2026-09-23）：版本类 attr 值差异=预期演进，豁免不报且计数可见；
+    同记忆非版本 attr（超时）不受豁免影响照报——证明豁免范围没扩大。"""
+    tools = tv.make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    _write_with_claims(
+        tools, "内核版本为 0.15.8，超时为 500 毫秒。", "a",
+        [{"attr": "版本", "value": "0.15.8"}, {"attr": "超时", "value": "500 毫秒"}],
+    )
+    b = _write_with_claims(
+        tools, "内核版本为 0.16.0，超时为 3 秒。", "b",
+        [{"attr": "版本", "value": "0.16.0"}, {"attr": "超时", "value": "3 秒"}],
+    )
+    result = tools._process_semantic_conflict_job(
+        b["id"], {"memory_id": b["id"], "version": 1, "content_hash": "unused"},
+    )
+    channel = result.get("claims_channel", {})
+    assert channel.get("versional_vetoed", 0) >= 1  # 版本 claim 被豁免且可见
+    assert channel.get("notices", 0) == 1  # 超时值不同照报（豁免不外溢）
+    fired = [
+        n for n in tools.db.list_semantic_notices()
+        if n["notice_type"] == "claim_conflict"
+    ]
+    assert len(fired) == 1 and "超时" in fired[0]["message"]
+
+
+def test_claims_channel_versional_hit_level_fallback(tmp_path: Path, monkeypatch) -> None:
+    """D1 hit 级兜底：own attr 非版本、peer attr 版本类（τ 近似过门）同样豁免。"""
+    import memory_arbiter.constants as constants
+    monkeypatch.setattr(constants, "CLAIM_ATTR_TAU", 0.0)
+    tools = tv.make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    _write_with_claims(tools, "构建说明见发布说明，版本 1.0 已出。", "a",
+                       [{"attr": "发布说明", "value": "版本 1.0"}])
+    b = _write_with_claims(tools, "构建说明 release notes 更新到 2.0。", "b",
+                           [{"attr": "release notes", "value": "2.0"}])
+    result = tools._process_semantic_conflict_job(
+        b["id"], {"memory_id": b["id"], "version": 1, "content_hash": "unused"},
+    )
+    channel = result.get("claims_channel", {})
+    assert channel.get("notices", 0) == 0
+    assert channel.get("versional_vetoed", 0) >= 1
+    assert not [
+        n for n in tools.db.list_semantic_notices()
+        if n["notice_type"] == "claim_conflict"
+    ]
+
+
 def test_agent_supplied_backfill_pending_and_apply(tmp_path: Path) -> None:
     """0.17.0（owner 2026-09-23）：claims_backfill 的 agent 供给模式——
     pending 列缺口清单、apply 落库（source=backfill/replace 语义/grounding）。"""

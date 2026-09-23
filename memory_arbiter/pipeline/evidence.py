@@ -139,7 +139,7 @@ class EvidencePipeline:
         Bounded by CLAIMS_MAX_NOTICES_PER_WRITE (review A3); overflow is
         counted, never silent."""
         from ..constants import CLAIMS_MAX_NOTICES_PER_WRITE, CLAIM_ATTR_TAU
-        from ..semantic_conflict import vector_cosine
+        from ..semantic_conflict import attr_is_versional, vector_cosine
 
         record = snapshot if snapshot.get("content") is not None else (
             self.db.get_memory(int(memory_id)) or {}
@@ -187,6 +187,7 @@ class EvidencePipeline:
         notices = 0
         capped_count = 0
         checked = 0
+        versional_vetoed = 0  # D1: evolution exemption must stay observable
         fired_attrs: set[str] = set()  # A3: one notice per attr per write
         skip = skip_peers or set()
         own_coexistence: dict[str, list[str]] = {
@@ -202,6 +203,11 @@ class EvidencePipeline:
             for claim in own_claims:
                 own_vector = own_rows.get(int(claim["id"]))
                 if not own_vector:
+                    continue
+                # D1 (owner 2026-09-23): version-like attrs are expected
+                # timeline evolution — skip before any KNN work and count.
+                if attr_is_versional(str(claim["attr_norm"])):
+                    versional_vetoed += 1
                     continue
                 checked += 1
                 hits = conn.execute(
@@ -226,6 +232,13 @@ class EvidencePipeline:
                     attr_cos = vector_cosine(own_vector, hit_vector)
                     same_exact = str(hit["attr_norm"]) == str(claim["attr_norm"])
                     if not same_exact and (attr_cos is None or attr_cos < CLAIM_ATTR_TAU):
+                        continue
+                    # D1 hit-level fallback: the own attr is not versional
+                    # (own-level skip above already took those), but a
+                    # τ-similar peer attr can still be version semantics
+                    # (发布说明 ≈ release notes) — same exemption applies.
+                    if attr_is_versional(str(hit["attr_norm"])):
+                        versional_vetoed += 1
                         continue
                     if str(hit["value_norm"]) == str(claim["value_norm"]):
                         continue
@@ -341,6 +354,8 @@ class EvidencePipeline:
         result: dict[str, Any] = {"claims_checked": checked, "notices": notices}
         if capped_count:
             result["claims_notices_capped"] = capped_count
+        if versional_vetoed:
+            result["versional_vetoed"] = versional_vetoed
         return result
 
     def drain_conflict_backlog(self, limit: int = 2) -> int:
