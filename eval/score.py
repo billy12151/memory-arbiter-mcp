@@ -8,6 +8,9 @@
 
 指标口径：
   recall  Recall@5/@10 微平均（分母=各 qid 的 relevant target 数）；
+          capped 变体（gate-v2 拍板 5）分母=min(相关数, k)——「该进前 k
+          的都进了」，R>k 的 query 不再被 k+1 名罚分；classic 与 capped
+          双口径同时输出；
           MRR=首个 relevant target 排名倒数均值；borderline 单列不进分母；
           无关误召回=C/D 组 query 返回条目中非无关标注（relevant/borderline）
           的计数——临时库无 C/D 真 target，命中 A/B target 即误召回。
@@ -55,6 +58,13 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
     labeled_keys |= {k for qid in borderline_by_qid for k in borderline_by_qid[qid]}
 
     hit5 = hit10 = total_rel = 0
+    # Capped recall (gate-v2 拍板 5): "everything that belongs in the top-k
+    # got in" — the denominator per query is min(|relevant|, k), so a query
+    # with 6 relevant targets and a full top-5 scores 1.0 instead of being
+    # punished for the k+1th target no ranking could have returned. Micro-
+    # averaged: Σhits / Σmin(R_i, k); classic and capped are both reported
+    # so old numbers stay traceable.
+    capped5_total = capped10_total = 0
     rr_sum = 0.0
     rr_count = 0
     false_pull_count = 0
@@ -65,8 +75,12 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
         targets = relevant_by_qid.get(qid, set())
         ranked = [hit["fixture_key"] for hit in query.get("hits") or []]
         total_rel += len(targets)
-        hit5 += len(targets & set(ranked[:5]))
-        hit10 += len(targets & set(ranked[:10]))
+        hits_at_5 = len(targets & set(ranked[:5]))
+        hits_at_10 = len(targets & set(ranked[:10]))
+        hit5 += hits_at_5
+        hit10 += hits_at_10
+        capped5_total += min(len(targets), 5)
+        capped10_total += min(len(targets), 10)
         first_rank = next(
             (i + 1 for i, key in enumerate(ranked) if key in targets),
             None,
@@ -78,8 +92,10 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
             "qid": qid,
             "kind": query["kind"],
             "relevant_targets": len(targets),
-            "recall@5": _pct(len(targets & set(ranked[:5])), len(targets)),
-            "recall@10": _pct(len(targets & set(ranked[:10])), len(targets)),
+            "recall@5": _pct(hits_at_5, len(targets)),
+            "recall@10": _pct(hits_at_10, len(targets)),
+            "recall@5_capped": _pct(hits_at_5, min(len(targets), 5)),
+            "recall@10_capped": _pct(hits_at_10, min(len(targets), 10)),
             "first_relevant_rank": first_rank,
         }
         if query["kind"] in {"legal", "far"}:
@@ -108,6 +124,16 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
             "hits": hit10,
             "total": total_rel,
             "rate": _pct(hit10, total_rel),
+        },
+        "recall_at_5_capped": {
+            "hits": hit5,
+            "total": capped5_total,
+            "rate": _pct(hit5, capped5_total),
+        },
+        "recall_at_10_capped": {
+            "hits": hit10,
+            "total": capped10_total,
+            "rate": _pct(hit10, capped10_total),
         },
         "mrr": {
             "value": round(rr_sum / rr_count, 4) if rr_count else None,
