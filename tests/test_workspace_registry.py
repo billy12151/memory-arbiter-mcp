@@ -2209,3 +2209,74 @@ def test_tools_forwarder_exists(tmp_path):
     r = tools.memory_confirm_workspaces(authorized=True)
     assert r["ok"] is True
     assert _sidecar(tools).exists()
+
+
+# ── 0.17.1 confirm 清场（prompt suppression 存量治理） ─────────────────────────
+
+def _enqueue_pending_workspace_row(
+    tools: MemoryTools, mid: int, own: str, suspected: str, tag: str,
+) -> str:
+    """Pending workspace row with the FULL detail envelope — 清场解析
+    (current_workspace, suspected_workspace)；detail={} 的行自愈/清场不认。"""
+    import hashlib
+
+    candidate_key_hash = hashlib.sha256(f"confirm-sweep:{tag}".encode("utf-8")).hexdigest()
+    outcome = tools.db.scan_queue.enqueue(
+        kind="workspace",
+        workspace_canonical=own,
+        candidate_key_hash=candidate_key_hash,
+        member_versions=[{"memory_id": mid, "version": 1}],
+        evidence=[],
+        reason="t",
+        severity="normal",
+        source="test",
+        detail={"current_workspace": own, "suspected_workspace": suspected},
+    )
+    assert outcome.get("outcome") == "queued", outcome
+    return candidate_key_hash
+
+
+def _workspace_row_status(tools: MemoryTools, candidate_key_hash: str) -> str:
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT status FROM scan_queue WHERE candidate_key_hash=?",
+            (candidate_key_hash,),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_confirm_expires_pending_confirmed_pairs(tmp_path):
+    """confirm 快照落地后：双确认对的 pending workspace 行即时 expired；
+    未确认对（projB→projC，projC 不在快照里）不动。"""
+    tools = review_doctor_make_tools(tmp_path)
+    mid_a = _write(tools, "a", "projA")
+    mid_b = _write(tools, "b", "projB")
+    stale_hash = _enqueue_pending_workspace_row(tools, mid_a, "projA", "projB", "stale")
+    live_hash = _enqueue_pending_workspace_row(tools, mid_b, "projB", "projC", "live")
+
+    r = tools.memory_govern("confirm_workspaces", {"authorized": True})
+    assert r["ok"] is True
+    assert r["data"]["suppressed_pending"] == 1
+    assert _workspace_row_status(tools, stale_hash) == "expired"
+    assert _workspace_row_status(tools, live_hash) == "pending"
+
+
+def test_confirm_expiry_failure_warns_not_fails(tmp_path, monkeypatch):
+    """清场抛错绝不回滚快照：confirmed 仍 true、suppressed_pending=-1、
+    降级 warning（下次 kick 自愈兜底）。"""
+    tools = review_doctor_make_tools(tmp_path)
+    mid = _write(tools, "a", "projA")
+    row_hash = _enqueue_pending_workspace_row(tools, mid, "projA", "projB", "boom")
+
+    def _raising_write_transaction(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tools.db, "write_transaction", _raising_write_transaction)
+    r = tools.memory_govern("confirm_workspaces", {"authorized": True})
+    assert r["ok"] is True
+    assert r["data"]["confirmed"] is True
+    assert r["data"]["suppressed_pending"] == -1
+    assert any("清场失败" in w for w in r["warnings"]), r["warnings"]
+    assert _sidecar(tools).exists(), "快照不得被清场失败回滚"
+    assert _workspace_row_status(tools, row_hash) == "pending"

@@ -697,3 +697,38 @@ def test_incremental_confirmed_pair_skipped(tmp_path: Path) -> None:
             "SELECT COUNT(*) FROM scan_queue WHERE kind='workspace' AND status='pending'"
         ).fetchone()[0]
     assert rows == 1, "单端确认不得豁免"
+
+
+def test_kick_self_heals_confirmed_pair_rows(tmp_path: Path) -> None:
+    """C3.2 kick 前置自愈：双确认对的 pending workspace 行（confirm 与清场
+    之间崩溃 / 升级前存量）不再卡 §九 workspace_backlog_pending——自愈先
+    把它 expired，round 照常跑。构造必须带完整 detail 桶对。"""
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "自愈主题", "自愈正文 postgres")
+    outcome = tools.db.scan_queue.enqueue(
+        kind="workspace",
+        workspace_canonical="ws",
+        candidate_key_hash=hashlib.sha256(b"self-heal:confirmed-pair").hexdigest(),
+        member_versions=[{"memory_id": mid, "version": 1}],
+        evidence=[],
+        reason="t",
+        severity="normal",
+        source="test",
+        detail={"current_workspace": "ws", "suspected_workspace": "dbpgsql"},
+    )
+    assert outcome.get("outcome") == "queued", outcome
+    (tmp_path / "workspace_review.json").write_text(json.dumps({
+        "confirmed_workspaces": ["ws", "dbpgsql"],
+        "confirmed_at": "2026-09-23T00:00:00Z", "version": 1,
+    }), encoding="utf-8")
+
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    assert kick["ok"], kick
+    assert kick["data"]["ok"] is True, "自愈后 kick 不得再被 workspace_backlog_pending 卡住"
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT status, decided_reason FROM scan_queue WHERE kind='workspace'"
+        ).fetchone()
+    assert row is not None
+    assert str(row["status"]) == "expired"
+    assert str(row["decided_reason"]) == "confirmed pair suppressed (kick self-heal)"

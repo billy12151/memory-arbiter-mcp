@@ -1473,12 +1473,54 @@ class OperationsPipeline:
                 {"confirmed": False, "error": f"workspace review snapshot write failed: {exc}"},
                 ok=False,
             )
+        # 0.17.1 prompt suppression 存量清场：快照已持久（os.replace 成功），
+        # 把两端都确认的 pending workspace 提议行即时了结——它们再也不可能
+        # 被合法判成 move。清场失败绝不回滚快照：降级 warning，下次 kick
+        # 前置自愈兜底（suppressed=-1 在响应里可见）。
+        suppressed = 0
+        try:
+            confirmed_set = set(confirmed)
+            with self.db.write_transaction() as conn:
+                pend = conn.execute(
+                    """SELECT id, detail, workspace_canonical FROM scan_queue
+                       WHERE kind='workspace' AND status='pending'"""
+                ).fetchall()
+                stale: list[int] = []
+                for row in pend:
+                    try:
+                        detail = json.loads(str(row["detail"] or "{}"))
+                    except json.JSONDecodeError:
+                        detail = {}
+                    if not isinstance(detail, dict):
+                        detail = {}
+                    own = str(detail.get("current_workspace") or row["workspace_canonical"] or "")
+                    top = str(detail.get("suspected_workspace") or "")
+                    if own and top and own in confirmed_set and top in confirmed_set:
+                        stale.append(int(row["id"]))
+                if stale:
+                    now = utc_now_iso()
+                    conn.executemany(
+                        """UPDATE scan_queue SET status='expired',
+                             decided_reason='confirmed pair suppressed', decided_at=?, updated_at=?
+                           WHERE id=? AND status='pending'""",  # CAS（B10 纪律）
+                        [(now, now, rid) for rid in stale],
+                    )
+            suppressed = len(stale)
+        except Exception:
+            suppressed = -1
+        extra_warnings: list[str] = []
+        if suppressed < 0:
+            extra_warnings.append(
+                "workspace 存量清场失败（确认快照已生效）：双确认对的 pending 提议行未被清退，"
+                "下次 scan kick 前置自愈会重试"
+            )
         return self.db.state.response({
             "confirmed": True,
             "confirmed_workspaces": confirmed,
             "count": len(confirmed),
             "sidecar": str(sidecar),
-        })
+            "suppressed_pending": suppressed,
+        }, extra_warnings=extra_warnings or None)
 
     def memory_activate(
         self, memory_id: int, authorized: bool = False, **_: Any,

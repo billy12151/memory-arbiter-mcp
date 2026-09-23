@@ -127,6 +127,7 @@ class ScanPipeline:
         vec_state = self.db.get_vec_index_state()
         if vec_state.get("state") in {"mismatch", "failed"}:
             return {"ok": False, "error": "embedding_space_rebuild_required"}
+        self._expire_confirmed_pair_pending()
         pending_ws = self._pending_workspace_items()
         if pending_ws:
             # 0.16.10 §九 (owner 2026-09-19): workspace 归一判定清完才扫冲突——
@@ -312,6 +313,50 @@ class ScanPipeline:
             return int(row["c"]) if row is not None else 0
         except sqlite3.Error:
             return 0
+
+    def _expire_confirmed_pair_pending(self) -> None:
+        """Self-heal (0.17.x prompt suppression): retire pending kind='workspace'
+        rows whose two buckets are both in the confirmed snapshot — they can
+        never be legitimately judged 'move' anymore, and §九 would otherwise
+        wedge the kick on rows nobody needs to see. Covers the windows the
+        confirm-time sweep (memory_confirm_workspaces) cannot: crash between
+        snapshot write and sweep, and pre-upgrade stock rows. Idempotent;
+        runs BEFORE the §九 backlog gate. Any failure degrades to the original
+        kick behaviour (the gate still sees the rows)."""
+        try:
+            from .doctor import load_confirmed_workspaces
+
+            confirmed = load_confirmed_workspaces(self.db.settings)
+            if not confirmed:
+                return
+            with self.db.write_transaction() as conn:
+                pend = conn.execute(
+                    """SELECT id, detail, workspace_canonical FROM scan_queue
+                       WHERE kind='workspace' AND status='pending'"""
+                ).fetchall()
+                stale: list[int] = []
+                for row in pend:
+                    try:
+                        detail = json.loads(str(row["detail"] or "{}"))
+                    except json.JSONDecodeError:
+                        detail = {}
+                    if not isinstance(detail, dict):
+                        detail = {}
+                    own = str(detail.get("current_workspace") or row["workspace_canonical"] or "")
+                    top = str(detail.get("suspected_workspace") or "")
+                    if own and top and own in confirmed and top in confirmed:
+                        stale.append(int(row["id"]))
+                if stale:
+                    now = self._now()
+                    conn.executemany(
+                        """UPDATE scan_queue SET status='expired',
+                             decided_reason='confirmed pair suppressed (kick self-heal)',
+                             decided_at=?, updated_at=?
+                           WHERE id=? AND status='pending'""",  # CAS（B10 纪律）
+                        [(now, now, rid) for rid in stale],
+                    )
+        except Exception:
+            pass  # 自愈失败不影响 kick 原有行为
 
     # ── internals ───────────────────────────────────────────────────────────
 

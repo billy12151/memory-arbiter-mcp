@@ -27,6 +27,10 @@ Versions follow semantic versioning.
 - **feat(scan): 扫描侧行级+慢车道+谱系 veto（P2-6）。** 跨记忆候选换行级 KNN（无行回退单元）；last_scanned_at 墙钟慢车道（20 条/kick 轮转全覆盖、slow_lane=false 可关）；谱系版本演进 veto（双侧自报 v 前缀/版本字样/第N版且主版本不同→演进不报；E2 产品版本差异保持候选）。
 - **feat(similarity): 写时相似检查 summary 向量化（P2-7）。** 候选生成换 memory_summary_vec（空 subject 不再取消资格）；细排门 content 3-gram 余弦为主门、subject 0.8 仅在内容重叠<0.60 时生效（改标题近重复过门）；subject_tags_vec 发布保留。
 - **fix(review): 两轮 review 13 项修复。** 谱系正则误杀（配置句式不当版本号）、慢车道 SQL 参数序、claims 编辑/激活孤儿、memory_claims 摘出 LEGACY_DERIVED_TABLES（防 upgrade/doctor 误判）、backlog 队头活锁、claims 帽计数+同 attr 单发+跨通道去重、性能三处（预取/并入/预 embed）、summary_vec 生命周期、replay 教学键、淘汰计数、doctor 覆盖率。已知取舍：epoch 不清 internal_conflicts（判过不重判契约优先）。
+- **feat(suppress): workspace 搬桶提示豁免（0.17.1 版本槽，2026-09-23 owner 拍板「一些闲聊的留在 default 的就行，用户确认过的桶就不要再提示了」；本追加包随 0.17.0 未发版收敛一并入库，发版切分由 release commit 处理；不与上面 embedder 批量线混 commit）。** 实施方案两轮 review（R1 对码 + R2 对抗）全部修正回写；三道机制都在**生成端**（提议根本不产生，不是产生后再压），对称口径：确认桶对之间双向不再提（折回与正向散件提醒一起停），default 作源的提议不受影响（真错桶捕捉能力保留）。
+  - **确认桶静默门（C1）。** `doctor.load_confirmed_workspaces` 共享解析 workspace_review sidecar（missing/corrupt→空集 fail-open；reserved default 永不入集→default 端点永不豁免）；scan_pipeline 两个搬桶提议生成器（写轮增量 `_enqueue_workspace_suspects` + 周扫 `memory_scan_workspace_anomalies`）入队前查门 A：own∈confirmed ∧ top_bucket∈confirmed 即跳过——weekly 侧在 suspected.append 之前（被静默条目不吃 cap=10 名额、不进 suspected/returned/queued 计数，suspected 新语义=过门且未被抑制）。
+  - **workspace dismiss 持久化（C2）。** 新表 `workspace_dismissals`（memory_id+version+suspected_workspace 主键，reason/decided_at 全量审计档）修「每轮 dismiss 只压一轮」结构洞：原唯一去重锚点 scan_queue 行会被启动 purge / 检测器换代整表 DELETE 释放，锚点一没下周三重新入队。`_expire_workspace_rows` 重写：仅 agent 显式 dismiss 同事务落持久行（`durable_record` 开关——protected/multi_family hint 分支只翻状态不落表，防 hint 意外永久化）；生成端门 B：(version,suspected) 命中持久表即跳过——版本钉死（编辑 bump version 后同桶可再提，与 conflict stale_snapshot 语义一致），启动 purge/换代清台后同身份不复发。
+  - **confirm_workspaces 存量清场 + kick 前置自愈（C3）。** confirm 写快照成功后同事务清退双确认对的 pending workspace 行（UPDATE 带 `AND status='pending'` CAS；清场失败绝不回滚快照，降级 warning 且响应带 `suppressed_pending=-1`）；kick 在 §九 workspace 门禁**之前**幂等自愈同清场（覆盖 confirm 后崩溃/升级前存量行卡死 kick 的窗口，自愈失败不影响 kick 原有行为）。
 
 ## [0.16.12] — 2026-09-22
 
