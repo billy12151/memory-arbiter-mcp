@@ -1756,8 +1756,11 @@ class MemoryTools:
                 )
                 if isinstance(channel_c, dict):
                     result["claims_channel_c"] = channel_c
-            except Exception:
-                pass
+            except Exception as exc:  # counted, never silent (gate-v2 review)
+                self._record_check_degradation(
+                    "claims_channel_error", str(exc)[:200],
+                )
+                result["claims_channel_error"] = str(exc)[:200]
         result.pop("surfaced_peers", None)  # internal cross-channel key, never in receipts
         result.pop("_allowed_memory_ids", None)
         return result

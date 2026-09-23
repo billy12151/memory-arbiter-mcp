@@ -566,6 +566,26 @@ class ScanPipeline:
                 peer_id_c = int(hit_c["memory_id"])
                 if peer_id_c == memory_id or peer_id_c in surfaced_c_peers:
                     continue
+                # G5 screen applies to channel C too: a peer the slow lane
+                # excluded (process record / version evolution) must not be
+                # re-surfaced through C (adversarial review P1).
+                if peer_id_c in excluded_peers:
+                    continue
+                if peer_id_c not in screened_peers:
+                    screened_peers.add(peer_id_c)
+                    peer_tags_c = hit_c.get("tags")
+                    if isinstance(peer_tags_c, str) and peer_tags_c:
+                        try:
+                            peer_tags_c = json.loads(peer_tags_c)
+                        except (TypeError, ValueError):
+                            peer_tags_c = []
+                    if memory_pair_excluded(
+                        own_subject, own_tags,
+                        str(hit_c.get("subject") or ""), peer_tags_c or [],
+                    ):
+                        excluded_peers.add(peer_id_c)
+                        memory_pairs_excluded += 1
+                        continue
                 surfaced_c_peers.add(peer_id_c)
                 decision_c = decide_evidence(
                     f"{claim.get('attr')}为{claim.get('value')}",

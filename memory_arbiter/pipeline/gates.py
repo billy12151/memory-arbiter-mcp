@@ -55,12 +55,14 @@ def row_prefilter(
     would double-report the same statement through channel A. Rows with a
     value but NO covering claim stay (未被覆盖不跳)."""
     for row in rows:
-        if str(getattr(row, "kind", "") or "") == "table_row":
-            yield row
-            continue
         start = int(getattr(row, "start_offset", 0))
         end = int(getattr(row, "end_offset", 0))
+        # coverage check FIRST (adversarial review P2): a claim-covered
+        # table row must not bypass the skip via the kind shortcut.
         if any(span_start < end and start < span_end for span_start, span_end in claim_spans):
+            continue
+        if str(getattr(row, "kind", "") or "") == "table_row":
+            yield row
             continue
         if _SENT_PREFILTER.search(str(getattr(row, "text", "") or "")):
             yield row
@@ -120,10 +122,6 @@ _RELEASE_VERSION_TOKEN = re.compile(
     r"(?:v\d+(?:\.\d+)+|\d+\.\d+(?:\.\d+)+|(?:19|20)\d{2})",
     re.IGNORECASE,
 )
-_RELEASE_WORDING = re.compile(
-    r"发版|发布|release|changelog|升级|上线|review|复盘|审查|方案|规划|闭环",
-    re.IGNORECASE,
-)
 _VERSION_TOKEN_SPLIT = re.compile(
     r"v\d+(?:\.\d+)*|\d+(?:\.\d+)+|(?:19|20)\d{2}",
     re.IGNORECASE,
@@ -143,7 +141,12 @@ def _subject_version_primary(subject: str) -> "tuple[int, ...] | None":
     tokens = _RELEASE_VERSION_TOKEN.findall(subject or "")
     if not tokens:
         return None
-    return max(tuple(int(part) for part in token.lstrip("v").split(".")) for token in tokens)
+    # IGNORECASE makes "V2.5" a match; lstrip must take both cases or
+    # int("V2...") raises and poisons the whole job (实施后对抗 review P0).
+    return max(
+        tuple(int(part) for part in token.casefold().lstrip("v").split("."))
+        for token in tokens
+    )
 
 
 def _subject_is_process_record(hit_subject: str, own_subject: str) -> bool:

@@ -244,8 +244,6 @@ class EvidencePipeline:
                     continue  # A3: same attr already reported this write
                 bridge_candidate_rows: list[dict[str, Any]] = []
                 attr_matched = False
-                bridge_ran = False
-                bridge_budget = [CLAIMS_BRIDGE_MAX_PER_WRITE]
                 for hit in hits:
                     # Gate-v2 G6: every claim-KNN neighbour is a bridge
                     # candidate peer (their SENTENCE rows are the attr's
@@ -377,7 +375,6 @@ class EvidencePipeline:
                     and bridge_budget[0] > 0
                 ):
                     bridge_budget[0] -= 1
-                    bridge_ran = True
                     bridge_outcome = self._run_claim_bridge(
                         conn, int(memory_id), version, record, claim,
                         own_vector, bridge_candidate_rows, skip,
@@ -1500,6 +1497,15 @@ class EvidencePipeline:
             (embedding for seg_view, embedding in paired if seg_view.kind == "subject"),
             None,
         ) if paired else None
+        if subject_vec is None and embedder is not None:
+            # First-write streaming path: paired vectors are all None until
+            # publish — embed the subject inline (one embed, milliseconds) so
+            # the screen runs on the MAIN write path too, not just
+            # re-detections (实施后对抗 review P0：粗筛+通道 C 首写从不执行).
+            subject_embed = embedder.embed_text(
+                prefix="", body=str(record.get("subject") or ""),
+            )
+            subject_vec = subject_embed.embedding or None
         allowed_memory_ids: list[int] | None = None
         memory_pairs_excluded = 0
         if subject_vec is not None:
