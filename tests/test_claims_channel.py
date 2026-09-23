@@ -154,3 +154,42 @@ def test_claims_channel_soft_gate_single_side_passes(tmp_path: Path) -> None:
         b["id"], {"memory_id": b["id"], "version": 1, "content_hash": "unused"},
     )
     assert result.get("claims_channel", {}).get("notices", 0) >= 1  # 单侧未填=不拦
+
+
+def test_agent_supplied_backfill_pending_and_apply(tmp_path: Path) -> None:
+    """0.17.0（owner 2026-09-23）：claims_backfill 的 agent 供给模式——
+    pending 列缺口清单、apply 落库（source=backfill/replace 语义/grounding）。"""
+    tools = tv.make_tools(tmp_path)
+    a = tools.memory_write(content="网关读超时为 500 毫秒，熔断开启。", subject="a", tags=[])["data"]
+    b = tools.memory_write(content="限流上限为 200 QPS。", subject="b", tags=[])["data"]
+
+    pending = tools._claims_backfill_task({"mode": "pending", "limit": 10})
+    assert pending["ok"] and pending["count"] == 2
+    ids = {item["memory_id"] for item in pending["items"]}
+    assert ids == {a["id"], b["id"]}
+    assert all(item["content"] for item in pending["items"])
+
+    applied = tools._claims_backfill_task({
+        "mode": "apply",
+        "results": [
+            {"memory_id": a["id"], "claims": [
+                {"attr": "超时", "value": "500 毫秒"},
+                {"attr": "熔断", "value": "没有这句话"},  # grounding 拒
+            ]},
+            {"memory_id": b["id"], "claims": [{"attr": "限流上限", "value": "200 QPS"}]},
+        ],
+    })
+    assert applied["ok"] and applied["applied_memories"] == 2
+    assert applied["claims_written"] == 2
+    assert applied["rejected_count"] == 1
+    rows = tools.db.claims.current_claims(a["id"])
+    assert len(rows) == 1 and rows[0]["source"] == "backfill"
+    # 缺口清零
+    assert tools._claims_backfill_task({"mode": "pending"})["count"] == 0
+    # replace 重放：同结果覆盖不产生重复
+    again = tools._claims_backfill_task({
+        "mode": "apply",
+        "results": [{"memory_id": a["id"], "claims": [{"attr": "超时", "value": "500 毫秒"}]}],
+    })
+    assert again["claims_written"] == 1
+    assert len(tools.db.claims.current_claims(a["id"])) == 1

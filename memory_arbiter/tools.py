@@ -1581,14 +1581,100 @@ class MemoryTools:
             snapshot["trusted_applying_context"] = trusted_applying_context.to_dict()
         return self._semantic_worker.enqueue(int(memory_id), snapshot)
 
-    def _claims_backfill_task(self, data: dict[str, Any]) -> dict[str, Any]:
-        """0.17.0 P2-5.4: bounded claims backfill (owner designates a cheap
-        model via ``data.model_path``, falling back to the resident backend).
+    def _claims_backfill_pending(self, data: dict[str, Any]) -> dict[str, Any]:
+        """agent 供给模式：列出缺当前版本 claims 的记忆（含内容）供大模型抽取。"""
+        after_id = max(0, int(data.get("after_id") or 0))
+        limit = max(1, min(int(data.get("limit") or 50), 50))
+        try:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    """SELECT m.id, m.version, m.subject, m.content FROM memories m
+                       WHERE m.status='active' AND m.id > ?
+                         AND NOT EXISTS (
+                           SELECT 1 FROM memory_claims c
+                           WHERE c.memory_id = m.id AND c.memory_version = m.version
+                         )
+                       ORDER BY m.id LIMIT ?""",
+                    (after_id, limit),
+                ).fetchall()
+        except Exception as exc:
+            return {"ok": False, "error": f"claims pending query failed: {exc}"}
+        items = [
+            {
+                "memory_id": int(r["id"]), "version": int(r["version"] or 1),
+                "subject": str(r["subject"] or ""), "content": str(r["content"] or ""),
+            }
+            for r in rows
+        ]
+        next_after = int(rows[-1]["id"]) if rows else after_id
+        return {
+            "ok": True, "mode": "pending", "count": len(items),
+            "next_after_id": next_after,
+            "coverage": self.db.claims.coverage(),
+            "items": items,
+        }
 
-        50 memories per call with an ``after_id`` cursor; the filter chain
-        (grounding + bounded + whole-sentence/boilerplate rejection + attr
-        near-dup merge) owns fabrication defence; failures leave the memory
-        pending for the next pass."""
+    def _claims_backfill_apply(self, data: dict[str, Any]) -> dict[str, Any]:
+        """agent 供给模式：接收抽取结果并落库（grounding+归一+向量）。"""
+        from .pipeline.write import WritePipeline
+
+        results = data.get("results")
+        if not isinstance(results, list):
+            return {"ok": False, "error": "apply requires results=[{memory_id, claims:[{attr,value}]}]"}
+        applied = 0
+        written = 0
+        rejected_total: list[dict[str, Any]] = []
+        for item in results[:50]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                memory_id = int(item.get("memory_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            claims = item.get("claims")
+            if memory_id <= 0 or not isinstance(claims, list):
+                continue
+            record = self.db.get_memory(memory_id)
+            if not record or str(record.get("status")) != "active":
+                continue
+            row_content = str(record.get("content") or "")
+
+            class _Rec:
+                content = row_content
+
+            count, rejected = WritePipeline._persist_claims_for_version(
+                self, memory_id, int(record.get("version") or 1), _Rec(), claims,
+                source="backfill", replace=True,
+            )
+            applied += 1
+            written += count
+            for r in rejected:
+                rejected_total.append({"memory_id": memory_id, **r})
+        return {
+            "ok": True, "mode": "apply", "applied_memories": applied,
+            "claims_written": written,
+            "rejected_count": len(rejected_total),
+            "rejected_sample": rejected_total[:10],
+            "coverage": self.db.claims.coverage(),
+        }
+
+    def _claims_backfill_task(self, data: dict[str, Any]) -> dict[str, Any]:
+        """0.17.0 P2-5.4 + agent 供给模式（owner 2026-09-23）。
+
+        mode="pending"：按 id 游标列出缺 claims 的 active 记忆（含内容，
+        limit≤50），供调用方大模型抽取——claims 契约本就是 agent 供给，
+        大模型抽取质量远高于本地 0.6B。
+        mode="apply"：接收调用方抽取结果 [{memory_id, claims:[{attr,value}]}]
+        （≤20 条/记忆），走 grounding+归一+attr 向量落库（source='backfill'，
+        replace 语义=同版本重抽覆盖）。
+        无 mode（默认）：保留 Qwen 廉价通道（无人值守场景；需显式 model_path
+        或常驻 backend——隔离 backend 无 extract_claims，会返回
+        backend_unavailable_without_agent_mode）。"""
+        mode = str(data.get("mode") or "").strip().lower()
+        if mode == "pending":
+            return self._claims_backfill_pending(data)
+        if mode == "apply":
+            return self._claims_backfill_apply(data)
         import re as _re
         from .semantic_conflict import (
             LocalGGUFSemanticBackend,

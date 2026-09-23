@@ -337,8 +337,10 @@ class WritePipeline:
     @staticmethod
     def _persist_claims_for_version(
         tools: "Any", memory_id: int, memory_version: int, record: Any, claims: list[Any],
+        *, source: str = "agent", replace: bool = False,
     ) -> tuple[int, list[dict[str, Any]]]:
-        """Shared by write (version 1) and edit (post-bump version) paths."""
+        """Shared by write (version 1), edit (post-bump version), and the
+        agent-supplied backfill (source='backfill', replace=True 语义见下)."""
         """Normalize + ground + persist claims with attr vectors (P2-5.2).
 
         Rejections are per-item and reported back (claims_rejected) — the
@@ -372,7 +374,7 @@ class WritePipeline:
             prepared.append({
                 "attr": attr, "attr_norm": attr_norm,
                 "value": value, "value_norm": value_norm,
-                "source": "agent",
+                "source": source,
             })
         if not prepared:
             return 0, rejected
@@ -397,6 +399,17 @@ class WritePipeline:
             with tools.db.write_transaction() as conn:
                 from ..models import utc_now_iso
                 now = utc_now_iso()
+                if replace:
+                    # backfill 重跑：先清当前版本旧行+其向量，再落新抽取
+                    conn.execute(
+                        "DELETE FROM memory_claim_vec WHERE id IN "
+                        "(SELECT id FROM memory_claims WHERE memory_id=? AND memory_version=?)",
+                        (memory_id, memory_version),
+                    )
+                    conn.execute(
+                        "DELETE FROM memory_claims WHERE memory_id=? AND memory_version=?",
+                        (memory_id, memory_version),
+                    )
                 for claim, vec in zip(prepared[:20], attr_vectors):
                     cur = conn.execute(
                         """INSERT OR IGNORE INTO memory_claims(

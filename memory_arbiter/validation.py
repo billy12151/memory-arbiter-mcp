@@ -132,7 +132,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "anchor_memory_id", "batch", "k", "include_check", "max_distance",
         "include_duplicates", "include_quotes", "workspace",
     },
-    ("memory_repair", "claims_backfill"): {"model_path", "after_id", "limit", "workspace"},
+    ("memory_repair", "claims_backfill"): {"model_path", "after_id", "limit", "mode", "results", "workspace"},
     ("memory_repair", "scan_duplicates"): {"include_quotes", "workspace"},
     ("memory_repair", "scan_workspace_anomalies"): {"workspace"},
     ("memory_repair", "record_conflict"): {
