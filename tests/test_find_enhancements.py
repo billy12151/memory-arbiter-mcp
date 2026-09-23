@@ -665,10 +665,10 @@ def test_outline_table_path_matches_reparse(tmp_path: Path) -> None:
         for index, part in enumerate(content.split("\n\n")):
             start = sum(len(p) + 2 for p in content.split("\n\n")[:index])
             conn.execute(
-                "INSERT INTO memory_evidence(memory_id, memory_version, content_hash,"
-                " unit_index, kind, text, start_offset, end_offset, created_at)"
+                "INSERT INTO memory_row(memory_id, memory_version, content_hash,"
+                " row_index, kind, text, start_offset, end_offset, created_at)"
                 " VALUES (?,?,?,?,?,?,?,?,?)",
-                (mid, version, "h", index, "text", part, start, start + len(part), utc_now_iso()),
+                (mid, version, "h", index, "sentence", part, start, start + len(part), utc_now_iso()),
             )
     via_table = _outline_for_item(tools.db, mid, version, subject, content)
     assert via_table == _content_outline(subject, content)

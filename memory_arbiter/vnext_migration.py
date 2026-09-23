@@ -41,12 +41,14 @@ from .db.meta import active_scan_boundary_on_connection, canonical_scan_boundary
 from .tools import MemoryTools
 
 
+# 0.17.0 C6: memory_evidence is no longer preserved (unit channel retired);
+# memory_row carries the derived rows instead and rebuilds like units did.
 PRESERVED_TABLES = (
-    "memories", "memory_history", "memory_evidence",
+    "memories", "memory_history", "memory_row",
     "workspace_canonicals", "workspace_aliases", "backup_replay_log",
 )
 FULL_REBUILD_COPY_TABLES = tuple(
-    table for table in PRESERVED_TABLES if table != "memory_evidence"
+    table for table in PRESERVED_TABLES if table != "memory_row"
 )
 DESTRUCTIVELY_REBUILT_TABLES = (
     "conflicts", "conflict_judgments", "semantic_notices", "workspace_alias_events",
@@ -143,7 +145,7 @@ def _fingerprint_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
     for table, order_by in (
         ("memories", "id"),
         ("memory_history", "id"),
-        ("memory_evidence", "id"),
+        ("memory_row", "id"),
         ("workspace_canonicals", "id"),
         ("workspace_aliases", "alias_workspace,canonical"),
         ("backup_replay_log", "replay_key"),
@@ -151,11 +153,14 @@ def _fingerprint_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
         digest = hashlib.sha256()
         count = 0
         if _table_exists(conn, table):
-            if table == "memory_evidence":
+            if table == "memory_row":
+                # 0.17.0 C6: the derived-store fingerprint follows the rows
+                # (the old unit fingerprint watched a table that is now
+                # empty — a coverage blind spot found in review).
                 rows = conn.execute(
-                    """SELECT memory_id,memory_version,content_hash,unit_index,kind,
+                    """SELECT memory_id,memory_version,content_hash,row_index,kind,
                               text,start_offset,end_offset
-                       FROM memory_evidence ORDER BY memory_id,unit_index"""
+                       FROM memory_row ORDER BY memory_id,row_index"""
                 )
             elif table == "workspace_aliases":
                 rows = conn.execute(
@@ -306,8 +311,11 @@ def _set_preserved_vector_compatibility(
     vector_rows = 0
     if configured and not active:
         try:
+            # 0.17.0 C6 (review finding): count the ROW store — the unit vec
+            # table is empty since the worker merge, so the old probe saw
+            # vector_rows=0 and silently blessed foreign-space row vectors.
             vector_rows = int(
-                conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0]
+                conn.execute("SELECT COUNT(*) FROM memory_row_vec").fetchone()[0]
             ) + int(
                 conn.execute("SELECT COUNT(*) FROM workspace_canonicals_vec").fetchone()[0]
             )
@@ -733,8 +741,8 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
                     (prior_rebuild_space is not None and prior_rebuild_space != expected_space_id)
                     or (prior_rebuild_space is None and cursor_started)
                 ):
-                    conn.execute("DELETE FROM memory_evidence_vec")
-                    conn.execute("DELETE FROM memory_evidence")
+                    conn.execute("DELETE FROM memory_row_vec")
+                    conn.execute("DELETE FROM memory_row")
                     conn.execute("DELETE FROM workspace_canonicals_vec")
                     # Hint vectors from an aborted rebuild live in a foreign
                     # embedding space; the table may not exist on a fresh
@@ -836,7 +844,7 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
     source_fp, target_fp = _fingerprint(source), _fingerprint(target)
     stable_keys = [
         key for key in source_fp
-        if not key.startswith("memory_evidence_")
+        if not key.startswith("memory_row_") and not key.startswith("memory_evidence_")
     ]
     # A full rebuild may intentionally change logical evidence text/offsets
     # when the embedding pipeline version changes. Core source data remains

@@ -36,7 +36,7 @@ def _render_plan(plan: dict[str, Any]) -> str:
     mode_lines = (
         [
             "The source evidence index is ready in the configured embedding space.",
-            "Existing memory_evidence and vector tables can be cloned unchanged; no",
+            "Existing memory_row and vector tables can be cloned unchanged; no",
             "model loading or embedding recomputation is required for this upgrade.",
         ]
         if conflict_only else

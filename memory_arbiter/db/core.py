@@ -318,8 +318,8 @@ class MemoryDB:
     def _ensure_fts(self, conn: sqlite3.Connection) -> None:
         return self.schema._ensure_fts(conn)
 
-    def ensure_evidence_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
-        return self.schema.ensure_evidence_vec_table(conn, dim)
+    # (0.17.0 C6: ensure_evidence_vec_table forward retired with the unit
+    # vec table; ensure_memory_row_vec_table owns the evidence channel.)
 
     def ensure_workspace_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         return self.schema.ensure_workspace_vec_table(conn, dim)

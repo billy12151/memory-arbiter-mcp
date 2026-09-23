@@ -312,7 +312,7 @@ def test_doctor_deep_probe_reports_dimension_mismatch(tmp_path: Path) -> None:
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
-    store.ensure_evidence_vec_table(conn, 2)
+    store.ensure_memory_row_vec_table(conn, 2)
     conn.close()
 
     class ProbeEmbedder:

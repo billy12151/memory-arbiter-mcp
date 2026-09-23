@@ -1010,7 +1010,7 @@ def test_server_delegates_generation_gate_to_memorydb(
         server.build_runtime()
     with sqlite3.connect(legacy) as conn:
         assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='memory_evidence'"
+            "SELECT 1 FROM sqlite_master WHERE name='memory_row'"
         ).fetchone() is None
 
 
@@ -1441,7 +1441,7 @@ def test_fake_embedder_dim_creates_lazy_tables_and_records_active_dim(
     with db.connection() as conn:
         assert (
             conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_evidence_vec'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_row_vec'"
             ).fetchone()
             is None
         )
@@ -1463,11 +1463,11 @@ def test_fake_embedder_dim_creates_lazy_tables_and_records_active_dim(
     with db.connection() as conn:
         assert (
             conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_evidence_vec'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_row_vec'"
             ).fetchone()
             is not None
         )
-        assert vec_table_dimension(conn, "memory_evidence_vec") == 4
+        assert vec_table_dimension(conn, "memory_row_vec") == 4
         assert vec_table_dimension(conn, "workspace_canonicals_vec") == 4
     assert db.meta.get_active_dim() == 4
     assert db.get_vec_index_state()["state"] == "ready"
@@ -1490,7 +1490,7 @@ def test_dim_change_drops_and_recreates_vec_tables(tmp_path: Path) -> None:
     # and re-create them at the new dim atomically with the mismatch flip.
     db.init_vec_index_state("new-space", True, active_dim=2)
     with db.connection() as conn:
-        assert vec_table_dimension(conn, "memory_evidence_vec") == 2
+        assert vec_table_dimension(conn, "memory_row_vec") == 2
         assert vec_table_dimension(conn, "workspace_canonicals_vec") == 2
     assert db.meta.get_active_dim() == 2
     state = db.get_vec_index_state()
@@ -1521,11 +1521,11 @@ def test_dim_swap_back_arms_rebuild_on_native_dim_tables(tmp_path: Path) -> None
     db.init_vec_index_state("space-a", True, active_dim=4)  # swap back
 
     with db.connection() as conn:
-        assert vec_table_dimension(conn, "memory_evidence_vec") == 4
+        assert vec_table_dimension(conn, "memory_row_vec") == 4
         assert vec_table_dimension(conn, "workspace_canonicals_vec") == 4
         # A native-dim vector must be insertable — the wedged state failed here.
         conn.execute(
-            "INSERT INTO memory_evidence_vec(id, parent_status, embedding) VALUES(1,'active',?)",
+            "INSERT INTO memory_row_vec(id, parent_status, embedding) VALUES(1,'active',?)",
             ("[" + ", ".join("0.1" for _ in range(4)) + "]",),
         )
     state = db.get_vec_index_state()
@@ -1624,7 +1624,7 @@ def test_model_configured_library_without_vec_tables_is_healthy(tmp_path: Path) 
     assert db.db_available is True
     assert not any("sqlite-vec unavailable" in w for w in db.state.warnings)
     with db.connection() as conn:
-        for table in ("memory_evidence_vec", "workspace_canonicals_vec"):
+        for table in ("memory_row_vec", "workspace_canonicals_vec"):
             assert (
                 conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",

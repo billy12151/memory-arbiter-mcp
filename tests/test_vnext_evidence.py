@@ -1489,7 +1489,7 @@ def test_lazy_space_check_blocks_ordinary_publish_until_rebuild_starts(tmp_path:
     first = tools.memory_write(content="old space", subject="old", tags=[])["data"]["id"]
     assert tools.wait_semantic_worker_drained(timeout=5)
     with tools.db.connection() as conn:
-        before = int(conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0])
+        before = int(conn.execute("SELECT COUNT(*) FROM memory_row_vec").fetchone()[0])
 
     tools.db.init_vec_index_state("new-space", True)
     tools._embedder = FakeEmbedder()
@@ -1498,7 +1498,7 @@ def test_lazy_space_check_blocks_ordinary_publish_until_rebuild_starts(tmp_path:
     assert blocked["status"] == "skipped"
     assert blocked["reason"] == "embedding_space_rebuild_required"
     with tools.db.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM memory_evidence_vec").fetchone()[0] == before
+        assert conn.execute("SELECT COUNT(*) FROM memory_row_vec").fetchone()[0] == before
 
     tools.db.mark_space_rebuild_started()
     allowed = tools._index_local_text_evidence(first, tools.db.get_memory(first))

@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+
+from ..evidence import INDEXABLE_PREFILTER_SQL
 import struct
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -833,21 +835,28 @@ class MemoriesStore:
         return out
 
     def missing_row_vector_rows(self) -> list[dict[str, Any]]:
-        """0.17.0 P2-2.5: active memories with published evidence units but
-        no row segments — the row backfill's pending set."""
+        """C6 (owner ruling 2026-09-23 #2): non-deleted memories that pass the
+        indexable prefilter but have no row segments — the row backfill's
+        pending set. The old unit-table EXISTS precondition is gone (it dies
+        with the tables and silently starved the backfill); the expired
+        family is INCLUDED so the delete-table guard can ever be satisfied
+        and memory_search_expired keeps its vector channel on old rows."""
         try:
             with self._db.connection() as conn:
                 rows = conn.execute(
-                    """SELECT m.id, m.version, m.subject, m.content,
+                    f"""SELECT m.id, m.version, m.subject, m.content,
                               COALESCE(m.content_sha,'') AS content_sha
                        FROM memories m
-                       WHERE m.status='active'
-                         AND EXISTS(SELECT 1 FROM memory_evidence e WHERE e.memory_id=m.id)
+                       WHERE m.status!='deleted' AND {INDEXABLE_PREFILTER_SQL}
                          AND NOT EXISTS(SELECT 1 FROM memory_row r WHERE r.memory_id=m.id)
                        ORDER BY m.id"""
                 ).fetchall()
                 return [dict(r) for r in rows]
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            # C6: a silent empty return starved the backfill forever (the
+            # review P1-2 trap); surface the failure through doctor instead.
+            import sys
+            print(f"missing_row_vector_rows failed: {exc}", file=sys.stderr)
             return []
 
     def missing_summary_vec_rows(self) -> list[dict[str, Any]]:

@@ -273,15 +273,15 @@ def test_vec_evidence_channel_excludes_blacklisted(tmp_path):
         conn = tools.db._new_connection()
         import hashlib
         conn.execute(
-            "INSERT INTO memory_evidence(memory_id, memory_version, content_hash,"
-            " unit_index, kind, text, start_offset, end_offset, created_at)"
+            "INSERT INTO memory_row(memory_id, memory_version, content_hash,"
+            " row_index, kind, text, start_offset, end_offset, created_at)"
             " VALUES(?,?,?,?,?,?,?,?,?)",
             (mid, 1, hashlib.sha1(f"{ws}-ev".encode()).hexdigest(),
-             0, "body", f"{ws} evidence text", 0, 10, "2026-09-04T00:00:00Z"),
+             0, "sentence", f"{ws} evidence text", 0, 10, "2026-09-04T00:00:00Z"),
         )
         eid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
-            "INSERT INTO memory_evidence_vec(id, parent_status, embedding) VALUES(?,?,?)",
+            "INSERT INTO memory_row_vec(id, parent_status, embedding) VALUES(?,?,?)",
             (eid, "active", __import__("json").dumps(list(ev))),
         )
         conn.commit()

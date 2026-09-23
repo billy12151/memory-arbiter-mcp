@@ -117,20 +117,9 @@ class SchemaStore:
               FOREIGN KEY(resolution_memory_id) REFERENCES memories(id)
             );
 
-            CREATE TABLE IF NOT EXISTS memory_evidence (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              memory_id INTEGER NOT NULL,
-              memory_version INTEGER NOT NULL,
-              content_hash TEXT NOT NULL,
-              unit_index INTEGER NOT NULL,
-              kind TEXT NOT NULL,
-              text TEXT NOT NULL,
-              start_offset INTEGER NOT NULL,
-              end_offset INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE,
-              UNIQUE(memory_id, unit_index)
-            );
+            -- (0.17.0 C6: memory_evidence retired — fresh databases never
+            -- create the unit tables; legacy ones drop them via the guarded
+            -- additive migration once row coverage is complete.)
 
             CREATE TABLE IF NOT EXISTS backup_replay_log (
               replay_key TEXT PRIMARY KEY,
@@ -313,7 +302,7 @@ class SchemaStore:
                     # exist — a current library that predates its first embed
                     # has no vec tables yet, which is healthy, not a failure.
                     for table in (
-                        "memory_evidence_vec", "workspace_canonicals_vec",
+                        "memory_row_vec", "workspace_canonicals_vec",
                         "subject_tags_vec", "memory_summary_vec",
                     ):
                         exists = conn.execute(
@@ -414,14 +403,9 @@ class SchemaStore:
                 "content, tags, subject, content='memories', content_rowid='id')"
             )
 
-    def ensure_evidence_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
-        # No commit here: callers either own a write_transaction (meta's
-        # mismatch flip needs this DDL inside its transaction) or commit
-        # explicitly once both tables exist.
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_evidence_vec "
-            f"USING vec0(id INTEGER PRIMARY KEY, parent_status TEXT, embedding float[{int(dim)}])"
-        )
+    # (0.17.0 C6: ensure_evidence_vec_table retired — the unit vec table
+    # is no longer created; ensure_memory_row_vec_table owns the evidence
+    # channel's vectors.)
 
     def ensure_workspace_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         try:
@@ -495,13 +479,13 @@ class SchemaStore:
         them empty at ``dim``. Must run inside the caller's transaction —
         the flip to mismatch commits atomically with it."""
         for table in (
-            "memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec",
+            "workspace_canonicals_vec", "subject_tags_vec",
             "memory_summary_vec", "memory_row_vec", "memory_claim_vec",
         ):
             conn.execute(f"DROP TABLE IF EXISTS {table}")
         shadows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND ("
-            "name LIKE 'memory_evidence_vec_%' OR "
+            "name LIKE 'memory_evidence_vec_%' OR "  # legacy shadow sweep keeps unit-era leftovers
             "name LIKE 'workspace_canonicals_vec_%' OR "
             "name LIKE 'subject_tags_vec_%' OR "
             "name LIKE 'memory_summary_vec_%' OR "
@@ -510,7 +494,6 @@ class SchemaStore:
         ).fetchall()
         for row in shadows:
             conn.execute(f'DROP TABLE IF EXISTS "{str(row[0])}"')
-        self.ensure_evidence_vec_table(conn, dim)
         self.ensure_workspace_vec_table(conn, dim)
         self.ensure_subject_tags_vec_table(conn, dim)
         self.ensure_memory_summary_vec_table(conn, dim)
@@ -528,7 +511,6 @@ class SchemaStore:
         conn: sqlite3.Connection | None = None
         try:
             conn = self._db._new_connection()
-            self.ensure_evidence_vec_table(conn, dim)
             self.ensure_workspace_vec_table(conn, dim)
             self.ensure_subject_tags_vec_table(conn, dim)
             self.ensure_memory_summary_vec_table(conn, dim)
@@ -564,18 +546,17 @@ class SchemaStore:
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
             expected = {
-                "memory_evidence_vec", "workspace_canonicals_vec", "subject_tags_vec",
+                "workspace_canonicals_vec", "subject_tags_vec",
                 "memory_summary_vec", "memory_row_vec", "memory_claim_vec",
             }
             before = {
                 str(row[0]) for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name IN ('memory_evidence_vec','workspace_canonicals_vec',"
+                    "AND name IN ('workspace_canonicals_vec',"
                     "'subject_tags_vec','memory_summary_vec','memory_row_vec',"
                     "'memory_claim_vec')"
                 )
             }
-            self.ensure_evidence_vec_table(conn, dim)
             self.ensure_workspace_vec_table(conn, dim)
             self.ensure_subject_tags_vec_table(conn, dim)
             self.ensure_memory_summary_vec_table(conn, dim)

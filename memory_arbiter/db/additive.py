@@ -268,8 +268,72 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     subject_rows = _rebuild_memory_row_store(conn)
     if subject_rows:
         applied.append(subject_rows)
+    retired = _retire_unit_tables(conn)
+    if retired:
+        applied.append(retired)
     conn.commit()
     return applied
+
+
+_UNIT_RETIREMENT_KEY = "unit_vector_tables_retired_v1"
+
+
+def _retire_unit_tables(conn: sqlite3.Connection) -> str:
+    """C6: guarded DROP of memory_evidence + memory_evidence_vec.
+
+    The guard is ONE SQL answer (never two coverage numbers subtracted in
+    Python): retirement may proceed only when no non-deleted, indexable
+    memory still holds unit rows without row rows. Until the row backfill
+    covers the library the migration skips and retries on the next boot —
+    never delete-then-backfill. migration_state key prevents re-entry after
+    the tables are gone.
+    """
+    try:
+        already = conn.execute(
+            "SELECT value FROM migration_state WHERE key=?", (_UNIT_RETIREMENT_KEY,)
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    if already is not None:
+        return ""
+    tables = {
+        str(row[0]) for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('memory_evidence','memory_evidence_vec')"
+        )
+    }
+    if not tables:
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO migration_state(key,value) VALUES (?,?)",
+                (_UNIT_RETIREMENT_KEY, "absent_at_boot"),
+            )
+        except sqlite3.Error:
+            pass
+        return ""
+    if "memory_evidence" in tables:
+        blocking = conn.execute(
+            """SELECT 1 FROM memories m
+               WHERE m.status!='deleted'
+                 AND (COALESCE(m.subject,'')!='' OR TRIM(COALESCE(m.content,''))!='')
+                 AND EXISTS(SELECT 1 FROM memory_evidence e WHERE e.memory_id=m.id)
+                 AND NOT EXISTS(SELECT 1 FROM memory_row r WHERE r.memory_id=m.id)
+               LIMIT 1"""
+        ).fetchone()
+        if blocking is not None:
+            return ""  # row coverage incomplete — retry next boot
+    if "memory_evidence_vec" in tables:
+        conn.execute("DROP TABLE memory_evidence_vec")
+    if "memory_evidence" in tables:
+        conn.execute("DROP TABLE memory_evidence")
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO migration_state(key,value) VALUES (?,?)",
+            (_UNIT_RETIREMENT_KEY, "dropped"),
+        )
+    except sqlite3.Error:
+        pass
+    return "unit_tables(dropped)"
 
 
 _SUBJECT_ROW_KEY = "memory_row_subject_kind_v1"
