@@ -1734,34 +1734,69 @@ class MemoryTools:
         # only: segment + batch-embed + publish, no detection, receipt says so.
         if snapshot.get("index_only"):
             return self._evidence.index_rows_in_job(memory_id, snapshot)
-        result = self._evidence.process_conflicts(memory_id, snapshot)
-        # 0.17.0 P2-5.3: the zero-Qwen claims channel rides the same
-        # post-commit job (additive receipt keys; never blocks the text path).
-        # Skipped jobs (pending activation etc.) keep their exact old shape.
-        if result.get("status") != "skipped":
-            try:
-                surfaced = result.get("surfaced_peers") or []
-                skip_peers = {int(p) for p in surfaced} if surfaced else None
-                claims_result = self._evidence.check_claims_conflicts(
-                    memory_id, snapshot, skip_peers=skip_peers,
-                )
-                if isinstance(claims_result, dict):
-                    result["claims_channel"] = claims_result
-                # Gate-v2 G6b 通道 C: claims×sentences over the SAME clean
-                # neighbour list channel A used (三通道零重叠的名单共享).
-                allowed = result.pop("_allowed_memory_ids", None)
-                channel_c = self._evidence.check_claim_sentence_conflicts(
-                    memory_id, snapshot, skip_peers=skip_peers,
-                    allowed_memory_ids=allowed,
-                    notices_used=int((claims_result or {}).get("notices") or 0),
-                )
-                if isinstance(channel_c, dict):
-                    result["claims_channel_c"] = channel_c
-            except Exception as exc:  # counted, never silent (gate-v2 review)
-                self._record_check_degradation(
-                    "claims_channel_error", str(exc)[:200],
-                )
-                result["claims_channel_error"] = str(exc)[:200]
+        # 0.17.0 Q1 相分裂 (owner plan §3.1, D1/D7): 确定性相 → B → internal
+        # Qwen → C → A-cross 派发相，共享 job 全局 Qwen 预算池（ctx["budget"]：
+        # internal 保护帽 ≤3 → C 可扣穿不可被拦 → A-cross 余量派发，耗尽
+        # continue 不 break）。B/C 先于 A-cross：跨通道去重方向翻转，B∪C
+        # 已浮出 peer 进 A-cross 的 skip 集合（review R1-3）。
+        ev = self._evidence
+        ctx = ev.conflicts_deterministic_phase(memory_id, snapshot)
+        terminal: "dict[str, Any] | None" = ctx.get("terminal")
+        if terminal is not None and terminal.get("status") == "skipped":
+            return terminal
+        claims_result: "dict[str, Any] | None" = None
+        channel_c: "dict[str, Any] | None" = None
+        claims_error: "str | None" = None
+        b_surfaced: "list[int]" = []
+        c_surfaced: "list[int]" = []
+        # B (zero-Qwen claims×claims; bridge rides its own per-write cap)
+        # rides first; each channel is independently guarded — a failure is
+        # counted, never silent, and never blocks the deterministic layers.
+        try:
+            b_result = ev.check_claims_conflicts(memory_id, snapshot, skip_peers=None)
+            if isinstance(b_result, dict):
+                claims_result = b_result
+                b_surfaced = b_result.pop("surfaced_peers", []) or []
+        except Exception as exc:  # counted, never silent (gate-v2 review)
+            claims_error = str(exc)[:200]
+            self._record_check_degradation("claims_channel_error", claims_error)
+        # Internal Qwen between B and C (owner D7: internal protection cap
+        # keeps priority ahead of channel C).
+        if terminal is None:
+            ev.conflicts_internal_qwen_phase(ctx)
+        # Channel C draws the job-global pool down via budget_sink (per ACTUAL
+        # dispatch, R1-4) and honours the fairness wall (R1-1) — it is never
+        # blocked by the pool (D3).
+        try:
+            c_result = ev.check_claim_sentence_conflicts(
+                memory_id, snapshot, skip_peers=None,
+                allowed_memory_ids=ctx.get("allowed_memory_ids"),
+                notices_used=int((claims_result or {}).get("notices") or 0),
+                budget_sink=ctx["budget"].spend_channel_c,
+                deadline_fn=lambda: ev.conflicts_job_deadline(ctx),
+            )
+            if isinstance(c_result, dict):
+                channel_c = c_result
+                c_surfaced = c_result.pop("surfaced_peers", []) or []
+        except Exception as exc:  # counted, never silent (gate-v2 review)
+            claims_error = claims_error or str(exc)[:200]
+            self._record_check_degradation("claims_channel_error", str(exc)[:200])
+        if terminal is None:
+            # R1-2: a deterministic-phase truncation terminal skips internal
+            # Qwen and the dispatch phase entirely (the pre-split semantics).
+            skip_union = {int(p) for p in (*b_surfaced, *c_surfaced)}
+            ev.conflicts_dispatch_phase(ctx, skip_peers=skip_union)
+            result = ev.conflicts_finalize_receipt(ctx)
+        else:
+            result = terminal
+        if ctx["phase_ms"]:
+            result["elapsed_ms"] = round(sum(ctx["phase_ms"]), 1)
+        if claims_result is not None:
+            result["claims_channel"] = claims_result
+        if channel_c is not None:
+            result["claims_channel_c"] = channel_c
+        if claims_error is not None:
+            result["claims_channel_error"] = claims_error
         result.pop("surfaced_peers", None)  # internal cross-channel key, never in receipts
         result.pop("_allowed_memory_ids", None)
         return result

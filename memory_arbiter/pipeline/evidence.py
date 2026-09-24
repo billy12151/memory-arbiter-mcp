@@ -6,7 +6,7 @@ import sqlite3
 import json
 import threading
 import time
-from typing import Any, TYPE_CHECKING, Iterator
+from typing import Any, Callable, TYPE_CHECKING, Iterator
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
@@ -122,6 +122,122 @@ def _attr_cos_or_none(
     return vector_cosine(list(ea.embedding), list(eb.embedding))
 
 
+def _conflict_envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
+    """0.17.0 Q1 (相分裂): pair envelopes were a job closure, now a pure
+    function shared by the internal and cross dispatch phases. Gate-v2 G3:
+    metadata.entity/scope retired — the prompt keeps the (now always empty)
+    metadata slot so the protocol shape is stable."""
+    return {
+        "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
+        "tags": list(memory.get("tags") or [])[:20],
+        "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
+        "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
+        "event_time": memory.get("event_time"),
+        "metadata": {},
+    }
+
+
+def _job_fair_deadline(semantic_worker: "SemanticConflictWorker", publish_done_at: "list[float]") -> "float | None":
+    """0.17.0 Q1 (相分裂): the fairness deadline was a job closure, now a
+    module function so the internal/cross dispatch phases AND the wrapper-
+    orchestrated channel C can share one wall-clock semantics. Detection-
+    phase deadline = max(fairness wall, this job's own budget counted from
+    publish completion); identical logic to the former closure."""
+    value = semantic_worker.pending_job_deadline(
+        SEMANTIC_JOB_TIMEOUT_MS / 1000.0,
+    )
+    if value is None:
+        # Idle queue: the old contract stands — no wall, no cap; an
+        # in-flight Qwen pair runs to completion.
+        return None
+    wall = float(value)
+    if publish_done_at:
+        own = publish_done_at[0] + SEMANTIC_JOB_TIMEOUT_MS / 1000.0
+        if wall <= time.monotonic():
+            # The fairness wall has ALREADY blown (the oldest queued
+            # job waited past its budget) — truncation wins over the
+            # own-anchor extension; never let one slow job park the
+            # whole queue behind max(wall, own).
+            return wall
+        # Busy queue, wall still ahead: the embed phase must not eat
+        # the detection budget, so count this job's budget from
+        # publish completion — but never SHORTEN the wall other
+        # queued jobs already rely on.
+        return max(wall, own)
+    return wall
+
+
+class _JobQwenBudget:
+    """0.17.0 Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS upgraded from
+    "channel A's internal pair cap" to the write job's GLOBAL Qwen pair
+    budget — internal (protection cap) → channel C (draws freely, can
+    overdraw the pool but is never blocked by it) → A-cross (residual
+    max(0, total − internal − C); exhaustion turns the cross loop's
+    break into a continue — deterministic verdicts still land).
+
+    The pool lives in this object, owned by the orchestrator (wrapper or
+    standalone process_conflicts) and passed explicitly into the phases —
+    never on the EvidencePipeline instance (review R2-3: no cross-job
+    mutable state on the shared object). Channel B's bridge keeps its own
+    CLAIMS_BRIDGE_MAX_PER_WRITE cap and does NOT draw on this pool (owner
+    plan §3.1 scope: internal + C + A-cross)."""
+
+    def __init__(
+        self,
+        total: int = SEMANTIC_MAX_EXAMINED_PAIRS,
+        internal_cap: int = SEMANTIC_INTERNAL_QWEN_MAX_PAIRS,
+    ) -> None:
+        self.total = max(1, int(total))
+        self.internal_cap = max(0, int(internal_cap))
+        self.internal_used = 0
+        self.channel_c_used = 0
+        self.a_cross_used = 0
+        self.a_cross_dispatch_skipped = False
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.internal_used - self.channel_c_used - self.a_cross_used)
+
+    def spend_internal(self) -> bool:
+        """Internal Qwen dispatch: protection-capped AND pool-bounded."""
+        if self.internal_used >= self.internal_cap or self.remaining <= 0:
+            return False
+        self.internal_used += 1
+        return True
+
+    def spend_channel_c(self) -> None:
+        """Channel C draws the pool down but is never blocked by it (D3)."""
+        self.channel_c_used += 1
+
+    def spend_a_cross(self) -> bool:
+        """A-cross Qwen dispatch: residual pool only; exhaustion records the
+        dispatch skip (receipt key) and the caller continues, never breaks."""
+        if self.remaining <= 0:
+            self.a_cross_dispatch_skipped = True
+            return False
+        self.a_cross_used += 1
+        return True
+
+    def receipt_block(self) -> "dict[str, Any] | None":
+        """§3.3 conditional receipt block — absent entirely when nothing was
+        deducted and nothing was skipped (zero values never appear)."""
+        block: dict[str, Any] = {}
+        if self.internal_used:
+            block["internal"] = self.internal_used
+        if self.channel_c_used:
+            block["channel_c"] = self.channel_c_used
+        if self.a_cross_used:
+            block["a_cross"] = self.a_cross_used
+        if self.a_cross_dispatch_skipped:
+            block["a_cross_dispatch_skipped"] = True
+        return block or None
+
+    @property
+    def pairs_examined(self) -> int:
+        """Job-global pairs_examined (§3.3): internal + C + A-cross."""
+        return self.internal_used + self.channel_c_used + self.a_cross_used
+
+
 class EvidencePipeline:
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
@@ -208,6 +324,7 @@ class EvidencePipeline:
         bridge_budget = [CLAIMS_BRIDGE_MAX_PER_WRITE]
         fired_attrs: set[str] = set()  # A3: one notice per attr per write
         skip = skip_peers or set()
+        surfaced: list[int] = []  # Q1 R1-3: peers this channel surfaced — the wrapper unions them into the A-cross skip set (dedup direction flip)
         own_coexistence: dict[str, list[str]] = {
             str(claim_row["attr_norm"]): [
                 str(v) for v in self.db.claims.coexisting_values(
@@ -363,6 +480,7 @@ class EvidencePipeline:
                     if outcome.get("outcome") == "created":
                         notices += 1
                         fired_attrs.add(str(claim["attr_norm"]))
+                        surfaced.append(peer_id)
                 # Gate-v2 G6 单边桥: no peer claim carries this attr — aim the
                 # attr vector at the peer's SENTENCE rows and let Qwen pull
                 # the value (case a, prompt names the attr). Unresolvable
@@ -375,13 +493,15 @@ class EvidencePipeline:
                     and bridge_budget[0] > 0
                 ):
                     bridge_budget[0] -= 1
-                    bridge_outcome = self._run_claim_bridge(
+                    bridge_outcome, bridge_peer = self._run_claim_bridge(
                         conn, int(memory_id), version, record, claim,
                         own_vector, bridge_candidate_rows, skip,
                     )
                     if bridge_outcome == "created":
                         notices += 1
                         fired_attrs.add(str(claim["attr_norm"]))
+                        if bridge_peer is not None:
+                            surfaced.append(bridge_peer)
                     elif bridge_outcome == "unresolved":
                         unresolved_bridges += 1
         result: dict[str, Any] = {"claims_checked": checked, "notices": notices}
@@ -391,25 +511,33 @@ class EvidencePipeline:
             result["versional_vetoed"] = versional_vetoed
         if unresolved_bridges:
             result["claim_bridge_unresolved"] = unresolved_bridges
+        if surfaced:
+            # Internal cross-channel key: consumed by the job wrapper for the
+            # A-cross skip set (R1-3), never a receipt field.
+            result["surfaced_peers"] = sorted(set(surfaced))
         return result
 
     def _run_claim_bridge(
         self, conn: "sqlite3.Connection", memory_id: int, version: int,
         record: dict[str, Any], claim: dict[str, Any], attr_vector: list[float],
         candidate_rows: "list[dict[str, Any]]", skip: "set[int]",
-    ) -> str:
+    ) -> "tuple[str, int | None]":
         """Gate-v2 G6 单边桥: own claim (attr, value) has no same-attr peer
         claim — case a of the three-case dispatch. The attr vector aims at
         the peer's sentence rows (the channel-C KNN shape); the TOP row's
         text goes to Qwen with a prompt naming the attr; an extracted value
         that differs from the own claim lands the notice. Returns
-        created / unresolved / skipped."""
+        (created / unresolved / skipped, surfaced peer id or None).
+
+        Q1: the bridge's Qwen rides channel B's own CLAIMS_BRIDGE_MAX_PER_WRITE
+        cap — it does NOT draw on the job-global pool (owner plan §3.1 scope:
+        internal + C + A-cross)."""
         from ..constants import SEMANTIC_CROSS_KNN_WINDOW
         from .gates import dispatch_hint_text
 
         backend = self._ensure_semantic_backend()
         if backend is None:
-            return "skipped"
+            return ("skipped", None)
         row_text: str | None = None
         row_peer: tuple[int, int] | None = None
         for candidate in candidate_rows:
@@ -429,10 +557,10 @@ class EvidencePipeline:
                 row_peer = (peer_id, int(hits[0].get("memory_row_version") or candidate["peer_version"]))
                 break
         if not row_text or row_peer is None:
-            return "unresolved"
+            return ("unresolved", None)
         peer_id, peer_version = row_peer
         if peer_id in skip:
-            return "skipped"
+            return ("skipped", None)
         left_env: dict[str, Any] = {
             # FULL own body as the quote: the claim value is a slice of it,
             # and grounding rejects a value equal to the whole quote (anti
@@ -465,10 +593,10 @@ class EvidencePipeline:
             signal_extraction(forward), left_env, right_env,
         )
         if gate.state != "notice_ready":
-            return "unresolved"
+            return ("unresolved", None)
         extracted_b = str(gate.value_b or "")
         if not extracted_b or normalize_value(extracted_b) == normalize_value(str(claim["value_norm"])):
-            return "unresolved"  # extracted the SAME value: no conflict
+            return ("unresolved", None)  # extracted the SAME value: no conflict
         slot_key = _retired_gate_slot_key(
             record.get("workspace_canonical") or record.get("workspace"),
             str(claim["attr_norm"]), str(record.get("subject") or ""),
@@ -520,13 +648,17 @@ class EvidencePipeline:
             left_version=version, right_version=peer_version,
             source="claim_conflict",
         )
-        return "created" if outcome.get("outcome") == "created" else "skipped"
+        if outcome.get("outcome") == "created":
+            return ("created", peer_id)
+        return ("skipped", None)
 
     def check_claim_sentence_conflicts(
         self, memory_id: int, snapshot: dict[str, Any],
         skip_peers: "set[int] | None" = None,
         allowed_memory_ids: "list[int] | None" = None,
         notices_used: int = 0,
+        budget_sink: "Callable[[], None] | None" = None,
+        deadline_fn: "Callable[[], float | None] | None" = None,
     ) -> dict[str, Any]:
         """Gate-v2 G6b 通道 C: claims×sentences across the clean neighbour
         list (owner 2026-09-23). Each own claim's ATTR vector queries the
@@ -534,7 +666,15 @@ class EvidencePipeline:
         peer filling claims); pairs passing the cosine band go to Qwen as
         case a (the prompt names the attr). Versional attrs are exempted
         (D1, own counter). Cross-channel dedup rides skip_peers (channel A's
-        surfaced peers) and the shared per-write notice cap."""
+        surfaced peers) and the shared per-write notice cap.
+
+        Q1 (owner D1): channel C now runs AHEAD of the A-cross loop and
+        draws the job-global Qwen pool down via ``budget_sink`` (one call per
+        ACTUAL dispatch — the pool is never a cap on C, D3). ``deadline_fn``
+        (review R1-1) stops further dispatches once the fairness wall is
+        blown — C is unbounded in PAIRS but must not eat the queue's clock.
+        ``surfaced_peers`` in the result is an internal cross-channel key
+        for the wrapper's A-cross skip set, never a receipt field."""
         from ..constants import (
             CLAIMS_MAX_NOTICES_PER_WRITE,
             SEMANTIC_CANDIDATE_COS_CEIL,
@@ -576,10 +716,13 @@ class EvidencePipeline:
         versional = 0
         unresolved = 0
         checked = 0
+        surfaced: list[int] = []  # Q1 R1-3: wrapper unions into the A-cross skip set
         _unres_reasons: dict[str, int] = {}
         backend = self._ensure_semantic_backend()
         embedder, _warnings = self._ensure_active_embedder()
         peer_content_cache: dict[int, dict[str, Any]] = {}
+        min_budget = SEMANTIC_MIN_PAIR_BUDGET_MS / 1000.0
+        deadline_stopped = False
 
         def peer_row(peer_id: int) -> dict[str, Any]:
             if peer_id not in peer_content_cache:
@@ -587,6 +730,8 @@ class EvidencePipeline:
             return peer_content_cache[peer_id]
 
         for claim in own_claims:
+            if deadline_stopped:
+                break  # the fairness wall is monotonic — no later pair can dispatch
             attr_vector = own_vectors.get(int(claim["id"]))
             if not attr_vector:
                 continue
@@ -605,6 +750,17 @@ class EvidencePipeline:
                 if notices + notices_used >= CLAIMS_MAX_NOTICES_PER_WRITE:
                     capped += 1
                     break
+                # R1-1: the wall-clock fairness gate A lives by — C may
+                # overdraw the PAIR pool (D3) but must not eat the queue's
+                # clock. Same margin as the A-cross loop (min_budget × 2).
+                if deadline_fn is not None:
+                    active_deadline = deadline_fn()
+                    if (
+                        active_deadline is not None
+                        and active_deadline - time.monotonic() < min_budget * 2
+                    ):
+                        deadline_stopped = True
+                        break
                 peer_id = int(hit["memory_id"])
                 if peer_id in skip:
                     continue  # channel A already surfaced this peer
@@ -655,6 +811,12 @@ class EvidencePipeline:
                     )
                 except TypeError:
                     forward = backend.classify_pair(left_env, right_env)
+                # Q1 R1-4: the pool is charged per ACTUAL dispatch —
+                # claims_checked above also counts band-passers that never
+                # dispatched (inactive peer, backend None); those must not
+                # erode the A-cross residual.
+                if budget_sink is not None:
+                    budget_sink()
                 gate = evaluate_single_direction_extraction(
                     signal_extraction(forward), left_env, right_env,
                     attr_cos=_attr_cos_or_none(embedder, signal_extraction(forward)),
@@ -725,6 +887,7 @@ class EvidencePipeline:
                 )
                 if outcome.get("outcome") == "created":
                     notices += 1
+                    surfaced.append(peer_id)
         result: dict[str, Any] = {
             "channel_c": True, "claims_checked": checked, "notices": notices,
         }
@@ -735,6 +898,10 @@ class EvidencePipeline:
         if unresolved:
             result["channel_c_unresolved"] = unresolved
             result["channel_c_unresolved_reasons"] = _unres_reasons
+        if surfaced:
+            # Internal cross-channel key: consumed by the job wrapper for the
+            # A-cross skip set (R1-3), never a receipt field.
+            result["surfaced_peers"] = sorted(set(surfaced))
         return result
 
     def drain_conflict_backlog(self, limit: int = 2) -> int:
@@ -1108,17 +1275,44 @@ class EvidencePipeline:
                 "index_only": True, "notices_created": 0}
 
     def process_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Run the bounded notice gate and report completion to sync callers."""
+        """Standalone full-A entry (tests, direct callers): deterministic →
+        internal Qwen → A-cross dispatch, in the owner-D1 order with the
+        job-global pool. The write job does NOT use this — the wrapper in
+        tools.py calls the phase methods directly so channels B and C ride
+        between them (确定性相 → B → internal → C → 派发相)."""
+        ctx = self.conflicts_deterministic_phase(memory_id, snapshot)
+        terminal = ctx.get("terminal")
+        if terminal is None:
+            self.conflicts_internal_qwen_phase(ctx)
+            self.conflicts_dispatch_phase(ctx, skip_peers=set())
+            result = self.conflicts_finalize_receipt(ctx)
+        else:
+            result = terminal
+        if ctx["phase_ms"]:
+            result["elapsed_ms"] = round(sum(ctx["phase_ms"]), 1)
+        return result
+
+    def conflicts_deterministic_phase(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """0.17.0 Q1 相分裂 (owner plan §3.2) — phase 1 of 3: indexing publish,
+        G5 clean list, candidate collection/ordering, internal keeper
+        collection, truncation early-exit. ZERO Qwen. Returns the job context
+        dict; ``ctx["terminal"]`` set means no further phase may run
+        (skipped / stale / truncated — R1-2: the wrapper still rides B and C
+        on a truncation terminal, matching the pre-split behavior)."""
+        ctx = self._new_conflict_ctx(memory_id, snapshot)
         record = self.db.get_memory(int(memory_id))
         if record and record.get("status") == "pending":
             # A pending (workspace-activation) memory is not an incomplete
             # check: the conflict job is simply skipped until activation,
             # matching the "skipped" semantics used by index_memory above.
-            return {"status": "skipped", "reason": "pending_workspace_activation", "notices_created": 0}
+            ctx["terminal"] = {"status": "skipped", "reason": "pending_workspace_activation", "notices_created": 0}
+            return ctx
         if not record or record.get("status") != "active":
-            return {"status": "incomplete", "reason": "memory_not_active", "notices_created": 0}
+            ctx["terminal"] = {"status": "incomplete", "reason": "memory_not_active", "notices_created": 0}
+            return ctx
         if int(record.get("version") or 1) != int(snapshot.get("version") or 1):
-            return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
+            ctx["terminal"] = {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
+            return ctx
         content = str(record.get("content") or "")
         # 0.16.12 P2-T2: the row's content_sha column IS sha256(content) (set
         # at insert, recomputed on every content edit) — compare against it
@@ -1127,47 +1321,163 @@ class EvidencePipeline:
         if not row_sha:
             row_sha = hashlib.sha256(content.encode()).hexdigest()
         if row_sha != snapshot.get("content_hash"):
-            return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
-        # 0.16.12 P2-T6: the whole job body runs on ONE read-only connection
-        # under an explicit read transaction — per-unit evidence_knn, per-pair
-        # exists/closed probes and the peer prefetch all reuse it instead of
-        # opening one connection each. The BEGIN gives the job a single WAL
-        # snapshot (the old open-per-read behaviour saw a different
-        # point-in-time on every read); the job's own notice writes keep their
-        # own per-notice write transactions and never touch this connection.
+            ctx["terminal"] = {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
+            return ctx
+        # 0.16.12 P2-T6: the COLLECTION phase runs on ONE read-only connection
+        # under an explicit read transaction — per-unit evidence_knn and the
+        # peer probes all reuse it instead of opening one connection each.
+        # Q1 相分裂 (review R1-5): the internal/dispatch phases open their own
+        # snapshots — B/C notices now land BETWEEN deterministic collection
+        # and dispatch, so dispatch must see the world as of dispatch time.
+        phase_started = time.monotonic()
         with self.db.connection() as job_conn:
             job_conn.execute("BEGIN")
-            job_started = time.monotonic()
             try:
-                result = self._process_conflicts_job(
-                    memory_id, snapshot, record, job_conn, content, row_sha,
-                )
+                self._conflicts_deterministic_collect(ctx, record, job_conn, content, row_sha)
             finally:
                 try:
                     job_conn.rollback()
                 except sqlite3.Error:
                     pass
-        # 0.16.12 eval contract: ACTUAL job execution time (embedding +
-        # KNN candidate collection + Qwen pairs + notice writes), excluding
-        # the caller's notice_sync_wait window — additive receipt key so the
-        # harness can report processing cost without the wait-window noise.
-        result["elapsed_ms"] = round((time.monotonic() - job_started) * 1000, 1)
-        return result
+        ctx["phase_ms"].append((time.monotonic() - phase_started) * 1000)
+        return ctx
 
-    def _process_conflicts_job(
-        self, memory_id: int, snapshot: dict[str, Any],
-        record: dict[str, Any], job_conn: "sqlite3.Connection",
-        content: str, row_sha: str,
-    ) -> dict[str, Any]:
+    def _new_conflict_ctx(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """0.17.0 Q1: the job context threading the three conflict phases.
+        The Qwen budget pool lives here — owned by this job, passed
+        explicitly, never on the EvidencePipeline instance (review R2-3)."""
+        return {
+            "memory_id": int(memory_id),
+            "snapshot": snapshot,
+            "record": None,          # set by the deterministic phase
+            "content": "",
+            "content_hash": "",
+            "workspace": None,
+            "internal_version": 1,
+            "embedder": None,
+            "publish_done_at": [],   # C2 anchor for the fairness deadline
+            "budget": _JobQwenBudget(),
+            "min_budget": SEMANTIC_MIN_PAIR_BUDGET_MS / 1000.0,
+            "applying_slots": set(),
+            "degradation_reasons": set(),
+            "reasons_seen": [],
+            "reached_pair": set(),
+            "ordered": [],
+            "internal_qwen_pairs": [],
+            "allowed_memory_ids": None,
+            "units_examined": 0,
+            "rows_mode": False,
+            "no_difference_filtered": 0,
+            "memory_pairs_excluded": 0,
+            "prefiltered_rows": 0,
+            "rows_covered_by_claims": 0,
+            "below_cos_floor": 0,
+            "repeatability_skipped": 0,
+            "internal_found": 0,
+            "internal_qwen_confirmed": 0,
+            "internal_qwen_vetoed": 0,
+            "surfaced": 0,
+            "surfaced_peer_ids": set(),
+            "dropped_unlocalizable": 0,
+            "backlogged": 0,
+            "sweep_evicted": 0,
+            "incomplete_reason": None,
+            "direct_verdicts": 0,
+            "terminal": None,
+            "truncated": False,
+            "phase_ms": [],
+        }
+
+    def _record_job_degradation(
+        self, ctx: dict[str, Any], reason: str, sample: "str | None" = None,
+    ) -> None:
+        """Behaviour change (v3 hardening): each degradation reason is counted
+        at most once per task — the pair loops can hit the same technical
+        failure for many pairs, and counting every hit made
+        _check_degradation_count grow with pair count rather than with
+        distinct failure modes."""
+        reasons: set[str] = ctx["degradation_reasons"]
+        if reason in reasons:
+            return
+        reasons.add(reason)
+        ctx["reasons_seen"].append(reason)
+        self._tools._record_check_degradation(reason, sample)
+
+    def _enqueue_backlog_entries(
+        self, ctx: dict[str, Any],
+        entries: "list[tuple[int, tuple[dict[str, Any], Any, Any, float]]]",
+    ) -> tuple[int, int]:
+        """0.17.0 P2-4.2: truncation leftovers land in conflict_backlog
+        instead of vanishing. Identity = detector version + both
+        members@version + row anchors (review A7: a detector bump or a
+        member edit invalidates the frozen pair)."""
+        enqueued = 0
+        evicted_total = 0
+        record = ctx["record"]
+        memory_id = int(ctx["memory_id"])
+        left_version = int(record.get("version") or 1)
+        for peer_id, (hit, seg_view, decision, pair_cos) in entries:
+            # Gate-v2 G6: the backlog priority uses the SAME score as the
+            # live Qwen budget — a stale formula would starve high-band
+            # pairs after a truncation.
+            from .gates import compute_pair_score
+
+            score = compute_pair_score(
+                decision, pair_cos, seg_view.text, str(hit.get("text") or ""),
+            )
+            right_version = int(hit.get("version") or hit.get("memory_row_version") or 1)
+            key_hash = hashlib.sha256(
+                "|".join((
+                    CONFLICT_DETECTOR_VERSION,
+                    f"{memory_id}@{left_version}",
+                    f"{peer_id}@{right_version}",
+                    f"{seg_view.start_offset}-{seg_view.end_offset}",
+                    f"{hit.get('start_offset')}-{hit.get('end_offset')}",
+                )).encode("utf-8"),
+            ).hexdigest()
+            outcome = self.db.conflict_backlog.enqueue(
+                candidate_key_hash=key_hash,
+                left_memory_id=memory_id, left_version=left_version,
+                right_memory_id=int(peer_id), right_version=right_version,
+                left_text=str(seg_view.text), right_text=str(hit.get("text") or ""),
+                pair_score=score,
+            )
+            if outcome.get("outcome") in {"queued", "duplicate"}:
+                enqueued += 1
+            evicted_total += int(outcome.get("evicted") or 0)
+        return enqueued, evicted_total
+
+    def _conflicts_deterministic_collect(
+        self, ctx: dict[str, Any], record: dict[str, Any],
+        job_conn: "sqlite3.Connection", content: str, row_sha: str,
+    ) -> None:
+        """Q1 相分裂 phase 1 body: indexing publish, G5 screen, candidate
+        collection/ordering, internal keeper collection, truncation early-
+        exit (E10①). Zero Qwen — the backend is fetched by the later phases.
+        Terminal outcomes (embedder/vec-state/truncation) land in
+        ctx["terminal"] and skip every later phase."""
+        memory_id = int(ctx["memory_id"])
+        snapshot = ctx["snapshot"]
         embedder, _ = self._ensure_active_embedder()
         if embedder is None:
-            return {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
+            ctx["terminal"] = {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
+            return
         if self.db.get_vec_index_state().get("state") in {"mismatch", "failed"}:
-            return {
+            ctx["terminal"] = {
                 "status": "incomplete",
                 "reason": "embedding_space_rebuild_required",
                 "notices_created": 0,
             }
+            return
+        ctx["record"] = record
+        ctx["content"] = content
+        ctx["content_hash"] = row_sha
+        ctx["workspace"] = (
+            record.get("workspace_canonical") or record.get("workspace")
+            if self.settings.isolation == "strict" else None
+        )
+        ctx["internal_version"] = int(record.get("version") or 1)
+        ctx["embedder"] = embedder
         # Spec §5/§15.3: while a conflict group is applying, versions produced
         # by its apply plan must not re-notify THE SAME conflict. Suppression is
         # therefore slot-scoped and applied only after the gate resolves the
@@ -1175,7 +1485,7 @@ class EvidencePipeline:
         # same two memories is still examined and surfaced. Validation is
         # server-side against the live conflict rows; the trusted context only
         # names which row to revalidate.
-        applying_slots: set[str] = set()
+        applying_slots: set[str] = ctx["applying_slots"]
         applying_groups: list[dict[str, Any]] = []
         trusted = TrustedApplyingContext.from_dict(snapshot.get("trusted_applying_context"))
         if trusted is not None:
@@ -1214,108 +1524,27 @@ class EvidencePipeline:
                 applying_slots.add(json.dumps(
                     group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 ))
-        min_budget = SEMANTIC_MIN_PAIR_BUDGET_MS / 1000.0
-        # Behaviour change (v3 hardening): each degradation reason is counted
-        # at most once per task. The pair loop can hit the same technical
-        # failure for many pairs, and counting every hit made
-        # _check_degradation_count grow with pair count rather than with
-        # distinct failure modes. reasons_seen keeps the per-task list that
-        # _check_degradation_reason (last write wins) would otherwise lose.
-        degradation_reasons: set[str] = set()
-        reasons_seen: list[str] = []
 
-        def record_degradation(reason: str, sample: str | None = None) -> None:
-            if reason in degradation_reasons:
-                return
-            degradation_reasons.add(reason)
-            reasons_seen.append(reason)
-            self._tools._record_check_degradation(reason, sample)
-
-        def backlog_deadline() -> float | None:
+        def backlog_deadline() -> "float | None":
             # C2: detection-phase deadline = max(fairness wall, this job's
-            # own budget counted from publish completion). The fairness wall
-            # (oldest queued job's enqueue time + timeout, from the worker's
-            # pending snapshot) is unchanged; publish_done_at carries the
-            # execution-time anchor the pending snapshot cannot know.
-            value = self._semantic_worker.pending_job_deadline(
-                SEMANTIC_JOB_TIMEOUT_MS / 1000.0,
-            )
-            if value is None:
-                # Idle queue: the old contract stands — no wall, no cap; an
-                # in-flight Qwen pair runs to completion.
-                return None
-            wall = float(value)
-            if publish_done_at:
-                own = publish_done_at[0] + SEMANTIC_JOB_TIMEOUT_MS / 1000.0
-                if wall <= time.monotonic():
-                    # The fairness wall has ALREADY blown (the oldest queued
-                    # job waited past its budget) — truncation wins over the
-                    # own-anchor extension; never let one slow job park the
-                    # whole queue behind max(wall, own).
-                    return wall
-                # Busy queue, wall still ahead: the embed phase must not eat
-                # the detection budget, so count this job's budget from
-                # publish completion — but never SHORTEN the wall other
-                # queued jobs already rely on.
-                return max(wall, own)
-            return wall
+            # own budget counted from publish completion) — the shared
+            # implementation lives in _job_fair_deadline.
+            return _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
 
         max_units = max(1, SEMANTIC_MAX_EVIDENCE_UNITS)
         max_rows = max(1, SEMANTIC_MAX_ROWS)
-        workspace = (
-            record.get("workspace_canonical") or record.get("workspace")
-            if self.settings.isolation == "strict" else None
-        )
+        workspace = ctx["workspace"]
         by_peer: dict[int, tuple[dict[str, Any], Any, Any, float]] = {}
-        reached_pair: set[int] = set()
-
-        def _enqueue_backlog(
-            entries: "list[tuple[int, tuple[dict[str, Any], Any, Any, float]]]",
-        ) -> tuple[int, int]:
-            """0.17.0 P2-4.2: truncation leftovers land in conflict_backlog
-            instead of vanishing. Identity = detector version + both
-            members@version + row anchors (review A7: a detector bump or a
-            member edit invalidates the frozen pair)."""
-            enqueued = 0
-            evicted_total = 0
-            left_version = int(record.get("version") or 1)
-            for peer_id, (hit, seg_view, decision, pair_cos) in entries:
-                # Gate-v2 G6: the backlog priority uses the SAME score as the
-                # live Qwen budget — a stale formula would starve high-band
-                # pairs after a truncation.
-                from .gates import compute_pair_score
-
-                score = compute_pair_score(
-                    decision, pair_cos, seg_view.text, str(hit.get("text") or ""),
-                )
-                right_version = int(hit.get("version") or hit.get("memory_row_version") or 1)
-                key_hash = hashlib.sha256(
-                    "|".join((
-                        CONFLICT_DETECTOR_VERSION,
-                        f"{memory_id}@{left_version}",
-                        f"{peer_id}@{right_version}",
-                        f"{seg_view.start_offset}-{seg_view.end_offset}",
-                        f"{hit.get('start_offset')}-{hit.get('end_offset')}",
-                    )).encode("utf-8"),
-                ).hexdigest()
-                outcome = self.db.conflict_backlog.enqueue(
-                    candidate_key_hash=key_hash,
-                    left_memory_id=int(memory_id), left_version=left_version,
-                    right_memory_id=int(peer_id), right_version=right_version,
-                    left_text=str(seg_view.text), right_text=str(hit.get("text") or ""),
-                    pair_score=score,
-                )
-                if outcome.get("outcome") in {"queued", "duplicate"}:
-                    enqueued += 1
-                evicted_total += int(outcome.get("evicted") or 0)
-            return enqueued, evicted_total
 
         # P2-T2: same digest as the stale check above — the maintained
         # content_sha column (or its recompute fallback), never a fresh hash.
         content_hash = row_sha
         # C2: publish_done_at anchors this job's own detection budget AFTER
         # the index phase (embedding is index work, not conflict budget).
-        publish_done_at: list[float] = []
+        # Q1 相分裂: the list lives in ctx so the later phases and the
+        # wrapper-orchestrated channel C share one anchor (append is
+        # in-place — the local alias stays a live view of ctx state).
+        publish_done_at: list[float] = ctx["publish_done_at"]
         # 0.17.0 C2: the index duty lives in the job. Read the published row
         # vectors; when they are missing, recover in-job with
         # segment+batch-embed+PUBLISH (invariant: publish precedes any Qwen
@@ -1346,6 +1575,7 @@ class EvidencePipeline:
         # for the backfill; the detection phase sees an empty segment set
         # rather than falling back to units.
         rows_mode = bool(row_vectors) or bool(pending_segments)
+        ctx["rows_mode"] = rows_mode
         # Normalized segment view: rows carry row_index, units carry
         # unit_index — the view exposes .unit_index for BOTH so every
         # downstream consumer (internal create, envelopes, member evidence)
@@ -1399,14 +1629,15 @@ class EvidencePipeline:
         # recognition duty, and Qwen's verdict is the triple
         # ready→pending+attribution / definitive negative→dismissed veto /
         # technical failure→pending unannotated (fail-open).
-        internal_found = 0
-        internal_version = int(record.get("version") or 1)
+        internal_version: int = ctx["internal_version"]
         # 0.17.0 P2-3.1: internal (same-memory) pairs are row segments in
         # rows mode (row_index lands in internal_conflicts' unit_a/unit_b —
         # the 0.17.0 detector bump separates the index semantics cleanly).
         from ..scan_pipeline import internal_pair_admission
 
-        internal_qwen_pairs: list[tuple[Any, Any, Any]] = []
+        # append-only through the alias — the list object lives in ctx and
+        # feeds the internal Qwen phase (E10① keepers).
+        internal_qwen_pairs: list[tuple[Any, Any, Any]] = ctx["internal_qwen_pairs"]
         # C3 A+ guard: subject rows never originate pairs (internal or cross).
         # Adversarial-review follow-up: an INDEPENDENT cap (not the cross
         # loop's) — O(n²) construction with row granularity needs its own
@@ -1433,7 +1664,6 @@ class EvidencePipeline:
                 if not admitted:
                     continue
                 internal_qwen_pairs.append((seg_a, seg_b, internal_decision))
-        units_examined = 0
         # 0.16.2 write-time pre-gates (owner, data-driven): two deterministic
         # filters run in the KNN collection loop, BEFORE the per-peer dedup —
         # a cleared representative would otherwise burn a peer slot that a
@@ -1448,8 +1678,7 @@ class EvidencePipeline:
         # Claims attribute alignment carries the same-subject signal now.
         # Gate 2 (difference classifier): no extractable value difference
         # means the pair can never satisfy Qwen's same-attribute-different-
-        # value gate.
-        no_difference_filtered = 0
+        # value gate. (Counter lives in ctx — the finalize phase reads it.)
         # Spec §15.5: a bounded check that ran out of budget must not later
         # claim checked_no_notice. The two truncation causes report
         # distinctly (2026-09-10 #957/#959 diagnosis: the shared string cost
@@ -1495,8 +1724,6 @@ class EvidencePipeline:
             int(getattr(view, "unit_index", getattr(view, "row_index", 0)))
             for view in row_prefilter(seg_views, own_claim_spans)
         }
-        prefiltered_rows = 0
-        rows_covered_by_claims = 0
         # Gate-v2 G5 ②″ 记忆级一揽子筛选: ONE subject-row coarse KNN builds
         # the neighbour list; memory_pair_excluded vets each neighbour on
         # subject/tags alone; the sentence KNN then runs ONLY inside the
@@ -1517,8 +1744,7 @@ class EvidencePipeline:
                 prefix="", body=str(record.get("subject") or ""),
             )
             subject_vec = subject_embed.embedding or None
-        allowed_memory_ids: list[int] | None = None
-        memory_pairs_excluded = 0
+        allowed_memory_ids: "list[int] | None" = ctx["allowed_memory_ids"]
         if subject_vec is not None:
             neighbours = self.db.row_knn(
                 subject_vec, k=SEMANTIC_NEIGHBOR_SCREEN, workspace=workspace,
@@ -1541,15 +1767,15 @@ class EvidencePipeline:
                     str(neighbour.get("subject") or ""), peer_tags_n,
                 ):
                     excluded_ids.add(peer_id_n)
-            allowed_memory_ids = [
+            ctx["allowed_memory_ids"] = [
                 int(n["memory_id"]) for n in neighbours
                 if int(n["memory_id"]) not in excluded_ids
             ]
-            memory_pairs_excluded = len(excluded_ids)
-            if not allowed_memory_ids:
-                allowed_memory_ids = []  # everything screened out: no KNN at all
-        below_cos_floor = 0
-        repeatability_skipped = 0
+            allowed_memory_ids = ctx["allowed_memory_ids"]
+            ctx["memory_pairs_excluded"] = len(excluded_ids)
+            if not ctx["allowed_memory_ids"]:
+                ctx["allowed_memory_ids"] = []  # everything screened out: no KNN at all
+                allowed_memory_ids = []
         try:
             for seg_view, embedding in pair_iter:
                 if streaming:
@@ -1570,18 +1796,18 @@ class EvidencePipeline:
                         span_start < seg_view.end_offset and seg_view.start_offset < span_end
                         for span_start, span_end in own_claim_spans
                     ):
-                        rows_covered_by_claims += 1
+                        ctx["rows_covered_by_claims"] += 1
                     else:
-                        prefiltered_rows += 1
+                        ctx["prefiltered_rows"] += 1
                     continue
-                if units_examined >= max_segments:
+                if ctx["units_examined"] >= max_segments:
                     truncation_reason = truncation_reason or segments_capped_reason
                     continue  # detection capped; keep draining for publish
                 active_deadline = backlog_deadline()
                 if active_deadline is not None and time.monotonic() >= active_deadline:
                     truncation_reason = truncation_reason or "notice_budget_exhausted"
                     continue  # budget gone; keep draining for publish
-                units_examined += 1
+                ctx["units_examined"] += 1
                 if allowed_memory_ids is not None and not allowed_memory_ids:
                     continue  # whole neighbourhood screened out
                 knn_hits = self.db.row_knn(
@@ -1600,8 +1826,8 @@ class EvidencePipeline:
                 gated, below_floor_pairs, at_ceil_pairs = candidate_cos_gate(
                     embedding, knn_hits, hit_vectors,
                 )
-                below_cos_floor += len(below_floor_pairs)
-                repeatability_skipped += len(at_ceil_pairs)
+                ctx["below_cos_floor"] += len(below_floor_pairs)
+                ctx["repeatability_skipped"] += len(at_ceil_pairs)
                 gated_cos = {id(hit): cos for hit, cos in gated}
                 for hit in knn_hits:
                     if id(hit) not in gated_cos:
@@ -1623,7 +1849,7 @@ class EvidencePipeline:
                     if classify_pair(
                         seg_view.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
                     ) == "clear":
-                        no_difference_filtered += 1
+                        ctx["no_difference_filtered"] += 1
                         continue
                     existing = by_peer.get(peer_id)
                     closer = existing is not None and float(hit.get("distance") or 9) < float(existing[0].get("distance") or 9)
@@ -1679,11 +1905,11 @@ class EvidencePipeline:
         if truncation_reason:
             # E10① order guarantee: internal findings land BEFORE the cross
             # loop and survive its truncation. The internal Qwen pass has not
-            # run yet at this point (it needs the backend fetched below), so
-            # the collected keepers land unannotated here — fail-open, never
-            # lost. (Adversarial self-review: without this, an evidence-unit
-            # cap or budget exhaustion mid-collection silently dropped every
-            # internal keep pair of this run.)
+            # run yet at this point (it needs the backend fetched by its own
+            # phase), so the collected keepers land unannotated here —
+            # fail-open, never lost. (Adversarial self-review: without this,
+            # an evidence-unit cap or budget exhaustion mid-collection
+            # silently dropped every internal keep pair of this run.)
             for unit_a, unit_b, internal_decision in internal_qwen_pairs:
                 if self.db.internal_conflicts.create(
                     memory_id=int(memory_id), memory_version=internal_version,
@@ -1694,27 +1920,33 @@ class EvidencePipeline:
                     reason=str(internal_decision.reason or ""),
                     detector_version=CONFLICT_DETECTOR_VERSION,
                 ):
-                    internal_found += 1
-            record_degradation(truncation_reason)
+                    ctx["internal_found"] += 1
+            self._record_job_degradation(ctx, truncation_reason)
             early_result: dict[str, Any] = {
                 "status": "incomplete", "reason": truncation_reason,
-                "notices_created": 0, "reasons_seen": reasons_seen,
+                "notices_created": 0, "reasons_seen": ctx["reasons_seen"],
                 # Internal-truncation exits before the cross-memory loop even
                 # starts, so no pairs were examined yet (counter not yet live).
                 "pairs_examined": 0,
             }
-            if internal_found:
-                early_result["internal_conflicts"] = internal_found
+            if ctx["internal_found"]:
+                early_result["internal_conflicts"] = ctx["internal_found"]
             # 0.17.0 P2-4.2: collected-but-unexamined candidates go to the
             # backlog (owner design #8) — the receipt says how many.
-            early_backlogged, early_evicted = _enqueue_backlog(list(by_peer.items()))
+            early_backlogged, early_evicted = self._enqueue_backlog_entries(ctx, list(by_peer.items()))
             if early_backlogged:
                 early_result["backlogged"] = early_backlogged
             if early_evicted:
                 early_result["backlog_evicted"] = early_evicted
-            return early_result
+            # Q1 R1-2: truncation freezes the whole dispatch side (no internal
+            # Qwen, no A-cross) — the wrapper still rides B/C on this terminal,
+            # matching the pre-split behavior exactly.
+            ctx["terminal"] = early_result
+            ctx["truncated"] = True
+            return
 
-        backend = self._ensure_semantic_backend()
+        # (Q1 相分裂: the backend fetch moved into the internal/dispatch
+        # phases — the deterministic phase stays Qwen-free.)
         # C4 soft ordering (⑦ 定案): rank same-level pairs by subject+tags
         # overlap before distance — the Qwen budget should spend on pairs the
         # owner's signals (subject/tag) already flag as related. Zero-overlap
@@ -1757,7 +1989,14 @@ class EvidencePipeline:
             except (TypeError, ValueError):
                 return 0.0
 
-        ordered = sorted(
+        # 0.15.14 (A5): the former surfaced>=max_notice_pairs early stop is
+        # gone — notices are recorded per-pair inside the loop (write-on-
+        # discovery), so an early stop only saved Qwen time, which the
+        # examined-pairs cap now bounds deterministically.
+        # Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS is the job-global Qwen
+        # pool living in ctx["budget"] (internal + channel C + A-cross); the
+        # per-phase caps live in _JobQwenBudget.
+        ctx["ordered"] = sorted(
             by_peer.items(),
             key=lambda item: (
                 -_pair_score(item[0], item[1]),
@@ -1766,56 +2005,48 @@ class EvidencePipeline:
                 float(item[1][0].get("distance") or 9),
             ),
         )
-        # 0.15.14 (A5): the former surfaced>=max_notice_pairs early stop is
-        # gone — notices are recorded per-pair inside the loop (write-on-
-        # discovery), so an early stop only saved Qwen time, which the
-        # examined-pairs cap now bounds deterministically. The check examines
-        # up to SEMANTIC_MAX_EXAMINED_PAIRS pairs (fair deadline first, cap
-        # second) and surfaces every notice it finds; the notice count is
-        # therefore bounded by the pairs cap.
-        max_examined_pairs = max(1, SEMANTIC_MAX_EXAMINED_PAIRS)
-        pairs_examined = 0
-        surfaced = 0
-        surfaced_peer_ids: set[int] = set()
-        dropped_unlocalizable = 0
-        backlogged = 0
-        incomplete_reason: str | None = None
 
-        def envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
-            # Gate-v2 G3: metadata.entity/scope retired — the prompt keeps the
-            # (now always empty) metadata slot so the protocol shape is stable.
-            return {
-                "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
-                "tags": list(memory.get("tags") or [])[:20],
-                "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
-                "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
-                "event_time": memory.get("event_time"),
-                "metadata": {},
-            }
+    def _conflict_classify(
+        self, backend: "SemanticBackend", left_env: dict[str, Any], right_env: dict[str, Any],
+    ) -> Any:
+        """0.16.2 unified-flow classify closure, hoisted to a method for the
+        Q1 phase split. Once a pair starts, only the inference hard timeout
+        may stop it. The job budget is a fairness gate between pairs; the
+        retry gate (A6) is the same fairness idea one level down: with
+        another job queued, a protocol-invalid output fails fast instead of
+        doubling its own latency."""
+        try:
+            return backend.classify_pair(
+                left_env, right_env, deadline_monotonic=None,
+                retry_allowed=not self._semantic_worker.has_pending_jobs(),
+            )
+        except TypeError:
+            # Test/legacy backends implementing the original two-arg protocol.
+            return backend.classify_pair(left_env, right_env)
 
-        def classify(left_env: dict[str, Any], right_env: dict[str, Any]) -> Any:
-            if backend is None:
-                # The per-pair guard below never lets a None reach the call;
-                # keep the narrowed local so the closure type-checks.
-                raise RuntimeError("semantic backend unavailable mid-pair")
-            try:
-                # Once a pair starts, only the inference hard timeout may stop
-                # it. The job budget is a fairness gate between pairs; the
-                # retry gate (A6) is the same fairness idea one level down:
-                # with another job queued, a protocol-invalid output fails
-                # fast instead of doubling its own latency.
-                return backend.classify_pair(
-                    left_env, right_env, deadline_monotonic=None,
-                    retry_allowed=not self._semantic_worker.has_pending_jobs(),
-                )
-            except TypeError:
-                # Test/legacy backends implementing the original two-arg protocol.
-                return backend.classify_pair(left_env, right_env)
+    def conflicts_job_deadline(self, ctx: dict[str, Any]) -> "float | None":
+        """Q1 R1-1: the fairness wall for wrapper-orchestrated channel C —
+        the SAME deadline semantics the internal/dispatch phases live by
+        (C may overdraw the pair pool per D3, but must not eat the queue's
+        clock)."""
+        return _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
 
+    def conflicts_internal_qwen_phase(self, ctx: dict[str, Any]) -> None:
+        """Q1 相分裂 phase 2 (owner plan §3.1): internal (same-memory) keeper
+        Qwen review — E10① lands before the cross loop; protection-capped at
+        SEMANTIC_INTERNAL_QWEN_MAX_PAIRS and drawing the job-global pool
+        (D1/D7: internal keeps its priority ahead of channel C)."""
+        phase_started = time.monotonic()
+        memory_id = int(ctx["memory_id"])
+        record = ctx["record"]
+        internal_version = int(ctx["internal_version"])
+        budget: _JobQwenBudget = ctx["budget"]
+        min_budget: float = ctx["min_budget"]
+        backend = self._ensure_semantic_backend()
         # 0.16.2 unified flow: internal check-keepers go through the SAME Qwen
         # slot extraction as cross-memory pairs, BEFORE the cross loop (E10①
         # order guarantee: internal findings land first and survive a
-        # truncated cross loop). Shared pairs_examined budget and deadline —
+        # truncated cross loop). Shared job-global pool and deadline —
         # internal keepers are naturally few (filter-calibrated). Verdicts:
         #   notice_ready  → land pending, reason annotated with the extracted
         #                    attribute/values
@@ -1826,11 +2057,8 @@ class EvidencePipeline:
         #   technical failure / no backend → land pending unannotated
         #   (fail-open: an advisory rule signal must not be lost to an
         #   unavailable model)
-        internal_qwen_confirmed = 0
-        internal_qwen_vetoed = 0
-        internal_qwen_budget = max(0, SEMANTIC_INTERNAL_QWEN_MAX_PAIRS)
-        for unit_a, unit_b, internal_decision in internal_qwen_pairs:
-            if internal_qwen_budget <= 0:
+        for unit_a, unit_b, internal_decision in ctx["internal_qwen_pairs"]:
+            if budget.internal_used >= budget.internal_cap:
                 # Harness regression fix: row granularity multiplied internal
                 # keepers and they starved the cross pairs out of the shared
                 # Qwen budget. E10① keeps its land-first guarantee — within
@@ -1838,23 +2066,21 @@ class EvidencePipeline:
                 break
             reason_text = str(internal_decision.reason or "")
             if backend is not None:
-                active_deadline = backlog_deadline()
+                active_deadline = _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
                 budget_ok = not (
                     active_deadline is not None
                     and active_deadline - time.monotonic() < min_budget * 2
-                ) and pairs_examined < max_examined_pairs
+                ) and budget.spend_internal()
                 if budget_ok:
-                    pairs_examined += 1
-                    internal_qwen_budget -= 1
-                    env_a = envelope(record, unit_a.text)
-                    env_b = envelope(record, unit_b.text)
+                    env_a = _conflict_envelope(record, unit_a.text)
+                    env_b = _conflict_envelope(record, unit_b.text)
                     if internal_decision.left_value and internal_decision.right_value:
                         env_a["rule_value"] = internal_decision.left_value
                         env_b["rule_value"] = internal_decision.right_value
                     # Single-direction judging (owner 2026-09-17): all three
                     # paths share the one-forward-extraction gate — the
                     # bidirectional mirror was falsified on the eval line.
-                    forward = classify(env_a, env_b)
+                    forward = self._conflict_classify(backend, env_a, env_b)
                     gate = evaluate_single_direction_extraction(
                         signal_extraction(forward), env_a, env_b,
                         # internal path keeps STRICT attribute equality
@@ -1865,7 +2091,7 @@ class EvidencePipeline:
                             f"{reason_text} | qwen:{gate.attribute}="
                             f"{gate.value_a}|{gate.value_b}"
                         )
-                        internal_qwen_confirmed += 1
+                        ctx["internal_qwen_confirmed"] += 1
                     else:
                         technical = (
                             (forward.error and "timeout" in str(forward.error).lower())
@@ -1874,7 +2100,7 @@ class EvidencePipeline:
                             or forward.candidate_type in {"invalid_json", "invalid_schema"}
                         )
                         if not technical and gate.reason != "qwen_unverified":
-                            internal_qwen_vetoed += 1
+                            ctx["internal_qwen_vetoed"] += 1
                             self.db.internal_conflicts.create(
                                 memory_id=int(memory_id), memory_version=internal_version,
                                 unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
@@ -1894,24 +2120,86 @@ class EvidencePipeline:
                 span_b=[unit_b.start_offset, unit_b.end_offset],
                 reason=reason_text, detector_version=CONFLICT_DETECTOR_VERSION,
             ):
-                internal_found += 1
+                ctx["internal_found"] += 1
+        ctx["phase_ms"].append((time.monotonic() - phase_started) * 1000)
 
+    def conflicts_dispatch_phase(
+        self, ctx: dict[str, Any], skip_peers: "set[int] | None",
+    ) -> None:
+        """Q1 相分裂 phase 3 (owner plan §3.1): the A-cross ordered-pair loop.
+        Qwen dispatch is gated by the job-global pool's RESIDUAL
+        (max(0, total − internal − channel_c)); exhaustion turns the old
+        break into a continue — deterministic direct verdicts still land and
+        undispatched pairs fall to the backlog sweep (D2). ``skip_peers`` is
+        the B∪C surfaced-peer union (review R1-3 — the dedup direction flip:
+        C now runs ahead of A-cross)."""
+        phase_started = time.monotonic()
+        ordered = ctx["ordered"]
+        backend = self._ensure_semantic_backend()
+        # R1-5: the dispatch probes run on their OWN read snapshot — channels
+        # B/C landed notices between the deterministic collection and this
+        # phase, so the collection snapshot (job_conn) no longer describes
+        # the world the closed-pair probes must see. The explicit skip set
+        # (R1-3) replaces whatever the probes could have inferred about B/C.
+        with self.db.connection() as dispatch_conn:
+            dispatch_conn.execute("BEGIN")
+            try:
+                self.conflicts_dispatch_loop(ctx, dispatch_conn, backend, skip_peers)
+            finally:
+                try:
+                    dispatch_conn.rollback()
+                except sqlite3.Error:
+                    pass
+        # 0.17.0 P2-4.2: budget/cap leftovers land in the backlog — bounded,
+        # visible, never silently dropped (owner design #8). Stale/duplicate
+        # keys report as enqueued here; eviction counts ride the store.
+        leftover_entries = [item for item in ordered if item[0] not in ctx["reached_pair"]]
+        ctx["sweep_evicted"] = 0
+        if leftover_entries:
+            ctx["backlogged"], ctx["sweep_evicted"] = self._enqueue_backlog_entries(
+                ctx, leftover_entries,
+            )
+        ctx["phase_ms"].append((time.monotonic() - phase_started) * 1000)
+
+    def conflicts_dispatch_loop(
+        self, ctx: dict[str, Any], dispatch_conn: "sqlite3.Connection",
+        backend: "SemanticBackend | None", skip_peers: "set[int] | None",
+    ) -> None:
+        """The ordered-pair loop body (kept as its own method so the dispatch
+        phase's read transaction wraps every probe)."""
+        memory_id = int(ctx["memory_id"])
+        record = ctx["record"]
+        content = str(ctx["content"])
+        workspace = ctx["workspace"]
+        embedder = ctx["embedder"]
+        budget: _JobQwenBudget = ctx["budget"]
+        min_budget: float = ctx["min_budget"]
+        reached_pair: set[int] = ctx["reached_pair"]
+        applying_slots: set[str] = ctx["applying_slots"]
+        surfaced_peer_ids: set[int] = ctx["surfaced_peer_ids"]
         # P2-T6: batch-prefetch every candidate peer in ONE id-IN query
         # instead of one get_memory connection per pair.
         peer_rows = self.db.get_memories_by_ids(
-            [int(pid) for pid, _triple in ordered], conn=job_conn,
+            [int(pid) for pid, _triple in ctx["ordered"]], conn=dispatch_conn,
         )
-        for peer_id, (hit, unit, decision, _pair_cos) in ordered:
+        for peer_id, (hit, unit, decision, _pair_cos) in ctx["ordered"]:
             peer = peer_rows.get(int(peer_id))
             if not peer or peer.get("status") != "active":
                 reached_pair.add(peer_id)  # settled (inactive) — not backlog
+                continue
+            if skip_peers and peer_id in skip_peers:
+                # Q1 R1-3 dedup direction flip: channel B/C already surfaced
+                # this peer on this write — A-cross stands down (cross-channel
+                # single report; strongest-evidence-first primitives like the
+                # closed-pair check are unchanged).
+                reached_pair.add(peer_id)  # settled (surfaced by B/C) — not backlog
                 continue
             record_row: dict[str, Any] = record or {}
             peer_row: dict[str, Any] = peer or {}
             left_version = int(record.get("version") or 1)
             right_version = int(peer.get("version") or 1)
             if self.db.semantic_notices.is_semantic_pair_closed_on_conn(
-                job_conn, memory_id, peer_id, left_version, right_version,
+                dispatch_conn, memory_id, peer_id, left_version, right_version,
             ):
                 reached_pair.add(peer_id)  # settled (closed) — not backlog
                 continue
@@ -1929,7 +2217,9 @@ class EvidencePipeline:
             )
             if direct is not None:
                 reached_pair.add(peer_id)  # deterministic verdict — settled
-            if direct is not None:
+                # Q1 §3.3: deterministic 直出 counter — the stage-2
+                # comprehensive-recall channel attribution reads it.
+                ctx["direct_verdicts"] += 1
                 gate = PairGateResult(
                     "notice_ready", "deterministic_same_key_value_diff",
                     direct[0], direct[1], direct[2], True,
@@ -1941,24 +2231,27 @@ class EvidencePipeline:
                 forward_signal = None
             else:
                 if backend is None:
-                    record_degradation("qwen_unavailable")
-                    incomplete_reason = "qwen_unavailable"
+                    self._record_job_degradation(ctx, "qwen_unavailable")
+                    ctx["incomplete_reason"] = "qwen_unavailable"
                     continue
-                active_deadline = backlog_deadline()
+                active_deadline = _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
                 if active_deadline is not None and active_deadline - time.monotonic() < min_budget * 2:
-                    record_degradation("qwen_budget_exhausted")
-                    incomplete_reason = "qwen_budget_exhausted"
+                    self._record_job_degradation(ctx, "qwen_budget_exhausted")
+                    ctx["incomplete_reason"] = "qwen_budget_exhausted"
                     continue
-                # A5 deterministic cap: only pairs that actually reach Qwen count;
-                # skipped (closed/inactive) pairs never consume the budget.
-                if pairs_examined >= max_examined_pairs:
-                    record_degradation("pairs_examined_capped")
-                    incomplete_reason = "pairs_examined_capped"
-                    break
-                pairs_examined += 1
+                # Q1 (owner D1/D2): the job-global pool's RESIDUAL gates Qwen
+                # dispatch; exhaustion no longer breaks the loop — it
+                # CONTINUES: direct verdicts still land and undispatched
+                # pairs stay unsettled for the backlog sweep (饱和不终止确
+                # 定性检查). First skip reason wins (same first-trip-wins
+                # semantics the old break had).
+                if not budget.spend_a_cross():
+                    self._record_job_degradation(ctx, "pairs_examined_capped")
+                    ctx["incomplete_reason"] = ctx["incomplete_reason"] or "pairs_examined_capped"
+                    continue
                 reached_pair.add(peer_id)  # Qwen examined — settled
-                left_env = envelope(record_row, unit.text)
-                right_env = envelope(peer_row, str(hit.get("text") or ""))
+                left_env = _conflict_envelope(record_row, unit.text)
+                right_env = _conflict_envelope(peer_row, str(hit.get("text") or ""))
                 # pair-v7: hand Qwen the rule layer's extracted value difference
                 # (numeric check route only) as a locating hint — see _pair_text.
                 if decision.left_value and decision.right_value:
@@ -1977,7 +2270,7 @@ class EvidencePipeline:
                 # hard false positives 0/43 on the product chain). One clean
                 # extraction + grounding + veto lands the notice; scan and
                 # internal-conflict paths keep the bidirectional gate.
-                forward_signal = classify(left_env, right_env)
+                forward_signal = self._conflict_classify(backend, left_env, right_env)
                 reverse_signal = None
                 self._tools._record_pair_sample(
                     pair_ms=int((time.monotonic() - started) * 1000),
@@ -2009,7 +2302,7 @@ class EvidencePipeline:
                     # The model explicitly reported an unextractable field: a
                     # completed negative decision (fail-closed for notice), not
                     # a technical failure (spec §8 diagnostics distinction).
-                    dropped_unlocalizable += 1
+                    ctx["dropped_unlocalizable"] += 1
                     continue
                 else:
                     reason = gate.reason
@@ -2017,9 +2310,9 @@ class EvidencePipeline:
                     # Grounding failed: uncertain — fail-closed for notices and
                     # the pair remains a scan review candidate. Owner ruling
                     # #9: unlocalizable candidates are DROPPED, counted loud.
-                    record_degradation(reason)
-                    dropped_unlocalizable += 1
-                    incomplete_reason = reason
+                    self._record_job_degradation(ctx, reason)
+                    ctx["dropped_unlocalizable"] += 1
+                    ctx["incomplete_reason"] = reason
                     continue
                 if reason in _TECHNICAL_REASONS:
                     sample = None
@@ -2033,8 +2326,8 @@ class EvidencePipeline:
                             ),
                             None,
                         )
-                    record_degradation(reason, sample)
-                    incomplete_reason = reason
+                    self._record_job_degradation(ctx, reason, sample)
+                    ctx["incomplete_reason"] = reason
                     continue
                 # Definitive strict-gate negatives (not_same_attribute_different_value,
                 # coexist_*, direction_invalid, bidirectional_*): the pair was
@@ -2128,7 +2421,7 @@ class EvidencePipeline:
             # surfaced counts notices actually created (deduped pairs were
             # already surfaced) — since A5 it is a result summary, not a gate.
             if outcome.get("outcome") == "created":
-                surfaced += 1
+                ctx["surfaced"] += 1
                 surfaced_peer_ids.add(int(peer_id))
             elif outcome.get("outcome") not in {"deduped"}:
                 # Second-round review: a ready pair whose notice could not be
@@ -2136,90 +2429,100 @@ class EvidencePipeline:
                 # unavailable / error) must not vanish silently — without this
                 # the run could report checked_no_notice while a real conflict
                 # was found and lost.
-                record_degradation("notice_write_failed")
-                incomplete_reason = "notice_write_failed"
+                self._record_job_degradation(ctx, "notice_write_failed")
+                ctx["incomplete_reason"] = "notice_write_failed"
         # 0.17.0 P2-4.2: budget/cap leftovers land in the backlog — bounded,
         # visible, never silently dropped (owner design #8). Stale/duplicate
         # keys report as enqueued here; eviction counts ride the store.
-        leftover_entries = [item for item in ordered if item[0] not in reached_pair]
-        sweep_evicted = 0
-        if leftover_entries:
-            backlogged, sweep_evicted = _enqueue_backlog(leftover_entries)
-        if surfaced:
+    def conflicts_finalize_receipt(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        """Q1 相分裂: merge the three phases' ctx state into the ONE job
+        receipt (shape-compatible with the pre-split contract — additive
+        keys only, and the zero case emits nothing new)."""
+        if ctx["surfaced"]:
             result: dict[str, Any] = {
-                "status": "completed", "outcome": "notices_created", "notices_created": surfaced,
+                "status": "completed", "outcome": "notices_created", "notices_created": ctx["surfaced"],
                 # 0.17.0: peers the evidence channel surfaced THIS run — the
-                # claims channel skips them (cross-channel single-report,
-                # plan appendix C-7 ruling: strongest evidence wins).
-                "surfaced_peers": sorted(surfaced_peer_ids),
+                # wrapper pops this internal key; channels B/C ride BEFORE the
+                # dispatch phase now and feed its skip set directly (Q1).
+                "surfaced_peers": sorted(ctx["surfaced_peer_ids"]),
             }
-            if internal_found:
-                result["internal_conflicts"] = internal_found
-            if incomplete_reason:
+            if ctx["internal_found"]:
+                result["internal_conflicts"] = ctx["internal_found"]
+            if ctx["incomplete_reason"]:
                 # Notices went out, but later pairs hit a truncation/degradation
                 # — surface it instead of a bare completed (second-round
                 # review): the caller would otherwise read a bounded, partial
                 # check as a full one.
                 result["truncated"] = True
-        elif incomplete_reason:
-            result = {"status": "incomplete", "reason": incomplete_reason, "notices_created": 0}
+        elif ctx["incomplete_reason"]:
+            result = {"status": "incomplete", "reason": ctx["incomplete_reason"], "notices_created": 0}
         else:
             result = {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
-        if internal_found and "internal_conflicts" not in result:
+        if ctx["internal_found"] and "internal_conflicts" not in result:
             # Internal findings survive a truncated cross-memory loop: they
             # were landed BEFORE the loop ran (E10① order guarantee).
-            result["internal_conflicts"] = internal_found
+            result["internal_conflicts"] = ctx["internal_found"]
         # 0.16.2 write-time pre-gate visibility (conditional — the unfiltered
         # zero case keeps the exact-shape response contract unchanged):
         # what the deterministic filters killed this run, and what the
         # unified internal Qwen flow confirmed/vetoed.
         filter_summary: dict[str, int] = {}
-        if no_difference_filtered:
-            filter_summary["no_difference_skipped"] = no_difference_filtered
+        if ctx["no_difference_filtered"]:
+            filter_summary["no_difference_skipped"] = ctx["no_difference_filtered"]
         # Gate-v2 G4 observability: the prefilter/coverage/band split (the
         # unfiltered zero case keeps the exact-shape response contract).
         gate_rows: dict[str, int] = {}
-        if memory_pairs_excluded:
-            gate_rows["memory_pairs_excluded"] = memory_pairs_excluded
-        if prefiltered_rows:
-            gate_rows["prefiltered_rows"] = prefiltered_rows
-        if rows_covered_by_claims:
-            gate_rows["rows_covered_by_claims"] = rows_covered_by_claims
-        if below_cos_floor:
-            gate_rows["below_cos_floor"] = below_cos_floor
-        if repeatability_skipped:
-            gate_rows["repeatability_skipped"] = repeatability_skipped
+        if ctx["memory_pairs_excluded"]:
+            gate_rows["memory_pairs_excluded"] = ctx["memory_pairs_excluded"]
+        if ctx["prefiltered_rows"]:
+            gate_rows["prefiltered_rows"] = ctx["prefiltered_rows"]
+        if ctx["rows_covered_by_claims"]:
+            gate_rows["rows_covered_by_claims"] = ctx["rows_covered_by_claims"]
+        if ctx["below_cos_floor"]:
+            gate_rows["below_cos_floor"] = ctx["below_cos_floor"]
+        if ctx["repeatability_skipped"]:
+            gate_rows["repeatability_skipped"] = ctx["repeatability_skipped"]
         if gate_rows:
             result["candidate_gates"] = gate_rows
         # INTERNAL key (popped by the job wrapper): the G5 clean neighbour
         # list, shared by channel C (claims×sentences) — never in receipts.
-        if allowed_memory_ids is not None:
-            result["_allowed_memory_ids"] = allowed_memory_ids
-        if internal_qwen_confirmed:
-            filter_summary["internal_qwen_confirmed"] = internal_qwen_confirmed
-        if internal_qwen_vetoed:
-            filter_summary["internal_qwen_vetoed"] = internal_qwen_vetoed
-        if dropped_unlocalizable:
+        if ctx["allowed_memory_ids"] is not None:
+            result["_allowed_memory_ids"] = ctx["allowed_memory_ids"]
+        if ctx["internal_qwen_confirmed"]:
+            filter_summary["internal_qwen_confirmed"] = ctx["internal_qwen_confirmed"]
+        if ctx["internal_qwen_vetoed"]:
+            filter_summary["internal_qwen_vetoed"] = ctx["internal_qwen_vetoed"]
+        if ctx["dropped_unlocalizable"]:
             # 0.17.0 P2-3.5 (owner ruling #9): dropped unlocalizable pairs are
             # never silent — the counter rides every completed receipt.
-            filter_summary["dropped_unlocalizable"] = dropped_unlocalizable
+            filter_summary["dropped_unlocalizable"] = ctx["dropped_unlocalizable"]
         if filter_summary:
             result["deterministic_filter"] = filter_summary
-        if backlogged:
+        if ctx["backlogged"]:
             # 0.17.0 P2-4.2: truncation leftovers went to the conflict
             # backlog instead of vanishing.
-            result["backlogged"] = backlogged
-        if sweep_evicted:
+            result["backlogged"] = ctx["backlogged"]
+        if ctx["sweep_evicted"]:
             # P2-4.3: cap evictions are visible, never silent.
-            result["backlog_evicted"] = sweep_evicted
-        if rows_mode:
+            result["backlog_evicted"] = ctx["sweep_evicted"]
+        if ctx["rows_mode"]:
             result["rows_mode"] = True
-            result["rows_examined"] = int(units_examined)
-        if reasons_seen:
+            result["rows_examined"] = int(ctx["units_examined"])
+        if ctx["reasons_seen"]:
             # Degradations may also occur on pairs before a later pair surfaces
             # a notice, so the list is attached to completed outcomes too.
-            result["reasons_seen"] = reasons_seen
+            result["reasons_seen"] = ctx["reasons_seen"]
         # 0.16.12 perf baseline: the examination budget actually consumed this
         # run (additive receipt key; also visible on completed write receipts).
-        result["pairs_examined"] = int(pairs_examined)
+        # Q1 (owner D1): 口径升级为 job 全局 — internal + channel C + A-cross
+        # 之和（数值上 = 旧口径 + C）。
+        result["pairs_examined"] = int(ctx["budget"].pairs_examined)
+        qwen_budget = ctx["budget"].receipt_block()
+        if qwen_budget is not None:
+            # Q1 §3.3 additive observability — absent entirely when nothing
+            # was deducted and nothing was skipped.
+            result["qwen_budget"] = qwen_budget
+        if ctx["direct_verdicts"]:
+            result["direct_verdicts"] = int(ctx["direct_verdicts"])
         return result
+

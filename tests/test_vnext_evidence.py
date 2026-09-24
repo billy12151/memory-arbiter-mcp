@@ -1101,7 +1101,8 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
 
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     first.pop("elapsed_ms", None)
-    for _row_key in ("rows_mode", "rows_examined", "claims_channel", "claims_channel_c"):
+    for _row_key in ("rows_mode", "rows_examined", "claims_channel", "claims_channel_c",
+                     "qwen_budget", "direct_verdicts"):  # Q1 additive receipt keys
         first.pop(_row_key, None)
     assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4, "pairs_examined": 0}
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
@@ -1112,7 +1113,8 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
 
     second = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     second.pop("elapsed_ms", None)
-    for _row_key in ("rows_mode", "rows_examined", "claims_channel", "claims_channel_c"):
+    for _row_key in ("rows_mode", "rows_examined", "claims_channel", "claims_channel_c",
+                     "qwen_budget", "direct_verdicts"):  # Q1 additive receipt keys
         second.pop(_row_key, None)
     assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 0}
     assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 4
@@ -1296,12 +1298,16 @@ def test_evidence_index_error_completes_exact_reserved_task(tmp_path: Path, monk
 
     def failing_job(memory_id, snapshot):
         # Simulates the job's index phase failing (C2: indexing lives in the
-        # semantic job now — the failure surface moved with it).
-        return {"status": "incomplete", "reason": "index_synthetic_failure",
-                "notices_created": 0}
+        # semantic job now — the failure surface moved with it). Q1 相分裂:
+        # the wrapper enters through the deterministic phase, so the failure
+        # stamps a terminal receipt on the job context.
+        ctx = tools._evidence._new_conflict_ctx(memory_id, snapshot)
+        ctx["terminal"] = {"status": "incomplete", "reason": "index_synthetic_failure",
+                           "notices_created": 0}
+        return ctx
 
     monkeypatch.setattr(
-        tools._evidence, "process_conflicts", failing_job,
+        tools._evidence, "conflicts_deterministic_phase", failing_job,
     )
     result = tools.memory_write(content="index me", subject="index failure", tags=[])
     check = result["data"]["semantic_conflict_check"]
@@ -2961,6 +2967,7 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
     result.pop("elapsed_ms", None)
     result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
+    result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1}
     # A clean model decision is not counted as check degradation.
     degradation = tools._semantic_status()["check_degradation"]
@@ -3004,6 +3011,7 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     result.pop("elapsed_ms", None)
     result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
+    result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1}
     assert deadlines == [None]  # single-direction: one extraction per pair
 
@@ -3057,6 +3065,7 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     result.pop("elapsed_ms", None)
     result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
+    result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     # 0.17.0 P2-3/P2-4: rows receipt keys + budget-skipped pairs backlog
     result.pop("rows_mode", None)
     result.pop("rows_examined", None)
