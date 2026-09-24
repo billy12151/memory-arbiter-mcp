@@ -32,7 +32,7 @@ RetrievalMode = Literal[
     "unavailable",       # SQLite not available
 ]
 
-from .constants import CONTENT_LIKE_CAP, COS_EXACT_BOOST, Isolation, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
+from .constants import CONTENT_LIKE_CAP, COS_EXACT_BOOST, COS_MIDBAND_CEIL, COS_RECALL_FLOOR, Isolation, KEYWORD_QUERY_MAX_TOKENS, KEYWORD_RESCUE_BOOST, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
 
 
 @dataclass
@@ -343,6 +343,68 @@ def _is_pure_cjk_token(token: str) -> bool:
     return is_pure_cjk_token(token)
 
 
+def _is_short_cjk_keyword(token: str) -> bool:
+    """检索线 K1：1~4 字、逐字符纯 CJK 的关键词 token（方案 §3a 判据）。
+
+    ``is_pure_cjk_token`` 只排除 ASCII 字母数字（标点/emoji 会漏过），
+    「纯 CJK」语义必须逐字符判定（R2-P1-1），前者仅作快速前置排除复用。
+    """
+    if not 1 <= len(token) <= 4:
+        return False
+    if not _is_pure_cjk_token(token):
+        return False
+    from .text import is_cjk_char
+    return all(is_cjk_char(ch) for ch in token)
+
+
+def is_keyword_query(query: str) -> bool:
+    """检索线 K1（owner 2026-09-24 拍板 1/8）：关键词模式判定——空格分隔、
+    ≥2 个 token、且全部 token 均为 1~4 字纯 CJK 短词（不加新参数，把
+    Agent 现有的「向量 唯一键 冲突」式用法升为一等查询形态）。
+
+    「向量 唯一键 冲突」「金营 智能配券 场景」「操作纪律 桥接脚本」→ True；
+    「网站备案手续办完了吗」（单长 token）、「deploy pipeline is green」
+    （非 CJK）、「发版 之前要跑哪些检查」（短词+长句混合）、「催收 侮辱，」
+    （标点 token）→ False。纯函数，无 IO。
+    """
+    tokens = (query or "").split()
+    if not 2 <= len(tokens) <= KEYWORD_QUERY_MAX_TOKENS:
+        return False
+    return all(_is_short_cjk_keyword(token) for token in tokens)
+
+
+def _apply_keyword_rescue(query: str, pool: list[dict[str, Any]]) -> None:
+    """检索线 K1：关键词模式查询的中间带救济（方案 §3b，in-place）。
+
+    owner 拍板 2 的「短名单 LIKE」形态：向量召回后的池内候选，best 行
+    真余弦落在 [COS_RECALL_FLOOR, COS_MIDBAND_CEIL) 中间带、且无词法
+    席位（``_lexical_rank`` 为 None 的 evidence-only 行）、content/
+    subject 含任一关键词时，融合分加 KEYWORD_RESCUE_BOOST（×300 →
+    final +3.0，置于 _soft_rerank 之前自然上浮）。content 在池行里
+    现成（SELECT * 进池），``in`` 子串匹配无通配语义；真余弦缺失
+    （向量未发布/拉取失败）不救济。纯内存操作，零新增 SQL。
+    """
+    if not is_keyword_query(query):
+        return
+    keywords = query.split()
+    for row in pool:
+        cos = row.get("_evidence_best_score")
+        if cos is None:
+            continue
+        cos = float(cos)
+        if not COS_RECALL_FLOOR <= cos < COS_MIDBAND_CEIL:
+            continue
+        if row.get("_lexical_rank") is not None:
+            continue
+        content = row.get("content") or ""
+        subject = row.get("subject") or ""
+        if any(keyword in content or keyword in subject for keyword in keywords):
+            row["_keyword_rescued"] = True
+            row["_fusion_score"] = (
+                float(row.get("_fusion_score") or 0.0) + KEYWORD_RESCUE_BOOST
+            )
+
+
 def _score_tags_surface(
     query: str,
     tags_list: list[str],
@@ -534,6 +596,10 @@ def _soft_rerank(
             if match_reason == "subject_or_tag_match":
                 match_reason = "evidence_vec_recall"
             notes.append("local-text evidence recall candidate (vNext)")
+        if rec.get("_keyword_rescued"):
+            notes.append(
+                "keyword rescue: midband evidence-only row with keyword hit"
+            )
 
         rec_copy = dict(rec)
         rec_copy["_final_score"] = final_score
@@ -886,6 +952,11 @@ def _wide_recall(
                     for key in (
                         "_vec_candidate", "_evidence_vec_candidate",
                         "_evidence_rank", "_evidence_hits", "id",
+                        # K1: 真余弦必须活过重建——G2 的余弦精确席与检索线
+                        # 的中间带救济都消费它，而 evidence-only 行（两者
+                        # 的目标人群）此前在这里被整体洗掉（先在缺陷：
+                        # 既有 G2 余弦用例碰巧是双通道行才一直绿着）。
+                        "_evidence_best_score",
                     )
                     if key in pool[mid]
                 }
@@ -1294,6 +1365,9 @@ def search_memories(
                 ws_canonical, pool_canonicals,
             )
 
+    # 检索线 K1：关键词模式查询的中间带救济（方案 §3b）——池内内存
+    # 操作，先于 _soft_rerank 生效；非关键词查询零成本直返。
+    _apply_keyword_rescue(query, pool)
     reranked = _soft_rerank(
         query, pool,
         ws_canonical=ws_canonical, isolation=isolation,

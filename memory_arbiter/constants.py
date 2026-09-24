@@ -163,6 +163,27 @@ COS_EXACT_BOOST = 0.98
 # batched IN query per collection loop.
 SEMANTIC_CANDIDATE_COS_FLOOR = 0.60
 SEMANTIC_CANDIDATE_COS_CEIL = COS_EXACT_BOOST
+# 检索线档位（0.17.0 追加包 K1/K2：关键词模式查询+召回余弦档位，方案
+# docs/mema-keyword-query-and-cos-bands-2026-09-24.md §1/§4；owner
+# 2026-09-24 拍板。与检测线的 SEMANTIC_CANDIDATE_COS_* 用途不同、各自
+# 标定，禁止共用）。
+COS_RECALL_FLOOR = 0.52
+# 向量结果准入线：evidence-only 候选（无词法席位）的 best 行真余弦低于
+# 此线不进结果（K2；仅 active 查询路径，expired 审计豁免沿 8.25 口径）。
+# 0.58 档实测会删掉 A04(0.567)/A12(0.543) 两条已在 top10 内的 relevant
+# （R@10 0.889 击穿 ≥0.93 门）；0.52 由 owner 拍板留余量，三条贴线
+# relevant（0.543/0.554/0.567）全保留。换嵌入模型或语料扩版必须重标。
+COS_MIDBAND_CEIL = 0.75
+# 中间带上界（relevant p75=0.769 / borderline p75=0.678 / irrelevant
+# 长尾 0.794 的重叠区右缘）；[COS_RECALL_FLOOR, COS_MIDBAND_CEIL) 是
+# 关键词救济带，不随准入线变动。
+KEYWORD_QUERY_MAX_TOKENS = 8
+# 关键词模式 token 数上限（防超长枚举查询；超限按非关键词查询处理）。
+KEYWORD_RESCUE_BOOST = 0.01
+# 中间带救济融合分加值：×_RRF_SCORE_WEIGHT(300) → final +3.0 分，排在
+# 词法 strong(10)/medium(6) 命中之下、weak(2.0) 与纯向量 floor 之上。
+# 初始值，K3 全量 AB 标定：过强（越过词法 strong/medium）或过弱（名次
+# 不动）按 0.005 步进调（方案 §6 BOOST 标定门）。
 # Gate-v2 G5 title coarse-screen width (方案: 30-50 条记忆, 初值 30-50,
 # 宽不罚——后续层会筛; 窄才漏). One subject-row KNN per write.
 SEMANTIC_NEIGHBOR_SCREEN = 50
