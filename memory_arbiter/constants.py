@@ -184,6 +184,13 @@ KEYWORD_RESCUE_BOOST = 0.01
 # 词法 strong(10)/medium(6) 命中之下、weak(2.0) 与纯向量 floor 之上。
 # 初始值，K3 全量 AB 标定：过强（越过词法 strong/medium）或过弱（名次
 # 不动）按 0.005 步进调（方案 §6 BOOST 标定门）。
+KEYWORD_RESCUE_DF_MAX = 5
+# 救济匹配形态的区分度闸（K3 实施标定，待 owner 追认）：形态在池内
+# 中间带 evidence-only 行命中 >5 即视为话题词不救济。r3 探针实测
+# （B07/C07/C08/D01/D02/D04/K03 七池命中数）给出干净分离带——
+# 探针词：桥接 5 / 纪律 2 / 做法 1；话题词：脚本 8 / 计划 8 / 评估 10 /
+# 预算 12 / 操作 17 / 场景 20 / 数据 38 / 安全 18 / 上限 15。无闸时
+# （r2）通用词把 C07/C08/D01/D02 负例 0→8~10、误召回 2→18。
 # Gate-v2 G5 title coarse-screen width (方案: 30-50 条记忆, 初值 30-50,
 # 宽不罚——后续层会筛; 窄才漏). One subject-row KNN per write.
 SEMANTIC_NEIGHBOR_SCREEN = 50

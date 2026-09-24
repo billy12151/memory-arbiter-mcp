@@ -32,7 +32,7 @@ RetrievalMode = Literal[
     "unavailable",       # SQLite not available
 ]
 
-from .constants import CONTENT_LIKE_CAP, COS_EXACT_BOOST, COS_MIDBAND_CEIL, COS_RECALL_FLOOR, Isolation, KEYWORD_QUERY_MAX_TOKENS, KEYWORD_RESCUE_BOOST, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
+from .constants import CONTENT_LIKE_CAP, COS_EXACT_BOOST, COS_MIDBAND_CEIL, COS_RECALL_FLOOR, Isolation, KEYWORD_QUERY_MAX_TOKENS, KEYWORD_RESCUE_BOOST, KEYWORD_RESCUE_DF_MAX, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
 
 
 @dataclass
@@ -379,26 +379,49 @@ def _apply_keyword_rescue(query: str, pool: list[dict[str, Any]]) -> None:
     owner 拍板 2 的「短名单 LIKE」形态：向量召回后的池内候选，best 行
     真余弦落在 [COS_RECALL_FLOOR, COS_MIDBAND_CEIL) 中间带、且无词法
     席位（``_lexical_rank`` 为 None 的 evidence-only 行）、content/
-    subject 含任一关键词时，融合分加 KEYWORD_RESCUE_BOOST（×300 →
-    final +3.0，置于 _soft_rerank 之前自然上浮）。content 在池行里
-    现成（SELECT * 进池），``in`` 子串匹配无通配语义；真余弦缺失
-    （向量未发布/拉取失败）不救济。纯内存操作，零新增 SQL。
+    subject 含任一关键词（**整 token 子串，不切词**——owner 2026-09-24
+    追加拍板：B07 门实测连写词救不到，结论是「查不到说明查询的关键词
+    不对」，不做强行匹配；曾试过 4 字切前2+后2，r2 误召回 2→18，已撤）
+    时，融合分加 KEYWORD_RESCUE_BOOST（×300 → final +3.0，置于
+    _soft_rerank 之前自然上浮）。content 在池行里现成（SELECT * 进池），
+    ``in`` 子串匹配无通配语义；真余弦缺失（向量未发布/拉取失败）不
+    救济。纯内存操作，零新增 SQL。
     """
     if not is_keyword_query(query):
         return
-    keywords = query.split()
-    for row in pool:
-        cos = row.get("_evidence_best_score")
-        if cos is None:
-            continue
-        cos = float(cos)
-        if not COS_RECALL_FLOOR <= cos < COS_MIDBAND_CEIL:
-            continue
-        if row.get("_lexical_rank") is not None:
-            continue
+    variants: list[str] = []
+    for keyword in query.split():
+        if keyword not in variants:
+            variants.append(keyword)
+    # K3 实施标定：区分度闸——关键词在池内合格行（中间带 evidence-only）
+    # 命中超过 KEYWORD_RESCUE_DF_MAX 即视为话题词而非探针词，该词整体
+    # 不救济（「做法」「预算」类通用词的护栏；七池探针实测分离带见
+    # constants.py 注释）。误召回本身可接受（owner 口径：关键看误召回
+    # 是否排在相关结果之后），闸只压话题词的整池抬升。
+    eligible = [
+        row
+        for row in pool
+        if row.get("_evidence_best_score") is not None
+        and COS_RECALL_FLOOR
+        <= float(row["_evidence_best_score"]) < COS_MIDBAND_CEIL
+        and row.get("_lexical_rank") is None
+    ]
+    active: list[str] = []
+    for form in variants:
+        hits = sum(
+            1
+            for row in eligible
+            if form in (row.get("content") or "")
+            or form in (row.get("subject") or "")
+        )
+        if 0 < hits <= KEYWORD_RESCUE_DF_MAX:
+            active.append(form)
+    if not active:
+        return
+    for row in eligible:
         content = row.get("content") or ""
         subject = row.get("subject") or ""
-        if any(keyword in content or keyword in subject for keyword in keywords):
+        if any(form in content or form in subject for form in active):
             row["_keyword_rescued"] = True
             row["_fusion_score"] = (
                 float(row.get("_fusion_score") or 0.0) + KEYWORD_RESCUE_BOOST

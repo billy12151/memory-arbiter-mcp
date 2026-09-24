@@ -140,6 +140,19 @@ def test_non_keyword_query_never_rescues() -> None:
     assert "_keyword_rescued" not in pool[0]
 
 
+def test_four_char_token_matches_whole_only() -> None:
+    """owner 2026-09-24 追加拍板：4 字 token 整词匹配、不切词——查不到
+    说明查询关键词不对，不强行匹配。目标内容只有「桥接」没有连写的
+    「桥接脚本」时不救（B07 原查询形态即此结果）；内容含整词才救。"""
+    pool = [
+        _row(1, 0.65, content="飞天小虾私有桥接通道自检"),   # 只有「桥接」无「桥接脚本」
+        _row(2, 0.65, content="私有桥接脚本自检说明"),       # 含整词「桥接脚本」
+    ]
+    _apply_keyword_rescue("操作纪律 桥接脚本", pool)
+    assert "_keyword_rescued" not in pool[0]
+    assert pool[1].get("_keyword_rescued") is True
+
+
 def test_rescued_row_floats_above_same_fusion_peer_in_soft_rerank() -> None:
     """BOOST 生效方向：同融合分的两行，被救济者 final 分高 3.0。"""
     rescued = _row(1, 0.65, content="含桥接", fusion=0.0164, subject="记录甲")
