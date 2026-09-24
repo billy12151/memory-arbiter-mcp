@@ -7,8 +7,14 @@
 ## 快速跑
 
 ```bash
-# 全量三套件（recall+similarity 共库无 Qwen ≈5min；conflict 独立库开 Qwen ≈8min）
+# 全量三套件（recall+similarity 共库无 Qwen；conflict 独立库开 Qwen）
 .venv/bin/python eval/runner.py --suite all --label <标签>
+
+# 提速（owner 2026-09-24）：两库道进程并行 + 缩短写响应同步窗。
+# 同步窗只影响 sync/async 诊断拆分（gate 已排除该单项与 env.*），行为指标
+# （identified/miss/recall/precision）与逐对 wait_task 异步采集完全不变。
+.venv/bin/python eval/runner.py --suite all --label <标签> \
+    --parallel --conflict-sync-wait-ms 100
 
 # 只跑召回+自召回 / 只跑相似 / 只跑冲突
 .venv/bin/python eval/runner.py --suite recall --label <标签>

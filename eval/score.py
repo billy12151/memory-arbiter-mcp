@@ -783,6 +783,10 @@ def gate(
             (".count", ".total", ".n", "first_relevant_rank")
         ):
             continue
+        if key.startswith("env."):
+            # 提速批（mema #1066）：env 是环境元数据（语料计数/同步窗/模型
+            # 路径 sha）——同步窗等运行配置正当可调，绝不进行为相对门。
+            continue
         if any(key.endswith(meta) for meta in _GATE_META_KEYS):
             continue
         if any(key.endswith(meta) for meta in _GATE_SPLIT_KEYS):

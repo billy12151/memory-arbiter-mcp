@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
@@ -104,6 +105,7 @@ def temp_library(
     embed_model: Path | None,
     keep_db: Path | None = None,
     qwen_model: Path | None = None,
+    sync_wait_ms: int | None = None,
 ) -> Iterator[MemoryTools]:
     """临时库生命周期：建库 → 起 workers → yield → drain + shutdown → 销毁."""
     import tempfile
@@ -111,6 +113,12 @@ def temp_library(
     workdir = Path(tempfile.mkdtemp(prefix="mema-eval-"))
     settings = build_settings(workdir, embed_model, qwen_model)
     tools = MemoryTools(settings, MemoryDB(settings))
+    if sync_wait_ms is not None:
+        # harness 提速（owner 2026-09-24）：写响应的 notice 同步等待窗只
+        # 影响 sync/async 诊断拆分（gate 已排除 .sync.rate/.async.rate 单项，
+        # cand2 拍板：行为指标=identified/miss/recall/precision）。套件对每个
+        # 右成员 wait_task 等 job 完成后再写下一对，异步采集不受窗口影响。
+        tools.settings.semantic_conflict_notice_sync_wait_ms = max(0, int(sync_wait_ms))
     tools.start_evidence_worker()
     tools.start_semantic_worker()
     try:
@@ -661,6 +669,42 @@ def default_qwen_model() -> Path | None:
         return None
 
 
+def _spawn_conflict_child(
+    args: "argparse.Namespace", embed_model: Path, qwen_model: Path,
+) -> "subprocess.Popen":
+    """--parallel（owner 2026-09-24 提速）：conflict 库道拆独立子进程。
+
+    两条库道（recall+similarity / conflict）本就是互不相干的临时库——
+    进程级并行零共享状态；子进程 stdout/stderr 直通父进程，失败由
+    _collect_conflict_child 以退出码大声报错。"""
+    child_label = f"{args.label}__lane-conflict"
+    cmd = [
+        sys.executable, str(Path(__file__).resolve()),
+        "--suite", "conflict", "--label", child_label, "--out", str(args.out),
+        "--embed-model", str(embed_model), "--qwen-model", str(qwen_model),
+        "--conflict-sync-wait-ms", str(
+            NOTICE_SYNC_WAIT_MS
+            if args.conflict_sync_wait_ms is None
+            else int(args.conflict_sync_wait_ms)
+        ),
+    ]
+    if args.keep_db:
+        cmd += ["--keep-db", str(args.keep_db)]
+    return subprocess.Popen(cmd)
+
+
+def _collect_conflict_child(
+    child: "subprocess.Popen", args: "argparse.Namespace",
+) -> "tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]":
+    """等子进程收两套件行集；部分 raw 已并入父 raw，删掉防 results 目录堆积。"""
+    if child.wait() != 0:
+        raise SystemExit(f"[parallel] conflict lane child exited {child.returncode}")
+    child_path = args.out / f"conflict-{args.label}__lane-conflict.json"
+    child_raw = json.loads(child_path.read_text(encoding="utf-8"))
+    child_path.unlink()
+    return child_raw.get("conflict"), child_raw.get("conflict_claims")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -682,6 +726,24 @@ def main() -> int:
     parser.add_argument("--label", default="run", help="产物文件名标签")
     parser.add_argument(
         "--keep-db", type=Path, default=None, help="调试：保留临时库副本到该目录"
+    )
+    parser.add_argument(
+        "--conflict-sync-wait-ms",
+        type=int,
+        default=None,
+        help=(
+            "冲突套件写响应 notice 同步等待窗（默认=库默认 3000）。调小只改变 "
+            "sync/async 诊断拆分（gate 已排除），identified/miss/recall 行为指标不变；"
+            "套件逐对 wait_task 等 job 完成，异步采集不受影响"
+        ),
+    )
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help=(
+            "suite=all 时把 conflict 库道拆到子进程，与 recall+similarity 库道"
+            "并行（两条临时库本就完全隔离）；两道结果合并为一份 raw"
+        ),
     )
     args = parser.parse_args()
 
@@ -721,6 +783,19 @@ def main() -> int:
     batch_consistency: dict[str, Any] | None = None
     similarity: dict[str, Any] | None = None
     replay_perf: list[dict[str, Any]] | None = None
+    conflict: list[dict[str, Any]] | None = None
+    conflict_claims: list[dict[str, Any]] | None = None
+    # --parallel（owner 2026-09-24 提速）：conflict 库道（独立临时库+Qwen）
+    # 先拆子进程起跑，再在本进程跑 recall+similarity 库道（独立临时库+嵌入）。
+    conflict_child: "subprocess.Popen | None" = None
+    conflict_sync_wait_ms = (
+        NOTICE_SYNC_WAIT_MS
+        if args.conflict_sync_wait_ms is None
+        else max(0, int(args.conflict_sync_wait_ms))
+    )
+    if want_conflict and args.suite == "all" and args.parallel:
+        print("[parallel] conflict lane -> child process")
+        conflict_child = _spawn_conflict_child(args, embed_model, qwen_model)
     if want_recall or want_similarity:
         suite_start = time.monotonic()
         with temp_library(embed_model, keep_db=args.keep_db) as tools:
@@ -747,28 +822,39 @@ def main() -> int:
         print(
             f"[timer] recall+similarity suite {time.monotonic() - suite_start:.0f}s total (replay+index+queries inside)"
         )
-    conflict: list[dict[str, Any]] | None = None
-    conflict_claims: list[dict[str, Any]] | None = None
     if want_conflict:
         suite_start = time.monotonic()
-        # 0.16.12 P0-T2：常规对集 + 中大型 large_unit 对集合并执行
-        # 0.17.0 P2-0.1：+ noisy 真实噪音对集（250-600 字长段落，诱饵/中文时长/表格）
-        conflict_pairs = _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
-        conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
-        conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_noisy.jsonl")
-        with temp_library(embed_model, qwen_model=qwen_model) as tools:
-            conflict = run_conflict_suite(tools, conflict_pairs)
-        # Gate-v2 G7b: the claims corpus (B/C channels) runs in the SAME
-        # library pass — B pairs exercise the deterministic claims×claims
-        # channel, C pairs the claims×sentence KNN channel.
-        claims_pairs = _load_claims_pairs()
-        if claims_pairs:
-            with temp_library(embed_model, qwen_model=qwen_model) as tools:
-                conflict_claims = run_conflict_suite(tools, claims_pairs)
-        print(
-            f"[timer] conflict suite {time.monotonic() - suite_start:.0f}s "
-            f"({len(conflict_pairs)} pairs, 3s sync window + Qwen)"
-        )
+        if conflict_child is not None:
+            conflict, conflict_claims = _collect_conflict_child(conflict_child, args)
+            print(
+                f"[timer] conflict lane (child) {time.monotonic() - suite_start:.0f}s "
+                f"wait+merge ({len(conflict or [])} sentence rows, "
+                f"{len(conflict_claims or [])} claims rows)"
+            )
+        else:
+            # 0.16.12 P0-T2：常规对集 + 中大型 large_unit 对集合并执行
+            # 0.17.0 P2-0.1：+ noisy 真实噪音对集（250-600 字长段落，诱饵/中文时长/表格）
+            conflict_pairs = _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
+            conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
+            conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_noisy.jsonl")
+            with temp_library(
+                embed_model, qwen_model=qwen_model, sync_wait_ms=conflict_sync_wait_ms,
+            ) as tools:
+                conflict = run_conflict_suite(tools, conflict_pairs)
+            # Gate-v2 G7b: the claims corpus (B/C channels) runs in the SAME
+            # library pass — B pairs exercise the deterministic claims×claims
+            # channel, C pairs the claims×sentence KNN channel.
+            claims_pairs = _load_claims_pairs()
+            if claims_pairs:
+                with temp_library(
+                    embed_model, qwen_model=qwen_model, sync_wait_ms=conflict_sync_wait_ms,
+                ) as tools:
+                    conflict_claims = run_conflict_suite(tools, claims_pairs)
+            print(
+                f"[timer] conflict suite {time.monotonic() - suite_start:.0f}s "
+                f"({len(conflict_pairs)} pairs, "
+                f"{conflict_sync_wait_ms}ms sync window + Qwen)"
+            )
 
     raw = {
         "suite": args.suite,
@@ -783,7 +869,9 @@ def main() -> int:
             "targets": len(targets),
             "distractors": len(distractors),
             "semantic_conflict_enabled": want_conflict,
-            "conflict_sync_wait_ms": NOTICE_SYNC_WAIT_MS,
+            # 提速旗标如实入 env：调小时 sync/async 诊断拆分变化（gate 已排除
+            # .sync.rate/.async.rate 与 env.*），行为指标不变
+            "conflict_sync_wait_ms": conflict_sync_wait_ms,
             # 0.16.12 P0-T2 起冲突对集= pairs.jsonl + pairs_large.jsonl；
             # 0.17.0 P2-0.1 起再加 pairs_noisy.jsonl；
             # 语料变更必须 bump 此版本号并重建基线（第一轮 review finding）

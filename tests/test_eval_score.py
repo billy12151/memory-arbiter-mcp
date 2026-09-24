@@ -278,3 +278,19 @@ def test_gate_excludes_diagnostic_blocks() -> None:
         f["metric"].startswith("conflict_comprehensive.recall")
         for f in result["failures"]
     )
+
+
+def test_gate_excludes_env_metadata() -> None:
+    """提速批（mema #1066）：env 是环境元数据——同步窗等运行配置正当可调
+    （--conflict-sync-wait-ms），不进行为相对门；行为键真跌仍拦。"""
+    baseline = {
+        "env": {"conflict_sync_wait_ms": 3000.0, "targets": 98.0},
+        "recall": {"recall_at_10": {"rate": 0.9}},
+    }
+    current = {
+        "env": {"conflict_sync_wait_ms": 100.0, "targets": 98.0},
+        "recall": {"recall_at_10": {"rate": 0.9}},
+    }
+    assert score.gate(current, baseline, 0.1)["gate"] == "PASSED"
+    current["recall"]["recall_at_10"]["rate"] = 0.5
+    assert score.gate(current, baseline, 0.1)["gate"] == "FAILED"
