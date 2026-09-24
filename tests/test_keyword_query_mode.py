@@ -153,6 +153,20 @@ def test_four_char_token_matches_whole_only() -> None:
     assert pool[1].get("_keyword_rescued") is True
 
 
+def test_rescue_df_cap_blocks_topic_words() -> None:
+    """K3b 区分度闸（R2-P1-1 补钉）：合格行命中 > KEYWORD_RESCUE_DF_MAX(5)
+    的词视为话题词整体不救济；恰 5 条（探针词「桥接」实测值）仍在闸内；
+    命中 0 的词不连坐其它词。"""
+    # 6 条命中 → 超闸 → 全体不救
+    pool = [_row(i, 0.65, content=f"做法说明变体{i}") for i in range(6)]
+    _apply_keyword_rescue("红烧肉 做法", pool)
+    assert all("_keyword_rescued" not in row for row in pool)
+    # 恰 5 条命中 → 闸内 → 救济生效；0 命中的「红烧肉」不影响「做法」激活
+    pool2 = [_row(i, 0.65, content=f"做法说明变体{i}") for i in range(5)]
+    _apply_keyword_rescue("红烧肉 做法", pool2)
+    assert all(row.get("_keyword_rescued") is True for row in pool2)
+
+
 def test_rescued_row_floats_above_same_fusion_peer_in_soft_rerank() -> None:
     """BOOST 生效方向：同融合分的两行，被救济者 final 分高 3.0。"""
     rescued = _row(1, 0.65, content="含桥接", fusion=0.0164, subject="记录甲")

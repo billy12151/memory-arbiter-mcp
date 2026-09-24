@@ -592,7 +592,10 @@ _SIM_FALSE_LABELS = ("clearly_different", "opposite_semantics", "same_entity_dif
 # 0.17.0 校准轮：conflict 的 noise 标签 firing 同为假阳性（半秒 bug 时代曾
 # 3/27 sync），gate 方向必须 lower-is-better——首轮对比曾把 3→2 的改善误判 FAILED。
 _CONFLICT_FALSE_LABELS = ("noise",)
-_GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target")
+_GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target",
+                   # 检索线 K3（R2-P2-3）：语料元数据不是行为指标——同语料
+                   # 内恒定，不进相对门（corpus bump 由 corpus_version 前置校验拦）
+                   ".queries", ".batches")
 # 0.17.0 cand2：sync/async 单项是 3 秒窗与 job 延迟的划分产物（行级化后 job
 # 变慢、更多对跨窗补上≠行为回归）；行为指标=identified/miss/precision/recall。
 _GATE_SPLIT_KEYS = (".sync.rate", ".async.rate")
@@ -752,6 +755,7 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
             lines.append(
                 f"- 关键词模式（{kb['queries']} 题）题级 top10 命中 = **{kb['query_top10_hit_rate']}** · "
                 f"R@10 = {kb['recall_at_10']['rate']}（target 级） · MRR = {kb['mrr']['value']}"
+                "（K 组每题单 target，双口径当前恒等）"
             )
             for band, row in (kb.get("by_band") or {}).items():
                 lines.append(

@@ -43,7 +43,11 @@ class _FloorEmbedder:
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars: "int | None" = None) -> EmbedResult:
         text = f"{prefix} {body}".casefold()
-        if "新潮" in text:
+        if "贴线" in text:
+            # 0.52 整值在 float64 归一后落 0.51998（线下），取 0.5205
+            # 线上样本与 0.4 线下样本夹出开边界（R2-P2-7）
+            vector = _unit([0.5205, 0.8538])   # 真余弦 ≈0.5205 > 0.52
+        elif "新潮" in text:
             vector = _unit([0.4, 0.9165])   # 真余弦 ≈0.4 < 0.52
         elif "alpha" in text:
             vector = [1.0, 0.0]
@@ -104,6 +108,15 @@ def _pool(tools: MemoryTools, query: str, *, status_filter: str = "active",
             pool_cap=RECALL_POOL_CAP,
         )
     }
+
+
+def test_floor_just_above_line_is_kept(tmp_path: Path) -> None:
+    """线上（≈0.5205）保留、线下（0.4）删除——开边界被夹在两者之间
+    （0.52 整值 float64 归一后落 0.51998，精确贴线不可稳定表示）。"""
+    tools = _make_tools(tmp_path)
+    boundary = _write_and_index(tools, "贴线主题记录", "贴线方案说明")
+    pool = _pool(tools, "alpha query")
+    assert boundary in pool
 
 
 def test_subfloor_evidence_only_row_is_dropped(tmp_path: Path) -> None:

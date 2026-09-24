@@ -344,10 +344,11 @@ def _is_pure_cjk_token(token: str) -> bool:
 
 
 def _is_short_cjk_keyword(token: str) -> bool:
-    """检索线 K1：1~4 字、逐字符纯 CJK 的关键词 token（方案 §3a 判据）。
+    """检索线 K1：1~4 字、逐字符 CJK 的关键词 token（方案 §3a 判据）。
 
-    ``is_pure_cjk_token`` 只排除 ASCII 字母数字（标点/emoji 会漏过），
-    「纯 CJK」语义必须逐字符判定（R2-P1-1），前者仅作快速前置排除复用。
+    「纯 CJK」按 CJK_RE_SEARCH 口径（text.py：含假名/谚文，BMP 外
+    CJK 扩展不含——R2-P2-4 澄清）；``is_pure_cjk_token`` 只排除 ASCII
+    字母数字（标点/emoji 会漏过），仅作快速前置排除复用。
     """
     if not 1 <= len(token) <= 4:
         return False
