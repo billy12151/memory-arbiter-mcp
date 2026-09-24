@@ -76,3 +76,45 @@ def test_capped_at_10_matches_classic_when_no_r_gt_10() -> None:
     result = _recall_with_labels(labels, queries)
     assert result["recall_at_10"] == result["recall_at_10_capped"]
     assert result["recall_at_10"]["rate"] == round(2 / 3, 4)
+
+
+def test_keyword_bucket_query_and_band_splits() -> None:
+    """K3：keyword 分桶——题级命中率与 target 级微平均双口径 + band 子桶."""
+    labels = [
+        {"qid": "K01", "fixture_key": "t-k1", "label": "relevant"},
+        {"qid": "K02", "fixture_key": "t-k2", "label": "relevant"},
+        {"qid": "K03", "fixture_key": "t-k3", "label": "relevant"},
+    ]
+    queries = [
+        # midband：target 进 top5（双口径全命中）
+        {"qid": "K01", "kind": "keyword", "expected_band": "midband",
+         "hits": [{"fixture_key": "t-k1"}, {"fixture_key": "noise"}]},
+        # midband：target 只进 top10（题级 top10 命中 1、top5 命中 0；
+        # target 级 R@5=0、R@10=1）
+        {"qid": "K02", "kind": "keyword", "expected_band": "midband",
+         "hits": [{"fixture_key": "n"}] * 5 + [{"fixture_key": "t-k2"}]},
+        # above：miss（题级 0）
+        {"qid": "K03", "kind": "keyword", "expected_band": "above",
+         "hits": [{"fixture_key": "n"}] * 10},
+        # 非 keyword 题不进 K 桶
+        {"qid": "A01", "kind": "paraphrase", "hits": [{"fixture_key": "t-k1"}]},
+    ]
+    result = _recall_with_labels(labels, queries)
+    bucket = result["keyword_bucket"]
+    assert bucket["queries"] == 3
+    assert bucket["query_top10_hit_rate"] == round(2 / 3, 4)   # K03 miss
+    assert bucket["query_top5_hit_rate"] == round(1 / 3, 4)    # 仅 K01
+    assert bucket["recall_at_10"]["rate"] == round(2 / 3, 4)   # target 级
+    assert bucket["by_band"]["midband"]["queries"] == 2
+    assert bucket["by_band"]["midband"]["query_top10_hit_rate"] == 1.0
+    assert bucket["by_band"]["midband"]["query_top5_hit_rate"] == 0.5
+    assert bucket["by_band"]["above"]["query_top10_hit_rate"] == 0.0
+
+
+def test_gate_rejects_recall_corpus_mismatch() -> None:
+    """K3（R2-P1-9）：recall corpus_version 不一致拒绝跨语料对比."""
+    current = {"corpus_version": "recall-v2-kw", "recall": {}}
+    baseline = {"corpus_version": "recall-v1", "recall": {}}
+    result = score.gate(current, baseline)
+    assert result["gate"] == "FAILED"
+    assert result["failures"][0]["direction"] == "corpus_mismatch"

@@ -22,15 +22,21 @@ def _load(name: str) -> list[dict]:
     ]
 
 
-def test_queries_cover_34_with_expected_kinds() -> None:
+def test_queries_cover_47_with_expected_kinds() -> None:
     data = json.loads((FIXTURES / "queries.json").read_text(encoding="utf-8"))
     queries = data["queries"]
-    assert data["corpus_version"] == "recall-v1"
-    assert len(queries) == 34
+    # 检索线 K3：corpus bump recall-v2-kw——原 34 题（问句/混合形态）保留
+    # 作回归基线，+K01~K13 关键词模式专属考题（expected_band 实测定档）
+    assert data["corpus_version"] == "recall-v2-kw"
+    assert len(queries) == 47
     kinds: dict[str, int] = {}
     for row in queries:
         kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
-    assert kinds == {"paraphrase": 12, "lookup": 10, "legal": 8, "far": 4}
+    assert kinds == {"paraphrase": 12, "lookup": 10, "legal": 8, "far": 4, "keyword": 13}
+    bands = {row["qid"]: row.get("expected_band") for row in queries if row["kind"] == "keyword"}
+    assert set(bands.values()) == {"midband", "above"}
+    assert list(bands.values()).count("midband") >= 5
+    assert list(bands.values()).count("above") >= 3
 
 
 def test_targets_content_addressed_and_unique() -> None:
@@ -50,8 +56,9 @@ def test_labels_reference_existing_targets_only() -> None:
         assert row["label"] in {"relevant", "borderline"}, row
         assert row["fixture_key"] in known, row
     labeled_qids = {row["qid"] for row in labels}
-    # 当年口径：A/B 组 22 qid 有非无关标注；C/D 组 12 qid 未标=默认无关
-    assert len(labeled_qids) == 22
+    # 原 22 qid（A/B 组非无关标注）+ K 组 13 qid（relevant 目标）；
+    # C/D 组 12 qid 未标=默认无关
+    assert len(labeled_qids) == 35
 
 
 def test_distractors_exclude_twin_bucket_and_targets() -> None:
@@ -68,7 +75,7 @@ def test_manifest_matches_files() -> None:
     manifest = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["targets"] == len(_load("targets.jsonl"))
     assert manifest["distractors"] == len(_load("distractors.jsonl"))
-    assert manifest["labeled_qids"] == 22
+    assert manifest["labeled_qids"] == 35
 
 
 SIM_FIXTURES = REPO / "eval" / "fixtures" / "similarity"

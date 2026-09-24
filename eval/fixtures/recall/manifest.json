@@ -1,10 +1,11 @@
 {
-  "corpus_version": "recall-v1",
+  "corpus_version": "recall-v2-kw",
   "exported_at": "2026-09-16T03:16:54+00:00",
   "source_db": "/Users/zhangzhiwei17/.local/share/memory-arbiter/memory.sqlite3",
   "labels_source": "/Users/zhangzhiwei17/BillyProject/memory-arbiter-mcp/docs/eval/labels.jsonl",
   "targets": 98,
   "distractors": 200,
-  "labeled_qids": 22,
-  "unlabeled_qids_default_irrelevant": "C01-C08,D01-D04"
+  "labeled_qids": 35,
+  "unlabeled_qids_default_irrelevant": "C01-C08,D01-D04",
+  "k_group_note": "0.17.0 检索线：K01-K13 关键词模式专属考题（expected_band 实测定档，探针 eval/probe_keyword_bands.py）"
 }

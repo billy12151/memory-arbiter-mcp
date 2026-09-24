@@ -114,6 +114,12 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
             "total": len(self_recall),
             "rate": _pct(top10, len(self_recall)),
         }
+
+    # 检索线 K3：keyword 模式分桶（题级命中率与 target 级微平均双口径——
+    # 两口径可一过一炸，必须都出，R2-P1-8）；band 子桶按 queries 的
+    # expected_band（midband=救济带专考 / above=≥0.75 不误伤专考；
+    # subfloor 配额 owner 2026-09-24 拍板撤销）。
+    keyword_bucket = _score_keyword_bucket(queries, relevant_by_qid)
     return {
         "recall_at_5": {
             "hits": hit5,
@@ -145,8 +151,62 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
             "rate": _pct(false_pull_count, false_pull_returned),
         },
         "self_recall_top10": self_top10,
+        "keyword_bucket": keyword_bucket,
         "per_query": per_query,
     }
+
+
+def _score_keyword_bucket(
+    queries: list[dict[str, Any]],
+    relevant_by_qid: dict[str, set[str]],
+) -> dict[str, Any] | None:
+    k_queries = [query for query in queries if query.get("kind") == "keyword"]
+    if not k_queries:
+        return None
+
+    def _accumulate(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        hit5 = hit10 = total_rel = 0
+        rr_sum = 0.0
+        rr_count = 0
+        q_top5 = q_top10 = 0
+        for query in rows:
+            qid = query["qid"]
+            targets = relevant_by_qid.get(qid, set())
+            ranked = [hit["fixture_key"] for hit in query.get("hits") or []]
+            total_rel += len(targets)
+            hits_at_5 = len(targets & set(ranked[:5]))
+            hits_at_10 = len(targets & set(ranked[:10]))
+            hit5 += hits_at_5
+            hit10 += hits_at_10
+            first_rank = next(
+                (i + 1 for i, key in enumerate(ranked) if key in targets),
+                None,
+            )
+            if first_rank:
+                rr_sum += 1.0 / first_rank
+                rr_count += 1
+            q_top5 += int(hits_at_5 > 0)
+            q_top10 += int(hits_at_10 > 0)
+        return {
+            "queries": len(rows),
+            "query_top5_hit_rate": _pct(q_top5, len(rows)),
+            "query_top10_hit_rate": _pct(q_top10, len(rows)),
+            "recall_at_5": {"hits": hit5, "total": total_rel, "rate": _pct(hit5, total_rel)},
+            "recall_at_10": {"hits": hit10, "total": total_rel, "rate": _pct(hit10, total_rel)},
+            "mrr": {
+                "value": round(rr_sum / rr_count, 4) if rr_count else None,
+                "queries_with_target": rr_count,
+            },
+        }
+
+    bucket = _accumulate(k_queries)
+    by_band: dict[str, Any] = {}
+    for band in ("midband", "above"):
+        rows = [q for q in k_queries if q.get("expected_band") == band]
+        if rows:
+            by_band[band] = _accumulate(rows)
+    bucket["by_band"] = by_band
+    return bucket
 
 
 def score_similarity(raw: dict) -> dict[str, Any] | None:
@@ -328,11 +388,21 @@ def score_conflict_claims(raw: dict) -> dict[str, Any] | None:
 
 
 def score_all(raw: dict) -> dict[str, Any]:
+    consistency = raw.get("batch_find_consistency")
     return {
         "mema_version": raw.get("mema_version"),
         "corpus_version": raw.get("corpus_version"),
         "env": raw.get("env"),
         "recall": score_recall(raw),
+        "batch_find_consistency": (
+            {
+                "queries": consistency.get("queries"),
+                "batches": consistency.get("batches"),
+                "mismatch_count": consistency.get("mismatch_count"),
+            }
+            if consistency
+            else None
+        ),
         "similarity": score_similarity(raw),
         "conflict": score_conflict(raw),
         "conflict_claims": score_conflict_claims(raw),
@@ -543,6 +613,25 @@ def _lower_is_better(key: str) -> bool:
 def gate(
     current: dict, baseline: dict, rel_drop: float = DEFAULT_REL_DROP
 ) -> dict[str, Any]:
+    # 检索线 K3（R2-P1-9）：recall 语料版本不一致拒绝跨语料对比——
+    # corpus bump 后基线未重建会被静默当成回归/持平（corpus_version 是
+    # 字符串不进 _flatten，相对门看不见它）。
+    cur_corpus = current.get("corpus_version")
+    base_corpus = baseline.get("corpus_version")
+    if cur_corpus != base_corpus:
+        return {
+            "gate": "FAILED",
+            "rel_drop_threshold": rel_drop,
+            "failures": [
+                {
+                    "metric": "corpus_version",
+                    "direction": "corpus_mismatch",
+                    "baseline": base_corpus,
+                    "current": cur_corpus,
+                    "note": "recall 考卷语料版本不一致，拒绝跨语料对比；重建基线后重试",
+                }
+            ],
+        }
     # 0.16.12 第二轮对抗 review：跨语料对比会把不同分母的 rate 直接比较，
     # 既不报错也不可解释——两侧 env.conflict_corpus_version 必须都在位且一致。
     cur_corpus = (current.get("env") or {}).get("conflict_corpus_version")
@@ -658,6 +747,17 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
             lines.append(
                 f"- 自召回 top10 = **{sr['count']}/{sr['total']}**（{sr['rate']}）"
             )
+        kb = recall.get("keyword_bucket")
+        if kb:
+            lines.append(
+                f"- 关键词模式（{kb['queries']} 题）题级 top10 命中 = **{kb['query_top10_hit_rate']}** · "
+                f"R@10 = {kb['recall_at_10']['rate']}（target 级） · MRR = {kb['mrr']['value']}"
+            )
+            for band, row in (kb.get("by_band") or {}).items():
+                lines.append(
+                    f"  - {band}（{row['queries']} 题）：题级 top5 命中 **{row['query_top5_hit_rate']}** · "
+                    f"题级 top10 命中 {row['query_top10_hit_rate']} · R@5 = {row['recall_at_5']['rate']}"
+                )
         lines.append("")
     sim = scored.get("similarity")
     if sim:

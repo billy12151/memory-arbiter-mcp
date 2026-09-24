@@ -371,7 +371,11 @@ def build_runtime() -> ServerBundle:
         hit_spans appears only on query-recall pages — browse/filter pages
         carry none; hits whose evidence row lags the memory's current version
         are dropped with a stale_hit_spans marker plus a re-query warning),
-        "full" returns whole texts. Offsets are 0-based Unicode code-point
+        "full" returns whole texts. Space-separated short CJK words (each
+        <=4 chars, e.g. "向量 唯一键 冲突") are understood as keywords:
+        semantically close memories whose content/subject contains a keyword
+        rank higher (0.17.0; whole-word matching, generic words ignored).
+        Offsets are 0-based Unicode code-point
         offsets into the content as indexed for the item's version; the
         evidence index may lag right after an edit (see vector_lag). Score
         compares only within the page; if the top page misses, reword the

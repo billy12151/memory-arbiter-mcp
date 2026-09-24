@@ -217,7 +217,12 @@ def run_recall_queries(
     queries: list[dict],
     id_map: dict[str, int],
 ) -> list[dict[str, Any]]:
-    """34 条固定 query：采集排名/分数/耗时（judge 留给 scorers）."""
+    """34+K 条固定 query：采集排名/分数/耗时（judge 留给 scorers）.
+
+    K3：透传 expected_band（K 组 band 子桶）；逐 hit 附带
+    _evidence_best_score / _keyword_rescued（debug_ranking 在网，BOOST
+    标定与 band 复核的可观察对象）。
+    """
     reverse_map = {new_id: key for key, new_id in id_map.items()}
     collected: list[dict[str, Any]] = []
     for query in queries:
@@ -235,6 +240,8 @@ def run_recall_queries(
                     if row.get("score") is not None
                     else row.get("final_score"),
                     "final_score": row.get("_final_score"),
+                    "evidence_best": row.get("_evidence_best_score"),
+                    "rescued": bool(row.get("_keyword_rescued")),
                     "workspace": row.get("workspace"),
                 }
             )
@@ -243,6 +250,7 @@ def run_recall_queries(
                 "qid": query["qid"],
                 "kind": query["kind"],
                 "query": query["query"],
+                "expected_band": query.get("expected_band"),
                 "ok": outcome["ok"],
                 "elapsed_ms": outcome["elapsed_ms"],
                 "retrieval_mode": payload.get("mode") or payload.get("retrieval_mode"),
@@ -250,6 +258,64 @@ def run_recall_queries(
             }
         )
     return collected
+
+
+def run_batch_find_consistency(
+    tools: MemoryTools,
+    queries: list[dict],
+    id_map: dict[str, int],
+    find_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """K3：batch_find 通道一致性硬断言（钉「三入口同行为」）.
+
+    ≤8 题一批分批调用（MAX_BATCH_FIND_QUERIES=8 fail-fast 整批拒，
+    R2-P0-3）；deduplicate=False + limit_per_query=10 暴露逐题原始序
+    （与 find limit=10 对齐）；逐题 fixture_key 序列与 find 单查 top10
+    逐位比对，不一致 raise（零容忍——gate() 对基线为 0 的键必然跳过
+    （R2-P1-9），不能进相对门）。
+    """
+    from memory_arbiter.constants import MAX_BATCH_FIND_QUERIES
+
+    reverse_map = {new_id: key for key, new_id in id_map.items()}
+    find_by_qid = {row["qid"]: [h["fixture_key"] for h in row["hits"]] for row in find_results}
+    mismatches: list[dict[str, Any]] = []
+    batches = 0
+    for start in range(0, len(queries), MAX_BATCH_FIND_QUERIES):
+        chunk = queries[start : start + MAX_BATCH_FIND_QUERIES]
+        batches += 1
+        payload = tools.memory(
+            "batch_find",
+            {
+                "queries": [
+                    {"id": q["qid"], "query": q["query"]} for q in chunk
+                ],
+                "limit_per_query": 10,
+                "deduplicate": False,
+            },
+        )
+        data = payload.get("data") or {}
+        per_qid: dict[str, list[str]] = {q["qid"]: [] for q in chunk}
+        for item in data.get("results") or []:
+            qid = str(item.get("best_query_id") or "")
+            mid = int(item.get("id") or 0)
+            if qid in per_qid:
+                per_qid[qid].append(reverse_map.get(mid, f"id:{mid}"))
+        for qid, batch_keys in per_qid.items():
+            find_keys = find_by_qid.get(qid, [])[:10]
+            if batch_keys != find_keys:
+                mismatches.append({"qid": qid, "find": find_keys, "batch": batch_keys})
+    summary = {
+        "queries": len(queries),
+        "batches": batches,
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
+    }
+    if mismatches:
+        raise AssertionError(
+            "[batch_find consistency] 逐题结果与 find 不一致: "
+            + json.dumps(mismatches, ensure_ascii=False)[:800]
+        )
+    return summary
 
 
 def run_self_recall(
@@ -647,6 +713,7 @@ def main() -> int:
     want_similarity = args.suite in {"similarity", "all"}
     recall: list[dict[str, Any]] | None = None
     self_recall: list[dict[str, Any]] | None = None
+    batch_consistency: dict[str, Any] | None = None
     similarity: dict[str, Any] | None = None
     replay_perf: list[dict[str, Any]] | None = None
     if want_recall or want_similarity:
@@ -657,6 +724,15 @@ def main() -> int:
                 print(f"[replay] library size={len(set(id_map.values()))}")
                 recall = run_recall_queries(tools, queries, id_map)
                 self_recall = run_self_recall(tools, targets, id_map)
+                # K3：batch_find 通道一致性（硬断言，不一致 raise）
+                batch_consistency = run_batch_find_consistency(
+                    tools, queries, id_map, recall
+                )
+                print(
+                    f"[batch_find consistency] queries={batch_consistency['queries']} "
+                    f"batches={batch_consistency['batches']} "
+                    f"mismatches={batch_consistency['mismatch_count']}"
+                )
             if want_similarity:
                 # 0.17.0 P2-0.1：常规 48 例 + noisy 噪音例（含负例，误报率可度量）合并执行
                 sim_cases = _load_jsonl(
@@ -715,6 +791,7 @@ def main() -> int:
         "replay_perf": replay_perf,
         "queries": recall,
         "self_recall": self_recall,
+        "batch_find_consistency": batch_consistency,
         "similarity": similarity,
         "conflict": conflict,
         # Gate-v2 G7b: the claims corpus results (B/C channels), same row
