@@ -154,3 +154,88 @@ def test_perf_keys_are_excluded_from_gate() -> None:
     # render 只喂 perf/env（其余套件段缺失时跳过渲染）
     markdown = score.render_markdown({"env": {}, "perf": current["perf"]}, None)
     assert "性能" in markdown and "9999" in markdown
+
+
+def test_conflict_comprehensive_union_any_channel() -> None:
+    """H1/D4：综合召回 = 两语料合并 any-channel 口径（Σidentified(true)/Σtrue）。
+
+    复现 r1 推算锚（review R2-7）：句料库 7/43、claims 语料 11/15 →
+    recall 18/58=0.3103、precision 18/24=0.75。"""
+    raw = {
+        "conflict": [
+            {"pair_id": f"s{i}", "label": "true_conflict", "skipped_member_replay": False,
+             "sync": i < 7, "async": False, "notice_missing": i >= 7}
+            for i in range(43)
+        ] + [
+            {"pair_id": "c1", "label": "coexist", "skipped_member_replay": False,
+             "sync": True, "async": False, "notice_missing": False},  # 共存 FP 进精确分母
+        ] + [
+            # 句料库 identified_all=13 的形态锚（r1：7 真 + 6 非真 → 18/24）
+            {"pair_id": f"n{i}", "label": "noise", "skipped_member_replay": False,
+             "sync": True, "async": False, "notice_missing": False}
+            for i in range(5)
+        ] + [
+            {"pair_id": "c2", "label": "true_conflict", "skipped_member_replay": True,
+             "sync": None, "async": None, "notice_missing": None},  # replay 不计
+        ],
+        "conflict_claims": [
+            {"pair_id": f"b{i}", "channel": "B", "label": "true_conflict",
+             "skipped_member_replay": False, "sync": True, "async": False, "notice_missing": False}
+            for i in range(5)
+        ] + [
+            {"pair_id": f"c{i}", "channel": "C", "label": "true_conflict",
+             "skipped_member_replay": False, "sync": i < 6, "async": False, "notice_missing": i >= 6}
+            for i in range(10)
+        ] + [
+            {"pair_id": "n1", "channel": "C", "label": "coexist",
+             "skipped_member_replay": False, "sync": False, "async": False, "notice_missing": True},
+            {"pair_id": "n2", "channel": "B", "label": "true_conflict",
+             "skipped_member_replay": True, "sync": None, "async": None, "notice_missing": None},
+        ],
+    }
+    comp = score.score_conflict_comprehensive(raw)
+    assert comp["recall"] == {"count": 18, "total": 58, "rate": 0.3103}
+    assert comp["precision"] == {"count": 18, "total": 24, "rate": 0.75}
+    assert comp["sources"]["conflict"] == {"true_total": 43, "true_identified": 7}
+    assert comp["sources"]["conflict_claims"] == {"true_total": 15, "true_identified": 11}
+    # score_all 接线 + 门方向（recall/precision 均为 higher-is-better）
+    scored = score.score_all(raw)
+    assert scored["conflict_comprehensive"] == comp
+    gate = score.gate(scored, scored, 0.1)
+    assert gate["gate"] == "PASSED"
+    worse = json.loads(json.dumps(scored))
+    worse["conflict_comprehensive"]["recall"]["rate"] = 0.2
+    assert score.gate(worse, scored, 0.1)["gate"] == "FAILED"
+
+
+def test_conflict_attribution_reads_qwen_budget_and_direct_verdicts() -> None:
+    """H1：分通道归因直读 Qwen 回执新键（review R1-6——pairs_examined 全局
+    口径之后，A qwen 归因不再用差额推算）；旧 raw 无此二键按 0 计。"""
+    raw = {
+        "conflict": [
+            {"pair_id": "s1", "label": "true_conflict", "skipped_member_replay": False,
+             "sync": True, "async": False, "notice_missing": False,
+             "_receipt": {"qwen_budget": {"internal": 1, "a_cross": 2},
+                          "direct_verdicts": 3}},
+            {"pair_id": "s2", "label": "true_conflict", "skipped_member_replay": False,
+             "sync": False, "async": True, "notice_missing": False,
+             "_receipt": {"pairs_examined": 9}},  # 旧 raw：无新键
+        ],
+        "conflict_claims": [
+            {"pair_id": "b1", "channel": "B", "label": "true_conflict",
+             "skipped_member_replay": False, "sync": True, "async": False, "notice_missing": False},
+            {"pair_id": "c1", "channel": "C", "label": "true_conflict",
+             "skipped_member_replay": False, "sync": True, "async": False, "notice_missing": False,
+             "_receipt": {"qwen_budget": {"channel_c": 2}}},
+        ],
+    }
+    attr = score.score_conflict_attribution(raw)
+    assert attr == {
+        "a_channel_identified": 2,
+        "a_direct_verdicts_total": 3,
+        "a_qwen_internal_total": 1,
+        "a_qwen_cross_total": 2,
+        "channel_b_identified": 1,
+        "channel_c_identified": 1,
+        "channel_c_qwen_total": 2,
+    }

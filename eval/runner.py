@@ -603,6 +603,9 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
         if receipt is not None:
             # 0.16.12 perf：完成回执的预算消耗（pairs_examined 为 0.16.12
             # 新增回执键）与降级标记，供 score.py perf 段离线汇总。
+            # Q1/H1：qwen_budget + direct_verdicts 进白名单——综合召回的
+            # 分通道归因表（score_conflict_attribution）读它们；旧 raw 无
+            # 此二键，归因按 0 计（纯函数对存档 r1-r5 仍可跑）。
             row["_receipt"] = {
                 key: receipt.get(key)
                 for key in (
@@ -613,6 +616,8 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
                     "elapsed_ms",
                     "internal_conflicts",
                     "deterministic_filter",
+                    "qwen_budget",
+                    "direct_verdicts",
                 )
                 if key in receipt
             }

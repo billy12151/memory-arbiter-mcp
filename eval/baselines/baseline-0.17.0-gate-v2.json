@@ -848,6 +848,28 @@
   },
   "skipped_member_replay": 0
  },
+ "conflict_comprehensive": {
+  "recall": {
+   "count": 18,
+   "total": 58,
+   "rate": 0.3103
+  },
+  "precision": {
+   "count": 18,
+   "total": 24,
+   "rate": 0.75
+  },
+  "sources": {
+   "conflict": {
+    "true_total": 43,
+    "true_identified": 7
+   },
+   "conflict_claims": {
+    "true_total": 15,
+    "true_identified": 11
+   }
+  }
+ },
  "perf": {
   "write_ms": {
    "n": 298,
@@ -924,6 +946,7 @@
     "count": 11,
     "rate": 0.275
    }
-  }
+  },
+  "conflict_comprehensive_note": "H1 回填（Q1 机制后重跑 score.py 纯函数，对存档 r1-r5 重打分五轮逐位一致）：recall 18/58=0.3103、precision 18/24=0.75（= r1 scored 手工推算锚 0.3103/0.75，review R2-7 sanity 通过）。注意（R1-7）：本文件 corpus_version=recall-v1 而当前套件已 recall-v2-kw，gate() 顶层语料校验会先拒绝——此回填值供人工对比与 Q1/Q2 直接键对比，正式门基线由 H2 新基线文件承担。"
  }
 }

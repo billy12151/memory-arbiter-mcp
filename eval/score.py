@@ -387,6 +387,93 @@ def score_conflict_claims(raw: dict) -> dict[str, Any] | None:
     }
 
 
+def score_conflict_comprehensive(raw: dict) -> dict[str, Any] | None:
+    """0.17.0 Q1/H1 (owner D4): the headline conflict metric — 综合召回.
+    conflict ∪ conflict_claims 两语料合并的 any-channel 口径：
+    Σidentified(true_conflict) / Σtrue_conflict；综合精确 = 真 notice 数 /
+    总 notice 数（两语料合并，coexist FP 计入分母）。分母明细给出两语料各
+    自的分子分母贡献。块形状只含 recall/precision/sources-counts——
+    _flatten 会把它送进相对门，细分桶不放进来（review R2-6）。"""
+    conflict = raw.get("conflict")
+    claims = raw.get("conflict_claims")
+    if conflict is None and claims is None:
+        return None
+
+    def _valid(rows: "list[dict] | None") -> list[dict]:
+        return [r for r in (rows or []) if not r.get("skipped_member_replay")]
+
+    def _true_total(rows: list[dict]) -> int:
+        return sum(1 for r in rows if r["label"] == "true_conflict")
+
+    def _true_identified(rows: list[dict]) -> int:
+        return sum(
+            1 for r in rows if r["label"] == "true_conflict" and (r["sync"] or r["async"])
+        )
+
+    def _identified(rows: list[dict]) -> int:
+        return sum(1 for r in rows if r["sync"] or r["async"])
+
+    sent = _valid(conflict)
+    clm = _valid(claims)
+    true_total = _true_total(sent) + _true_total(clm)
+    true_id = _true_identified(sent) + _true_identified(clm)
+    id_total = _identified(sent) + _identified(clm)
+    return {
+        "recall": {
+            "count": true_id, "total": true_total, "rate": _pct(true_id, true_total),
+        },
+        "precision": {
+            "count": true_id, "total": id_total, "rate": _pct(true_id, id_total),
+        },
+        "sources": {
+            "conflict": {
+                "true_total": _true_total(sent), "true_identified": _true_identified(sent),
+            },
+            "conflict_claims": {
+                "true_total": _true_total(clm), "true_identified": _true_identified(clm),
+            },
+        },
+    }
+
+
+def score_conflict_attribution(raw: dict) -> dict[str, Any] | None:
+    """0.17.0 H1: 分通道归因表（诊断，不进 gate——不写进基线文件即不受门）。
+
+    Q1 之后 pairs_examined 是 job 全局口径（internal+C+A-cross），A qwen 的
+    归因直读回执 qwen_budget 分量（review R1-6）；A direct 读 direct_verdicts。
+    旧 raw 无这些键 → 各按 0 计（纯函数对存档 r1-r5 仍可跑）。"""
+
+    def _valid(rows: "list[dict] | None") -> list[dict]:
+        return [r for r in (rows or []) if not r.get("skipped_member_replay")]
+
+    sent = _valid(raw.get("conflict"))
+    clm = _valid(raw.get("conflict_claims"))
+
+    def _receipt_sum(rows: list[dict], key: str) -> int:
+        total = 0
+        for row in rows:
+            receipt = row.get("_receipt") or {}
+            if key == "direct_verdicts":
+                total += int(receipt.get("direct_verdicts") or 0)
+            else:
+                total += int((receipt.get("qwen_budget") or {}).get(key) or 0)
+        return total
+
+    return {
+        "a_channel_identified": sum(1 for r in sent if r["sync"] or r["async"]),
+        "a_direct_verdicts_total": _receipt_sum(sent, "direct_verdicts"),
+        "a_qwen_internal_total": _receipt_sum(sent, "internal"),
+        "a_qwen_cross_total": _receipt_sum(sent, "a_cross"),
+        "channel_b_identified": sum(
+            1 for r in clm if r.get("channel") == "B" and (r["sync"] or r["async"])
+        ),
+        "channel_c_identified": sum(
+            1 for r in clm if r.get("channel") == "C" and (r["sync"] or r["async"])
+        ),
+        "channel_c_qwen_total": _receipt_sum(clm, "channel_c"),
+    }
+
+
 def score_all(raw: dict) -> dict[str, Any]:
     consistency = raw.get("batch_find_consistency")
     return {
@@ -406,6 +493,8 @@ def score_all(raw: dict) -> dict[str, Any]:
         "similarity": score_similarity(raw),
         "conflict": score_conflict(raw),
         "conflict_claims": score_conflict_claims(raw),
+        "conflict_comprehensive": score_conflict_comprehensive(raw),
+        "conflict_attribution": score_conflict_attribution(raw),
         "perf": compute_perf(raw),
     }
 
@@ -795,6 +884,33 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
             f"- Recall = **{overall['recall']['rate']}**（{overall['recall']['count']}/{overall['recall']['total']}）",
             f"- 共存误报 = **{overall['coexist_false_positive']['count']}/{overall['coexist_false_positive']['total']}**（{overall['coexist_false_positive']['rate']}）",
             f"- 成员重叠跳过 {overall['skipped_member_replay']} 对（不计指标）",
+            "",
+        ]
+    comprehensive = scored.get("conflict_comprehensive")
+    if comprehensive:
+        lines += [
+            "## 冲突综合召回（D4 headline：conflict ∪ conflict_claims，any-channel）",
+            "",
+            f"- Recall = **{comprehensive['recall']['rate']}**（{comprehensive['recall']['count']}/{comprehensive['recall']['total']}）",
+            f"- Precision = **{comprehensive['precision']['rate']}**（{comprehensive['precision']['count']}/{comprehensive['precision']['total']}）",
+        ]
+        for source, row in (comprehensive.get("sources") or {}).items():
+            lines.append(
+                f"  - {source}：true {row['true_identified']}/{row['true_total']}"
+            )
+        lines.append("")
+    attribution = scored.get("conflict_attribution")
+    if attribution:
+        lines += [
+            "## 分通道归因（诊断，不进 gate）",
+            "",
+            f"- 句料库 identified（A 链路）= **{attribution['a_channel_identified']}**"
+            f"（回执级 direct 直出 {attribution['a_direct_verdicts_total']} ·"
+            f" Qwen internal {attribution['a_qwen_internal_total']} ·"
+            f" A-cross {attribution['a_qwen_cross_total']}）",
+            f"- claims 语料 identified：B = **{attribution['channel_b_identified']}** ·"
+            f" C = **{attribution['channel_c_identified']}**"
+            f"（C Qwen 派发 {attribution['channel_c_qwen_total']}）",
             "",
         ]
     perf = scored.get("perf")
