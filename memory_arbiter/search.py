@@ -996,6 +996,24 @@ def _wide_recall(
                 row["evidence_best_score"] = round(float(best_cosine), 4)
         row["_fusion_score"] = fusion
 
+    # 检索线 K2：向量准入线（方案 §3c，owner 2026-09-24 拍板 9）——
+    # evidence-only 候选（无词法席位的纯向量行）的 best 行真余弦低于
+    # COS_RECALL_FLOOR 的整条不进结果，词法候选豁免（维持 §1c 的
+    # 排名+8.25 双保险）。仅 active 查询路径生效：expired 审计是
+    # 宁滥勿缺的遍历语义，沿 8.25 门的既有豁免口径（R2-P1-10）。
+    # 真余弦缺失（向量未发布/拉取失败）fail-open——与 G2 对 None 的
+    # 处理一致，不误杀（R2-P1-4）。池内字典操作，零新增 SQL。
+    if status_filter == "active":
+        dropped = [
+            memory_id
+            for memory_id, row in pool.items()
+            if memory_id not in lexical_rank
+            and row.get("_evidence_best_score") is not None
+            and float(row["_evidence_best_score"]) < COS_RECALL_FLOOR
+        ]
+        for memory_id in dropped:
+            del pool[memory_id]
+
     fused = sorted(
         pool.values(),
         key=lambda row: (
