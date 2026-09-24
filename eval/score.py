@@ -393,7 +393,8 @@ def score_conflict_comprehensive(raw: dict) -> dict[str, Any] | None:
     Σidentified(true_conflict) / Σtrue_conflict；综合精确 = 真 notice 数 /
     总 notice 数（两语料合并，coexist FP 计入分母）。分母明细给出两语料各
     自的分子分母贡献。块形状只含 recall/precision/sources-counts——
-    _flatten 会把它送进相对门，细分桶不放进来（review R2-6）。"""
+    recall/precision.rate 进相对门；sources 计数由 _GATE_META_KEYS 排除
+    （H1 修复批：分母明细是诊断量，review R2-6 + 对抗 review）。"""
     conflict = raw.get("conflict")
     claims = raw.get("conflict_claims")
     if conflict is None and claims is None:
@@ -437,7 +438,8 @@ def score_conflict_comprehensive(raw: dict) -> dict[str, Any] | None:
 
 
 def score_conflict_attribution(raw: dict) -> dict[str, Any] | None:
-    """0.17.0 H1: 分通道归因表（诊断，不进 gate——不写进基线文件即不受门）。
+    """0.17.0 H1: 分通道归因表（诊断，不进 gate——gate() 在 flatten 前整块
+    剔除，基线文件里留作人工对照）。
 
     Q1 之后 pairs_examined 是 job 全局口径（internal+C+A-cross），A qwen 的
     归因直读回执 qwen_budget 分量（review R1-6）；A direct 读 direct_verdicts。
@@ -684,7 +686,11 @@ _CONFLICT_FALSE_LABELS = ("noise",)
 _GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target",
                    # 检索线 K3（R2-P2-3）：语料元数据不是行为指标——同语料
                    # 内恒定，不进相对门（corpus bump 由 corpus_version 前置校验拦）
-                   ".queries", ".batches")
+                   ".queries", ".batches",
+                   # H1 修复批（mema #1066 对抗 review）：comprehensive 的
+                   # sources 分母明细是 recall 块的分解诊断量（true_identified
+                   # 与 recall.count 同值），单独受门只会制造假回归。
+                   ".true_total", ".true_identified")
 # 0.17.0 cand2：sync/async 单项是 3 秒窗与 job 延迟的划分产物（行级化后 job
 # 变慢、更多对跨窗补上≠行为回归）；行为指标=identified/miss/precision/recall。
 _GATE_SPLIT_KEYS = (".sync.rate", ".async.rate")
@@ -764,8 +770,13 @@ def gate(
                 }
             ],
         }
-    cur = _flatten(current)
-    base = _flatten(baseline)
+    # H1 修复批（mema #1066 对抗 review）：conflict_attribution 是分通道
+    # 归因诊断块——派发计数随检测效率正当波动（过滤变好 → Qwen 派发变少
+    # = 改善），默认 higher-is-better 方向会把 D1 的预期效果判成回归。
+    # 整块不进相对门（基线文件里可以留作人工对照）。
+    diagnostic_blocks = ("conflict_attribution",)
+    cur = _flatten({k: v for k, v in current.items() if k not in diagnostic_blocks})
+    base = _flatten({k: v for k, v in baseline.items() if k not in diagnostic_blocks})
     failures: list[dict[str, Any]] = []
     for key, base_value in sorted(base.items()):
         if key not in cur or key.endswith(

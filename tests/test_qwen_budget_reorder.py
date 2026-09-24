@@ -347,4 +347,130 @@ def test_internal_keepers_land_when_deterministic_phase_truncates(tmp_path, monk
     assert receipt["internal_conflicts"] == 1  # E10①：keepers 先于截断落地
     assert receipt["pairs_examined"] == 0
     assert not _Recorder.calls, "truncation terminal skips internal Qwen AND dispatch"
-    assert "qwen_budget" not in receipt
+    assert "qwen_budget" not in receipt  # C 未派发（allowed 缺失早退）→ 池零活动
+
+
+# ── 对抗 review 修复批（mema #1066 第二轮）────────────────────────────────────
+
+_NO_SURFACING_C = {"attribute_a": "连接池上限", "value_a": "99",
+                   "attribute_b": "连接池上限", "value_b": "99"}
+
+
+class _NoSurfacingRecorder(_Recorder):
+    """C 同值抽取 → unresolved 不浮出（版本守卫/backlog 归因不被 skip 集合遮蔽）。"""
+
+    @classmethod
+    def classify_pair(cls, left, right, **kw):
+        if "dispatch_hint" in left and left.get("quote") == cls.own_content[:1000]:
+            cls.calls.append(("C", str(right.get("quote") or "")))
+            return ModelSignal(True, "attribute_value_extraction", None, "",
+                               dict(_NO_SURFACING_C), None)
+        return super().classify_pair(left, right, **kw)
+
+
+def test_stale_hit_peer_settled_not_backlogged(tmp_path, monkeypatch) -> None:
+    """P2-1：派发相读到 peer 已编辑（fresh version > KNN 行版本）——证据/版本
+    错位的 notice 不得落库；对按 settled 处理：不派发、不进 backlog、不扣池。"""
+    tools, new, peer1 = _write_scene(tmp_path, monkeypatch)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _NoSurfacingRecorder)
+    a_hits = [_peer_hit(peer1, 101, "连接池上限为 300，队列长度为 4。", 0.1)]
+    c_hits = [_peer_hit(peer1, 201, "连接池上限为 100。", 0.2)]
+    _install_stubs(monkeypatch, tools, peer1=peer1, a_hits=a_hits, c_hits=c_hits,
+                   c_vectors={201: [0.4, 0.9]})
+    original_by_ids = tools.db.get_memories_by_ids
+
+    def bumped_by_ids(ids, **kw):
+        rows = original_by_ids(ids, **kw)
+        for row in rows.values():
+            row["version"] = int(row.get("version") or 1) + 1  # 两相之间被编辑
+        return rows
+
+    monkeypatch.setattr(tools.db, "get_memories_by_ids", bumped_by_ids)
+
+    receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
+
+    assert not any(k == "A" for k, _q in _NoSurfacingRecorder.calls), (
+        "stale-hit peer must not reach Qwen dispatch"
+    )
+    a_notices = [n for n in tools.db.list_semantic_notices()
+                 if n["memory_id"] == int(new["id"])
+                 and n.get("notice_type") == "semantic_evidence"]
+    assert not a_notices, "evidence/version mismatch notice must not land"
+    assert "backlogged" not in receipt, "stale pair is settled — never backlogged"
+    # C 相先于派发相跑、不受版本守卫影响（C 的 notice 以 hit 行版本为锚，
+    # 证据-版本天然一致），故账本 = internal 1 + C 1；A-cross 零花费。
+    assert receipt["qwen_budget"] == {"internal": 1, "channel_c": 1}
+
+
+def test_channel_c_deadline_stopped_key(tmp_path, monkeypatch) -> None:
+    """P3：通道 C 撞公平墙停走必须 loud（channel_c_deadline_stopped 条件键）；
+    墙在派发前拦住 → 零扣池、零 classify。"""
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer1 = tools.memory_write(
+        content="连接池上限为 300，队列长度为 4。", subject="c-wall-peer", tags=[],
+    )["data"]
+    new = tools.memory_write(
+        content="连接池上限为 99。", subject="c-wall-own", tags=[], claims=[dict(_OWN_CLAIM)],
+    )["data"]
+    assert tools.wait_semantic_worker_drained(timeout=5)
+    _Recorder.reset("连接池上限为 99。")
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _Recorder)
+    c_hits = [_peer_hit(peer1, 201, "连接池上限为 100。", 0.2)]
+    monkeypatch.setattr(tools.db, "row_knn", lambda embedding, **kw: list(c_hits))
+    spends: list[int] = []
+
+    result = tools._evidence.check_claim_sentence_conflicts(
+        int(new["id"]), tv._job_snapshot(tools, new["id"]),
+        skip_peers=None, allowed_memory_ids=[int(peer1["id"])],
+        notices_used=0, budget_sink=lambda: spends.append(1),
+        deadline_fn=lambda: 1.0,  # 公平墙早已过去
+    )
+
+    assert result["claims_checked"] == 0 and result["notices"] == 0
+    assert result["channel_c_deadline_stopped"] is True
+    assert spends == [] and not _Recorder.calls
+
+
+def test_c_surfaced_and_saturated_combo(tmp_path, monkeypatch) -> None:
+    """P3 弱钉补齐：C 浮出 peer2（进 skip 集合、settled 不进 backlog——连
+    direct 可直出的对也让位）与池被 C 扣穿（peer1 无法派发、进 backlog）
+    同时发生——两机制正交且互不遮蔽。"""
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    peer1 = tools.memory_write(
+        content="连接池上限为 300，队列长度为 4。", subject="budget-peer", tags=[],
+    )["data"]
+    peer2 = tools.memory_write(
+        content="备份窗口为凌晨 2 点。", subject="backup-peer", tags=[],
+    )["data"]
+    content = "\n".join((*_OWN_ROWS, "备份窗口为凌晨 3 点。"))
+    new = tools.memory_write(
+        content=content, subject="budget-own", tags=[], claims=[dict(_OWN_CLAIM)],
+    )["data"]
+    assert tools.wait_semantic_worker_drained(timeout=5)
+    _Recorder.reset(content)
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _Recorder)
+    # C 的 12 个命中全部指向 peer2：前两个带可 grounding 引文（值 100 在
+    # 引文内 → 浮出 peer2），其余 10 个纯片段（unresolved）→ 派发 12 扣穿池。
+    c_hits = [_peer_hit(peer2, 300, "连接池上限为 100。", 0.2),
+              _peer_hit(peer2, 301, "连接池上限为 100。", 0.21)]
+    c_hits += [_peer_hit(peer2, 302 + i, f"连接池片段 {i}。", 0.22 + i * 0.01) for i in range(10)]
+    a_hits = [
+        _peer_hit(peer1, 101, "连接池上限为 100，队列长度为 4。", 0.1),
+        _peer_hit(peer2, 102, "备份窗口为凌晨 2 点。", 0.2),
+    ]
+    _install_stubs(monkeypatch, tools, peer1=peer1, a_hits=a_hits, c_hits=c_hits,
+                   c_vectors={h["id"]: [0.4, 0.9] for h in c_hits})
+
+    receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
+
+    notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == int(new["id"])]
+    c_notices = [n for n in notices if n.get("payload", {}).get("channel_c")]
+    assert c_notices, "grounded C hit must surface peer2 (skip set)"
+    assert not any(k == "A" for k, _q in _Recorder.calls)
+    assert receipt["qwen_budget"]["channel_c"] == 12
+    # peer2 被 C 浮出 → skip 让位（哪怕它是 direct 可直出的对）；
+    # peer1 非 direct、非 skip → 池尽被拦 → 唯一 backlog 对。
+    assert receipt["qwen_budget"]["a_cross_dispatch_skipped"] is True
+    assert receipt.get("backlogged") == 1

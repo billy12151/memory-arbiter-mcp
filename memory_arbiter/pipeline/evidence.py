@@ -902,6 +902,11 @@ class EvidencePipeline:
             # Internal cross-channel key: consumed by the job wrapper for the
             # A-cross skip set (R1-3), never a receipt field.
             result["surfaced_peers"] = sorted(set(surfaced))
+        if deadline_stopped:
+            # 对抗 review 修复（R1-1 收尾）：C 撞公平墙停走必须 loud——
+            # 「干到一半被墙砍」与「自然跑完」在回执上可区分（§3.3 惯例：
+            # 停走条件键，未撞墙不出现）。
+            result["channel_c_deadline_stopped"] = True
         return result
 
     def drain_conflict_backlog(self, limit: int = 2) -> int:
@@ -2203,6 +2208,14 @@ class EvidencePipeline:
             ):
                 reached_pair.add(peer_id)  # settled (closed) — not backlog
                 continue
+            # 对抗 review 修复（Q1 相分裂 R1-5 的后果）：hit 证据来自确定性相
+            # 快照，peer 行来自派发相新快照——两相之间 peer 被编辑时
+            # memory_row_version（KNN 行自带）与 fresh version 不再一致，
+            # 证据/版本错位的 notice 不可落库。视为 settled（本 job 跳过、
+            # 不进 backlog——冻结对身份已过期，下次写会重收集）。
+            if int(hit.get("memory_row_version") or 1) != right_version:
+                reached_pair.add(peer_id)  # settled (stale hit) — not backlog
+                continue
             # NOT reached yet: budget/cap skips below leave the pair
             # unmarked so the post-loop backlog sweep picks it up.
             # Deterministic direct path (2026-09-16, owner-approved): same
@@ -2232,12 +2245,12 @@ class EvidencePipeline:
             else:
                 if backend is None:
                     self._record_job_degradation(ctx, "qwen_unavailable")
-                    ctx["incomplete_reason"] = "qwen_unavailable"
+                    ctx["incomplete_reason"] = ctx["incomplete_reason"] or "qwen_unavailable"
                     continue
                 active_deadline = _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
                 if active_deadline is not None and active_deadline - time.monotonic() < min_budget * 2:
                     self._record_job_degradation(ctx, "qwen_budget_exhausted")
-                    ctx["incomplete_reason"] = "qwen_budget_exhausted"
+                    ctx["incomplete_reason"] = ctx["incomplete_reason"] or "qwen_budget_exhausted"
                     continue
                 # Q1 (owner D1/D2): the job-global pool's RESIDUAL gates Qwen
                 # dispatch; exhaustion no longer breaks the loop — it
@@ -2430,7 +2443,7 @@ class EvidencePipeline:
                 # the run could report checked_no_notice while a real conflict
                 # was found and lost.
                 self._record_job_degradation(ctx, "notice_write_failed")
-                ctx["incomplete_reason"] = "notice_write_failed"
+                ctx["incomplete_reason"] = ctx["incomplete_reason"] or "notice_write_failed"
         # 0.17.0 P2-4.2: budget/cap leftovers land in the backlog — bounded,
         # visible, never silently dropped (owner design #8). Stale/duplicate
         # keys report as enqueued here; eviction counts ride the store.

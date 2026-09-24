@@ -1789,6 +1789,14 @@ class MemoryTools:
             result = ev.conflicts_finalize_receipt(ctx)
         else:
             result = terminal
+            # 对抗 review 修复（review 发现 F2）：截断 terminal 上 B/C 照跑
+            # （R1-2），C 经 budget_sink 的实际派发必须如实进回执——terminal
+            # 硬编码 pairs_examined=0 只描述 A 侧，Qwen 池的账不豁免。
+            budget_block = ctx["budget"].receipt_block()
+            if budget_block is not None:
+                result["qwen_budget"] = budget_block
+            if ctx["budget"].pairs_examined:
+                result["pairs_examined"] = ctx["budget"].pairs_examined
         if ctx["phase_ms"]:
             result["elapsed_ms"] = round(sum(ctx["phase_ms"]), 1)
         if claims_result is not None:

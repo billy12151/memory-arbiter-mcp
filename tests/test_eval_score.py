@@ -239,3 +239,42 @@ def test_conflict_attribution_reads_qwen_budget_and_direct_verdicts() -> None:
         "channel_c_identified": 1,
         "channel_c_qwen_total": 2,
     }
+
+
+def test_gate_excludes_diagnostic_blocks() -> None:
+    """H1 修复批（mema #1066 对抗 review）：conflict_attribution 整块与
+    comprehensive sources 分母明细不进相对门——归因计数下降（过滤变好 →
+    Qwen 派发变少）是 D1 的预期效果，不是回归；sources 是 recall 的分解
+    诊断量。recall.rate 真跌仍拦（对照）。"""
+    baseline = {
+        "conflict_attribution": {
+            "a_channel_identified": 7.0, "a_direct_verdicts_total": 3.0,
+            "a_qwen_internal_total": 2.0, "a_qwen_cross_total": 6.0,
+            "channel_b_identified": 5.0, "channel_c_identified": 6.0,
+            "channel_c_qwen_total": 9.0,
+        },
+        "conflict_comprehensive": {
+            "recall": {"count": 18, "total": 58, "rate": 0.3103},
+            "precision": {"count": 18, "total": 24, "rate": 0.75},
+            "sources": {
+                "conflict": {"true_total": 43, "true_identified": 7},
+                "conflict_claims": {"true_total": 15, "true_identified": 11},
+            },
+        },
+    }
+    current = json.loads(json.dumps(baseline))
+    current["conflict_attribution"] = {k: 0.0 for k in baseline["conflict_attribution"]}
+    current["conflict_comprehensive"]["sources"] = {
+        "conflict": {"true_total": 0, "true_identified": 0},
+        "conflict_claims": {"true_total": 0, "true_identified": 0},
+    }
+    # 归因/明细全部归零：门 PASSED（诊断块不受门）。
+    assert score.gate(current, baseline, 0.1)["gate"] == "PASSED"
+    # recall.rate 真跌超阈值：门 FAILED，且失败项只有行为键。
+    current["conflict_comprehensive"]["recall"]["rate"] = 0.2
+    result = score.gate(current, baseline, 0.1)
+    assert result["gate"] == "FAILED"
+    assert all(
+        f["metric"].startswith("conflict_comprehensive.recall")
+        for f in result["failures"]
+    )
