@@ -539,7 +539,9 @@ def _load_claims_pairs() -> list[dict]:
     return pairs
 
 
-def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, Any]]:
+def run_conflict_suite(
+    tools: MemoryTools, pairs: list[dict], setup_sync_wait_ms: int = 0,
+) -> list[dict[str, Any]]:
     """冲突套件（方案 §2.4）：写左→写右，三结局采集（同步窗/异步 job/漏检）.
 
     同步结局：写右响应 data.semantic_conflict_check 为完成态（status 非
@@ -548,9 +550,15 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
     (notice_missing=True)——不静默跳过（owner D2 硬要求）。
     成员在先前对中已写入（幂等重放、无 post-commit check）的对标记
     skipped_member_replay，不计入指标。
+    setup_sync_wait_ms（owner 2026-09-24 提速二）：左成员是 setup 写、不是
+    被测事件——sync 指标只从右写响应读，左写的同步窗是纯等（默认 0=关；
+    左 job 落后台、与右写/右 job 自然重叠）。被测的右写保持库默认窗
+    （--conflict-sync-wait-ms，默认 3000），3 秒窗 sync 语义保留。
     """
     results: list[dict[str, Any]] = []
     seen_shas: set[str] = set()
+    default_sync_wait = int(tools.settings.semantic_conflict_notice_sync_wait_ms)
+    setup_wait = max(0, int(setup_sync_wait_ms))
 
     def _sha_of(envelope: dict) -> str:
         import hashlib
@@ -570,7 +578,11 @@ def run_conflict_suite(tools: MemoryTools, pairs: list[dict]) -> list[dict[str, 
         right_result: dict = {}
         right_write_ms: float | None = None
         if left_sha not in seen_shas:
-            left_id, _, _, _ = _remember_envelope(tools, left, pair_entity)
+            tools.settings.semantic_conflict_notice_sync_wait_ms = setup_wait
+            try:
+                left_id, _, _, _ = _remember_envelope(tools, left, pair_entity)
+            finally:
+                tools.settings.semantic_conflict_notice_sync_wait_ms = default_sync_wait
             seen_shas.add(left_sha)
         if right_sha not in seen_shas:
             right_id, _, right_result, right_write_ms = _remember_envelope(
@@ -687,6 +699,7 @@ def _spawn_conflict_child(
             if args.conflict_sync_wait_ms is None
             else int(args.conflict_sync_wait_ms)
         ),
+        "--setup-sync-wait-ms", str(int(args.setup_sync_wait_ms)),
     ]
     if args.keep_db:
         cmd += ["--keep-db", str(args.keep_db)]
@@ -735,6 +748,16 @@ def main() -> int:
             "冲突套件写响应 notice 同步等待窗（默认=库默认 3000）。调小只改变 "
             "sync/async 诊断拆分（gate 已排除），identified/miss/recall 行为指标不变；"
             "套件逐对 wait_task 等 job 完成，异步采集不受影响"
+        ),
+    )
+    parser.add_argument(
+        "--setup-sync-wait-ms",
+        type=int,
+        default=0,
+        help=(
+            "非被测写入（每对左成员 setup 写）的 notice 同步窗，默认 0=关闭："
+            "sync 指标只从右（被测）写响应读，左写窗口纯等。右写仍用 "
+            "--conflict-sync-wait-ms（默认 3000），3 秒窗 sync 语义保留"
         ),
     )
     parser.add_argument(
@@ -840,7 +863,9 @@ def main() -> int:
             with temp_library(
                 embed_model, qwen_model=qwen_model, sync_wait_ms=conflict_sync_wait_ms,
             ) as tools:
-                conflict = run_conflict_suite(tools, conflict_pairs)
+                conflict = run_conflict_suite(
+                    tools, conflict_pairs, setup_sync_wait_ms=args.setup_sync_wait_ms,
+                )
             # Gate-v2 G7b: the claims corpus (B/C channels) runs in the SAME
             # library pass — B pairs exercise the deterministic claims×claims
             # channel, C pairs the claims×sentence KNN channel.
@@ -849,11 +874,13 @@ def main() -> int:
                 with temp_library(
                     embed_model, qwen_model=qwen_model, sync_wait_ms=conflict_sync_wait_ms,
                 ) as tools:
-                    conflict_claims = run_conflict_suite(tools, claims_pairs)
+                    conflict_claims = run_conflict_suite(
+                        tools, claims_pairs, setup_sync_wait_ms=args.setup_sync_wait_ms,
+                    )
             print(
                 f"[timer] conflict suite {time.monotonic() - suite_start:.0f}s "
-                f"({len(conflict_pairs)} pairs, "
-                f"{conflict_sync_wait_ms}ms sync window + Qwen)"
+                f"({len(conflict_pairs)} pairs; setup {args.setup_sync_wait_ms}ms / "
+                f"tested {conflict_sync_wait_ms}ms sync windows + Qwen)"
             )
 
     raw = {
@@ -872,6 +899,7 @@ def main() -> int:
             # 提速旗标如实入 env：调小时 sync/async 诊断拆分变化（gate 已排除
             # .sync.rate/.async.rate 与 env.*），行为指标不变
             "conflict_sync_wait_ms": conflict_sync_wait_ms,
+            "conflict_setup_sync_wait_ms": max(0, int(args.setup_sync_wait_ms)),
             # 0.16.12 P0-T2 起冲突对集= pairs.jsonl + pairs_large.jsonl；
             # 0.17.0 P2-0.1 起再加 pairs_noisy.jsonl；
             # 语料变更必须 bump 此版本号并重建基线（第一轮 review finding）
