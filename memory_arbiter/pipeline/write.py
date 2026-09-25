@@ -349,7 +349,16 @@ class WritePipeline:
 
         rejected: list[dict[str, Any]] = []
         prepared: list[dict[str, Any]] = []
-        content = str(record.content or "")
+        # record 有三种形态：write 的 MemoryRecord、update 的 post-edit dict
+        # （operations.py）、backfill 的 _Rec shim——鸭子取 content（缺陷修复
+        # 2026-09-25：dict 走 record.content 属性访问抛 AttributeError，使
+        # update+claims 自 P2-5.2 上线起确定性崩溃，外部实测三形态复现）。
+        record_content = (
+            record.get("content")
+            if isinstance(record, dict)
+            else getattr(record, "content", None)
+        )
+        content = str(record_content or "")
         seen_norm: set[tuple[str, str]] = set()
         for index, item in enumerate(claims if isinstance(claims, list) else []):
             if not isinstance(item, dict):

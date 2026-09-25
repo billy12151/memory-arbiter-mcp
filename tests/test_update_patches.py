@@ -54,6 +54,48 @@ def test_two_patches_one_call_one_version(tmp_path: Path) -> None:
     assert updated["content"] == "db is MySQL 8.0 in region us-west-2, budget 100."
 
 
+def test_update_claims_ride_content_edit_patches_form(tmp_path: Path) -> None:
+    """缺陷回归钉（2026-09-25 外部实测）：update 的 claims 落库钩子（P2-5.2
+    P1-3）把 post-edit record 以 dict 形态传进 _persist_claims_for_version，
+    record.content 属性访问抛 AttributeError → claims+patches/claims+
+    new_content 两形态确定性崩溃，P2-5.2 上线起 update 通道 claims 全废。"""
+    tools = make_tools(tmp_path)
+    record = _write(tools, "db is MySQL 5.7 in region us-east-1, budget 100.")
+    memory_id = int(record["id"])
+
+    result = tools.memory_edit(
+        memory_id,
+        patches=[{"old_text": "MySQL 5.7", "new_text": "MySQL 8.0"}],
+        claims=[{"attr": "数据库", "value": "MySQL 8.0"}],
+        reason="claims ride the edit",
+    )
+    assert result["ok"] is True, result
+    data = result["data"]
+    assert data["edited"] is True
+    assert data.get("claims_written") == 1, data
+    claims = tools.db.claims.current_claims(memory_id)
+    assert [(c["attr"], c["value"]) for c in claims] == [("数据库", "MySQL 8.0")]
+
+
+def test_update_claims_ride_content_edit_new_content_form(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    record = _write(tools, "旧内容占位。")
+    memory_id = int(record["id"])
+
+    result = tools.memory_edit(
+        memory_id,
+        new_content="新内容写明连接池上限为 50，队列长度为 4。",
+        claims=[{"attr": "连接池上限", "value": "50"}],
+        reason="rewrite with claims",
+    )
+    assert result["ok"] is True, result
+    data = result["data"]
+    assert data["edited"] is True
+    assert data.get("claims_written") == 1, data
+    claims = tools.db.claims.current_claims(memory_id)
+    assert [(c["attr"], c["value"]) for c in claims] == [("连接池上限", "50")]
+
+
 def test_second_patch_miss_rejects_atomically(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     record = _write(tools, "alpha value is 1. beta value is 2.")
