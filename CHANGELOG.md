@@ -35,6 +35,7 @@ Versions follow semantic versioning.
 
 - **feat(E1): 行上下文 envelope。** `rowseg.row_context_text`（所属标题+前/后最近非空非标题非分隔行，分部截断 80/110、总帽 300，空返回不设键）接入 A-cross 派发两侧与通道 C peer 侧（row_knn 自带偏移+content，零新增查询）；prompt **pair-v9→pair-v10**：**系统提示词与 v9 逐位一致**（slow 校准对实证：仅加一行上下文指令即扰动 0.6B 长值对抽取两连挂），上下文契约下沉到仅 context 出现时才渲染的用户段（「仅供判断属性归属，属性与值必须取自下方证据原文」，中英双份；无 context 渲染与 v9 逐位兼容）；`CONFLICT_DETECTOR_VERSION` bump gate-v2-three-dispatch-v5→**row-context-envelope-v6**（发版全量重扫契约照旧）。grounding 契约零改动——校验只读 quote（主行），机制上挡住从上下文捞值。
 - **test(E2): 行上下文行为钉。** row_context_text 构造六组（装配/跳过空行分隔行标题/分部截断/空返回/跨行句）、A-cross 双侧 envelope context+quote 主行原文+internal 无 context 范围钉、C peer 侧 context+claim 侧不带、pair-v10 渲染（有/无 context/EN/示例标记唯一）、D4 契约（值取自上下文→qwen_unverified，值取自主行→notice_ready）。
+- **fix(E-review): 实施后对抗 review（独立 agent）修复批：1 P2 + 5 P3 全修。** P2 truncation retry 未同步缩 context——双长行+双侧满 context 的 retry 形态被 n_ctx 守卫确定性关死（est×1.3+64+512≥2048，长对一次 invalid 即终局），修=`_pair_text` 增 `context_cap`、retry 传 `SEMANTIC_PAIR_RETRY_CONTEXT_CHARS=120`+渲染钉；P3 prev 截断方向反（尾部贴主行应保尾切头）+P3 空行屏障（邻行不跨 section，修「表二行挂表一行」实测污染，分隔行透明跳过）——row_context_text 改双向独立扫描（向上/向下遇空行/标题即止）；P3 通道 C content 回退优先级取反（hit 自带 content 与偏移严格同版，改 `hit.content or peer.content`）；P3 系统提示词逐位钉升级为 sha256（子串缺席防不住其他措辞漂移）；P3 方案文档 backlog「无 Qwen」措辞修正（无 stored extraction 的排空派发是真实 Qwen 调用，行为取舍不变理由改准确）。
 
 ### Changed (0.17.0 追加包：冲突检测门 v2 分层重设计+召回融合修正，owner 2026-09-23 拍板，未发版一次性收敛)
 

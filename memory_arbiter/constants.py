@@ -109,6 +109,10 @@ SEMANTIC_MIN_PAIR_BUDGET_MS = 1000
 # lower still. Unknown-field/backend failures never retry.
 SEMANTIC_PAIR_MAX_ATTEMPTS = 2
 SEMANTIC_PAIR_RETRY_QUOTE_CHARS = 240
+# pair-v10（owner 2026-09-25 行上下文方案，对抗 review P2）：truncation retry
+# 的渲染必须同步缩 context——不缩则双长行+双侧满 context 的 retry 形态被
+# n_ctx 守卫确定性关死（est×1.3+64+512 ≥ 2048），长对一次 invalid 即终局。
+SEMANTIC_PAIR_RETRY_CONTEXT_CHARS = 120
 SEMANTIC_PAIR_RETRY_MAX_TOKENS = 512
 # A1 ring (0.15.14): recent examined-pair samples kept for status/doctor
 # aggregation (mean/p95 pair_ms, retried ratio, long-decode ratio). A sample

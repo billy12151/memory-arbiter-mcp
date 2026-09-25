@@ -26,6 +26,11 @@ from memory_arbiter.semantic_conflict import (
     evaluate_single_direction_extraction,
 )
 
+# pair-v10 系统提示词逐位钉（对抗 review P3：子串缺席防不住其他措辞漂移）。
+# 改动系统词必须显式 bump PAIR_PROMPT_VERSION 并更新此钉。
+_PAIR_PROMPT_SHA = "82d6543575d5ce085f53b2c7f75392c6af6905a52e792e5799d8d910e6276959"
+_PAIR_PROMPT_EN_SHA = "db00b8c41cd749284a705f9fa07b62e33b4506a645ba9a4186a624300b5acc56"
+
 
 # ── row_context_text 构造 ─────────────────────────────────────────────────────
 
@@ -63,10 +68,24 @@ def test_row_context_text_skips_blank_heading_and_separator_lines() -> None:
     )
     start = content.index("| 上限 | 200 |")
     end = start + len("| 上限 | 200 |")
-    # 前邻行跳过分隔行取表头（原始行文本），后邻行跳过空行取散文行；标题取所属 # 标题。
-    assert row_context_text(content, start, end) == (
-        "标题 / | 名 | 值 | / 下一段内容够长可以成行。"
+    # 前邻行跳过分隔行取表头（原始行文本，同 block）；后方向跨空行屏障不再取
+    # 邻行（对抗 review P3：异 block 归属污染）。
+    assert row_context_text(content, start, end) == "标题 / | 名 | 值 |"
+
+
+def test_row_context_text_blank_line_blocks_cross_table_neighbors() -> None:
+    content = (
+        "# 表一\n"
+        "| a | 1 |\n"
+        "| b | 2 |\n"
+        "\n"
+        "# 表二\n"
+        "| c | 3 |\n"
     )
+    start = content.index("| c | 3 |")
+    end = start + len("| c | 3 |")
+    # 跨空行屏障后 prev 不再取表一的数据行（实测过的归属污染形态）。
+    assert row_context_text(content, start, end) == "表二"
 
 
 def test_row_context_text_caps_per_part_and_total() -> None:
@@ -256,9 +275,23 @@ def test_pair_text_renders_context_block() -> None:
     assert _PAIR_PROMPT.count("例：") == 1, "示例标记唯一，_strip_pair_example 契约不变"
     # pair-v10：系统提示词与 v9 逐位一致（0.6B 对系统措辞敏感——slow 校准对
     # 实证，加一行指令即扰动长值对抽取）；契约只存在于渲染出的 context 段。
+    # sha 钉（对抗 review P3）：子串缺席防不住其他措辞漂移——改系统词必须显式换版本。
+    import hashlib
+
+    assert hashlib.sha256(_PAIR_PROMPT.encode()).hexdigest() == _PAIR_PROMPT_SHA
+    assert hashlib.sha256(_PAIR_PROMPT_EN.encode()).hexdigest() == _PAIR_PROMPT_EN_SHA
     assert "上下文" not in _PAIR_PROMPT and "context" not in _PAIR_PROMPT_EN.lower()
     assert "属性与值必须取自下方证据原文" in with_ctx
     assert "must come from the evidence below" in en
+    # 对抗 review P2：truncation retry 渲染同步缩 context（120/侧）——
+    # 否则双长行+满 context 的 retry 形态被 n_ctx 守卫确定性关死。
+    retry_text = LocalGGUFSemanticBackend._pair_text(
+        {**base_left, "context": "甲" * 300},
+        {**base_right, "context": "乙" * 300},
+        quote_cap=240, context_cap=120,
+    )
+    assert "甲" * 120 in retry_text and "甲" * 121 not in retry_text
+    assert "乙" * 120 in retry_text and "乙" * 121 not in retry_text
 
 
 # ── D4 契约：值取自上下文被 grounding 挡住 ─────────────────────────────────────

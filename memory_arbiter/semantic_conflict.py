@@ -26,6 +26,7 @@ from .constants import (
     SEMANTIC_N_CTX,
     SEMANTIC_PAIR_MAX_ATTEMPTS,
     SEMANTIC_PAIR_RETRY_MAX_TOKENS,
+    SEMANTIC_PAIR_RETRY_CONTEXT_CHARS,
     SEMANTIC_PAIR_RETRY_QUOTE_CHARS,
 )
 from .tokens import estimate_tokens
@@ -1657,7 +1658,10 @@ class LocalGGUFSemanticBackend:
         )
 
     @classmethod
-    def _pair_text(cls, left: dict[str, Any], right: dict[str, Any], *, quote_cap: int = 400) -> str:
+    def _pair_text(
+        cls, left: dict[str, Any], right: dict[str, Any], *,
+        quote_cap: int = 400, context_cap: "int | None" = None,
+    ) -> str:
         """Serialize metadata first and leave both bounded quotes nearest the output."""
         # 400 chars = the local-text segmenter's unit cap, so an evidence unit
         # reaches the model whole (no second truncation); longer text only
@@ -1707,6 +1711,12 @@ class LocalGGUFSemanticBackend:
         # 供属性归属恢复；两侧任一带 context 才渲染该段（空缺标（无））。
         left_context = str(left.get("context") or "").strip()
         right_context = str(right.get("context") or "").strip()
+        if context_cap is not None:
+            # truncation retry 渲染（对抗 review P2）：context 与 quote 一同
+            # 缩减——否则双长行+满 context 的 retry 形态被 n_ctx 守卫确定性
+            # 关死，长对的截断恢复路径失效。
+            left_context = left_context[:context_cap]
+            right_context = right_context[:context_cap]
         context_block = ""
         if left_context or right_context:
             context_block = (
@@ -1922,12 +1932,19 @@ class LocalGGUFSemanticBackend:
                     # Re-read the family flag: the self-heal above may have
                     # flipped it mid-call.
                     retry_nothink = "/no_think\n" if self._qwen3_style else ""
+                    retry_user_text = self._pair_text(
+                        left, right,
+                        quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS,
+                        # 对抗 review P2：context 与 quote 同步缩减，保住
+                        # n_ctx 守卫下的截断恢复路径。
+                        context_cap=SEMANTIC_PAIR_RETRY_CONTEXT_CHARS,
+                    )
                     retry_messages = [
                         messages[0],
                         {"role": "user", "content": (
-                            f"{retry_nothink}输入: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\n输出:"
+                            f"{retry_nothink}输入: {retry_user_text}\n输出:"
                             if cjk else
-                            f"{retry_nothink}Input: {self._pair_text(left, right, quote_cap=SEMANTIC_PAIR_RETRY_QUOTE_CHARS)}\nOutput:"
+                            f"{retry_nothink}Input: {retry_user_text}\nOutput:"
                         )},
                         {"role": "user", "content": feedback},
                     ]

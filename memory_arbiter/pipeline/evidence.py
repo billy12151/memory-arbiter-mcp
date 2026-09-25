@@ -805,8 +805,9 @@ class EvidencePipeline:
                 # D3（owner 2026-09-25 翻案）：C 的 peer 侧同样接行上下文——
                 # 属性已由 dispatch_hint 点名，上下文供 peer 行的值语境恢复；
                 # left 是结构化 claim（无句子）不加。FP=0 是硬线，验收盯防。
+                # content 优先取 hit 自带（与偏移严格同版；对抗 review P3）
                 peer_context = row_context_text(
-                    str(peer.get("content") or str(hit.get("content") or "")),
+                    str(hit.get("content") or peer.get("content") or ""),
                     int(hit.get("start_offset") or 0),
                     int(hit.get("end_offset") or 0),
                 )
