@@ -2524,12 +2524,14 @@ class OperationsPipeline:
                 self._tools._backfill_subject_tags_vectors(embedder)
         except Exception:
             pass
+        worker_snapshot = self._tools._semantic_worker.snapshot()
         return self.db.state.response(
             {
                 "dry_run": False,
                 "queued": len(results) - failed,
                 "failed": failed,
                 "results": results,
+                "semantic_worker": worker_snapshot,
                 "workspace_vector_rebuild": (
                     workspace_rebuild if mismatch_rebuild else {"ok": True, "rebuilt": 0}
                 ),

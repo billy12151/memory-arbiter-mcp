@@ -1223,7 +1223,14 @@ class EvidencePipeline:
         if record and record.get("status") == "pending":
             return {"status": "skipped", "reason": "pending_workspace_activation",
                     "index_only": True, "notices_created": 0}
-        if not record or record.get("status") != "active":
+        # 0.17.0 修复（owner 2026-09-25 拍板，C6「非 deleted 保全」口径）：重建
+        # 选集含全部非 deleted 状态（active/retired/superseded/expired），而本路径
+        # 此前对非 active 一律 memory_not_active 拒绝 → 非活跃记忆的 pending 永远
+        # 清不空 → 空间翻转永不触发 → 向量通道锁死（真库实测 106 superseded +
+        # 117 retired 卡死翻转）。放行全部非 deleted；检测仍只对 active（上方
+        # pending-activation skip 不变）。
+        status_now = str((record or {}).get("status") or "")
+        if not record or status_now == "deleted":
             return {"status": "incomplete", "reason": "memory_not_active",
                     "index_only": True, "notices_created": 0}
         version = int(record.get("version") or 1)

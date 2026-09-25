@@ -164,6 +164,24 @@ class SemanticConflictWorker:
         except Exception as exc:
             self.set_error(str(exc))
 
+    def snapshot(self) -> dict[str, Any]:
+        """可观测性（2026-09-25 重建排障）：worker 内部状态一次读全——线程是否
+        存活、队列深度、inflight、处理计数、暂停/禁用标志与最近错误。"""
+        with self._cond:
+            thread_alive = bool(self._thread and self._thread.is_alive())
+        return {
+            "thread_alive": thread_alive,
+            "queue_depth": len(self._pending),
+            "inflight": len(self._inflight),
+            "processed": self._processed,
+            "skipped": self._skipped,
+            "dropped_queue_full": self._dropped_queue_full,
+            "paused": self._paused,
+            "runtime_disabled": self._runtime_disabled,
+            "shutdown": self._shutdown,
+            "last_error": self._last_error,
+        }
+
     def reserve(self, task_id: str) -> None:
         with self._cond:
             if task_id not in self._completed:
