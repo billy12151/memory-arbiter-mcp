@@ -469,6 +469,9 @@ class DummyAPI:
     def memory_detail(self, memory_id: int, sections: str = "catalog"):
         return {"memory": {"id": memory_id}, "sections": sections}
 
+    def memory_graph(self, memory_id: int, workspace: str | None = None):
+        return {"error": f"memory id {memory_id} not found", "_http_status": 404}
+
     def memories(self, **kwargs):
         return {"error": "strict isolation requires workspace", "_http_status": 400}
 
@@ -727,3 +730,149 @@ def test_pagination_functions_exist_and_bind_correctly() -> None:
     assert "memPage: {" in INDEX_HTML
     # request sequence guard against stale responses (M3 race fix)
     assert "memReqSeq" in INDEX_HTML
+
+
+# ── memory relations graph (/api/memories/<id>/graph) ──
+
+
+def test_memory_graph_returns_self_and_conflict_edges(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    left = api.tools.memory_write(
+        content="old scope", subject="Graph", tags=["g"], workspace="console-ws",
+    )["data"]["id"]
+    right = api.tools.memory_write(
+        content="new scope", subject="Other", tags=["g2"], workspace="console-ws",
+    )["data"]["id"]
+    conflict = _record_group(api, left, right)
+    graph = api.memory_graph(left)
+    assert graph["memory"]["id"] == left
+    self_node = next(node for node in graph["nodes"] if node["kind"] == "self")
+    assert self_node["id"] == left
+    conflict_edges = [edge for edge in graph["edges"] if edge["type"] == "conflict"]
+    assert conflict_edges, "expected a conflict edge"
+    assert conflict_edges[0]["target"] == right
+    assert conflict_edges[0]["conflict_id"] == conflict["conflict_id"]
+    neighbor_ids = {node["id"] for node in graph["nodes"] if node["kind"] == "memory"}
+    assert right in neighbor_ids
+
+
+def test_memory_graph_same_subject_and_tag_edges(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    base = api.tools.memory_write(
+        content="alpha", subject="Shared", tags=["t1", "t2"], workspace="console-ws",
+    )["data"]["id"]
+    same_subject = api.tools.memory_write(
+        content="beta", subject="Shared", tags=["other"], workspace="console-ws",
+    )["data"]["id"]
+    same_tag = api.tools.memory_write(
+        content="gamma", subject="Elsewhere", tags=["t2"], workspace="console-ws",
+    )["data"]["id"]
+    graph = api.memory_graph(base)
+    edges = {(edge["type"], edge["target"]) for edge in graph["edges"]}
+    assert ("same_subject", same_subject) in edges
+    assert ("same_tag", same_tag) in edges
+    assert all(edge["source"] == base for edge in graph["edges"])
+    assert all(edge["target"] != base for edge in graph["edges"])
+
+
+def test_memory_graph_history_after_edit(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    mid = api.tools.memory_write(
+        content="v1 content", subject="Hist", workspace="console-ws",
+    )["data"]["id"]
+    api.tools.memory_edit(mid, new_content="v2 content")
+    graph = api.memory_graph(mid)
+    assert graph["history"], "expected history rows after an edit"
+    versions = [row["version"] for row in graph["history"]]
+    assert versions == sorted(versions, reverse=True)
+
+
+def test_memory_graph_404_for_missing_id(tmp_path: Path) -> None:
+    api = _api(tmp_path)
+    result = api.memory_graph(9999)
+    assert result["error"] == "memory id 9999 not found"
+    assert result["_http_status"] == 404
+
+
+def test_console_server_graph_route_bad_id_and_missing(tmp_path) -> None:
+    server = build_http_server("127.0.0.1", 0, api=DummyAPI())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/memories/not-an-id/graph", timeout=2)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["error"] == "memory id must be an integer"
+        else:
+            raise AssertionError("expected HTTPError")
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/memories/123/graph", timeout=2)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+        else:
+            raise AssertionError("expected HTTPError")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_memory_graph_frontend_contract() -> None:
+    """The memory detail page must fetch the graph endpoint and render the
+    canvas + fallback list — locks the wiring a node --check parse cannot."""
+    assert "api(`/api/memories/${encodeURIComponent(id)}/graph`)" in INDEX_HTML
+    assert "function drawEgoGraph(" in INDEX_HTML
+    assert "function relationsCard(" in INDEX_HTML
+    assert 'id="egoGraph"' in INDEX_HTML
+    assert "legendSameTag" in INDEX_HTML
+
+
+def test_memory_graph_strict_scopes_neighbors(tmp_path: Path) -> None:
+    """Strict isolation: neighbors outside the admitted set must not leak via
+    any edge type or the node list, while fully-visible same-workspace
+    relations (conflict / subject / tag) are kept."""
+    db_path = tmp_path / "console.sqlite3"
+    backup = tmp_path / "console.jsonl"
+    open_api = ConsoleAPI(MemoryTools(Settings(
+        db_path=db_path, backup_jsonl=backup, client="pytest",
+        agent_id="console-test", workspace="ws-a",
+    )))
+    a = open_api.tools.memory_write(
+        content="alpha", subject="S", tags=["t"], workspace="ws-a", agent_id="t",
+    )["data"]["id"]
+    b = open_api.tools.memory_write(
+        content="beta", subject="S", tags=["t"], workspace="ws-b", agent_id="t",
+    )["data"]["id"]
+    c = open_api.tools.memory_write(
+        content="gamma", subject="S", tags=["t"], workspace="ws-a", agent_id="t",
+    )["data"]["id"]
+    _record_group(open_api, a, c)
+
+    strict_api = ConsoleAPI(MemoryTools(Settings(
+        db_path=db_path, backup_jsonl=backup, client="pytest",
+        agent_id="console-test", workspace="ws-a", isolation="strict",
+    )))
+    graph = strict_api.memory_graph(a, workspace="ws-a")
+    targets = {edge["target"] for edge in graph["edges"]}
+    assert b not in targets
+    assert b not in {node["id"] for node in graph["nodes"]}
+    assert any(edge["type"] == "conflict" and edge["target"] == c for edge in graph["edges"])
+    assert ("same_subject", c) in {(edge["type"], edge["target"]) for edge in graph["edges"]}
+    assert ("same_tag", c) in {(edge["type"], edge["target"]) for edge in graph["edges"]}
+    # none 模式无隔离：跨 workspace 邻居可见
+    open_graph = open_api.memory_graph(a)
+    assert b in {edge["target"] for edge in open_graph["edges"]}
+
+
+def test_overview_by_workspace_active_excludes_superseded(tmp_path: Path) -> None:
+    """by_workspace counts every non-deleted memory (audit semantics);
+    by_workspace_active must pair it with per-workspace active-only counts."""
+    api = _api(tmp_path)
+    api.tools.memory_write(content="active one", subject="A", workspace="console-ws", agent_id="t")
+    gone = api.tools.memory_write(content="old one", subject="B", workspace="console-ws", agent_id="t")["data"]["id"]
+    api.tools.memory_supersede(gone, reason="superseded by test", authorized=True)
+    overview = api.overview()
+    assert overview["by_workspace_active"].get("console-ws") == 1
+    assert overview["by_workspace"].get("console-ws", 0) >= 2

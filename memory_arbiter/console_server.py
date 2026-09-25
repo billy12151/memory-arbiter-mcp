@@ -95,6 +95,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     offset=_one(qs, "offset", "0"),
                 ), send_body=send_body)
                 return
+            if parsed.path.startswith("/api/memories/") and parsed.path.endswith("/graph"):
+                memory_id = _path_int(parsed.path[: -len("/graph")])
+                if memory_id is None:
+                    self._json({"error": "memory id must be an integer"}, status=HTTPStatus.BAD_REQUEST, send_body=send_body)
+                    return
+                qs = parse_qs(parsed.query)
+                ws = _one(qs, "workspace", "") or None
+                self._json_or_error(self.api.memory_graph(memory_id, workspace=ws) if ws else self.api.memory_graph(memory_id), send_body=send_body)
+                return
             if parsed.path.startswith("/api/memories/"):
                 qs = parse_qs(parsed.query)
                 memory_id = _path_int(parsed.path)
