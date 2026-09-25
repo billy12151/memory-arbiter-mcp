@@ -682,7 +682,17 @@ _LOWER_IS_BETTER_SUBSTR = (
 _SIM_FALSE_LABELS = ("clearly_different", "opposite_semantics", "same_entity_diff_attr")
 # 0.17.0 校准轮：conflict 的 noise 标签 firing 同为假阳性（半秒 bug 时代曾
 # 3/27 sync），gate 方向必须 lower-is-better——首轮对比曾把 3→2 的改善误判 FAILED。
-_CONFLICT_FALSE_LABELS = ("noise",)
+# 0.17.0 校准轮：conflict 的 noise 标签 firing 同为假阳性（半秒 bug 时代曾
+# 3/27 sync），gate 方向必须 lower-is-better——首轮对比曾把 3→2 的改善误判 FAILED。
+# 2026-09-25 owner 拍板（E3 实证：FP 改善 7→6 被旧基线门误判 FAILED）：负样本
+# governed_negative 的 firing 类指标（identified/sync/async）同规——用精确段
+# 匹配而非整标签，miss（负样本上不报=正确）保持 higher-is-better 不受牵连。
+_CONFLICT_FALSE_LABELS = (
+    "noise",
+    "governed_negative.identified",
+    "governed_negative.sync",
+    "governed_negative.async",
+)
 _GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target",
                    # 检索线 K3（R2-P2-3）：语料元数据不是行为指标——同语料
                    # 内恒定，不进相对门（corpus bump 由 corpus_version 前置校验拦）

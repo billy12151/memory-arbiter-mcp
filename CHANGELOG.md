@@ -30,7 +30,10 @@ Versions follow semantic versioning.
 - **perf(harness): 全量一轮提速（owner 2026-09-24「20 多分钟太久了」当场拍板）。** 时间构成拆解：conflict 套件 1114s 里 ~420s 是 140 次写入 × 3s 写响应同步窗——该窗只养 sync/async 诊断拆分（gate 早已排除 `.sync.rate`/`.async.rate` 单项，cand2 拍板行为指标=identified/miss/recall/precision），且套件逐对 `wait_task(180s)` 等 job 完成、异步采集不依赖窗口；另 recall+similarity 与 conflict 是互不相干的独立临时库却串行跑。三改动：①runner 新旗标 `--conflict-sync-wait-ms`（默认缺省=库默认 3000，基线可比性不变；调小只改 sync/async 拆分，行为指标逐位不变，env 如实记录生效值）；②`--parallel`（suite=all 时 conflict 库道拆子进程与 recall+similarity 并行，子进程 stdout 直通、失败按退出码大声报错，子 raw 合并进父 raw 后删除）；③gate() 排除 `env.*` 环境元数据键（同步窗等运行配置正当可调，绝不进门）；④提速二（owner 追问「非验证冲突的写入能不能不付 3 秒窗」）：`--setup-sync-wait-ms` 默认 0——每对左成员是 setup 写、不是被测事件，sync 指标只从右（被测）写响应读，左写窗口默认关闭（左 job 落后台、与右写/右 job 自然重叠），右写保持 `--conflict-sync-wait-ms`（默认 3000），**默认旗标即得提速且 3 秒 sync 语义保留**；env 增记 `conflict_setup_sync_wait_ms`。预期全量 ~22min → ~10-11min（Qwen job p50 3.2s × ~120 job 是不可压下限；再快需跨对并行派发，牵动公平墙语义，挂观测不做）。
 
 - **fix(claims): update+claims 确定性崩溃修复（2026-09-25 外部 workbuddy 会话实测三形态复现）。** update 的 claims 落库钩子（P2-5.2 对抗 review P1-3）把 post-edit record 以 **dict** 形态传进 `_persist_claims_for_version`，而函数体内 `record.content` 是属性访问 → `'dict' object has no attribute 'content'`——claims+new_content 与 claims+patches 两形态自 P2-5.2 上线起 100% 崩溃（claims-only 被拒属既定契约「claims 必须与内容编辑同行」非 bug）。修=函数内鸭子取 content（`isinstance(record, dict)` 分支），MemoryRecord/_Rec shim 两形态不受影响。**该崩溃能存活至今的根因是 update+claims 钩子从无端到端测试**——补两形态回归钉（claims_written + 新版本 claims 行落库断言）。
-- **fix(claims): 修复后对抗 review 收尾批。** 修复本身无缺陷（三调用方 record 形态/version 语义/replace 语义/全仓调用方普查逐项核过）；相邻缺口两项当场修：①backfill 兜底补防渗规则（`attr_contains_value`——schema `_v_claims` 硬拒同款，原先 backfill apply 可落 remember/update 必拒的 claims）+空 attr/value 从静默蒸发改进回执（`empty_attr`/`empty_value`）；②负分支回归钉（值不在新 content 逐条回执、显式 `[]` 声明无 claims 落 0 且旧行孤儿化）。**遗留待 owner 拍板**：update 路径的 claims 灰度/强制门缺失（P2-5.2 方案原文写「edit 对应项」，实现只有 remember 有——enforce 期 update 静默孤儿化旧 claims），属方案语义偏离需拍板后另 commit；tags_only+claims 静默吞掉、治理路径（merge/apply）claims 断流靠 backfill 兜底——记案。
+- **fix(claims): 修复后对抗 review 收尾批。** 修复本身无缺陷（三调用方 record 形态/version 语义/replace 语义/全仓调用方普查逐项核过）；相邻缺口两项当场修：①backfill 兜底补防渗规则（`attr_contains_value`——schema `_v_claims` 硬拒同款，原先 backfill apply 可落 remember/update 必拒的 claims）+空 attr/value 从静默蒸发改进回执（`empty_attr`/`empty_value`）；②负分支回归钉（值不在新 content 逐条回执、显式 `[]` 声明无 claims 落 0 且旧行孤儿化）。**遗留项 owner 已拍板（2026-09-25）**：update 路径**不强制** claims 灰度/强制门（owner：更新场景属性不明确，覆盖/追加语义两难——维持现状：claims 缺失不警告不拒，旧行孤儿化由 backfill 兜底）；tags_only+claims 静默吞、治理路径 claims 断流靠 backfill 兜底——记案。
+
+- **fix(gate): 负样本误报判分方向修正（owner 2026-09-25 拍板，E3 实证驱动）。** `conflict.by_shape.governed_negative` 的 firing 类指标（identified/sync/async）是负样本误报——lower-is-better 才对，原 higher-is-better 把本次 FP 改善 7→6 误判 FAILED（31 条少数样本语料 14.3% 跌幅超 10% 阈值）即活证。修=入 `_CONFLICT_FALSE_LABELS` 精确段匹配（`governed_negative.identified/sync/async`），miss（负样本上不报=正确）保持 higher-is-better 不受牵连；+方向双向测试。
+- **拍板记录（2026-09-25）**：①行上下文 envelope **保留**（E3 实测误报降、召回持平、C FP=0 守住，详见 envelope 方案 §9.4）；②update 不强制 claims；③**发版上线要求追加：0.17.0 上线时必须强制提示存量用户更新向量值（全量重扫+重嵌），doctor 同步提示，完成前提示不消失**——落 embedder 前缀方案与发版 checklist。
 
 ### Changed (0.17.0 追加包：检测行上下文 envelope——碎行召回修复，owner 2026-09-25 拍板，未发版一次性收敛)
 
@@ -62,7 +65,7 @@ Versions follow semantic versioning.
 - 已知取舍记录：单线程串行吞吐（原两 worker 流水线合并，owner 接受单机低写入）；embed_texts 持锁期间 backfill 单条嵌入阻塞为常态；无单元回退路径（owner 拍板全局退役）。
 
 
-冲突/相似识别率提升（Part 2）。P2-0~P2-7 全量实施 + 两轮 review（第二轮对抗性）13 项修复；对 0.16.12 基线（conflict-v3-noisy 全量语料）的对比数字见发版前 harness 报告。**行为门：新表全部 additive（memory_row/memory_row_vec/memory_claims/memory_claim_vec/conflict_backlog）、memories.last_scanned_at 加列；claims 为 remember/update 新增必填字段（灰度 claims.required 默认 false 只警告）；发版须统一 bump CONFLICT_DETECTOR_VERSION 并触发一次全量重扫。**
+冲突/相似识别率提升（Part 2）。P2-0~P2-7 全量实施 + 两轮 review（第二轮对抗性）13 项修复；对 0.16.12 基线（conflict-v3-noisy 全量语料）的对比数字见发版前 harness 报告。**行为门：新表全部 additive（memory_row/memory_row_vec/memory_claims/memory_claim_vec/conflict_backlog）、memories.last_scanned_at 加列；claims 为 remember/update 新增必填字段（灰度 claims.required 默认 false 只警告）；发版须统一 bump CONFLICT_DETECTOR_VERSION 并触发一次全量重扫；上线时必须强制提示存量用户更新向量值（全量重扫+重嵌完成前提示不消失，doctor 同步提示——owner 2026-09-25 指令）。**
 
 ### Changed
 

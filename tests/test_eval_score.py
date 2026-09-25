@@ -294,3 +294,23 @@ def test_gate_excludes_env_metadata() -> None:
     assert score.gate(current, baseline, 0.1)["gate"] == "PASSED"
     current["recall"]["recall_at_10"]["rate"] = 0.5
     assert score.gate(current, baseline, 0.1)["gate"] == "FAILED"
+
+
+def test_gate_negative_label_firing_is_lower_is_better() -> None:
+    """owner 2026-09-25 拍板（E3 实证 FP 改善 7→6 被旧基线误判 FAILED）：
+    governed_negative 的 firing 类指标=负样本误报，lower-is-better；miss
+    （负样本上不报=正确）保持 higher-is-better 不受牵连。"""
+    baseline = {"conflict": {"by_shape": {"governed_negative": {
+        "identified": {"rate": 0.2258}, "miss": {"rate": 0.7742}}}}}
+    improved = {"conflict": {"by_shape": {"governed_negative": {
+        "identified": {"rate": 0.1935}, "miss": {"rate": 0.8065}}}}}
+    # 误报降、miss 升（都是改善）：PASSED
+    assert score.gate(improved, baseline, 0.1)["gate"] == "PASSED"
+    # 误报涨超阈值（真回归）：FAILED
+    worse = {"conflict": {"by_shape": {"governed_negative": {
+        "identified": {"rate": 0.30}, "miss": {"rate": 0.70}}}}}
+    result = score.gate(worse, baseline, 0.1)
+    assert result["gate"] == "FAILED"
+    assert all(
+        "identified" in f["metric"] for f in result["failures"]
+    ), result
