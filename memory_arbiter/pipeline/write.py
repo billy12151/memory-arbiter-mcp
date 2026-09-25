@@ -366,6 +366,16 @@ class WritePipeline:
             attr = str(item.get("attr") or "").strip()
             value = str(item.get("value") or "").strip()
             if not attr or not value:
+                # 空 attr/value 原来静默蒸发（对抗 review P3）——进回执可见
+                rejected.append({
+                    "index": index,
+                    "reason": "empty_attr" if not attr else "empty_value",
+                })
+                continue
+            if value in attr:
+                # 防渗规则（schema _v_claims 硬拒同款，对抗 review P3）：
+                # backfill 兜底原缺此检查，可落 remember/update 必拒的 claims
+                rejected.append({"index": index, "reason": "attr_contains_value"})
                 continue
             if value not in content:
                 rejected.append({"index": index, "reason": "value_not_in_content"})
