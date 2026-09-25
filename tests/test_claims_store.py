@@ -115,6 +115,23 @@ def test_attr_conflict_candidates_excludes_self_and_inactive(tmp_path: Path) -> 
     assert [c["memory_id"] for c in candidates] == [2]  # 自身与 retired 排除
 
 
+def test_attr_conflict_candidates_limit_truncation_visible(tmp_path: Path) -> None:
+    """R2 复评：候选上限必须显式传参且调用方可经 len(rows)==limit 判定截断
+    （默认 CLAIMS_EXACT_CANDIDATE_LIMIT=100；截断在通道侧以
+    channel_b_exact_capped 回执，不静默）。"""
+    store = _make_store(tmp_path)
+    for mid in (1, 2, 3, 4):
+        _seed(store, mid, 1)
+        store.insert(
+            memory_id=mid, memory_version=1,
+            claims=[_claim("超时", f"{mid}s", f"{mid}|s")],
+        )
+    rows = store.attr_conflict_candidates(
+        attr_norm="超时", exclude_memory_id=1, limit=2,
+    )
+    assert len(rows) == 2  # 满 limit → 调用方视为「可能截断」信号
+
+
 def test_coexisting_values_a4(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     _seed(store, 1, 1)

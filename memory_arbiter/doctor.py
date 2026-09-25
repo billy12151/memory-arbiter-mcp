@@ -299,11 +299,15 @@ def _c_row_vector_coverage(ctx: _DoctorCtx) -> Finding:
     # the boot backfill's pending queue — a snapshot cannot judge whether it
     # is shrinking, so the numbers go to detail and never to overall status.
     try:
-        covered = int(ctx.conn.execute(
-            "SELECT COUNT(DISTINCT r.memory_id) FROM memory_row r"
-        ).fetchone()[0])
         eligible = int(ctx.conn.execute(
             "SELECT COUNT(DISTINCT e.memory_id) FROM memory_row e"
+        ).fetchone()[0])
+        # 0.17.0 review R2：covered 原与 eligible 同表同谓词（恒等死仪表，
+        # 恒报 100%，回填缺口永不可见）——covered 以 memory_row_vec 侧存在
+        # 对应向量为口径（publish 单事务原子写两表，行在⇔向量在）。
+        covered = int(ctx.conn.execute(
+            "SELECT COUNT(DISTINCT e.memory_id) FROM memory_row e"
+            " WHERE EXISTS(SELECT 1 FROM memory_row_vec v WHERE v.id = e.id)"
         ).fetchone()[0])
     except sqlite3.Error:
         return _finding(

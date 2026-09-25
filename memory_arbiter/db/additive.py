@@ -134,6 +134,9 @@ def scan_queue_ddl() -> str:
       reason TEXT NOT NULL DEFAULT '',
       severity TEXT,
       source TEXT NOT NULL DEFAULT 'scan_pipeline',
+      -- 0.17.0 review R2：判定页窗口内按 pair 分数降序展示（compute_pair_score
+      -- 同式打分，入队时盖章；旧库由下方 has_column 迁移补列，默认 0=按 id）。
+      priority REAL NOT NULL DEFAULT 0,
       detail TEXT CHECK(detail IS NULL OR (json_valid(detail) AND json_type(detail)='object' AND length(detail) <= 32768)),
       decided_ref TEXT,
       decided_reason TEXT,
@@ -232,6 +235,9 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scan_queue'"
     ).fetchone())
     conn.executescript(scan_queue_ddl())
+    if not has_column(conn, "scan_queue", "priority"):
+        conn.execute("ALTER TABLE scan_queue ADD COLUMN priority REAL NOT NULL DEFAULT 0")
+        applied.append("scan_queue.priority")
     if not scan_queue_existed:
         applied.append("scan_queue")
     internal_existed = bool(conn.execute(

@@ -301,8 +301,8 @@ def _write_many_units(tools: MemoryTools, paragraphs: int) -> int:
     return int(written["id"])
 
 
-def test_over_cap_memory_reports_evidence_units_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """>64 text units (cap since 0.15.14 A5) -> incomplete/evidence_units_capped."""
+def test_over_cap_memory_reports_rows_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """>SEMANTIC_MAX_ROWS row candidates (P2-3.1) -> incomplete/rows_capped."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", lambda timeout: None)
@@ -386,10 +386,12 @@ def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkey
     assert result["reason"] == "rows_capped"
 
 
-def test_technical_reasons_registry_includes_evidence_units_capped() -> None:
+def test_technical_reasons_registry_rows_cap() -> None:
     from memory_arbiter.pipeline.evidence import _TECHNICAL_REASONS
 
-    assert "evidence_units_capped" in _TECHNICAL_REASONS
+    # 0.17.0 review R2 r2s-12: the units mode is retired (C5) — the cap
+    # reason rides the rows-mode registry only.
+    assert "evidence_units_capped" not in _TECHNICAL_REASONS
     assert "rows_capped" in _TECHNICAL_REASONS
     assert "notice_budget_exhausted" in _TECHNICAL_REASONS
 

@@ -193,11 +193,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "0/0 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 0,
-      "row_eligible": 0
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -416,11 +413,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "0/0 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 0,
-      "row_eligible": 0
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -728,11 +722,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -951,11 +942,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -1263,11 +1251,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -1486,11 +1471,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -1805,11 +1787,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -2035,11 +2014,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -2362,11 +2338,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -2600,11 +2573,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -2927,11 +2897,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -3165,11 +3132,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -3493,11 +3457,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -3732,11 +3693,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -4070,11 +4028,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -4319,11 +4274,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -4646,11 +4598,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "0/0 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 0,
-      "row_eligible": 0
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -4884,11 +4833,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "0/0 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 0,
-      "row_eligible": 0
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -5191,11 +5137,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -5440,11 +5383,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "0/0 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 0,
-      "row_eligible": 0
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -5663,11 +5603,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -5892,11 +5829,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -6121,11 +6055,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -6344,11 +6275,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -6567,11 +6495,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -6803,11 +6728,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -7026,11 +6948,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -7249,11 +7168,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -7485,11 +7401,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "3/3 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 3,
-      "row_eligible": 3
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -7708,11 +7621,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -8020,11 +7930,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -8332,11 +8239,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -8644,11 +8548,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -8956,11 +8857,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -9293,11 +9191,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -9630,11 +9525,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -9962,11 +9854,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -10299,11 +10188,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -10636,11 +10522,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -10973,11 +10856,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -11310,11 +11190,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -11642,11 +11519,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -11979,11 +11853,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -12316,11 +12187,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -12653,11 +12521,8 @@
      "severity": "info",
      "status": "pass",
      "title": "rows.coverage",
-     "detail": "2/2 evidence-indexed memories have row vectors",
-     "evidence": {
-      "row_covered": 2,
-      "row_eligible": 2
-     },
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {

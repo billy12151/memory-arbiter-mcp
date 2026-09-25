@@ -21,6 +21,7 @@ transport work:
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any, TYPE_CHECKING
 
 from .constants import is_default_workspace_term
@@ -202,7 +203,7 @@ class QueueProtocol:
             with self.db.connection() as conn:
                 rows = conn.execute(
                     """SELECT id,kind,workspace_canonical,status,candidate_key_hash,
-                              member_versions,evidence,reason,severity,source,detail
+                              member_versions,evidence,reason,severity,source,priority,detail
                        FROM scan_queue WHERE status='pending' AND kind='conflict' AND id>?
                        """ + scope_sql + " ORDER BY id LIMIT ?",
                     (int(after_id), *scope_params, ASSEMBLY_WINDOW),
@@ -259,7 +260,19 @@ class QueueProtocol:
             for member in row.get("member_versions") or []:
                 if member.get("memory_id") is not None:
                     component["member_ids"].add(int(member["memory_id"]))
-        return sorted(components.values(), key=lambda c: c["last_queue_id"])
+        # 0.17.0 review R2：判定页窗口（ASSEMBLY_WINDOW）内按组最高 pair
+        # 优先级降序展示（tie-break 保 id 游标稳定）——数值对立/低 cos 高分
+        # 对先到 agent 手里，不再被入队顺序埋没。
+        return sorted(
+            components.values(),
+            key=lambda c: (
+                -max(
+                    (float(p.get("priority") or 0.0) for p in c["pairs"]),
+                    default=0.0,
+                ),
+                c["last_queue_id"],
+            ),
+        )
 
     def _member_visible(self, memory_id: int) -> bool:
         """Strict-isolation fail-closed check (adversarial review #2): a
@@ -739,10 +752,16 @@ class QueueProtocol:
                        WHERE id=? AND status='pending'""",  # CAS（仓库 B10 纪律）
                     [(status, why, now, now, rid) for rid in row_ids],
                 )
-        except Exception:
+        except sqlite3.OperationalError as exc:
             # F1 (R2)：durable 表缺失时 INSERT 连坐队列翻转（假绿 dismissed +
             # 行永 pending + §九永久卡死）——队列翻转必须落地，回退旧路径。
-            self._expire_workspace_rows_legacy_fallback(memory_id, status, why, now)
+            # 0.17.0 review R2：降级只针对「workspace_dismissals 表缺失」这
+            # 一设计内形态；写锁等瞬时错误曾被同一裸 except 吞进降级（豁免
+            # 静默丢失 + 假绿 dismissed）——其余照抛，counted never silent。
+            if "no such table" in str(exc) and "workspace_dismissals" in str(exc):
+                self._expire_workspace_rows_legacy_fallback(memory_id, status, why, now)
+            else:
+                raise
 
     def _expire_workspace_rows_legacy_fallback(
         self, memory_id: int, status: str, why: str, now: str,
@@ -758,8 +777,8 @@ class QueueProtocol:
                                     WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
                     (status, why, now, now, int(memory_id)),
                 )
-        except Exception:
-            pass
+        except sqlite3.Error:
+            pass  # 库不可写（只读/损坏）：行留 pending，agent 可再处置
 
     def _multi_family_mentions(self, record: dict[str, Any], target: str) -> list[str]:
         """E7-4: subject/tags mentioning >=2 registered project families

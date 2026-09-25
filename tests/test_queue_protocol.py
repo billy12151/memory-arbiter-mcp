@@ -796,3 +796,36 @@ def test_confirmed_move_leaves_no_durable_row(tmp_path: Path) -> None:
     assert durable == 0, "confirmed 搬桶不得落持久豁免"
     # 搬桶使行钉（旧桶/旧版本）失效，队列行被作废——重点是 durable 不落表。
     assert all(str(r[0]) != "pending" for r in queue_status)
+
+
+def test_dismiss_transient_error_propagates_not_fallback(tmp_path: Path, monkeypatch) -> None:
+    """R2 P3：legacy 降级只允许「workspace_dismissals 表缺失」这一设计内
+    形态——写锁等瞬时 sqlite 错误曾被裸 except 吞进 fallback（durable 豁免
+    静默丢失 + 假绿 dismissed），现在必须照抛（counted, never silent）。"""
+    import sqlite3 as _sqlite3
+
+    tools = make_tools(tmp_path)
+    mid = _workspace_clan(tools)
+    _enqueue_workspace_candidate(tools, mid, tag="locked")
+    fallback_calls: list[int] = []
+
+    def _boom(*args, **kwargs):
+        raise _sqlite3.OperationalError("database is locked")
+
+    from memory_arbiter.queue_protocol import QueueProtocol
+
+    def _spy_fallback(self, memory_id, status, why, now):
+        fallback_calls.append(1)
+        raise AssertionError("legacy fallback must not run on transient errors")
+
+    monkeypatch.setattr(
+        tools.db.scan_queue, "record_workspace_dismissals_on_conn", _boom,
+    )
+    monkeypatch.setattr(
+        QueueProtocol, "_expire_workspace_rows_legacy_fallback", _spy_fallback,
+    )
+    with pytest.raises(_sqlite3.OperationalError):
+        _submit(tools, [
+            {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "写锁传播"},
+        ])
+    assert fallback_calls == [], "瞬时错误不得走 legacy 降级"

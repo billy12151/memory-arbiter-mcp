@@ -24,7 +24,7 @@ from .semantic_conflict import (
 from .update_monitor import UpdateMonitor
 from .request_identity import get_request_identity
 from .scan_tasks import AGENT_INSTRUCTION as _SCAN_AGENT_INSTRUCTION, SCHEDULED_TASKS_SPEC as _SCAN_TASKS_SPEC
-from .workers import LocalTextIndexWorker, SemanticConflictWorker
+from .workers import SemanticConflictWorker
 from .surfaces import ProductSurfaces
 from .pipeline.signals import ConflictSignalPipeline
 from .pipeline.write import WritePipeline
@@ -65,7 +65,9 @@ class MemoryTools:
         self._query_embed_cache_lock = threading.Lock()
         self._query_embed_cache_capacity = 128
         self._update_monitor: UpdateMonitor | None = None
-        self._evidence_worker = LocalTextIndexWorker(self)
+        # R2-S1：唯一 worker 提前到管线构造前（原 LocalTextIndexWorker 的
+        # 位置）——ReadPipeline/OperationsPipeline 在 __init__ 里就要引用它。
+        self._semantic_worker = SemanticConflictWorker(self)
         self._surfaces = ProductSurfaces(self)
         self._signals = ConflictSignalPipeline(self)
         self._write_pipeline = WritePipeline(self)
@@ -77,7 +79,6 @@ class MemoryTools:
         self._semantic_backend: SemanticBackend | None = None
         self._semantic_backend_lock = threading.Lock()
         self._semantic_runtime_disabled = False
-        self._semantic_worker = SemanticConflictWorker(self)
         self._shutdown_lock = threading.Lock()
         self._shutdown_started = False
         self._shutdown_complete = False
@@ -211,11 +212,10 @@ class MemoryTools:
         except Exception:
             pass
 
-    def start_evidence_worker(self) -> None:
-        self._evidence_worker.start()
-
     def wait_evidence_worker_drained(self, timeout: float = 30.0) -> bool:
-        return self._evidence_worker.wait_drained(timeout)
+        # R2-S1（C2 后 LocalTextIndexWorker 退役）：历史方法名保留给 eval/
+        # replay 调用方，语义 worker 就是唯一的存活 worker——索引与检测同队列。
+        return self._semantic_worker.wait_drained(timeout)
 
     def _record_check_degradation(self, reason: str, sample: str | None = None) -> None:
         from .models import utc_now_iso
@@ -309,7 +309,8 @@ class MemoryTools:
         """C2 (0.17.0 worker merge): enqueue the ONE semantic job that does
         indexing AND detection. The old two-queue chain (evidence worker
         indexes → forwards to the semantic worker) is gone; the local-text
-        index worker remains only for boot backfill / repair.
+        index worker is retired with it (R2-S1) — boot backfill / repair
+        paths call the same single semantic queue.
 
         ``recheck_conflicts=False`` (conflict-apply edits §15.3, replay
         postprocess) enqueues an index_only job: segment + batch-embed +
@@ -705,7 +706,6 @@ class MemoryTools:
         if self._backfill_thread is not None and self._backfill_thread.is_alive():
             self._backfill_done.wait(timeout=min(30.0, timeout))
         worker_shutdown = self._semantic_worker.shutdown(discard_pending=True)
-        evidence_shutdown = self._evidence_worker.shutdown(discard_pending=False)
         # Shutdown also closes synchronous workspace-suggestion admission before
         # waiting; otherwise a new call can race the worker drain/unload phase.
         with self._semantic_backend_lock:
@@ -715,8 +715,6 @@ class MemoryTools:
                 admitted_backend.set_disabled(True)
         remaining = max(0.0, deadline - time.monotonic())
         semantic_drained = self._semantic_worker.wait_drained(remaining)
-        remaining = max(0.0, deadline - time.monotonic())
-        evidence_drained = self._evidence_worker.wait_drained(remaining)
         backend = self._get_semantic_backend_ref()
         unload_result: dict[str, Any] = {"ok": True, "unloaded": False, "reason": "no_backend"}
         if backend is not None:
@@ -738,7 +736,7 @@ class MemoryTools:
         if embedder is not None:
             embedder.close()
             embedder_closed = True
-        ok = bool(semantic_drained and evidence_drained and unload_result.get("ok", False))
+        ok = bool(semantic_drained and unload_result.get("ok", False))
         with self._shutdown_lock:
             self._shutdown_complete = ok
             self._shutdown_started = False
@@ -746,9 +744,7 @@ class MemoryTools:
             "ok": ok,
             "already_shutdown": False,
             "semantic_worker": worker_shutdown,
-            "evidence_worker": evidence_shutdown,
             "semantic_drained": semantic_drained,
-            "evidence_drained": evidence_drained,
             "backend_unload": unload_result,
             "embedder_closed": embedder_closed,
         }
@@ -1761,7 +1757,7 @@ class MemoryTools:
             b_result = ev.check_claims_conflicts(memory_id, snapshot, skip_peers=None)
             if isinstance(b_result, dict):
                 claims_result = b_result
-                b_surfaced = b_result.pop("surfaced_peers", []) or []
+                b_surfaced = b_result.pop("_surfaced_peers", []) or []
         except Exception as exc:  # counted, never silent (gate-v2 review)
             claims_error = str(exc)[:200]
             self._record_check_degradation("claims_channel_error", claims_error)
@@ -1774,15 +1770,15 @@ class MemoryTools:
         # blocked by the pool (D3).
         try:
             c_result = ev.check_claim_sentence_conflicts(
-                memory_id, snapshot, skip_peers=None,
+                memory_id, snapshot,
                 allowed_memory_ids=ctx.get("allowed_memory_ids"),
-                notices_used=int((claims_result or {}).get("notices") or 0),
+                notices_used=int((claims_result or {}).get("channel_b_notices") or 0),
                 budget_sink=ctx["budget"].spend_channel_c,
                 deadline_fn=lambda: ev.conflicts_job_deadline(ctx),
             )
             if isinstance(c_result, dict):
                 channel_c = c_result
-                c_surfaced = c_result.pop("surfaced_peers", []) or []
+                c_surfaced = c_result.pop("_surfaced_peers", []) or []
         except Exception as exc:  # counted, never silent (gate-v2 review)
             claims_error = claims_error or str(exc)[:200]
             self._record_check_degradation("claims_channel_error", str(exc)[:200])
@@ -1794,23 +1790,17 @@ class MemoryTools:
             result = ev.conflicts_finalize_receipt(ctx)
         else:
             result = terminal
-            # 对抗 review 修复（review 发现 F2）：截断 terminal 上 B/C 照跑
-            # （R1-2），C 经 budget_sink 的实际派发必须如实进回执——terminal
-            # 硬编码 pairs_examined=0 只描述 A 侧，Qwen 池的账不豁免。
-            budget_block = ctx["budget"].receipt_block()
-            if budget_block is not None:
-                result["qwen_budget"] = budget_block
-            if ctx["budget"].pairs_examined:
-                result["pairs_examined"] = ctx["budget"].pairs_examined
-        if ctx["phase_ms"]:
-            result["elapsed_ms"] = round(sum(ctx["phase_ms"]), 1)
+        # r2s-08: the receipt tail (qwen_budget/pairs_examined/elapsed_ms) is
+        # stamped in ONE place — the truncation-terminal branch previously
+        # re-assembled it by hand and forgot elapsed_ms.
+        result = ev.conflicts_receipt_tail(ctx, result)
         if claims_result is not None:
             result["claims_channel"] = claims_result
         if channel_c is not None:
             result["claims_channel_c"] = channel_c
         if claims_error is not None:
             result["claims_channel_error"] = claims_error
-        result.pop("surfaced_peers", None)  # internal cross-channel key, never in receipts
+        result.pop("_surfaced_peers", None)  # internal cross-channel key, never in receipts
         result.pop("_allowed_memory_ids", None)
         return result
 

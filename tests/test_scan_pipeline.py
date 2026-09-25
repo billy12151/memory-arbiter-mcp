@@ -737,3 +737,20 @@ def test_kick_self_heals_confirmed_pair_rows(tmp_path: Path) -> None:
     assert row is not None
     assert str(row["status"]) == "expired"
     assert str(row["decided_reason"]) == "confirmed pair suppressed (kick self-heal)"
+
+
+def test_scan_enqueue_stamps_pair_priority(tmp_path: Path) -> None:
+    """R2：扫描入队按 compute_pair_score 同式盖章 priority（数值对立路线
+    至少吃到 numeric 0.25 + 带内 band 权重），判定页据此做窗口内排序。"""
+    tools = make_tools(tmp_path)
+    _write(tools, "优先级甲", "重试次数为 3 次")
+    _write(tools, "优先级乙", "重试次数为 5 次")
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
+    assert kick["ok"], kick
+    with tools.db.connection() as conn:
+        rows = conn.execute(
+            "SELECT priority FROM scan_queue WHERE kind='conflict'"
+        ).fetchall()
+    assert rows, "数值对必须入队"
+    assert all(float(r["priority"]) > 0 for r in rows), rows

@@ -509,7 +509,9 @@ class ReadPipeline:
         self._tools = tools
         self.db = tools.db
         self.settings = tools.settings
-        self._evidence_worker = tools._evidence_worker
+        # R2-S1：语义 worker 是唯一 worker（C2 合并后索引同队列），向量滞
+        # 后观测跟着走。
+        self._semantic_worker = tools._semantic_worker
         self._embedder_warnings = tools._embedder_warnings
 
     def _attach_conflict_signals(
@@ -552,9 +554,10 @@ class ReadPipeline:
 
     def _vector_lag(self) -> dict[str, int]:
         """Spec §13.1: search must not pretend the async evidence index is
-        consistent with the write path — surface pending index work."""
+        consistent with the write path — surface pending index work (the
+        semantic queue is the only index queue since the C2 worker merge)."""
         try:
-            worker = self._evidence_worker.status()
+            worker = self._semantic_worker.status()
         except Exception:
             return {"pending_evidence_index": 0}
         pending = int(worker.get("queue_depth") or 0) + len(worker.get("inflight") or [])
@@ -1324,8 +1327,8 @@ class ReadPipeline:
 
         Searches ONLY non-active, non-deleted memories (superseded +
         conflicted + pending) for audit/history walkthroughs:
-        - evidence channel: ``evidence_knn(parent_status_filter="expired")``
-          with ``parent_status NOT IN ('active','deleted')`` predicate
+        - evidence channel: ``row_knn`` with the
+          ``parent_status NOT IN ('active','deleted')`` predicate
         - FTS channel: ``search_memories(status_filter="expired")`` with
           ``status_clause = "m.status NOT IN ('active','deleted')"``
 

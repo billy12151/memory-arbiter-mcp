@@ -249,7 +249,7 @@ def compute_pair_score(
 ) -> float:
     """⑦ pair_score（G6 重写，纯函数）：预算消费顺序，永不改变判定。
 
-    score = 0.40*band(clamp((cos-FLOOR)/0.20)) + 0.25*numeric_route
+    score = 0.40*band(clamp((cos-FLOOR)/(CEIL-FLOOR))) + 0.25*numeric_route
           + 0.20*values_differ(normalized unequal) + 0.15*negation(单侧)
     Negation opposition = the G4 negation vocab hitting EXACTLY ONE side.
     Value-equal pairs are settled at adjudication — the bonus is only for

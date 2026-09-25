@@ -119,7 +119,6 @@ def temp_library(
         # cand2 拍板：行为指标=identified/miss/recall/precision）。套件对每个
         # 右成员 wait_task 等 job 完成后再写下一对，异步采集不受窗口影响。
         tools.settings.semantic_conflict_notice_sync_wait_ms = max(0, int(sync_wait_ms))
-    tools.start_evidence_worker()
     tools.start_semantic_worker()
     try:
         yield tools
@@ -921,7 +920,10 @@ def main() -> int:
             # 0.16.12 P0-T2 起冲突对集= pairs.jsonl + pairs_large.jsonl；
             # 0.17.0 P2-0.1 起再加 pairs_noisy.jsonl；
             # 语料变更必须 bump 此版本号并重建基线（第一轮 review finding）
-            "conflict_corpus_version": "conflict-v3-noisy",
+            # v4（0.17.0 review R2）：cf-noise-11-917-918 shape 随 2026-09-22
+            # 标签翻转同步改 write_opposition（governed_negative 桶混入真对
+            # 双向污染 gate 判分）
+            "conflict_corpus_version": "conflict-v4-noisy",
             "conflict_claims_corpus_version": "conflict-claims-v1",
             # 0.17.0 P2-0.1：相似套件同样可变（cases.jsonl + cases_noisy.jsonl），
             # 版本键进 env 供 gate 前置校验拒绝跨语料对比（review R1-5）

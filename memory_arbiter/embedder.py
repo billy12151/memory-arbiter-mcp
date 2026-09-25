@@ -278,13 +278,19 @@ class ManagedEmbedder:
                 )
             except Exception as exc:
                 self.last_encode_error = str(exc)
-                if self._maybe_degrade_to_cpu(str(exc)):
-                    # The rebuild swapped encode_raw/tokenize to the fresh CPU
-                    # instance; the batch closure still points at the closed
-                    # GPU one, so drop it — the next round exits via the
-                    # encode_batch-is-None path and the caller goes per-item.
-                    self.encode_batch = None
-                    return None
+                # R2 review P1: the degrade must run under _embed_lock (its
+                # docstring contract). The batch except fires AFTER the with
+                # block released the lock on the propagating exception, so an
+                # unlocked degrade closed the live GPU instance under any
+                # concurrent embed_text (use-after-free / torn closure swap).
+                with self._embed_lock:
+                    if self._maybe_degrade_to_cpu(str(exc)):
+                        # The rebuild swapped encode_raw/tokenize to the fresh CPU
+                        # instance; the batch closure still points at the closed
+                        # GPU one, so drop it — the next round exits via the
+                        # encode_batch-is-None path and the caller goes per-item.
+                        self.encode_batch = None
+                        return None
         return None
 
     def close(self) -> None:

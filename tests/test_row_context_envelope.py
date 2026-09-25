@@ -237,11 +237,11 @@ def test_channel_c_right_env_context_claim_side_none(tmp_path, monkeypatch) -> N
 
     result = tools._evidence.check_claim_sentence_conflicts(
         int(new["id"]), tv._job_snapshot(tools, new["id"]),
-        skip_peers=None, allowed_memory_ids=[int(peer1["id"])],
+        allowed_memory_ids=[int(peer1["id"])],
         notices_used=0, budget_sink=None, deadline_fn=None,
     )
 
-    assert result["notices"] == 1, "grounded value difference must land the C notice"
+    assert result["channel_c_notices"] == 1, "grounded value difference must land the C notice"
     assert _EnvCapture.calls, "channel C must have dispatched Qwen once"
     left, right = _EnvCapture.calls[0]
     assert "context" not in left, "claim side carries no sentence context (D3)"

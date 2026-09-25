@@ -486,8 +486,21 @@ class MemoriesStore:
             # 0.17.0 (adversarial review P1-3): claims are version-pinned the
             # same way — a status flip must not orphan them (strict-mode
             # pending→active would otherwise silence the claims channel).
+            # R2 review P1: the blanket +1 re-pin collided with itself —
+            # UNIQUE(memory_id, memory_version, attr_norm, value_norm) checks
+            # per row immediately, and cross-version same-value rows are the
+            # designed steady state (edits keep the old rows as audit), so any
+            # adjacent-version shared value blew up mid-statement and wedged
+            # every snapshot-semantics write (supersede/activation/confidence)
+            # permanently. Shift through negative space — negate, then
+            # translate into place: no intermediate state can collide.
             conn.execute(
-                "UPDATE memory_claims SET memory_version=memory_version+1 "
+                "UPDATE memory_claims SET memory_version=-memory_version "
+                "WHERE memory_id=?",
+                (int(memory_id),),
+            )
+            conn.execute(
+                "UPDATE memory_claims SET memory_version=1-memory_version "
                 "WHERE memory_id=?",
                 (int(memory_id),),
             )

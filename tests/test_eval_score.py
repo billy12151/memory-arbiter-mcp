@@ -119,7 +119,8 @@ def test_compute_perf_stats() -> None:
              "sync": False, "async": False, "notice_missing": True, "right_write_ms": 4600.0,
              "units": 70, "notice_count": 0,
              "_receipt": {"status": "completed", "notices_created": 0,
-                          "reasons_seen": ["pairs_examined_capped"], "pairs_examined": 10}},
+                          "reasons_seen": ["pairs_examined_capped", "rows_capped"],
+                          "pairs_examined": 10}},
             {"pair_id": "p3", "label": "noise", "skipped_member_replay": True,
              "sync": None, "async": None, "notice_missing": None},
         ],
@@ -133,7 +134,10 @@ def test_compute_perf_stats() -> None:
     assert window["n"] == 2 and window["completed"] == 2
     assert window["avg_pairs_examined"] == 6.5
     assert window["pairs_examined_capped_rows"] == 1
-    assert window["units_capped_rows"] == 1  # units=70 ≥ 64 预算
+    # 0.17.0 review R2 r2s-12: units 模式退役（C5），units_capped_rows /
+    # units_budget 死指标删除，rows_capped_rows 顶替口径
+    assert "units_capped_rows" not in window and "units_budget" not in window
+    assert window["rows_capped_rows"] == 1
     assert window["avg_units"] == 59.5
     assert window["avg_notice_count"] == 0.5
 
@@ -314,3 +318,243 @@ def test_gate_negative_label_firing_is_lower_is_better() -> None:
     assert all(
         "identified" in f["metric"] for f in result["failures"]
     ), result
+
+
+def test_gate_negative_bucket_miss_is_higher_is_better() -> None:
+    """R2 P1：负样本桶的 miss 上升=改善（负样本上不报=正确）——'.miss.'
+    全局子串曾把它扫进 lower-is-better，真改善 >10% 会假 FAILED（E3 同类
+    事故二次形态）。miss 升幅超阈必须 PASSED。"""
+    baseline = {"conflict": {"by_shape": {"governed_negative": {
+        "identified": {"rate": 0.2258}, "miss": {"rate": 0.7742}}}}}
+    improved = {"conflict": {"by_shape": {"governed_negative": {
+        "identified": {"rate": 0.1935}, "miss": {"rate": 0.95}}}}}
+    assert score.gate(improved, baseline, 0.1)["gate"] == "PASSED"
+    # 真桶（write_opposition）的 miss 上升仍是回归，不受牵连
+    true_bucket = {"conflict": {"by_shape": {
+        "governed_negative": {"identified": {"rate": 0.2258}, "miss": {"rate": 0.7742}},
+        "write_opposition": {"identified": {"rate": 0.8}, "miss": {"rate": 0.15}},
+    }}}
+    true_worse = {"conflict": {"by_shape": {
+        "governed_negative": {"identified": {"rate": 0.2258}, "miss": {"rate": 0.7742}},
+        "write_opposition": {"identified": {"rate": 0.8}, "miss": {"rate": 0.30}},
+    }}}
+    result = score.gate(true_worse, true_bucket, 0.1)
+    assert result["gate"] == "FAILED"
+    assert all(".miss." in f["metric"] for f in result["failures"]), result
+
+
+def test_gate_negative_sync_firing_stays_gated() -> None:
+    """R2/cand3（owner R8 非对称收益口径）：负样本桶的 SYNC firing 直接出现
+    在写响应、侵入性高一档——保持受门；写时正桶 sync（write_opposition）
+    仍按 cand2 豁免（3 秒窗划分产物），负样本 async firing=窗口外 advisory
+    同样豁免。"""
+    baseline = {"conflict": {"by_shape": {
+        "governed_negative": {
+            "sync": {"rate": 0.1}, "async": {"rate": 0.1}, "identified": {"rate": 0.1},
+        },
+        "write_opposition": {"sync": {"rate": 0.5}, "async": {"rate": 0.3}},
+    }}}
+    # 负样本 sync 0.1→0.2（+100%，负样本误报直接进写响应）：FAILED
+    # （sync 基线为 0 时相对上升门按既有语义跳过——无从计算）
+    sync_worse = {"conflict": {"by_shape": {
+        "governed_negative": {
+            "sync": {"rate": 0.2}, "async": {"rate": 0.1}, "identified": {"rate": 0.1},
+        },
+        "write_opposition": {"sync": {"rate": 0.5}, "async": {"rate": 0.3}},
+    }}}
+    result = score.gate(sync_worse, baseline, 0.1)
+    assert result["gate"] == "FAILED"
+    assert result["failures"][0]["metric"] == (
+        "conflict.by_shape.governed_negative.sync.rate"
+    ), result["failures"]
+    # 负样本 async 上升（窗口外 advisory）与正桶 sync 上升：均豁免
+    split_worse = {"conflict": {"by_shape": {
+        "governed_negative": {
+            "sync": {"rate": 0.1}, "async": {"rate": 0.3}, "identified": {"rate": 0.1},
+        },
+        "write_opposition": {"sync": {"rate": 0.7}, "async": {"rate": 0.3}},
+    }}}
+    assert score.gate(split_worse, baseline, 0.1)["gate"] == "PASSED"
+
+
+def test_gate_noisy_bucket_not_negative_mixed_corpus() -> None:
+    """R2 复评：noisy 从负样本桶收口移除——pairs_noisy 26 对中
+    true_conflict 15 + coexist 2 + noise 9（58% 真对），整桶按负样本定方向
+    两头都错：miss 上升（真对漏检变多）被当改善放行、sync firing 上升
+    （多为真对正当检出）被当假阳性误杀（r2-fix-final 的 noisy.sync
+    3→2 窗沿抖动曾触发假 FAILED）。noisy 回归普通桶口径。"""
+    baseline = {"conflict": {"by_shape": {"noisy": {
+        "identified": {"rate": 0.1154}, "miss": {"rate": 0.8462},
+        "sync": {"rate": 0.1154}, "async": {"rate": 0.0385},
+    }}}}
+    # miss 0.8462→0.95（真对漏检变多，>10%）：必须 FAILED，不再当改善放行
+    miss_worse = {"conflict": {"by_shape": {"noisy": {
+        "identified": {"rate": 0.1154}, "miss": {"rate": 0.95},
+        "sync": {"rate": 0.1154}, "async": {"rate": 0.0385},
+    }}}}
+    result = score.gate(miss_worse, baseline, 0.1)
+    assert result["gate"] == "FAILED"
+    assert all(".miss." in f["metric"] for f in result["failures"]), result
+    # sync 0.1154→0.2（真对正当检出增多）：cand2 豁免，不再按负样本 sync 受门
+    sync_up = {"conflict": {"by_shape": {"noisy": {
+        "identified": {"rate": 0.1154}, "miss": {"rate": 0.8462},
+        "sync": {"rate": 0.2}, "async": {"rate": 0.0385},
+    }}}}
+    assert score.gate(sync_up, baseline, 0.1)["gate"] == "PASSED"
+
+
+def test_keyword_bucket_reuses_main_loop_core_and_gains_capped() -> None:
+    """struct 修复：keyword 分桶累加器是 score_recall 主循环的手抄副本且
+    已漂移（缺 capped 变体）——收敛到共享实现后，分桶（含 band 子桶）自动
+    携带主循环全套指标（classic+capped+MRR），原有题级双口径与字段名不变。"""
+    raw = {
+        "queries": [
+            # K01：7 个 relevant target 只召回 3——classic 分母 7、capped 分母 5
+            {"qid": "K01", "kind": "keyword", "hits": [
+                {"fixture_key": f"t-{i}"} for i in range(3)]},
+            {"qid": "K02", "kind": "keyword", "expected_band": "midband",
+             "hits": [{"fixture_key": "t-0"}]},
+            {"qid": "A01", "kind": "paraphrase", "hits": [{"fixture_key": "t-a"}]},
+        ],
+    }
+    original = score._load_jsonl
+
+    def _stub(path: Path) -> list[dict]:
+        if path.name == "labels.jsonl" and "recall" in str(path):
+            return (
+                [
+                    {"qid": "K01", "fixture_key": f"t-{i}", "label": "relevant"}
+                    for i in range(7)
+                ]
+                + [{"qid": "K02", "fixture_key": "t-0", "label": "relevant"}]
+                + [{"qid": "A01", "fixture_key": "t-a", "label": "relevant"}]
+            )
+        return original(path)
+
+    score._load_jsonl = _stub
+    try:
+        result = score.score_recall(raw)
+    finally:
+        score._load_jsonl = original
+
+    kb = result["keyword_bucket"]
+    # 原有字段/口径不变：题级双口径 + classic target 级微平均 + MRR
+    assert kb["queries"] == 2
+    assert kb["query_top5_hit_rate"] == 1.0
+    assert kb["query_top10_hit_rate"] == 1.0
+    assert kb["recall_at_5"] == {"hits": 4, "total": 8, "rate": 0.5}
+    assert kb["recall_at_10"] == {"hits": 4, "total": 8, "rate": 0.5}
+    assert kb["mrr"] == {"value": 1.0, "queries_with_target": 2}
+    # 新增：capped 变体（K01 分母 min(7,5)=5 + K02 min(1,5)=1；@10 分母 7+1）
+    assert kb["recall_at_5_capped"] == {
+        "hits": 4, "total": 6, "rate": round(4 / 6, 4),
+    }
+    assert kb["recall_at_10_capped"] == {"hits": 4, "total": 8, "rate": 0.5}
+    # band 子桶同样继承 capped
+    assert kb["by_band"]["midband"]["recall_at_5_capped"] == {
+        "hits": 1, "total": 1, "rate": 1.0,
+    }
+    # 主循环自身口径不受重构影响（capped 分母 5+1+1）
+    assert result["recall_at_5_capped"] == {
+        "hits": 5, "total": 7, "rate": round(5 / 7, 4),
+    }
+
+
+def test_gate_corpus_mismatch_single_helper_all_three_suites() -> None:
+    """struct 修复：gate() 三段复制粘贴的语料版本早退收敛为
+    _corpus_version_mismatches 单次调用——三个套件（recall/conflict/
+    similarity）不匹配都必须在其余门逻辑之前以原消息逐字、单失败负载拦下；
+    多套件同炸按 recall→conflict→similarity 优先级只报首项；similarity 侧
+    缺键（旧基线）仍跳过。"""
+    baseline = {
+        "corpus_version": "rc-1",
+        "env": {
+            "conflict_corpus_version": "cc-1",
+            "similarity_corpus_version": "sc-1",
+        },
+        "recall": {"recall_at_10": {"rate": 0.9}},
+    }
+    ok = json.loads(json.dumps(baseline))
+    assert score.gate(ok, baseline)["gate"] == "PASSED"
+    assert score._corpus_version_mismatches(ok, baseline) == []
+
+    cases = [
+        ("corpus_version", "rc-1",
+         "recall 考卷语料版本不一致，拒绝跨语料对比；重建基线后重试"),
+        ("env.conflict_corpus_version", "cc-1",
+         "conflict 对集语料版本不一致，拒绝跨语料对比；重建基线后重试"),
+        ("env.similarity_corpus_version", "sc-1",
+         "similarity 套件语料版本不一致，拒绝跨语料对比；重建基线后重试"),
+    ]
+    for metric, base_value, note in cases:
+        current = json.loads(json.dumps(baseline))
+        if "." in metric:
+            scope, key = metric.split(".")
+            current[scope][key] = "bumped"
+        else:
+            current[metric] = "bumped"
+        result = score.gate(current, baseline)
+        assert result["gate"] == "FAILED", metric
+        assert len(result["failures"]) == 1, metric
+        assert result["failures"][0] == {
+            "metric": metric,
+            "direction": "corpus_mismatch",
+            "baseline": base_value,
+            "current": "bumped",
+            "note": note,
+        }, metric
+        # helper 直读与 gate 首项一致（文案/负载同源）
+        assert score._corpus_version_mismatches(current, baseline) == (
+            result["failures"]
+        )
+
+    # 优先级：三套件同时 bump → helper 按序产出，gate 只取首项
+    all_bumped = json.loads(json.dumps(baseline))
+    all_bumped["corpus_version"] = "rc-2"
+    all_bumped["env"]["conflict_corpus_version"] = "cc-2"
+    all_bumped["env"]["similarity_corpus_version"] = "sc-2"
+    helper_out = score._corpus_version_mismatches(all_bumped, baseline)
+    assert [m["metric"] for m in helper_out] == [
+        "corpus_version",
+        "env.conflict_corpus_version",
+        "env.similarity_corpus_version",
+    ]
+    assert score.gate(all_bumped, baseline)["failures"] == [helper_out[0]]
+
+    # 兼容：similarity 侧任一缺键（旧基线）跳过校验，不误拦
+    old_baseline = {"env": {"conflict_corpus_version": "cc-1"}}
+    current = {"env": {"conflict_corpus_version": "cc-1"}}
+    assert score._corpus_version_mismatches(current, old_baseline) == []
+    assert score.gate(current, old_baseline)["gate"] == "PASSED"
+
+
+def test_perf_markdown_query_label_derives_from_data() -> None:
+    """struct 修复：perf 段「recall N query」标签此前硬编码 34，语料扩到
+    47 题后过期——题数必须从数据（recall.per_query 行数）推导。"""
+    raw = {
+        "queries": [
+            {"qid": f"Q{i:02d}", "kind": "paraphrase", "hits": [], "elapsed_ms": 10.0}
+            for i in range(47)
+        ],
+    }
+    original = score._load_jsonl
+
+    def _stub(path: Path) -> list[dict]:
+        if path.name == "labels.jsonl" and "recall" in str(path):
+            return []
+        return original(path)
+
+    score._load_jsonl = _stub
+    try:
+        scored = score.score_all(raw)
+    finally:
+        score._load_jsonl = original
+    markdown = score.render_markdown(scored, None)
+    assert "recall 47 query" in markdown
+    assert "recall 34 query" not in markdown
+    # perf-only 渲染（无 recall 块）：回退 find_ms 样本数，不回归旧硬编码
+    perf_only = score.render_markdown(
+        {"env": {}, "perf": scored["perf"]}, None
+    )
+    assert "recall 2 query" not in perf_only and "recall 34" not in perf_only
+    assert "查询" in perf_only

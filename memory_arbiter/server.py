@@ -334,7 +334,6 @@ def build_runtime() -> ServerBundle:
         app._mcp_server.version = __version__
     tools = MemoryTools(settings)
     tools.start_update_monitor()
-    tools.start_evidence_worker()
     tools.start_semantic_worker()
     # stdio identity bridge: stdio has no per-request headers, so establish the
     # process-level identity from config once and apply it per tool call via

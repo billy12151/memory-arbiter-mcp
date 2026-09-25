@@ -315,11 +315,12 @@ def test_receipt_shape_null_run_has_no_new_keys(tmp_path, monkeypatch) -> None:
     assert "direct_verdicts" not in receipt
     assert receipt == {
         "status": "completed", "outcome": "checked_no_notice", "notices_created": 0,
-        "pairs_examined": 0,
         "candidate_gates": {"prefiltered_rows": 1},
         "rows_mode": True, "rows_examined": 0,
-        "claims_channel": {"claims_checked": 0, "notices": 0},
-        "claims_channel_c": {"channel_c": True, "claims_checked": 0, "notices": 0},
+        "claims_channel": {"channel_b_checked": 0, "channel_b_notices": 0},
+        "claims_channel_c": {
+            "channel_c": True, "channel_c_checked": 0, "channel_c_notices": 0,
+        },
     }
 
 
@@ -422,12 +423,12 @@ def test_channel_c_deadline_stopped_key(tmp_path, monkeypatch) -> None:
 
     result = tools._evidence.check_claim_sentence_conflicts(
         int(new["id"]), tv._job_snapshot(tools, new["id"]),
-        skip_peers=None, allowed_memory_ids=[int(peer1["id"])],
+        allowed_memory_ids=[int(peer1["id"])],
         notices_used=0, budget_sink=lambda: spends.append(1),
         deadline_fn=lambda: 1.0,  # 公平墙早已过去
     )
 
-    assert result["claims_checked"] == 0 and result["notices"] == 0
+    assert result["channel_c_checked"] == 0 and result["channel_c_notices"] == 0
     assert result["channel_c_deadline_stopped"] is True
     assert spends == [] and not _Recorder.calls
 

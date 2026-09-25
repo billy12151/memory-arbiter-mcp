@@ -57,6 +57,7 @@ class ScanQueueStore:
         reason: str,
         severity: str | None,
         source: str,
+        priority: float = 0.0,
         detail: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Insert one suspected item; ``candidate_key_hash`` UNIQUE makes
@@ -72,13 +73,13 @@ class ScanQueueStore:
                 cur = conn.execute(
                     """INSERT OR IGNORE INTO scan_queue(
                          kind,workspace_canonical,status,candidate_key_hash,member_versions,
-                         evidence,reason,severity,source,detail,created_at,updated_at)
-                       VALUES(?,?,'pending',?,?,?,?,?,?,?,?,?)""",
+                         evidence,reason,severity,source,priority,detail,created_at,updated_at)
+                       VALUES(?,?,'pending',?,?,?,?,?,?,?,?,?,?)""",
                     (
                         kind, workspace_canonical, candidate_key_hash,
                         json.dumps(member_versions, ensure_ascii=False),
                         json.dumps(evidence or [], ensure_ascii=False),
-                        reason, severity, source,
+                        reason, severity, source, float(priority),
                         json.dumps(detail, ensure_ascii=False) if detail else None,
                         now, now,
                     ),

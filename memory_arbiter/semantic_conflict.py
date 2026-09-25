@@ -419,7 +419,13 @@ def _lineage_primary_version(text: str) -> "tuple[int, ...] | None":
     for dotted, versioned, nth in matches:
         text_version = dotted or versioned
         if text_version:
-            versions.append(tuple(int(part) for part in text_version.split(".")))
+            parsed_version = tuple(int(part) for part in text_version.split("."))
+            # 「v2」与「v2.0」是同一版本的拼写变体（semver 同代）——去尾零
+            # 归一后再比较，否则同代真冲突在判定链两层（decide_evidence +
+            # gates._subject_version_primary）被元组不等静默豁免（R2 review）。
+            while len(parsed_version) > 1 and parsed_version[-1] == 0:
+                parsed_version = parsed_version[:-1]
+            versions.append(parsed_version)
         elif nth:
             parsed: "int | None" = int(nth) if nth.isdigit() else None
             if parsed is None:
@@ -1000,7 +1006,11 @@ def _fold_chinese_duration(normalized: str) -> str:
             return normalized
         count = str(parsed)
     if unit == "刻钟":
-        return f"{int(count) * 15}分钟"
+        # 「半刻钟」numeral=半 → count="0.5"，int("0.5") 曾直接 ValueError
+        # （归一层放行「刻钟」而准入层 _CN_HALF_UNIT_RE 刻意不收，两层口径
+        # 矛盾，R2 review）。按浮点折算：整刻钟保持整数拼写，半刻钟=7.5分钟。
+        minutes = float(count) * 15
+        return f"{int(minutes) if minutes == int(minutes) else minutes}分钟"
     return f"{count}{unit}"
 
 

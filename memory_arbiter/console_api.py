@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,53 @@ class ConsoleAPI:
             return {"error": "isolation=strict requires an explicit workspace query", "_http_status": 400}
         return None
 
+    def _memory_scope(
+        self,
+        caller: Any,
+        workspace: str | None,
+        expr: str = "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
+        alias: str | None = None,
+    ) -> tuple[str, list[str]]:
+        """Workspace-scoping WHERE fragment for hand-written memories-table SQL.
+
+        Single home for the former four inline copies (overview's
+        by_workspace_active, _status_counts, _recent_browse, memory_graph) of:
+        isolation branch (strict → the caller's admitted canonical set;
+        isolation=none with an explicitly supplied workspace → that one
+        canonical; anything else → unscoped) + ``workspace_scope_sql`` over
+        the canonical-with-raw-fallback expression. Returns ``(clause,
+        params)``; ``("", [])`` when no scoping applies — call sites must then
+        use the clause-less SQL variant, exactly like the former inline else
+        branches. ``workspace_scope_sql`` maps an empty canonical/admitted set
+        to ``("", [])`` itself, so the result is identical to the old
+        ``... and caller.canonical`` guards.
+
+        ``alias`` (e.g. ``"m"``) prefixes the ``workspace`` /
+        ``workspace_canonical`` columns in ``expr`` for JOINed queries.
+
+        Parameter-order contract: ``params`` are POSITIONAL (``?`` binds).
+        sqlite3 refuses to mix named and positional parameters in one
+        statement, and every call site also binds unrelated positional values
+        (ids, tags, LIMIT/OFFSET), so named binds are not an option here.
+        ``params`` must therefore be spliced into the execute tuple at exactly
+        the placeholder positions the clause text occupies — build each tuple
+        with the scope params adjacent to the ``{scope_sql}`` interpolation
+        site (trailing scope clause → trailing scope params, before LIMIT).
+        """
+        isolation = caller.isolation
+        explicit_none_scope = (
+            isolation == "none" and bool(str(workspace or "").strip())
+        )
+        if not (isolation == "strict" or explicit_none_scope):
+            return "", []
+        if alias:
+            expr = re.sub(r"\bworkspace_canonical\b", f"{alias}.workspace_canonical", expr)
+            expr = re.sub(r"\bworkspace\b", f"{alias}.workspace", expr)
+        return workspace_scope_sql(
+            expr,
+            caller.scope_canonicals() if isolation == "strict" else caller.canonical,
+        )
+
     def overview(self, workspace: str | None = None) -> dict[str, Any]:
         missing_ws = self._strict_workspace_required(workspace)
         if missing_ws is not None:
@@ -75,18 +123,13 @@ class ConsoleAPI:
         # "active" metric — pair it with per-workspace active counts.
         by_workspace_active: dict[str, int] = {}
         try:
-            explicit_none_scope = (
-                caller.isolation == "none" and bool(str(workspace or "").strip())
-            )
-            if (caller.isolation == "strict" or explicit_none_scope) and caller.canonical:
-                active_scope_sql, active_scope_params = workspace_scope_sql(
-                    "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
-                    caller.scope_canonicals() if caller.isolation == "strict" else caller.canonical,
-                )
+            active_scope_sql, active_scope_params = self._memory_scope(caller, workspace)
+            if active_scope_sql:
                 active_sql = (
                     "SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS ws, COUNT(*) AS c "
                     f"FROM memories WHERE status='active' AND {active_scope_sql} GROUP BY ws"
                 )
+                # scope params bind 1:1 with {active_scope_sql}'s placeholders
                 active_params: list[str] = active_scope_params
             else:
                 active_sql = (
@@ -159,14 +202,8 @@ class ConsoleAPI:
             return counts
         try:
             caller = self.tools._caller_workspace(workspace)
-            explicit_none_scope = (
-                caller.isolation == "none" and bool(str(workspace or "").strip())
-            )
-            if (caller.isolation == "strict" or explicit_none_scope) and caller.canonical:
-                scope_sql, scope_params = workspace_scope_sql(
-                    "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
-                    caller.scope_canonicals() if caller.isolation == "strict" else caller.canonical,
-                )
+            scope_sql, scope_params = self._memory_scope(caller, workspace)
+            if scope_sql:
                 with self.tools.db.connection() as conn:
                     rows = conn.execute(
                         f"SELECT status, COUNT(*) AS count FROM memories WHERE {scope_sql} GROUP BY status",
@@ -364,22 +401,18 @@ class ConsoleAPI:
         # without one would leak cross-workspace memories. Reject the same way
         # memory_search does, so the console surfaces the error rather than
         # silently bypassing isolation.
-        isolation = getattr(self.tools.settings, "isolation", "none")
         caller = self.tools._caller_workspace(workspace)
-        if isolation == "strict" and not caller.canonical:
+        if caller.isolation == "strict" and not caller.canonical:
             return {"error": "forbidden_strict_workspace", "_http_status": 400, **caller.response_fields()}
         try:
             with db.connection() as conn:
-                explicit_none_scope = isolation == "none" and bool(str(workspace or "").strip())
-                if isolation == "strict" or explicit_none_scope:
-                    scope_sql, scope_params = workspace_scope_sql(
-                        "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
-                        caller.scope_canonicals() if isolation == "strict" else caller.canonical,
-                    )
+                scope_sql, scope_params = self._memory_scope(caller, workspace)
+                if scope_sql:
                     total = int(conn.execute(
                         f"SELECT COUNT(*) FROM memories WHERE status='active' AND {scope_sql}",
                         scope_params,
                     ).fetchone()[0] or 0)
+                    # scope params lead: the clause sits before LIMIT/OFFSET
                     rows = conn.execute(
                         f"SELECT * FROM memories WHERE status='active' AND {scope_sql} "
                         "ORDER BY ingest_time DESC, id DESC LIMIT ? OFFSET ?",
@@ -406,7 +439,7 @@ class ConsoleAPI:
             "has_more": has_more,
             "status": "active",
         }
-        if isolation == "strict":
+        if caller.isolation == "strict":
             out.update(caller.response_fields())
         return out
 
@@ -460,27 +493,21 @@ class ConsoleAPI:
                 tags = json.loads(tags)
             except json.JSONDecodeError:
                 tags = []
-        tags = [str(tag) for tag in (tags or []) if str(tag).strip()][:8]
+        # 0.17.0 review R2：原 [:8] 输入截断会静默丢共享第 9~32 个标签的
+        # 邻居（存储上限 32），且此处不置 truncated——直接用全量。
+        tags = [str(tag) for tag in (tags or []) if str(tag).strip()]
 
         edges: list[dict[str, Any]] = []
         truncated = {"conflict": False, "candidate": False, "same_subject": False, "same_tag": False}
         neighbor_ids: set[int] = set()
 
         caller = self.tools._caller_workspace(workspace)
-        isolation = getattr(self.tools.settings, "isolation", "none")
+        isolation = caller.isolation
         explicit_none_scope = isolation == "none" and bool(str(workspace or "").strip())
-        scope_sql: str = ""
-        scope_params: list[str] = []
-        scope_sql_m: str = ""
-        scope_params_m: list[str] = []
-        if isolation == "strict" or explicit_none_scope:
-            scope = caller.scope_canonicals() if isolation == "strict" else caller.canonical
-            scope_sql, scope_params = workspace_scope_sql(
-                "COALESCE(NULLIF(workspace_canonical, ''), workspace)", scope
-            )
-            scope_sql_m, scope_params_m = workspace_scope_sql(
-                "COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", scope
-            )
+        # One resolved caller, two scope fragments from _memory_scope:
+        # unaliased for single-table queries, "m."-aliased for the tags JOIN.
+        scope_sql, scope_params = self._memory_scope(caller, workspace)
+        scope_sql_m, scope_params_m = self._memory_scope(caller, workspace, alias="m")
 
         def _neighbor_visible(row: dict[str, Any] | None) -> bool:
             # Same read-ACL shape as memory_get (center) and
@@ -583,6 +610,8 @@ class ConsoleAPI:
                     subject_rows = conn.execute(
                         f"SELECT id FROM memories WHERE subject=? AND id<>? AND status='active'{scope_clause} "
                         "ORDER BY ingest_time DESC, id DESC LIMIT ?",
+                        # {scope_clause} trails the WHERE — scope params slot
+                        # between the subject/mid binds and LIMIT
                         (subject, mid, *scope_params, self.GRAPH_SAME_SUBJECT_LIMIT + 1),
                     ).fetchall()
             except sqlite3.Error:
@@ -606,6 +635,8 @@ class ConsoleAPI:
                         f"JOIN json_each(m.tags) t ON t.value IN ({tag_placeholders}) "
                         f"WHERE m.id<>? AND m.status='active'{scope_clause_m} "
                         "GROUP BY m.id ORDER BY overlap DESC, m.id DESC LIMIT ?",
+                        # json_each binds first, then {scope_clause_m}'s
+                        # params, then LIMIT — matching placeholder order
                         (*tags, mid, *scope_params_m, self.GRAPH_SAME_TAG_LIMIT + 1),
                     ).fetchall()
             except sqlite3.Error:
@@ -642,6 +673,7 @@ class ConsoleAPI:
                     node_rows = conn.execute(
                         f"SELECT id, subject, status, source_type, version FROM memories "
                         f"WHERE id IN ({id_placeholders}){scope_clause}",
+                        # {scope_clause}'s params trail the IN-list binds
                         (*sorted(neighbor_ids), *scope_params),
                     ).fetchall()
             except sqlite3.Error:

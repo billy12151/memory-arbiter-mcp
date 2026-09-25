@@ -21,15 +21,18 @@ Per-memory processing (E10 final form):
 """
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 import time
 import uuid
 from typing import Any, TYPE_CHECKING
 
+from .acl import scope_names, workspace_scope_sql
 from .constants import (
     SCAN_MACHINE_ROUTE_TOP_K,
     SCAN_SLOW_LANE_PER_KICK,
+    SEMANTIC_MAX_ROWS,
 )
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .difference_classifier import classify_pair, internal_noise_pair, is_garbage
@@ -37,6 +40,7 @@ from .semantic_conflict import decide_evidence, is_cross_evolution
 from .normalize_gate import compute_summary_votes, normalize_gate
 
 if TYPE_CHECKING:
+    from .acl import WorkspaceScope
     from .tools import MemoryTools
 
 from .constants import PROTECTED_WORKSPACES as PROTECTED
@@ -266,6 +270,10 @@ class ScanPipeline:
                             self.db.mark_scanned(slow_id, int(slow_outcome["version"]))
                         queued += slow_outcome["queued"]
                         internal_found += slow_outcome["internal"]
+                        # 0.17.0 review R2：慢车道复制快车道记账时漏了
+                        # machine_cleared——轮级「机判清除」计数少账，观测口径
+                        # 与快车道不一致。
+                        machine_cleared += int(slow_outcome.get("machine_cleared") or 0)
                         slow_lane_done += 1
             except Exception:
                 pass
@@ -374,255 +382,310 @@ class ScanPipeline:
             "queued": 0, "auto_rejected": 0, "internal": 0,
             "machine_cleared": 0, "cleared_garbage": 0,
         }
-        record = self.db.get_memory(memory_id)
-        if not record or record.get("status") != "active":
-            if record is not None:
-                outcome["version"] = int(record.get("version") or 1)
+        # 0.17.0 R2 单连接收编：下方只读探针（get_memory / KNN / 向量批取 /
+        # claims 向量 SELECT）此前每步各自开/关连接（conn churn），改为穿过
+        # 同一条读连接（先例 P2-T6）。写路径（internal create、scan_queue 入队、
+        # claims 桥接）保持各自事务——WAL 下空闲读连接不挡写。db_available 在
+        # 此显式把关：connection() 直接抛错，而 get_memory 原本降级为 None。
+        if not self.db.db_available:
             return outcome
-        version = int(record.get("version") or 1)
-        workspace = str(
-            record.get("workspace_canonical") or record.get("workspace") or ""
-        ).strip()
-        outcome["version"] = version
-        outcome["workspace"] = workspace
-        # C2/C5 (0.17.0 worker merge): the scan source is rows, full stop —
-        # the job no longer publishes unit vectors, so the old `if not units`
-        # gate and the `is not units` identity probe are gone. No rows yet
-        # (mid-backfill) means nothing scannable this round; the slow lane
-        # re-picks the memory later.
-        internal_source = [
-            row for row in self.db.evidence.scan_rows(memory_id, version)
-            # C3 A+ guard (adversarial review P2): subject rows are index
-            # participants, never scan originators — same discipline as the
-            # write-side loops and the diagnostic channel's anchor SQL.
-            if str(row.get("kind") or "") != "subject"
-        ]
-        if not internal_source:
-            return outcome
-        internal = self._examine_internal(memory_id, version, workspace, internal_source)
-        outcome["internal"] = internal
-        # Gate-v2 G3: the metadata.entity clear leg is retired with the
-        # provenance gate — classify_pair runs on text evidence alone (the
-        # entity params stay on the classifier for external callers, but the
-        # detection chain no longer reads metadata.entity).
-        # 0.17.0 P2-6.1: cross-memory candidates run on ROW vectors — same
-        # identity discipline as the write side (eid is the memory_row.id).
-        cross_units = internal_source
-        def cross_knn(embedding: list[float], **kw: Any) -> list[dict[str, Any]]:
-            # Detection window: exclude the peers' subject rows (same
-            # discipline as the write side — they crowd out body rows).
-            return self.db.row_knn(embedding, include_subject_rows=False, **kw)
-        # 2) cross-memory same-bucket rank pairing.
-        # Gate-v2 G4: the scan orchestration SKIPS the sentence prefilter by
-        # owner decision (Agent judges prose oppositions) but runs the SAME
-        # cosine band gate — one shared implementation (pipeline.gates).
-        from .pipeline.gates import candidate_cos_gate, memory_pair_excluded
-        below_cos_floor = 0
-        repeatability_skipped = 0
-        own_subject = str(record.get("subject") or "")
-        own_tags = record.get("tags") or []
-        memory_pairs_excluded = 0
-        screened_peers: set[int] = set()
-        excluded_peers: set[int] = set()
-        for unit in cross_units:
-            if unit.get("embedding") is None:
-                continue
-            hits = cross_knn(
-                unit["embedding"], k=neighbor_k + 1,
-                workspace=workspace or None,
-                exclude_memory_id=memory_id,
+        with self.db.connection() as conn:
+            record = self.db.memories.get_memory(memory_id, conn=conn)
+            if not record or record.get("status") != "active":
+                if record is not None:
+                    outcome["version"] = int(record.get("version") or 1)
+                return outcome
+            version = int(record.get("version") or 1)
+            workspace = str(
+                record.get("workspace_canonical") or record.get("workspace") or ""
+            ).strip()
+            outcome["version"] = version
+            outcome["workspace"] = workspace
+            # C2/C5 (0.17.0 worker merge): the scan source is rows, full stop —
+            # the job no longer publishes unit vectors, so the old `if not units`
+            # gate and the `is not units` identity probe are gone. No rows yet
+            # (mid-backfill) means nothing scannable this round; the slow lane
+            # re-picks the memory later.
+            internal_source = [
+                row for row in self.db.evidence.scan_rows(memory_id, version)
+                # C3 A+ guard (adversarial review P2): subject rows are index
+                # participants, never scan originators — same discipline as the
+                # write-side loops and the diagnostic channel's anchor SQL.
+                if str(row.get("kind") or "") != "subject"
+            ]
+            if not internal_source:
+                return outcome
+            internal = self._examine_internal(memory_id, version, workspace, internal_source)
+            outcome["internal"] = internal
+            # Gate-v2 G3: the metadata.entity clear leg is retired with the
+            # provenance gate — classify_pair runs on text evidence alone (the
+            # entity params stay on the classifier for external callers, but the
+            # detection chain no longer reads metadata.entity).
+            # 0.17.0 P2-6.1: cross-memory candidates run on ROW vectors — same
+            # identity discipline as the write side (eid is the memory_row.id).
+            cross_units = internal_source
+            def cross_knn(embedding: list[float], **kw: Any) -> list[dict[str, Any]]:
+                # Detection window: exclude the peers' subject rows (same
+                # discipline as the write side — they crowd out body rows).
+                return self.db.row_knn(
+                embedding, include_subject_rows=False, conn=conn, **kw
             )
-            hit_vectors = self.db.evidence.row_vectors_for_ids(
-                [int(hit["id"]) for hit in hits],
-            )
-            _passed, below_pairs, at_ceil_pairs = candidate_cos_gate(unit["embedding"], hits, hit_vectors)
-            hits = [hit for hit, _cos in _passed]
-            below_cos_floor += len(below_pairs)
-            repeatability_skipped += len(at_ceil_pairs)
-            # Rank counts TEXT hits only — non-text units the KNN interleaves
-            # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
-            # not raw row positions).
-            text_rank = 0
-            for hit in hits:
-                peer_id = int(hit["memory_id"])
-                if peer_id == memory_id:
+            # 2) cross-memory same-bucket rank pairing.
+            # Gate-v2 G4: the scan orchestration SKIPS the sentence prefilter by
+            # owner decision (Agent judges prose oppositions) but runs the SAME
+            # cosine band gate — one shared implementation (pipeline.gates).
+            from .pipeline.gates import candidate_cos_gate, memory_pair_excluded
+            below_cos_floor = 0
+            repeatability_skipped = 0
+            own_subject = str(record.get("subject") or "")
+            own_tags = record.get("tags") or []
+            memory_pairs_excluded = 0
+            screened_peers: set[int] = set()
+            excluded_peers: set[int] = set()
+            a_enqueued_peers: set[int] = set()
+            for unit in cross_units:
+                if unit.get("embedding") is None:
                     continue
-                # Gate-v2 G5 scan 同构: the SAME memory-level screen, called
-                # once per peer (first hit wins the verdict; later hits of
-                # the same peer reuse it).
-                if peer_id not in screened_peers:
-                    screened_peers.add(peer_id)
-                    peer_tags = hit.get("tags")
-                    if isinstance(peer_tags, str) and peer_tags:
-                        try:
-                            peer_tags = json.loads(peer_tags)
-                        except (TypeError, ValueError):
-                            peer_tags = []
-                    if memory_pair_excluded(
-                        own_subject, own_tags,
-                        str(hit.get("subject") or ""), peer_tags or [],
-                    ):
-                        excluded_peers.add(peer_id)
-                        memory_pairs_excluded += 1
+                hits = cross_knn(
+                    unit["embedding"], k=neighbor_k + 1,
+                    workspace=workspace or None,
+                    exclude_memory_id=memory_id,
+                )
+                hit_vectors = self.db.evidence.row_vectors_for_ids(
+                    [int(hit["id"]) for hit in hits], conn=conn,
+                )
+                _passed, below_pairs, at_ceil_pairs = candidate_cos_gate(unit["embedding"], hits, hit_vectors)
+                hits = [hit for hit, _cos in _passed]
+                cos_by_row_id = {int(h["id"]): float(c) for h, c in _passed}
+                below_cos_floor += len(below_pairs)
+                repeatability_skipped += len(at_ceil_pairs)
+                # Rank counts TEXT hits only — non-text units the KNN interleaves
+                # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
+                # not raw row positions).
+                text_rank = 0
+                for hit in hits:
+                    peer_id = int(hit["memory_id"])
+                    if peer_id == memory_id:
                         continue
-                if peer_id in excluded_peers:
-                    continue
-                text_rank += 1
-                peer_bucket = str(
-                    hit.get("workspace_canonical") or hit.get("workspace") or ""
-                ).strip()
-                if peer_bucket and workspace and peer_bucket != workspace:
-                    continue  # C3b: same-bucket pairing only
-                decision = decide_evidence(str(unit["text"]), str(hit.get("text") or ""))
-                if decision.action == "ignore":
-                    continue
-                # 0.16.4 §1: cross-memory evolution domain (todo/polarity
-                # snapshots) is excluded BEFORE any machine route — it never
-                # reaches the rank gate, the classifier, or the queue. The
-                # todo-closure reminder keeps its dedicated channel
-                # (linked_open_items); the same predicate guards the
-                # write-time KNN loop (§0.5 single implementation).
-                if is_cross_evolution(decision):
-                    continue
-                # 0.16.2 §1.5: machine-decidable check routes generate only
-                # within the top-3 neighbour ranks (notify kept top-10 until
-                # 0.16.4 excluded it here — only check shapes remain).
-                if text_rank > SCAN_MACHINE_ROUTE_TOP_K:
-                    continue
-                # 0.16.2 §1.4: difference-based clearance — check-route
-                # pairs must carry an extractable value difference or they
-                # are duplicates/evolution noise. Cleared pairs are
-                # counted, never enqueued, never landed in conflicts.
-                verdict = classify_pair(
-                    str(unit["text"]), str(hit.get("text") or ""),
-                    route=str(decision.reason or ""),
-                )
-                if verdict == "clear":
-                    outcome["machine_cleared"] += 1
-                    if is_garbage(str(unit["text"])) or is_garbage(str(hit.get("text") or "")):
-                        outcome["cleared_garbage"] += 1
-                    continue
-                refs, candidate_key, candidate_hash = self._pair_identity(
-                    memory_id, version, unit, peer_id, hit,
-                )
-                if self._suppressed(refs, candidate_hash, suppression):
-                    continue
-                # E11③ live retirement (0.16.2 plan §6④/§7): numeric pairs
-                # that survive the difference classifier are same-sentence
-                # two-value candidates — they enqueue for agent judgment;
-                # the noise the old auto-reject consumed is cleared above
-                # without conflicts rows. No new scan_numeric_autoreject
-                # rows are created (existing ones stay as audit history,
-                # excluded from suppression per §1.8).
-                enqueued = self._enqueue_pair(
-                    workspace, memory_id, version, unit, peer_id, hit,
-                    decision=decision, candidate_key=candidate_key,
-                    candidate_hash=candidate_hash,
-                )
-                if enqueued:
-                    outcome["queued"] += 1
-        # Gate-v2 G6b 通道 C (scan leg): anchor claims × neighbour sentences.
-        # The attr vector queries sentence rows in the SAME bucket; pairs
-        # passing the cosine band enqueue with the claim declaration and the
-        # sentence as DUAL evidence — the Agent judges directly (no Qwen on
-        # the scan path). Versional attrs are exempted (D1) and counted.
-        from .semantic_conflict import attr_is_versional
-        from .pipeline.gates import candidate_cos_gate as _ccg
-        channel_c_queued = 0
-        channel_c_versional = 0
-        claims = self.db.claims.current_claims(memory_id) if hasattr(self.db, "claims") else []
-        claim_vectors: dict[int, list[float]] = {}
-        try:
-            with self.db.connection() as conn:
+                    # Gate-v2 G5 scan 同构: the SAME memory-level screen, called
+                    # once per peer (first hit wins the verdict; later hits of
+                    # the same peer reuse it).
+                    if peer_id not in screened_peers:
+                        screened_peers.add(peer_id)
+                        peer_tags = hit.get("tags")
+                        if isinstance(peer_tags, str) and peer_tags:
+                            try:
+                                peer_tags = json.loads(peer_tags)
+                            except (TypeError, ValueError):
+                                peer_tags = []
+                        if memory_pair_excluded(
+                            own_subject, own_tags,
+                            str(hit.get("subject") or ""), peer_tags or [],
+                        ):
+                            excluded_peers.add(peer_id)
+                            memory_pairs_excluded += 1
+                            continue
+                    if peer_id in excluded_peers:
+                        continue
+                    text_rank += 1
+                    peer_bucket = str(
+                        hit.get("workspace_canonical") or hit.get("workspace") or ""
+                    ).strip()
+                    if peer_bucket and workspace and peer_bucket != workspace:
+                        continue  # C3b: same-bucket pairing only
+                    decision = decide_evidence(str(unit["text"]), str(hit.get("text") or ""))
+                    if decision.action == "ignore":
+                        continue
+                    # 0.16.4 §1: cross-memory evolution domain (todo/polarity
+                    # snapshots) is excluded BEFORE any machine route — it never
+                    # reaches the rank gate, the classifier, or the queue. The
+                    # todo-closure reminder keeps its dedicated channel
+                    # (linked_open_items); the same predicate guards the
+                    # write-time KNN loop (§0.5 single implementation).
+                    if is_cross_evolution(decision):
+                        continue
+                    # 0.16.2 §1.5: machine-decidable check routes generate only
+                    # within the top-3 neighbour ranks (notify kept top-10 until
+                    # 0.16.4 excluded it here — only check shapes remain).
+                    if text_rank > SCAN_MACHINE_ROUTE_TOP_K:
+                        continue
+                    # 0.16.2 §1.4: difference-based clearance — check-route
+                    # pairs must carry an extractable value difference or they
+                    # are duplicates/evolution noise. Cleared pairs are
+                    # counted, never enqueued, never landed in conflicts.
+                    verdict = classify_pair(
+                        str(unit["text"]), str(hit.get("text") or ""),
+                        route=str(decision.reason or ""),
+                    )
+                    if verdict == "clear":
+                        outcome["machine_cleared"] += 1
+                        if is_garbage(str(unit["text"])) or is_garbage(str(hit.get("text") or "")):
+                            outcome["cleared_garbage"] += 1
+                        continue
+                    refs, candidate_key, candidate_hash = self._pair_identity(
+                        memory_id, version, unit, peer_id, hit,
+                    )
+                    if self._suppressed(refs, candidate_hash, suppression):
+                        continue
+                    # E11③ live retirement (0.16.2 plan §6④/§7): numeric pairs
+                    # that survive the difference classifier are same-sentence
+                    # two-value candidates — they enqueue for agent judgment;
+                    # the noise the old auto-reject consumed is cleared above
+                    # without conflicts rows. No new scan_numeric_autoreject
+                    # rows are created (existing ones stay as audit history,
+                    # excluded from suppression per §1.8).
+                    enqueued = self._enqueue_pair(
+                        workspace, memory_id, version, unit, peer_id, hit,
+                        decision=decision, candidate_key=candidate_key,
+                        candidate_hash=candidate_hash,
+                        pair_cos=cos_by_row_id.get(int(hit["id"])),
+                    )
+                    if enqueued:
+                        outcome["queued"] += 1
+                        a_enqueued_peers.add(peer_id)
+            # Gate-v2 G6b 通道 C (scan leg): anchor claims × neighbour sentences.
+            # The attr vector queries sentence rows in the SAME bucket; pairs
+            # passing the cosine band enqueue with the claim declaration and the
+            # sentence as DUAL evidence — the Agent judges directly (no Qwen on
+            # the scan path). Versional attrs are exempted (D1) and counted.
+            from .semantic_conflict import attr_is_versional
+            from .pipeline.gates import candidate_cos_gate as _ccg
+            channel_c_queued = 0
+            channel_c_versional = 0
+            claims = self.db.claims.current_claims(memory_id) if hasattr(self.db, "claims") else []
+            claim_vectors: dict[int, list[float]] = {}
+            try:
                 for row in conn.execute(
-                    """SELECT c.id AS cid, v.embedding FROM memory_claims c
-                       LEFT JOIN memory_claim_vec v ON v.id=c.id
-                       WHERE c.memory_id=? AND c.memory_version=?""",
+                        """SELECT c.id AS cid, v.embedding FROM memory_claims c
+                           LEFT JOIN memory_claim_vec v ON v.id=c.id
+                           WHERE c.memory_id=? AND c.memory_version=?""",
                     (memory_id, version),
                 ).fetchall():
                     if row["embedding"] is not None:
                         claim_vectors[int(row["cid"])] = (
                             self.db.evidence._blob_to_vector(bytes(row["embedding"]))
                         )
-        except sqlite3.Error:
-            claim_vectors = {}
-        surfaced_c_peers: set[int] = set()
-        for claim in claims:
-            attr_vector = claim_vectors.get(int(claim["id"]))
-            if not attr_vector:
-                continue
-            if attr_is_versional(str(claim.get("attr") or claim["attr_norm"])):
-                channel_c_versional += 1
-                continue
-            hits_c = self.db.row_knn(
-                attr_vector, k=neighbor_k + 1, workspace=workspace or None,
-                exclude_memory_id=memory_id, include_subject_rows=False,
-            )
-            vecs_c = self.db.evidence.row_vectors_for_ids(
-                [int(h["id"]) for h in hits_c],
-            )
-            passed_c, _below, _ceil = _ccg(attr_vector, hits_c, vecs_c)
-            for hit_c, cos_c in passed_c:
-                peer_id_c = int(hit_c["memory_id"])
-                if peer_id_c == memory_id or peer_id_c in surfaced_c_peers:
+            except sqlite3.Error:
+                claim_vectors = {}
+            surfaced_c_peers: set[int] = set()
+            channel_c_deduped_a = 0
+            for claim in claims:
+                attr_vector = claim_vectors.get(int(claim["id"]))
+                if not attr_vector:
                     continue
-                # G5 screen applies to channel C too: a peer the slow lane
-                # excluded (process record / version evolution) must not be
-                # re-surfaced through C (adversarial review P1).
-                if peer_id_c in excluded_peers:
+                if attr_is_versional(str(claim.get("attr") or claim["attr_norm"])):
+                    channel_c_versional += 1
                     continue
-                if peer_id_c not in screened_peers:
-                    screened_peers.add(peer_id_c)
-                    peer_tags_c = hit_c.get("tags")
-                    if isinstance(peer_tags_c, str) and peer_tags_c:
-                        try:
-                            peer_tags_c = json.loads(peer_tags_c)
-                        except (TypeError, ValueError):
-                            peer_tags_c = []
-                    if memory_pair_excluded(
-                        own_subject, own_tags,
-                        str(hit_c.get("subject") or ""), peer_tags_c or [],
-                    ):
-                        excluded_peers.add(peer_id_c)
-                        memory_pairs_excluded += 1
+                hits_c = self.db.row_knn(
+                    attr_vector, k=neighbor_k + 1, workspace=workspace or None,
+                    exclude_memory_id=memory_id, include_subject_rows=False,
+                    conn=conn,
+                )
+                vecs_c = self.db.evidence.row_vectors_for_ids(
+                    [int(h["id"]) for h in hits_c], conn=conn,
+                )
+                passed_c, _below, _ceil = _ccg(attr_vector, hits_c, vecs_c)
+                for hit_c, cos_c in passed_c:
+                    peer_id_c = int(hit_c["memory_id"])
+                    if peer_id_c == memory_id or peer_id_c in surfaced_c_peers:
                         continue
-                surfaced_c_peers.add(peer_id_c)
-                decision_c = decide_evidence(
-                    f"{claim.get('attr')}为{claim.get('value')}",
-                    str(hit_c.get("text") or ""),
-                )
-                refs_c, candidate_key_c, candidate_hash_c = self._pair_identity(
-                    memory_id, version,
-                    {"text": f"[claim] {claim.get('attr')}={claim.get('value')}",
-                     "start_offset": 0, "end_offset": len(str(claim.get("value") or "")),
-                     "eid": int(claim["id"]), "content_hash": ""},
-                    peer_id_c, hit_c,
-                )
-                if self._suppressed(refs_c, candidate_hash_c, suppression):
-                    continue
-                enqueued_c = self._enqueue_pair(
-                    workspace, memory_id, version,
-                    {"text": f"[claim] {claim.get('attr')}={claim.get('value')}",
-                     "start_offset": 0, "end_offset": len(str(claim.get("value") or "")),
-                     "eid": int(claim["id"]), "memory_version": version, "content_hash": ""},
-                    peer_id_c, hit_c,
-                    decision=decision_c, candidate_key=candidate_key_c,
-                    candidate_hash=candidate_hash_c,
-                )
-                if enqueued_c:
-                    channel_c_queued += 1
-        if channel_c_queued:
-            outcome["channel_c_queued"] = channel_c_queued
-        if channel_c_versional:
-            outcome["channel_c_versional_vetoed"] = channel_c_versional
-        # Gate-v2 G4/G5 observability (conditional, additive receipt keys).
-        if memory_pairs_excluded:
-            outcome["memory_pairs_excluded"] = memory_pairs_excluded
-        if below_cos_floor:
-            outcome["below_cos_floor"] = below_cos_floor
-        if repeatability_skipped:
-            outcome["repeatability_skipped"] = repeatability_skipped
-        return outcome
+                    # G5 screen applies to channel C too: a peer the slow lane
+                    # excluded (process record / version evolution) must not be
+                    # re-surfaced through C (adversarial review P1).
+                    if peer_id_c in excluded_peers:
+                        continue
+                    # 设计承诺的跨通道去重（G6b「与通道 A 同句去重」落地）：A 已
+                    # 入队的 peer 不再经 C 重复入队——同一 (own@ver, peer@ver) 单
+                    # 行进判定队列，Agent 单判。
+                    if peer_id_c in a_enqueued_peers:
+                        channel_c_deduped_a += 1
+                        continue
+                    if peer_id_c not in screened_peers:
+                        screened_peers.add(peer_id_c)
+                        peer_tags_c = hit_c.get("tags")
+                        if isinstance(peer_tags_c, str) and peer_tags_c:
+                            try:
+                                peer_tags_c = json.loads(peer_tags_c)
+                            except (TypeError, ValueError):
+                                peer_tags_c = []
+                        if memory_pair_excluded(
+                            own_subject, own_tags,
+                            str(hit_c.get("subject") or ""), peer_tags_c or [],
+                        ):
+                            excluded_peers.add(peer_id_c)
+                            memory_pairs_excluded += 1
+                            continue
+                    surfaced_c_peers.add(peer_id_c)
+                    decision_c = decide_evidence(
+                        f"{claim.get('attr')}为{claim.get('value')}",
+                        str(hit_c.get("text") or ""),
+                    )
+                    refs_c, candidate_key_c, candidate_hash_c = self._pair_identity(
+                        memory_id, version,
+                        {"text": f"[claim] {claim.get('attr')}={claim.get('value')}",
+                         "start_offset": 0, "end_offset": len(str(claim.get("value") or "")),
+                         "eid": int(claim["id"]), "content_hash": ""},
+                        peer_id_c, hit_c,
+                    )
+                    if self._suppressed(refs_c, candidate_hash_c, suppression):
+                        continue
+                    enqueued_c = self._enqueue_pair(
+                        workspace, memory_id, version,
+                        {"text": f"[claim] {claim.get('attr')}={claim.get('value')}",
+                         "start_offset": 0, "end_offset": len(str(claim.get("value") or "")),
+                         "eid": int(claim["id"]), "memory_version": version, "content_hash": ""},
+                        peer_id_c, hit_c,
+                        decision=decision_c, candidate_key=candidate_key_c,
+                        candidate_hash=candidate_hash_c, pair_cos=float(cos_c),
+                    )
+                    if enqueued_c:
+                        channel_c_queued += 1
+            if channel_c_queued:
+                outcome["channel_c_queued"] = channel_c_queued
+            if channel_c_versional:
+                outcome["channel_c_versional_vetoed"] = channel_c_versional
+            if channel_c_deduped_a:
+                outcome["channel_c_deduped_channel_a"] = channel_c_deduped_a
+            # Gate-v2 G6 扫描侧通道 B（claims×claims）——设计 §扫描侧任务安排
+            # 「同一套函数，零成本」落地：backfill 回填/存量 claims 的冲突此前只
+            # 在写时检测、扫描轮永不看。复用写侧 check_claims_conflicts（零
+            # Qwen 确定性值对立→notice）；on_write=off 不产 notice；A/C 已入队
+            # 的 peer 跳过（单通道拥有该对，Agent 单判）。
+            if (
+                claims
+                and self._tools.settings.semantic_conflict_on_write != "off"
+            ):
+                try:
+                    bridge = self._tools._evidence.check_claims_conflicts(
+                        memory_id, dict(record),
+                        skip_peers=a_enqueued_peers | surfaced_c_peers,
+                    )
+                except Exception:
+                    bridge = None
+                    outcome["channel_b_error"] = "claims_channel_failed"
+                if bridge:
+                    # r2s-08: channel B now natively emits the unified channel_b_*
+                    # receipt keys — the old per-key remap layer is gone; keys are
+                    # copied through (zero keys stay absent, §3.3 convention).
+                    # reason/exact_capped mark the KNN leg not running / the
+                    # exact lane hitting its candidate bound (never silent).
+                    for _k in (
+                        "channel_b_checked", "channel_b_notices", "channel_b_capped",
+                        "channel_b_versional_vetoed", "channel_b_unresolved",
+                        "channel_b_exact_checked", "channel_b_exact_capped",
+                    ):
+                        if bridge.get(_k):
+                            outcome[_k] = int(bridge[_k])
+                    if bridge.get("reason"):
+                        outcome["channel_b_reason"] = str(bridge["reason"])
+            # Gate-v2 G4/G5 observability (conditional, additive receipt keys).
+            if memory_pairs_excluded:
+                outcome["memory_pairs_excluded"] = memory_pairs_excluded
+            if below_cos_floor:
+                outcome["below_cos_floor"] = below_cos_floor
+            if repeatability_skipped:
+                outcome["repeatability_skipped"] = repeatability_skipped
+            return outcome
 
     def _examine_internal(
         self, memory_id: int, version: int, workspace: str,
@@ -636,8 +699,19 @@ class ScanPipeline:
         means. Here: admitted shapes (check AND notify) land pending for
         agent judgment — no Qwen on the scan side (E11①); a write-time Qwen
         veto row survives via exists() and is never resurrected.
+
+        0.17.0 R2: the per-memory candidate cap aligns with the WRITE side's
+        row cap — both bound the examined rows with SEMANTIC_MAX_ROWS
+        (constants.py, P2-3.1; the write side applies it in
+        _conflicts_deterministic_collect). The scan side previously ran the
+        O(n²) pair loop over the full row list unbounded.
         """
         landed = 0
+        # 0.17.0 R2 上限对齐：单记忆候选行帽与写入侧同一常量——写入侧
+        # _conflicts_deterministic_collect 以 SEMANTIC_MAX_ROWS（constants.py，
+        # P2-3.1，值锚定排序后截断）界定参检行，scan 侧此前对全量行做无上限
+        # O(n²) 两两检查。对齐为同一常量引用（非硬编码），来源即写入侧行帽。
+        units = units[:max(1, SEMANTIC_MAX_ROWS)]
         count = len(units)
         for i in range(count):
             for j in range(i + 1, count):
@@ -724,7 +798,18 @@ class ScanPipeline:
         self, workspace: str, memory_id: int, version: int, unit: dict[str, Any],
         peer_id: int, hit: dict[str, Any], *, decision: Any,
         candidate_key: dict[str, Any], candidate_hash: str,
+        pair_cos: "float | None" = None,
     ) -> bool:
+        # 0.17.0 review R2：入队时按 compute_pair_score 同式盖章 priority
+        # （无 cos 缺 0.40 带项），判定页窗口内按组最高分降序展示——预算
+        # 消费顺序信号在此生成一次，不改变任何判定。
+        priority = 0.0
+        if pair_cos is not None:
+            from .pipeline.gates import compute_pair_score
+            priority = compute_pair_score(
+                decision, float(pair_cos),
+                str(unit.get("text") or ""), str(hit.get("text") or ""),
+            )
         members = self._pair_members(memory_id, version, unit, peer_id, hit)
         evidence = [
             {
@@ -747,6 +832,7 @@ class ScanPipeline:
             # so the severity split lost its high branch — one value.
             severity="normal",
             source="scan_pipeline",
+            priority=priority,
             detail={
                 "action": decision.action,
                 "distance": float(hit.get("distance") or 0),
@@ -1035,6 +1121,538 @@ class ScanPipeline:
                 ]
         return result
 
+    def scan_rule_candidates(
+        self,
+        *,
+        after_memory_id: int = 0,
+        anchor_batch: int = 50,
+        neighbor_k: int = 10,
+        include_check: bool = False,
+        max_distance: float | None = None,
+        workspace: "WorkspaceScope" = None,
+        similarity_pool_limit: int = 0,
+        include_duplicates: bool = False,
+        suspected_anomalies: dict[int, str] | None = None,
+    ) -> dict[str, Any]:
+        """Enumerate conflict-candidate pairs for an external scan loop.
+
+        Scheduled LLM review cannot load the whole library into a session,
+        so the server enumerates the clues: for every active memory's
+        current evidence units, KNN neighbours (rank-based, like the
+        write-time notice path but with a wider window) pass through the
+        deterministic decide_evidence rule. By default only rule-level
+        notify routes (numeric/polarity/todo change) are returned —
+        similarity-only check pairs are legion in topic-clustered
+        libraries and are opt-in via include_check. Each pair carries the
+        triggering unit snippets so the agent can triage without reading
+        full memories. Pairs with an open conflict, or a version-pinned
+        not_a_conflict dismissal, are filtered out.
+
+        include_duplicates additionally exposes same-value near-duplicate
+        pairs (ignore/equivalent_value|compatible_evidence) as a bounded
+        duplicates_pool for governance merge; recorded pairs are suppressed
+        with the same candidate-hash contract.
+
+        C3b (0.15.13): pairing is workspace-grouped. Each anchor's KNN is
+        scoped to the anchor's OWN bucket, so cross-bucket pairs are never
+        generated (they cannot satisfy record_conflict's single-bucket
+        group identity and used to loop weekly without landing).
+        suspected_anomalies ({memory_id: suspected_bucket} from the active
+        workspace_review notices) additionally sweeps each suspected
+        misplaced memory against its SUSPECTED bucket: those hits are
+        cross-bucket by construction and surface in a separate
+        cross_bucket_references list for the running agent — authoritative
+        disposition is the workspace_review notice (move), never
+        record_conflict.
+
+        Calibrated on a real 474-memory production copy: absolute vector
+        distance has no discrimination there (random same-workspace pairs
+        overlap notice pairs), so ranking + rules do the work and
+        max_distance stays an optional extra gate.
+
+        0.17.0 R2: this pairing orchestration moved here from the db layer
+        (EvidenceStore) — rule/candidate policy belongs to the pipeline; the
+        store keeps only the KNN/vector primitives. SQL and semantics are
+        carried over verbatim.
+        """
+        db = self.db
+        if not db.state.sqlite_vec_available:
+            return {"error": "sqlite_vec_unavailable"}
+        workspace_anchor_sql = ""
+        anchor_params: list[Any] = []
+        workspace_names = scope_names(workspace)
+        echo_workspace = workspace_names[0] if workspace_names else None
+        if workspace is not None:
+            # Strict callers must not anchor on — or leak snippets from —
+            # memories outside their admitted workspace set.
+            anchor_scope_sql, anchor_scope_params = workspace_scope_sql(
+                "COALESCE(NULLIF(workspace_canonical,''),workspace)", workspace,
+            )
+            if anchor_scope_sql:
+                workspace_anchor_sql = f"AND {anchor_scope_sql} "
+                anchor_params.extend(anchor_scope_params)
+        with db.connection() as conn:
+            anchors = [
+                int(row["id"]) for row in conn.execute(
+                    "SELECT id FROM memories WHERE status='active' AND id > ? "
+                    + workspace_anchor_sql
+                    + "ORDER BY id LIMIT ?",
+                    (int(after_memory_id), *anchor_params, max(1, int(anchor_batch))),
+                )
+            ]
+            if not anchors:
+                return {
+                    "anchors_scanned": 0, "next_anchor_memory_id": None,
+                    "candidates": [], "counts": {"knn_pairs": 0, "rule_pass": 0,
+                                                 "filtered_open": 0, "filtered_dismissed": 0,
+                                                 "duplicates": 0},
+                    "duplicates_pool": [], "duplicates_truncated": False,
+                    "cross_bucket_references": [], "anchor_buckets": [],
+                }
+            # The group schema has no left/right columns. Suppression is tied
+            # to the exact candidate snapshot successfully persisted by
+            # record_conflict, not merely to a memory pair. That keeps an
+            # unrecorded external review repeatable and allows changed member
+            # versions/evidence to be reconsidered.
+            recorded_candidate_statuses: dict[str, str] = {}
+            active_group_members: list[frozenset[str]] = []
+            dismissed_group_members: list[frozenset[str]] = []
+            for row in conn.execute(
+                "SELECT status,candidate_key_hash,member_versions FROM conflicts "
+                "WHERE status IN ('open','applying','not_a_conflict')"
+            ):
+                candidate_hash = str(row["candidate_key_hash"] or "")
+                status = str(row["status"])
+                if candidate_hash:
+                    recorded_candidate_statuses[candidate_hash] = status
+                try:
+                    members = json.loads(str(row["member_versions"] or "[]"))
+                    refs = frozenset(
+                        f"{int(member['memory_id'])}@{int(member['version'])}"
+                        for member in members
+                    )
+                except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
+                # C2 (0.15.13): a dismissed not_a_conflict pair now suppresses
+                # by MEMORY-PAIR @version, not only by its exact evidence
+                # snapshot. The same pair re-enumerated through different unit
+                # slices (new hashes) used to resurface forever. Version
+                # pinning stays: an edited memory lifts the suppression and
+                # the pair is reconsidered. open/applying stay a separate
+                # set so a pair with BOTH an open group and a dismissal
+                # keeps the open group's precedence.
+                if refs and status in {"open", "applying"}:
+                    active_group_members.append(refs)
+                elif refs and status == "not_a_conflict":
+                    dismissed_group_members.append(refs)
+            candidates: dict[tuple[int, int], dict[str, Any]] = {}
+            # Spec §7.1 wide gate: similarity-only pairs dropped from the
+            # default candidate set stay available as a bounded pool for the
+            # caller's Qwen union instead of vanishing outright.
+            similarity_pool: dict[tuple[int, int], dict[str, Any]] = {}
+            # Near-duplicate (ignore/equivalent_value|compatible_evidence)
+            # pairs, exposed for governance merge only when include_duplicates
+            # is set. Same suppression contract as real candidates: pairs
+            # already recorded (not_a_conflict/open/applying) are not
+            # re-enumerated — the candidate_hash lookup runs inside the ignore
+            # branch, ahead of the historical silent drop.
+            duplicates_pool: dict[tuple[int, int], dict[str, Any]] = {}
+            duplicates_truncated = False
+            duplicates_cap = 2 * max(1, int(anchor_batch))
+            pool_limit = max(0, int(similarity_pool_limit))
+            knn_pair_count = 0
+            stale_anchors = 0
+            filtered_open = 0
+            filtered_dismissed = 0
+            cross_bucket_refs: dict[tuple[int, int], dict[str, Any]] = {}
+            anchor_buckets: dict[str, dict[str, int]] = {}
+            # C3b: suspected misplaced memories (from ACTIVE workspace_review
+            # notices) are ALSO paired against their suspected bucket. Those
+            # pairs are cross-bucket, cannot land in record_conflict, and go
+            # to a reference list only.
+            suspected = {
+                int(mid): str(bucket)
+                for mid, bucket in (suspected_anomalies or {}).items()
+            }
+            for anchor_id in anchors:
+                anchor_row = conn.execute(
+                    "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    "FROM memories WHERE id=?",
+                    (anchor_id,),
+                ).fetchone()
+                # C3b grouping: pair only within the anchor's own bucket. The
+                # strict caller scope (workspace) already bounds the whole
+                # page; the anchor bucket narrows pairing further.
+                anchor_bucket = (
+                    str(anchor_row["workspace"] or "").strip() if anchor_row else ""
+                )
+                # C5 per-group page accounting: doctor's broken-chain alarm
+                # needs to know which bucket the walk was last inside.
+                if anchor_bucket:
+                    entry = anchor_buckets.setdefault(
+                        anchor_bucket, {"count": 0, "last_anchor": 0},
+                    )
+                    entry["count"] += 1
+                    entry["last_anchor"] = max(entry["last_anchor"], anchor_id)
+                # C2/C5: rows are the scan source — the job no longer
+                # publishes unit vectors. rowseg emits no heading rows and
+                # (pre-C3) no subject rows, so the old kind='text' filter's
+                # intent (subjects/headings excluded) holds by construction.
+                # C3 A+ guard: subject rows never ORIGINATE a scan pair
+                # (subject version progression is timeline evolution, not a
+                # numeric clue) — the row-channel counterpart of the unit
+                # channel's kind='text' anchor filter.
+                units = conn.execute(
+                    """SELECT r.id AS eid, r.text AS text, v.embedding AS embedding,
+                              r.memory_version AS memory_version, r.content_hash AS content_hash,
+                              r.start_offset AS start_offset, r.end_offset AS end_offset
+                       FROM memory_row r
+                       JOIN memory_row_vec v ON v.id=r.id
+                       WHERE r.memory_id=? AND r.memory_version=(
+                           SELECT version FROM memories WHERE id=?)
+                         AND r.kind != 'subject'
+                       ORDER BY r.id""",
+                    (anchor_id, anchor_id),
+                )
+                first_unit = units.fetchone()
+                if first_unit is None:
+                    # Async republish window or a permanently failed publish:
+                    # surface it instead of silently skipping forever.
+                    stale_anchors += 1
+                anchor_content_row = conn.execute(
+                    "SELECT content FROM memories WHERE id=?", (anchor_id,),
+                ).fetchone()
+                anchor_content = str(anchor_content_row["content"]) if anchor_content_row else ""
+                peer_content_cache: dict[int, str] = {}
+
+                def peer_content(peer_mid: int) -> str:
+                    if peer_mid not in peer_content_cache:
+                        row = conn.execute(
+                            "SELECT content FROM memories WHERE id=?", (peer_mid,),
+                        ).fetchone()
+                        peer_content_cache[peer_mid] = str(row["content"]) if row else ""
+                    return peer_content_cache[peer_mid]
+
+                def locate_span(content: str, unit_text: str, hint_start: int, hint_end: int) -> dict[str, int] | None:
+                    """Validate an exact evidence span and pad it for review.
+
+                    Evidence pipeline v2 guarantees that cleaning the source
+                    slice equals the unit text. Do not search for the text:
+                    repeated phrases make search ambiguous and can silently
+                    choose the wrong occurrence. A failed invariant drops the
+                    span and falls back to a full read.
+                    """
+                    from .evidence import _clean
+
+                    start, end = int(hint_start), int(hint_end)
+                    if not (content and unit_text and 0 <= start < end <= len(content)):
+                        return None
+                    if _clean(content[start:end]) != unit_text:
+                        return None
+                    return {
+                        "start": max(0, start - 128),
+                        "end": min(len(content), end + 128),
+                    }
+
+                def _pool_near_duplicate(
+                    peer: int, hit: "dict[str, Any]", anchor: int,
+                    unit_row: "dict[str, Any]", text_a: str, reason: str,
+                ) -> None:
+                    """Gate-v2 G4: shared duplicates_pool admission for BOTH
+                    near-duplicate sources — the deterministic ignore routes
+                    and the at-ceil cosine pairs. Same suppression contract,
+                    same free-dict-replace cap accounting."""
+                    nonlocal duplicates_truncated
+                    pair_key = (min(anchor, peer), max(anchor, peer))
+                    member_refs, _key, candidate_hash = self.db.evidence._unit_pair_identity(
+                        anchor, unit_row, peer, hit,
+                    )
+                    recorded = recorded_candidate_statuses.get(candidate_hash)
+                    if recorded is not None or any(
+                        member_refs <= group_members for group_members in active_group_members
+                    ) or any(
+                        member_refs <= group_members for group_members in dismissed_group_members
+                    ):
+                        return
+                    hit_text = str(hit.get("text") or "")
+                    # Re-hitting an already-pooled pair is a free dict
+                    # replace, not pool growth — it must not count against
+                    # the cap or flag truncation that never happened.
+                    if pair_key in duplicates_pool or len(duplicates_pool) < duplicates_cap:
+                        duplicates_pool[pair_key] = {
+                            "left_id": pair_key[0], "right_id": pair_key[1],
+                            "reason": reason,
+                            "distance": float(hit.get("distance") or 0),
+                            "candidate_key_hash": candidate_hash,
+                            "left_snippet": text_a[:200] if pair_key[0] == anchor else hit_text[:200],
+                            "right_snippet": hit_text[:200] if pair_key[1] == peer else text_a[:200],
+                            "members": [
+                                _candidate_pair_member(
+                                    pair_key[0], is_anchor=(pair_key[0] == anchor),
+                                    unit=unit_row, hit=hit,
+                                    anchor_text=text_a, peer_text=hit_text,
+                                ),
+                                _candidate_pair_member(
+                                    pair_key[1], is_anchor=(pair_key[1] == anchor),
+                                    unit=unit_row, hit=hit,
+                                    anchor_text=text_a, peer_text=hit_text,
+                                ),
+                            ],
+                        }
+                    else:
+                        duplicates_truncated = True
+
+
+                # C3b: same-bucket pairing. Under a strict caller scope the
+                # anchor bucket must stay inside the admitted set.
+                admitted_names = set(workspace_names) if workspace_names else set()
+                pairing_scope = anchor_bucket if (
+                    anchor_bucket and (workspace is None or anchor_bucket in admitted_names)
+                ) else workspace
+                suspect_bucket = suspected.get(anchor_id)
+                from .pipeline.gates import candidate_cos_gate
+                for unit in (() if first_unit is None else itertools.chain((first_unit,), units)):
+                    text = str(unit["text"] or "")
+                    if not text:
+                        continue
+                    unit_vector = self.db.evidence._blob_to_vector(bytes(unit["embedding"]))
+                    hits = self.db.row_knn(
+                        unit_vector,
+                        k=max(1, int(neighbor_k)) + 1,
+                        workspace=pairing_scope,
+                        exclude_memory_id=anchor_id,
+                        include_subject_rows=False,
+                    )
+                    # Gate-v2 G4 余弦门 (diagnostic-channel leg): below-floor
+                    # pairs are noise; AT/ABOVE-ceil pairs are near-duplicates
+                    # — they route into duplicates_pool below instead of being
+                    # dropped (that pool IS their governance consumer). The
+                    # suspect-bucket sweep stays OUTSIDE the gate: those hits
+                    # are cross-bucket references, not conflict candidates.
+                    gate_vectors = self.db.evidence.row_vectors_for_ids(
+                        [int(hit["id"]) for hit in hits], conn=conn,
+                    )
+                    _passed, _below, at_ceil_pairs = candidate_cos_gate(unit_vector, hits, gate_vectors)
+                    hits = [hit for hit, _cos in _passed]
+                    if include_duplicates:
+                        for dup_hit, _dup_cos in at_ceil_pairs:
+                            _pool_near_duplicate(
+                                int(dup_hit["memory_id"]), dup_hit, anchor_id, unit,
+                                text, "near_duplicate_cosine",
+                            )
+                    # C3b: the suspected-bucket sweep for misplaced memories.
+                    suspect_hits: list[dict[str, Any]] = []
+                    if suspect_bucket and suspect_bucket != anchor_bucket:
+                        suspect_hits = self.db.row_knn(
+                            unit_vector,
+                            k=max(1, int(neighbor_k)) + 1, include_subject_rows=False,
+                            workspace=suspect_bucket,
+                            exclude_memory_id=anchor_id,
+                        )
+                    for hit in itertools.chain(hits, suspect_hits):
+                        # C2/C5: rows carry no 'text' kind — the old unit-
+                        # channel filter's intent (exclude subject/heading
+                        # units) holds by construction (rowseg emits neither).
+                        peer_id = int(hit["memory_id"])
+                        if peer_id == anchor_id:
+                            continue
+                        peer_bucket = str(hit.get("workspace_canonical") or hit.get("workspace") or "").strip()
+                        if peer_bucket and anchor_bucket and peer_bucket != anchor_bucket:
+                            # C3b: cross-bucket hits exist only in the
+                            # suspected-bucket sweep (regular pairing is
+                            # bucket-scoped). Reference-only: they can never
+                            # satisfy record_conflict's single-bucket group
+                            # identity. Authority is the workspace_review
+                            # notice (move), never a conflict group.
+                            pair_key = (min(anchor_id, peer_id), max(anchor_id, peer_id))
+                            decision = decide_evidence(text, str(hit.get("text") or ""))
+                            ref = cross_bucket_refs.setdefault(pair_key, {
+                                "left_id": pair_key[0], "right_id": pair_key[1],
+                                "workspace": anchor_bucket,
+                                "suspected_workspace": suspect_bucket,
+                                "reasons": set(), "distance": float(hit.get("distance") or 0),
+                                "left_snippet": text[:200], "right_snippet": str(hit.get("text") or "")[:200],
+                                "note": "cross-bucket reference only; disposition via the workspace_review notice (move), not record_conflict",
+                            })
+                            ref["reasons"].add(decision.reason)
+                            ref["distance"] = min(ref["distance"], float(hit.get("distance") or 0))
+                            continue
+                        knn_pair_count += 1
+                        # Every unit pair is judged: an earlier equivalent
+                        # match (e.g. identical subjects) must not blacklist
+                        # the peer, or a later numeric-change unit on the
+                        # same pair would be lost.
+                        decision = decide_evidence(text, str(hit.get("text") or ""))
+                        # 0.16.4 §1/§0.5: the diagnostic channel routes
+                        # through the SAME shared predicate as the scan
+                        # pipeline and the write-time KNN loop — evolution-
+                        # domain pairs must not surface here either, or the
+                        # retroactive void's "re-enqueue and surface the gap"
+                        # design would leak them back as notice_ready.
+                        if is_cross_evolution(decision):
+                            continue
+                        if decision.action == "ignore":
+                            if include_duplicates and decision.reason in {"equivalent_value", "compatible_evidence"}:
+                                _pool_near_duplicate(
+                                    peer_id, hit, anchor_id, unit, text, decision.reason,
+                                )
+                            continue
+                        # Numeric deltas remain a deterministic scan baseline
+                        # candidate even though they can no longer directly
+                        # produce a write-time notice.
+                        similarity_only = (
+                            decision.action == "check"
+                            and decision.reason != "numeric_value_candidate"
+                            and not include_check
+                        )
+                        if similarity_only and pool_limit <= 0:
+                            continue
+                        if max_distance is not None and float(hit.get("distance") or 0) > float(max_distance):
+                            continue
+                        pair = (min(anchor_id, peer_id), max(anchor_id, peer_id))
+                        distance = float(hit.get("distance") or 0)
+                        store = similarity_pool if similarity_only else candidates
+                        existing = store.get(pair)
+                        hit_text = str(hit.get("text") or "")
+                        anchor_span = locate_span(
+                            anchor_content, text,
+                            int(unit["start_offset"] or 0), int(unit["end_offset"] or 0),
+                        )
+                        peer_span = locate_span(
+                            peer_content(peer_id), hit_text,
+                            int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0),
+                        )
+                        member_refs, candidate_key, candidate_hash = self.db.evidence._unit_pair_identity(
+                            anchor_id, unit, peer_id, hit,
+                        )
+                        recorded_status = recorded_candidate_statuses.get(candidate_hash)
+                        if recorded_status is None and any(
+                            member_refs <= group_members for group_members in active_group_members
+                        ):
+                            recorded_status = "open"
+                        if recorded_status is None and any(
+                            member_refs <= group_members for group_members in dismissed_group_members
+                        ):
+                            # C2: pair@version dismissal. Counted as dismissed,
+                            # never silently folded into filtered_open — the
+                            # counter is the convergence observability face.
+                            recorded_status = "not_a_conflict"
+                        if recorded_status is not None:
+                            if recorded_status == "not_a_conflict":
+                                filtered_dismissed += 1
+                            else:
+                                filtered_open += 1
+                            continue
+                        if existing is None:
+                            state = "notice_ready" if decision.action == "notify" else "review_candidate"
+                            store[pair] = {
+                                "left_id": pair[0], "right_id": pair[1],
+                                "state": state, "route": state,
+                                "reasons": {decision.reason}, "distance": distance,
+                                "candidate_key": candidate_key,
+                                "candidate_key_hash": candidate_hash,
+                                "members": [
+                                    _candidate_pair_member(
+                                        pair[0], is_anchor=(pair[0] == anchor_id),
+                                        unit=unit, hit=hit,
+                                        anchor_text=text, peer_text=hit_text,
+                                    ),
+                                    _candidate_pair_member(
+                                        pair[1], is_anchor=(pair[1] == anchor_id),
+                                        unit=unit, hit=hit,
+                                        anchor_text=text, peer_text=hit_text,
+                                    ),
+                                ],
+                                "value_groups": [], "slot_key": None, "slot_provenance": None,
+                                "left_snippet": text[:200] if pair[0] == anchor_id else hit_text[:200],
+                                "right_snippet": hit_text[:200] if pair[0] == anchor_id else text[:200],
+                                # Pre-built deep-read calls: reading just the
+                                # triggering region (plus context) instead of
+                                # the full text keeps triage token cost low.
+                                "deep_read": {
+                                    "left": {
+                                        "memory_id": pair[0],
+                                        "span": anchor_span if pair[0] == anchor_id else peer_span,
+                                        **({"workspace": echo_workspace} if echo_workspace else {}),
+                                    },
+                                    "right": {
+                                        "memory_id": pair[1],
+                                        "span": peer_span if pair[0] == anchor_id else anchor_span,
+                                        **({"workspace": echo_workspace} if echo_workspace else {}),
+                                    },
+                                },
+                            }
+                        else:
+                            # notice_ready outranks review_candidate when
+                            # different unit pairs on the same memory pair
+                            # disagree. Snippets and spans track the strongest
+                            # signal, not the first discovery.
+                            if not similarity_only and existing["state"] == "review_candidate" and decision.action == "notify":
+                                existing["state"] = "notice_ready"
+                                existing["route"] = "notice_ready"
+                                existing["left_snippet"] = text[:200] if pair[0] == anchor_id else hit_text[:200]
+                                existing["right_snippet"] = hit_text[:200] if pair[0] == anchor_id else text[:200]
+                                existing["deep_read"] = {
+                                    "left": {
+                                        "memory_id": pair[0],
+                                        "span": anchor_span if pair[0] == anchor_id else peer_span,
+                                        **({"workspace": echo_workspace} if echo_workspace else {}),
+                                    },
+                                    "right": {
+                                        "memory_id": pair[1],
+                                        "span": peer_span if pair[0] == anchor_id else anchor_span,
+                                        **({"workspace": echo_workspace} if echo_workspace else {}),
+                                    },
+                                }
+                            existing["reasons"].add(decision.reason)
+                            existing["distance"] = min(existing["distance"], distance)
+            ordered = [candidates[pair] for pair in sorted(candidates)]
+            for item in ordered:
+                item["reasons"] = sorted(item["reasons"])
+            similarity_ordered = sorted(
+                similarity_pool.values(), key=lambda item: float(item.get("distance") or 9),
+            )[:pool_limit]
+            for item in similarity_ordered:
+                item["reasons"] = sorted(item["reasons"])
+            next_anchor = anchors[-1]
+            with db.connection() as conn:
+                more = conn.execute(
+                    "SELECT 1 FROM memories WHERE status='active' AND id > ? "
+                    + workspace_anchor_sql
+                    + "LIMIT 1",
+                    (next_anchor, *anchor_params),
+                ).fetchone()
+            duplicates_ordered = [
+                duplicates_pool[pair] for pair in sorted(duplicates_pool)
+            ]
+            cross_refs_ordered = [
+                {**cross_bucket_refs[pair], "reasons": sorted(cross_bucket_refs[pair]["reasons"])}
+                for pair in sorted(cross_bucket_refs)
+            ]
+            return {
+                "anchors_scanned": len(anchors),
+                "next_anchor_memory_id": int(next_anchor) if more else None,
+                "candidates": ordered,
+                "similarity_pool": similarity_ordered,
+                "duplicates_pool": duplicates_ordered,
+                "duplicates_truncated": duplicates_truncated,
+                "cross_bucket_references": cross_refs_ordered,
+                "anchor_buckets": [
+                    {"workspace": ws, "anchors_scanned": entry["count"],
+                     "last_anchor": entry["last_anchor"]}
+                    for ws, entry in sorted(anchor_buckets.items())
+                ],
+                "counts": {
+                    "knn_pairs": knn_pair_count,
+                    "rule_pass": len(ordered),
+                    "similarity_pool": len(similarity_ordered),
+                    "duplicates": len(duplicates_ordered),
+                    "filtered_open": filtered_open,
+                    "filtered_dismissed": filtered_dismissed,
+                    "stale_anchors": stale_anchors,
+                },
+            }
+
     def memory_scan_workspace_anomalies(self, **_: Any) -> dict[str, Any]:
         """C3a workspace anomaly check: single-pass matmul over all summary vectors.
 
@@ -1189,6 +1807,44 @@ class ScanPipeline:
                 for item in capped
             ],
         })
+
+def _candidate_pair_member(
+    memory_id: int, *,
+    is_anchor: bool,
+    unit: "dict[str, Any]", hit: "dict[str, Any]",
+    anchor_text: str, peer_text: str,
+) -> dict[str, Any]:
+    """One ``members`` entry of a scan_rule_candidates pair (0.17.0 R2 收编).
+
+    The candidates store and the duplicates_pool previously assembled this
+    13-field member dict in FOUR byte-identical copies (left/right ×
+    real/pool); the key set and its order ARE the record/queue contract, so
+    the copies collapse into this single producer. ``is_anchor`` selects the
+    field source: the anchor's unit row (eid/memory_version/content_hash/
+    offsets) vs the peer's hit row (id/memory_version|memory_row_version/...).
+    """
+    if is_anchor:
+        version = int(unit["memory_version"] or 1)
+        quote = anchor_text
+        span = [int(unit["start_offset"] or 0), int(unit["end_offset"] or 0)]
+        content_hash = str(unit["content_hash"] or "")
+        evidence_unit = int(unit["eid"])
+    else:
+        version = int(hit.get("memory_version") or hit.get("memory_row_version") or 1)
+        quote = peer_text
+        span = [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)]
+        content_hash = str(hit.get("content_hash") or "")
+        evidence_unit = int(hit.get("id") or 0)
+    return {
+        "memory_id": memory_id, "version": version,
+        "attribute_raw": None, "value_raw": None,
+        "normalized_attribute": None, "normalized_value": None,
+        "evidence_quote": quote, "evidence_span": span,
+        "content_hash": content_hash, "evidence_unit": evidence_unit,
+        "direction": "deterministic", "prompt_version": None,
+        "detector_version": CONFLICT_DETECTOR_VERSION,
+    }
+
 
 def spans_overlap(a: "tuple[int, int]", b: "tuple[int, int]") -> bool:
     """True when two evidence spans intersect at all. The long-text fallback

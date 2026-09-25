@@ -35,9 +35,11 @@ def _render_plan(plan: dict[str, Any]) -> str:
     conflict_only = plan.get("upgrade_mode") == "conflict_only"
     mode_lines = (
         [
-            "The source evidence index is ready in the configured embedding space.",
-            "Existing memory_row and vector tables can be cloned unchanged; no",
-            "model loading or embedding recomputation is required for this upgrade.",
+            "The source evidence index is cloned unchanged; no model loading is",
+            "required for the migration itself. If this release rotated the",
+            "embedding pipeline version, the preserved space is reported as",
+            "mismatch on the next page and stays disabled until rebuilt with a",
+            "local model (memory_repair rebuild_evidence) — 0.17.0 does rotate it.",
         ]
         if conflict_only else
         [

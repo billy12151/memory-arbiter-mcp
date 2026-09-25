@@ -348,7 +348,7 @@ def test_claim_bridge_extracts_and_reports(tmp_path, monkeypatch) -> None:
     claims = result.get("claims_channel") or {}
     assert captured_prompts, "bridge must consult Qwen with the attr-named prompt"
     assert "上传方式" in captured_prompts[0], "case-a prompt must name the attribute"
-    assert claims.get("notices", 0) >= 1
+    assert claims.get("channel_b_notices", 0) >= 1
     notices = tools.db.list_semantic_notices(status="open")
     assert any(n.get("payload", {}).get("claim_bridge") for n in notices)
 
@@ -430,10 +430,10 @@ def test_channel_c_reports_claim_vs_sentence_conflict(tmp_path, monkeypatch) -> 
     )
     result = tools._evidence.check_claim_sentence_conflicts(
         new["id"], tv._job_snapshot(tools, new["id"]),
-        skip_peers=None, allowed_memory_ids=[int(peer["id"])],
+        allowed_memory_ids=[int(peer["id"])],
     )
     assert captured, "channel C must consult Qwen with the sentence"
-    assert result["notices"] == 1
+    assert result["channel_c_notices"] == 1
     notices = tools.db.list_semantic_notices(status="open")
     assert any(n.get("payload", {}).get("channel_c") for n in notices)
 
@@ -450,12 +450,12 @@ def test_channel_c_versional_attr_exempt_and_skip_peers(tmp_path) -> None:
     # Versional attr → exempted before any KNN, own counter (分键).
     result = EvidencePipeline(tools).check_claim_sentence_conflicts(
         new["id"], tv._job_snapshot(tools, new["id"]),
-        skip_peers=None, allowed_memory_ids=[1, 2, 3],
+        allowed_memory_ids=[1, 2, 3],
     )
     assert result["channel_c_versional_vetoed"] == 1
     # Empty clean list → channel C is a no-op (名单共享语义).
     result2 = EvidencePipeline(tools).check_claim_sentence_conflicts(
         new["id"], tv._job_snapshot(tools, new["id"]),
-        skip_peers=None, allowed_memory_ids=[],
+        allowed_memory_ids=[],
     )
-    assert result2["claims_checked"] == 0
+    assert result2["channel_c_checked"] == 0

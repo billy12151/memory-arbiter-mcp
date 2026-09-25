@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
-import ast
 import contextlib
 import uuid
 from typing import Any
@@ -106,16 +105,6 @@ def test_local_text_units_are_simple_and_cover_headings() -> None:
     assert [unit.kind for unit in units][:2] == ["subject", "heading"]
     assert any(unit.kind == "text" and "PostgreSQL" in unit.text for unit in units)
     assert all(unit.unit_index == index for index, unit in enumerate(units))
-
-
-def test_local_text_worker_has_single_definition() -> None:
-    worker_source = Path(__file__).parents[1] / "memory_arbiter" / "workers.py"
-    tree = ast.parse(worker_source.read_text(encoding="utf-8"))
-    definitions = [
-        node for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "LocalTextIndexWorker"
-    ]
-    assert len(definitions) == 1
 
 
 def _hits_with_metadata(tools, hits):
@@ -701,7 +690,6 @@ def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, mo
         "notices_created": 0,
         "task_id": task_id,
         "dedupe_key": task_id,
-        "pairs_examined": 0,
     }
     assert tools.wait_semantic_worker_drained(timeout=2)
     # 单队列不变式：行已发布（含 A+ subject 行），检测在同一 job 完成，
@@ -712,7 +700,7 @@ def test_vnext_semantic_job_is_chained_after_evidence_publish(tmp_path: Path, mo
         )]
     assert kinds and kinds[0] == "subject"
     assert tools.db.evidence.coverage()["indexed_memories"] == 1
-    assert tools._evidence_worker.status()["queue_depth"] == 0
+    assert tools._semantic_worker.status()["queue_depth"] == 0
 
 
 def test_semantic_job_reuses_just_published_evidence_vectors(tmp_path: Path, monkeypatch) -> None:
@@ -1104,7 +1092,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
     for _row_key in ("rows_mode", "rows_examined", "claims_channel", "claims_channel_c",
                      "qwen_budget", "direct_verdicts"):  # Q1 additive receipt keys
         first.pop(_row_key, None)
-    assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4, "pairs_examined": 0}
+    assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4}
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
     assert len(notices) == 4
     assert all(n["payload"]["route"] == "notice_ready" for n in notices)
@@ -1116,7 +1104,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
     for _row_key in ("rows_mode", "rows_examined", "claims_channel", "claims_channel_c",
                      "qwen_budget", "direct_verdicts"):  # Q1 additive receipt keys
         second.pop(_row_key, None)
-    assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 0}
+    assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
     assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 4
 
 
@@ -1696,19 +1684,6 @@ def test_knn_truncates_to_requested_k_with_filters(tmp_path: Path) -> None:
     assert tools.wait_semantic_worker_drained(timeout=5)
     hits = tools.db.row_knn([1.0, 0.0], k=3, workspace="w", exclude_memory_id=999999)
     assert 0 < len(hits) <= 3
-
-
-def test_stale_publish_race_does_not_pollute_worker_last_error(tmp_path: Path, monkeypatch) -> None:
-    tools = make_tools(tmp_path)
-    written = tools.memory_write(content="内容。", subject="s", tags=[])["data"]
-    tools.settings.semantic_conflict_on_write = "off"
-    monkeypatch.setattr(
-        tools, "_index_local_text_evidence",
-        lambda *a, **k: {"status": "failed", "outcome": "stale_snapshot"},
-    )
-    tools._evidence_worker.enqueue(written["id"], {"version": 1})
-    assert tools._evidence_worker.wait_drained(timeout=2)
-    assert tools._evidence_worker.status()["last_error"] is None
 
 
 def test_migrate_vnext_cli_exit_codes(tmp_path: Path, monkeypatch, capsys) -> None:

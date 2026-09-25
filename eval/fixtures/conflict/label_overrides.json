@@ -145,6 +145,6 @@
   ],
   "cf-noise-11-917-918": [
     "true_conflict",
-    "calibration audit 2026-09-22: owner 后续裁定 conflict-test export-format json vs csv 为真冲突基准对（tests/test_write_time_prefilter 保活注释）；corpus 原标 noise 系裁定前口径，随 0.17.0 校准轮翻转"
+    "calibration audit 2026-09-22: owner 后续裁定 conflict-test export-format json vs csv 为真冲突基准对（tests/test_write_time_prefilter 保活注释）；corpus 原标 noise 系裁定前口径，随 0.17.0 校准轮翻转；0.17.0 review R2：shape 同步改 write_opposition，语料 bump conflict-v4-noisy"
   ]
 }

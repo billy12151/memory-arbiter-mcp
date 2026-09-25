@@ -1,33 +1,12 @@
-"""Backpressure for the evidence-index worker (review decision #825 issue 4)."""
+"""Backpressure for the semantic worker (R2-S1: the retired evidence-index
+worker's own capacity test died with the class — the merged queue's
+queue_full rejection is covered by
+test_vnext_evidence.test_queue_full_drop_completes_exact_reserved_task_end_to_end)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import tests.test_vnext_evidence as tv
-from memory_arbiter.constants import EVIDENCE_QUEUE_MAX_SIZE
-
-
-def test_evidence_worker_enqueue_rejects_when_queue_full(tmp_path: Path) -> None:
-    tools = tv.make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    worker = tools._evidence_worker
-
-    # Saturate the worker by marking the cap as inflight; this avoids waiting
-    # for 200 real jobs while still exercising the capacity check.
-    with worker._cond:
-        worker._inflight = set(range(EVIDENCE_QUEUE_MAX_SIZE))
-    try:
-        result = worker.enqueue(9999, {"version": 1, "task_id": "semantic:9999@1"})
-        assert result["status"] == "busy"
-        assert result["reason"] == "evidence_worker_queue_full"
-        assert result["queue_depth"] == 0
-        assert len(worker._pending) <= EVIDENCE_QUEUE_MAX_SIZE
-        # The new item must not have been queued.
-        assert 9999 not in worker._pending
-    finally:
-        with worker._cond:
-            worker._inflight.clear()
-            worker._cond.notify_all()
 
 
 def test_memory_write_warns_when_evidence_worker_busy(tmp_path: Path) -> None:

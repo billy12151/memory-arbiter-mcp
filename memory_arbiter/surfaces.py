@@ -1185,7 +1185,7 @@ class ProductSurfaces:
                 self._active_workspace_anomalies() if scan_workspace is None else None
             )
             scan_started = time.perf_counter()
-            result = self.db.scan_rule_candidates(
+            result = self._tools._scan_pipeline.scan_rule_candidates(
                 after_memory_id=anchor_value,
                 anchor_batch=batch_value,
                 neighbor_k=k_value,
@@ -1554,7 +1554,7 @@ class ProductSurfaces:
         pages_scanned = 0
         anchor = 0
         while True:
-            page = self.db.scan_rule_candidates(
+            page = self._tools._scan_pipeline.scan_rule_candidates(
                 after_memory_id=anchor,
                 anchor_batch=SCAN_DUPLICATES_BATCH,
                 include_duplicates=True,

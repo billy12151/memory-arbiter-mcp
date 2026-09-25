@@ -227,7 +227,6 @@ SEMANTIC_NEIGHBOR_SCREEN = 50
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.
-SEMANTIC_MAX_EVIDENCE_UNITS = 64
 # 0.15.14 (A5): deterministic second gate on Qwen work per write-check — the
 # fair job deadline remains the first. Formula (plan mema-01514 §A5):
 # clamp(6, 16, round(20s target check budget ÷ p95 pair wall)); with the
@@ -255,6 +254,12 @@ CLAIM_ATTR_TAU = 0.70
 # 0.17.0 review A3: the claims channel is zero-Qwen with no natural pairs
 # cap — notices per write are bounded here instead (overflow visible).
 CLAIMS_MAX_NOTICES_PER_WRITE = 5
+# 0.17.0 review R2: per-attr candidate bound for the exact-key lane
+# (attr_conflict_candidates). Not the KNN k=10 window — this only stops a
+# hot attr (dozens of memories sharing 状态/负责人) from scanning
+# unbounded; hitting it is surfaced as channel_b_exact_capped, never
+# silent.
+CLAIMS_EXACT_CANDIDATE_LIMIT = 100
 # Gate-v2 G6 单边桥: own claim has no same-attr peer claim — aim the attr
 # vector at the peer's sentence rows and let Qwen extract the value (case a,
 # prompt names the attr). Bounded per write; unresolved bridges are counted.
@@ -264,7 +269,7 @@ CLAIMS_BRIDGE_MAX_PER_WRITE = 2
 # discrimination INSIDE the set (wrong layer), so it drops to a tiebreak.
 # The budget order now leads with the CONFLICT-BAND membership of the true
 # cosine, then the deterministic opposition signals:
-#   score = 0.40*band(clamp((cos-0.60)/0.20)) + 0.25*numeric_route
+#   score = 0.40*band(clamp((cos-0.60)/(0.98-0.60))) + 0.25*numeric_route
 #         + 0.20*values_differ(normalized unequal) + 0.15*negation
 # Order-only boundary invariant: a mis-rank wastes budget, never flips a
 # verdict. Weights are initial values — recalibrated at G7 (五轮基线).

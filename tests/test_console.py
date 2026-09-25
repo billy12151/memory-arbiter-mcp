@@ -876,3 +876,21 @@ def test_overview_by_workspace_active_excludes_superseded(tmp_path: Path) -> Non
     overview = api.overview()
     assert overview["by_workspace_active"].get("console-ws") == 1
     assert overview["by_workspace"].get("console-ws", 0) >= 2
+
+
+def test_memory_graph_beyond_eight_tags(tmp_path: Path) -> None:
+    """R2 P3：[:8] 输入截断会静默丢共享第 9+ 个标签的邻居（存储上限 32）
+    ——标签边必须用全量标签采集。"""
+    api = _api(tmp_path)
+    many = [f"tag-{i}" for i in range(10)]
+    left = api.tools.memory_write(
+        content="tag host one", subject="Tags9A", tags=many, workspace="console-ws",
+    )["data"]["id"]
+    right = api.tools.memory_write(
+        content="tag host two", subject="Tags9B", tags=many, workspace="console-ws",
+    )["data"]["id"]
+    graph = api.memory_graph(left)
+    same_tag = [edge for edge in graph["edges"] if edge["type"] == "same_tag"]
+    assert same_tag, "共享第 9/10 个标签必须仍产生 same_tag 边"
+    neighbor_ids = {edge["target"] for edge in same_tag}
+    assert right in neighbor_ids

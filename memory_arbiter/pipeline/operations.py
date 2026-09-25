@@ -90,7 +90,6 @@ class OperationsPipeline:
         self._tools = tools
         self.db = tools.db
         self.settings = tools.settings
-        self._evidence_worker = tools._evidence_worker
 
     @property
     def _update_monitor(self) -> "UpdateMonitor | None":
@@ -2161,7 +2160,8 @@ class OperationsPipeline:
                 "local_text_evidence": evidence_status,
                 "conflict_scan": conflict_scan,
                 "conflict_scan_required": conflict_scan["required"],
-                "local_text_index_worker": self._evidence_worker.status(),
+                # R2-S1：local_text_index_worker 随 LocalTextIndexWorker 退役
+                # 删除——worker 观测在同一回执的 semantic_conflict.worker。
                 "isolation": self.settings.isolation,
                 "workspace_recall": {
                     "admission_enabled": WORKSPACE_RECALL_ADMISSION,
@@ -2949,6 +2949,33 @@ class OperationsPipeline:
             data["claims_written"] = claims_written
             if claims_rejected:
                 data["claims_rejected"] = claims_rejected
+        elif claims is None and not tags_only and updated is not None and current is not None:
+            # 0.17.0 review R2（owner 拍板方案 C）：内容编辑不传 claims 时，
+            # 旧版本 claims 自动继承到新版本——通道不再被编辑静默打死。继承
+            # 走同一落库函数重过 grounding：值已不在新正文的剔除进回执；
+            # 逐条 source 沿用原行。
+            inherited = self.db.claims.claims_for_version(
+                memory_id_int, int(current.get("version") or 1),
+            )
+            if inherited:
+                from .write import WritePipeline
+                claims_written, claims_rejected = (
+                    WritePipeline._persist_claims_for_version(
+                        self._tools, memory_id_int,
+                        int(updated.get("version") or 1), updated,
+                        [
+                            {
+                                "attr": str(row["attr"]),
+                                "value": str(row["value"]),
+                                "source": str(row["source"] or "agent"),
+                            }
+                            for row in inherited
+                        ],
+                    )
+                )
+                data["claims_inherited"] = claims_written
+                if claims_rejected:
+                    data["claims_inherited_dropped"] = claims_rejected
         data["evidence_index"], data["semantic_conflict_check"] = (
             self._post_commit(memory_id_int, updated, recheck_conflicts=True)
         )

@@ -81,8 +81,11 @@ for tag, model, prefix in CONFIGS:
             top = np.argsort(-row)[:K_WINDOW]
             cand_keys.update(key_of_row[i] for i in top)
         hit = right_key in cand_keys
-        # right 最佳句对余弦（任意 left 行 × right 行的最大值）
-        best = float(sim.max())
+        # right 最佳句对余弦（任意 left 行 × right 行的最大值）——限定 right
+        # 记忆的行（0.17.0 review R2：原 sim.max() 全池最大，无关记忆行会
+        # 抬高量尺，band/FLOOR 标定与生产「对 right 的 KNN 命中」口径漂移）。
+        right_idx = [i for i, k in enumerate(key_of_row) if k == right_key]
+        best = float(sim[:, right_idx].max()) if right_idx else float(sim.max())
         if p["label"] == "true_conflict":
             n_true += 1
             true_hit += hit

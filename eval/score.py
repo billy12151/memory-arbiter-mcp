@@ -44,82 +44,46 @@ def _pct(count: int, total: int) -> float | None:
     return round(count / total, 4) if total else None
 
 
-def score_recall(raw: dict) -> dict[str, Any] | None:
-    queries = raw.get("queries")
-    if queries is None:
-        return None
-    labels = _load_jsonl(FIXTURES / "recall" / "labels.jsonl")
-    relevant_by_qid: dict[str, set[str]] = {}
-    borderline_by_qid: dict[str, set[str]] = {}
-    for row in labels:
-        bucket = relevant_by_qid if row["label"] == "relevant" else borderline_by_qid
-        bucket.setdefault(row["qid"], set()).add(row["fixture_key"])
-    labeled_keys = {k for qid in relevant_by_qid for k in relevant_by_qid[qid]}
-    labeled_keys |= {k for qid in borderline_by_qid for k in borderline_by_qid[qid]}
-
-    hit5 = hit10 = total_rel = 0
-    # Capped recall (gate-v2 拍板 5): "everything that belongs in the top-k
-    # got in" — the denominator per query is min(|relevant|, k), so a query
-    # with 6 relevant targets and a full top-5 scores 1.0 instead of being
-    # punished for the k+1th target no ranking could have returned. Micro-
-    # averaged: Σhits / Σmin(R_i, k); classic and capped are both reported
-    # so old numbers stay traceable.
-    capped5_total = capped10_total = 0
-    rr_sum = 0.0
-    rr_count = 0
-    false_pull_count = 0
-    false_pull_returned = 0
-    per_query: list[dict[str, Any]] = []
-    for query in queries:
-        qid = query["qid"]
-        targets = relevant_by_qid.get(qid, set())
-        ranked = [hit["fixture_key"] for hit in query.get("hits") or []]
-        total_rel += len(targets)
-        hits_at_5 = len(targets & set(ranked[:5]))
-        hits_at_10 = len(targets & set(ranked[:10]))
-        hit5 += hits_at_5
-        hit10 += hits_at_10
-        capped5_total += min(len(targets), 5)
-        capped10_total += min(len(targets), 10)
-        first_rank = next(
+def _query_rank_row(
+    query: dict[str, Any], relevant_by_qid: dict[str, set[str]]
+) -> dict[str, Any]:
+    """每题核心检索量——主循环与 keyword 分桶共用的唯一实现（struct 修复：
+    keyword 分桶此前是主循环的手抄副本且已漂移（缺 capped 分母），收敛后
+    分桶自动继承主循环后续新增的每题指标）。"""
+    targets = relevant_by_qid.get(query["qid"], set())
+    ranked = [hit["fixture_key"] for hit in query.get("hits") or []]
+    return {
+        "qid": query["qid"],
+        "kind": query["kind"],
+        "ranked": ranked,
+        "n_targets": len(targets),
+        "hits_at_5": len(targets & set(ranked[:5])),
+        "hits_at_10": len(targets & set(ranked[:10])),
+        "capped5_denom": min(len(targets), 5),
+        "capped10_denom": min(len(targets), 10),
+        "first_rank": next(
             (i + 1 for i, key in enumerate(ranked) if key in targets),
             None,
-        )
-        if first_rank:
-            rr_sum += 1.0 / first_rank
-            rr_count += 1
-        row = {
-            "qid": qid,
-            "kind": query["kind"],
-            "relevant_targets": len(targets),
-            "recall@5": _pct(hits_at_5, len(targets)),
-            "recall@10": _pct(hits_at_10, len(targets)),
-            "recall@5_capped": _pct(hits_at_5, min(len(targets), 5)),
-            "recall@10_capped": _pct(hits_at_10, min(len(targets), 10)),
-            "first_relevant_rank": first_rank,
-        }
-        if query["kind"] in {"legal", "far"}:
-            false_hits = [k for k in ranked if k in labeled_keys]
-            false_pull_count += len(false_hits)
-            false_pull_returned += len(ranked)
-            row["irrelevant_query_false_pulls"] = len(false_hits)
-        per_query.append(row)
+        ),
+    }
 
-    self_recall = raw.get("self_recall")
-    self_top10 = None
-    if self_recall:
-        top10 = sum(1 for row in self_recall if row["in_top10"])
-        self_top10 = {
-            "count": top10,
-            "total": len(self_recall),
-            "rate": _pct(top10, len(self_recall)),
-        }
 
-    # 检索线 K3：keyword 模式分桶（题级命中率与 target 级微平均双口径——
-    # 两口径可一过一炸，必须都出，R2-P1-8）；band 子桶按 queries 的
-    # expected_band（midband=救济带专考 / above=≥0.75 不误伤专考；
-    # subfloor 配额 owner 2026-09-24 拍板撤销）。
-    keyword_bucket = _score_keyword_bucket(queries, relevant_by_qid)
+def _aggregate_rank_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """每题核心量微平均成 recall_at_5/@10（classic + capped）与 MRR。
+
+    Capped recall (gate-v2 拍板 5): "everything that belongs in the top-k
+    got in" — the denominator per query is min(|relevant|, k), so a query
+    with 6 relevant targets and a full top-5 scores 1.0 instead of being
+    punished for the k+1th target no ranking could have returned. Micro-
+    averaged: Σhits / Σmin(R_i, k); classic and capped are both reported
+    so old numbers stay traceable.
+    """
+    hit5 = sum(r["hits_at_5"] for r in rows)
+    hit10 = sum(r["hits_at_10"] for r in rows)
+    total_rel = sum(r["n_targets"] for r in rows)
+    capped5_total = sum(r["capped5_denom"] for r in rows)
+    capped10_total = sum(r["capped10_denom"] for r in rows)
+    rr = [1.0 / r["first_rank"] for r in rows if r["first_rank"]]
     return {
         "recall_at_5": {
             "hits": hit5,
@@ -142,9 +106,66 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
             "rate": _pct(hit10, capped10_total),
         },
         "mrr": {
-            "value": round(rr_sum / rr_count, 4) if rr_count else None,
-            "queries_with_target": rr_count,
+            "value": round(sum(rr) / len(rr), 4) if rr else None,
+            "queries_with_target": len(rr),
         },
+    }
+
+
+def score_recall(raw: dict) -> dict[str, Any] | None:
+    queries = raw.get("queries")
+    if queries is None:
+        return None
+    labels = _load_jsonl(FIXTURES / "recall" / "labels.jsonl")
+    relevant_by_qid: dict[str, set[str]] = {}
+    borderline_by_qid: dict[str, set[str]] = {}
+    for row in labels:
+        bucket = relevant_by_qid if row["label"] == "relevant" else borderline_by_qid
+        bucket.setdefault(row["qid"], set()).add(row["fixture_key"])
+    labeled_keys = {k for qid in relevant_by_qid for k in relevant_by_qid[qid]}
+    labeled_keys |= {k for qid in borderline_by_qid for k in borderline_by_qid[qid]}
+
+    # 每题核心量走唯一实现（struct 修复见 _query_rank_row），主循环只补
+    # 自己的扩展量：per_query 明细行与无关误召回（C/D 组）。
+    rank_rows = [_query_rank_row(query, relevant_by_qid) for query in queries]
+    false_pull_count = 0
+    false_pull_returned = 0
+    per_query: list[dict[str, Any]] = []
+    for query, stats in zip(queries, rank_rows):
+        row = {
+            "qid": stats["qid"],
+            "kind": stats["kind"],
+            "relevant_targets": stats["n_targets"],
+            "recall@5": _pct(stats["hits_at_5"], stats["n_targets"]),
+            "recall@10": _pct(stats["hits_at_10"], stats["n_targets"]),
+            "recall@5_capped": _pct(stats["hits_at_5"], stats["capped5_denom"]),
+            "recall@10_capped": _pct(stats["hits_at_10"], stats["capped10_denom"]),
+            "first_relevant_rank": stats["first_rank"],
+        }
+        if query["kind"] in {"legal", "far"}:
+            false_hits = [k for k in stats["ranked"] if k in labeled_keys]
+            false_pull_count += len(false_hits)
+            false_pull_returned += len(stats["ranked"])
+            row["irrelevant_query_false_pulls"] = len(false_hits)
+        per_query.append(row)
+
+    self_recall = raw.get("self_recall")
+    self_top10 = None
+    if self_recall:
+        top10 = sum(1 for row in self_recall if row["in_top10"])
+        self_top10 = {
+            "count": top10,
+            "total": len(self_recall),
+            "rate": _pct(top10, len(self_recall)),
+        }
+
+    # 检索线 K3：keyword 模式分桶（题级命中率与 target 级微平均双口径——
+    # 两口径可一过一炸，必须都出，R2-P1-8）；band 子桶按 queries 的
+    # expected_band（midband=救济带专考 / above=≥0.75 不误伤专考；
+    # subfloor 配额 owner 2026-09-24 拍板撤销）。
+    keyword_bucket = _score_keyword_bucket(queries, relevant_by_qid)
+    return {
+        **_aggregate_rank_rows(rank_rows),
         "irrelevant_false_pulls": {
             "count": false_pull_count,
             "returned": false_pull_returned,
@@ -165,38 +186,17 @@ def _score_keyword_bucket(
         return None
 
     def _accumulate(rows: list[dict[str, Any]]) -> dict[str, Any]:
-        hit5 = hit10 = total_rel = 0
-        rr_sum = 0.0
-        rr_count = 0
-        q_top5 = q_top10 = 0
-        for query in rows:
-            qid = query["qid"]
-            targets = relevant_by_qid.get(qid, set())
-            ranked = [hit["fixture_key"] for hit in query.get("hits") or []]
-            total_rel += len(targets)
-            hits_at_5 = len(targets & set(ranked[:5]))
-            hits_at_10 = len(targets & set(ranked[:10]))
-            hit5 += hits_at_5
-            hit10 += hits_at_10
-            first_rank = next(
-                (i + 1 for i, key in enumerate(ranked) if key in targets),
-                None,
-            )
-            if first_rank:
-                rr_sum += 1.0 / first_rank
-                rr_count += 1
-            q_top5 += int(hits_at_5 > 0)
-            q_top10 += int(hits_at_10 > 0)
+        # 核心每题量走与主循环同一实现（struct 修复：此前是手抄副本且缺
+        # capped 变体——分桶自动继承主循环全套 classic+capped+MRR），
+        # 分桶只补自己的题级命中率双口径。
+        rank_rows = [_query_rank_row(q, relevant_by_qid) for q in rows]
+        q_top5 = sum(1 for r in rank_rows if r["hits_at_5"] > 0)
+        q_top10 = sum(1 for r in rank_rows if r["hits_at_10"] > 0)
         return {
             "queries": len(rows),
             "query_top5_hit_rate": _pct(q_top5, len(rows)),
             "query_top10_hit_rate": _pct(q_top10, len(rows)),
-            "recall_at_5": {"hits": hit5, "total": total_rel, "rate": _pct(hit5, total_rel)},
-            "recall_at_10": {"hits": hit10, "total": total_rel, "rate": _pct(hit10, total_rel)},
-            "mrr": {
-                "value": round(rr_sum / rr_count, 4) if rr_count else None,
-                "queries_with_target": rr_count,
-            },
+            **_aggregate_rank_rows(rank_rows),
         }
 
     bucket = _accumulate(k_queries)
@@ -528,10 +528,7 @@ def compute_perf(raw: dict) -> dict[str, Any] | None:
     耗时指标天然有噪声，绝不进 gate()（_flatten 显式跳过顶层 perf 键）；
     未来独立 perf 门阈值在噪声带数据齐后另定。
     """
-    from memory_arbiter.constants import (
-        SEMANTIC_MAX_EVIDENCE_UNITS,
-        SEMANTIC_MAX_EXAMINED_PAIRS,
-    )
+    from memory_arbiter.constants import SEMANTIC_MAX_EXAMINED_PAIRS
 
     replay = raw.get("replay_perf") or []
     queries = raw.get("queries") or []
@@ -640,11 +637,12 @@ def compute_perf(raw: dict) -> dict[str, Any] | None:
                 for r in with_receipt
                 if "pairs_examined_capped" in (r.get("reasons_seen") or [])
             ),
-            "units_capped_rows": sum(
-                1 for u in units_values if u >= SEMANTIC_MAX_EVIDENCE_UNITS
+            "rows_capped_rows": sum(
+                1
+                for r in with_receipt
+                if "rows_capped" in (r.get("reasons_seen") or [])
             ),
             "pairs_budget": SEMANTIC_MAX_EXAMINED_PAIRS,
-            "units_budget": SEMANTIC_MAX_EVIDENCE_UNITS,
             "avg_notice_count": (
                 round(sum(notice_counts) / len(notice_counts), 2)
                 if notice_counts
@@ -682,17 +680,28 @@ _LOWER_IS_BETTER_SUBSTR = (
 _SIM_FALSE_LABELS = ("clearly_different", "opposite_semantics", "same_entity_diff_attr")
 # 0.17.0 校准轮：conflict 的 noise 标签 firing 同为假阳性（半秒 bug 时代曾
 # 3/27 sync），gate 方向必须 lower-is-better——首轮对比曾把 3→2 的改善误判 FAILED。
-# 0.17.0 校准轮：conflict 的 noise 标签 firing 同为假阳性（半秒 bug 时代曾
-# 3/27 sync），gate 方向必须 lower-is-better——首轮对比曾把 3→2 的改善误判 FAILED。
 # 2026-09-25 owner 拍板（E3 实证：FP 改善 7→6 被旧基线门误判 FAILED）：负样本
-# governed_negative 的 firing 类指标（identified/sync/async）同规——用精确段
+# governed_negative 的 firing 类指标（identified/sync）同规——用精确段
 # 匹配而非整标签，miss（负样本上不报=正确）保持 higher-is-better 不受牵连。
+# 0.17.0 review R2：".miss." 全局子串与上面「miss 保持 higher-is-better」的
+# 声明自相矛盾——负样本桶（by_shape governed_negative、by_label noise）的
+# miss 上升是改善，却被 _LOWER_IS_BETTER_SUBSTR 扫进 lower-is-better
+# （E3 同类事故二次形态：真改善 >10% 会假 FAILED）。_negative_bucket 收口。
+# 0.17.0 review R2 复评：noisy 从负样本桶收口移除——pairs_noisy 26 对中
+# true_conflict 15 + coexist 2 + noise 9，58% 是真对，整桶按负样本定方向
+# 两头都错：miss 上升（真对漏检变多）被当改善放行、firing 上升（多为真对
+# 正当检出）被当假阳性误杀。noisy 回归普通桶口径（miss 受门、sync/async
+# 走 cand2 豁免）；governed_negative（纯负）与 noise 标签不变。
 _CONFLICT_FALSE_LABELS = (
     "noise",
     "governed_negative.identified",
     "governed_negative.sync",
-    "governed_negative.async",
 )
+_GATE_NEGATIVE_LABELS = ("noise", "governed_negative")
+
+
+def _negative_bucket(key: str) -> bool:
+    return any(f".{label}." in key for label in _GATE_NEGATIVE_LABELS)
 _GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target",
                    # 检索线 K3（R2-P2-3）：语料元数据不是行为指标——同语料
                    # 内恒定，不进相对门（corpus bump 由 corpus_version 前置校验拦）
@@ -704,13 +713,13 @@ _GATE_META_KEYS = (".skipped_member_replay", ".returned", ".queries_with_target"
 # 0.17.0 cand2：sync/async 单项是 3 秒窗与 job 延迟的划分产物（行级化后 job
 # 变慢、更多对跨窗补上≠行为回归）；行为指标=identified/miss/precision/recall。
 _GATE_SPLIT_KEYS = (".sync.rate", ".async.rate")
-# 0.17.0 cand3（owner R8 非对称收益口径）：noise 的 ASYNC firing=窗口外
-# advisory 通知，与 C2 贴线误报同类（attr 门论证已接受）；SYNC firing 直接
-# 出现在写响应里、侵入性高一档，保持受门。
-_GATE_DOCTRINE_EXEMPT = ("noise.async.rate",)
 
 
 def _lower_is_better(key: str) -> bool:
+    # 0.17.0 review R2：负样本桶的 miss 必须先于 ".miss." 子串规则判断——
+    # 负样本上不报=正确，miss 上升是改善（higher-is-better）。
+    if ".miss." in key and _negative_bucket(key):
+        return False
     if any(s in key for s in _LOWER_IS_BETTER_SUBSTR):
         return True
     if any(f".{label}." in key for label in _SIM_FALSE_LABELS):
@@ -718,67 +727,67 @@ def _lower_is_better(key: str) -> bool:
     return any(f".{label}." in key for label in _CONFLICT_FALSE_LABELS)
 
 
+def _corpus_version_mismatches(
+    current: dict, baseline: dict
+) -> list[dict[str, Any]]:
+    """三套件语料版本前置校验的唯一实现（struct 修复：gate() 里原是三段
+    复制粘贴的早退块）。按既有优先级产出不匹配失败项：recall 顶层 →
+    conflict → similarity；similarity 侧兼容旧基线（任一侧缺键即跳过）。
+    消息文案与失败项负载逐字保持原样。"""
+    cur_env = current.get("env") or {}
+    base_env = baseline.get("env") or {}
+    mismatches: list[dict[str, Any]] = []
+    for metric, cur, base, note, skip_if_missing in (
+        (
+            "corpus_version",
+            current.get("corpus_version"),
+            baseline.get("corpus_version"),
+            "recall 考卷语料版本不一致，拒绝跨语料对比；重建基线后重试",
+            False,
+        ),
+        (
+            "env.conflict_corpus_version",
+            cur_env.get("conflict_corpus_version"),
+            base_env.get("conflict_corpus_version"),
+            "conflict 对集语料版本不一致，拒绝跨语料对比；重建基线后重试",
+            False,
+        ),
+        (
+            "env.similarity_corpus_version",
+            cur_env.get("similarity_corpus_version"),
+            base_env.get("similarity_corpus_version"),
+            "similarity 套件语料版本不一致，拒绝跨语料对比；重建基线后重试",
+            True,
+        ),
+    ):
+        if skip_if_missing and (cur is None or base is None):
+            continue
+        if cur != base:
+            mismatches.append(
+                {
+                    "metric": metric,
+                    "direction": "corpus_mismatch",
+                    "baseline": base,
+                    "current": cur,
+                    "note": note,
+                }
+            )
+    return mismatches
+
+
 def gate(
     current: dict, baseline: dict, rel_drop: float = DEFAULT_REL_DROP
 ) -> dict[str, Any]:
-    # 检索线 K3（R2-P1-9）：recall 语料版本不一致拒绝跨语料对比——
-    # corpus bump 后基线未重建会被静默当成回归/持平（corpus_version 是
-    # 字符串不进 _flatten，相对门看不见它）。
-    cur_corpus = current.get("corpus_version")
-    base_corpus = baseline.get("corpus_version")
-    if cur_corpus != base_corpus:
+    # 检索线 K3（R2-P1-9）：语料版本不一致拒绝跨语料对比——corpus bump 后
+    # 基线未重建会被静默当成回归/持平（版本号不进 _flatten，相对门看不见
+    # 它）。三套件校验收敛为单一 helper（struct 修复），仍先于其余门逻辑、
+    # 首个不匹配即拦（单失败负载与文案同旧三段逐字一致）。
+    mismatches = _corpus_version_mismatches(current, baseline)
+    if mismatches:
         return {
             "gate": "FAILED",
             "rel_drop_threshold": rel_drop,
-            "failures": [
-                {
-                    "metric": "corpus_version",
-                    "direction": "corpus_mismatch",
-                    "baseline": base_corpus,
-                    "current": cur_corpus,
-                    "note": "recall 考卷语料版本不一致，拒绝跨语料对比；重建基线后重试",
-                }
-            ],
-        }
-    # 0.16.12 第二轮对抗 review：跨语料对比会把不同分母的 rate 直接比较，
-    # 既不报错也不可解释——两侧 env.conflict_corpus_version 必须都在位且一致。
-    cur_corpus = (current.get("env") or {}).get("conflict_corpus_version")
-    base_corpus = (baseline.get("env") or {}).get("conflict_corpus_version")
-    if cur_corpus != base_corpus:
-        return {
-            "gate": "FAILED",
-            "rel_drop_threshold": rel_drop,
-            "failures": [
-                {
-                    "metric": "env.conflict_corpus_version",
-                    "direction": "corpus_mismatch",
-                    "baseline": base_corpus,
-                    "current": cur_corpus,
-                    "note": "conflict 对集语料版本不一致，拒绝跨语料对比；重建基线后重试",
-                }
-            ],
-        }
-    # 0.17.0 P2-0.1（review R1-5）：相似套件语料同样可变，版本不一致同样拒绝对比。
-    # 兼容：一侧缺 similarity_corpus_version 键（旧基线）时跳过该校验。
-    cur_sim_corpus = (current.get("env") or {}).get("similarity_corpus_version")
-    base_sim_corpus = (baseline.get("env") or {}).get("similarity_corpus_version")
-    if (
-        cur_sim_corpus is not None
-        and base_sim_corpus is not None
-        and cur_sim_corpus != base_sim_corpus
-    ):
-        return {
-            "gate": "FAILED",
-            "rel_drop_threshold": rel_drop,
-            "failures": [
-                {
-                    "metric": "env.similarity_corpus_version",
-                    "direction": "corpus_mismatch",
-                    "baseline": base_sim_corpus,
-                    "current": cur_sim_corpus,
-                    "note": "similarity 套件语料版本不一致，拒绝跨语料对比；重建基线后重试",
-                }
-            ],
+            "failures": [mismatches[0]],
         }
     # H1 修复批（mema #1066 对抗 review）：conflict_attribution 是分通道
     # 归因诊断块——派发计数随检测效率正当波动（过滤变好 → Qwen 派发变少
@@ -800,9 +809,14 @@ def gate(
         if any(key.endswith(meta) for meta in _GATE_META_KEYS):
             continue
         if any(key.endswith(meta) for meta in _GATE_SPLIT_KEYS):
-            continue
-        if any(key.endswith(meta) for meta in _GATE_DOCTRINE_EXEMPT):
-            continue
+            # 0.17.0 cand3（owner R8 非对称收益口径）：负样本桶的 SYNC firing
+            # 直接出现在写响应、侵入性高一档——保持受门（lower-is-better，
+            # 上升才是回归）；其余 sync/async 单项是 3 秒窗与 job 延迟的划分
+            # 产物（cand2），跳过。原 _GATE_DOCTRINE_EXEMPT（noise.async.rate）
+            # 与 governed_negative.async 死条目一并删除：async 窗口外豁免口径
+            # 下二者永不可达。
+            if not (key.endswith(".sync.rate") and _negative_bucket(key)):
+                continue
         cur_value = cur[key]
         if _lower_is_better(key):
             if base_value <= 0 or cur_value <= base_value:
@@ -941,10 +955,19 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
     perf = scored.get("perf")
     if perf:
         lines += ["## 性能（informational——不进回归门）", ""]
+        # struct 修复：题数标签从数据推导（recall.per_query 行数=实际查询
+        # 数；旧硬编码 34 在语料扩到 47 题后已过期）。perf-only 渲染（无
+        # recall 块）回退 find_ms 样本数。
+        n_find = None
+        if recall and recall.get("per_query"):
+            n_find = len(recall["per_query"])
+        elif (perf.get("find_ms") or {}).get("n"):
+            n_find = perf["find_ms"]["n"]
+        find_label = f"查询（recall {n_find} query）" if n_find else "查询"
         for label, key in (
             ("写入（fixture 重放）", "write_ms"),
             ("写入（非幂等重放）", "write_ms_fresh"),
-            ("查询（recall 34 query）", "find_ms"),
+            (find_label, "find_ms"),
             ("冲突对右侧写入", "conflict_right_write_ms"),
         ):
             bucket = perf.get(key)
@@ -960,8 +983,8 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
                 f"平均 Qwen 检查对数 {window['avg_pairs_examined']}（预算 {window['pairs_budget']}，"
                 f"capped 行 {window['pairs_examined_capped_rows']}） · "
                 f"job 实际耗时 p50 **{window['job_ms']['p50_ms']}ms** / p95 {window['job_ms']['p95_ms']}ms · "
-                f"平均单元 {window['avg_units']}（预算 {window['units_budget']}，"
-                f"capped 行 {window['units_capped_rows']}） · 平均 notice 数 {window['avg_notice_count']}"
+                f"平均单元 {window['avg_units']}（rows_capped 行 {window['rows_capped_rows']}）"
+                f" · 平均 notice 数 {window['avg_notice_count']}"
             )
         lines.append("")
     if gate_result:

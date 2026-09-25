@@ -347,6 +347,7 @@ class WritePipeline:
         Rejections are per-item and reported back (claims_rejected) — the
         write itself is already durable and never fails here."""
         from ..semantic_conflict import normalize_attribute, normalize_value
+        from ..db.claims import CLAIM_SOURCES, CLAIMS_MAX_PER_MEMORY
 
         rejected: list[dict[str, Any]] = []
         prepared: list[dict[str, Any]] = []
@@ -396,11 +397,26 @@ class WritePipeline:
                 rejected.append({"index": index, "reason": "duplicate_norm"})
                 continue
             seen_norm.add(key)
+            row_source = str(item.get("source") or source or "agent")
+            if row_source not in CLAIM_SOURCES:
+                # source 兜底 agent（CHECK 约束会炸非法值；backfill apply 是
+                # 唯一绕过 remember/update schema 校验的入口）。
+                row_source = "agent"
             prepared.append({
+                "index": index,
                 "attr": attr, "attr_norm": attr_norm,
                 "value": value, "value_norm": value_norm,
-                "source": source,
+                "source": row_source,
             })
+        # 0.17.0 review R2：超出单记忆上限的 claims 原被 prepared[:20] 静默
+        # 截断、不进回执（backfill apply 是唯一绕过 schema ≤20 硬门的入口）
+        # ——溢出逐条回报，通道契约「逐条可回报」。
+        if len(prepared) > CLAIMS_MAX_PER_MEMORY:
+            rejected.extend(
+                {"index": claim["index"], "reason": "exceeds_max_per_memory"}
+                for claim in prepared[CLAIMS_MAX_PER_MEMORY:]
+            )
+            prepared = prepared[:CLAIMS_MAX_PER_MEMORY]
         if not prepared:
             return 0, rejected
         written = 0
@@ -418,7 +434,7 @@ class WritePipeline:
             # write transaction — model inference under BEGIN IMMEDIATE held
             # the library write lock for up to 20 embeds.
             attr_vectors: "list[list[float] | None]" = []
-            for claim in prepared[:20]:
+            for claim in prepared:
                 er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=claim["attr"])
                 attr_vectors.append([float(x) for x in er.embedding] if er and er.embedding else None)
             with tools.db.write_transaction() as conn:
@@ -435,7 +451,7 @@ class WritePipeline:
                         "DELETE FROM memory_claims WHERE memory_id=? AND memory_version=?",
                         (memory_id, memory_version),
                     )
-                for claim, vec in zip(prepared[:20], attr_vectors):
+                for claim, vec in zip(prepared, attr_vectors):
                     cur = conn.execute(
                         """INSERT OR IGNORE INTO memory_claims(
                              memory_id, memory_version, attr, attr_norm,

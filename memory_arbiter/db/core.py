@@ -430,24 +430,10 @@ class MemoryDB:
         include_subject_rows: bool = True,
         include_memory_ids: "list[int] | set[int] | None" = None,
         subject_rows_only: bool = False,
+        include_content: bool = False,
     ) -> list[dict[str, Any]]:
         """0.17.0 P2-2.4: row-level KNN convenience (conflict channel)."""
-        return self.evidence.row_knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id, exclude_workspaces=exclude_workspaces, conn=conn, include_subject_rows=include_subject_rows, include_memory_ids=include_memory_ids, subject_rows_only=subject_rows_only)
-
-    def scan_rule_candidates(
-        self, *, after_memory_id: int = 0, anchor_batch: int = 50, neighbor_k: int = 10,
-        include_check: bool = False, max_distance: float | None = None,
-        workspace: WorkspaceScope = None, similarity_pool_limit: int = 0,
-        include_duplicates: bool = False, suspected_anomalies: dict[int, str] | None = None,
-    ) -> dict[str, Any]:
-        return self.evidence.scan_rule_candidates(
-            after_memory_id=after_memory_id, anchor_batch=anchor_batch,
-            neighbor_k=neighbor_k, include_check=include_check,
-            max_distance=max_distance, workspace=workspace,
-            similarity_pool_limit=similarity_pool_limit,
-            include_duplicates=include_duplicates,
-            suspected_anomalies=suspected_anomalies,
-        )
+        return self.evidence.row_knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id, exclude_workspaces=exclude_workspaces, conn=conn, include_subject_rows=include_subject_rows, include_memory_ids=include_memory_ids, subject_rows_only=subject_rows_only, include_content=include_content)
 
     def insert_memory(
         self,

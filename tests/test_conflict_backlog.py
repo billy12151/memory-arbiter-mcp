@@ -208,3 +208,97 @@ def test_drain_consumes_stored_extraction_and_lands_notice(tmp_path: Path) -> No
     refreshed = tools._evidence.drain_conflict_backlog(limit=2)
     assert refreshed == 0
     assert tools.db.conflict_backlog.counts().get("stale", 0) >= 1
+
+
+def test_drain_no_backend_skip_rotation_is_bounded(tmp_path: Path, monkeypatch) -> None:
+    """R2-W1 回归：无后端 + 无 extraction 的积压在 drain 里零进展——skip-
+    rotate 不设上限时 while processed<limit 只能靠 take_next 扫完全部
+    pending 才停（take_next 每次新开 sqlite 连接 ⇒ 空闲 tick 每 5s 一轮
+    O(N) 连接空转）。超界即停；条目未 complete 仍 pending，后端出现后
+    照常重试。"""
+    import sys
+    sys.path.insert(0, str(REPO / "tests"))
+    from test_vnext_evidence import make_tools
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "prod"}
+    a = tools.memory_write(
+        content="连接池上限为 10。", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(
+        content="连接池上限为 99。", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_semantic_worker_drained(timeout=5)
+    pending_n = 40
+    for i in range(pending_n):
+        result = tools.db.conflict_backlog.enqueue(
+            candidate_key_hash=f"knb-{i:03d}",
+            left_memory_id=a["id"], left_version=1,
+            right_memory_id=b["id"], right_version=1,
+            left_text="连接池上限为 10。", right_text="连接池上限为 99。",
+            pair_score=0.5 + i / 1000,  # 全部无 extraction
+        )
+        assert result["outcome"] == "queued"
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
+    store = tools.db.conflict_backlog
+    real_take_next = store.take_next
+    take_calls: list[int] = []
+
+    def _counting_take_next(*args, **kwargs):
+        take_calls.append(1)
+        return real_take_next(*args, **kwargs)
+
+    monkeypatch.setattr(store, "take_next", _counting_take_next)
+
+    processed = tools._evidence.drain_conflict_backlog(limit=2)
+    assert processed == 0, "无后端不可能有进展"
+    # 上界 2*limit ⇒ take_next 最多 2*limit+1 次（末次取空判定）；未设上限
+    # 时这里会是 41 次（扫完全部 pending 才停）。
+    assert len(take_calls) <= 2 * 2 + 1, (
+        f"skip-rotate 未设上限：take_next 调用 {len(take_calls)} 次"
+    )
+    assert store.counts().get("pending", 0) == pending_n, "skip 条目必须保持 pending"
+
+
+def test_worker_idle_drain_skipped_when_off(tmp_path: Path) -> None:
+    """R2 P2：on_write="off" 语义=无检测活动——worker idle 轮不得自动消化
+    backlog（会加载 Qwen 并产 notice，与 start() 不预加载及 runtime_state
+    的 off 报告自相矛盾）。积压留待恢复 on_write 后消化；idle tick 周期
+    5s，此处等待两轮确认零调用。"""
+    import sys
+    import time
+    sys.path.insert(0, str(REPO / "tests"))
+    from test_vnext_evidence import make_tools
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "off"
+    meta = {"entity": "svc", "scope": "prod"}
+    a = tools.memory_write(
+        content="连接池上限为 10。", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(
+        content="连接池上限为 99。", subject="b", tags=[], metadata=meta)["data"]
+    tools.db.conflict_backlog.enqueue(
+        candidate_key_hash="kw-off-1",
+        left_memory_id=a["id"], left_version=1,
+        right_memory_id=b["id"], right_version=1,
+        left_text="连接池上限为 10。", right_text="连接池上限为 99。",
+        pair_score=0.6,
+        extraction={"attribute": "连接池上限", "value_a": "10", "value_b": "99"},
+    )
+    assert tools.wait_semantic_worker_drained(timeout=5)
+    drain_calls: list[int] = []
+    real_drain = tools._evidence.drain_conflict_backlog
+
+    def _counting_drain(limit: int = 2):
+        drain_calls.append(limit)
+        return real_drain(limit=limit)
+
+    tools._evidence.drain_conflict_backlog = _counting_drain
+    time.sleep(10.5)  # ≥2 个 idle tick（5s 间隔）
+    assert drain_calls == [], "off 语义下 idle 轮不得自动 drain"
+    assert tools.db.conflict_backlog.counts().get("pending", 0) == 1, "积压必须保留"
+    # 恢复 on_write 后手动 drain 仍可用（消化权在显式恢复侧）
+    tools._evidence.drain_conflict_backlog = real_drain
+    tools.settings.semantic_conflict_on_write = "sync"
+    processed = tools._evidence.drain_conflict_backlog(limit=2)
+    assert processed == 1

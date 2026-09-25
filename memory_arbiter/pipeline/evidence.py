@@ -12,7 +12,6 @@ from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
     EMBED_PREFIX_STS,
     SEMANTIC_JOB_TIMEOUT_MS,
-    SEMANTIC_MAX_EVIDENCE_UNITS,
     SEMANTIC_MAX_EXAMINED_PAIRS,
     SEMANTIC_INTERNAL_QWEN_MAX_PAIRS,
     SEMANTIC_CROSS_KNN_WINDOW,
@@ -46,7 +45,7 @@ if TYPE_CHECKING:
 _TECHNICAL_REASONS = {
     "qwen_timeout", "qwen_unavailable", "qwen_backend_error",
     "qwen_invalid_output", "qwen_budget_exhausted", "notice_budget_exhausted",
-    "evidence_units_capped", "rows_capped", "pairs_examined_capped",
+    "rows_capped", "pairs_examined_capped",
     "notice_write_failed",
 }
 
@@ -92,6 +91,77 @@ def _retired_gate_slot_key(workspace: Any, attribute: Any, subject: Any) -> dict
         "attribute": str(attribute or ""),
         "scope": canon_scope(str(subject or "")[:32]),
     }
+
+
+def _conflict_notice_payload(
+    *,
+    reason: str,
+    attribute: str,
+    slot_key: "dict[str, str] | None" = None,
+    left_id: int = 0, left_version: int = 1,
+    left_value_norm: str = "", left_display: str = "", left_quote: Any = "",
+    right_id: int = 0, right_version: int = 1,
+    right_value_norm: str = "", right_display: str = "", right_quote: Any = "",
+    left_content: str = "", right_content: str = "",
+    attr_cos: "float | None" = None,
+    left_evidence_extra: "dict[str, Any] | None" = None,
+    right_evidence_extra: "dict[str, Any] | None" = None,
+    left_member_extra: "dict[str, Any] | None" = None,
+    right_member_extra: "dict[str, Any] | None" = None,
+    extra: "dict[str, Any] | None" = None,
+) -> dict[str, Any]:
+    """Shared payload assembler for all notice sites (0.17.0 review R2
+    r2s-01): the five per-site copies had already drifted — content
+    fingerprints existed ONLY on the A-cross leg, so four channels'
+    notices had no basis for staleness invalidation. Owner 拍板（2026-09-26
+    补齐）：left/right content hashes ride EVERY payload now (same
+    evidence_content_hash 口径 as the A-cross leg). A hash is emitted only
+    when the site had that side's content in hand — absence means unknown
+    (never a hash of the empty string)."""
+    left_evidence: dict[str, Any] = {"text": left_quote}
+    if left_evidence_extra:
+        left_evidence.update(left_evidence_extra)
+    right_evidence: dict[str, Any] = {"text": right_quote}
+    if right_evidence_extra:
+        right_evidence.update(right_evidence_extra)
+    payload: dict[str, Any] = {
+        "route": "notice_ready",
+        "reason": reason,
+        "slot_key": slot_key,
+        "slot_provenance": {
+            "entity": "workspace", "scope": "subject", "attribute": attribute,
+        },
+        "member_versions": [
+            {"memory_id": left_id, "version": left_version,
+             "value": left_value_norm,
+             "evidence": {"quote": left_quote, **(left_member_extra or {})}},
+            {"memory_id": right_id, "version": right_version,
+             "value": right_value_norm,
+             "evidence": {"quote": right_quote, **(right_member_extra or {})}},
+        ],
+        "value_groups": [
+            {"normalized_value": left_value_norm, "display_value": left_display,
+             "members": [f"{left_id}@{left_version}"]},
+            {"normalized_value": right_value_norm, "display_value": right_display,
+             "members": [f"{right_id}@{right_version}"]},
+        ],
+        "candidate_key": {
+            "detector_version": CONFLICT_DETECTOR_VERSION,
+            "members": sorted([f"{left_id}@{left_version}", f"{right_id}@{right_version}"]),
+            "evidence": [],
+        },
+        "left_evidence": left_evidence,
+        "right_evidence": right_evidence,
+    }
+    if left_content:
+        payload["left_content_hash"] = evidence_content_hash(left_content)
+    if right_content:
+        payload["right_content_hash"] = evidence_content_hash(right_content)
+    if attr_cos is not None:
+        payload["attr_cos"] = round(float(attr_cos), 4)
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 def _attr_cos_or_none(
@@ -239,6 +309,21 @@ class _JobQwenBudget:
         return self.internal_used + self.channel_c_used + self.a_cross_used
 
 
+def _coexistence_by_attr(claims: "list[dict[str, Any]]") -> dict[str, list[str]]:
+    """A4 coexistence map derived locally from claims rows in hand (0.17.0
+    review R2 CL-1): groups distinct value_norms by attr_norm in one pass —
+    replaces per-attr coexisting_values() re-queries (up to 20 fresh
+    connections + ~400 row re-reads per write on the sync path)."""
+    grouped: dict[str, list[str]] = {}
+    for row in claims:
+        attr = str(row["attr_norm"])
+        values = grouped.setdefault(attr, [])
+        value = str(row["value_norm"])
+        if value not in values:
+            values.append(value)
+    return grouped
+
+
 class EvidencePipeline:
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
@@ -258,6 +343,165 @@ class EvidencePipeline:
 
     def _ensure_semantic_backend(self) -> "SemanticBackend | None":
         return self._tools._ensure_semantic_backend()
+
+    def _own_claim_vectors(self, memory_id: int, version: int) -> dict[int, list[float]]:
+        """Claim-id → vector for one memory's current-version claims (B and C
+        shared the identical prefetch block; r2s consolidation)."""
+        rows: dict[int, list[float]] = {}
+        with self.db.connection() as conn:
+            for row in conn.execute(
+                """SELECT c.id AS cid, v.embedding FROM memory_claims c
+                   LEFT JOIN memory_claim_vec v ON v.id=c.id
+                   WHERE c.memory_id=? AND c.memory_version=?""",
+                (int(memory_id), int(version)),
+            ).fetchall():
+                if row["embedding"] is not None:
+                    rows[int(row["cid"])] = self.db.evidence._blob_to_vector(
+                        bytes(row["embedding"])
+                    )
+        return rows
+
+    def _claims_exact_lane(
+        self, memory_id: int, version: int, record: dict[str, Any],
+        own_claims: "list[dict[str, Any]]", skip: "set[int]",
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """0.17.0 review R2（owner 拍板接线）：attr_norm 精确键通道。
+
+        与 KNN 通道（check_claims_conflicts 主体）共享同一套后续闸（值对立
+        + A4 共存否决 + pair-closure 去重 + 通知帽），但不依赖向量：不受
+        KNN 的 k=10 窗口限制、不需要 sqlite-vec——无 vec 环境是唯一还能
+        产出 claims 冲突 notice 的通道。仍有自己的候选上限
+        (CLAIMS_EXACT_CANDIDATE_LIMIT)，触顶记 state["exact_capped"]
+        （可观测，不静默）。产出的 attr 记入 fired_attrs（A3：KNN 侧同
+        attr 自动跳过）；surfaced peers 并入跨通道 skip 集合。读/写失败
+        上抛（wrapper 的 claims_channel_error loud 路径），与 KNN lane
+        一致——不在这里吞。
+
+        ``state``（跨调用共享的可变计数）：notices / capped /
+        versional_vetoed / fired_attrs / surfaced / exact_capped /
+        own_coexistence / peer_coexistence。返回 {"checked": 精确候选检查数}。"""
+        own_coexistence: dict[str, list[str]] = state["own_coexistence"]
+        peer_coexistence: dict[int, dict[str, list[str]]] = state["peer_coexistence"]
+        fired_attrs: set[str] = state["fired_attrs"]
+        surfaced: list[int] = state["surfaced"]
+        checked = 0
+        if not own_claims:
+            return {"checked": 0}
+        from ..constants import (
+            CLAIMS_EXACT_CANDIDATE_LIMIT, CLAIMS_MAX_NOTICES_PER_WRITE,
+        )
+        from ..semantic_conflict import attr_is_versional
+
+        with self.db.connection() as conn:
+            for claim in own_claims:
+                # D1 (owner 2026-09-23): version-like attrs are expected
+                # timeline evolution — skip before any channel work and
+                # count. Judged on the RAW attr: attr_norm strips spaces,
+                # which defeats the vocabulary's word boundaries
+                # (releasenotes).
+                if attr_is_versional(str(claim.get("attr") or claim["attr_norm"])):
+                    state["versional_vetoed"] = int(state["versional_vetoed"]) + 1
+                    continue
+                candidates = self.db.claims.attr_conflict_candidates(
+                    attr_norm=str(claim["attr_norm"]),
+                    exclude_memory_id=int(memory_id),
+                    limit=CLAIMS_EXACT_CANDIDATE_LIMIT,
+                    conn=conn,
+                )
+                if len(candidates) >= CLAIMS_EXACT_CANDIDATE_LIMIT:
+                    state["exact_capped"] = int(state["exact_capped"]) + 1
+                for hit in candidates:
+                    checked += 1
+                    peer_id = int(hit["memory_id"])
+                    if peer_id in skip:
+                        continue  # evidence channel already surfaced this pair
+                    if str(claim["attr_norm"]) in fired_attrs:
+                        continue  # A3: same attr already reported this write
+                    # D1 hit-level fallback (same as the KNN lane): the
+                    # peer's RAW attr can carry version semantics even
+                    # when attr_norm collides with a non-versional own
+                    # attr (attr_norm strips spaces: "release notes" →
+                    # "releasenotes", defeating the vocabulary's word
+                    # boundaries) — exempt without counting as fired.
+                    if attr_is_versional(str(hit["attr"] or hit["attr_norm"])):
+                        state["versional_vetoed"] = (
+                            int(state["versional_vetoed"]) + 1
+                        )
+                        continue
+                    if str(hit["value_norm"]) == str(claim["value_norm"]):
+                        continue
+                    # A4: either side declaring multiple values for the
+                    # attr is self-coexistence, not opposition.
+                    if len(own_coexistence.get(str(claim["attr_norm"]), ())) > 1:
+                        continue
+                    peer_attrs = peer_coexistence.get(peer_id)
+                    if peer_attrs is None:
+                        peer_attrs = _coexistence_by_attr(
+                            self.db.claims.current_claims(peer_id),
+                        )
+                        peer_coexistence[peer_id] = peer_attrs
+                    if len(peer_attrs.get(str(hit["attr_norm"]), ())) > 1:
+                        continue
+                    # Cross-channel dedup (appendix C 7): a pair the
+                    # evidence channel already settled this version never
+                    # double-fires.
+                    if self.db.semantic_notices.is_semantic_pair_closed_on_conn(
+                        conn, int(memory_id), peer_id, version,
+                        int(hit["memory_version"] or 1),
+                    ):
+                        continue
+                    if int(state["notices"]) >= CLAIMS_MAX_NOTICES_PER_WRITE:
+                        state["capped"] = int(state["capped"]) + 1
+                        continue
+                    slot_key = _retired_gate_slot_key(
+                        record.get("workspace_canonical") or record.get("workspace"),
+                        str(hit["attr_norm"]), str(record.get("subject") or ""),
+                    )
+                    peer_record = self.db.get_memory(peer_id) or {}
+                    outcome = self.db.record_semantic_notice(
+                        memory_id=int(memory_id), peer_id=peer_id,
+                        severity="normal", notice_type="claim_conflict",
+                        title=f"Claim conflict with #{peer_id}",
+                        message=(
+                            f"claims attr {claim['attr']} value differs"
+                            " (exact attr match)"
+                        ),
+                        payload=_conflict_notice_payload(
+                            reason="claim_attr_exact_gate",
+                            attribute="claims_channel_exact",
+                            slot_key=slot_key,
+                            left_id=int(memory_id), left_version=version,
+                            left_value_norm=str(claim["value_norm"]),
+                            left_display=str(claim["value"]),
+                            left_quote=str(claim["value"]),
+                            right_id=peer_id,
+                            right_version=int(hit["memory_version"] or 1),
+                            right_value_norm=str(hit["value_norm"]),
+                            right_display=str(hit["value"]),
+                            right_quote=str(hit["value"]),
+                            left_content=str(record.get("content") or ""),
+                            right_content=str(peer_record.get("content") or ""),
+                            attr_cos=1.0,
+                            extra={
+                                "source": "claim_conflict",
+                                "claims_channel": True,
+                                "claims_exact_lane": True,
+                            },
+                        ),
+                        dedupe_key=notice_dedupe_key(
+                            int(memory_id), peer_id, version,
+                            int(hit["memory_version"] or 1), "claim_conflict",
+                        ),
+                        left_version=version,
+                        right_version=int(hit["memory_version"] or 1),
+                        source="claim_conflict",
+                    )
+                    if outcome.get("outcome") == "created":
+                        state["notices"] = int(state["notices"]) + 1
+                        fired_attrs.add(str(claim["attr_norm"]))
+                        surfaced.append(peer_id)
+        return {"checked": checked}
 
     def check_claims_conflicts(
         self, memory_id: int, snapshot: dict[str, Any],
@@ -289,22 +533,79 @@ class EvidencePipeline:
         )
         own_claims = self.db.claims.current_claims(int(memory_id))
         if not own_claims:
-            return {"claims_checked": 0, "notices": 0}
+            return {"channel_b_checked": 0, "channel_b_notices": 0}
+        own_coexistence: dict[str, list[str]] = _coexistence_by_attr(own_claims)
+        peer_coexistence: dict[int, dict[str, list[str]]] = {}
+        # 0.17.0 review R2（owner 拍板接线）：精确键通道——attr_norm 完全
+        # 相等的同属性对立不需要向量、不受 KNN 的 k=10 窗口限制、也不依赖
+        # sqlite-vec，在 KNN 之前跑（候选上限 CLAIMS_EXACT_CANDIDATE_LIMIT，
+        # 触顶 channel_b_exact_capped 可观测）。产出的 attr 记入 fired_attrs
+        # （KNN 侧同 attr 自动跳过，A3）；无向量环境也可单独产出确定性 notice。
+        skip = skip_peers or set()
+        surfaced: list[int] = []  # Q1 R1-3: peers this channel surfaced — the wrapper unions them into the A-cross skip set (dedup direction flip)
+        notices = 0
+        capped_count = 0
+        checked = 0
+        exact_capped = 0
+        versional_vetoed = 0  # D1: evolution exemption must stay observable
+        fired_attrs: set[str] = set()  # A3: one notice per attr per write
+        exact_state: dict[str, Any] = {
+            "notices": notices, "capped": capped_count,
+            "versional_vetoed": versional_vetoed,
+            "exact_capped": exact_capped,
+            "fired_attrs": fired_attrs, "surfaced": surfaced,
+            "own_coexistence": own_coexistence,
+            "peer_coexistence": peer_coexistence,
+        }
+        exact_lane = self._claims_exact_lane(
+            memory_id, version, record, own_claims, skip, exact_state,
+        )
+        notices = int(exact_state["notices"])
+        capped_count = int(exact_state["capped"])
+        versional_vetoed = int(exact_state["versional_vetoed"])
+        exact_capped = int(exact_state["exact_capped"])
+        own_coexistence = exact_state["own_coexistence"]
+        peer_coexistence = exact_state["peer_coexistence"]
         if not self.db.state.sqlite_vec_available:
-            return {"claims_checked": len(own_claims), "notices": 0, "reason": "vec_unavailable"}
-        # Own claim vectors (published on the write path).
-        own_rows: dict[int, list[float]] = {}
-        with self.db.connection() as conn:
-            for row in conn.execute(
-                """SELECT c.id AS cid, v.embedding FROM memory_claims c
-                   LEFT JOIN memory_claim_vec v ON v.id=c.id
-                   WHERE c.memory_id=? AND c.memory_version=?""",
-                (int(memory_id), version),
-            ).fetchall():
-                if row["embedding"] is not None:
-                    own_rows[int(row["cid"])] = self.db.evidence._blob_to_vector(bytes(row["embedding"]))
+            # 精确键通道不依赖向量——无 vec 环境仍产出确定性 notice 后返回。
+            vec_free: dict[str, Any] = {
+                "channel_b_checked": int(exact_lane["checked"]),
+                "channel_b_notices": notices,
+                "channel_b_exact_checked": int(exact_lane["checked"]),
+            }
+            if capped_count:
+                vec_free["channel_b_capped"] = capped_count
+            if exact_capped:
+                vec_free["channel_b_exact_capped"] = exact_capped
+            if versional_vetoed:
+                vec_free["channel_b_versional_vetoed"] = versional_vetoed
+            if surfaced:
+                # Internal cross-channel key: consumed by the job wrapper for
+                # the A-cross skip set (R1-3), never a receipt field
+                # (underscore: wrapper MUST pop it — r2s-08 one-convention rule).
+                vec_free["_surfaced_peers"] = sorted(set(surfaced))
+            return vec_free
+        own_rows = self._own_claim_vectors(int(memory_id), version)
         if not own_rows:
-            return {"claims_checked": len(own_claims), "notices": 0, "reason": "vectors_pending"}
+            # KNN leg can't run (claim vectors still absent), but the exact
+            # lane ran first and may already have created notices — carry its
+            # real result, same shape as the vec-free branch, plus a reason
+            # marking that the KNN leg did not run.
+            pending: dict[str, Any] = {
+                "channel_b_checked": int(exact_lane["checked"]),
+                "channel_b_notices": notices,
+                "channel_b_exact_checked": int(exact_lane["checked"]),
+                "reason": "vectors_pending",
+            }
+            if capped_count:
+                pending["channel_b_capped"] = capped_count
+            if exact_capped:
+                pending["channel_b_exact_capped"] = exact_capped
+            if versional_vetoed:
+                pending["channel_b_versional_vetoed"] = versional_vetoed
+            if surfaced:
+                pending["_surfaced_peers"] = sorted(set(surfaced))
+            return pending
 
         from ..acl import workspace_scope_sql
         workspace_sql, workspace_params = workspace_scope_sql(
@@ -317,40 +618,24 @@ class EvidencePipeline:
             eligible_params.extend(workspace_params)
         id_constraint = f"c.id IN (SELECT c.id FROM memory_claims c JOIN memories m ON m.id=c.memory_id WHERE {eligible})"
 
-        notices = 0
-        capped_count = 0
-        checked = 0
-        versional_vetoed = 0  # D1: evolution exemption must stay observable
         unresolved_bridges = 0
         bridge_budget = [CLAIMS_BRIDGE_MAX_PER_WRITE]
-        fired_attrs: set[str] = set()  # A3: one notice per attr per write
-        skip = skip_peers or set()
-        surfaced: list[int] = []  # Q1 R1-3: peers this channel surfaced — the wrapper unions them into the A-cross skip set (dedup direction flip)
-        own_coexistence: dict[str, list[str]] = {
-            str(claim_row["attr_norm"]): [
-                str(v) for v in self.db.claims.coexisting_values(
-                    int(memory_id), str(claim_row["attr_norm"]),
-                )
-            ]
-            for claim_row in own_claims
-        }
-        peer_coexistence: dict[int, dict[str, list[str]]] = {}
         with self.db.connection() as conn:
             for claim in own_claims:
                 own_vector = own_rows.get(int(claim["id"]))
                 if not own_vector:
                     continue
                 # D1 (owner 2026-09-23): version-like attrs are expected
-                # timeline evolution — skip before any KNN work and count.
-                # Judged on the RAW attr: attr_norm strips spaces, which
-                # defeats the vocabulary's word boundaries (releasenotes).
+                # timeline evolution — skip before any KNN work. The COUNT
+                # happens exactly once, in the exact lane (same predicate ran
+                # there already); counting here too would double every entry.
                 if attr_is_versional(str(claim.get("attr") or claim["attr_norm"])):
-                    versional_vetoed += 1
                     continue
                 checked += 1
                 hits = conn.execute(
                     f"""SELECT c.*, v.distance AS distance,
-                               m.subject, m.metadata, m.workspace, m.workspace_canonical
+                               m.subject, m.metadata, m.content,
+                               m.workspace, m.workspace_canonical
                         FROM memory_claim_vec v
                         JOIN memory_claims c ON c.id=v.id
                         JOIN memories m ON m.id=c.memory_id
@@ -404,14 +689,9 @@ class EvidencePipeline:
                         continue
                     peer_attrs = peer_coexistence.get(peer_id)
                     if peer_attrs is None:
-                        peer_attrs = {
-                            str(row["attr_norm"]): [
-                                str(v) for v in self.db.claims.coexisting_values(
-                                    peer_id, str(row["attr_norm"]),
-                                )
-                            ]
-                            for row in self.db.claims.current_claims(peer_id)
-                        }
+                        peer_attrs = _coexistence_by_attr(
+                            self.db.claims.current_claims(peer_id),
+                        )
                         peer_coexistence[peer_id] = peer_attrs
                     if len(peer_attrs.get(str(hit["attr_norm"]), ())) > 1:
                         continue
@@ -433,44 +713,27 @@ class EvidencePipeline:
                         notice_type="claim_conflict",
                         title=f"Claim conflict with #{peer_id}",
                         message=f"claims attr {claim['attr']} value differs",
-                        payload={
-                            "route": "notice_ready",
-                            "reason": "claim_attr_vector_gate",
-                            "source": "claim_conflict",
-                            "slot_key": slot_key,
-                            "slot_provenance": {
-                                "entity": "workspace", "scope": "subject",
-                                "attribute": "claims_channel",
+                        payload=_conflict_notice_payload(
+                            reason="claim_attr_vector_gate",
+                            attribute="claims_channel",
+                            slot_key=slot_key,
+                            left_id=int(memory_id), left_version=version,
+                            left_value_norm=str(claim["value_norm"]),
+                            left_display=str(claim["value"]),
+                            left_quote=str(claim["value"]),
+                            right_id=peer_id,
+                            right_version=int(hit["memory_version"] or 1),
+                            right_value_norm=str(hit["value_norm"]),
+                            right_display=str(hit["value"]),
+                            right_quote=str(hit["value"]),
+                            left_content=str(record.get("content") or ""),
+                            right_content=str(hit["content"] or ""),
+                            attr_cos=float(attr_cos or 1.0),
+                            extra={
+                                "source": "claim_conflict",
+                                "claims_channel": True,
                             },
-                            "attr_cos": round(float(attr_cos or 1.0), 4),
-                            "member_versions": [
-                                {"memory_id": int(memory_id), "version": version,
-                                 "value": str(claim["value_norm"]),
-                                 "evidence": {"quote": str(claim["value"])}},
-                                {"memory_id": peer_id, "version": int(hit["memory_version"] or 1),
-                                 "value": str(hit["value_norm"]),
-                                 "evidence": {"quote": str(hit["value"])}},
-                            ],
-                            "value_groups": [
-                                {"normalized_value": str(claim["value_norm"]),
-                                 "display_value": str(claim["value"]),
-                                 "members": [f"{memory_id}@{version}"]},
-                                {"normalized_value": str(hit["value_norm"]),
-                                 "display_value": str(hit["value"]),
-                                 "members": [f"{peer_id}@{int(hit['memory_version'] or 1)}"]},
-                            ],
-                            "candidate_key": {
-                                "detector_version": CONFLICT_DETECTOR_VERSION,
-                                "members": sorted([
-                                    f"{memory_id}@{version}",
-                                    f"{peer_id}@{int(hit['memory_version'] or 1)}",
-                                ]),
-                                "evidence": [],
-                            },
-                            "left_evidence": {"text": str(claim["value"])},
-                            "right_evidence": {"text": str(hit["value"])},
-                            "claims_channel": True,
-                        },
+                        ),
                         dedupe_key=notice_dedupe_key(
                             int(memory_id), peer_id, version, int(hit["memory_version"] or 1),
                             "claim_conflict",
@@ -505,17 +768,24 @@ class EvidencePipeline:
                             surfaced.append(bridge_peer)
                     elif bridge_outcome == "unresolved":
                         unresolved_bridges += 1
-        result: dict[str, Any] = {"claims_checked": checked, "notices": notices}
+        result: dict[str, Any] = {
+            "channel_b_checked": checked, "channel_b_notices": notices,
+        }
+        if int(exact_lane["checked"]):
+            result["channel_b_exact_checked"] = int(exact_lane["checked"])
         if capped_count:
-            result["claims_notices_capped"] = capped_count
+            result["channel_b_capped"] = capped_count
+        if exact_capped:
+            result["channel_b_exact_capped"] = exact_capped
         if versional_vetoed:
-            result["versional_vetoed"] = versional_vetoed
+            result["channel_b_versional_vetoed"] = versional_vetoed
         if unresolved_bridges:
-            result["claim_bridge_unresolved"] = unresolved_bridges
+            result["channel_b_unresolved"] = unresolved_bridges
         if surfaced:
             # Internal cross-channel key: consumed by the job wrapper for the
-            # A-cross skip set (R1-3), never a receipt field.
-            result["surfaced_peers"] = sorted(set(surfaced))
+            # A-cross skip set (R1-3), never a receipt field (underscore:
+            # wrapper MUST pop it — r2s-08 one-convention rule).
+            result["_surfaced_peers"] = sorted(set(surfaced))
         return result
 
     def _run_claim_bridge(
@@ -584,12 +854,7 @@ class EvidencePipeline:
             "memory_id": peer_id, "version": peer_version,
             "metadata": {},
         }
-        try:
-            forward = backend.classify_pair(
-                left_env, right_env, deadline_monotonic=None, retry_allowed=False,
-            )
-        except TypeError:
-            forward = backend.classify_pair(left_env, right_env)
+        forward = self._conflict_classify(backend, left_env, right_env, retry_allowed=False)
         gate = evaluate_single_direction_extraction(
             signal_extraction(forward), left_env, right_env,
         )
@@ -607,42 +872,27 @@ class EvidencePipeline:
             notice_type="claim_conflict",
             title=f"Claim conflict with #{peer_id}",
             message=f"claim bridge attr {claim['attr']} value differs",
-            payload={
-                "route": "notice_ready",
-                "reason": "claim_bridge_extract_value",
-                "source": "claim_conflict",
-                "slot_key": slot_key,
-                "slot_provenance": {
-                    "entity": "workspace", "scope": "subject",
-                    "attribute": "claim_bridge",
+            payload=_conflict_notice_payload(
+                reason="claim_bridge_extract_value",
+                attribute="claim_bridge",
+                slot_key=slot_key,
+                left_id=int(memory_id), left_version=version,
+                left_value_norm=str(claim["value_norm"]),
+                left_display=str(claim["value"]),
+                left_quote=str(claim["value"]),
+                right_id=peer_id, right_version=peer_version,
+                right_value_norm=extracted_b,
+                right_display=extracted_b,
+                right_quote=row_text,
+                left_content=str(record.get("content") or ""),
+                right_content=str(peer_record.get("content") or ""),
+                attr_cos=1.0,
+                extra={
+                    "source": "claim_conflict",
+                    "claims_channel": True,
+                    "claim_bridge": True,
                 },
-                "attr_cos": 1.0,
-                "member_versions": [
-                    {"memory_id": memory_id, "version": version,
-                     "value": str(claim["value_norm"]),
-                     "evidence": {"quote": str(claim["value"])}},
-                    {"memory_id": peer_id, "version": peer_version,
-                     "value": extracted_b,
-                     "evidence": {"quote": row_text}},
-                ],
-                "value_groups": [
-                    {"normalized_value": str(claim["value_norm"]),
-                     "display_value": str(claim["value"]),
-                     "members": [f"{memory_id}@{version}"]},
-                    {"normalized_value": extracted_b,
-                     "display_value": extracted_b,
-                     "members": [f"{peer_id}@{peer_version}"]},
-                ],
-                "candidate_key": {
-                    "detector_version": CONFLICT_DETECTOR_VERSION,
-                    "members": sorted([f"{memory_id}@{version}", f"{peer_id}@{peer_version}"]),
-                    "evidence": [],
-                },
-                "left_evidence": {"text": str(claim["value"])},
-                "right_evidence": {"text": row_text},
-                "claims_channel": True,
-                "claim_bridge": True,
-            },
+            ),
             dedupe_key=notice_dedupe_key(
                 memory_id, peer_id, version, peer_version, "claim_conflict",
             ),
@@ -655,7 +905,6 @@ class EvidencePipeline:
 
     def check_claim_sentence_conflicts(
         self, memory_id: int, snapshot: dict[str, Any],
-        skip_peers: "set[int] | None" = None,
         allowed_memory_ids: "list[int] | None" = None,
         notices_used: int = 0,
         budget_sink: "Callable[[], None] | None" = None,
@@ -666,15 +915,19 @@ class EvidencePipeline:
         sentence rows inside the G5 clean list (claims never depend on the
         peer filling claims); pairs passing the cosine band go to Qwen as
         case a (the prompt names the attr). Versional attrs are exempted
-        (D1, own counter). Cross-channel dedup rides skip_peers (channel A's
-        surfaced peers) and the shared per-write notice cap.
+        (D1, own counter). Cross-channel dedup does NOT ride an input skip
+        set here (0.17.0 review R2 r2s-12: every production/test caller
+        passed None since the R1-3 direction flip) — pairs the other
+        channels already settled are excluded via the wrapper's A-cross
+        skip set union instead; the shared per-write notice cap still
+        applies.
 
         Q1 (owner D1): channel C now runs AHEAD of the A-cross loop and
         draws the job-global Qwen pool down via ``budget_sink`` (one call per
         ACTUAL dispatch — the pool is never a cap on C, D3). ``deadline_fn``
         (review R1-1) stops further dispatches once the fairness wall is
         blown — C is unbounded in PAIRS but must not eat the queue's clock.
-        ``surfaced_peers`` in the result is an internal cross-channel key
+        ``_surfaced_peers`` in the result is an internal cross-channel key
         for the wrapper's A-cross skip set, never a receipt field."""
         from ..constants import (
             CLAIMS_MAX_NOTICES_PER_WRITE,
@@ -694,25 +947,13 @@ class EvidencePipeline:
             return {"channel_c": True, "reason": "vec_unavailable"}
         own_claims = self.db.claims.current_claims(int(memory_id))
         if not own_claims or allowed_memory_ids is None or not allowed_memory_ids:
-            return {"channel_c": True, "claims_checked": 0, "notices": 0}
+            return {"channel_c": True, "channel_c_checked": 0, "channel_c_notices": 0}
         workspace = (
             record.get("workspace_canonical") or record.get("workspace")
             if self.settings.isolation == "strict" else None
         )
-        skip = skip_peers or set()
         # own claim vectors (attr embeddings published on the write path)
-        own_vectors: dict[int, list[float]] = {}
-        with self.db.connection() as conn:
-            for row in conn.execute(
-                """SELECT c.id AS cid, v.embedding FROM memory_claims c
-                   LEFT JOIN memory_claim_vec v ON v.id=c.id
-                   WHERE c.memory_id=? AND c.memory_version=?""",
-                (int(memory_id), version),
-            ).fetchall():
-                if row["embedding"] is not None:
-                    own_vectors[int(row["cid"])] = self.db.evidence._blob_to_vector(
-                        bytes(row["embedding"])
-                    )
+        own_vectors = self._own_claim_vectors(int(memory_id), version)
         notices = 0
         capped = 0
         versional = 0
@@ -744,6 +985,12 @@ class EvidencePipeline:
                 attr_vector, k=SEMANTIC_CROSS_KNN_WINDOW, workspace=workspace,
                 exclude_memory_id=int(memory_id), include_subject_rows=False,
                 include_memory_ids=allowed_memory_ids,
+                include_content=True,  # claims channel: row content feeds the
+                # peer-side context (row-version-pinned, preferred over the
+                # peer's current content) and the notice content fingerprint
+            )
+            hit_vectors = self.db.evidence.row_vectors_for_ids(
+                [int(h["id"]) for h in hits],
             )
             for hit in hits:
                 # P2-6: the cap is SHARED with the claims channel — the
@@ -764,12 +1011,9 @@ class EvidencePipeline:
                         deadline_stopped = True
                         break
                 peer_id = int(hit["memory_id"])
-                if peer_id in skip:
-                    continue  # channel A already surfaced this peer
                 # cosine band on the TRUE attr-vector×sentence cosine
-                hit_vectors = self.db.evidence.row_vectors_for_ids(
-                    [int(hit["id"])],
-                )
+                # (vectors prefetched per claim above — per-hit single-row
+                # fetches were N round-trips per KNN window)
                 vector = hit_vectors.get(int(hit["id"]))
                 if not vector:
                     continue
@@ -817,13 +1061,7 @@ class EvidencePipeline:
                 if backend is None:
                     unresolved += 1
                     continue
-                try:
-                    forward = backend.classify_pair(
-                        left_env, right_env, deadline_monotonic=None,
-                        retry_allowed=not self._semantic_worker.has_pending_jobs(),
-                    )
-                except TypeError:
-                    forward = backend.classify_pair(left_env, right_env)
+                forward = self._conflict_classify(backend, left_env, right_env)
                 # Q1 R1-4: the pool is charged per ACTUAL dispatch —
                 # claims_checked above also counts band-passers that never
                 # dispatched (inactive peer, backend None); those must not
@@ -854,44 +1092,27 @@ class EvidencePipeline:
                     notice_type="claim_conflict",
                     title=f"Claim conflict with #{peer_id}",
                     message=f"channel-C claim vs sentence attr {claim['attr']} differs",
-                    payload={
-                        "route": "notice_ready",
-                        "reason": "claim_channel_c_attr_sentence",
-                        "source": "claim_conflict",
-                        "slot_key": slot_key,
-                        "slot_provenance": {
-                            "entity": "workspace", "scope": "subject",
-                            "attribute": "claims_channel_c",
+                    payload=_conflict_notice_payload(
+                        reason="claim_channel_c_attr_sentence",
+                        attribute="claims_channel_c",
+                        slot_key=slot_key,
+                        left_id=int(memory_id), left_version=version,
+                        left_value_norm=str(claim["value_norm"]),
+                        left_display=str(claim["value"]),
+                        left_quote=str(claim["value"]),
+                        right_id=peer_id, right_version=peer_version,
+                        right_value_norm=normalize_value(extracted),
+                        right_display=extracted,
+                        right_quote=str(hit.get("text") or ""),
+                        left_content=str(record.get("content") or ""),
+                        right_content=str(peer.get("content") or ""),
+                        attr_cos=float(cos),
+                        extra={
+                            "source": "claim_conflict",
+                            "claims_channel": True,
+                            "channel_c": True,
                         },
-                        "attr_cos": round(float(cos), 4),
-                        "member_versions": [
-                            {"memory_id": int(memory_id), "version": version,
-                             "value": str(claim["value_norm"]),
-                             "evidence": {"quote": str(claim["value"])}},
-                            {"memory_id": peer_id, "version": peer_version,
-                             "value": extracted,
-                             "evidence": {"quote": str(hit.get("text") or "")}},
-                        ],
-                        "value_groups": [
-                            {"normalized_value": str(claim["value_norm"]),
-                             "display_value": str(claim["value"]),
-                             "members": [f"{memory_id}@{version}"]},
-                            {"normalized_value": normalize_value(extracted),
-                             "display_value": extracted,
-                             "members": [f"{peer_id}@{peer_version}"]},
-                        ],
-                        "candidate_key": {
-                            "detector_version": CONFLICT_DETECTOR_VERSION,
-                            "members": sorted([
-                                f"{memory_id}@{version}", f"{peer_id}@{peer_version}",
-                            ]),
-                            "evidence": [],
-                        },
-                        "left_evidence": {"text": str(claim["value"])},
-                        "right_evidence": {"text": str(hit.get("text") or "")},
-                        "claims_channel": True,
-                        "channel_c": True,
-                    },
+                    ),
                     dedupe_key=notice_dedupe_key(
                         int(memory_id), peer_id, version, peer_version, "claim_conflict",
                     ),
@@ -902,7 +1123,8 @@ class EvidencePipeline:
                     notices += 1
                     surfaced.append(peer_id)
         result: dict[str, Any] = {
-            "channel_c": True, "claims_checked": checked, "notices": notices,
+            "channel_c": True,
+            "channel_c_checked": checked, "channel_c_notices": notices,
         }
         if capped:
             result["channel_c_capped"] = capped
@@ -913,8 +1135,9 @@ class EvidencePipeline:
             result["channel_c_unresolved_reasons"] = _unres_reasons
         if surfaced:
             # Internal cross-channel key: consumed by the job wrapper for the
-            # A-cross skip set (R1-3), never a receipt field.
-            result["surfaced_peers"] = sorted(set(surfaced))
+            # A-cross skip set (R1-3), never a receipt field (underscore:
+            # wrapper MUST pop it — r2s-08 one-convention rule).
+            result["_surfaced_peers"] = sorted(set(surfaced))
         if deadline_stopped:
             # 对抗 review 修复（R1-1 收尾）：C 撞公平墙停走必须 loud——
             # 「干到一半被墙砍」与「自然跑完」在回执上可区分（§3.3 惯例：
@@ -968,6 +1191,13 @@ class EvidencePipeline:
                     # lower-scored entries (if any carry stored extraction)
                     # still drain.
                     skipped.append(int(entry["id"]))
+                    # R2-W1：该分支零进展（processed 不增），不设上限时
+                    # while processed<limit 只能靠 take_next 扫完全部 pending
+                    # 才停（每次调用新开 sqlite 连接，积压 500 ⇒ 空闲 tick 每
+                    # 5s 一轮上千次连接空转）。超界即停本轮；条目未 complete
+                    # 仍 pending，后端出现后照常重试——契约不变。
+                    if len(skipped) > 2 * limit:
+                        break
                     continue
                 embedder, _warnings = self._ensure_embedder()
                 direct = direct_value_verdict(left_text, right_text, decision, embedder=embedder)
@@ -980,25 +1210,11 @@ class EvidencePipeline:
                     self.db.conflict_backlog.complete(int(entry["id"]))
                     processed += 1
                     continue
-                def _env(memory: dict[str, Any], quote: str) -> dict[str, Any]:
-                    return {
-                        "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
-                        "tags": list(memory.get("tags") or [])[:20],
-                        "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
-                        "memory_id": int(memory.get("id") or 0),
-                        "version": int(memory.get("version") or 1),
-                        "event_time": memory.get("event_time"),
-                        "metadata": {},
-                    }
-                try:
-                    forward = backend.classify_pair(
-                        _env(left, left_text), _env(right, right_text),
-                        retry_allowed=not self._semantic_worker.has_pending_jobs(),
-                    )
-                except TypeError:
-                    forward = backend.classify_pair(_env(left, left_text), _env(right, right_text))
+                left_env = _conflict_envelope(left, left_text)
+                right_env = _conflict_envelope(right, right_text)
+                forward = self._conflict_classify(backend, left_env, right_env)
                 gate = evaluate_single_direction_extraction(
-                    signal_extraction(forward), _env(left, left_text), _env(right, right_text),
+                    signal_extraction(forward), left_env, right_env,
                     attr_cos=_attr_cos_or_none(embedder, signal_extraction(forward)),
                 )
                 if gate.state == "notice_ready":
@@ -1049,31 +1265,24 @@ class EvidencePipeline:
             notice_type="semantic_evidence",
             title=f"Possible memory change with #{right_id}",
             message=str(decision.reason or "backlog"),
-            payload={
-                "route": "notice_ready", "reason": reason,
-                "prompt_version": PAIR_PROMPT_VERSION,
-                "anchors": decision.anchors,
-                "slot_key": slot_key,
-                "slot_provenance": {"entity": "workspace", "scope": "subject", "attribute": "backlog"},
-                "member_versions": [
-                    {"memory_id": left_id, "version": left_version, "value": value_a,
-                     "evidence": {"quote": left_text}},
-                    {"memory_id": right_id, "version": right_version, "value": value_b,
-                     "evidence": {"quote": right_text}},
-                ],
-                "value_groups": [
-                    {"normalized_value": value_a, "display_value": value_a, "members": [f"{left_id}@{left_version}"]},
-                    {"normalized_value": value_b, "display_value": value_b, "members": [f"{right_id}@{right_version}"]},
-                ],
-                "candidate_key": {
-                    "detector_version": CONFLICT_DETECTOR_VERSION,
-                    "members": sorted([f"{left_id}@{left_version}", f"{right_id}@{right_version}"]),
-                    "evidence": [],
+            payload=_conflict_notice_payload(
+                reason=reason,
+                attribute="backlog",
+                slot_key=slot_key,
+                left_id=left_id, left_version=left_version,
+                left_value_norm=value_a, left_display=value_a,
+                left_quote=left_text,
+                right_id=right_id, right_version=right_version,
+                right_value_norm=value_b, right_display=value_b,
+                right_quote=right_text,
+                left_content=str(left.get("content") or ""),
+                right_content=str(right.get("content") or ""),
+                extra={
+                    "prompt_version": PAIR_PROMPT_VERSION,
+                    "anchors": decision.anchors,
+                    "backlog": True,
                 },
-                "left_evidence": {"text": left_text},
-                "right_evidence": {"text": right_text},
-                "backlog": True,
-            },
+            ),
             dedupe_key=notice_dedupe_key(
                 left_id, right_id, left_version, right_version, "semantic_evidence",
             ),
@@ -1313,9 +1522,7 @@ class EvidencePipeline:
             result = self.conflicts_finalize_receipt(ctx)
         else:
             result = terminal
-        if ctx["phase_ms"]:
-            result["elapsed_ms"] = round(sum(ctx["phase_ms"]), 1)
-        return result
+        return self.conflicts_receipt_tail(ctx, result)
 
     def conflicts_deterministic_phase(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         """0.17.0 Q1 相分裂 (owner plan §3.2) — phase 1 of 3: indexing publish,
@@ -1472,44 +1679,18 @@ class EvidencePipeline:
             evicted_total += int(outcome.get("evicted") or 0)
         return enqueued, evicted_total
 
-    def _conflicts_deterministic_collect(
-        self, ctx: dict[str, Any], record: dict[str, Any],
-        job_conn: "sqlite3.Connection", content: str, row_sha: str,
-    ) -> None:
-        """Q1 相分裂 phase 1 body: indexing publish, G5 screen, candidate
-        collection/ordering, internal keeper collection, truncation early-
-        exit (E10①). Zero Qwen — the backend is fetched by the later phases.
-        Terminal outcomes (embedder/vec-state/truncation) land in
-        ctx["terminal"] and skip every later phase."""
+    def _collect_applying_slots(self, ctx: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        """Deterministic phase step 1 (r2s-02 split): slot-scoped suppression
+        keys for conflict groups currently under application.
+
+        Spec §5/§15.3: while a conflict group is applying, versions produced
+        by its apply plan must not re-notify THE SAME conflict. Suppression is
+        therefore slot-scoped and applied only after the gate resolves the
+        candidate's slot_key, so a genuinely different conflict between the
+        same two memories is still examined and surfaced. Validation is
+        server-side against the live conflict rows; the trusted context only
+        names which row to revalidate."""
         memory_id = int(ctx["memory_id"])
-        snapshot = ctx["snapshot"]
-        embedder, _ = self._ensure_active_embedder()
-        if embedder is None:
-            ctx["terminal"] = {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
-            return
-        if self.db.get_vec_index_state().get("state") in {"mismatch", "failed"}:
-            ctx["terminal"] = {
-                "status": "incomplete",
-                "reason": "embedding_space_rebuild_required",
-                "notices_created": 0,
-            }
-            return
-        ctx["record"] = record
-        ctx["content"] = content
-        ctx["content_hash"] = row_sha
-        ctx["workspace"] = (
-            record.get("workspace_canonical") or record.get("workspace")
-            if self.settings.isolation == "strict" else None
-        )
-        ctx["internal_version"] = int(record.get("version") or 1)
-        ctx["embedder"] = embedder
-        # Spec §5/§15.3: while a conflict group is applying, versions produced
-        # by its apply plan must not re-notify THE SAME conflict. Suppression is
-        # therefore slot-scoped and applied only after the gate resolves the
-        # candidate's slot_key, so a genuinely different conflict between the
-        # same two memories is still examined and surfaced. Validation is
-        # server-side against the live conflict rows; the trusted context only
-        # names which row to revalidate.
         applying_slots: set[str] = ctx["applying_slots"]
         applying_groups: list[dict[str, Any]] = []
         trusted = TrustedApplyingContext.from_dict(snapshot.get("trusted_applying_context"))
@@ -1550,13 +1731,168 @@ class EvidencePipeline:
                     group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 ))
 
+    def _collect_internal_pairs(
+        self, ctx: dict[str, Any], job_conn: "sqlite3.Connection",
+        seg_views: "list[Any]",
+    ) -> None:
+        """Deterministic phase step 2 (r2s-02 split): O(n²) same-memory
+        keeper collection, feeding the internal Qwen phase (E10①).
+
+        0.16.0 E10① (§6⑳): same-memory internal examination comes FIRST —
+        units are in hand (no KNN), the rule is deterministic, and the
+        finding lands in the dedicated internal_conflicts structure (the
+        conflicts table's pair invariants reject a single memory@version
+        twice). It consumes no Qwen budget; the cross-memory loop is
+        untouched in shape, and a truncated cross loop still reports the
+        internal findings already landed this run.
+        0.16.2 (owner, unified flow): the internal check uses the SAME
+        filter-plus-slot-extraction logic as the cross-memory route.
+        0.16.4 §0.5/§2: the whole filter sequence is ONE shared gate —
+        internal_pair_admission (scan_pipeline) — called identically by
+        the scan side. Here: EVERY admitted shape (check AND notify)
+        collects for the Qwen final review — a real in-memory
+        self-contradiction has a recognition duty, and Qwen's verdict is
+        the triple ready→pending+attribution / definitive negative→
+        dismissed veto / technical failure→pending unannotated (fail-open).
+        0.17.0 P2-3.1: internal (same-memory) pairs are row segments in
+        rows mode (row_index lands in internal_conflicts' unit_a/unit_b)."""
+        memory_id = int(ctx["memory_id"])
+        internal_version = int(ctx["internal_version"])
+        from ..scan_pipeline import internal_pair_admission
+
+        # append-only through the alias — the list object lives in ctx and
+        # feeds the internal Qwen phase (E10① keepers).
+        internal_qwen_pairs: list[tuple[Any, Any, Any]] = ctx["internal_qwen_pairs"]
+        # C3 A+ guard: subject rows never originate pairs (internal or cross).
+        # Adversarial-review follow-up: an INDEPENDENT cap (not the cross
+        # loop's) — O(n²) construction with row granularity needs its own
+        # ceiling, while E10①'s guarantee (internal keepers land despite
+        # cross truncation) forbids sharing the cross cap.
+        from ..constants import SEMANTIC_INTERNAL_MAX_ROWS
+        originator_views = [
+            v for v in seg_views if v.kind != "subject"
+        ][:SEMANTIC_INTERNAL_MAX_ROWS]
+        for i in range(len(originator_views)):
+            for j in range(i + 1, len(originator_views)):
+                seg_a, seg_b = originator_views[i], originator_views[j]
+                internal_decision = decide_evidence(seg_a.text, seg_b.text)
+                admitted = internal_pair_admission(
+                    seg_a.text, seg_b.text,
+                    (seg_a.start_offset, seg_a.end_offset),
+                    (seg_b.start_offset, seg_b.end_offset),
+                    internal_decision,
+                    exists_probe=lambda: self.db.internal_conflicts.exists_on_conn(
+                        job_conn, int(memory_id), internal_version,
+                        seg_a.unit_index, seg_b.unit_index,
+                    ),
+                )
+                if not admitted:
+                    continue
+                internal_qwen_pairs.append((seg_a, seg_b, internal_decision))
+
+    def _collect_neighbour_screen(
+        self, ctx: dict[str, Any], record: dict[str, Any], paired: "list[Any]",
+        embedder: "Any", job_conn: "sqlite3.Connection",
+    ) -> "list[int] | None":
+        """Deterministic phase step 3 (r2s-02 split): Gate-v2 G5 ②″ 记忆级
+        一揽子筛选. ONE subject-row coarse KNN builds the neighbour list;
+        memory_pair_excluded vets each neighbour on subject/tags alone; the
+        sentence KNN then runs ONLY inside the clean list (rowid-IN
+        restriction — window slots are not burned on unrelated or
+        already-excluded memories). 宽不罚——窄才漏. Returns the effective
+        clean list (ctx["allowed_memory_ids"] stays the shared contract for
+        the wrapper-orchestrated channel C)."""
+        memory_id = int(ctx["memory_id"])
+        workspace = ctx["workspace"]
+        from .gates import memory_pair_excluded as _pair_excluded
+        from ..constants import SEMANTIC_NEIGHBOR_SCREEN
+        subject_vec = next(
+            (embedding for seg_view, embedding in paired if seg_view.kind == "subject"),
+            None,
+        ) if paired else None
+        if subject_vec is None and embedder is not None:
+            # First-write streaming path: paired vectors are all None until
+            # publish — embed the subject inline (one embed, milliseconds) so
+            # the screen runs on the MAIN write path too, not just
+            # re-detections (实施后对抗 review P0：粗筛+通道 C 首写从不执行).
+            subject_embed = embedder.embed_text(
+                prefix=EMBED_PREFIX_STS, body=str(record.get("subject") or ""),
+            )
+            subject_vec = subject_embed.embedding or None
+        allowed_memory_ids: "list[int] | None" = ctx["allowed_memory_ids"]
+        if subject_vec is not None:
+            neighbours = self.db.row_knn(
+                subject_vec, k=SEMANTIC_NEIGHBOR_SCREEN, workspace=workspace,
+                exclude_memory_id=memory_id, conn=job_conn,
+                include_subject_rows=True, subject_rows_only=True,
+            )
+            excluded_ids: set[int] = set()
+            own_tags = record.get("tags") or []
+            for neighbour in neighbours:
+                peer_id_n = int(neighbour["memory_id"])
+                if peer_id_n in excluded_ids:
+                    continue
+                tags_raw_n = neighbour.get("tags")
+                peer_tags_n = (
+                    json.loads(tags_raw_n) if isinstance(tags_raw_n, str) and tags_raw_n
+                    else (tags_raw_n if isinstance(tags_raw_n, list) else [])
+                )
+                if _pair_excluded(
+                    str(record.get("subject") or ""), own_tags,
+                    str(neighbour.get("subject") or ""), peer_tags_n,
+                ):
+                    excluded_ids.add(peer_id_n)
+            ctx["allowed_memory_ids"] = [
+                int(n["memory_id"]) for n in neighbours
+                if int(n["memory_id"]) not in excluded_ids
+            ]
+            allowed_memory_ids = ctx["allowed_memory_ids"]
+            ctx["memory_pairs_excluded"] = len(excluded_ids)
+            if not allowed_memory_ids:
+                ctx["allowed_memory_ids"] = []  # everything screened out: no KNN at all
+                allowed_memory_ids = []
+        return allowed_memory_ids
+
+    def _conflicts_deterministic_collect(
+        self, ctx: dict[str, Any], record: dict[str, Any],
+        job_conn: "sqlite3.Connection", content: str, row_sha: str,
+    ) -> None:
+        """Q1 相分裂 phase 1 body: indexing publish, G5 screen, candidate
+        collection/ordering, internal keeper collection, truncation early-
+        exit (E10①). Zero Qwen — the backend is fetched by the later phases.
+        Terminal outcomes (embedder/vec-state/truncation) land in
+        ctx["terminal"] and skip every later phase."""
+        memory_id = int(ctx["memory_id"])
+        snapshot = ctx["snapshot"]
+        embedder, _ = self._ensure_active_embedder()
+        if embedder is None:
+            ctx["terminal"] = {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
+            return
+        if self.db.get_vec_index_state().get("state") in {"mismatch", "failed"}:
+            ctx["terminal"] = {
+                "status": "incomplete",
+                "reason": "embedding_space_rebuild_required",
+                "notices_created": 0,
+            }
+            return
+        ctx["record"] = record
+        ctx["content"] = content
+        ctx["content_hash"] = row_sha
+        ctx["workspace"] = (
+            record.get("workspace_canonical") or record.get("workspace")
+            if self.settings.isolation == "strict" else None
+        )
+        ctx["internal_version"] = int(record.get("version") or 1)
+        ctx["embedder"] = embedder
+        self._collect_applying_slots(ctx, snapshot)
+        applying_slots: set[str] = ctx["applying_slots"]
+
         def backlog_deadline() -> "float | None":
             # C2: detection-phase deadline = max(fairness wall, this job's
             # own budget counted from publish completion) — the shared
             # implementation lives in _job_fair_deadline.
             return _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
 
-        max_units = max(1, SEMANTIC_MAX_EVIDENCE_UNITS)
         max_rows = max(1, SEMANTIC_MAX_ROWS)
         workspace = ctx["workspace"]
         by_peer: dict[int, tuple[dict[str, Any], Any, Any, float]] = {}
@@ -1633,62 +1969,9 @@ class EvidencePipeline:
             for seg, _embedding in paired
         ]
         seg_embeddings = [embedding for _seg, embedding in paired]
-        max_segments = max_rows if rows_mode else max_units
-        segments_capped_reason = "rows_capped" if rows_mode else "evidence_units_capped"
-        # 0.16.0 E10① (§6⑳): same-memory internal examination comes FIRST —
-        # units are in hand (no KNN), the rule is deterministic, and the
-        # finding lands in the dedicated internal_conflicts structure (the
-        # conflicts table's pair invariants reject a single memory@version
-        # twice). It consumes no Qwen budget; the cross-memory loop below is
-        # untouched in shape, and a truncated cross loop still reports the
-        # internal findings already landed this run.
-        # 0.16.2 (owner, unified flow): the internal check uses the SAME
-        # filter-plus-slot-extraction logic as the cross-memory route. A
-        # contradiction a reader would flag in one document must not become
-        # invisible just because it was written inside ONE memory.
-        # 0.16.4 §0.5/§2: the whole filter sequence is ONE shared gate —
-        # internal_pair_admission (scan_pipeline) — called identically by
-        # the scan side; the callers differ only in what an admitted pair
-        # means. Here: EVERY admitted shape (check AND notify) collects for
-        # the Qwen final review — a real in-memory self-contradiction has a
-        # recognition duty, and Qwen's verdict is the triple
-        # ready→pending+attribution / definitive negative→dismissed veto /
-        # technical failure→pending unannotated (fail-open).
-        internal_version: int = ctx["internal_version"]
-        # 0.17.0 P2-3.1: internal (same-memory) pairs are row segments in
-        # rows mode (row_index lands in internal_conflicts' unit_a/unit_b —
-        # the 0.17.0 detector bump separates the index semantics cleanly).
-        from ..scan_pipeline import internal_pair_admission
-
-        # append-only through the alias — the list object lives in ctx and
-        # feeds the internal Qwen phase (E10① keepers).
-        internal_qwen_pairs: list[tuple[Any, Any, Any]] = ctx["internal_qwen_pairs"]
-        # C3 A+ guard: subject rows never originate pairs (internal or cross).
-        # Adversarial-review follow-up: an INDEPENDENT cap (not the cross
-        # loop's) — O(n²) construction with row granularity needs its own
-        # ceiling, while E10①'s guarantee (internal keepers land despite
-        # cross truncation) forbids sharing the cross cap.
-        from ..constants import SEMANTIC_INTERNAL_MAX_ROWS
-        originator_views = [
-            v for v in seg_views if v.kind != "subject"
-        ][:SEMANTIC_INTERNAL_MAX_ROWS]
-        for i in range(len(originator_views)):
-            for j in range(i + 1, len(originator_views)):
-                seg_a, seg_b = originator_views[i], originator_views[j]
-                internal_decision = decide_evidence(seg_a.text, seg_b.text)
-                admitted = internal_pair_admission(
-                    seg_a.text, seg_b.text,
-                    (seg_a.start_offset, seg_a.end_offset),
-                    (seg_b.start_offset, seg_b.end_offset),
-                    internal_decision,
-                    exists_probe=lambda: self.db.internal_conflicts.exists_on_conn(
-                        job_conn, int(memory_id), internal_version,
-                        seg_a.unit_index, seg_b.unit_index,
-                    ),
-                )
-                if not admitted:
-                    continue
-                internal_qwen_pairs.append((seg_a, seg_b, internal_decision))
+        max_segments = max_rows
+        segments_capped_reason = "rows_capped"
+        self._collect_internal_pairs(ctx, job_conn, seg_views)
         # 0.16.2 write-time pre-gates (owner, data-driven): two deterministic
         # filters run in the KNN collection loop, BEFORE the per-peer dedup —
         # a cleared representative would otherwise burn a peer slot that a
@@ -1707,15 +1990,15 @@ class EvidencePipeline:
         # Spec §15.5: a bounded check that ran out of budget must not later
         # claim checked_no_notice. The two truncation causes report
         # distinctly (2026-09-10 #957/#959 diagnosis: the shared string cost
-        # an extra investigation round): the per-memory evidence-unit cap is
-        # evidence_units_capped; the fair job deadline stays
-        # notice_budget_exhausted. The cap is checked first so a state where
-        # both hold attributes to the more specific cause.
+        # an extra investigation round): the per-memory row cap is
+        # rows_capped; the fair job deadline stays notice_budget_exhausted.
+        # The cap is checked first so a state where both hold attributes to
+        # the more specific cause.
         truncation_reason: str | None = None
         # 0.17.0 P2-3.1: the cross loop walks the normalized segments —
         # row_knn in rows mode (candidates are clean short sentences or
-        # header-folded table rows), evidence_knn otherwise. Rows carry no
-        # 'text'-only kind filter (table rows are first-class candidates).
+        # header-folded table rows). Rows carry no 'text'-only kind filter
+        # (table rows are first-class candidates).
         landed: list[tuple[Any, list[float]]] = []
         streaming = bool(pending_segments)
         ranked_pending: list[Any] = []
@@ -1749,58 +2032,9 @@ class EvidencePipeline:
             int(getattr(view, "unit_index", getattr(view, "row_index", 0)))
             for view in row_prefilter(seg_views, own_claim_spans)
         }
-        # Gate-v2 G5 ②″ 记忆级一揽子筛选: ONE subject-row coarse KNN builds
-        # the neighbour list; memory_pair_excluded vets each neighbour on
-        # subject/tags alone; the sentence KNN then runs ONLY inside the
-        # clean list (rowid-IN restriction — window slots are not burned on
-        # unrelated or already-excluded memories). 宽不罚——窄才漏.
-        from .gates import memory_pair_excluded as _pair_excluded
-        from ..constants import SEMANTIC_NEIGHBOR_SCREEN
-        subject_vec = next(
-            (embedding for seg_view, embedding in paired if seg_view.kind == "subject"),
-            None,
-        ) if paired else None
-        if subject_vec is None and embedder is not None:
-            # First-write streaming path: paired vectors are all None until
-            # publish — embed the subject inline (one embed, milliseconds) so
-            # the screen runs on the MAIN write path too, not just
-            # re-detections (实施后对抗 review P0：粗筛+通道 C 首写从不执行).
-            subject_embed = embedder.embed_text(
-                prefix=EMBED_PREFIX_STS, body=str(record.get("subject") or ""),
-            )
-            subject_vec = subject_embed.embedding or None
-        allowed_memory_ids: "list[int] | None" = ctx["allowed_memory_ids"]
-        if subject_vec is not None:
-            neighbours = self.db.row_knn(
-                subject_vec, k=SEMANTIC_NEIGHBOR_SCREEN, workspace=workspace,
-                exclude_memory_id=memory_id, conn=job_conn,
-                include_subject_rows=True, subject_rows_only=True,
-            )
-            excluded_ids: set[int] = set()
-            own_tags = record.get("tags") or []
-            for neighbour in neighbours:
-                peer_id_n = int(neighbour["memory_id"])
-                if peer_id_n in excluded_ids:
-                    continue
-                tags_raw_n = neighbour.get("tags")
-                peer_tags_n = (
-                    json.loads(tags_raw_n) if isinstance(tags_raw_n, str) and tags_raw_n
-                    else (tags_raw_n if isinstance(tags_raw_n, list) else [])
-                )
-                if _pair_excluded(
-                    str(record.get("subject") or ""), own_tags,
-                    str(neighbour.get("subject") or ""), peer_tags_n,
-                ):
-                    excluded_ids.add(peer_id_n)
-            ctx["allowed_memory_ids"] = [
-                int(n["memory_id"]) for n in neighbours
-                if int(n["memory_id"]) not in excluded_ids
-            ]
-            allowed_memory_ids = ctx["allowed_memory_ids"]
-            ctx["memory_pairs_excluded"] = len(excluded_ids)
-            if not ctx["allowed_memory_ids"]:
-                ctx["allowed_memory_ids"] = []  # everything screened out: no KNN at all
-                allowed_memory_ids = []
+        allowed_memory_ids = self._collect_neighbour_screen(
+            ctx, record, paired, embedder, job_conn,
+        )
         try:
             for seg_view, embedding in pair_iter:
                 if streaming:
@@ -1933,11 +2167,11 @@ class EvidencePipeline:
             # run yet at this point (it needs the backend fetched by its own
             # phase), so the collected keepers land unannotated here —
             # fail-open, never lost. (Adversarial self-review: without this,
-            # an evidence-unit cap or budget exhaustion mid-collection
-            # silently dropped every internal keep pair of this run.)
-            for unit_a, unit_b, internal_decision in internal_qwen_pairs:
+            # a row cap or budget exhaustion mid-collection silently dropped
+            # every internal keep pair of this run.)
+            for unit_a, unit_b, internal_decision in ctx["internal_qwen_pairs"]:
                 if self.db.internal_conflicts.create(
-                    memory_id=int(memory_id), memory_version=internal_version,
+                    memory_id=int(memory_id), memory_version=int(ctx["internal_version"]),
                     unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
                     quote_a=unit_a.text, quote_b=unit_b.text,
                     span_a=[unit_a.start_offset, unit_a.end_offset],
@@ -1970,13 +2204,33 @@ class EvidencePipeline:
             ctx["truncated"] = True
             return
 
-        # (Q1 相分裂: the backend fetch moved into the internal/dispatch
-        # phases — the deterministic phase stays Qwen-free.)
-        # C4 soft ordering (⑦ 定案): rank same-level pairs by subject+tags
-        # overlap before distance — the Qwen budget should spend on pairs the
-        # owner's signals (subject/tag) already flag as related. Zero-overlap
-        # pairs are only ordered later, never excluded. (0.16.4 §1: the
-        # notify-first key lost its subject — only check shapes remain.)
+        self._collect_order_candidates(ctx, by_peer)
+
+    def _collect_order_candidates(
+        self, ctx: dict[str, Any], by_peer: dict[int, "tuple[dict[str, Any], Any, Any, float]"],
+    ) -> None:
+        """Deterministic phase step 4 (r2s-02 split): candidate ordering.
+
+        (Q1 相分裂: the backend fetch moved into the internal/dispatch
+        phases — the deterministic phase stays Qwen-free.)
+        C4 soft ordering (⑦ 定案): rank same-level pairs by subject+tags
+        overlap before distance — the Qwen budget should spend on pairs the
+        owner's signals (subject/tag) already flag as related. Zero-overlap
+        pairs are only ordered later, never excluded. (0.16.4 §1: the
+        notify-first key lost its subject — only check shapes remain.)
+        0.17.0 P2-3.4: pair_score orders the Qwen budget — value features
+        lead (routed numeric + both-sides-extractable), C4 subject/tags
+        overlap is the base, row distance the tiebreak. Order-only: a
+        single pair's verdict never changes (owner-approved boundary).
+        Weights initial; P2-3.2 recalibrates on the noisy corpus.
+        0.15.14 (A5): the former surfaced>=max_notice_pairs early stop is
+        gone — notices are recorded per-pair inside the loop (write-on-
+        discovery), so an early stop only saved Qwen time, which the
+        examined-pairs cap now bounds deterministically.
+        Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS is the job-global Qwen
+        pool living in ctx["budget"] (internal + channel C + A-cross); the
+        per-phase caps live in _JobQwenBudget."""
+        memory_id = int(ctx["memory_id"])
         from ..semantic_conflict import vector_cosine
 
         hint_vectors = self.db.memories.subject_tags_vectors(
@@ -1984,17 +2238,13 @@ class EvidencePipeline:
         )
         own_vector = hint_vectors.get(int(memory_id))
         if own_vector is None:
-            overlap_rank = {peer_id: 0.0 for peer_id in by_peer}
+            overlap_rank: dict[int, float] = {peer_id: 0.0 for peer_id in by_peer}
         else:
             overlap_rank = {
                 peer_id: vector_cosine(own_vector, hint_vectors.get(peer_id))
                 for peer_id in by_peer
             }
-        # 0.17.0 P2-3.4: pair_score orders the Qwen budget — value features
-        # lead (routed numeric + both-sides-extractable), C4 subject/tags
-        # overlap is the base, row distance the tiebreak. Order-only: a
-        # single pair's verdict never changes (owner-approved boundary).
-        # Weights initial; P2-3.2 recalibrates on the noisy corpus.
+
         def _pair_score(
             peer_id: int, triple: "tuple[dict[str, Any], Any, Any, float]",
         ) -> float:
@@ -2014,13 +2264,6 @@ class EvidencePipeline:
             except (TypeError, ValueError):
                 return 0.0
 
-        # 0.15.14 (A5): the former surfaced>=max_notice_pairs early stop is
-        # gone — notices are recorded per-pair inside the loop (write-on-
-        # discovery), so an early stop only saved Qwen time, which the
-        # examined-pairs cap now bounds deterministically.
-        # Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS is the job-global Qwen
-        # pool living in ctx["budget"] (internal + channel C + A-cross); the
-        # per-phase caps live in _JobQwenBudget.
         ctx["ordered"] = sorted(
             by_peer.items(),
             key=lambda item: (
@@ -2033,17 +2276,23 @@ class EvidencePipeline:
 
     def _conflict_classify(
         self, backend: "SemanticBackend", left_env: dict[str, Any], right_env: dict[str, Any],
+        retry_allowed: "bool | None" = None,
     ) -> Any:
         """0.16.2 unified-flow classify closure, hoisted to a method for the
         Q1 phase split. Once a pair starts, only the inference hard timeout
         may stop it. The job budget is a fairness gate between pairs; the
         retry gate (A6) is the same fairness idea one level down: with
         another job queued, a protocol-invalid output fails fast instead of
-        doubling its own latency."""
+        doubling its own latency. ``retry_allowed`` overrides the default
+        queue-derived gate explicitly (the claim bridge passes False — its
+        write-time budget cannot absorb a retry)."""
         try:
             return backend.classify_pair(
                 left_env, right_env, deadline_monotonic=None,
-                retry_allowed=not self._semantic_worker.has_pending_jobs(),
+                retry_allowed=(
+                    not self._semantic_worker.has_pending_jobs()
+                    if retry_allowed is None else retry_allowed
+                ),
             )
         except TypeError:
             # Test/legacy backends implementing the original two-arg protocol.
@@ -2402,12 +2651,6 @@ class EvidencePipeline:
                 # currently under application: scan review only (spec §15.3),
                 # no new notice.
                 continue
-            member_versions = [
-                {"memory_id": memory_id, "version": left_version, "value": gate.value_a,
-                 "evidence": {"quote": unit.text, "start": unit.start_offset, "end": unit.end_offset}},
-                {"memory_id": peer_id, "version": right_version, "value": gate.value_b,
-                 "evidence": {"quote": hit.get("text"), "start": hit.get("start_offset"), "end": hit.get("end_offset")}},
-            ]
             # Model output may omit keys (or parsed may not be a dict at all):
             # fall back to the gate's normalised value instead of raising
             # KeyError (mirrors the scan-path defence in tools.py).
@@ -2416,12 +2659,6 @@ class EvidencePipeline:
                 if forward_signal is not None and isinstance(forward_signal.parsed, dict)
                 else {}
             )
-            value_groups = [
-                {"normalized_value": gate.value_a, "display_value": forward_parsed.get("value_a") or gate.value_a,
-                 "members": [f"{memory_id}@{left_version}"]},
-                {"normalized_value": gate.value_b, "display_value": forward_parsed.get("value_b") or gate.value_b,
-                 "members": [f"{peer_id}@{right_version}"]},
-            ]
             outcome = self.db.record_semantic_notice(
                 memory_id=memory_id, peer_id=peer_id,
                 # 0.16.4 §1: cross-memory notify is excluded at collection,
@@ -2429,37 +2666,40 @@ class EvidencePipeline:
                 severity="normal",
                 notice_type="semantic_evidence",
                 title=f"Possible memory change with #{peer_id}", message=decision.reason,
-                payload={
-                    "route": "notice_ready", "reason": gate.reason,
-                    "prompt_version": PAIR_PROMPT_VERSION,
-                    "anchors": decision.anchors,
-                    "slot_key": slot_key,
-                    "slot_provenance": {
-                        "entity": "workspace", "scope": "subject",
-                        "attribute": (
-                            "deterministic_skeleton" if direct is not None
-                            else "single_direction_extraction"
-                        ),
+                payload=_conflict_notice_payload(
+                    reason=str(gate.reason),
+                    attribute=(
+                        "deterministic_skeleton" if direct is not None
+                        else "single_direction_extraction"
+                    ),
+                    slot_key=slot_key,
+                    left_id=int(memory_id), left_version=left_version,
+                    left_value_norm=str(gate.value_a or ""),
+                    left_display=str(forward_parsed.get("value_a") or gate.value_a),
+                    left_quote=unit.text,
+                    left_member_extra={"start": unit.start_offset, "end": unit.end_offset},
+                    left_evidence_extra={
+                        "start_offset": unit.start_offset, "end_offset": unit.end_offset,
                     },
-                    "member_versions": member_versions,
-                    "value_groups": value_groups,
-                    "candidate_key": {
-                        "detector_version": CONFLICT_DETECTOR_VERSION,
-                        "members": sorted([f"{memory_id}@{left_version}", f"{peer_id}@{right_version}"]),
-                        "evidence": [],
+                    right_id=int(peer_id), right_version=right_version,
+                    right_value_norm=str(gate.value_b or ""),
+                    right_display=str(forward_parsed.get("value_b") or gate.value_b),
+                    right_quote=hit.get("text"),
+                    right_member_extra={
+                        "start": hit.get("start_offset"), "end": hit.get("end_offset"),
                     },
-                    "left_evidence": {
-                        "text": unit.text, "start_offset": unit.start_offset,
-                        "end_offset": unit.end_offset,
-                    },
-                    "right_evidence": {
-                        "text": hit.get("text"), "start_offset": hit.get("start_offset"),
+                    right_evidence_extra={
+                        "start_offset": hit.get("start_offset"),
                         "end_offset": hit.get("end_offset"),
                     },
-                    "left_content_hash": evidence_content_hash(content),
-                    "right_content_hash": evidence_content_hash(str(peer.get("content") or "")),
-                    "qwen_signal": qwen,
-                },
+                    left_content=str(content or ""),
+                    right_content=str(peer.get("content") or ""),
+                    extra={
+                        "prompt_version": PAIR_PROMPT_VERSION,
+                        "anchors": decision.anchors,
+                        "qwen_signal": qwen,
+                    },
+                ),
                 dedupe_key=notice_dedupe_key(
                     memory_id, peer_id, left_version, right_version, "semantic_evidence",
                 ),
@@ -2492,7 +2732,8 @@ class EvidencePipeline:
                 # 0.17.0: peers the evidence channel surfaced THIS run — the
                 # wrapper pops this internal key; channels B/C ride BEFORE the
                 # dispatch phase now and feed its skip set directly (Q1).
-                "surfaced_peers": sorted(ctx["surfaced_peer_ids"]),
+                # Underscore = internal convention (r2s-08).
+                "_surfaced_peers": sorted(ctx["surfaced_peer_ids"]),
             }
             if ctx["internal_found"]:
                 result["internal_conflicts"] = ctx["internal_found"]
@@ -2560,17 +2801,25 @@ class EvidencePipeline:
             # Degradations may also occur on pairs before a later pair surfaces
             # a notice, so the list is attached to completed outcomes too.
             result["reasons_seen"] = ctx["reasons_seen"]
-        # 0.16.12 perf baseline: the examination budget actually consumed this
-        # run (additive receipt key; also visible on completed write receipts).
-        # Q1 (owner D1): 口径升级为 job 全局 — internal + channel C + A-cross
-        # 之和（数值上 = 旧口径 + C）。
-        result["pairs_examined"] = int(ctx["budget"].pairs_examined)
+        if ctx["direct_verdicts"]:
+            result["direct_verdicts"] = int(ctx["direct_verdicts"])
+        return result
+
+    def conflicts_receipt_tail(self, ctx: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        """r2s-08: ONE place stamps the receipt tail — qwen_budget /
+        pairs_examined / elapsed_ms. The finalize path, the wrapper's
+        truncation-terminal branch, and process_conflicts all ride it (the
+        tail was previously stamped three ways and had already drifted: the
+        terminal branch forgot elapsed, finalize stamped pairs_examined: 0
+        unconditionally, breaking the §3.3 zero-values-never-appear rule)."""
+        if ctx["phase_ms"]:
+            result["elapsed_ms"] = round(sum(ctx["phase_ms"]), 1)
+        if ctx["budget"].pairs_examined:
+            result["pairs_examined"] = int(ctx["budget"].pairs_examined)
         qwen_budget = ctx["budget"].receipt_block()
         if qwen_budget is not None:
             # Q1 §3.3 additive observability — absent entirely when nothing
             # was deducted and nothing was skipped.
             result["qwen_budget"] = qwen_budget
-        if ctx["direct_verdicts"]:
-            result["direct_verdicts"] = int(ctx["direct_verdicts"])
         return result
 

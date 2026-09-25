@@ -1830,7 +1830,9 @@ def test_scan_candidates_pages_persist_progress_and_clear_gate(tmp_path: Path) -
     tools = MemoryTools(settings=settings, db=db)
     # The scan path is exercised without requiring sqlite-vec in this gate test.
     tools.db.state.sqlite_vec_available = True
-    tools.db.scan_rule_candidates = lambda **kwargs: {
+    # 0.17.0 R2: scan_rule_candidates moved from the db layer to ScanPipeline —
+    # the gate test stubs the pipeline method, not db.
+    tools._scan_pipeline.scan_rule_candidates = lambda **kwargs: {
         "anchors_scanned": min(2, 3 - int(kwargs["after_memory_id"])),
         "next_anchor_memory_id": 2 if int(kwargs["after_memory_id"]) == 0 else None,
         "candidates": [],
