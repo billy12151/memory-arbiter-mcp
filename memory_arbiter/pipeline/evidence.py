@@ -10,6 +10,7 @@ from typing import Any, Callable, TYPE_CHECKING, Iterator
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
+    EMBED_PREFIX_STS,
     SEMANTIC_JOB_TIMEOUT_MS,
     SEMANTIC_MAX_EVIDENCE_UNITS,
     SEMANTIC_MAX_EXAMINED_PAIRS,
@@ -108,8 +109,8 @@ def _attr_cos_or_none(
         return None
     if normalize_attribute(str(attr_a)) == normalize_attribute(str(attr_b)):
         return None
-    ea = embedder.embed_text(prefix="", body=str(attr_a))
-    eb = embedder.embed_text(prefix="", body=str(attr_b))
+    ea = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=str(attr_a))
+    eb = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=str(attr_b))
     if not ea.embedding or not eb.embedding:
         return None
     # Degenerate-vector guard: byte-identical embeddings carry ZERO
@@ -678,7 +679,7 @@ class EvidencePipeline:
         from ..constants import (
             CLAIMS_MAX_NOTICES_PER_WRITE,
             SEMANTIC_CANDIDATE_COS_CEIL,
-            SEMANTIC_CANDIDATE_COS_FLOOR,
+            SEMANTIC_CHANNEL_C_COS_FLOOR,
             SEMANTIC_CROSS_KNN_WINDOW,
         )
         from ..semantic_conflict import attr_is_versional, vector_cosine
@@ -773,7 +774,7 @@ class EvidencePipeline:
                 if not vector:
                     continue
                 cos = vector_cosine(attr_vector, vector)
-                if not (SEMANTIC_CANDIDATE_COS_FLOOR <= cos < SEMANTIC_CANDIDATE_COS_CEIL):
+                if not (SEMANTIC_CHANNEL_C_COS_FLOOR <= cos < SEMANTIC_CANDIDATE_COS_CEIL):
                     continue
                 checked += 1
                 peer = peer_row(peer_id)
@@ -1109,7 +1110,7 @@ class EvidencePipeline:
         )
         row_embeddings: list[list[float]] = []
         ok = True
-        for embed_result in embedder.embed_texts([seg.text for seg in row_segments]):
+        for embed_result in embedder.embed_texts([seg.text for seg in row_segments], prefix=EMBED_PREFIX_STS):
             if not embed_result.embedding:
                 ok = False
                 break
@@ -1178,7 +1179,7 @@ class EvidencePipeline:
                     if stop or time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
                         break  # phase cap: stop submitting, tail is lowest-value
                     batch = ranked_segments[start:start + SEMANTIC_STREAM_BATCH_ROWS]
-                    results = embedder.embed_texts([seg.text for seg in batch])
+                    results = embedder.embed_texts([seg.text for seg in batch], prefix=EMBED_PREFIX_STS)
                     pairs: list[tuple[Any, Any]] = []
                     for seg, result in zip(batch, results):
                         if not result.embedding:
@@ -1259,7 +1260,7 @@ class EvidencePipeline:
         from ..rowseg import segment_rows
         phase_started = time.monotonic()
         segments = segment_rows(str(record.get("subject") or ""), content)
-        results = embedder.embed_texts([segment.text for segment in segments])
+        results = embedder.embed_texts([segment.text for segment in segments], prefix=EMBED_PREFIX_STS)
         if time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
             # The llama call itself cannot be interrupted mid-flight; the cap
             # marks the job incomplete (retry) and keeps the stall observable
@@ -1758,7 +1759,7 @@ class EvidencePipeline:
             # the screen runs on the MAIN write path too, not just
             # re-detections (实施后对抗 review P0：粗筛+通道 C 首写从不执行).
             subject_embed = embedder.embed_text(
-                prefix="", body=str(record.get("subject") or ""),
+                prefix=EMBED_PREFIX_STS, body=str(record.get("subject") or ""),
             )
             subject_vec = subject_embed.embedding or None
         allowed_memory_ids: "list[int] | None" = ctx["allowed_memory_ids"]

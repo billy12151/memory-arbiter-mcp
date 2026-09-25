@@ -862,12 +862,24 @@ def _d_vector_space(ctx: _DeepCtx) -> Finding:
         configured_space is None
         or (ctx.vec_meta.get("state") == "ready" and active_space == configured_space)
     )
+    state = ctx.vec_meta.get("state") or "unmanaged"
+    detail = (
+        f"state={state}, "
+        f"active={active_space or 'none'}, configured={configured_space or 'none'}"
+    )
+    # 0.17.0 强制提示（owner 指令）：向量空间不匹配 = 升级后必须重建，
+    # 提示带具体动作且完成前（state 翻 ready）持续出现。
+    if state in {"mismatch", "failed"}:
+        detail += (
+            " — 升级待办：向量索引需重建，请执行 "
+            "memory_repair(task='rebuild_evidence')（约 6 分钟/2 万向量）；"
+            "完成前向量检索与冲突扫描降级为词法通道。"
+        )
     return _finding(
         "vector.space", space_ok,
-        f"state={ctx.vec_meta.get('state') or 'unmanaged'}, "
-        f"active={active_space or 'none'}, configured={configured_space or 'none'}",
+        detail,
         evidence={
-            "state": ctx.vec_meta.get("state", "unmanaged"),
+            "state": state,
             "active_space_id": active_space,
             "configured_space_id": configured_space,
         },

@@ -88,7 +88,7 @@ def test_write_admission_folds_near_neighbor_workspace_names(tmp_path: Path) -> 
         @staticmethod
         def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
             vector = [0.0] * 32
-            text = f"{prefix}\n{body}".casefold()
+            text = body.casefold()  # 直方图只对 body（prefix 不参与分箱）
             for ch in text:
                 vector[ord(ch) % 32] += 1.0
             return EmbedResult(vector, False, len(text), len(text))
@@ -107,8 +107,9 @@ def test_write_admission_folds_near_neighbor_workspace_names(tmp_path: Path) -> 
     db.init_vec_index_state(
         CharHistogramEmbedder.embedding_space_id, True, active_dim=CharHistogramEmbedder.dim,
     )
-    # wsA 先注册；wsB 字符直方图与 wsA 近似（仅一字符之差）→ 折到 wsA
-    for ws in ("wsA", "wsB"):
+    # wsA 先注册；wsA2 与 wsA 直方图近邻（多一字符，cos≈0.866/距离≈0.134
+    # < 0.25，body-only 直方图口径）→ 折到 wsA
+    for ws in ("wsA", "wsA2"):
         result = tools.memory_write(
             content=f"内容 {ws}", subject=f"s-{ws}", workspace=ws,
             source_type="agent_generated", tags=[],
@@ -117,7 +118,7 @@ def test_write_admission_folds_near_neighbor_workspace_names(tmp_path: Path) -> 
     rows = _rows(tools)
     assert rows[0][1] == "wsA"
     assert rows[1][1] == "wsA", f"近邻名应被 admission 归一: {rows}"
-    assert rows[1][0] == "wsB"  # raw 保留
+    assert rows[1][0] == "wsA2"  # raw 保留
     # 完全不同的名字不折叠
     result = tools.memory_write(
         content="内容 billing", subject="s-billing", workspace="billing",

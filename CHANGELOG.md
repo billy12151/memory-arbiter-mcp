@@ -35,6 +35,15 @@ Versions follow semantic versioning.
 - **fix(gate): 负样本误报判分方向修正（owner 2026-09-25 拍板，E3 实证驱动）。** `conflict.by_shape.governed_negative` 的 firing 类指标（identified/sync/async）是负样本误报——lower-is-better 才对，原 higher-is-better 把本次 FP 改善 7→6 误判 FAILED（31 条少数样本语料 14.3% 跌幅超 10% 阈值）即活证。修=入 `_CONFLICT_FALSE_LABELS` 精确段匹配（`governed_negative.identified/sync/async`），miss（负样本上不报=正确）保持 higher-is-better 不受牵连；+方向双向测试。
 - **拍板记录（2026-09-25）**：①行上下文 envelope **保留**（E3 实测误报降、召回持平、C FP=0 守住，详见 envelope 方案 §9.4）；②update 不强制 claims；③**发版上线要求追加：0.17.0 上线时必须强制提示存量用户更新向量值（全量重扫+重嵌），doctor 同步提示，完成前提示不消失**——落 embedder 前缀方案与发版 checklist。
 
+### Changed (0.17.0 追加包：embedder 任务前缀 + 阈值全量重标，owner 2026-09-25 拍板，未发版一次性收敛)
+
+方案：docs/mema-embedder-prefix-recalibration-plan-2026-09-25.md（mema #1073；两轮 review——对码轮+独立对抗轮——修正全部回写 §9.1/§9.2）。根因=mema #1071：`embed_text(prefix, body)` 的前缀形参从未被用（全仓 25 处 `prefix=""`），EmbeddingGemma 训练带任务 prompt，相似度判别不准的根因即此（句对二分 77.8%→100%，分离度 gap −0.0782→+0.0293）；#1072 选型保留 EmbeddingGemma-300M 只补前缀。
+
+- **feat(P1): 任务前缀分型落地。** 新常量 `EMBED_PREFIX_STS`（存量/配对：行、attr、summary、subject_tags、workspace——M0 实测 sts 配对分离度与探针 9/9 全优）与 `EMBED_PREFIX_SEARCH`（检索查询，self-recall 96/98 ≥ 现状 95）；25 处裸调用按（存储侧，查询侧）配对语义改型，`embed_texts` 增 prefix 形参且 batch 路由与单条路统一 `prefix+"\n"+body` 拼接（batch 资格判定扣 prefix 长度，防 n_batch 截尾分叉）；`EMBEDDING_PIPELINE_VERSION` 2→3（space_id 轮换触发重建链）。**对抗轮 P0 修正**：WRITE_SIMILAR_SUBJECT_FLOOR 0.72 回退 0.45——该阈值消费方是 difflib 词法 ratio 非 embedder 产物，M0 的 sts 余弦是错尺。
+- **feat(P3): 阈值重标（每组带 M0 分布数据锚，`eval/calibration/prefix-calibration-m0.json`+`eval/probe_prefix_matrix.py` 落档）。** 冲突带 FLOOR 0.60→**0.70**（sts true_min 0.7467/p5 0.7612，44 真对全保留）；CEIL/EXACT_BOOST 0.98 不变（近重复 0.9965 仍排除；true 9 条 ≥0.98 过顶落 duplicates=既有 doctrine，harness 复验）；CLAIM_ATTR_TAU 0.70 不变（异属性 max 0.584，余量 0.116）；**通道 C 独立下沿 `SEMANTIC_CHANNEL_C_COS_FLOOR=0.60`**（attr↔row 跨型几何与 row↔row 不同：min 0.5696/mean 0.7037，维持旧值待带标签 M1 数据）；检索 FLOOR 0.52→**0.48**（relevant best min 0.5085/p5 0.5238）、MIDBAND_CEIL 0.75→**0.67**（relevant p75 0.6718）；gates band 除数改 (CEIL−FLOOR)（原硬编码 0.20 与带宽不符）。E 组（workspace 三阈值 0.25）**回退不动**：sts 下真实 11 对 alias 距离 max 0.4264 超闸，但负例分布未测、0.45 有相似名折叠风险——挂观察待补负例语料。
+- **feat(P4): 升级强制提示。** doctor `vector.space` mismatch/failed 时 detail 带「升级待办：执行 memory_repair(task='rebuild_evidence')」指引（owner 指令：完成前不消失）；vec_disabled 警告五处统一 `vec_disabled_warning()` 带 rebuild 指引（boot 不自动重建——对抗轮 P0 实证 rebuild 唯一入口是显式任务，boot 只武装 mismatch）。
+- **test(P2): M0 标定脚本+数据落档；测试夹具全量重校。** FakeEmbedder 家族 13 处补 prefix 形参；recall floor 夹具 0.4805/0.4 夹逼（float64 教训同款）；冲突带夹具 cos≈0.75；keyword 救济带参数化 [0.47/0.66/0.67/0.90]（0.67 恰在 ceil 钉半开边界）；scan 家族 fake 夹角 cos≈0.72（新带内且名字距离 0.28>0.25 不折叠）；char-histogram fake 改 body-only（前缀字符不参与分箱）；doctor golden space id 掩码 `<SPACE_ID>`（版本绑定值）；space id/pipeline version 字面钉同步 v3。全量 2792 passed+ruff+mypy 绿。
+
 ### Changed (0.17.0 追加包：检测行上下文 envelope——碎行召回修复，owner 2026-09-25 拍板，未发版一次性收敛)
 
 方案：docs/mema-row-context-envelope-plan-2026-09-25.md（mema #1070；D1 context=标题+前后邻行帽 300 字/D3 翻案 C 接入 peer 侧且 FP=0 硬线/D4 值须取自主行/D5 方向验收；对码修正：服务内扫描侧无 Qwen pair 路径，D2 无对象）。

@@ -157,6 +157,17 @@ SEMANTIC_CROSS_KNN_WINDOW = 16
 # find-rank 15 after RRF rank-flattening) — the fusion boost bypasses rank
 # arithmetic entirely. The detection side reuses the same ceiling: pairs at
 # or above it are duplicates, not conflicts (G4 repeatability skip).
+# embedder 任务前缀（owner 2026-09-25 拍板，方案 docs/mema-embedder-prefix-
+# recalibration-plan-2026-09-25.md；EmbeddingGemma 训练带任务 prompt，llama.cpp
+# 载 GGUF 不自动补——25 处裸调用是相似度不准的根因，mema #1071）。分型按
+# （存储侧，查询侧）配对语义：存量行/attr/summary/subject_tags/workspace 一律
+# sts（配对通道主消费者，M0 实测 sts 配对分离度与探针 9/9 全优）；检索查询
+# search（M0 self-recall 96/98 ≥ 现状 95）。doctor 维度探针豁免。
+EMBED_PREFIX_STS = "task: sentence similarity | query: "
+EMBED_PREFIX_SEARCH = "task: search result | query: "
+# 0.17.0 前缀重标注记（M0）：sts 下 nontrue 近重复对可达 0.9965（≥CEIL 正确
+# 落 duplicates），但 true 里也有 9 条 ≥0.9837——新空间「过顶=近重复冲突通道
+# 不收」的既有 doctrine 需 harness 复验；本值与 CEIL 同源（A2 联动，勿单独动）。
 COS_EXACT_BOOST = 0.98
 # Gate-v2 G4 candidate cosine band on TRUE row-to-row cosine (calibration
 # table §1: true conflicts 0.80-0.97, same-topic non-conflicts 0.64-0.75,
@@ -165,19 +176,25 @@ COS_EXACT_BOOST = 0.98
 # hence the ceil == COS_EXACT_BOOST). Non-unit row vectors (|v|≈16.5) make
 # L2-to-cos conversion unreliable, so the gate runs on fetched vectors, one
 # batched IN query per collection loop.
-SEMANTIC_CANDIDATE_COS_FLOOR = 0.60
+# 0.17.0 前缀重标（M0 sts 分布、生产同款 prefix+\n 拼接，
+# eval/results/prefix-calibration-m0.json）：true_min 0.7467 / p5 0.7612 →
+# 0.70 保留 100% 语料真对并上收噪声带。
+SEMANTIC_CANDIDATE_COS_FLOOR = 0.70
 SEMANTIC_CANDIDATE_COS_CEIL = COS_EXACT_BOOST
 # 检索线档位（0.17.0 追加包 K1/K2：关键词模式查询+召回余弦档位，方案
 # docs/mema-keyword-query-and-cos-bands-2026-09-24.md §1/§4；owner
 # 2026-09-24 拍板。与检测线的 SEMANTIC_CANDIDATE_COS_* 用途不同、各自
 # 标定，禁止共用）。
-COS_RECALL_FLOOR = 0.52
+# 0.17.0 前缀重标（M0 search/sts 分布）：relevant best min 0.5085 / p5
+# 0.5238 → 0.48 留余量（旧 0.52 口径在新空间会砍贴线 relevant）。
+COS_RECALL_FLOOR = 0.48
 # 向量结果准入线：evidence-only 候选（无词法席位）的 best 行真余弦低于
 # 此线不进结果（K2；仅 active 查询路径，expired 审计豁免沿 8.25 口径）。
 # 0.58 档实测会删掉 A04(0.567)/A12(0.543) 两条已在 top10 内的 relevant
 # （R@10 0.889 击穿 ≥0.93 门）；0.52 由 owner 拍板留余量，三条贴线
 # relevant（0.543/0.554/0.567）全保留。换嵌入模型或语料扩版必须重标。
-COS_MIDBAND_CEIL = 0.75
+# 0.17.0 前缀重标（M0）：relevant best p75 0.6718 → 救济带上界 0.67。
+COS_MIDBAND_CEIL = 0.67
 # 中间带上界（relevant p75=0.769 / borderline p75=0.678 / irrelevant
 # 长尾 0.794 的重叠区右缘）；[COS_RECALL_FLOOR, COS_MIDBAND_CEIL) 是
 # 关键词救济带，不随准入线变动。
@@ -225,6 +242,10 @@ SEMANTIC_MAX_ROWS = 256
 # with the P2-0 corpus during P2-3.2.
 # 0.17.0 P2-3.3/P2-5.3: claims channel attr-vector gate τ (8th-round spike:
 # A/B recall 4/4, C2+D1 accepted as advisory FPs; asymmetric-benefit doctrine).
+# 0.17.0 前缀重标注记（对抗 review P1-3）：通道 C 的 attr↔row 跨型几何与
+# row↔row 不同（M0 sts：min 0.5696/mean 0.7037/max 0.7889，无标签）——维持
+# 旧下沿 0.60 待带标签 M1 数据，勿随 A1 的 0.70 联动。
+SEMANTIC_CHANNEL_C_COS_FLOOR = 0.60
 CLAIM_ATTR_TAU = 0.70
 # 0.17.0 review A3: the claims channel is zero-Qwen with no natural pairs
 # cap — notices per write are bounded here instead (overflow visible).
@@ -289,6 +310,8 @@ WRITE_SIMILAR_CONTENT_COSINE = 0.4
 # (含 noisy 改写) s∈[0.32,1.0]/c∈[0.17,0.74]，组内样板互撞带 s≈0.10/c∈
 # [0.60,0.74]（旧豁免线 0.60 正落在带内致 sim07 假阳性），负例带 c≤0.16。
 # 地板 0.22 取负例带之上、真值地板之下；0.45/0.80 分层兜 sim12 型低内容对。
+# 对抗 review P0 修正：此阈值消费方是 difflib 词法 ratio（write.py），非
+# embedder 产物——不受前缀影响，0.45 维持（M0 的 sts 余弦是错尺，勿用）。
 WRITE_SIMILAR_SUBJECT_FLOOR = 0.45
 WRITE_SIMILAR_CONTENT_FLOOR = 0.22
 WRITE_SIMILAR_SUBJECT_STRONG = 0.80
@@ -317,14 +340,14 @@ SCAN_DUPLICATES_MAX_PAGES = 200
 
 # workspace normalization Qwen guard (A/B: top-3 beats top-5; over-distance
 # candidates must never reach the model — see tools._suggest_workspace_candidate)
-QWEN_CANDIDATE_DISTANCE = 0.25
+QWEN_CANDIDATE_DISTANCE = 0.25  # 0.17.0 前缀重标暂缓：sts 下 11 对真实 alias 距离 max 0.4264 超此值，但负例分布未测（0.45 有相似名折叠风险，scan 家族夹具即证）——补负例语料后重标（挂观察）
 QWEN_CANDIDATE_TOP_K = 3
 QWEN_BUDGET_MS = 750
 
 # workspace recall / normalization thresholds (global; NOT per-isolation)
-WORKSPACE_MATCH_DISTANCE = 0.25
+WORKSPACE_MATCH_DISTANCE = 0.25  # 0.17.0 前缀重标暂缓：sts 下 11 对真实 alias 距离 max 0.4264 超此值，但负例分布未测（0.45 有相似名折叠风险，scan 家族夹具即证）——补负例语料后重标（挂观察）
 WORKSPACE_RECALL_ADMISSION = True
-WORKSPACE_RECALL_CUTOFF = 0.25
+WORKSPACE_RECALL_CUTOFF = 0.25  # 0.17.0 前缀重标暂缓：sts 下 11 对真实 alias 距离 max 0.4264 超此值，但负例分布未测（0.45 有相似名折叠风险，scan 家族夹具即证）——补负例语料后重标（挂观察）
 WORKSPACE_WEAK_VECTOR_WEIGHT = False
 WORKSPACE_MIN_NAME_LEN = 3
 

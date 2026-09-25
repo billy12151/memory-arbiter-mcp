@@ -59,7 +59,7 @@ class _DirectedEmbedder:
         return EmbedResult(vector, False, 1, 1)
 
     @classmethod
-    def embed_texts(cls, bodies: "list[str]", max_body_chars: "int | None" = None) -> list[EmbedResult]:
+    def embed_texts(cls, bodies: "list[str]", prefix: str = "", max_body_chars: "int | None" = None) -> list[EmbedResult]:
         return [cls.embed_text("", body) for body in bodies]
 
 

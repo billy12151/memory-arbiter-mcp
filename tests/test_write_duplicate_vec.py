@@ -37,7 +37,7 @@ class CharHistogramEmbedder:
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
         vector = [0.0] * 32
-        text = f"{prefix}\n{body}".casefold()
+        text = body.casefold()  # 直方图只对 body（prefix 不参与分箱）
         for ch in text:
             vector[ord(ch) % 32] += 1.0
         return EmbedResult(vector, False, len(text), len(text))

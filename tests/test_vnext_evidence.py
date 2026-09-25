@@ -34,11 +34,11 @@ class FakeEmbedder:
     last_encode_error = None
 
     @classmethod
-    def embed_texts(cls, texts: list[str]) -> list["EmbedResult"]:
+    def embed_texts(cls, texts: list[str], prefix: str = "") -> list["EmbedResult"]:
         # C1: index-path batch API — the fake has no batch closure, so it
         # delegates per item (the same route ManagedEmbedder takes when
         # encode_batch is None).
-        return [cls.embed_text(prefix="", body=text) for text in texts]
+        return [cls.embed_text(prefix=prefix, body=text) for text in texts]
 
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
@@ -2916,7 +2916,8 @@ def test_short_paragraph_merge_never_crosses_heading_barrier() -> None:
 def test_embedding_pipeline_version_rotated_for_exact_offsets() -> None:
     from memory_arbiter.embedder import EMBEDDING_PIPELINE_VERSION
 
-    assert EMBEDDING_PIPELINE_VERSION == 2
+    # v3（owner 2026-09-25）：任务前缀上线（25 处裸调用改型），空间轮换
+    assert EMBEDDING_PIPELINE_VERSION == 3
 
 
 # ── 2026-08-21 review round: notice-pipeline and scan wide-gate fixes ────────

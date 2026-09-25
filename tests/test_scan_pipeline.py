@@ -24,11 +24,11 @@ class FakeEmbedder:
     last_encode_error = None
 
     @classmethod
-    def embed_texts(cls, texts: list[str]) -> list["EmbedResult"]:
+    def embed_texts(cls, texts: list[str], prefix: str = "") -> list["EmbedResult"]:
         # C1: index-path batch API — the fake has no batch closure, so it
         # delegates per item (the same route ManagedEmbedder takes when
         # encode_batch is None).
-        return [cls.embed_text(prefix="", body=text) for text in texts]
+        return [cls.embed_text(prefix=prefix, body=text) for text in texts]
 
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
@@ -36,13 +36,14 @@ class FakeEmbedder:
         # Gate-v2 G4: the two directions are deliberately NOT orthogonal —
         # real-model same-template sentences sit in the 0.95+ cosine band
         # (标定 #3), orthogonal fakes (cos 0.0) would be filtered as noise
-        # by the candidate cosine gate before any ranking happens. The
-        # angle is tuned to cos≈0.68: inside the [0.60, 0.98) conflict band
-        # yet OUTSIDE the workspace-name admission radius (distance ≤0.25
-        # would fold "apisvc" into "dbpgsql" and break the suspect channel).
+        # by the candidate cosine gate before any ranking happens. The angle
+        # is tuned to cos≈0.72: inside the NEW [0.70, 0.98) band (0.17.0
+        # 前缀重标 FLOOR 0.70) yet OUTSIDE the workspace-name admission
+        # radius (name distance = 1−0.72 = 0.28 > 0.25, "apisvc" stays
+        # unfolded from "dbpgsql" — the suspect channel needs that).
         if "postgres" in text or "pgsql" in text:
             return EmbedResult([0.9308, 0.3653], False, len(text), len(text))
-        return EmbedResult([0.3653, 0.9308], False, len(text), len(text))
+        return EmbedResult([0.42, 0.9075], False, len(text), len(text))
 
 
 def make_tools(tmp_path: Path) -> MemoryTools:

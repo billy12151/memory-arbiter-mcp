@@ -30,7 +30,7 @@ class _VecEmbedder:
     last_encode_error = None
 
     @staticmethod
-    def embed_texts(texts):
+    def embed_texts(texts, prefix: str = ""):
         return [_VecEmbedder.embed_text(prefix="", body=t) for t in texts]
 
     @staticmethod

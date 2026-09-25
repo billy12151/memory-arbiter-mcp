@@ -260,11 +260,16 @@ def compute_pair_score(
         PAIR_SCORE_W_NEGATION,
         PAIR_SCORE_W_NUMERIC_ROUTE,
         PAIR_SCORE_W_VALUES_DIFFER,
+        SEMANTIC_CANDIDATE_COS_CEIL,
         SEMANTIC_CANDIDATE_COS_FLOOR,
     )
     from ..semantic_conflict import _NEGATION_WORDS, normalize_value
 
-    band = max(0.0, min(1.0, (float(pair_cos) - SEMANTIC_CANDIDATE_COS_FLOOR) / 0.20))
+    band = max(0.0, min(
+        1.0,
+        (float(pair_cos) - SEMANTIC_CANDIDATE_COS_FLOOR)
+        / (SEMANTIC_CANDIDATE_COS_CEIL - SEMANTIC_CANDIDATE_COS_FLOOR),
+    ))
     score = PAIR_SCORE_W_CONFLICT_BAND * band
     if str(getattr(decision, "reason", "") or "") == "numeric_value_candidate":
         score += PAIR_SCORE_W_NUMERIC_ROUTE

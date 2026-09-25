@@ -31,7 +31,7 @@ class FakeEmbedder:
     last_encode_error = None
 
     @classmethod
-    def embed_texts(cls, texts):
+    def embed_texts(cls, texts, prefix: str = ""):
         # C1: batch entry used by the index path; fakes delegate per item.
         return [cls.embed_text(prefix="", body=t) for t in texts]
 

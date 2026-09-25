@@ -445,7 +445,7 @@ def test_migrate_into_target_with_existing_vector_keeps_it(tmp_path: Path) -> No
         def embed_text(self, *, prefix: str = "", body: str = "", max_body_chars: int = 0):
             return type("ER", (), {"embedding": [0.25, 0.75], "last_encode_error": None})()
 
-        def embed_texts(self, texts):
+        def embed_texts(self, texts, prefix: str = ""):
             return [self.embed_text(prefix="", body=t) for t in texts]
 
     register(tools, "target-ws")
@@ -957,8 +957,8 @@ def test_over_distance_candidate_is_filtered_before_qwen(tmp_path):
             return WorkspaceCandidateSignal(candidates[0] if candidates else None,
                                             "same_project", 0.95, "hallucinated")
 
-    # Only over-distance neighbors (0.357 > 0.25): Qwen must not even be asked.
-    _force_undecided_with_candidate(t, _SpyBackend(), similar_name="proto-test", distance=0.357)
+    # Only over-distance neighbors (0.55 > 0.45 前缀重标阈): Qwen must not even be asked.
+    _force_undecided_with_candidate(t, _SpyBackend(), similar_name="proto-test", distance=0.55)
     r = t.memory_write(content="x", workspace="openclaw", source_type="agent_generated", subject="s")
     assert calls == []  # no candidate survived the distance bound
     assert r["data"]["workspace_canonical"] == "openclaw"  # stays NEW, not merged

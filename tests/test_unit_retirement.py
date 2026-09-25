@@ -149,7 +149,7 @@ def test_streaming_embed_failure_publishes_nothing(tmp_path: Path) -> None:
 
     class _FlakyEmbedder(tv.FakeEmbedder):
         @classmethod
-        def embed_texts(cls, texts):
+        def embed_texts(cls, texts, prefix: str = ""):
             calls["n"] += 1
             if calls["n"] >= 2:  # second batch dies mid-stream
                 raise RuntimeError("synthetic embedder death")

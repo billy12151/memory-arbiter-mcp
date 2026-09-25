@@ -1563,7 +1563,7 @@ def test_default_model_space_id_unchanged_vs_literal_former_defaults(
     from_literals = compute_embedding_space_id(
         digest,
         768,
-        2,
+        3,  # v3（owner 2026-09-25）：任务前缀上线，与 EMBEDDING_PIPELINE_VERSION 同步
         {"n_ctx": 2048, "reserved_tokens": 64, "max_section_chars": 3600},
     )
     assert from_constants == from_literals

@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 from .difference_classifier import _cn_to_int
 from .constants import (
+    EMBED_PREFIX_STS,
     CLAIM_ATTR_TAU,
     SEMANTIC_N_CTX,
     SEMANTIC_PAIR_MAX_ATTEMPTS,
@@ -668,8 +669,8 @@ def direct_value_verdict(
     elif key_cosine is not None:
         cosine = key_cosine
     elif embedder is not None:
-        vec_a = embedder.embed_text(prefix="", body=key_a)
-        vec_b = embedder.embed_text(prefix="", body=key_b)
+        vec_a = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=key_a)
+        vec_b = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=key_b)
         cosine = vector_cosine(list(vec_a.embedding), list(vec_b.embedding))
     else:
         return None

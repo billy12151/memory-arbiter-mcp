@@ -124,7 +124,7 @@ def phase_dump(out: Path) -> None:
             emb = None
             if embedder is not None:
                 er = embedder.embed_text(
-                    prefix="", body=q["query"],
+                    prefix="task: search result | query: ", body=q["query"],
                     max_body_chars=max(EMBEDDING_MAX_SECTION_CHARS, 2048),
                 )
                 emb = er.embedding

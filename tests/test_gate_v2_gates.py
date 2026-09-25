@@ -60,10 +60,10 @@ def test_cosine_gate_band_split() -> None:
     # guard would pass byte-equal pairs unconditionally).
     own = [0.99, 0.141]
     hits = [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]
-    # cos ≈0.99 (ceil) / ≈0.64 (band) / ≈0.14 (floor) / missing vector
+    # cos ≈0.99 (ceil) / ≈0.75 (band, 新带 [0.70,0.98)) / ≈0.14 (floor) / missing vector
     vecs = {
         1: [1.0, 0.0],
-        2: [0.5268, 0.85],
+        2: [0.65, 0.7599],
         3: [0.0, 1.0],
     }
     passed, below, at_ceil = candidate_cos_gate(own, hits, vecs)
@@ -362,11 +362,13 @@ def test_compute_pair_score_formula() -> None:
 
     numeric = SimpleNamespace(reason="numeric_value_candidate",
                               left_value="300", right_value="100")
-    # cos 0.94 → band (0.94-0.60)/0.20 = 1.0（饱和）；全信号 → 0.40+0.25+0.20=0.85
-    assert compute_pair_score(numeric, 0.94, "网关超时 500ms", "网关超时 300ms") == pytest.approx(0.85)
-    # cos 0.60 → band 0 → 0.25+0.20=0.45；cos 0.70 → band 0.5 → 0.65（band 主导）
+    # cos 0.94 → band (0.94-0.70)/0.28 ≈ 0.857 → 0.40*0.857+0.25+0.20 ≈ 0.793
+    assert compute_pair_score(numeric, 0.94, "网关超时 500ms", "网关超时 300ms") == pytest.approx(0.793, abs=1e-2)
+    # cos 0.60 → band 0 → 0.45；cos 0.70 → band 0（新 FLOOR）→ 0.25+0.20=0.45；
+    # cos 0.74 → band (0.04)/0.28 ≈ 0.143 → 0.40*0.143+0.45 ≈ 0.507（band 开始主导）
     assert compute_pair_score(numeric, 0.60, "", "") == pytest.approx(0.45)
-    assert compute_pair_score(numeric, 0.70, "", "") == pytest.approx(0.65)
+    assert compute_pair_score(numeric, 0.70, "", "") == pytest.approx(0.45)
+    assert compute_pair_score(numeric, 0.74, "", "") == pytest.approx(0.507, abs=1e-2)
     # negation: 单侧命中加 0.15，双侧命中（同一形态）不加
     polarity = SimpleNamespace(reason="polarity_changed", left_value=None, right_value=None)
     assert compute_pair_score(polarity, 0.60, "包含缓存", "不包含缓存") == pytest.approx(0.15)
@@ -374,7 +376,8 @@ def test_compute_pair_score_formula() -> None:
     # 值相等（换算后）：裁决层已毙的形态，排序不加分
     equal = SimpleNamespace(reason="numeric_value_candidate",
                             left_value="500ms", right_value="0.5s")
-    assert compute_pair_score(equal, 0.94, "x", "y") == pytest.approx(0.65)
+    # band(0.94) ≈ 0.857 → 0.40*0.857 + 0.25（numeric，值相等不加分）≈ 0.593
+    assert compute_pair_score(equal, 0.94, "x", "y") == pytest.approx(0.593, abs=1e-2)
 
 
 # ── G6b channel C (claims×sentences) ────────────────────────────────────────

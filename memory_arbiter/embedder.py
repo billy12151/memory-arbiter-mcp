@@ -24,7 +24,10 @@ from .timeutil import utc_now_iso
 # the space id must NOT rotate.
 # (0.17.0 C4: the P1-T5 unit-parity audit obligation retired with the unit
 # tables — outline serves from memory_row now; rowseg owns segmentation.)
-EMBEDDING_PIPELINE_VERSION = 2
+# v3 (owner 2026-09-25): task prefixes added to every embedding call
+# (EmbeddingGemma trained prompt-aware; 25 bare calls prefixed) — new
+# vector space, forced rebuild via the standing mismatch chain.
+EMBEDDING_PIPELINE_VERSION = 3
 
 EncodeFn = Callable[[str], list[float]]
 TokenizeFn = Callable[[str], list[int]]
@@ -218,7 +221,9 @@ class ManagedEmbedder:
                 used_tokens=used_tokens,
             )
 
-    def embed_texts(self, texts: list[str]) -> list[EmbedResult]:
+    def embed_texts(
+        self, texts: list[str], prefix: str = "",
+    ) -> list[EmbedResult]:
         """Batched embed for the index path (C1).
 
         One ``embed(list)`` call for items at or under
@@ -235,10 +240,17 @@ class ManagedEmbedder:
         results: list[EmbedResult | None] = [None] * len(texts)
         short_idx = [
             i for i, t in enumerate(texts)
-            if len(t) <= EMBED_TEXTS_SPLIT_CHARS and t.strip()
+            if len(t) + len(prefix) <= EMBED_TEXTS_SPLIT_CHARS and t.strip()
+            # 前缀计入 batch 预算（对抗 review P2-1）：500 字 CJK+前缀
+            # 触 n_batch 截尾会与 per-item 回退分叉
         ]
         if short_idx and self.encode_batch is not None:
-            batch_texts = [texts[i] for i in short_idx]
+            # batch 路由与 embed_text 同一拼接语义（prefix+"\n"+text）——
+            # 对抗 review P1：两条路产出必须逐位同空间（batch 成功/回退一致）
+            batch_texts = [
+                (prefix + "\n" + texts[i]) if prefix else texts[i]
+                for i in short_idx
+            ]
             vectors = self._encode_batch_with_retry(batch_texts)
             if vectors is not None:
                 for i, vec in zip(short_idx, vectors):
@@ -248,7 +260,7 @@ class ManagedEmbedder:
                     )
         for i in range(len(texts)):
             if results[i] is None:
-                results[i] = self.embed_text(prefix="", body=texts[i])
+                results[i] = self.embed_text(prefix=prefix, body=texts[i])
         return [r for r in results if r is not None]
 
     def _encode_batch_with_retry(self, batch: list[str]) -> "list[list[float]] | None":

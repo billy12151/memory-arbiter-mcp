@@ -121,7 +121,7 @@ def test_rescue_skips_lexical_rows() -> None:
     assert "_keyword_rescued" not in pool[0]
 
 
-@pytest.mark.parametrize("cos", [0.51, 0.75, 0.90, None])
+@pytest.mark.parametrize("cos", [0.47, 0.70, 0.90, None])
 def test_rescue_skips_out_of_band(cos: "float | None") -> None:
     pool = [_row(1, cos, content="含桥接的行")]
     _apply_keyword_rescue("桥接 自检", pool)
@@ -129,9 +129,19 @@ def test_rescue_skips_out_of_band(cos: "float | None") -> None:
 
 
 def test_rescue_band_is_half_open_on_floor() -> None:
-    pool = [_row(1, 0.52, content="贴线但含桥接")]
+    pool = [_row(1, 0.47, content="贴线但含桥接")]
     _apply_keyword_rescue("桥接 自检", pool)
-    assert pool[0].get("_keyword_rescued") is True
+    assert pool[0].get("_keyword_rescued") is not True
+
+
+def test_rescue_band_is_half_open_on_ceil() -> None:
+    """0.17.0 前缀重标：救济带 [0.48, 0.67)——0.66 救、0.67（恰在 ceil）不救。"""
+    inside = [_row(1, 0.66, content="含桥接的行")]
+    _apply_keyword_rescue("桥接 自检", inside)
+    assert inside[0].get("_keyword_rescued") is True
+    outside = [_row(1, 0.67, content="含桥接的行")]
+    _apply_keyword_rescue("桥接 自检", outside)
+    assert "_keyword_rescued" not in outside[0]
 
 
 def test_non_keyword_query_never_rescues() -> None:
@@ -200,7 +210,7 @@ class _BandEmbedder:
         return EmbedResult(vector, False, 1, 1)
 
     @classmethod
-    def embed_texts(cls, bodies: "list[str]", max_body_chars: "int | None" = None) -> list[EmbedResult]:
+    def embed_texts(cls, bodies: "list[str]", prefix: str = "", max_body_chars: "int | None" = None) -> list[EmbedResult]:
         return [cls.embed_text("", body) for body in bodies]
 
 

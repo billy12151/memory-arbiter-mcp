@@ -1,11 +1,11 @@
-"""检索线 K2：向量准入线 COS_RECALL_FLOOR=0.52（方案 §3c，owner 拍板 9）。
+"""检索线 K2：向量准入线 COS_RECALL_FLOOR=0.48（方案 §3c，owner 拍板 9）。
 
-evidence-only 候选（无词法席位的纯向量行）best 行真余弦 < 0.52 整条
+evidence-only 候选（无词法席位的纯向量行）best 行真余弦 < 0.48 整条
 不进结果；词法候选豁免（排名+8.25 双保险维持现状）；真余弦缺失
 fail-open；expired 审计路径豁免（宁滥勿缺，沿 8.25 门既有口径）。
 
 标定依据：0.58 实测删 A04(0.567)/A12(0.543) 两条已在 top10 内的
-relevant（R@10 0.889 击穿 ≥0.93 门）；0.52 保三条贴线 relevant 全员。
+relevant（R@10 0.889 击穿 ≥0.93 门）；0.52 保三条贴线 relevant 全员。0.17.0 前缀重标 0.48（M0：relevant best min 0.5023/p5 0.5032）。
 """
 from __future__ import annotations
 
@@ -40,15 +40,19 @@ class _FloorEmbedder:
     dim = 2
     last_encode_error = None
 
+    @classmethod
+    def embed_texts(cls, texts: "list[str]", prefix: str = "") -> "list[EmbedResult]":
+        return [cls.embed_text(prefix=prefix, body=t) for t in texts]
+
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars: "int | None" = None) -> EmbedResult:
         text = f"{prefix} {body}".casefold()
         if "贴线" in text:
-            # 0.52 整值在 float64 归一后落 0.51998（线下），取 0.5205
+            # 0.48 整值在 float64 归一后落 0.47999（线下），取 0.4805
             # 线上样本与 0.4 线下样本夹出开边界（R2-P2-7）
-            vector = _unit([0.5205, 0.8538])   # 真余弦 ≈0.5205 > 0.52
+            vector = _unit([0.4805, 0.8770])   # 真余弦 ≈0.4805 > 0.48
         elif "新潮" in text:
-            vector = _unit([0.4, 0.9165])   # 真余弦 ≈0.4 < 0.52
+            vector = _unit([0.4, 0.9165])   # 真余弦 ≈0.4 < 0.48
         elif "alpha" in text:
             vector = [1.0, 0.0]
         else:
@@ -56,8 +60,8 @@ class _FloorEmbedder:
         return EmbedResult(vector, False, 1, 1)
 
     @classmethod
-    def embed_texts(cls, bodies: "list[str]", max_body_chars: "int | None" = None) -> list[EmbedResult]:
-        return [cls.embed_text("", body) for body in bodies]
+    def embed_texts(cls, bodies: "list[str]", prefix: str = "", max_body_chars: "int | None" = None) -> list[EmbedResult]:
+        return [cls.embed_text(prefix, body) for body in bodies]
 
 
 def _make_tools(tmp_path: Path) -> MemoryTools:
@@ -111,8 +115,8 @@ def _pool(tools: MemoryTools, query: str, *, status_filter: str = "active",
 
 
 def test_floor_just_above_line_is_kept(tmp_path: Path) -> None:
-    """线上（≈0.5205）保留、线下（0.4）删除——开边界被夹在两者之间
-    （0.52 整值 float64 归一后落 0.51998，精确贴线不可稳定表示）。"""
+    """线上（≈0.4805）保留、线下（0.4）删除——开边界被夹在两者之间
+    （0.48 整值 float64 归一后落 0.47999，精确贴线不可稳定表示）。"""
     tools = _make_tools(tmp_path)
     boundary = _write_and_index(tools, "贴线主题记录", "贴线方案说明")
     pool = _pool(tools, "alpha query")

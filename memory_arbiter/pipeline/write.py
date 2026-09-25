@@ -10,6 +10,7 @@ from ..embedder import ManagedEmbedder
 
 from .. import workspace_rules
 from ..constants import (
+    EMBED_PREFIX_STS,
     WRITE_DUPLICATE_VEC_TOP_K,
     WRITE_SIMILAR_CONTENT_FLOOR,
     WRITE_SIMILAR_CONTENT_MIN,
@@ -100,7 +101,7 @@ class WritePipeline:
                 # Keep the subject_tags_vec publish (C4 conflict ordering and
                 # the fallback scan read it) — one extra embed per write.
                 er_subject = embedder.embed_text(
-                    prefix="",
+                    prefix=EMBED_PREFIX_STS,
                     body=self._subject_tags_embed_text(
                         subject, getattr(record, "tags", None),
                     ),
@@ -116,7 +117,7 @@ class WritePipeline:
                     subject, getattr(record, "tags", None),
                     str(getattr(record, "content", None) or ""),
                 )
-                er = embedder.embed_text(prefix="", body=summary_text)
+                er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=summary_text)
                 if er is not None and er.embedding:
                     vector = [float(x) for x in er.embedding]
                     # 校准轮：该向量即 refresh_summary_vector 稍后要写的同一条
@@ -168,7 +169,7 @@ class WritePipeline:
             if embedder is None or not self.db.state.sqlite_vec_available:
                 return False
             er = embedder.embed_text(
-                prefix="",
+                prefix=EMBED_PREFIX_STS,
                 body=self._subject_tags_embed_text(
                     record.get("subject"), record.get("tags"),
                 ),
@@ -201,7 +202,7 @@ class WritePipeline:
             from ..tools import MemoryTools
 
             er = embedder.embed_text(
-                prefix="",
+                prefix=EMBED_PREFIX_STS,
                 body=MemoryTools._summary_embed_text(
                     record.get("subject"), record.get("tags"), record.get("content"),
                 ),
@@ -418,7 +419,7 @@ class WritePipeline:
             # the library write lock for up to 20 embeds.
             attr_vectors: "list[list[float] | None]" = []
             for claim in prepared[:20]:
-                er = embedder.embed_text(prefix="", body=claim["attr"])
+                er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=claim["attr"])
                 attr_vectors.append([float(x) for x in er.embedding] if er and er.embedding else None)
             with tools.db.write_transaction() as conn:
                 from ..models import utc_now_iso
@@ -858,7 +859,7 @@ class WritePipeline:
         if embedder is None or not self.db.state.sqlite_vec_available:
             return None
         try:
-            er = embedder.embed_text(prefix="", body=subject)
+            er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=subject)
         except Exception:
             return None
         if not er or not er.embedding:

@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from .config import Settings
 from .constants import (
+    EMBED_PREFIX_STS,
     EMBEDDING_DEFAULT_DIM,
     EMBEDDING_MAX_SECTION_CHARS,
     EMBEDDING_N_CTX,
@@ -808,7 +809,7 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
                 if not is_default_workspace_term(str(row["name"] or ""))
             ]
         for canonical in canonical_names:
-            workspace_embedding = rebuild_embedder.embed_text(prefix="", body=canonical)
+            workspace_embedding = rebuild_embedder.embed_text(prefix=EMBED_PREFIX_STS, body=canonical)
             warnings = db.workspaces.publish_workspace_canonical_vector(
                 canonical,
                 list(workspace_embedding.embedding) if workspace_embedding.embedding else None,

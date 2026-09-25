@@ -55,7 +55,7 @@ class FakeEmbedder:
 
 
     @classmethod
-    def embed_texts(cls, texts):
+    def embed_texts(cls, texts, prefix: str = ""):
         return [cls.embed_text(prefix="", body=t) for t in texts]
 
 def make_tools(tmp_path: Path) -> MemoryTools:

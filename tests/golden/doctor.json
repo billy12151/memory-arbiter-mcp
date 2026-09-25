@@ -11691,11 +11691,11 @@
      "severity": "warning",
      "status": "warn",
      "title": "vector.space",
-     "detail": "state=unmanaged, active=none, configured=fb687cae9fe683997a2455daebd7e858449bf3cff88c8e8f1b91bd5b74e216e9",
+     "detail": "state=unmanaged, active=none, configured=<SPACE_ID>",
      "evidence": {
       "state": "unmanaged",
       "active_space_id": null,
-      "configured_space_id": "fb687cae9fe683997a2455daebd7e858449bf3cff88c8e8f1b91bd5b74e216e9"
+      "configured_space_id": "<SPACE_ID>"
      },
      "fix_hint": null
     },
@@ -12028,11 +12028,11 @@
      "severity": "warning",
      "status": "warn",
      "title": "vector.space",
-     "detail": "state=unmanaged, active=none, configured=acdea70c92ae866636617f52058ba8b3cfadccdeaf843eba8fd15bad4f42e571",
+     "detail": "state=unmanaged, active=none, configured=<SPACE_ID>",
      "evidence": {
       "state": "unmanaged",
       "active_space_id": null,
-      "configured_space_id": "acdea70c92ae866636617f52058ba8b3cfadccdeaf843eba8fd15bad4f42e571"
+      "configured_space_id": "<SPACE_ID>"
      },
      "fix_hint": null
     },

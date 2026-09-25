@@ -6,7 +6,7 @@ from typing import Any, TYPE_CHECKING
 from ..acl import CallerWorkspace
 from ..embedder import ManagedEmbedder
 
-from ..constants import EMBEDDING_MAX_SECTION_CHARS, SUPERSEDED_LIMIT
+from ..constants import EMBED_PREFIX_SEARCH, EMBEDDING_MAX_SECTION_CHARS, SUPERSEDED_LIMIT
 from ..evidence import local_text_units
 from ..tokens import meter_payloads
 
@@ -37,6 +37,15 @@ _HIT_WINDOW_MAX = 5
 
 _CONTENT_MODES = ("preview", "hits", "full")
 
+
+
+
+def vec_disabled_warning(reason: str) -> str:
+    """升级待办强制提示（owner 指令）：向量通道关闭必须带重建指引。"""
+    return (
+        f'vec_disabled={reason}: run memory_repair'
+        "(task='rebuild_evidence') to restore vector recall"
+    )
 
 def _coerce_hit_window(value: Any, warnings: list[str]) -> int:
     """Normalise the caller's hit_window into [0, _HIT_WINDOW_MAX].
@@ -923,7 +932,9 @@ class ReadPipeline:
                 if vec_state.get("state") == "mismatch"
                 else "embedding_migration_failed"
             )
-            extra_warnings.append(f"vec_disabled={disabled_reason}")
+            extra_warnings.append(
+                f"vec_disabled={disabled_reason}: run memory_repair(task='rebuild_evidence') to restore vector recall"
+            )
             return None
         if query_embedding is not None or not (query and self.settings.embedding_auto_query):
             return query_embedding
@@ -945,7 +956,7 @@ class ReadPipeline:
             # Char-level pre-trim for pathological pastes; the token
             # budget inside embed_text still makes the final cut.
             er = embedder.embed_text(
-                prefix="", body=query,
+                prefix=EMBED_PREFIX_SEARCH, body=query,
                 max_body_chars=max(EMBEDDING_MAX_SECTION_CHARS, 2048),
             )
             if er.embedding:
@@ -956,7 +967,7 @@ class ReadPipeline:
                         if refreshed_state.get("state") == "mismatch"
                         else "embedding_migration_failed"
                     )
-                    extra_warnings.append(f"vec_disabled={reason}")
+                    extra_warnings.append(vec_disabled_warning(reason))
                     return None
                 self._tools._query_embed_cache_put(cache_key, er.embedding)
                 return er.embedding
@@ -1336,7 +1347,9 @@ class ReadPipeline:
                 if vec_state.get("state") == "mismatch"
                 else "embedding_migration_failed"
             )
-            extra_warnings.append(f"vec_disabled={disabled_reason}")
+            extra_warnings.append(
+                f"vec_disabled={disabled_reason}: run memory_repair(task='rebuild_evidence') to restore vector recall"
+            )
             query_embedding = None
         elif query_embedding is None and query and self.settings.embedding_auto_query:
             embedder, ensure_warnings = self._ensure_embedder()
@@ -1346,7 +1359,7 @@ class ReadPipeline:
                     # Char-level pre-trim for pathological pastes; the token
                     # budget inside embed_text still makes the final cut.
                     er = embedder.embed_text(
-                        prefix="", body=query,
+                        prefix=EMBED_PREFIX_SEARCH, body=query,
                         max_body_chars=max(EMBEDDING_MAX_SECTION_CHARS, 2048),
                     )
                     if er.embedding:
@@ -1357,7 +1370,7 @@ class ReadPipeline:
                                 if refreshed_state.get("state") == "mismatch"
                                 else "embedding_migration_failed"
                             )
-                            extra_warnings.append(f"vec_disabled={reason}")
+                            extra_warnings.append(vec_disabled_warning(reason))
                         else:
                             query_embedding = er.embedding
                     else:

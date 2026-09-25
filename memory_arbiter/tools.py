@@ -12,7 +12,7 @@ from typing import Any, Callable, cast
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, visible_memory
 from .arbitration import compare_memories  # noqa: F401 (monkeypatch seam, see pipeline/read.py:226)
 from .config import Settings
-from .constants import EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, QWEN_BUDGET_MS, QWEN_CANDIDATE_DISTANCE, QWEN_CANDIDATE_TOP_K, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_BATCH, SEMANTIC_N_CTX, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
+from .constants import EMBED_PREFIX_STS, EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, QWEN_BUDGET_MS, QWEN_CANDIDATE_DISTANCE, QWEN_CANDIDATE_TOP_K, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_BATCH, SEMANTIC_N_CTX, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
 from .models import TrustedApplyingContext, utc_now_iso
@@ -956,7 +956,10 @@ class MemoryTools:
                     continue
                 # C1: one batched embed per memory instead of a per-segment
                 # loop (14.5→8.4ms/item wall clock on the GPU worker).
-                results = embedder.embed_texts([segment.text for segment in segments])
+                results = embedder.embed_texts(
+                    [segment.text for segment in segments],
+                    prefix=EMBED_PREFIX_STS,
+                )
                 vectors: list[list[float]] = []
                 ok = True
                 for result in results:
@@ -1035,7 +1038,7 @@ class MemoryTools:
                 try:
                     profile = _embed_input_profile(row)
                     er = embedder.embed_text(
-                        prefix="",
+                        prefix=EMBED_PREFIX_STS,
                         body=self._summary_embed_text(
                             row.get("subject"), row.get("tags"), row.get("content"),
                         ),
@@ -1115,7 +1118,7 @@ class MemoryTools:
             for row in chunk:
                 try:
                     er = embedder.embed_text(
-                        prefix="",
+                        prefix=EMBED_PREFIX_STS,
                         body=WritePipeline._subject_tags_embed_text(
                             row.get("subject"), row.get("tags"),
                         ),
@@ -1165,7 +1168,9 @@ class MemoryTools:
                 "embedding_space_mismatch" if state == "mismatch"
                 else "embedding_migration_failed"
             )
-            warning = f"vec_disabled={reason}"
+            from .pipeline.read import vec_disabled_warning
+
+            warning = vec_disabled_warning(reason)
             if warning not in warnings:
                 warnings.append(warning)
             return None, warnings

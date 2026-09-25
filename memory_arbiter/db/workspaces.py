@@ -10,6 +10,7 @@ from ..config import Settings
 from ..degrade import DegradeState
 
 from ..constants import (
+    EMBED_PREFIX_STS,
     DEFAULT_WORKSPACE_NAME,
     DEFAULT_TERMS,
     WORKSPACE_MATCH_DISTANCE,
@@ -150,7 +151,7 @@ class WorkspaceStore:
             return
 
         try:
-            er = embedder.embed_text(prefix="", body=canonical)
+            er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=canonical)
             embedding = list(er.embedding) if er and er.embedding else None
         except Exception:
             embedding = None
@@ -214,7 +215,7 @@ class WorkspaceStore:
         except sqlite3.Error:
             return None
         try:
-            er = embedder.embed_text(prefix="", body=canonical)
+            er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=canonical)
             return list(er.embedding) if er and er.embedding else None
         except Exception:
             return None
@@ -289,7 +290,7 @@ class WorkspaceStore:
                     return {"ok": True, "rebuilt": 0, "already_current": True}
             vectors: dict[str, list[float]] = {}
             for name in names:
-                result = embedder.embed_text(prefix="", body=name)
+                result = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=name)
                 embedding = list(result.embedding) if result and result.embedding else []
                 if not embedding:
                     return {
@@ -463,7 +464,7 @@ class WorkspaceStore:
                         and embedder is not None
                     ):
                         try:
-                            er = embedder.embed_text(prefix="", body=raw)
+                            er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=raw)
                             exact_embedding = list(er.embedding) if er and er.embedding else None
                         except Exception:
                             exact_embedding = None
@@ -511,7 +512,7 @@ class WorkspaceStore:
                 embedding = None
                 if vec_ok:
                     try:
-                        er = embedder.embed_text(prefix="", body=raw)
+                        er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=raw)
                         embedding = list(er.embedding) if er and er.embedding else None
                     except Exception:
                         embedding = None
@@ -1359,7 +1360,7 @@ class WorkspaceStore:
         to_embedding = None
         if embedder is not None and self.state.sqlite_vec_available:
             try:
-                er = embedder.embed_text(prefix="", body=to_ws)
+                er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=to_ws)
                 to_embedding = list(er.embedding) if er and er.embedding else None
             except Exception:
                 to_embedding = None
@@ -1704,7 +1705,7 @@ class WorkspaceStore:
             and not is_default_workspace_term(canonical)
         ):
             try:
-                er = embedder.embed_text(prefix="", body=canonical)
+                er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=canonical)
                 return list(er.embedding) if er and er.embedding else None
             except Exception:
                 return None

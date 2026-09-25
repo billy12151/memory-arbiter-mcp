@@ -536,6 +536,14 @@ def _mask(report: dict[str, Any]) -> dict[str, Any]:
         # is the integer 4, so it is masked by key and only its prefixed form
         # ("serves v4") is touched in detail -- a bare "4" replacement would
         # corrupt the counts this gate exists to compare.
+        if check == "vector.space":
+            # space id 是版本绑定值（pipeline version bump 即轮换）——掩码，
+            # 防 embedding 管线版本变更打碎 golden（2026-09-25 前缀重标）。
+            for key in ("active_space_id", "configured_space_id"):
+                if evidence.get(key):
+                    original = str(evidence[key])
+                    evidence[key] = "<SPACE_ID>"
+                    finding["detail"] = finding["detail"].replace(original, "<SPACE_ID>")
         if check == "conflicts.scan_epoch":
             evidence["to"] = "<DETECTOR_VER>"
             finding["detail"] = finding["detail"].replace(CONFLICT_DETECTOR_VERSION, "<DETECTOR_VER>")
