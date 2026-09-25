@@ -1,0 +1,89 @@
+{
+ "date": "2026-09-25",
+ "method": "同 fixture 语料（recall 47 题/98 targets + conflict 100 对 + claims 40 对 + similarity 64 例），各配置按各自 M0-lite 标定阈值（eval/calibration/three-way-thresholds.json），Qwen 裁决层不变",
+ "configs": {
+  "gemma_none": {
+   "model": "EmbeddingGemma-300M-Q8",
+   "prefix": "无",
+   "dim": 768,
+   "run": "all-row-context-final-r1",
+   "thresholds": "band 0.60/recall 0.52/mid 0.75/tau 0.70/C 0.60"
+  },
+  "gemma_query": {
+   "model": "EmbeddingGemma-300M-Q8",
+   "prefix": "全链 task: search result | query:",
+   "dim": 768,
+   "run": "all-threeway-gemma-query",
+   "thresholds": "band 0.56/recall 0.42/mid 0.60/tau 0.85/C 0.43"
+  },
+  "bge_none": {
+   "model": "bge-m3-Q8_0",
+   "prefix": "无",
+   "dim": 1024,
+   "run": "all-threeway-bge-none",
+   "thresholds": "band 0.58/recall 0.40/mid 0.67/tau 0.87/C 0.47"
+  }
+ },
+ "results": {
+  "gemma_none": {
+   "self_recall": "98/98",
+   "r5": 0.8448,
+   "r10": 0.9483,
+   "conflict_true": "7/43",
+   "conflict_recall": 0.1628,
+   "conflict_precision": 0.5833,
+   "write_opp": "5/12",
+   "gov_neg_fp": 6,
+   "noise_fp": 3,
+   "coexist_fp": 2,
+   "claims_B": "5/5",
+   "claims_C": "6/10",
+   "merged": 0.7333,
+   "comprehensive": [
+    0.3103,
+    0.7826
+   ],
+   "sim_fp": 0
+  },
+  "gemma_query": {
+   "self_recall": "97/98",
+   "r5": 0.8621,
+   "r10": 0.9483,
+   "conflict_true": "7/43",
+   "conflict_recall": 0.1628,
+   "conflict_precision": 0.7778,
+   "write_opp": "6/12",
+   "gov_neg_fp": 3,
+   "noise_fp": 2,
+   "coexist_fp": 0,
+   "claims_B": "5/5",
+   "claims_C": "7/10",
+   "merged": 0.8,
+   "comprehensive": [
+    0.3276,
+    0.9048
+   ],
+   "sim_fp": 0
+  },
+  "bge_none": {
+   "self_recall": "98/98",
+   "r5": 0.8276,
+   "r10": 0.931,
+   "conflict_true": "10/43",
+   "conflict_recall": 0.2326,
+   "conflict_precision": 0.7143,
+   "write_opp": "8/12",
+   "gov_neg_fp": 5,
+   "noise_fp": 3,
+   "coexist_fp": 1,
+   "claims_B": "5/5",
+   "claims_C": "7/10",
+   "merged": 0.8,
+   "comprehensive": [
+    0.3793,
+    0.8462
+   ],
+   "sim_fp": 0
+  }
+ }
+}

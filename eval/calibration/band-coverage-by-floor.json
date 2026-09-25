@@ -1,0 +1,38 @@
+{
+ "gemma-none": {
+  "true": {
+   "pass@0.5": 44,
+   "pass@0.55": 44,
+   "pass@0.6": 44,
+   "pass@0.65": 44,
+   "pass@0.7": 43,
+   "max_ge_ceil": 22
+  },
+  "nontrue": {
+   "pass@0.5": 56,
+   "pass@0.55": 56,
+   "pass@0.6": 56,
+   "pass@0.65": 55,
+   "pass@0.7": 54,
+   "max_ge_ceil": 24
+  }
+ },
+ "bge-none": {
+  "true": {
+   "pass@0.5": 43,
+   "pass@0.55": 43,
+   "pass@0.6": 43,
+   "pass@0.65": 42,
+   "pass@0.7": 40,
+   "max_ge_ceil": 23
+  },
+  "nontrue": {
+   "pass@0.5": 56,
+   "pass@0.55": 56,
+   "pass@0.6": 56,
+   "pass@0.65": 56,
+   "pass@0.7": 53,
+   "max_ge_ceil": 27
+  }
+ }
+}

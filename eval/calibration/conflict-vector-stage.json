@@ -1,0 +1,46 @@
+{
+ "gemma-none": {
+  "n_true": 44,
+  "n_nontrue": 56,
+  "true_window16_hit": "43/44",
+  "nontrue_window16": "55/56",
+  "true_best_cos_min": 0.7178,
+  "true_best_cos_p5": 0.7808,
+  "true_band_pass": {
+   "0.5": 19,
+   "0.55": 19,
+   "0.6": 19,
+   "0.65": 19,
+   "0.7": 19
+  },
+  "nontrue_band_pass": {
+   "0.5": 23,
+   "0.55": 23,
+   "0.6": 23,
+   "0.65": 23,
+   "0.7": 23
+  }
+ },
+ "bge-none": {
+  "n_true": 44,
+  "n_nontrue": 56,
+  "true_window16_hit": "44/44",
+  "nontrue_window16": "56/56",
+  "true_best_cos_min": 0.6981,
+  "true_best_cos_p5": 0.7568,
+  "true_band_pass": {
+   "0.5": 18,
+   "0.55": 18,
+   "0.6": 18,
+   "0.65": 18,
+   "0.7": 17
+  },
+  "nontrue_band_pass": {
+   "0.5": 22,
+   "0.55": 22,
+   "0.6": 22,
+   "0.65": 22,
+   "0.7": 21
+  }
+ }
+}

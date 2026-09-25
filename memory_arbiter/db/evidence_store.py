@@ -353,6 +353,14 @@ class EvidenceStore:
         checks and delete+rebuild discipline as the unit publish."""
         if len(rows) != len(row_embeddings) or any(not value for value in row_embeddings):
             return {"outcome": "invalid_row_embeddings", "published": False}
+        # 缺陷修复（2026-09-25）：写路径传入的 rows 是值锚定排序（非 row_index
+        # 序），而下方 fresh_ids 按 row_index 重读——两个顺序一 zip，subject 与
+        # 首个值锚定行的向量互换（实测 row0←sent1vec、row1←subjectvec），每次
+        # 新写入的前若干行向量全部错位，冲突检测 KNN 候选因此大面积 below_cos_floor。
+        # 插入前按 row_index 排序对齐，行↔向量一一对应。
+        aligned = sorted(zip(rows, row_embeddings), key=lambda pair: int(pair[0].row_index))
+        rows = [r for r, _v in aligned]
+        row_embeddings = [v for _r, v in aligned]
         try:
             with self._db.write_transaction() as conn:
                 # C5 write-transaction tightening: ONE memories SELECT carries
