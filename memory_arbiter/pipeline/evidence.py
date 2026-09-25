@@ -682,6 +682,7 @@ class EvidencePipeline:
             SEMANTIC_CROSS_KNN_WINDOW,
         )
         from ..semantic_conflict import attr_is_versional, vector_cosine
+        from ..rowseg import row_context_text
         from .gates import dispatch_hint_text
 
         record = snapshot if snapshot.get("content") is not None else (
@@ -801,6 +802,16 @@ class EvidencePipeline:
                     "version": int(hit.get("memory_row_version") or 1),
                     "event_time": peer.get("event_time"), "metadata": {},
                 }
+                # D3（owner 2026-09-25 翻案）：C 的 peer 侧同样接行上下文——
+                # 属性已由 dispatch_hint 点名，上下文供 peer 行的值语境恢复；
+                # left 是结构化 claim（无句子）不加。FP=0 是硬线，验收盯防。
+                peer_context = row_context_text(
+                    str(peer.get("content") or str(hit.get("content") or "")),
+                    int(hit.get("start_offset") or 0),
+                    int(hit.get("end_offset") or 0),
+                )
+                if peer_context:
+                    right_env["context"] = peer_context
                 if backend is None:
                     unresolved += 1
                     continue
@@ -2265,6 +2276,21 @@ class EvidencePipeline:
                 reached_pair.add(peer_id)  # Qwen examined — settled
                 left_env = _conflict_envelope(record_row, unit.text)
                 right_env = _conflict_envelope(peer_row, str(hit.get("text") or ""))
+                # 行上下文 envelope（owner 2026-09-25 方案）：属性名可从
+                # 标题/邻行恢复，值必须取自主行——grounding 只读 quote，
+                # 机制上挡住从上下文捞值。空 context 不设键、prompt 不渲染。
+                from ..rowseg import row_context_text
+
+                own_context = row_context_text(content, unit.start_offset, unit.end_offset)
+                if own_context:
+                    left_env["context"] = own_context
+                peer_context = row_context_text(
+                    str(peer_row.get("content") or ""),
+                    int(hit.get("start_offset") or 0),
+                    int(hit.get("end_offset") or 0),
+                )
+                if peer_context:
+                    right_env["context"] = peer_context
                 # pair-v7: hand Qwen the rule layer's extracted value difference
                 # (numeric check route only) as a locating hint — see _pair_text.
                 if decision.left_value and decision.right_value:

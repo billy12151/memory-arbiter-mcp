@@ -57,7 +57,11 @@ SCHEMA_MIGRATIONS = {
 # subject guard + lineage veto — a detection-semantic change (plan §10: the
 # unified bump retires unit-keyed scan rows and re-arms one full round,
 # co-collecting the P2-1 误杀对 revival).
-CONFLICT_DETECTOR_VERSION = "gate-v2-three-dispatch-v5"
+# v6 (owner 2026-09-25): row-context envelope — A-cross and channel-C peer
+# envelopes carry heading+neighbour context for Qwen attribute recovery
+# (pair-v10); prompt/detection semantics changed, so the detector version
+# re-arms one full scan round per the standing release contract.
+CONFLICT_DETECTOR_VERSION = "row-context-envelope-v6"
 # 0.17.0 (review BUG-10): memory_claims is a LIVE table now (P2-5 claims
 # channel, additive.py builds it in every current library) — it must not
 # appear in the legacy-tombstone set or mema upgrade / doctor CLI would

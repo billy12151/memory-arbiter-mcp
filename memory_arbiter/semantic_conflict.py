@@ -58,8 +58,13 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
-PAIR_PROMPT_VERSION = "pair-v9"
+PAIR_PROMPT_VERSION = "pair-v10"
 
+# pair-v10（owner 2026-09-25 行上下文 envelope）：系统提示词与 pair-v9 逐位
+# 一致——slow 校准对实证：仅加一行「上下文」指令就足以扰动 0.6B 在长值对
+# 上的抽取（test_slow_long_values_keep_difference 两连挂）。上下文契约下沉到
+# 仅 context 出现时才渲染的用户段（见 _pair_text 的 context_block），无
+# context 的对（全部存量校准与多数真实流量）行为零漂移。
 _PAIR_PROMPT = """你只做条件抽槽，直接以 { 开头输出一个 JSON 对象，不要解释、复述输入或裁决。
 对象必须恰好包含四个字符串字段：attribute_a、value_a、attribute_b、value_b。
 attribute 是两侧正在回答的最小可比较问题，不包含具体值、时间、环境或版本；value 是原证据中该属性的具体取值，取原文中的连续片段，长度不超过 64 字、不超过 12 个词；原句过长时截取最能体现取值差异的连续片段，禁止整句照抄，value 不得以句号、叹号、分号等句末标点结尾。
@@ -1698,11 +1703,26 @@ class LocalGGUFSemanticBackend:
                 f"A-side known value={left_value} (reference only; the B value "
                 f"must be copied from B evidence):\n"
             )
+        # pair-v10 行上下文 envelope（owner 2026-09-25 方案）：标题+邻行语境
+        # 供属性归属恢复；两侧任一带 context 才渲染该段（空缺标（无））。
+        left_context = str(left.get("context") or "").strip()
+        right_context = str(right.get("context") or "").strip()
+        context_block = ""
+        if left_context or right_context:
+            context_block = (
+                f"上下文（仅供判断属性归属，属性与值必须取自下方证据原文）："
+                f"A上下文={left_context or '（无）'}；B上下文={right_context or '（无）'}\n"
+                if cjk else
+                f"Context (attribute ownership only; attribute and value must come "
+                f"from the evidence below): A context={left_context or '(none)'}; "
+                f"B context={right_context or '(none)'}\n"
+            )
         if cjk:
             return (
                 f"A metadata: {cls._memory_text(left)}\n"
                 f"B metadata: {cls._memory_text(right)}\n"
                 f"{hint}"
+                f"{context_block}"
                 "只根据以下证据原文抽取 attribute/value：\n"
                 f"A证据原文={left_quote}\nB证据原文={right_quote}"
             )
@@ -1710,6 +1730,7 @@ class LocalGGUFSemanticBackend:
             f"A metadata: {cls._memory_text(left)}\n"
             f"B metadata: {cls._memory_text(right)}\n"
             f"{hint}"
+            f"{context_block}"
             "Extract attribute/value from the evidence text only:\n"
             f"A evidence={left_quote}\nB evidence={right_quote}"
         )

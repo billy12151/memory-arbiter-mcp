@@ -28,6 +28,11 @@ ROW_MIN_CHARS = 8
 # yields nothing splittable. The span is the SAME slice the text came from —
 # content[start:end] == row text keeps the span contract intact.
 FALLBACK_ROW_CHARS = 200
+# 行上下文 envelope（owner 2026-09-25 方案 D1）：每部分独立截断，合计不超
+# CONTEXT_MAX_CHARS——只进 Qwen prompt（属性名恢复），绝不进向量/索引。
+CONTEXT_HEADING_CHARS = 80
+CONTEXT_NEIGHBOR_CHARS = 110
+CONTEXT_MAX_CHARS = 300
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,44 @@ def _emit_table_rows(
         text = _table_row_text(header, cells)
         if len(text) >= ROW_MIN_CHARS:
             rows.append(("table_row", text, start, end))
+
+
+def row_context_text(
+    content: str, start_offset: int, end_offset: int, *, max_chars: int = CONTEXT_MAX_CHARS,
+) -> str:
+    """行上下文 envelope（owner 2026-09-25 方案）：主行所属标题 + 前一行 +
+    后一行，供 Qwen 恢复属性归属（「## 连接池配置」屏障下的「上限调整为
+    200」）。合约为**属性名可从上下文恢复、值必须取自主行**——grounding
+    只读 envelope 的 quote（主行），机制上挡住从上下文捞值。
+
+    邻行 = 主行之前/之后最近的非空、非标题、非表格分隔行的原始行文本；
+    标题 = 主行之前最近的 ``#`` 标题。跨行句（行级分段折叠空白后一行可跨
+    多个源行）所在源行不算邻行。各部分独立截断（标题 80 / 邻行 110），
+    合计再裁 max_chars；无任何可用片段返回 ""——调用方据此不设 context
+    键，prompt 不渲染该段（写入/扫描/旧调用点向后兼容）。"""
+    heading = ""
+    prev_line = ""
+    next_line = ""
+    for line_start, line_end, raw in _line_spans(content or ""):
+        text = raw.strip()
+        if not text or _is_separator_row(raw):
+            continue
+        if _is_heading(raw):
+            if line_end <= int(start_offset):
+                heading = text.lstrip("#").strip()[:CONTEXT_HEADING_CHARS]
+            continue
+        if line_end <= int(start_offset):
+            prev_line = text
+        elif line_start >= int(end_offset) and not next_line:
+            next_line = text
+    parts = [
+        part[:CONTEXT_NEIGHBOR_CHARS] if len(part) > CONTEXT_NEIGHBOR_CHARS else part
+        for part in (heading, prev_line, next_line) if part
+    ]
+    if not parts:
+        return ""
+    joined = " / ".join(parts)
+    return joined[:max_chars]
 
 
 def segment_rows(subject: str, content: str) -> list[RowSegment]:
