@@ -176,10 +176,11 @@ COS_EXACT_BOOST = 0.98
 # hence the ceil == COS_EXACT_BOOST). Non-unit row vectors (|v|≈16.5) make
 # L2-to-cos conversion unreliable, so the gate runs on fetched vectors, one
 # batched IN query per collection loop.
-# 0.17.0 前缀重标（M0 sts 分布、生产同款 prefix+\n 拼接，
-# eval/results/prefix-calibration-m0.json）：true_min 0.7467 / p5 0.7612 →
-# 0.70 保留 100% 语料真对并上收噪声带。
-SEMANTIC_CANDIDATE_COS_FLOOR = 0.70
+# 0.17.0 前缀重标（M0 + real-model 实证）：sts 前缀把矛盾对余弦**推低**（探针
+# contra 0.96→0.85；digit-free 矛盾对在 0.70 下被切——floor 高于矛盾分布是错
+# 位的），维持 0.60 让矛盾对进带、由 Qwen 裁决；上收噪声交由 FLOOR 之上其余
+# 过滤层。0.70 的内容级 true_min 0.7467 是内容级量尺，句子级矛盾对可低至 0.6x。
+SEMANTIC_CANDIDATE_COS_FLOOR = 0.60
 SEMANTIC_CANDIDATE_COS_CEIL = COS_EXACT_BOOST
 # 检索线档位（0.17.0 追加包 K1/K2：关键词模式查询+召回余弦档位，方案
 # docs/mema-keyword-query-and-cos-bands-2026-09-24.md §1/§4；owner
@@ -243,8 +244,8 @@ SEMANTIC_MAX_ROWS = 256
 # 0.17.0 P2-3.3/P2-5.3: claims channel attr-vector gate τ (8th-round spike:
 # A/B recall 4/4, C2+D1 accepted as advisory FPs; asymmetric-benefit doctrine).
 # 0.17.0 前缀重标注记（对抗 review P1-3）：通道 C 的 attr↔row 跨型几何与
-# row↔row 不同（M0 sts：min 0.5696/mean 0.7037/max 0.7889，无标签）——维持
-# 旧下沿 0.60 待带标签 M1 数据，勿随 A1 的 0.70 联动。
+# row↔row 不同——M0 sts min 0.5696 贴近本值（harness 复验 0.55 与 0.60 零
+# 结果差异，掉的对是 KNN 窗口组成漂移非 floor）；重标待带标签 M1 数据。
 SEMANTIC_CHANNEL_C_COS_FLOOR = 0.60
 CLAIM_ATTR_TAU = 0.70
 # 0.17.0 review A3: the claims channel is zero-Qwen with no natural pairs
