@@ -331,7 +331,12 @@ def run_self_recall(
     targets: list[dict],
     id_map: dict[str, int],
 ) -> list[dict[str, Any]]:
-    """自召回（run_eval.py 模式移植）：query=subject，期望自己进 top-10."""
+    """自召回（run_eval.py 模式移植）：query=subject，期望自己进 top-10.
+
+    同 subject 家族口径（owner 2026-09-25）：真库存在多条同 subject 记忆时，
+    top10 被「指定 target 的同胞们」占满本身即检索正确——指定 target 未进但
+    任一同 normalized subject 的记忆进前 10，计 family_hit=True、in_top10=True。
+    """
     reverse_map = {new_id: key for key, new_id in id_map.items()}
     collected: list[dict[str, Any]] = []
     for target in targets:
@@ -339,17 +344,30 @@ def run_self_recall(
         if not subject:
             continue
         payload = _run_find(tools, subject)["payload"]
+        results = payload.get("results") or []
+        norm = lambda t: " ".join(str(t or "").casefold().split())
         rank_hit: int | None = None
-        for rank, row in enumerate(payload.get("results") or [], 1):
+        family_rank: int | None = None
+        target_row_subject = norm(target["subject"])
+        for rank, row in enumerate(results, 1):
             if int(row.get("id") or 0) == id_map[target["fixture_key"]]:
                 rank_hit = rank
                 break
+        if rank_hit is None:
+            for rank, row in enumerate(results, 1):
+                if rank > 10:
+                    break
+                row_subject = norm(row.get("subject"))
+                if row_subject and row_subject == target_row_subject:
+                    family_rank = rank
+                    break
         collected.append(
             {
                 "fixture_key": target["fixture_key"],
                 "subject": subject,
                 "self_rank": rank_hit,
-                "in_top10": rank_hit is not None,
+                "family_rank": family_rank,
+                "in_top10": rank_hit is not None or family_rank is not None,
             }
         )
     return collected

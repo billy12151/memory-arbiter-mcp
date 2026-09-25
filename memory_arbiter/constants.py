@@ -163,7 +163,11 @@ SEMANTIC_CROSS_KNN_WINDOW = 16
 # （存储侧，查询侧）配对语义：存量行/attr/summary/subject_tags/workspace 一律
 # sts（配对通道主消费者，M0 实测 sts 配对分离度与探针 9/9 全优）；检索查询
 # search（M0 self-recall 96/98 ≥ 现状 95）。doctor 维度探针豁免。
-EMBED_PREFIX_STS = "task: sentence similarity | query: "
+# 终局采纳（owner 2026-09-25，publish 错位修复后重测）：存储/配对侧与查询侧
+# 统一 query 前缀（query×query 同前缀检索）。历史名 STS 保留以最小化 diff，
+# 语义=「存储/配对侧统一前缀」。依据：检索 R@5 升 R@10 平、冲突 15/43 vs 14/43、
+# 综合 0.4483 vs 0.4310，全维度 ≥ 无前缀（eval/results/all-qxq-fix-r1）。
+EMBED_PREFIX_STS = "task: search result | query: "
 EMBED_PREFIX_SEARCH = "task: search result | query: "
 # 0.17.0 前缀重标注记（M0）：sts 下 nontrue 近重复对可达 0.9965（≥CEIL 正确
 # 落 duplicates），但 true 里也有 9 条 ≥0.9837——新空间「过顶=近重复冲突通道

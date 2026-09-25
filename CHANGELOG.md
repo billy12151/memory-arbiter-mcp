@@ -37,6 +37,8 @@ Versions follow semantic versioning.
 
 ### Changed (0.17.0 追加包：embedder 任务前缀 + 阈值全量重标，owner 2026-09-25 拍板，未发版一次性收敛)
 
+**终局采纳（owner 2026-09-25，publish 错位 P0 修复后重测定案）：全链 query 前缀（query×query）**——`EMBED_PREFIX_STS` 值改为 query 前缀（历史名保留，语义=存储/配对侧统一前缀）。依据（eval/results/all-qxq-fix-r1，publish 修复后）：检索 R@5 0.8621（优于无前缀 0.8448）、R@10 持平 0.9483、自召回 98/98（同 subject 家族口径，owner 拍板「11 条同 subject 有 10 条进前 10 即正确」——`run_self_recall` 增 family_hit 计数）；冲突 15/43=0.3488（优于无前缀 14/43）、综合 0.4483/0.8125（双双为历史最优，首次大幅突破 0.372 门）；FP 面不升。**基线 `baseline-0.17.0-qxq.json` 取代 prefix 基线，gate 自校验 PASSED**。同日否决：BGE-M3 换模型（写入 p50 +87% 吃掉 3 秒同步窗，mema #1075——其探针负 gap 未传导 E2E，横评以 E2E 为准）与 bge-reranker 重排（同步 +3.13s/查询、值对立对分数离散，mema #1076）。阈值维持不动（带门 0.50-0.65 覆盖率饱和）。
+
 方案：docs/mema-embedder-prefix-recalibration-plan-2026-09-25.md（mema #1073；两轮 review——对码轮+独立对抗轮——修正全部回写 §9.1/§9.2）。根因=mema #1071：`embed_text(prefix, body)` 的前缀形参从未被用（全仓 25 处 `prefix=""`），EmbeddingGemma 训练带任务 prompt，相似度判别不准的根因即此（句对二分 77.8%→100%，分离度 gap −0.0782→+0.0293）；#1072 选型保留 EmbeddingGemma-300M 只补前缀。
 
 - **feat(P1): 任务前缀分型落地。** 新常量 `EMBED_PREFIX_STS`（存量/配对：行、attr、summary、subject_tags、workspace——M0 实测 sts 配对分离度与探针 9/9 全优）与 `EMBED_PREFIX_SEARCH`（检索查询，self-recall 96/98 ≥ 现状 95）；25 处裸调用按（存储侧，查询侧）配对语义改型，`embed_texts` 增 prefix 形参且 batch 路由与单条路统一 `prefix+"\n"+body` 拼接（batch 资格判定扣 prefix 长度，防 n_batch 截尾分叉）；`EMBEDDING_PIPELINE_VERSION` 2→3（space_id 轮换触发重建链）。**对抗轮 P0 修正**：WRITE_SIMILAR_SUBJECT_FLOOR 0.72 回退 0.45——该阈值消费方是 difflib 词法 ratio 非 embedder 产物，M0 的 sts 余弦是错尺。
