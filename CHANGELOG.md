@@ -5,6 +5,10 @@ Versions follow semantic versioning.
 
 ## [0.17.0] — 2026-09-22
 
+### Changed (0.17.0 追加包：前缀终局形态——存储侧裸文本+查询侧 query 前缀，owner 2026-09-26 拍板，未发版一次性收敛)
+
+**owner 拍板：写入不加前缀，查询加前缀（条件「打平或更好」已由双语料消融满足）**——`EMBED_PREFIX_STS` 值改回空串（存储/配对侧裸文本），`EMBED_PREFIX_SEARCH` 维持 query 前缀；**`EMBEDDING_PIPELINE_VERSION` 钉回已发版的 2，不轮换**（owner 指令：别让用户全量重新生成向量）。依据（2026-09-26 双语料消融）：中文中长文语料 recall-v3-len 三写入侧前缀打平（R@5 全 0.9737、self_recall 72/72，eval/results/recall-len3-{qxq,bare,official}）；LOCOMO 英文改述场景 bare-doc+query-prefix **0.605 vs query×query 0.387（+21.8pt）**、纯向量 0.614 vs 0.538（WorkBuddy mema-vs-mem0 消融报告 §六）。不轮换的技术前提（已逐一核实）：`_summary_embed_text`/`_subject_tags_embed_text` 与 v0.16.12 逐字节一致、`EMBED_PREFIX_STS=""` 即裸文本=已发版向量语义——升级用户全部存量向量保持有效，查询侧前缀是运行时行为无需重嵌；row 向量为新表覆盖回填（新数据，非空间轮换）。**版本纪律沉淀**：前缀常量值不进 space_id 组成（model_digest/dim/version/config），未来任何改变存储侧嵌入文本的变更必须手动 bump 版本号，否则陈旧向量被未变的空间 id 掩盖。开发期 qxq 空间库（v3 space id）与新算 v2 必然 mismatch，正好由重建链收口。冲突带 FLOOR 0.60 等阈值系 sts 空间标定（702ff59），裸空间下经 harness conflict 门复验后按标定协议处置。
+
 ### Changed (0.17.0 追加包：未发版 commit 整体两轮 review 修复批 Round 1——正确性，2026-09-26)
 
 范围：`git diff v0.16.12..HEAD` 75 commit 全量 review（8 分片对抗验证：CONFIRMED 21 / REFUTED 4）。owner 拍板三项：扫描侧缺口三件全补；语料污染现在修+重跑基线；管线版本记档不 bump（bump 会让全部已部署库 mismatch 重建，而 gate 基线自校验不钉管线版本、不 bump 不失真）。
@@ -21,7 +25,7 @@ Versions follow semantic versioning.
 - **fix(semantic_conflict): 半刻钟值归一崩溃 + 谱系版本尾零。** ①`normalize_value("半刻钟")` 走分钟数乘法分支产出 `7.5分钟` 前先 `int()` 抛 ValueError——刻钟分支改浮点乘法+整值收敛（`7.5分钟`）；②`_lineage_primary_version` 把 `v2` 解析为 `(2,)` 而规则侧 `v2.0` 是 `(2,0)`，同代判定恒 False 误 veto——解析后去尾零。
 - **fix(gate): 负样本桶 miss 方向 + sync 受门 + 死条目清理。** ①`.miss.` 全局子串把负样本桶（by_shape governed_negative/noisy、by_label noise）的 miss 扫进 lower-is-better，与同注释块「miss 保持 higher-is-better」声明自相矛盾——负样本 miss 上升是改善，真改善 >10% 会假 FAILED（E3 同类事故二次形态）；`_negative_bucket` 前置判定收口。②owner R8 非对称收益口径落地：负样本桶 SYNC firing 直接出现在写响应、侵入性高一档——保持受门（lower-is-better）；其余 sync/async 单项维持 cand2 豁免。③`_GATE_DOCTRINE_EXEMPT`（noise.async.rate）与 `_CONFLICT_FALSE_LABELS` 的 governed_negative.async 均为永不可达死条目（被 split 跳过在先），删除；方向断言测试 10 例 + gate 集成 2 例。
 - **fix(eval): 语料 cf-noise-11 shape 污染修正（corpus bump conflict-v4-noisy）。** cf-noise-11-917-918 于 2026-09-22 校准轮翻转为 true_conflict（owner 裁定），但 shape 仍是 governed_negative——负样本桶混入真对双向污染 gate 判分（真桶 firing 被当负样本误报判 lower-is-better、负样本 miss 方向被带偏）。shape 改 write_opposition、adjudication 留痕、label_overrides 同步、`conflict_corpus_version` bump `conflict-v4-noisy`（语料变更必须 bump 并重建基线），基线全量重跑落新档。**probe 量尺口径修正**：probe_conflict_vector_stage 的 right 最佳句对余弦原取 `sim.max()` 全池最大（无关记忆行抬高量尺，FLOOR 标定偏松）——限定 right 记忆行重算。**注释契约同步**：compute_pair_score docstring 与 constants.py 权重注释的 band 除数 `/0.20`（G6 时代口径）同步为 fc9bcbb 拍板的 `(CEIL-FLOOR)=0.38`。
-- **fix(upgrade_cli): conflict_only 升级文案与同页 mismatch 披露自相矛盾修正。** 「no model loading or embedding recomputation is required」是无条件过期承诺——0.17.0 空间轮换（EMBEDDING_PIPELINE_VERSION 2→3）后克隆库必然 mismatch、保留空间 disabled 待重建，同页 Vector compatibility 行却显示 mismatch。文案改为如实：迁移本身无需模型；管线版本轮换时保留空间报 mismatch、需本地模型 rebuild_evidence（0.17.0 轮换中）。
+- **fix(upgrade_cli): conflict_only 升级文案与同页 mismatch 披露自相矛盾修正。** 「no model loading or embedding recomputation is required」是无条件过期承诺——管线版本一旦轮换，克隆库必然 mismatch、保留空间 disabled 待重建，同页 Vector compatibility 行却显示 mismatch（0.17.0 终局不轮换、版本钉 2，本路径由未来可能的轮换触发）。文案改为如实：迁移本身无需模型；管线版本轮换时保留空间报 mismatch、需本地模型 rebuild_evidence（0.17.0 轮换中）。
 - **fix(scan): 慢车道轮级记账漏 machine_cleared（Round 1 清单漏落，Round 2 复查发现补齐）。** kick 慢车道复制快车道记账只累计 queued/internal，`machine_cleared`（机判清除）从不入轮级计数——观测口径与快车道不一致；补齐后该计数只会上升（higher-is-better 门方向不受影响）。后续全量重跑落最终基线。
 - **拍板记录（2026-09-26）**：①claims_backfill 全链不做 workspace ACL——claims_backfill 是修数工具，workspace 语义是「查询返回结果范围限定」而非 agent 隔离边界；②update claims 门不强制（维持 2026-09-25 拍板），编辑断流由本批方案 C 继承兜住；③扫描侧三件（通道 B/去重/priority）全补；④语料现在修+基线重跑；⑤EMBEDDING_PIPELINE_VERSION 记档不 bump。
 

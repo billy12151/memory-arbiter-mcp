@@ -2891,8 +2891,10 @@ def test_short_paragraph_merge_never_crosses_heading_barrier() -> None:
 def test_embedding_pipeline_version_rotated_for_exact_offsets() -> None:
     from memory_arbiter.embedder import EMBEDDING_PIPELINE_VERSION
 
-    # v3（owner 2026-09-25）：任务前缀上线（25 处裸调用改型），空间轮换
-    assert EMBEDDING_PIPELINE_VERSION == 3
+    # 0.17.0 终局（owner 2026-09-26）：存储侧裸文本=已发版 v2 语义，版本钉 2
+    # 不轮换——升级用户零全量重嵌；查询侧前缀是运行时行为。前缀值变更不进
+    # space_id 组成，未来改存储侧嵌入文本必须手动 bump。
+    assert EMBEDDING_PIPELINE_VERSION == 2
 
 
 # ── 2026-08-21 review round: notice-pipeline and scan wide-gate fixes ────────

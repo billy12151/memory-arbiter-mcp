@@ -157,17 +157,23 @@ SEMANTIC_CROSS_KNN_WINDOW = 16
 # find-rank 15 after RRF rank-flattening) — the fusion boost bypasses rank
 # arithmetic entirely. The detection side reuses the same ceiling: pairs at
 # or above it are duplicates, not conflicts (G4 repeatability skip).
-# embedder 任务前缀（owner 2026-09-25 拍板，方案 docs/mema-embedder-prefix-
-# recalibration-plan-2026-09-25.md；EmbeddingGemma 训练带任务 prompt，llama.cpp
-# 载 GGUF 不自动补——25 处裸调用是相似度不准的根因，mema #1071）。分型按
-# （存储侧，查询侧）配对语义：存量行/attr/summary/subject_tags/workspace 一律
-# sts（配对通道主消费者，M0 实测 sts 配对分离度与探针 9/9 全优）；检索查询
-# search（M0 self-recall 96/98 ≥ 现状 95）。doctor 维度探针豁免。
-# 终局采纳（owner 2026-09-25，publish 错位修复后重测）：存储/配对侧与查询侧
-# 统一 query 前缀（query×query 同前缀检索）。历史名 STS 保留以最小化 diff，
-# 语义=「存储/配对侧统一前缀」。依据：检索 R@5 升 R@10 平、冲突 15/43 vs 14/43、
-# 综合 0.4483 vs 0.4310，全维度 ≥ 无前缀（eval/results/all-qxq-fix-r1）。
-EMBED_PREFIX_STS = "task: search result | query: "
+# embedder 任务前缀（EmbeddingGemma 训练带任务 prompt，llama.cpp 载 GGUF 不
+# 自动补——25 处裸调用是相似度不准的根因，mema #1071）。分型按（存储侧，
+# 查询侧）配对语义：历史名 STS 保留以最小化 diff，语义=「存储/配对侧统一
+# 前缀」。doctor 维度探针豁免。
+# 终局形态（owner 2026-09-26 拍板）：**存储侧裸文本，查询侧 query 前缀**。
+# 双语料实测（2026-09-26 消融）：中文中长文语料 recall-v3-len 三写入侧前缀
+# 打平（R@5 全 0.9737，eval/results/recall-len3-{qxq,bare,official}）；
+# LOCOMO 英文改述场景 bare-doc+query-prefix 0.605 vs query×query 0.387
+# （+21.8pt，WorkBuddy mema-vs-mem0 消融报告；纯向量 0.614 vs 0.538）。
+# 未发版改形零迁移成本，且存量用户库（0.16.x）即裸文本空间，文档侧语义连续。
+# 版本号纪律（owner 2026-09-26）：EMBEDDING_PIPELINE_VERSION 维持已发版的 2
+# 不轮换——存储侧向量语义与 0.16.12 逐字节一致，升级用户零全量重嵌；查询侧
+# 前缀是运行时行为无需重嵌。前缀常量值不进 space_id 组成，未来若改存储侧
+# 嵌入文本必须手动 bump 版本号。冲突带 FLOOR 0.60 等阈值系 sts 前缀空间
+# 标定（702ff59），裸空间下须经 harness conflict 门复验，不达即按既有标定
+# 协议重校。
+EMBED_PREFIX_STS = ""
 EMBED_PREFIX_SEARCH = "task: search result | query: "
 # 0.17.0 前缀重标注记（M0）：sts 下 nontrue 近重复对可达 0.9965（≥CEIL 正确
 # 落 duplicates），但 true 里也有 9 条 ≥0.9837——新空间「过顶=近重复冲突通道

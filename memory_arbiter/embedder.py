@@ -24,10 +24,20 @@ from .timeutil import utc_now_iso
 # the space id must NOT rotate.
 # (0.17.0 C4: the P1-T5 unit-parity audit obligation retired with the unit
 # tables — outline serves from memory_row now; rowseg owns segmentation.)
-# v3 (owner 2026-09-25): task prefixes added to every embedding call
-# (EmbeddingGemma trained prompt-aware; 25 bare calls prefixed) — new
-# vector space, forced rebuild via the standing mismatch chain.
-EMBEDDING_PIPELINE_VERSION = 3
+# v3 (owner 2026-09-25, UNRELEASED — superseded before ship): task prefixes
+# on every call, then query×query — both rotated the space (2→3).
+# v2 remains the released (0.16.12) definition and STAYS the version: the
+# final 0.17.0 form (owner 2026-09-26) is storage-side BARE — byte-identical
+# embed text to what 0.16.12 produced (_summary_embed_text /
+# _subject_tags_embed_text unchanged, EMBED_PREFIX_STS="") — so upgrading
+# user libraries keep every stored vector with NO forced re-embed. The
+# query-side prefix is runtime-only (queries embed at search time). New row
+# vectors backfill as new-schema coverage, not a space rotation. WARNING for
+# the next person: prefix constants are NOT part of compute_embedding_space_id
+# (model_digest/dim/version/config only) — any future change that alters
+# STORAGE-side embed text must bump this version by hand or stale vectors
+# hide behind an unchanged space id.
+EMBEDDING_PIPELINE_VERSION = 2
 
 EncodeFn = Callable[[str], list[float]]
 TokenizeFn = Callable[[str], list[int]]
