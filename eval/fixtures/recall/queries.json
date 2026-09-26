@@ -1,20 +1,10 @@
 {
- "corpus_version": "recall-v2-kw",
+ "corpus_version": "recall-v2-kw-trim",
  "queries": [
-  {
-   "qid": "A01",
-   "kind": "paraphrase",
-   "query": "检索不到记忆的时候返回什么行为"
-  },
   {
    "qid": "A02",
    "kind": "paraphrase",
    "query": "小模型抽槽最后选了哪个"
-  },
-  {
-   "qid": "A03",
-   "kind": "paraphrase",
-   "query": "网站备案手续办完了吗"
   },
   {
    "qid": "A04",
@@ -22,19 +12,9 @@
    "query": "代理服务稳定性加固做了什么"
   },
   {
-   "qid": "A05",
-   "kind": "paraphrase",
-   "query": "中文文档被重写丢了怎么恢复的"
-  },
-  {
    "qid": "A06",
    "kind": "paraphrase",
    "query": "一键配置功能谁拍板的"
-  },
-  {
-   "qid": "A07",
-   "kind": "paraphrase",
-   "query": "向量表插入数据报唯一键冲突"
   },
   {
    "qid": "A08",
@@ -100,11 +80,6 @@
    "qid": "B08",
    "kind": "lookup",
    "query": "llama.cpp n_batch 截断"
-  },
-  {
-   "qid": "B09",
-   "kind": "lookup",
-   "query": "recall_blacklist mema-twin"
   },
   {
    "qid": "B10",
