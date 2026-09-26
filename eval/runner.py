@@ -257,6 +257,7 @@ def run_recall_queries(
                 "qid": query["qid"],
                 "kind": query["kind"],
                 "query": query["query"],
+                "lang": query.get("lang"),
                 "expected_band": query.get("expected_band"),
                 "ok": outcome["ok"],
                 "elapsed_ms": outcome["elapsed_ms"],
@@ -755,6 +756,15 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=REPO / "eval" / "results")
     parser.add_argument("--label", default="run", help="产物文件名标签")
     parser.add_argument(
+        "--recall-dir",
+        type=Path,
+        default=None,
+        help=(
+            "recall 套件语料目录（默认 eval/fixtures/recall）。多语料共存："
+            "recall-v3-len 等新语料以独立目录提供，manifest.queries/labels 同构"
+        ),
+    )
+    parser.add_argument(
         "--keep-db", type=Path, default=None, help="调试：保留临时库副本到该目录"
     )
     parser.add_argument(
@@ -803,7 +813,7 @@ def main() -> int:
         )
         return 2
 
-    recall_dir = FIXTURES / "recall"
+    recall_dir = Path(args.recall_dir).resolve() if args.recall_dir else FIXTURES / "recall"
     queries = json.loads((recall_dir / "queries.json").read_text(encoding="utf-8"))[
         "queries"
     ]

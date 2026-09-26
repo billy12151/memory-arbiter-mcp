@@ -29,6 +29,9 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "eval" / "fixtures"
+# recall 语料目录：runner --recall-dir 的对偶（多语料 recall-v3-len 等）。
+# main() 按 CLI 覆盖；模块级默认保持旧路径，既有调用方零改动。
+RECALL_DIR = FIXTURES / "recall"
 DEFAULT_REL_DROP = 0.10  # provisional：首份基线报告后由 owner 定正式门槛
 
 
@@ -116,7 +119,7 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
     queries = raw.get("queries")
     if queries is None:
         return None
-    labels = _load_jsonl(FIXTURES / "recall" / "labels.jsonl")
+    labels = _load_jsonl(RECALL_DIR / "labels.jsonl")
     relevant_by_qid: dict[str, set[str]] = {}
     borderline_by_qid: dict[str, set[str]] = {}
     for row in labels:
@@ -164,6 +167,50 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
     # expected_band（midband=救济带专考 / above=≥0.75 不误伤专考；
     # subfloor 配额 owner 2026-09-24 拍板撤销）。
     keyword_bucket = _score_keyword_bucket(queries, relevant_by_qid)
+
+    # recall-v3-len（owner 2026-09-26）：语言分桶 × 噪音率。
+    # 语言桶 = 查询语言 → target 语言（zh/mixed/en 同尺 CJK/ASCII 比，
+    # runner 侧已把 query.lang 透传进 raw）；同语言/混合/跨语言三组对照
+    # 「单人真实使用跨语言召回极少」的产品判断。噪音 = 返回结果里既非
+    # relevant 也非 borderline 的条目——直接度量「浪费 token / 拉低下游
+    # 输出质量」的部分（此前只有 legal/far 两类无关题有 false pull 口径）。
+    target_lang: dict[str, str] = {}
+    if (RECALL_DIR / "targets.jsonl").exists():
+        for row in _load_jsonl(RECALL_DIR / "targets.jsonl"):
+            if row.get("lang"):
+                target_lang[row["fixture_key"]] = row["lang"]
+    lang_buckets: dict[str, dict[str, Any]] = {}
+    noise_total = 0
+    noise_returned = 0
+    noisy_queries = 0
+    noise_top: list[dict[str, Any]] = []
+    for query, stats in zip(queries, rank_rows):
+        q_lang = query.get("lang")
+        t_langs = sorted({target_lang[k] for k in relevant_by_qid.get(query["qid"], set())
+                          if k in target_lang})
+        for t_lang in t_langs or ["unknown"]:
+            bucket = lang_buckets.setdefault(
+                f"{q_lang or 'unknown'}->{t_lang}", {"queries": 0, "hits5": 0, "hits10": 0, "den5": 0, "den10": 0},
+            )
+            bucket["queries"] += 1
+            bucket["hits5"] += stats["hits_at_5"]
+            bucket["hits10"] += stats["hits_at_10"]
+            bucket["den5"] += stats["capped5_denom"]
+            bucket["den10"] += stats["capped10_denom"]
+        ranked = stats["ranked"]
+        if ranked:
+            noise_keys = [k for k in ranked if k not in labeled_keys]
+            if noise_keys:
+                noisy_queries += 1
+                noise_top.append({"qid": query["qid"], "noise": len(noise_keys),
+                                  "returned": len(ranked), "noise_keys": noise_keys})
+            noise_total += len(noise_keys)
+            noise_returned += len(ranked)
+    noise_top.sort(key=lambda r: -r["noise"])
+    for bucket in lang_buckets.values():
+        bucket["recall@5_capped"] = _pct(bucket.pop("hits5"), bucket["den5"])
+        bucket["recall@10_capped"] = _pct(bucket.pop("hits10"), bucket["den10"])
+        bucket.pop("den5"); bucket.pop("den10")
     return {
         **_aggregate_rank_rows(rank_rows),
         "irrelevant_false_pulls": {
@@ -173,6 +220,15 @@ def score_recall(raw: dict) -> dict[str, Any] | None:
         },
         "self_recall_top10": self_top10,
         "keyword_bucket": keyword_bucket,
+        "lang_breakdown": lang_buckets,
+        "noise": {
+            "total_noise": noise_total,
+            "total_returned": noise_returned,
+            "noise_rate": _pct(noise_total, noise_returned),
+            "noisy_queries": noisy_queries,
+            "queries": len(queries),
+            "top_noisy": noise_top[:10],
+        },
         "per_query": per_query,
     }
 
@@ -1018,6 +1074,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True, help="runner 产物 JSON")
     parser.add_argument(
+        "--recall-dir",
+        type=Path,
+        default=None,
+        help="recall 语料目录（默认 eval/fixtures/recall；与 runner --recall-dir 对偶）",
+    )
+    parser.add_argument(
         "--baseline-write", type=Path, default=None, help="写入基线文件"
     )
     parser.add_argument("--baseline", type=Path, default=None, help="对比基线文件")
@@ -1026,6 +1088,10 @@ def main() -> int:
         "--out", type=Path, default=None, help="报告输出（默认 run 同名 .md）"
     )
     args = parser.parse_args()
+
+    global RECALL_DIR
+    if args.recall_dir:
+        RECALL_DIR = Path(args.recall_dir).resolve()
 
     raw = json.loads(args.run.read_text(encoding="utf-8"))
     scored = score_all(raw)
