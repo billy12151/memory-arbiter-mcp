@@ -104,10 +104,17 @@ def main() -> int:
             for it in items:
                 key = mid_to_key.get(int(it.get("id") or 0))
                 score = it.get("_final_score")  # floor 消费的融合分（harness debug_ranking 上线字段）
+                ev = it.get("_evidence_best_score")
+                vec = bool(it.get("_vec_candidate"))
                 if key is not None:
-                    hits.append((key, float(score or 0.0)))
+                    hits.append((key, float(score or 0.0), float(ev) if ev is not None else None, vec))
             runs.append({"qid": qid, "qlang": qlang, "targets": set(target_keys), "hits": hits})
+            dump.write(json.dumps({"qid": qid, "qlang": qlang,
+                                   "targets": sorted(set(target_keys)),
+                                   "hits": hits}, ensure_ascii=False) + "\n")
+            dump.flush()
 
+        dump = open("/tmp/xlang_runs.jsonl", "w", encoding="utf-8")
         for q in queries_main:
             if q["qid"] in CROSS_EXISTING:
                 tkey = next(iter(gold_by_qid[q["qid"]]), None)
@@ -125,22 +132,30 @@ def main() -> int:
         print(f"[queries] {len(runs)}", flush=True)
 
     # ---- 离线政策评估 ----
+    # 政策统一为逐候选谓词：keep(hit) -> bool
+    def thr_policy(thr_fn):
+        return lambda q, hit: hit[1] >= thr_fn(q)
+
     POLICIES = {
-        "P0_floor8.25": lambda q, s: 8.25,
-        "P1_floor7.0": lambda q, s: 7.0,
-        "P2_none": lambda q, s: 0.0,
-        "P3_xlang0": lambda q, s: 0.0 if q["mismatch"] else 8.25,
-        "P4_xlang7.0": lambda q, s: 7.0 if q["mismatch"] else 8.25,
+        "P0_floor8.25": thr_policy(lambda q: 8.25),
+        "P1_floor7.0": thr_policy(lambda q: 7.0),
+        "P2_none": thr_policy(lambda q: 0.0),
+        "P3_xlang0": thr_policy(lambda q: 0.0 if q["mismatch"] else 8.25),
+        "P4_xlang7.0": thr_policy(lambda q: 7.0 if q["mismatch"] else 8.25),
+        # P5=①分层门槛模拟：复合分过线 OR（纯向量候选 且 余弦证据过 bar）。
+        # 跨语言命中天然是 vec-only（跨语种字面零重叠，词法通道零贡献）。
+        "P5_layered0.52": lambda q, hit: hit[1] >= 8.25 or (hit[3] and hit[2] is not None and hit[2] >= 0.52),
+        "P6_layered0.48": lambda q, hit: hit[1] >= 8.25 or (hit[3] and hit[2] is not None and hit[2] >= 0.48),
     }
 
-    def evaluate(policy_fn):
+    def evaluate(keep_fn):
         buckets = defaultdict(lambda: {"n": 0, "h5": 0, "h10": 0, "d5": 0, "d10": 0,
                                        "noise": 0, "returned": 0})
         for r in runs:
             mismatch = any(lang_of_key(k) != r["qlang"] for k in r["targets"])
-            thr = policy_fn({"mismatch": mismatch, "qlang": r["qlang"]}, None)
-            page = [(k, s) for k, s in r["hits"] if s >= thr][:10]
-            keys = [k for k, _ in page]
+            qinfo = {"mismatch": mismatch, "qlang": r["qlang"]}
+            page = [h for h in r["hits"] if keep_fn(qinfo, h)][:10]
+            keys = [k for k, _, _, _ in page]
             gold = r["targets"]
             classes = set()
             for k in gold:
@@ -181,27 +196,35 @@ def main() -> int:
     for r in runs:
         mismatch = any(lang_of_key(k) != r["qlang"] for k in r["targets"])
         gold = r["targets"]
-        keys50 = [k for k, _ in r["hits"]]
+        keys50 = [h[0] for h in r["hits"]]
         top10 = keys50[:10]
-        score_of = dict(r["hits"])
+        score_of = {h[0]: h for h in r["hits"]}
         for g in gold:
             gs = score_of.get(g)
             if g in top10:
                 continue
-            if gs is None:
+            ghit = score_of.get(g)
+            gs = ghit[1] if ghit else None
+            if ghit is None:
                 attr[f"{'cross' if mismatch else 'same'}: pool-miss(gold 不在融合池50)"] += 1
             elif gs < 8.25:
                 attr[f"{'cross' if mismatch else 'same'}: floor-kill(池内但 <8.25)"] += 1
-                (gold_scores_cross if mismatch else gold_scores_same).append(gs)
+                (gold_scores_cross if mismatch else gold_scores_same).append(
+                    (gs, ghit[2], ghit[3]))
             else:
                 attr[f"{'cross' if mismatch else 'same'}: rank>10(过门槛但排后面)"] += 1
     for k, v in sorted(attr.items()):
         print(f"  {v:>4}  {k}", flush=True)
     import statistics
-    for name, arr in (("cross floor-killed gold scores", gold_scores_cross),
-                      ("same floor-killed gold scores", gold_scores_same)):
+    for name, arr in (("cross floor-killed golds", gold_scores_cross),
+                      ("same floor-killed golds", gold_scores_same)):
         if arr:
-            print(f"  {name}: n={len(arr)} min={min(arr):.2f} med={statistics.median(arr):.2f} max={max(arr):.2f}", flush=True)
+            evs = [f"{e:.3f}{'v' if v else '?'}" for _, e, v in arr]
+            print(f"  {name}: n={len(arr)} fscore med={statistics.median(a for a,_,_ in arr):.2f}", flush=True)
+            print(f"    evidence_best(vec flag) per gold: {evs}", flush=True)
+            n_rescued_52 = sum(1 for _, e, v in arr if v and e is not None and e >= 0.52)
+            n_rescued_48 = sum(1 for _, e, v in arr if v and e is not None and e >= 0.48)
+            print(f"    -> P5(0.52) 可救 {n_rescued_52}/{len(arr)}；P6(0.48) 可救 {n_rescued_48}/{len(arr)}", flush=True)
         else:
             print(f"  {name}: n=0", flush=True)
 
