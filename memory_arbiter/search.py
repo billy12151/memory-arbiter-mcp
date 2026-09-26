@@ -1172,6 +1172,49 @@ def _passes_filters(
     )
 
 
+def _query_non_cjk_dominant(query: str) -> bool:
+    """查询语义由 ASCII/拉丁词承载（CJK 占字母比 < 0.5）时为 True。
+
+    分层门槛的豁免闸（owner 2026-09-26「无关召回涨了就修」）：非 CJK 主导
+    查询对 CJK 库结构性零字面锚定，其 evidence-only 行值得余弦线豁免；
+    CJK 查询对 CJK 库"本该咬中"而没咬中的语义近邻（legal-form 模板文查询
+    即此形态）维持复合线——实测主考卷 zh 查询豁免 51 行 0 gold 全噪音，
+    en→zh 豁免 15 gold（C01/C02 探针 28 条误召回由此归零）。
+    """
+    letters = [c for c in query if (c.isascii() and c.isalpha()) or '\u4e00' <= c <= '\u9fff']
+    if not letters:
+        return False
+    cjk = sum(1 for c in letters if '\u4e00' <= c <= '\u9fff')
+    return cjk / len(letters) < 0.5
+
+
+def _passes_query_recall_floor(row: dict[str, Any], alloglottic: bool = False) -> bool:
+    """0.17.0 分层门槛（owner 2026-09-26 拍板）：复合分线只管词法锚定候选，
+    evidence-only 纯向量行改由余弦线把守。
+
+    背景：8.25 复合线系中文个人库标定，而跨语言命中（en 查询→中文记忆）与
+    改述查询天然 evidence-only——跨语种字面零重叠使词法通道零贡献、复合分
+    系统性偏低（recall-v3-len en→zh 15 个 gold 复合 7.51-8.22 贴线被误杀，
+    余弦 0.509-0.681 全在 COS_RECALL_FLOOR 之上）。evidence-only 行的向量
+    质量已由 K2 向量准入线（同值 COS_RECALL_FLOOR）把守：进池与放行共用
+    一把余弦尺，不再被复合线二道惩罚；词法锚定候选（FTS/surface，
+    ``_lexical_rank`` 非 None）维持复合线——legal-form 噪音防线不变。
+    豁免仅在查询非 CJK 主导（alloglottic，由 _query_non_cjk_dominant 判定）
+    时启用——主考卷实测 zh 查询豁免 0 gold/51 噪音（legal 防线必须保留），
+    en 查询豁免 15 gold；双语料数据锚：eval/results/xlang-floor-policies.json
+    与 eval/results/recall-lf-fields.json 席位扫描；LOCOMO 同类反事实见
+    WorkBuddy mema-vs-mem0 消融报告。
+    """
+    if float(row.get("_final_score") or 0.0) >= QUERY_RECALL_SCORE_FLOOR:
+        return True
+    if not alloglottic:
+        return False
+    if row.get("_lexical_rank") is not None:
+        return False
+    ev = row.get("_evidence_best_score")
+    return ev is not None and float(ev) >= COS_RECALL_FLOOR
+
+
 def search_memories(
     db: MemoryDB,
     query: str,
@@ -1419,12 +1462,13 @@ def search_memories(
     # v0.15.9 page floor: on the ACTIVE query-recall path, below-floor
     # candidates never reach the page (宁缺毋滥). Expired audit recall keeps
     # everything — its purpose is exhaustive review, not relevance.
+    # 0.17.0 分层门槛：词法锚定候选走复合分线，evidence-only 纯向量行走
+    # COS_RECALL_FLOOR 余弦线（与 K2 准入线同值——见
+    # _passes_query_recall_floor docstring）。
     if status_filter == "active":
         pre_floor_count = len(reranked)
-        reranked = [
-            r for r in reranked
-            if float(r.get("_final_score") or 0.0) >= QUERY_RECALL_SCORE_FLOOR
-        ]
+        alloglottic = _query_non_cjk_dominant(query) if query else False
+        reranked = [r for r in reranked if _passes_query_recall_floor(r, alloglottic)]
         if pre_floor_count and not reranked:
             warnings.append(
                 f"no candidates reached the relevance floor ({QUERY_RECALL_SCORE_FLOOR:g}); "

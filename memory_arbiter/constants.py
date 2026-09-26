@@ -198,6 +198,12 @@ SEMANTIC_CANDIDATE_COS_CEIL = COS_EXACT_BOOST
 # 标定，禁止共用）。
 # 0.17.0 前缀重标（M0 search/sts 分布）：relevant best min 0.5085 / p5
 # 0.5238 → 0.48 留余量（旧 0.52 口径在新空间会砍贴线 relevant）。
+# 0.17.0 分层门槛（owner 2026-09-26）：本值同时是把守 evidence-only 纯向
+# 量行的三道同名尺——K2 准入线（进池）、查询门槛豁免线（放行，
+# _passes_query_recall_floor）、keyword 救济带下缘（search.py 与
+# COS_MIDBAND_CEIL 成对）。消费点必须同步重标：动了这里就同时改变"谁能
+# 进池"、"谁能上页"与"谁进救济带"。跨语言数据锚：recall-v3-len en→zh 15
+# 个贴线 gold 余弦 0.509-0.681 全在线上（xlang-floor-policies.json）。
 COS_RECALL_FLOOR = 0.48
 # 向量结果准入线：evidence-only 候选（无词法席位）的 best 行真余弦低于
 # 此线不进结果（K2；仅 active 查询路径，expired 审计豁免沿 8.25 口径）。

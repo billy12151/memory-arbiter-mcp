@@ -15,6 +15,7 @@ rerank 后过滤、池子与排序不变，故 floor-0 深拉列表 = 完整反�
 （en→zh ×20、zh→en ×9）+ 既有 4 条探针（zh→en ×3、en→zh ×1）。
 """
 import importlib.util
+import os
 import json
 import sys
 from collections import defaultdict
@@ -31,7 +32,10 @@ spec.loader.exec_module(R)
 
 import memory_arbiter.search as search_mod  # noqa: E402
 
-search_mod.QUERY_RECALL_SCORE_FLOOR = 0.0  # 反事实基础：先不过滤，离线套政策
+if os.environ.get("XLANG_LIVE_FLOOR"):
+    print("[live] 产品真实门槛（含 0.17.0 分层豁免谓词）", flush=True)
+else:
+    search_mod.QUERY_RECALL_SCORE_FLOOR = 0.0  # 反事实基础：先不过滤，离线套政策
 
 targets = R._load_jsonl(CORPUS / "targets.jsonl")
 distractors = R._load_jsonl(CORPUS / "distractors.jsonl")
@@ -86,6 +90,29 @@ def lang_of_key(key: str) -> str:
     return target_by_key.get(key, {}).get("lang", "unknown")
 
 
+def _live_report(runs, lang_of_key):
+    from collections import defaultdict
+    buckets = defaultdict(lambda: {"n": 0, "h5": 0, "h10": 0, "d5": 0, "d10": 0})
+    for r in runs:
+        gold = r["targets"]
+        keys = [h[0] for h in r["hits"]][:10]
+        classes = set()
+        for k in gold:
+            tl = lang_of_key(k)
+            classes.add("same" if tl == r["qlang"] else f"cross_{r['qlang']}->{tl}")
+        for cls in classes or {"unknown"}:
+            b = buckets[cls]
+            b["n"] += 1
+            b["h5"] += len(gold & set(keys[:5]))
+            b["h10"] += len(gold & set(keys[:10]))
+            b["d5"] += min(len(gold), 5)
+            b["d10"] += min(len(gold), 10)
+    for cls, b in sorted(buckets.items()):
+        r5 = round(b["h5"]/b["d5"], 4) if b["d5"] else None
+        r10 = round(b["h10"]/b["d10"], 4) if b["d10"] else None
+        print(f"  {cls:<14} n={b['n']:<3} R@5={r5} R@10={r10}", flush=True)
+
+
 def main() -> int:
     embed_model = R.default_embed_model()
     with R.temp_library(embed_model, keep_db=None) as tools:
@@ -106,8 +133,10 @@ def main() -> int:
                 score = it.get("_final_score")  # floor 消费的融合分（harness debug_ranking 上线字段）
                 ev = it.get("_evidence_best_score")
                 vec = bool(it.get("_vec_candidate"))
+                lex = it.get("_lexical_rank")
                 if key is not None:
-                    hits.append((key, float(score or 0.0), float(ev) if ev is not None else None, vec))
+                    hits.append((key, float(score or 0.0), float(ev) if ev is not None else None, vec,
+                                 None if lex is None else int(lex)))
             runs.append({"qid": qid, "qlang": qlang, "targets": set(target_keys), "hits": hits})
             dump.write(json.dumps({"qid": qid, "qlang": qlang,
                                    "targets": sorted(set(target_keys)),
@@ -142,10 +171,12 @@ def main() -> int:
         "P2_none": thr_policy(lambda q: 0.0),
         "P3_xlang0": thr_policy(lambda q: 0.0 if q["mismatch"] else 8.25),
         "P4_xlang7.0": thr_policy(lambda q: 7.0 if q["mismatch"] else 8.25),
-        # P5=①分层门槛模拟：复合分过线 OR（纯向量候选 且 余弦证据过 bar）。
-        # 跨语言命中天然是 vec-only（跨语种字面零重叠，词法通道零贡献）。
-        "P5_layered0.52": lambda q, hit: hit[1] >= 8.25 or (hit[3] and hit[2] is not None and hit[2] >= 0.52),
-        "P6_layered0.48": lambda q, hit: hit[1] >= 8.25 or (hit[3] and hit[2] is not None and hit[2] >= 0.48),
+        # P5/P6=①分层门槛模拟（与 search._passes_query_recall_floor 实现同构：
+        # evidence-only 行 _lexical_rank is None 走余弦线，词法锚定行维持复合线）。
+        "P5_layered0.52": lambda q, hit: hit[1] >= 8.25 or (
+            hit[4] is None and hit[2] is not None and hit[2] >= 0.52),
+        "P6_layered0.48": lambda q, hit: hit[1] >= 8.25 or (
+            hit[4] is None and hit[2] is not None and hit[2] >= 0.48),
     }
 
     def evaluate(keep_fn):
@@ -155,7 +186,7 @@ def main() -> int:
             mismatch = any(lang_of_key(k) != r["qlang"] for k in r["targets"])
             qinfo = {"mismatch": mismatch, "qlang": r["qlang"]}
             page = [h for h in r["hits"] if keep_fn(qinfo, h)][:10]
-            keys = [k for k, _, _, _ in page]
+            keys = [h[0] for h in page]
             gold = r["targets"]
             classes = set()
             for k in gold:
@@ -180,6 +211,10 @@ def main() -> int:
             }
         return out
 
+    if os.environ.get("XLANG_LIVE_FLOOR"):
+        print("\n=== 实弹模式（产品门槛+分层豁免，深拉 50） ===", flush=True)
+        _live_report(runs, lang_of_key)
+        return 0  # 正常 return：temp_library 上下文自行清理临时库
     print("\n=== 门槛政策反事实（recall-v3-len + 33 跨语言题，floor=0 深拉 50 离线套政策） ===", flush=True)
     table = {}
     for name, fn in POLICIES.items():
@@ -196,9 +231,9 @@ def main() -> int:
     for r in runs:
         mismatch = any(lang_of_key(k) != r["qlang"] for k in r["targets"])
         gold = r["targets"]
-        keys50 = [h[0] for h in r["hits"]]
-        top10 = keys50[:10]
         score_of = {h[0]: h for h in r["hits"]}
+        top10 = {h[0] for h in sorted(r["hits"], key=lambda h: -h[1])[:10]
+                 if h[1] >= 8.25}  # P0 真实页面：复合分过滤后前 10
         for g in gold:
             gs = score_of.get(g)
             if g in top10:

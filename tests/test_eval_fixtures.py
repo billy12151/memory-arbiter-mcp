@@ -22,17 +22,20 @@ def _load(name: str) -> list[dict]:
     ]
 
 
-def test_queries_cover_47_with_expected_kinds() -> None:
+def test_queries_cover_42_with_expected_kinds() -> None:
     data = json.loads((FIXTURES / "queries.json").read_text(encoding="utf-8"))
     queries = data["queries"]
     # 检索线 K3：corpus bump recall-v2-kw——原 34 题（问句/混合形态）保留
-    # 作回归基线，+K01~K13 关键词模式专属考题（expected_band 实测定档）
-    assert data["corpus_version"] == "recall-v2-kw"
-    assert len(queries) == 47
+    # 作回归基线，+K01~K13 关键词模式专属考题（expected_band 实测定档）。
+    # 0.17.0 修剪（owner 2026-09-26，recall-v2-kw-trim）：短句/超配跨语言/
+    # 死题出卷（R1-R4，eval/trim_recall_v2.py）——47→42（A01/A03/A05/A07/
+    # B09 五道死题移除）。
+    assert data["corpus_version"] == "recall-v2-kw-trim"
+    assert len(queries) == 42
     kinds: dict[str, int] = {}
     for row in queries:
         kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
-    assert kinds == {"paraphrase": 12, "lookup": 10, "legal": 8, "far": 4, "keyword": 13}
+    assert kinds == {"paraphrase": 8, "lookup": 9, "legal": 8, "far": 4, "keyword": 13}
     bands = {row["qid"]: row.get("expected_band") for row in queries if row["kind"] == "keyword"}
     assert set(bands.values()) == {"midband", "above"}
     assert list(bands.values()).count("midband") >= 5
@@ -56,9 +59,9 @@ def test_labels_reference_existing_targets_only() -> None:
         assert row["label"] in {"relevant", "borderline"}, row
         assert row["fixture_key"] in known, row
     labeled_qids = {row["qid"] for row in labels}
-    # 原 22 qid（A/B 组非无关标注）+ K 组 13 qid（relevant 目标）；
-    # C/D 组 12 qid 未标=默认无关
-    assert len(labeled_qids) == 35
+    # 0.17.0 修剪后：原 22→17 qid（A/B 组非无关标注，5 道死题移除）+
+    # K 组 13 qid（relevant 目标）；C/D 组 12 qid 未标=默认无关
+    assert len(labeled_qids) == 30
 
 
 def test_distractors_exclude_twin_bucket_and_targets() -> None:
@@ -75,7 +78,8 @@ def test_manifest_matches_files() -> None:
     manifest = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["targets"] == len(_load("targets.jsonl"))
     assert manifest["distractors"] == len(_load("distractors.jsonl"))
-    assert manifest["labeled_qids"] == 35
+    # 0.17.0 修剪（recall-v2-kw-trim）：35→30（A01/A03/A05/A07/B09 死题移除）
+    assert manifest["labeled_qids"] == 30
 
 
 SIM_FIXTURES = REPO / "eval" / "fixtures" / "similarity"

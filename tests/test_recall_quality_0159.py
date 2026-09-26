@@ -89,3 +89,76 @@ def test_channel3_stopwords_do_not_manufacture_surface_hits(tmp_path: Path) -> N
     ids = [int(r["id"]) for r in out.results]
     assert target in ids
     assert filler not in ids
+
+
+def test_query_floor_layered_vec_only_cosine_exemption() -> None:
+    """0.17.0 分层门槛：复合线管词法锚定候选，evidence-only 行走余弦线。
+
+    数据锚：recall-v3-len en→zh 15 个贴线 gold 复合 7.51-8.22、余弦
+    0.509-0.681（xlang-floor-policies.json 豁免政策与全取消召回逐项相等）。
+    """
+    from memory_arbiter.search import _passes_query_recall_floor
+
+    # 词法锚定（FTS/surface）：复合分线照旧，豁免不适用
+    assert _passes_query_recall_floor({"_final_score": 8.3, "_lexical_rank": 2}) is True
+    assert _passes_query_recall_floor({"_final_score": 8.0, "_lexical_rank": 2}) is False
+    # evidence-only：余弦线接管（0.48 = COS_RECALL_FLOOR）——但仅
+    # alloglottic（非 CJK 主导）查询开闸，见 gate 测试
+    assert _passes_query_recall_floor({
+        "_final_score": 8.0, "_lexical_rank": None, "_evidence_best_score": 0.5,
+    }, alloglottic=True) is True
+    assert _passes_query_recall_floor({
+        "_final_score": 8.0, "_lexical_rank": None, "_evidence_best_score": 0.47,
+    }, alloglottic=True) is False
+    # 余弦不可得（K2 fail-open 同款）：保守走复合线，不凭空放行
+    assert _passes_query_recall_floor({
+        "_final_score": 8.0, "_lexical_rank": None, "_evidence_best_score": None,
+    }, alloglottic=True) is False
+    # 同一行在 CJK 查询下（闸关）：复合线照拦
+    assert _passes_query_recall_floor({
+        "_final_score": 8.0, "_lexical_rank": None, "_evidence_best_score": 0.5,
+    }) is False
+    # 字段全缺（极端防御）：不过线
+    assert _passes_query_recall_floor({"_final_score": 7.0}) is False
+
+
+def test_query_floor_boundary_equality_pins_comparators() -> None:
+    """恰等边界钉 >= 比较符：与 K2 准入门（< COS_RECALL_FLOOR 拒）无缝。"""
+    from memory_arbiter.constants import COS_RECALL_FLOOR, QUERY_RECALL_SCORE_FLOOR
+    from memory_arbiter.search import _passes_query_recall_floor
+
+    assert _passes_query_recall_floor({"_final_score": QUERY_RECALL_SCORE_FLOOR}) is True
+    assert _passes_query_recall_floor({
+        "_final_score": 0.0, "_lexical_rank": None,
+        "_evidence_best_score": COS_RECALL_FLOOR,
+    }, alloglottic=True) is True
+    assert _passes_query_recall_floor({
+        "_final_score": 0.0, "_lexical_rank": None,
+        "_evidence_best_score": COS_RECALL_FLOOR - 0.001,
+    }, alloglottic=True) is False
+
+
+def test_query_floor_exemption_gated_by_alloglottic_query() -> None:
+    """豁免闸（owner「无关召回涨了就修」）：非 CJK 主导查询才开豁免。
+
+    数据锚：主考卷 zh 查询豁免 51 行 0 gold 全噪音（C01/C02 legal 探针
+    28 条误召回），en→zh 豁免 15 gold——闸把两者分开。
+    """
+    from memory_arbiter.search import _query_non_cjk_dominant, _passes_query_recall_floor
+
+    row = {"_final_score": 8.0, "_lexical_rank": None, "_evidence_best_score": 0.6}
+    # zh 查询：豁免关闭，复合线照拦（C01 legal 防线）
+    assert _passes_query_recall_floor(row, alloglottic=False) is False
+    # en 查询：豁免开启，余弦线放行
+    assert _passes_query_recall_floor(row, alloglottic=True) is True
+    # 词法锚定行任何查询下都走复合线
+    lex_row = {"_final_score": 8.0, "_lexical_rank": 2, "_evidence_best_score": 0.6}
+    assert _passes_query_recall_floor(lex_row, alloglottic=True) is False
+
+    assert _query_non_cjk_dominant("催收 辱骂 侮辱") is False
+    assert _query_non_cjk_dominant("Which system handles bank marketing renewals?") is True
+    assert _query_non_cjk_dominant("llama.cpp n_batch truncation") is True
+    assert _query_non_cjk_dominant("migrate_workspace UNIQUE 冲突") is True   # 技术名词混排
+    assert _query_non_cjk_dominant("修复 FTS5 查询 bug") is True              # 少量 CJK
+    assert _query_non_cjk_dominant("12345 !!!") is False                      # 无字母信息→保守关闭
+    assert _query_non_cjk_dominant("") is False

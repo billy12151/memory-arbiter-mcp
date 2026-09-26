@@ -269,4 +269,7 @@ def test_rescue_carries_midband_row_past_relevance_floor(tmp_path: Path) -> None
     assert by_id[exact].get("_exact_match") is True
     assert by_id[rescued].get("_keyword_rescued") is True
     assert any("keyword rescue" in note for note in by_id[rescued]["_ranking_notes"])
-    assert 3 not in ids  # 另一条手册记录：同余弦、无关键词（对照）
+    # 0.17.0 分层门槛：同余弦、无关键词的对照行（evidence-only 中间带）由
+    # 余弦线放行，不再被复合线二道惩罚——救济的差值从"进不进页"变为"名次"
+    # （KEYWORD_RESCUE_BOOST 把被救行排在对照行之前）。
+    assert 3 not in ids or ids.index(rescued) < ids.index(3)

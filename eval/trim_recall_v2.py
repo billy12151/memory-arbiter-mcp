@@ -91,6 +91,8 @@ def main() -> int:
 
     # 写回
     manifest["corpus_version"] = NEW_VERSION
+    manifest["targets"] = len(keep_targets)
+    manifest["labeled_qids"] = len({l["qid"] for l in keep_labels})
     manifest["trimmed"] = {
         "date": "2026-09-26",
         "rules": "R1 短(<500)移除(K组3条保护); R2 跨语言保留2条探针(A11 zh→en + B02 en→mixed); "

@@ -248,6 +248,7 @@ def run_recall_queries(
                     else row.get("final_score"),
                     "final_score": row.get("_final_score"),
                     "evidence_best": row.get("_evidence_best_score"),
+                    "evidence_only": row.get("_lexical_rank") is None,
                     "rescued": bool(row.get("_keyword_rescued")),
                     "workspace": row.get("workspace"),
                 }
