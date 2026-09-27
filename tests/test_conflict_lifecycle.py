@@ -886,8 +886,11 @@ def _hit(peer_id: int, text: str, *, row_id: int = 1, distance: float = 0.1,
     }
 
 
-def test_notice_value_groups_tolerate_missing_parsed_keys(tmp_path: Path, monkeypatch) -> None:
-    """A notice_ready gate with value keys missing from parsed must not KeyError."""
+def test_notice_value_groups_carry_quote_sides(tmp_path: Path, monkeypatch) -> None:
+    """0.17.1: judged notices carry the two ROW TEXTS as the value sides —
+    no extraction, so value_groups hold the quotes themselves (empty
+    normalised value, quote as display). The old missing-parsed-keys
+    tolerance died with the extraction paradigm (nothing parses)."""
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "MyProject", "scope": "Production"}
@@ -897,31 +900,25 @@ def test_notice_value_groups_tolerate_missing_parsed_keys(tmp_path: Path, monkey
 
     class Backend:
         @staticmethod
-        def classify_pair(left, right, *, deadline_monotonic=None):
-            # A well-formed signal whose parsed dict omits the value keys.
-            parsed = {"attribute_a": "数据库选型", "attribute_b": "数据库选型"}
-            return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+        def judge_pair(text_a, text_b):
+            from memory_arbiter.semantic_judge import PairVerdict
+            return PairVerdict(
+                "conflict", {"conflict": 0.95, "no_conflict": 0.03, "possible_conflict": 0.02},
+                "numeric_value", "mdeberta-v4m:test",
+            )
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: Backend())
-    gate = SimpleNamespace(
-        state="notice_ready", reason="bidirectional_conflict",
-        attribute="数据库选型", value_a="sqlite", value_b="mysql",
-    )
-    monkeypatch.setattr(
-        "memory_arbiter.pipeline.evidence.evaluate_single_direction_extraction", lambda *a, **k: gate,
-    )
 
     result = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
     assert result["outcome"] == "notices_created"
     notice = tools.db.list_semantic_notices(status="open", limit=10)[0]
     groups = notice["payload"]["value_groups"]
-    # Display values fall back to the gate's normalised values.
-    assert [group["display_value"] for group in groups] == ["sqlite", "mysql"]
-    # Gate-v2 G3: slot identity rides workspace + own subject (the
-    # metadata entity/scope source is retired — passing it changes nothing).
-    assert notice["payload"]["slot_key"] == {
-        "entity": "default", "attribute": "数据库选型", "scope": "b",
-    }
+    assert [g["display_value"] for g in groups] == [
+        "database sqlite 3 and 4", "database mysql 8 and 16",
+    ]
+    payload = notice["payload"]
+    assert payload["model_signal"]["label"] == "conflict"
+    assert payload["model_signal"]["model_version"].startswith("mdeberta-v4m:")
 
 
 def test_same_reason_degradation_counted_once_per_task(tmp_path: Path, monkeypatch) -> None:
@@ -948,15 +945,17 @@ def test_same_reason_degradation_counted_once_per_task(tmp_path: Path, monkeypat
 
     class BadOutput:
         @staticmethod
-        def classify_pair(left, right, *, deadline_monotonic=None):
-            return ModelSignal(False, "invalid_schema", None, "", None, "bad output")
+        def judge_pair(text_a, text_b):
+            from memory_arbiter.semantic_judge import PairVerdict
+            # both pairs fail with the SAME technical reason
+            return PairVerdict("no_conflict", {}, None, "mdeberta:unavailable", error="bad output")
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: BadOutput())
 
     result = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
     assert result["status"] == "incomplete"
-    assert result["reason"] == "qwen_invalid_output"
-    assert result["reasons_seen"] == ["qwen_invalid_output"]
+    assert result["reason"] == "judge_backend_error"
+    assert result["reasons_seen"] == ["judge_backend_error"]
     assert tools._check_degradation_count == 1
 
 

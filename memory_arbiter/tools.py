@@ -187,7 +187,7 @@ class MemoryTools:
         else:
             semantic_missing = self.settings.semantic_conflict_model_path is None
         if semantic_missing:
-            missing.append("✗ 冲突检测未启用（qwen 语义模型未找到）")
+            missing.append("✗ 冲突检测未启用（mdeberta 判定模型未配置：装 [mdeberta] extra、下载 V4m ckpt、配 semantic_conflict.mdeberta_ckpt）")
         if not missing:
             return None
         return "\n".join([

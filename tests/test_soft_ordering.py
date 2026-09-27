@@ -64,27 +64,32 @@ def make_tools(tmp_path: Path) -> MemoryTools:
 
 
 class _RecordingBackend:
-    """Classify nothing as notice; records pair evaluation order (once per pair)."""
+    """0.17.1: records judged pair evaluation order via the batch interface
+    (text pairs carry the hit row text — mapped back to memory ids by the
+    test through hits_by_peer)."""
 
     name = "recording"
 
     def __init__(self) -> None:
         self.order: list[tuple[int, int]] = []
+        self.text_to_id: dict[str, int] = {}
 
-    def classify_pair(
-        self, left: dict[str, Any], right: dict[str, Any], *, deadline_monotonic: float | None = None,
-    ) -> Any:
-        from memory_arbiter.semantic_conflict import ModelSignal
-        # forward+reverse both run per pair; dedupe by unordered id pair so
-        # `order` lists each evaluated pair exactly once, in evaluation order.
-        pair = {int(left["memory_id"]), int(right["memory_id"])}
-        if not self.order or self.order[-1] != pair:
-            self.order.append(pair)
-        parsed = {
-            "attribute_a": "export_format", "value_a": "json",
-            "attribute_b": "export_format", "value_b": "csv",
-        }
-        return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+    def register(self, hits_by_peer: dict[int, dict[str, Any]]) -> None:
+        for pid, hit in hits_by_peer.items():
+            self.text_to_id[hit["text"]] = int(pid)
+
+    def judge_pairs(self, pairs):
+        from memory_arbiter.semantic_judge import PairVerdict
+        for text_a, text_b in pairs:
+            pair = (self.text_to_id.get(text_b),)
+            if pair[0] is not None and (not self.order or self.order[-1] != pair):
+                self.order.append(pair)
+        return [
+            PairVerdict("no_conflict",
+                        {"conflict": 0.0, "no_conflict": 1.0, "possible_conflict": 0.0},
+                        None, "test")
+            for _ in pairs
+        ]
 
 
 def _write(tools: MemoryTools, content: str, subject: str, tags: list[str]) -> dict[str, Any]:
@@ -162,14 +167,14 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
 
     monkeypatch.setattr(tools.db, "row_knn", fake_knn)
     _pass_cos_gate(monkeypatch)
+    backend.register(hits_by_peer)
 
     result = tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 
     # The far (0.1) but zero-overlap pair must NOT come first any more: the
     # near (0.9) same-topic pair is evaluated first under equal check level.
     first_pair = backend.order[0]
-    assert int(near["id"]) in first_pair
-    assert int(far["id"]) not in first_pair
+    assert first_pair == (int(near["id"]),)
     assert result["status"] in {"completed", "incomplete"}
 
 
@@ -212,6 +217,10 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(tools.db, "row_knn", fake_knn)
     _pass_cos_gate(monkeypatch)
+    backend.register({
+        int(check_peer["id"]): {"text": "deploy pipeline is green 8 and 16"},
+        int(notify_peer["id"]): {"text": "invoice process is manual"},
+    })
 
     tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 

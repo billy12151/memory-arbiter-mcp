@@ -416,7 +416,7 @@ def test_pair_retry_feedback_matches_attribute_limits(monkeypatch: pytest.Monkey
 def test_pair_retry_skipped_when_window_cannot_fit(monkeypatch: pytest.MonkeyPatch) -> None:
     """The n_ctx guard: a retry whose prompt+output cannot fit the window is
     skipped instead of dying as a backend ValueError (which would reclassify
-    the degradation as qwen_backend_error)."""
+    the degradation as judge_backend_error)."""
     backend, llm = _backend_with_scripted_llm(
         monkeypatch, [_LIVE_SAMPLE_TRUNCATED, _VALID_EXTRACTION_JSON],
     )
@@ -637,7 +637,7 @@ def test_numeric_candidate_fails_closed_without_qwen(tmp_path: Path, monkeypatch
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     assert result["status"] == "incomplete"
-    assert result["reason"] == "qwen_unavailable"
+    assert result["reason"] == "judge_unavailable"
     assert result["notices_created"] == 0
     assert tools.db.list_semantic_notices(status="open") == []
     scan = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 20, "k": 10, "include_quotes": True})
@@ -1090,7 +1090,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
     first = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     first.pop("elapsed_ms", None)
     for _row_key in ("rows_mode", "rows_examined", "claims_channel", "claims_channel_c",
-                     "qwen_budget", "direct_verdicts"):  # Q1 additive receipt keys
+                     "judge_budget", "direct_verdicts"):  # Q1 additive receipt keys
         first.pop(_row_key, None)
     assert first == {"status": "completed", "outcome": "notices_created", "notices_created": 4}
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]
@@ -1102,7 +1102,7 @@ def test_notice_pairs_not_capped_by_count(tmp_path: Path, monkeypatch) -> None:
     second = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     second.pop("elapsed_ms", None)
     for _row_key in ("rows_mode", "rows_examined", "claims_channel", "claims_channel_c",
-                     "qwen_budget", "direct_verdicts"):  # Q1 additive receipt keys
+                     "judge_budget", "direct_verdicts"):  # Q1 additive receipt keys
         second.pop(_row_key, None)
     assert second == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
     assert len([n for n in tools.db.list_semantic_notices() if n["memory_id"] == new["id"]]) == 4
@@ -1159,7 +1159,7 @@ def test_check_degradation_is_visible_in_semantic_status(tmp_path: Path, monkeyp
     tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     assert tools.db.list_semantic_notices(status="open") == []
     degradation = tools._semantic_status()["check_degradation"]
-    assert degradation["last_reason"] == "qwen_unavailable"
+    assert degradation["last_reason"] == "judge_unavailable"
     assert degradation["count"] >= 1
 
 
@@ -1351,7 +1351,7 @@ def test_paused_disabled_and_shutdown_enqueue_complete_exact_task(tmp_path: Path
         assert worker.wait_task(task_id, 0) == outcome
 
 
-def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path, monkeypatch) -> None:
+def test_judge_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path, monkeypatch) -> None:
     from memory_arbiter.semantic_conflict import ModelSignal
 
     tools = make_tools(tmp_path, semantic_enabled=False)
@@ -1367,29 +1367,25 @@ def test_qwen_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path,
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     _pass_cos_gate(monkeypatch)
 
-    truncated_raw = '{"attribute_a": "数据库选型", "value_a": "MySQL", "attribute_b":'
     cases = [
-        ("semantic inference hard timeout after 30ms", "backend_error", "qwen_timeout", ""),
-        ("child exited", "backend_error", "qwen_backend_error", ""),
-        (None, "backend_unavailable", "qwen_unavailable", ""),
-        ("missing_json", "invalid_json", "qwen_invalid_output", truncated_raw),
+        ("mdeberta inference hard timeout after 30ms", "judge_timeout"),
+        ("mdeberta child exited", "judge_backend_error"),
+        ("mdeberta judge disabled", "judge_unavailable"),
     ]
-    for error, candidate_type, expected, raw in cases:
-        backend = type(
-            "B", (),
-            {"classify_pair": staticmethod(lambda l, r, _e=error, _t=candidate_type, _r=raw: ModelSignal(False, _t, None, _r, None, _e))},
-        )()
-        monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
+    for error, expected in cases:
+        class ErrBackend:
+            @staticmethod
+            def judge_pair(text_a, text_b):
+                from memory_arbiter.semantic_judge import PairVerdict
+                return PairVerdict("no_conflict", {}, None, "mdeberta:unavailable", error=error)
+
+        monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: ErrBackend())
         tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
         degradation = tools._semantic_status()["check_degradation"]
         assert degradation["last_reason"] == expected
     assert tools.db.list_semantic_notices(status="open") == []
-    # The offending raw output is kept for debugging; failures without model
-    # output (timeout / unavailable) leave no sample.
-    samples = degradation["recent_samples"]
-    assert [s["sample"] for s in samples] == [truncated_raw]
-    assert samples[0]["reason"] == "qwen_invalid_output"
-    assert samples[0]["at"]
+    # 0.17.1: the judge produces no raw output — the invalid_output sample
+    # assertion retired with the decode-retry protocol.
 
 
 def test_failed_migration_target_is_not_current_generation(tmp_path: Path, monkeypatch) -> None:
@@ -2932,21 +2928,25 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: _hits_with_metadata(tools, list(hits)))
     _pass_cos_gate(monkeypatch)
 
-    # Same normalized value on both sides → clean not_same_attribute_different_value.
-    class SameValue:
+    # 0.17.1: a clean negative is the judge saying no_conflict (the old
+    # same-extracted-value gate died with the slot paradigm).
+    class NoConflict:
         @staticmethod
-        def classify_pair(left, right, *, deadline_monotonic=None):
-            parsed = {"attribute_a": "数据库选型", "value_a": "mysql",
-                      "attribute_b": "数据库选型", "value_b": "mysql"}
-            return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: SameValue())
+        def judge_pair(text_a, text_b):
+            from memory_arbiter.semantic_judge import PairVerdict
+            return PairVerdict(
+                "no_conflict",
+                {"conflict": 0.05, "no_conflict": 0.9, "possible_conflict": 0.05},
+                None, "mdeberta-v4m:test",
+            )
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: NoConflict())
 
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     result.pop("elapsed_ms", None)
     result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
-    result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
-    assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1}
+    result.pop("judge_budget", None); result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
+    assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1, "model_clear": 1}
     # A clean model decision is not counted as check degradation.
     degradation = tools._semantic_status()["check_degradation"]
     assert degradation["last_reason"] != "not_same_attribute_different_value"
@@ -2989,9 +2989,11 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     result.pop("elapsed_ms", None)
     result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
-    result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
+    result.pop("judge_budget", None); result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1}
-    assert deadlines == [None]  # single-direction: one extraction per pair
+    # 0.17.1 攒批：判定走批前向，deadline 检查粒度从每对变为每块——慢后端
+    # 的 classify_pair 不再被逐对调用，deadlines 观测点 retired。
+    assert deadlines == []
 
 
 def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path: Path, monkeypatch) -> None:
@@ -3037,25 +3039,29 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
 
     # reasons_seen is attached because the second pair hit the job budget
-    # (qwen_budget_exhausted) after the first pair's notice was created;
+    # (judge_budget_exhausted) after the first pair's notice was created;
     # truncated flags that the check was bounded, not exhaustive
     # (second-round review).
     result.pop("elapsed_ms", None)
     result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
     result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
-    result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
+    result.pop("judge_budget", None); result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     # 0.17.0 P2-3/P2-4: rows receipt keys + budget-skipped pairs backlog
     result.pop("rows_mode", None)
     result.pop("rows_examined", None)
     result.pop("backlogged", None)
     result.pop("claims_channel", None)
+    # 0.17.1 攒批语义：pass1 逐对收对（慢后端在批前向里才走钟，pass1 内
+    # 时钟不动 → 公平墙不咬），两对一次批前向各落一条 notice——公平墙
+    # 语义从「逐对中断」变为「每块结算」，积压由 backlog 承接（不变式）。
     assert {
-        "status": "completed", "outcome": "notices_created", "notices_created": 1,
-        "truncated": True, "reasons_seen": ["qwen_budget_exhausted"],
-        "pairs_examined": 1,
-    } == {k: v for k, v in result.items()}
-    assert deadlines == [None]  # single-direction: one extraction per pair
-    assert len(tools.db.list_semantic_notices(status="open", limit=10)) == 1
+        "status": "completed", "outcome": "notices_created", "notices_created": 2,
+        "pairs_examined": 2,
+    } == {k: v for k, v in result.items() if k in {
+        "status", "outcome", "notices_created", "pairs_examined",
+    }}
+    assert deadlines == []
+    assert len(tools.db.list_semantic_notices(status="open", limit=10)) == 2
 
 
 def test_pending_job_deadline_uses_actual_enqueue_time(monkeypatch) -> None:

@@ -241,9 +241,12 @@ def test_sync_window_timeout_returns_async_and_survives(tmp_path: Path, monkeypa
 
     class _SlowBackend(_FormatBackend):
         @classmethod
-        def classify_pair(cls, left, right, *, deadline_monotonic=None):
-            time.sleep(0.4)
-            return super().classify_pair(left, right, deadline_monotonic=deadline_monotonic)
+        def judge_pairs(cls, pairs):
+            time.sleep(0.4)  # overflow the 50ms sync window
+            from memory_arbiter.semantic_judge import PairVerdict
+            return [PairVerdict("conflict",
+                                {"conflict": 0.9, "no_conflict": 0.05, "possible_conflict": 0.05},
+                                None, "test") for _ in pairs]
 
     _stub_knn_peer(monkeypatch, tools, int(record["id"]), "slowbench 的取值为 json。")
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _SlowBackend())

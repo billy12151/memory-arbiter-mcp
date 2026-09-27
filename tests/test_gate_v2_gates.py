@@ -256,11 +256,19 @@ def test_pair_score_orders_high_band_first(tmp_path, monkeypatch) -> None:
         calls = 0
 
         @staticmethod
-        def classify_pair(left, right, *, deadline_monotonic=None, retry_allowed=True):
-            Backend.calls += 1
-            consumed.append(int(right.get("memory_id") or 0))
-            from memory_arbiter.semantic_conflict import ModelSignal
-            return ModelSignal(False, "unknown_field", None, "", None, None)
+        def judge_pairs(pairs):
+            # 0.17.1: consumption order rides the batch interface; verdicts
+            # are no_conflict so nothing lands — the pin is the ORDER.
+            from memory_arbiter.semantic_judge import PairVerdict
+            Backend.calls += len(pairs)
+            for text_a, text_b in pairs:
+                if "200 条" in text_b:
+                    consumed.append(int(peer_lo["id"]))
+                elif "100 条" in text_b:
+                    consumed.append(int(peer_hi["id"]))
+            return [PairVerdict("no_conflict",
+                                {"conflict": 0.0, "no_conflict": 1.0, "possible_conflict": 0.0},
+                                None, "test") for _ in pairs]
 
     def fake_knn(embedding, **kw):
         if kw.get("subject_rows_only"):
@@ -317,19 +325,18 @@ def test_claim_bridge_extracts_and_reports(tmp_path, monkeypatch) -> None:
     )["data"]
     assert tools.wait_semantic_worker_drained(timeout=5)
 
-    captured_prompts: list[str] = []
+    captured_inputs: list[tuple[str, str]] = []
 
     class BridgeBackend:
         @staticmethod
-        def classify_pair(left, right, **kw):
-            captured_prompts.append(f"{left.get('dispatch_hint')}|{right.get('quote')}")
-            from memory_arbiter.semantic_conflict import ModelSignal
-            return ModelSignal(
-                True, "attribute_value_extraction", None, "",
-                # value_b must be a literal slice of the peer quote (grounding).
-                {"attribute_a": "上传方式", "value_a": "主仓库就是内部源",
-                 "attribute_b": "上传方式", "value_b": "dist/* 路径会 409"},
-                None,
+        def judge_pair(text_a, text_b):
+            # 0.17.1 (owner 拍板): the claim renders as `attr=value` and goes
+            # straight to the judge — the left side IS the attr-named input.
+            captured_inputs.append((text_a, text_b))
+            from memory_arbiter.semantic_judge import PairVerdict
+            return PairVerdict(
+                "conflict", {"conflict": 0.9, "no_conflict": 0.05, "possible_conflict": 0.05},
+                "reference_entity", "mdeberta-v4m:test",
             )
 
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: BridgeBackend())
@@ -346,8 +353,8 @@ def test_claim_bridge_extracts_and_reports(tmp_path, monkeypatch) -> None:
     )
     result = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
     claims = result.get("claims_channel") or {}
-    assert captured_prompts, "bridge must consult Qwen with the attr-named prompt"
-    assert "上传方式" in captured_prompts[0], "case-a prompt must name the attribute"
+    assert captured_inputs, "bridge must consult the judge with the claim"
+    assert captured_inputs[0][0].startswith("上传方式="), "left input renders attr=value"
     assert claims.get("channel_b_notices", 0) >= 1
     notices = tools.db.list_semantic_notices(status="open")
     assert any(n.get("payload", {}).get("claim_bridge") for n in notices)

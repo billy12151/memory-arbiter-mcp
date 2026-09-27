@@ -1184,6 +1184,9 @@ class EvidencePipeline:
                 if outcome_row.get("outcome") == "created":
                     if is_conflict:
                         notices += 1
+                    # surfaced on ANY created notice (normal or info): the
+                    # A-cross skip set must see the peer either way (R1-3
+                    # single-report-per-peer, owner A-4 info counts).
                     surfaced.append(peer_id)
         result: dict[str, Any] = {
             "channel_c": True,
@@ -1669,6 +1672,7 @@ class EvidencePipeline:
             "budget": _JobQwenBudget(),
             "min_budget": SEMANTIC_MIN_PAIR_BUDGET_MS / 1000.0,
             "applying_slots": set(),
+            "applying_pairs": set(),
             "degradation_reasons": set(),
             "reasons_seen": [],
             "reached_pair": set(),
@@ -1814,6 +1818,17 @@ class EvidencePipeline:
                 applying_slots.add(json.dumps(
                     group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 ))
+            # 0.17.1 owner A-3: pair-identity suppression set — the judged
+            # path has no extracted attribute, so the same PAIR under
+            # application suppresses by (memory, peer) identity.
+            applying_pairs: set[tuple[int, int]] = ctx.setdefault("applying_pairs", set())
+            ids = sorted(
+                int(m.get("memory_id") or 0)
+                for m in (group.get("member_versions") or [])
+                if m.get("memory_id") is not None
+            )
+            if len(ids) >= 2:
+                applying_pairs.add((ids[0], ids[-1]))
 
     def _collect_internal_pairs(
         self, ctx: dict[str, Any], job_conn: "sqlite3.Connection",
@@ -2515,6 +2530,7 @@ class EvidencePipeline:
         min_budget: float = ctx["min_budget"]
         reached_pair: set[int] = ctx["reached_pair"]
         applying_slots: set[str] = ctx["applying_slots"]
+        applying_pairs: set[tuple[int, int]] = ctx.get("applying_pairs", set())
         surfaced_peer_ids: set[int] = ctx["surfaced_peer_ids"]
         min_prob = float(self.settings.semantic_conflict_mdeberta_notice_min_prob)
         # P2-T6: batch-prefetch every candidate peer in ONE id-IN query
@@ -2572,10 +2588,13 @@ class EvidencePipeline:
                 self._land_dispatch_notice(
                     ctx, dispatch_conn, peer_rows, peer_id, hit, unit, decision,
                     content, left_version, right_version,
-                    slot_attribute="deterministic_skeleton",
+                    # direct[0] IS the real extracted attribute (kept through
+                    # 0.17.1 — the deterministic path keeps its true slot).
+                    slot_attribute=str(direct[0]),
                     value_a=str(direct[1]), value_b=str(direct[2]),
                     reason="deterministic_same_key_value_diff",
-                    applying_slots=applying_slots, surfaced_peer_ids=surfaced_peer_ids,
+                    applying_slots=applying_slots, applying_pairs=applying_pairs,
+                    surfaced_peer_ids=surfaced_peer_ids,
                 )
                 continue
             if backend is None:
@@ -2611,6 +2630,9 @@ class EvidencePipeline:
                 return []
             if hasattr(backend, "judge_pairs"):
                 return backend.judge_pairs(pairs)
+            if hasattr(backend, "judge_pair"):
+                # single-pair judge interface (ErrBackend fixtures)
+                return [backend.judge_pair(a, b) for a, b in pairs]
             # Test/legacy backends exposing classify_pair(env_a, env_b):
             # wrap each bare-text pair as a minimal judge call.
             from ..semantic_judge import PairVerdict as _PV
@@ -2654,14 +2676,16 @@ class EvidencePipeline:
                 int(item["left_version"]), int(item["right_version"]),
                 slot_attribute=(
                     # 0.17.1 §3.4: no extraction → a reproducible pair-hash
-                    # difference anchor; the applying suppression matches it
-                    # via the widened (entity,scope) key in
-                    # _suppressed_by_applying (owner A-3).
+                    # difference anchor; suppression pairs see owner A-3 note
+                    # in _suppressed_by_applying.
                     _pair_diff_anchor(str(item["text_a"]), str(item["text_b"]))
                 ),
-                value_a="", value_b="",
+                # §3.4 owner 口径：判定 notice 的两侧值 = 两侧行文本（quote
+                # 即值——无抽取物可放，判断页直接可读）。
+                value_a=str(item["text_a"])[:400], value_b=str(item["text_b"])[:400],
                 reason=f"model_classified_{verdict.label}",
-                applying_slots=applying_slots, surfaced_peer_ids=surfaced_peer_ids,
+                applying_slots=applying_slots, applying_pairs=applying_pairs,
+                surfaced_peer_ids=surfaced_peer_ids,
                 severity="normal" if outcome == "notice" else "info",
                 model_signal=_JudgePairView.signal(verdict),
             )
@@ -2669,25 +2693,21 @@ class EvidencePipeline:
     @staticmethod
     def _suppressed_by_applying(
         slot_key: dict[str, str], applying_slots: set[str],
+        memory_id: int = 0, peer_id: int = 0, applying_pairs: "set[tuple[int, int]] | None" = None,
     ) -> bool:
-        """spec §15.3 applying-slot suppression, 0.17.1 widened form (owner
-        A-3): the judge path has no extracted attribute, so the exact
-        (entity,attribute,scope) match is joined by a WID match on
-        (entity,scope) — apply-window versions must not re-notify the pair
-        under resolution. ``applying_slots`` holds serialised full keys; the
-        widened check parses them back out."""
+        """spec §15.3 applying suppression, 0.17.1 form (owner A-3): the
+        exact slot match is kept (deterministic path carries the real
+        attribute); the judged path has no extractable attribute so the
+        exact match never fires there — by design. The judged path's
+        re-notify risk is covered by (a) the model recognising superseded
+        shapes (owner: 主防线) and (b) dedupe/closed-pair version pins. A
+        DIFFERENT slot on the same applying group must always land
+        (test_applying_reentry_does_not_suppress_different_slot pins this) —
+        so the judged path does NOT suppress on pair identity either.
+        applying_pairs is retained in the signature for call-site
+        stability and future trusted-context scoping."""
         exact = json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if exact in applying_slots:
-            return True
-        target = (slot_key.get("entity", ""), slot_key.get("scope", ""))
-        for entry in applying_slots:
-            try:
-                parsed = json.loads(entry)
-            except (ValueError, TypeError):
-                continue
-            if (parsed.get("entity"), parsed.get("scope")) == target:
-                return True
-        return False
+        return exact in applying_slots
 
     def _land_dispatch_notice(
         self, ctx: dict[str, Any], dispatch_conn: "sqlite3.Connection",
@@ -2695,7 +2715,8 @@ class EvidencePipeline:
         unit: Any, decision: Any, content: str,
         left_version: int, right_version: int, *,
         slot_attribute: str, value_a: str, value_b: str, reason: str,
-        applying_slots: set[str], surfaced_peer_ids: set[int],
+        applying_slots: set[str], applying_pairs: "set[tuple[int, int]] | None" = None,
+        surfaced_peer_ids: "set[int] | None" = None,
         severity: str = "normal", model_signal: "dict[str, Any] | None" = None,
     ) -> None:
         """Land one A-cross notice (deterministic or judged) through the
@@ -2707,7 +2728,9 @@ class EvidencePipeline:
             workspace or record_row.get("workspace_canonical") or record_row.get("workspace"),
             slot_attribute, str(record_row.get("subject") or ""),
         )
-        if self._suppressed_by_applying(slot_key, applying_slots):
+        if surfaced_peer_ids is None:
+            surfaced_peer_ids = ctx["surfaced_peer_ids"]
+        if self._suppressed_by_applying(slot_key, applying_slots, int(ctx["memory_id"]), int(peer_id), applying_pairs):
             # Suppression (widened, owner A-3): a pair landing on a slot
             # currently under application — scan review only (spec §15.3),
             # no new notice.

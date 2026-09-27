@@ -1095,6 +1095,13 @@ class ScanPipeline:
             "left_quote": member_quote(0),
             "right_quote": member_quote(1),
         }
+        # 0.17.1: judged notices carry model_signal; legacy qwen_signal rows
+        # keep rendering through the old shape (one-release compat read).
+        model_signal = item.get("model_signal") if isinstance(item.get("model_signal"), dict) else None
+        if model_signal:
+            light["model_signal"] = {
+                key: model_signal.get(key) for key in ("label", "probs", "mechanism", "model_version")
+            }
         qwen_signal = item.get("qwen_signal") if isinstance(item.get("qwen_signal"), dict) else None
         if qwen_signal:
             light["qwen_signal"] = {

@@ -61,7 +61,7 @@ SCHEMA_MIGRATIONS = {
 # envelopes carry heading+neighbour context for Qwen attribute recovery
 # (pair-v10); prompt/detection semantics changed, so the detector version
 # re-arms one full scan round per the standing release contract.
-CONFLICT_DETECTOR_VERSION = "row-context-envelope-v6"
+CONFLICT_DETECTOR_VERSION = "mdeberta-v4m-v1"
 # 0.17.0 (review BUG-10): memory_claims is a LIVE table now (P2-5 claims
 # channel, additive.py builds it in every current library) — it must not
 # appear in the legacy-tombstone set or mema upgrade / doctor CLI would

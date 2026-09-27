@@ -156,14 +156,24 @@ def _peer_hit(peer: dict[str, Any], row_id: int, text: str, distance: float,
 
 # ── A-cross 两侧 envelope 带 context；quote 保持主行；internal 不带 ─────────────
 
-def test_cross_dispatch_envs_carry_context(tmp_path, monkeypatch) -> None:
+def test_cross_dispatch_bare_sentence_pairs_no_context(tmp_path, monkeypatch) -> None:
+    """0.17.1: the judge sees BARE row texts — the row-context envelope was a
+    slot-extraction aid and dies with that paradigm (owner 范围收窄)."""
     tools = tv.make_tools(tmp_path, semantic_enabled=True)
     tools.settings.semantic_conflict_on_write = "off"
     peer1 = tools.memory_write(content=_PEER_CONTENT, subject="ctx-peer", tags=[])["data"]
     new = tools.memory_write(content=_OWN_CONTENT, subject="ctx-own", tags=[])["data"]
     assert tools.wait_semantic_worker_drained(timeout=5)
-    _EnvCapture.reset()
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _EnvCapture)
+    captured: list[tuple[str, str]] = []
+
+    class Capture:
+        @staticmethod
+        def judge_pairs(pairs):
+            captured.extend(pairs)
+            from memory_arbiter.semantic_judge import PairVerdict
+            return [PairVerdict("no_conflict",
+                                {"conflict": 0.0, "no_conflict": 1.0, "possible_conflict": 0.0},
+                                None, "test") for _ in pairs]
 
     sentence = "连接池上限为 300，队列长度为 4。"
     sentence_start = _PEER_CONTENT.index(sentence)
@@ -181,36 +191,21 @@ def test_cross_dispatch_envs_carry_context(tmp_path, monkeypatch) -> None:
         _gates, "candidate_cos_gate",
         lambda own, hits, vecs: ([(h, 0.85) for h in hits], [], []),
     )
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: Capture)
 
     receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
-    cross_calls = [
-        (left, right) for left, right in _EnvCapture.calls
-        if "context" in left or "context" in right
-    ]
-    assert cross_calls, "A-cross Qwen dispatch must carry row context on the envelopes"
-    left, right = cross_calls[0]
-    # 两条 own 主行都可能成为被派发侧——各自的 context 预期不同但都确定。
-    expected_own_context = {
-        "连接池上限为 99，队列长度为 99。": "本机配置 / 连接池上限为 100，队列长度为 100。",
-        "连接池上限为 100，队列长度为 100。": "本机配置 / 连接池上限为 99，队列长度为 99。",
-    }
-    assert left["quote"] in expected_own_context
-    assert left["context"] == expected_own_context[left["quote"]]
-    assert right["context"] == "服务配置"
-    assert right["quote"] == sentence
-    # internal keeper（范围外）不带 context；无 claims → C 不派发
-    internal_calls = [
-        (left, right) for left, right in _EnvCapture.calls
-        if "context" not in left and "context" not in right
-    ]
-    assert internal_calls, "internal keepers ride without context (scope pin)"
-    assert receipt["qwen_budget"]["internal"] == 1
+    assert captured, "A-cross must consult the judge on the sentence pair"
+    for text_a, text_b in captured:
+        assert "context" not in text_a and "context" not in text_b
+    # the peer side is exactly the row sentence
+    assert any(text_b == sentence for text_a, text_b in captured)
 
 
-# ── C 通道：peer 侧带 context、claim 侧不带（D3 翻案）──────────────────────────
-
-def test_channel_c_right_env_context_claim_side_none(tmp_path, monkeypatch) -> None:
+def test_channel_c_bare_inputs_judged(tmp_path, monkeypatch) -> None:
+    """0.17.1: channel C judges `attr=value` (claim side, owner 拍板) against
+    the bare peer row — no context envelope (D3 aid retired with the
+    extraction paradigm)."""
     tools = tv.make_tools(tmp_path, semantic_enabled=True)
     tools.settings.semantic_conflict_on_write = "off"
     peer1 = tools.memory_write(content=_PEER_CONTENT, subject="c-ctx-peer", tags=[])["data"]
@@ -219,12 +214,19 @@ def test_channel_c_right_env_context_claim_side_none(tmp_path, monkeypatch) -> N
         claims=[{"attr": "连接池上限", "value": "99"}],
     )["data"]
     assert tools.wait_semantic_worker_drained(timeout=5)
-    _EnvCapture.reset()
-    _EnvCapture.reply = {
-        "attribute_a": "连接池上限", "value_a": "99",
-        "attribute_b": "连接池上限", "value_b": "300",
-    }
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _EnvCapture)
+    captured: list[tuple[str, str]] = []
+
+    class Capture:
+        @staticmethod
+        def judge_pair(text_a, text_b):
+            captured.append((text_a, text_b))
+            from memory_arbiter.semantic_judge import PairVerdict
+            return PairVerdict(
+                "conflict", {"conflict": 0.9, "no_conflict": 0.05, "possible_conflict": 0.05},
+                "numeric_value", "mdeberta-v4m:test",
+            )
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: Capture)
     sentence = "连接池上限为 300，队列长度为 4。"
     sentence_start = _PEER_CONTENT.index(sentence)
     hits = [_peer_hit(peer1, 201, sentence, 0.2,
@@ -241,12 +243,11 @@ def test_channel_c_right_env_context_claim_side_none(tmp_path, monkeypatch) -> N
         notices_used=0, budget_sink=None, deadline_fn=None,
     )
 
-    assert result["channel_c_notices"] == 1, "grounded value difference must land the C notice"
-    assert _EnvCapture.calls, "channel C must have dispatched Qwen once"
-    left, right = _EnvCapture.calls[0]
-    assert "context" not in left, "claim side carries no sentence context (D3)"
-    assert right["context"] == "服务配置"
-    assert right["quote"] == sentence
+    assert result["channel_c_notices"] == 1, "judged conflict lands the C notice"
+    assert captured, "channel C must consult the judge once"
+    text_a, text_b = captured[0]
+    assert text_a == "连接池上限=99", "claim renders attr=value"
+    assert text_b == sentence, "peer side is the bare row text"
 
 
 # ── pair-v10 渲染：带 context 出段、无 context 零变化 ──────────────────────────

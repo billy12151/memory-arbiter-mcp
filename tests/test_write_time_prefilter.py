@@ -182,7 +182,7 @@ def test_direct_path_lands_notice_without_qwen(tmp_path: Path, monkeypatch) -> N
     if isinstance(payload, str):
         payload = json.loads(payload)
     assert payload["reason"] == "deterministic_same_key_value_diff"
-    assert payload["slot_provenance"]["attribute"] == "deterministic_skeleton"
+    assert payload["slot_provenance"]["attribute"] == "连接池上限"
     # 0.17.1: the deterministic path never touches the judge — no signal key.
     assert "qwen_signal" not in payload and "model_signal" not in payload
     groups = {group["normalized_value"] for group in payload["value_groups"]}

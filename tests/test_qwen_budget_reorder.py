@@ -59,6 +59,7 @@ def test_job_qwen_budget_pool_arithmetic() -> None:
 # ── 共享场景构造 ────────────────────────────────────────────────────────────
 
 _OWN_ROWS = ("连接池上限为 99，队列长度为 99。", "连接池上限为 100，队列长度为 100。")
+_OWN_CLAIM_RENDER = "连接池上限=99"
 _OWN_CLAIM = {"attr": "连接池上限", "value": "99"}  # grounding：value 须为正文子串
 
 
@@ -104,27 +105,48 @@ def _install_stubs(
 
 
 class _Recorder:
-    """classify_pair 记录器：按 env 形态判别通道并返回对应抽取。"""
+    """0.17.1 判定记录器：按输入形态判别通道——internal=own 两行、C=左
+    `attr=value` 渲染句、A-cross=裸句对。返回 conflict 判定。"""
 
-    calls: list[tuple[str, str]] = []  # (kind, right_quote)
+    calls: list[tuple[str, str]] = []  # (kind, right_text)
     own_content = ""
+    c_surfaces = False  # True = C 通道异值浮出（旧 extract→diff→notice）
 
     @classmethod
-    def classify_pair(cls, left: dict[str, Any], right: dict[str, Any], **kw: Any) -> ModelSignal:
-        if "dispatch_hint" not in left:
-            kind = "internal"
-            parsed = {"attribute_a": "连接池上限", "value_a": "99",
-                      "attribute_b": "连接池上限", "value_b": "100"}
-        elif left.get("quote") == cls.own_content[:1000]:
-            kind = "C"
-            parsed = {"attribute_a": "连接池上限", "value_a": "99",
-                      "attribute_b": "连接池上限", "value_b": "100"}
-        else:
-            kind = "A"
-            parsed = {"attribute_a": "连接池上限", "value_a": "99",
-                      "attribute_b": "连接池上限", "value_b": "100"}
-        cls.calls.append((kind, str(right.get("quote") or "")))
-        return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+    def _verdict(cls, kind: str):
+        from memory_arbiter.semantic_judge import PairVerdict
+        if kind == "C" and not cls.c_surfaces:
+            # 同值不浮出（对齐旧 extract→same-value→unresolved 语义）
+            return PairVerdict("no_conflict",
+                               {"conflict": 0.0, "no_conflict": 1.0, "possible_conflict": 0.0},
+                               None, "test")
+        return PairVerdict("conflict",
+                           {"conflict": 0.9, "no_conflict": 0.05, "possible_conflict": 0.05},
+                           None, "test")
+
+    @classmethod
+    def judge_pair(cls, text_a: str, text_b: str):
+        kind = cls._kind(text_a, text_b)
+        cls.calls.append((kind, text_b))
+        return cls._verdict(kind)
+
+    @classmethod
+    def judge_pairs(cls, pairs):
+        out = []
+        for text_a, text_b in pairs:
+            kind = cls._kind(text_a, text_b)
+            cls.calls.append((kind, text_b))
+            out.append(cls._verdict(kind))
+        return out
+
+    @classmethod
+    def _kind(cls, text_a: str, text_b: str) -> str:
+        if text_a.startswith("连接池上限="):
+            return "C"
+        own = set(_OWN_ROWS) | {_OWN_CLAIM_RENDER}
+        if text_a in own and text_b in own:
+            return "internal"
+        return "A"
 
     @classmethod
     def reset(cls, own_content: str) -> None:
@@ -179,7 +201,7 @@ def test_dispatch_order_internal_then_c_then_a_cross(tmp_path, monkeypatch) -> N
     assert kinds.index("A") > max(i for i, k in enumerate(kinds) if k == "C"), (
         "channel C must dispatch before the A-cross loop"
     )
-    assert receipt["qwen_budget"] == {"internal": 1, "channel_c": 2, "a_cross": 1}
+    assert receipt["judge_budget"] == {"internal": 1, "channel_c": 2, "a_cross": 1}
     assert receipt["pairs_examined"] == 4
 
 
@@ -216,13 +238,15 @@ def test_saturation_c_overdraw_skips_dispatch_but_direct_lands(tmp_path, monkeyp
     assert not any(k == "A" for k, _q in _Recorder.calls), (
         "saturated pool must skip every A-cross Qwen dispatch"
     )
-    assert receipt["qwen_budget"]["channel_c"] == 12
-    assert receipt["qwen_budget"].get("a_cross", 0) == 0
-    assert receipt["qwen_budget"]["a_cross_dispatch_skipped"] is True
+    assert receipt["judge_budget"]["channel_c"] == 12
+    assert receipt["judge_budget"].get("a_cross", 0) == 0
+    assert receipt["judge_budget"]["a_cross_dispatch_skipped"] is True
     # direct 直出照常落地（peer2 单键骨架 → 零 Qwen notice）。
     assert receipt.get("direct_verdicts", 0) >= 1
     notices = [n for n in tools.db.list_semantic_notices() if n["memory_id"] == int(new["id"])]
-    direct_notices = [n for n in notices if n.get("payload", {}).get("slot_provenance", {}).get("attribute") == "deterministic_skeleton"]
+    # 0.17.1：direct 路径保留真属性（对抗 review 修复），占位符退役
+    direct_notices = [n for n in notices
+                      if n.get("payload", {}).get("reason") == "deterministic_same_key_value_diff"]
     assert direct_notices, "direct verdict must land even under saturation"
     # 未派发 Qwen 对进 backlog（饱和不终止确定性检查）。
     assert receipt.get("backlogged", 0) >= 1
@@ -232,6 +256,7 @@ def test_saturation_c_overdraw_skips_dispatch_but_direct_lands(tmp_path, monkeyp
 # ── §3.4-4 去重翻转：C 已浮出 peer → A-cross 跳过派发 ─────────────────────────
 
 def test_c_surfaced_peer_skips_a_cross_dispatch(tmp_path, monkeypatch) -> None:
+    _Recorder.c_surfaces = True
     tools, new, peer1 = _write_scene(tmp_path, monkeypatch)
     a_hits = [_peer_hit(peer1, 101, "连接池上限为 300，队列长度为 4。", 0.1)]
     c_hits = [_peer_hit(peer1, 201, "连接池上限为 100。", 0.2),
@@ -248,9 +273,9 @@ def test_c_surfaced_peer_skips_a_cross_dispatch(tmp_path, monkeypatch) -> None:
     a_notices = [n for n in notices if n.get("notice_type") == "semantic_evidence"]
     assert len(c_notices) == 1 and not a_notices, "single report — C wins the peer"
     # skip 集合不耗预算：无 skipped 标记、无 a_cross 扣减。
-    assert "a_cross" not in receipt["qwen_budget"]
-    assert "a_cross_dispatch_skipped" not in receipt["qwen_budget"]
-    assert receipt["qwen_budget"] == {"internal": 1, "channel_c": 2}
+    assert "a_cross" not in receipt["judge_budget"]
+    assert "a_cross_dispatch_skipped" not in receipt["judge_budget"]
+    assert receipt["judge_budget"] == {"internal": 1, "channel_c": 2}
 
 
 # ── §3.4-4b 去重并集：B surfaced peer 同样进 A-cross skip 集合 ────────────────
@@ -311,7 +336,7 @@ def test_receipt_shape_null_run_has_no_new_keys(tmp_path, monkeypatch) -> None:
     receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
     receipt.pop("elapsed_ms", None)
 
-    assert "qwen_budget" not in receipt
+    assert "judge_budget" not in receipt
     assert "direct_verdicts" not in receipt
     assert receipt == {
         "status": "completed", "outcome": "checked_no_notice", "notices_created": 0,
@@ -348,7 +373,7 @@ def test_internal_keepers_land_when_deterministic_phase_truncates(tmp_path, monk
     assert receipt["internal_conflicts"] == 1  # E10①：keepers 先于截断落地
     assert receipt["pairs_examined"] == 0
     assert not _Recorder.calls, "truncation terminal skips internal Qwen AND dispatch"
-    assert "qwen_budget" not in receipt  # C 未派发（allowed 缺失早退）→ 池零活动
+    assert "judge_budget" not in receipt  # C 未派发（allowed 缺失早退）→ 池零活动
 
 
 # ── 对抗 review 修复批（mema #1066 第二轮）────────────────────────────────────
@@ -400,7 +425,7 @@ def test_stale_hit_peer_settled_not_backlogged(tmp_path, monkeypatch) -> None:
     assert "backlogged" not in receipt, "stale pair is settled — never backlogged"
     # C 相先于派发相跑、不受版本守卫影响（C 的 notice 以 hit 行版本为锚，
     # 证据-版本天然一致），故账本 = internal 1 + C 1；A-cross 零花费。
-    assert receipt["qwen_budget"] == {"internal": 1, "channel_c": 1}
+    assert receipt["judge_budget"] == {"internal": 1, "channel_c": 1}
 
 
 def test_channel_c_deadline_stopped_key(tmp_path, monkeypatch) -> None:
@@ -434,6 +459,7 @@ def test_channel_c_deadline_stopped_key(tmp_path, monkeypatch) -> None:
 
 
 def test_c_surfaced_and_saturated_combo(tmp_path, monkeypatch) -> None:
+    _Recorder.c_surfaces = True
     """P3 弱钉补齐：C 浮出 peer2（进 skip 集合、settled 不进 backlog——连
     direct 可直出的对也让位）与池被 C 扣穿（peer1 无法派发、进 backlog）
     同时发生——两机制正交且互不遮蔽。"""
@@ -470,8 +496,8 @@ def test_c_surfaced_and_saturated_combo(tmp_path, monkeypatch) -> None:
     c_notices = [n for n in notices if n.get("payload", {}).get("channel_c")]
     assert c_notices, "grounded C hit must surface peer2 (skip set)"
     assert not any(k == "A" for k, _q in _Recorder.calls)
-    assert receipt["qwen_budget"]["channel_c"] == 12
+    assert receipt["judge_budget"]["channel_c"] == 12
     # peer2 被 C 浮出 → skip 让位（哪怕它是 direct 可直出的对）；
     # peer1 非 direct、非 skip → 池尽被拦 → 唯一 backlog 对。
-    assert receipt["qwen_budget"]["a_cross_dispatch_skipped"] is True
+    assert receipt["judge_budget"]["a_cross_dispatch_skipped"] is True
     assert receipt.get("backlogged") == 1
