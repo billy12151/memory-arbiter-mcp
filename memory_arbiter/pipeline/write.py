@@ -55,8 +55,6 @@ class WritePipeline:
     def _ensure_active_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
         return self._tools._ensure_active_embedder()
 
-    def _suggest_workspace_candidate(self, *args: Any, **kwargs: Any) -> Any:
-        return self._tools._suggest_workspace_candidate(*args, **kwargs)
 
     def current_agent_id(self) -> str | None:
         return self._tools.current_agent_id()
@@ -752,48 +750,13 @@ class WritePipeline:
             result["matched_by"] = "rule_keep"
             result["canonical_embedding"] = candidate_embedding
         elif rule["decision"] is None:
-            suggestion = self._suggest_workspace_candidate(raw, evidence, result["similar"])
-            result["candidate"] = suggestion
-            rejected = bool(
-                suggestion is not None and suggestion.candidate
-                and suggestion.candidate in (resolved.get("rejected_canonicals") or [])
+            # 0.17.1 (owner 拍板): the model suggester retired with the Qwen
+            # judge — unresolved normalization asks the caller (ASK), the
+            # human-in-the-loop design this path always fell back to.
+            result["decision"] = "ASK"
+            result["decision_reason"] = (
+                "no_similar_candidates" if not result["similar"] else "suggester_retired_ask"
             )
-            if (
-                suggestion is not None and suggestion.candidate
-                and suggestion.relation in {"alias", "typo", "same_project"}
-                and isolation in {"none", "weak"} and (suggestion.confidence or 0.0) >= 0.85
-                and not rejected
-            ):
-                result["canonical"] = suggestion.candidate
-                result["is_new"] = False
-                result["matched_by"] = "qwen"
-                result["decision"] = "AUTO"
-                result["decision_reason"] = "qwen_high_conf"
-                # The selected candidate already exists; never publish the raw
-                # query embedding under the chosen canonical.
-                result["canonical_embedding"] = None
-            else:
-                # Behavior is unchanged (keep raw canonical + workspace_review);
-                # the reason distinguishes model-absent/timeout/uncertain from a
-                # genuine low-confidence model output (spec §8 diagnostics).
-                result["decision"] = "ASK"
-                err = str(suggestion.error).lower() if (suggestion and suggestion.error) else ""
-                if suggestion is None:
-                    result["decision_reason"] = "qwen_unavailable" if result["similar"] else "no_similar_candidates"
-                elif rejected:
-                    result["decision_reason"] = "qwen_rejected_candidate"
-                elif "timeout" in err or "deadline" in err:
-                    # Admission/inference deadlines surface as "... deadline
-                    # expired ..." not the literal "timeout"; both are technical.
-                    result["decision_reason"] = "qwen_timeout"
-                elif err:
-                    # Any other backend error (disabled/crashed/invalid child)
-                    # is a technical failure, not a low-confidence model output.
-                    result["decision_reason"] = "qwen_backend_error"
-                elif not suggestion.candidate and suggestion.relation == "unrelated":
-                    result["decision_reason"] = "qwen_unrelated"
-                else:
-                    result["decision_reason"] = "qwen_low_conf"
         # Empty/default workspace: offer a NON-binding placement suggestion from
         # the memory's own subject (thought A: nearest existing memory's
         # workspace). A real-library A/B showed this is accurate but its

@@ -1413,46 +1413,9 @@ class MemoryTools:
             )
             return self._semantic_backend
 
-    def _suggest_workspace_candidate(
-        self, ws_raw: str, evidence: dict[str, Any], similar: list[dict[str, Any]],
-    ) -> Any:
-        """Ask the local model to suggest a workspace normalization candidate.
-
-        Returns a WorkspaceCandidateSignal, or None if no backend is configured
-        (caller then falls back to ASK). Never raises — the backend degrades to
-        an uncertain signal on any error (636 §6: suggester only, never arbiter).
-        """
-        backend = self._ensure_semantic_backend()
-        if backend is None or not hasattr(backend, "suggest_workspace_candidate"):
-            return None
-        # Spec §11: Qwen only arbitrates among candidates the vector already
-        # brought within range. Bounding the pool by distance stops the model
-        # from resurrecting an over-distance name (a real-library dry-run had
-        # Qwen "same_project@0.95" merge openclaw into proto-test at cosine
-        # 0.357, far past the 0.25 threshold). Cap at top-K (A/B: 3 beats 5).
-        candidates = [
-            s["name"] for s in (similar or [])
-            if s.get("name") and float(s.get("distance", 9.0)) <= QWEN_CANDIDATE_DISTANCE
-        ][:QWEN_CANDIDATE_TOP_K]
-        if not candidates:
-            return None
-        budget_ms = max(0, QWEN_BUDGET_MS)
-        if budget_ms <= 0:
-            return None
-        try:
-            suggestion = backend.suggest_workspace_candidate(
-                ws_raw, evidence, candidates,
-                deadline_monotonic=time.monotonic() + budget_ms / 1000.0,
-            )
-        except TypeError:
-            # Compatibility for injected/test backends implementing the original
-            # protocol. Production scheduling is deadline-aware below.
-            suggestion = backend.suggest_workspace_candidate(ws_raw, evidence, candidates)
-        except Exception:
-            suggestion = None
-        # Frozen resident=true: the model stays loaded, so there is no idle
-        # unload path any more.
-        return suggestion
+    # 0.17.1 (owner 拍板): _suggest_workspace_candidate retired — the model
+    # judge has no suggester; workspace normalization falls back to the
+    # existing ASK path (write.py), keeping the human-in-the-loop design.
 
     def _semantic_notice_workspace_scope(self, workspace: Any = None) -> "WorkspaceScope":
         """Use the shared read-only caller resolver for notice API/count scope.
