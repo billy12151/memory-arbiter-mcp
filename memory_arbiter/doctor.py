@@ -361,25 +361,63 @@ def _c_conflicts_backlog(ctx: _DoctorCtx) -> Finding:
 
 
 def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
-    """0.16.8: the legacy Qwen2.5-0.5B judge is in maintenance mode (owner
-    2026-09-17, real users in single digits — soft-push, never refuse): the
-    decoder still runs it byte-for-byte, but doctor nudges the upgrade.
-    Path-string based (the piggybacked model_family only exists after the
-    first judged pair); an unset path means the user opted out of semantic
-    conflict entirely, which is not this check's business."""
-    path = ctx.settings.semantic_conflict_model_path
-    if path is None:
+    """0.17.1: the judge is the mDeBERTa checkpoint. Checks, in order:
+    configured-but-missing checkpoint file, dependency availability (torch /
+    transformers — the ``mdeberta`` extra), label contract echo when the
+    backend is instantiated, and crash-breaker state. An unset ckpt means the
+    user opted out of write-time arbitration (not this check's business — the
+    degraded banner covers it)."""
+    ckpt = ctx.settings.semantic_conflict_mdeberta_ckpt
+    if ckpt is None:
         return None
-    lowered = str(path).lower()
-    if "qwen2.5" not in lowered or "0.5b" not in lowered:
-        return None
+    if not ckpt.exists():
+        return _finding(
+            "semantic.judge_model", False,
+            f"mdeberta checkpoint not found: {ckpt} — write-time conflict "
+            "arbitration is disabled; download mdeberta-v4m_dual_v1.pt and set "
+            "semantic_conflict.mdeberta_ckpt",
+            evidence={"ckpt": str(ckpt)},
+        )
+    try:
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+    except ImportError as exc:
+        return _finding(
+            "semantic.judge_model", False,
+            f"mdeberta judge dependencies missing ({exc}) — install the extra: "
+            "pip install memory-arbiter-mcp[mdeberta]",
+            evidence={"ckpt": str(ckpt)},
+        )
+    # Backend instantiated (a previous deep probe or a live worker): surface
+    # its last error / breaker state.
+    try:
+        backend = ctx.tools._ensure_semantic_backend()
+    except Exception:
+        backend = None
+    if backend is not None:
+        status = backend.status()
+        if status.get("disabled"):
+            return _finding(
+                "semantic.judge_model", False,
+                "mdeberta judge is DISABLED by the crash breaker "
+                f"({status.get('last_error')}); restart the service to clear",
+                evidence={k: status.get(k) for k in ("ckpt", "restarts", "timed_out")},
+            )
+        if status.get("last_error"):
+            return _finding(
+                "semantic.judge_model", False,
+                f"mdeberta judge reported an error: {status['last_error']}",
+                evidence={"ckpt": str(ckpt), "restarts": status.get("restarts")},
+            )
     return _finding(
-        "semantic.judge_model", False,
-        "conflict judge model is the legacy Qwen2.5-0.5B (maintenance mode since 0.16.8); "
-        "the recommended judge is Qwen3-0.6B-Q8_0 (write-time conflict recall materially "
-        "higher, single-direction 0.45s/pair on GPU) — update semantic_conflict.model_path "
-        "in config.json and restart to switch",
-        evidence={"model_path": str(path)},
+        "semantic.judge_model", True,
+        f"mdeberta judge configured: {ckpt.name}",
+        evidence={
+            "ckpt": str(ckpt),
+            "model_dir": str(ctx.settings.semantic_conflict_mdeberta_model_dir or ""),
+            "notice_min_prob": ctx.settings.semantic_conflict_mdeberta_notice_min_prob,
+            "batch_size": ctx.settings.semantic_conflict_mdeberta_batch,
+        },
     )
 
 

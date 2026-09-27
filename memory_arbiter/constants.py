@@ -96,6 +96,20 @@ EMBEDDING_DEFAULT_DIM = 768
 SEMANTIC_N_CTX = 2048
 SEMANTIC_N_THREADS = 4
 SEMANTIC_N_BATCH = 128
+
+# mDeBERTa judge (0.17.1, owner plan §3.1/§3.6): the write-time conflict
+# arbitration engine replacing Qwen. Label order is a PINNED CONTRACT — the
+# child echoes it at load and the parent refuses to serve on mismatch (a
+# re-trained checkpoint that reorders classes must fail loudly, not misjudge).
+SEMANTIC_MDEBERTA_LABELS = ("conflict", "no_conflict", "possible_conflict")
+SEMANTIC_MDEBERTA_MAX_LEN = 256
+# Batch size: device default (CPU 8 / MPS 16 — MPS unused for inference, the
+# dtype-assertion bug keeps us on CPU, but the key exists so the knee probe
+# has a fallback ladder), overridden by config and by the startup knee probe
+# (§3.2: probe 1/2/4/8/16, take the largest batch whose per-item latency is
+# within 1.2x of the best, write the result to doctor).
+SEMANTIC_MDEBERTA_BATCH = 8
+
 SEMANTIC_JOB_TIMEOUT_MS = 5000
 SEMANTIC_INFERENCE_TIMEOUT_MS = 30000
 SEMANTIC_LOAD_TIMEOUT_MS = 120000

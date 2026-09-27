@@ -12,13 +12,12 @@ from typing import Any, Callable, cast
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, visible_memory
 from .arbitration import compare_memories  # noqa: F401 (monkeypatch seam, see pipeline/read.py:226)
 from .config import Settings
-from .constants import EMBED_PREFIX_STS, EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, QWEN_BUDGET_MS, QWEN_CANDIDATE_DISTANCE, QWEN_CANDIDATE_TOP_K, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_BATCH, SEMANTIC_N_CTX, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
+from .constants import EMBED_PREFIX_STS, EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, QWEN_BUDGET_MS, QWEN_CANDIDATE_DISTANCE, QWEN_CANDIDATE_TOP_K, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
 from .models import TrustedApplyingContext, utc_now_iso
 from .search import search_memories, _linked_open_items_for_search  # noqa: F401 (monkeypatch seam, see pipeline/read.py:226)
 from .semantic_conflict import (
-    IsolatedGGUFSemanticBackend,
     SemanticBackend,
 )
 from .update_monitor import UpdateMonitor
@@ -1387,11 +1386,10 @@ class MemoryTools:
         return f"{subject}\n{content}".strip()
 
     def _semantic_configured(self) -> bool:
-        # The backend is always the local GGUF engine now — the former
-        # semantic_conflict.backend knob was dead configuration.
+        # 0.17.1: the judge is the mDeBERTa checkpoint — configured → enabled.
         return (
             bool(self.settings.semantic_conflict_enabled)
-            and self.settings.semantic_conflict_model_path is not None
+            and self.settings.semantic_conflict_mdeberta_ckpt is not None
         )
 
     def _ensure_semantic_backend(self) -> SemanticBackend | None:
@@ -1402,13 +1400,15 @@ class MemoryTools:
                 return None
             if self._semantic_backend is not None:
                 return self._semantic_backend
-            assert self.settings.semantic_conflict_model_path is not None
-            self._semantic_backend = IsolatedGGUFSemanticBackend(
-                self.settings.semantic_conflict_model_path,
-                n_ctx=SEMANTIC_N_CTX,
+            assert self.settings.semantic_conflict_mdeberta_ckpt is not None
+            from .semantic_judge import IsolatedMDeBERTaBackend
+
+            self._semantic_backend = IsolatedMDeBERTaBackend(
+                self.settings.semantic_conflict_mdeberta_ckpt,
+                self.settings.semantic_conflict_mdeberta_model_dir
+                or (self.settings.semantic_conflict_mdeberta_ckpt.parent / "mdeberta-base"),
+                batch_size=self.settings.semantic_conflict_mdeberta_batch,
                 n_threads=SEMANTIC_N_THREADS,
-                n_batch=SEMANTIC_N_BATCH,
-                n_gpu_layers=self.settings.semantic_conflict_gpu_layers,
                 hard_timeout_ms=SEMANTIC_INFERENCE_TIMEOUT_MS,
                 load_timeout_ms=SEMANTIC_LOAD_TIMEOUT_MS,
             )
@@ -1472,26 +1472,25 @@ class MemoryTools:
         return self._scan_pipeline.memory_scan_workspace_anomalies(**_)
 
     def _semantic_status(self, workspace_canonical: WorkspaceScope = None) -> dict[str, Any]:
-        from .semantic_conflict import PAIR_PROMPT_VERSION as _semantic_prompt_version
         backend = self._get_semantic_backend_ref()
+        ckpt = self.settings.semantic_conflict_mdeberta_ckpt
         backend_status = (
             backend.status()
             if backend is not None else
             {
-                "model_path": str(self.settings.semantic_conflict_model_path or ""),
-                "model_exists": bool(
-                    self.settings.semantic_conflict_model_path
-                    and self.settings.semantic_conflict_model_path.exists()
-                ),
+                "ckpt": str(ckpt or ""),
+                "ckpt_sha8": None,
+                "model_dir": str(self.settings.semantic_conflict_mdeberta_model_dir or ""),
+                "model_version": None,
                 "model_state": "unloaded",
+                "device": "cpu",
+                "batch_size": int(self.settings.semantic_conflict_mdeberta_batch),
                 "last_error": None,
-                # Same observability a live backend reports, for the config a
-                # restart would use.
-                "n_ctx": SEMANTIC_N_CTX,
-                "prompt_version": _semantic_prompt_version,
             }
         )
+        backend_status.setdefault("notice_min_prob", float(self.settings.semantic_conflict_mdeberta_notice_min_prob))
         return {
+            "engine": "mdeberta",
             "enabled": bool(self.settings.semantic_conflict_enabled),
             "configured": self._semantic_configured(),
             "on_write": self.settings.semantic_conflict_on_write,

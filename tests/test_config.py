@@ -1156,6 +1156,10 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "include_size",
         "semantic_conflict_enabled",
         "semantic_conflict_model_path",
+        "semantic_conflict_mdeberta_ckpt",
+        "semantic_conflict_mdeberta_model_dir",
+        "semantic_conflict_mdeberta_notice_min_prob",
+        "semantic_conflict_mdeberta_batch",
         "semantic_conflict_on_write",
         "semantic_conflict_gpu_layers",
         "semantic_conflict_notice_sync_wait_ms",
@@ -1172,7 +1176,8 @@ def test_settings_field_set_matches_slim_contract() -> None:
     # removed (B1: AgentPolicy deleted). config_file_loaded stays a
     # runtime-injected field (never a file key, not in the registry).
     # 0.17.0 P2-5.2: claims_required added (grey-period switch, default off).
-    assert len(SLIM_SETTINGS_FIELDS) == 22
+    # 0.17.1: mdeberta judge keys added (ckpt/model_dir/notice_min_prob/batch).
+    assert len(SLIM_SETTINGS_FIELDS) == 26
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 
@@ -1277,7 +1282,43 @@ def test_no_embedding_model_path_means_embedding_off(
     assert MemoryTools(settings)._embedding_configured() is False
 
 
-def test_semantic_model_path_alone_auto_enables_and_preloads(
+def test_semantic_mdeberta_ckpt_alone_auto_enables_and_preloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ckpt = tmp_path / "mdeberta-v4m.pt"
+    ckpt.write_bytes(b"fake")
+    (tmp_path / "mdeberta-base").mkdir()
+    _hermetic_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "db_path": str(tmp_path / "b.sqlite3"),
+            "backup_jsonl": str(tmp_path / "b.jsonl"),
+            "semantic_conflict": {"mdeberta_ckpt": str(ckpt)},
+        },
+    )
+
+    settings = Settings.from_env()
+    assert settings.semantic_conflict_enabled is True
+    assert settings.semantic_conflict_mdeberta_ckpt == ckpt
+    # model_dir default = ckpt-adjacent mdeberta-base (§3.6)
+    assert settings.semantic_conflict_mdeberta_model_dir == tmp_path / "mdeberta-base"
+    assert settings.semantic_conflict_mdeberta_notice_min_prob == 0.80
+    assert any("auto-enabled" in warning for warning in settings.config_warnings)
+
+    tools = MemoryTools(settings)
+    status = tools._semantic_status()
+    assert status["enabled"] is True
+    assert status["configured"] is True
+    assert status["engine"] == "mdeberta"
+    # preload/resident froze to true: a configured checkpoint loads at startup
+    # and stays resident.
+    assert SEMANTIC_PRELOAD is True
+    assert SEMANTIC_RESIDENT is True
+
+
+def test_semantic_legacy_model_path_warns_and_does_not_enable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1294,18 +1335,12 @@ def test_semantic_model_path_alone_auto_enables_and_preloads(
     )
 
     settings = Settings.from_env()
-    assert settings.semantic_conflict_enabled is True
-    assert settings.semantic_conflict_model_path == model
-    assert any("auto-enabled" in warning for warning in settings.config_warnings)
-
-    tools = MemoryTools(settings)
-    status = tools._semantic_status()
-    assert status["enabled"] is True
-    assert status["configured"] is True
-    # preload/resident froze to true: a configured model loads at startup and
-    # stays resident (former from_env default false — approved behavior change).
-    assert SEMANTIC_PRELOAD is True
-    assert SEMANTIC_RESIDENT is True
+    # 0.17.1: the Qwen/GGUF path is retired — configured legacy key warns and
+    # does NOT enable; intent now lives in mdeberta_ckpt.
+    assert settings.semantic_conflict_enabled is False
+    assert MemoryTools(settings)._semantic_configured() is False
+    assert any("model_path is retired" in w for w in settings.config_warnings)
+    assert any("mdeberta_ckpt" in w for w in settings.config_warnings)
 
 
 def test_semantic_explicit_false_wins_over_model_path(

@@ -18,6 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 vec = ["sqlite-vec>=0.1.6"]
 semantic-local = ["llama-cpp-python>=0.3.0"]
+# 0.17.1: the mDeBERTa conflict judge (V4m checkpoint, CPU fp32). The model
+# file itself ships separately (1.1GB) — see README model-download section.
+mdeberta = ["torch>=2.0", "transformers>=4.40"]
 test = ["pytest>=8.0.0"]
 # Refactor/maintenance tooling, never a runtime dependency. coverage backs the
 # golden-gate branch-coverage check; vulture only generates dead-code

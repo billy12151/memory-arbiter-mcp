@@ -46,12 +46,23 @@ class Settings:
     # returned_count, tokens_estimate}; off = none of them do. One knob for
     # the whole report-a-token-cost-per-recall contract, not per-call.
     include_size: bool = True
-    # semantic_conflict: model_path → auto-enabled (explicit enabled=false
-    # wins); preload/resident are frozen true — a configured model loads at
-    # startup and stays resident.
+    # semantic_conflict: mdeberta_ckpt → auto-enabled (explicit enabled=false
+    # wins); preload/resident are frozen true — a configured checkpoint loads
+    # at startup and stays resident.
     semantic_conflict_enabled: bool = False
     claims_required: bool = False
     semantic_conflict_model_path: Path | None = None
+    # 0.17.1: the mDeBERTa judge checkpoint (V4m). Configured → arbitration
+    # enabled; unset → arbitration disabled (fail-open, doctor reports).
+    semantic_conflict_mdeberta_ckpt: Path | None = None
+    # config.json + tokenizer dir; default = <ckpt dir>/mdeberta-base (§3.6).
+    semantic_conflict_mdeberta_model_dir: Path | None = None
+    # 0.17.1 owner 拍板: P(conflict) ≥ this → normal notice; below → counted
+    # only. possible_conflict → info notice (no threshold — ~1% rate).
+    semantic_conflict_mdeberta_notice_min_prob: float = 0.80
+    # 0.17.1 §3.2 攒批: device default (CPU 8); startup knee probe may
+    # override the effective value (doctor reports it).
+    semantic_conflict_mdeberta_batch: int = 8
     semantic_conflict_on_write: str = "async"
     # A3 (0.15.14): Qwen offload layer count. -1 = full Metal offload (the
     # default since grammar-free decoding restored GPU value: prefill speedup
@@ -201,18 +212,42 @@ class Settings:
             config_warnings.append(f"semantic_conflict.on_write={semantic_on_write!r} invalid; using async")
             semantic_on_write = "async"
         semantic_model_raw = semantic_cfg.get("model_path")
+        mdeberta_ckpt_raw = semantic_cfg.get("mdeberta_ckpt")
+        # 0.17.1: legacy Qwen path configured → migration warning (the GGUF
+        # backend is deleted; the key is dead). mdeberta_ckpt is the new
+        # auto-enable intent key.
+        if semantic_model_raw is not None:
+            config_warnings.append(
+                "semantic_conflict.model_path is retired in 0.17.1 (the Qwen/GGUF judge was "
+                "replaced by mDeBERTa); configure semantic_conflict.mdeberta_ckpt instead"
+            )
+        mdeberta_dir_raw = semantic_cfg.get("mdeberta_model_dir")
+        mdeberta_ckpt = Path(str(mdeberta_ckpt_raw)).expanduser() if mdeberta_ckpt_raw else None
+        mdeberta_model_dir = (
+            Path(str(mdeberta_dir_raw)).expanduser() if mdeberta_dir_raw
+            else (mdeberta_ckpt.parent / "mdeberta-base" if mdeberta_ckpt else None)
+        )
 
-        # model_path configured but enabled not explicitly set -> auto-enable.
-        # One intent shouldn't need two knobs; the user expressed intent by
-        # pointing at a model. Explicit enabled=false still wins.
-        _semantic_auto_enable = bool(semantic_model_raw)
+        # mdeberta_ckpt configured but enabled not explicitly set -> auto-enable
+        # (same one-intent rule the Qwen model_path key had). enabled=false wins.
+        _semantic_auto_enable = bool(mdeberta_ckpt)
         if (
             _semantic_auto_enable
             and semantic_cfg.get("enabled") is None
         ):
             config_warnings.append(
-                "semantic_conflict.enabled not set; model_path configured -> "
+                "semantic_conflict.enabled not set; mdeberta_ckpt configured -> "
                 "auto-enabled (and preloaded at startup). Set enabled=false to disable."
+            )
+        mdeberta_min_prob = semantic_cfg.get("mdeberta_notice_min_prob")
+        try:
+            mdeberta_min_prob_val = (
+                max(0.0, min(1.0, float(mdeberta_min_prob))) if mdeberta_min_prob is not None else 0.80
+            )
+        except (TypeError, ValueError):
+            mdeberta_min_prob_val = 0.80
+            config_warnings.append(
+                f"semantic_conflict.mdeberta_notice_min_prob={mdeberta_min_prob!r} invalid; using 0.80"
             )
 
         settings = cls(
@@ -248,6 +283,16 @@ class Settings:
                 default_bool=_semantic_auto_enable,
             ),
             semantic_conflict_model_path=Path(str(semantic_model_raw)).expanduser() if semantic_model_raw else None,
+            semantic_conflict_mdeberta_ckpt=mdeberta_ckpt,
+            semantic_conflict_mdeberta_model_dir=mdeberta_model_dir,
+            semantic_conflict_mdeberta_notice_min_prob=mdeberta_min_prob_val,
+            semantic_conflict_mdeberta_batch=clamp_int(
+                pick_int_field(
+                    semantic_cfg.get("mdeberta_batch"), 8,
+                    name="semantic_conflict.mdeberta_batch",
+                ),
+                1, 64, name="semantic_conflict.mdeberta_batch", warnings=config_warnings,
+            ),
             semantic_conflict_on_write=semantic_on_write,
             semantic_conflict_gpu_layers=clamp_int(
                 pick_int_field(semantic_cfg.get("n_gpu_layers"), -1, name="semantic_conflict.n_gpu_layers"),
