@@ -238,19 +238,18 @@ class MemoryTools:
             "last_at": self._check_degradation_at,
             "recent_samples": [dict(item) for item in self._check_degradation_samples],
             "note": (
-                "check-route candidates are fail-closed (no notice) while Qwen "
-                "is unavailable (qwen_unavailable/qwen_backend_error), times out "
-                "(qwen_timeout), returns invalid output (qwen_invalid_output), "
-                "or the check is truncated (rows_capped: the memory exceeds "
-                "the 256-row conflict-channel cap, 0.17.0; evidence_units_"
-                "capped: the legacy 64-unit cap on the unit fallback path; "
-                "pairs_examined_capped: the 10-pair examined cap; notice_"
-                "budget_exhausted: the fair job deadline hit). Pairs beyond a "
-                "truncation land in the conflict backlog (0.17.0, bounded and "
-                "visible) or are covered by scheduled scan. Since 0.15.14 the "
-                "former notice-count early "
-                "stop is gone: every examined pair may surface its notice. "
-                "Semantic-worker queue overflow shows as worker.dropped_queue_full."
+                "check-route candidates are fail-open while the judge is "
+                "unavailable (judge_unavailable/judge_backend_error) or times "
+                "out (judge_timeout); the check is truncated (rows_capped: the "
+                "memory exceeds the 256-row conflict-channel cap, 0.17.0; "
+                "evidence_units_capped: the legacy 64-unit cap on the unit "
+                "fallback path; pairs_examined_capped: the 10-pair examined "
+                "cap; notice_budget_exhausted: the fair job deadline hit). "
+                "Pairs beyond a truncation land in the conflict backlog "
+                "(0.17.0, bounded and visible) or are covered by scheduled "
+                "scan. Since 0.15.14 the former notice-count early stop is "
+                "gone: every examined pair may surface its notice. Semantic-"
+                "worker queue overflow shows as worker.dropped_queue_full."
             ),
         }
 
@@ -1763,7 +1762,7 @@ class MemoryTools:
         # Internal Qwen between B and C (owner D7: internal protection cap
         # keeps priority ahead of channel C).
         if terminal is None:
-            ev.conflicts_internal_qwen_phase(ctx)
+            ev.conflicts_internal_judge_phase(ctx)
         # Channel C draws the job-global pool down via budget_sink (per ACTUAL
         # dispatch, R1-4) and honours the fairness wall (R1-1) — it is never
         # blocked by the pool (D3).
@@ -1789,6 +1788,11 @@ class MemoryTools:
             result = ev.conflicts_finalize_receipt(ctx)
         else:
             result = terminal
+        # 0.17.1 owner A-4: job-level top-5 — conflict(normal) + possible(info)
+        # notices this write produced compete in ONE ranked pool; the tail is
+        # demoted to info (visible in the judgment page, out of the feed).
+        if terminal is None:
+            ev.conflicts_job_level_notice_cap(ctx)
         # r2s-08: the receipt tail (qwen_budget/pairs_examined/elapsed_ms) is
         # stamped in ONE place — the truncation-terminal branch previously
         # re-assembled it by hand and forgot elapsed_ms.

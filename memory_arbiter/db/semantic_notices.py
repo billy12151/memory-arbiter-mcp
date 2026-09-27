@@ -342,10 +342,18 @@ class SemanticNoticeStore:
                         echo = self._echo_workspace(workspace_canonical)
                         if echo is not None:
                             data["workspace"] = echo
+                        # 0.17.1 owner A-4: info-severity notices deliver
+                        # WITHOUT action_required — the agent self-disposes
+                        # (grey-zone reference); normal/critical keep the
+                        # mandatory read contract.
+                        is_info = str(notice.get("severity") or "").lower() == "info"
                         return {
                             "notice_id": notice["id"], "severity": notice["severity"],
                             "type": notice["notice_type"],
-                            "action_required": "read_semantic_notice",
+                            **({} if is_info else {"action_required": "read_semantic_notice"}),
+                            **({
+                                "note": "灰区参考：两侧信息不足以定论，自行裁量",
+                            } if is_info else {}),
                             "read_call": {"tool": "memory_repair", "task": "notice", "data": data},
                         }
                 # Rows marked stale leave the pending query; retry immediately
@@ -353,6 +361,31 @@ class SemanticNoticeStore:
                 # on this same product call, not a later one.
                 if not transitioned:
                     return None
+
+    def recent_semantic_notices_for_memory(self, memory_id: int, limit: int = 64) -> list[dict[str, Any]]:
+        """0.17.1 owner A-4 (job-level top-5): the newest judged notices
+        involving ``memory_id``, newest first. Includes each row's source and
+        severity so the job-cap demotion can rank and demote."""
+        with self._db.connection() as conn:
+            rows = conn.execute(
+                # member_versions is a JSON array of {"memory_id": N, ...};
+                # the '"memory_id": N' substring rides the serialised form.
+                """SELECT * FROM conflicts
+                   WHERE member_versions LIKE ?
+                   ORDER BY id DESC LIMIT ?""",
+                (f'%\"memory_id\": {int(memory_id)}%', int(limit)),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def demote_semantic_notice_to_info(self, notice_id: int) -> bool:
+        """0.17.1 owner A-4: demote a capped notice to severity=info — the
+        signal stays in the table/judgment page, the agent feed drops it."""
+        with self._db.write_transaction() as conn:
+            cur = conn.execute(
+                "UPDATE conflicts SET notice_severity='info' WHERE id=?",
+                (int(notice_id),),
+            )
+            return cur.rowcount > 0
 
     def read_semantic_notice(self, notice_id: int, workspace_canonical: "WorkspaceScope" = None) -> dict[str, Any] | None:
         workspace_sql, args = self._workspace_clause(workspace_canonical)

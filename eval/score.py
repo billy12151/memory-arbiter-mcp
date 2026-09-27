@@ -525,9 +525,10 @@ def score_conflict_attribution(raw: dict) -> dict[str, Any] | None:
     """0.17.0 H1: 分通道归因表（诊断，不进 gate——gate() 在 flatten 前整块
     剔除，基线文件里留作人工对照）。
 
-    Q1 之后 pairs_examined 是 job 全局口径（internal+C+A-cross），A qwen 的
-    归因直读回执 qwen_budget 分量（review R1-6）；A direct 读 direct_verdicts。
-    旧 raw 无这些键 → 各按 0 计（纯函数对存档 r1-r5 仍可跑）。"""
+    Q1 之后 pairs_examined 是 job 全局口径（internal+C+A-cross），A 判定
+    的归因直读回执 judge_budget 分量（0.17.1 改名自 qwen_budget；旧 raw 的
+    qwen_budget 键兼容读）；A direct 读 direct_verdicts。旧 raw 无这些键 →
+    各按 0 计（纯函数对存档 r1-r5 仍可跑）。"""
 
     def _valid(rows: "list[dict] | None") -> list[dict]:
         return [r for r in (rows or []) if not r.get("skipped_member_replay")]
@@ -542,7 +543,8 @@ def score_conflict_attribution(raw: dict) -> dict[str, Any] | None:
             if key == "direct_verdicts":
                 total += int(receipt.get("direct_verdicts") or 0)
             else:
-                total += int((receipt.get("qwen_budget") or {}).get(key) or 0)
+                block = receipt.get("judge_budget") or receipt.get("qwen_budget") or {}
+                total += int(block.get(key) or 0)
         return total
 
     return {

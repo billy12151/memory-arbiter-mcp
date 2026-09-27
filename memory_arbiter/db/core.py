@@ -775,6 +775,12 @@ class MemoryDB:
     def claim_next_semantic_notice(self, workspace_canonical: WorkspaceScope = None) -> dict[str, Any] | None:
         return self.semantic_notices.claim_next_semantic_notice(workspace_canonical)
 
+    def recent_semantic_notices_for_memory(self, memory_id: int, limit: int = 64) -> list[dict[str, Any]]:
+        return self.semantic_notices.recent_semantic_notices_for_memory(memory_id, limit=limit)
+
+    def demote_semantic_notice_to_info(self, notice_id: int) -> bool:
+        return self.semantic_notices.demote_semantic_notice_to_info(notice_id)
+
     def read_semantic_notice(
         self, notice_id: int, workspace_canonical: WorkspaceScope = None,
     ) -> dict[str, Any] | None:

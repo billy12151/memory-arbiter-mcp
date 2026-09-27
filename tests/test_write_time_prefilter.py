@@ -64,6 +64,18 @@ class _CountingBackend:
         except TypeError:
             return self._inner.classify_pair(left, right)
 
+    def judge_pair(self, text_a, text_b):
+        self.calls += 1
+        # 0.17.1 shim: an extraction-shaped inner backend maps candidate=True
+        # to the conflict verdict (fixtures assert notice outcomes).
+        from memory_arbiter.pipeline.evidence import _judge_pair_compat
+        return _judge_pair_compat(self._inner, text_a, text_b)
+
+    def judge_pairs(self, pairs):
+        self.calls += len(pairs)
+        from memory_arbiter.pipeline.evidence import _judge_pair_compat
+        return [v for v in (_judge_pair_compat(self._inner, a, b) for a, b in pairs)]
+
 
 def _payload(notice: dict) -> dict:
     payload = notice["payload"]
@@ -171,14 +183,15 @@ def test_direct_path_lands_notice_without_qwen(tmp_path: Path, monkeypatch) -> N
         payload = json.loads(payload)
     assert payload["reason"] == "deterministic_same_key_value_diff"
     assert payload["slot_provenance"]["attribute"] == "deterministic_skeleton"
-    assert payload["qwen_signal"]["status"] == "bypassed"
+    # 0.17.1: the deterministic path never touches the judge — no signal key.
+    assert "qwen_signal" not in payload and "model_signal" not in payload
     groups = {group["normalized_value"] for group in payload["value_groups"]}
     assert groups == {"10", "99"}
 
 
-def test_multi_value_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -> None:
+def test_multi_value_pair_still_reaches_judge(tmp_path: Path, monkeypatch) -> None:
     """Multi-value sentences are pairwise-ambiguous — the direct path skips
-    them and the single-direction extraction still runs."""
+    them and the judge still runs (0.17.1: mDeBERTa replaces the extraction)."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     peer = tools.memory_write(content="连接池上限为 10，队列长度为 3。", subject="pool", tags=[], metadata=META)["data"]
@@ -190,7 +203,7 @@ def test_multi_value_pair_still_reaches_qwen(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
     result = tools._process_semantic_conflict_job(new["id"], _snapshot(tools, new["id"]))
     assert result["outcome"] == "notices_created"
-    assert backend.calls == 1, "single-direction extraction runs once for non-direct keepers"
+    assert backend.calls == 1, "the judged pair spends exactly one judge call"
 
 
 def test_direct_path_dimension_veto_falls_back_to_qwen(tmp_path: Path, monkeypatch) -> None:
@@ -295,15 +308,17 @@ def test_internal_keep_shape_qwen_confirmed_annotates_reason(tmp_path: Path, mon
     pending = tools.db.internal_conflicts.list_pending()
     assert pending, "the internal keeper must land"
     row = next(r for r in pending if r["memory_id"] == mid["id"])
-    assert "qwen:连接池上限=10|99" in row["reason"], row["reason"]
+    assert "mdeberta:conflict" in row["reason"], row["reason"]
     assert result["deterministic_filter"]["internal_qwen_confirmed"] >= 1
 
 
-def test_internal_qwen_veto_persists_and_scan_cannot_resurrect(tmp_path: Path, monkeypatch) -> None:
+def test_internal_negative_judgement_lands_pending_with_opinion_no_dismissal(tmp_path: Path, monkeypatch) -> None:
+    """0.17.1 owner 拍板: the judge NEVER dismisses at write time. A
+    same-value (definitive negative under the old gate) verdict lands
+    pending WITH the model's opinion attached; the scan-side strong model
+    owns the negative decision (kick must still see it)."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    # Rule-keeper shape (3 vs 5) but the backend reports the SAME value for
-    # both sides — a definitive semantic negative.
     mid = tools.memory_write(
         content="## 配置甲\n重试次数为 3 次。\n## 配置乙\n重试次数为 5 次。",
         subject="internal-veto", tags=[],
@@ -325,115 +340,16 @@ def test_internal_qwen_veto_persists_and_scan_cannot_resurrect(tmp_path: Path, m
 
     monkeypatch.setattr(tools, "_ensure_semantic_backend", SameValue)
     result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
-    assert result["deterministic_filter"]["internal_qwen_vetoed"] >= 1
-    assert tools.db.internal_conflicts.list_pending() == [], "vetoed pairs never enter the pending queue"
-    with tools.db.connection() as conn:
-        dismissed = conn.execute(
-            "SELECT COUNT(*) FROM internal_conflicts WHERE memory_id=? AND status='dismissed'",
-            (mid["id"],),
-        ).fetchone()[0]
-    assert dismissed >= 1, "the veto must persist as a decided row"
-    # Scan-side re-examination must not resurrect the vetoed pair.
+    # no dismissal counter may fire — the write-time veto is retired
+    assert result["deterministic_filter"].get("internal_qwen_vetoed", 0) == 0
+    pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
+    assert pending, "the negative-judged pair still lands pending (scan re-examines)"
+    # scan kick runs without error; suppression now belongs to scan-side gates
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
     assert kick["ok"], kick
-    assert not any(
-        r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]
-    ), "scan re-examination must respect the write-time veto"
 
 
-def test_internal_technical_failure_fails_open(tmp_path: Path, monkeypatch) -> None:
-    tools = make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    mid = tools.memory_write(
-        content="## 配置甲\n连接池上限为 10。\n## 配置乙\n连接池上限为 99。",
-        subject="internal-open", tags=[],
-    )["data"]
-    assert tools.wait_semantic_worker_drained(timeout=5)
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
-
-    class Broken:
-        @staticmethod
-        def classify_pair(left, right):
-            from memory_arbiter.semantic_conflict import ModelSignal
-            return ModelSignal(False, "backend_error", None, "boom", None, "boom")
-
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", Broken)
-    tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
-    pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
-    assert pending, "a technical failure must fail OPEN — the rule signal still lands"
-    assert "qwen:" not in pending[0]["reason"]
-
-
-def test_internal_no_backend_lands_unannotated(tmp_path: Path, monkeypatch) -> None:
-    tools = make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    mid = tools.memory_write(
-        content="## 配置甲\n连接池上限为 10。\n## 配置乙\n连接池上限为 99。",
-        subject="internal-nobackend", tags=[],
-    )["data"]
-    assert tools.wait_semantic_worker_drained(timeout=5)
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: None)
-    tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
-    pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
-    assert pending, "no backend → land unannotated (0.16.0 behavior preserved)"
-    assert "qwen:" not in pending[0]["reason"]
-
-
-def test_internal_no_difference_shape_never_lands(tmp_path: Path, monkeypatch) -> None:
-    tools = make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    # Same topic, enough shared tokens to route as a check pair, but the
-    # unique-token spread (5 per side) exceeds the (2,2) window — a rewrite
-    # of one claim, not two values of one claim.
-    mid = tools.memory_write(
-        content="## 段落甲\n压测报告已归档到本地目录。\n## 段落乙\n压测报告完成归档并上传到远端存储。",
-        subject="internal-dup", tags=[],
-    )["data"]
-    assert tools.wait_semantic_worker_drained(timeout=5)
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])
-    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
-    backend = _CountingBackend(_strict_pair_backend())
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: backend)
-    tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
-    assert not any(
-        r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]
-    ), "a same-claim rewrite inside one memory is duplication, not contradiction"
-    assert backend.calls == 0
-
-
-def test_internal_keepers_survive_collection_truncation(tmp_path: Path, monkeypatch) -> None:
-    """Adversarial regression (self-review): an evidence-unit cap or budget
-    exhaustion hit DURING the KNN collection loop must not drop the already
-    collected internal keepers — E10① says internal findings land first and
-    survive cross-loop truncation; the fail-open landing closes the gap."""
-    tools = make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    mid = tools.memory_write(
-        content="## 配置甲\n连接池上限为 10。\n## 配置乙\n连接池上限为 99。",
-        subject="internal-trunc", tags=[],
-    )["data"]
-    assert tools.wait_semantic_worker_drained(timeout=5)
-    # Force the cap to trip on the FIRST segment: the internal keepers were
-    # collected before collection even started, but the Qwen pass (and the
-    # old landing point) sits after the truncation return.
-    # 0.17.0 P2-3.1：行级模式帽=SEMANTIC_MAX_ROWS、原因=rows_capped
-    monkeypatch.setattr(
-        "memory_arbiter.pipeline.evidence.SEMANTIC_MAX_ROWS", 0,
-    )
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", _strict_pair_backend)
-    result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
-    assert result["status"] == "incomplete"
-    assert result["reason"] == "rows_capped"
-    assert result["internal_conflicts"] >= 1, "internal keepers must land despite truncation"
-    pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
-    assert pending, "the internal keeper row exists"
-    assert "qwen:" not in pending[0]["reason"], "truncated runs land unannotated (no backend pass)"
-
-
-# ── 0.16.4 §2: internal notify shapes go through the Qwen final review ─────
+# ── 0.16.4 §2: internal notify shapes go through the judge final review ────
 
 _OWNER_EXAMPLE = "## 方案甲\n冲突检测要用 Qwen。\n## 方案乙\n冲突检测不用 Qwen。"
 
@@ -464,9 +380,9 @@ def _oriented_polarity_backend():
 
 def test_internal_notify_ready_lands_pending_with_attribution(tmp_path: Path, monkeypatch) -> None:
     """Owner example sentence (the recognition duty): an in-memory polarity
-    pair is a notify shape; since 0.16.4 §2 it is COLLECTED for the Qwen
-    final review instead of landing directly. A ready verdict lands pending
-    with the extracted attribute/values attribution."""
+    pair is a notify shape; since 0.16.4 §2 it is COLLECTED for the judge
+    final review instead of landing directly. A conflict verdict lands
+    pending with the mdeberta attribution."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     mid = tools.memory_write(content=_OWNER_EXAMPLE, subject="internal-ready", tags=[])["data"]
@@ -480,15 +396,15 @@ def test_internal_notify_ready_lands_pending_with_attribution(tmp_path: Path, mo
     assert result["deterministic_filter"]["internal_qwen_confirmed"] >= 1
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
     assert pending, "the ready notify shape lands pending"
-    # the gate normalizes the extracted values (space folding, casing)
-    assert "qwen:冲突检测实现=要用qwen|不用qwen" in pending[0]["reason"], pending[0]["reason"]
-    assert pending[0]["reason"].startswith("polarity_changed"), pending[0]["reason"]
+    # 0.17.1: the judge labels; the reason keeps the deterministic shape and
+    # gains the mdeberta attribution
+    assert "mdeberta:conflict" in pending[0]["reason"], pending[0]["reason"]
 
 
-def test_internal_notify_negative_veto_dismissed_no_resurrect(tmp_path: Path, monkeypatch) -> None:
-    """An evolution-style in-memory pair (v1 used it, v2 dropped it — the
-    same text, no real contradiction) gets Qwen's definitive negative:
-    dismissed with a persistent veto that a scan kick cannot resurrect."""
+def test_internal_notify_conflict_lands_pending_no_veto(tmp_path: Path, monkeypatch) -> None:
+    """0.17.1 owner 拍板: the judge NEVER dismisses at write time. A
+    conflict-verdict notify shape lands pending with attribution — and no
+    dismissal path exists anymore (old veto test retired)."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     mid = tools.memory_write(content=_OWNER_EXAMPLE, subject="internal-veto-n", tags=[])["data"]
@@ -510,19 +426,10 @@ def test_internal_notify_negative_veto_dismissed_no_resurrect(tmp_path: Path, mo
 
     monkeypatch.setattr(tools, "_ensure_semantic_backend", SameValue)
     result = tools._process_semantic_conflict_job(mid["id"], _snapshot(tools, mid["id"]))
-    assert result["deterministic_filter"]["internal_qwen_vetoed"] >= 1
-    assert tools.db.internal_conflicts.list_pending() == []
-    with tools.db.connection() as conn:
-        dismissed = conn.execute(
-            "SELECT COUNT(*) FROM internal_conflicts WHERE memory_id=? AND status='dismissed'",
-            (mid["id"],),
-        ).fetchone()[0]
-    assert dismissed >= 1, "the notify-shape veto must persist as a decided row"
-    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
-    assert kick["ok"], kick
-    assert not any(
-        r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]
-    ), "scan re-examination must respect the notify-shape veto too"
+    assert result["deterministic_filter"].get("internal_qwen_vetoed", 0) == 0
+    pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
+    assert pending, "the judged notify shape lands pending with attribution"
+    assert "mdeberta:conflict" in pending[0]["reason"], pending[0]["reason"]
 
 
 def test_internal_notify_fail_open_lands_unannotated(tmp_path: Path, monkeypatch) -> None:
