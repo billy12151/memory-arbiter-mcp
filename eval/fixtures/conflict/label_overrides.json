@@ -1,7 +1,7 @@
 {
   "cf-coexist-796-797": [
-    "true_conflict",
-    "manual_review: v1/v2 演进取代未标注，同 owner resolved#9 判定形态"
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：schema v1 vs v2 定稿（v2 明确对 v1 不满并取代）——版本演进（原 label=true_conflict/owner_resolved）"
   ],
   "cf-coexist-629-630": [
     null,
@@ -146,5 +146,41 @@
   "cf-noise-11-917-918": [
     "true_conflict",
     "calibration audit 2026-09-22: owner 后续裁定 conflict-test export-format json vs csv 为真冲突基准对（tests/test_write_time_prefilter 保活注释）；corpus 原标 noise 系裁定前口径，随 0.17.0 校准轮翻转；0.17.0 review R2：shape 同步改 write_opposition，语料 bump conflict-v4-noisy"
+  ],
+  "cf-res-9-759-767": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：v2 方案与 v3 续篇（767 明确『id=759 实施方案 v2 的续篇』）——版本演进链非对立（原 label=true_conflict/owner_resolved）"
+  ],
+  "cf-res-10-809-810": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：809 明确『Tier1 部分已被 id=810 v2 重排版取代，本条随后退役』——标注式版本演进（原 label=true_conflict/owner_resolved）"
+  ],
+  "cf-res-27-331-585": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：SOP 踩坑为时点性事故记录（v0.7.3-0.8.2 已补建）vs v0.10.1 发版记录，时点真实情况+不同主题（原 label=true_conflict/owner_resolved）"
+  ],
+  "cf-res-28-387-388": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：G6（空 query 召回）与 G8（docstring 英文化）同版本两件不同事，无值对立（原 label=true_conflict/owner_resolved）"
+  ],
+  "cf-res-29-480-549": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：v0.9.2 发版记录 vs v0.9.7 对抗性审查——不同版本不同主题（原 label=true_conflict/owner_resolved）"
+  ],
+  "cf-res-30-535-546": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：三档隔离决策 vs 同版本审查修复记录——互补过程叙事非对立（原 label=true_conflict/owner_resolved）"
+  ],
+  "cf-res-31-566-638": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：AGENTS.md 同步记录 vs 版本号单一数据源机制——完全不同主题（原 label=true_conflict/owner_resolved）"
+  ],
+  "cf-res-50-25-534": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：v0.2.1 规格的 twine dist/* 旧口径已被 v0.9.6 显式文件名口径演进取代（#50 配方演进）（原 label=true_conflict/owner_resolved）"
+  ],
+  "cf-res-75-972-973": [
+    "non_conflict",
+    "2026-09-28 口径审计: owner 2026-09-28 口径：冒烟合成对两侧同口径（显式文件名，甲已标注旧口径废止）——同值非对立（原 label=true_conflict/owner_resolved）"
   ]
 }

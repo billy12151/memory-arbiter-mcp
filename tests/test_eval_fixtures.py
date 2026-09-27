@@ -135,7 +135,12 @@ def test_similarity_corpus_shape_and_naturalness() -> None:
 
 
 CONFLICT_FIXTURES = REPO / "eval" / "fixtures" / "conflict"
-CONFLICT_LABELS = {"true_conflict", "coexist", "noise"}
+# 2026-09-28 口径审计（owner 指令）：新增 non_conflict（版本演进/时点说明/
+# 不同主题——原 owner_resolved 真冲突按新口径改标，见 audit-20260928.md）
+CONFLICT_LABELS = {"true_conflict", "coexist", "noise", "non_conflict"}
+CONFLICT_NON_CONFLICT_KINDS = {
+    "version_evolution", "point_in_time", "different_topic", "same_value_duplicate",
+}
 CONFLICT_SHAPES = {"scan_evolution", "governed_negative", "write_opposition"}
 
 
@@ -159,9 +164,17 @@ def test_conflict_pairs_composition_and_integrity() -> None:
         # 重放保真：成员正文非空且互不字节相同（防重门会拦截）
         assert left["content"] and right["content"], pair["pair_id"]
         assert left["content"] != right["content"], pair["pair_id"]
+        # 口径审计：non_conflict 必须带改标台账与细分 kind；true_conflict
+        # 必须带信息充足度标注（insufficient 对疑似=满分口径的计分依据）
+        if pair["label"] == "non_conflict":
+            assert pair.get("non_conflict_kind") in CONFLICT_NON_CONFLICT_KINDS, pair["pair_id"]
+            assert pair.get("relabel_20260928", {}).get("from") == "true_conflict", pair["pair_id"]
+        if pair["label"] == "true_conflict":
+            assert pair.get("opposition_quality") in {"sufficient", "insufficient"}, pair["pair_id"]
     labels = {p["label"] for p in pairs}
     assert labels == CONFLICT_LABELS
-    # owner 判定来源的对不得为空（ground truth 主体）
+    # owner 判定来源的对不得为空（ground truth 主体；non_conflict 改标对
+    # 保留原 owner_resolved label_source——审计台账在 relabel_20260928）
     owner_sourced = [p for p in pairs if p["label_source"].startswith("owner_")]
     assert len(owner_sourced) >= 30
 
@@ -170,7 +183,9 @@ def test_conflict_overrides_audit_trail_exists() -> None:
     overrides = json.loads(
         (CONFLICT_FIXTURES / "label_overrides.json").read_text(encoding="utf-8"),
     )
-    assert "cf-coexist-796-797" in overrides  # 改判 true_conflict（演进取代未标注）
+    # 2026-09-28 口径审计后该对改判 non_conflict（版本演进；原 true_conflict
+    # 判定史见 relabel_20260928 与 audit-20260928.md）
+    assert "cf-coexist-796-797" in overrides
     pair_ids = {p["pair_id"] for p in _conflict_pairs()}
     dropped = {pid for pid, (label, _) in overrides.items() if label is None}
     assert not (dropped & pair_ids), "剔除对不得留在正式对集"

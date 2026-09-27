@@ -311,13 +311,22 @@ def score_conflict(raw: dict) -> dict[str, Any] | None:
     # runner 采集不带 shape：按 pair_id 从对集 join（对集是 shape 的权威源）；
     # 0.16.12 起合并 pairs_large.jsonl（large_unit 中大型用例组）；
     # 0.17.0 P2-0.1 起合并 pairs_noisy.jsonl（noisy 真实噪音对集）
+    _corpus_pairs = (
+        _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
+        + _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
+        + _load_jsonl(FIXTURES / "conflict" / "pairs_noisy.jsonl")
+    )
     shape_of = {
         pair["pair_id"]: pair.get("shape") or "governed_negative"
-        for pair in (
-            _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
-            + _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
-            + _load_jsonl(FIXTURES / "conflict" / "pairs_noisy.jsonl")
-        )
+        for pair in _corpus_pairs
+    }
+    # 2026-09-28 口径审计（owner 指令）：真冲突对按信息充足度分桶——
+    # opposition_quality=insufficient 的对子（如 ny-num-short-sentence 裸值句
+    # 无属性名），判疑似（possible→info notice）与判冲突同分（满分口径），
+    # E2E 行为指标=identified 不变，此处只加分桶观测。
+    quality_of = {
+        pair["pair_id"]: pair.get("opposition_quality") or "sufficient"
+        for pair in _corpus_pairs
     }
 
     def _outcome_row(rows: list[dict]) -> dict[str, Any]:
@@ -338,8 +347,12 @@ def score_conflict(raw: dict) -> dict[str, Any] | None:
     true_rows = [r for r in valid if r["label"] == "true_conflict"]
     coexist_rows = [r for r in valid if r["label"] == "coexist"]
     noise_rows = [r for r in valid if r["label"] == "noise"]
+    # 2026-09-28 口径审计：版本演进/时点说明/不同主题对（原 owner_resolved
+    # 真冲突，按 owner 新口径改标）——纯负样本桶，firing=误报。
+    nonconf_rows = [r for r in valid if r["label"] == "non_conflict"]
     identified_all = [r for r in valid if r["sync"] or r["async"]]
     true_identified = [r for r in identified_all if r["label"] == "true_conflict"]
+    nonconf_fired = sum(1 for r in identified_all if r["label"] == "non_conflict")
     return {
         "overall": {
             "precision": {
@@ -360,12 +373,27 @@ def score_conflict(raw: dict) -> dict[str, Any] | None:
                     len(coexist_rows),
                 ),
             },
+            "non_conflict_false_positive": {
+                "count": nonconf_fired,
+                "total": len(nonconf_rows),
+                "rate": _pct(nonconf_fired, len(nonconf_rows)),
+            },
             "skipped_member_replay": len(conflict) - len(valid),
         },
         "by_label": {
             "true_conflict": _outcome_row(true_rows),
             "coexist": _outcome_row(coexist_rows),
             "noise": _outcome_row(noise_rows),
+            "non_conflict": _outcome_row(nonconf_rows),
+        },
+        # 真冲突按信息充足度分桶（owner 2026-09-28：信息不足对疑似=满分——
+        # E2E identified 口径本就 notice 不分强弱，此处拆桶供归因；judge 级
+        # 离线评测另有 possible 计满分的显式规则）
+        "by_opposition_quality": {
+            quality: _outcome_row(
+                [r for r in true_rows if quality_of.get(r["pair_id"]) == quality]
+            )
+            for quality in ("sufficient", "insufficient")
         },
         "by_shape": {
             shape: _outcome_row(
@@ -732,6 +760,7 @@ _LOWER_IS_BETTER_SUBSTR = (
     ".miss.",
     "irrelevant_false_pulls",
     "coexist_false_positive",
+    "non_conflict_false_positive",
 )
 _SIM_FALSE_LABELS = ("clearly_different", "opposite_semantics", "same_entity_diff_attr")
 # 0.17.0 校准轮：conflict 的 noise 标签 firing 同为假阳性（半秒 bug 时代曾
@@ -748,12 +777,17 @@ _SIM_FALSE_LABELS = ("clearly_different", "opposite_semantics", "same_entity_dif
 # 两头都错：miss 上升（真对漏检变多）被当改善放行、firing 上升（多为真对
 # 正当检出）被当假阳性误杀。noisy 回归普通桶口径（miss 受门、sync/async
 # 走 cand2 豁免）；governed_negative（纯负）与 noise 标签不变。
+# 2026-09-28 口径审计：non_conflict（版本演进/时点说明/不同主题，改标自
+# owner_resolved 真冲突）为纯负样本桶——firing 类指标 lower-is-better、
+# miss 保持 higher-is-better，同 governed_negative/noise 规。
 _CONFLICT_FALSE_LABELS = (
     "noise",
     "governed_negative.identified",
     "governed_negative.sync",
+    "non_conflict.identified",
+    "non_conflict.sync",
 )
-_GATE_NEGATIVE_LABELS = ("noise", "governed_negative")
+_GATE_NEGATIVE_LABELS = ("noise", "governed_negative", "non_conflict")
 
 
 def _negative_bucket(key: str) -> bool:
@@ -978,6 +1012,7 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
             f"- Precision = **{overall['precision']['rate']}**（{overall['precision']['count']}/{overall['precision']['total']}）",
             f"- Recall = **{overall['recall']['rate']}**（{overall['recall']['count']}/{overall['recall']['total']}）",
             f"- 共存误报 = **{overall['coexist_false_positive']['count']}/{overall['coexist_false_positive']['total']}**（{overall['coexist_false_positive']['rate']}）",
+            f"- 非冲突误报（版本演进/时点/不同主题） = **{overall['non_conflict_false_positive']['count']}/{overall['non_conflict_false_positive']['total']}**（{overall['non_conflict_false_positive']['rate']}）",
             f"- 成员重叠跳过 {overall['skipped_member_replay']} 对（不计指标）",
             "",
         ]

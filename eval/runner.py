@@ -504,7 +504,7 @@ def _pair_notice_row(
     conn.row_factory = _sq.Row
     try:
         rows = conn.execute(
-            "SELECT id, conflict_point, notice_type, notice_message, created_at "
+            "SELECT id, conflict_point, notice_type, notice_message, notice_severity, created_at "
             "FROM conflicts WHERE status='candidate' ORDER BY id",
         ).fetchall()
         matched: list[dict] = []
@@ -665,6 +665,10 @@ def run_conflict_suite(
         )
         notice_final = notice_final or notice_row
         row["notice_count"] = notice_count
+        # 2026-09-28 口径审计（owner 指令）：记录 notice 严重级——mDeBERTa 映射
+        # 下 possible→severity=info 的灰区 notice 与 conflict→normal 可区分，
+        # score 侧按 opposition_quality 分桶（信息不足对疑似=满分）。
+        row["notice_severity"] = (notice_final or {}).get("notice_severity")
         row["units"] = _evidence_unit_count(tools, int(right_id))
         # 三结局：识别以「conflicts 表出现该对 candidate notice」为准；
         # sync=同步窗内已完成且当场创建了 notice（notices_created>0）。
@@ -934,7 +938,13 @@ def main() -> int:
             # v4（0.17.0 review R2）：cf-noise-11-917-918 shape 随 2026-09-22
             # 标签翻转同步改 write_opposition（governed_negative 桶混入真对
             # 双向污染 gate 判分）
-            "conflict_corpus_version": "conflict-v4-noisy",
+            # v5（2026-09-28 owner 口径审计）：①10 条 cf-res/cf-coexist 改标
+            # non_conflict（版本演进/时点说明/不同主题——owner 新口径「属于
+            # 这两类不该算冲突」；cf-res-32/cf-noise-11 保留 true_conflict）；
+            # ②true_conflict 对新增 opposition_quality（ny-num-short-sentence
+            # =insufficient：裸值句无属性名，疑似=正确按满分计）；③runner 行
+            # 新增 notice_severity。旧基线（conflict-v4-noisy）作废须重建。
+            "conflict_corpus_version": "conflict-v5-audited",
             "conflict_claims_corpus_version": "conflict-claims-v1",
             # 0.17.0 P2-0.1：相似套件同样可变（cases.jsonl + cases_noisy.jsonl），
             # 版本键进 env 供 gate 前置校验拒绝跨语料对比（review R1-5）
